@@ -338,6 +338,7 @@ pub(super) fn reduce_operator_repair(snapshot: &Snapshot, bloom: &BloomId, repai
         seen_verify_failures: cursor.map_or(VerifyFailureSet::EMPTY, |cursor| cursor.seen_verify_failures),
         fold_checkpoint: cursor.and_then(|cursor| cursor.fold_checkpoint),
         fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
     };
     let mut effects = alloc::vec![recorded];
     effects.extend(move_effects_with_candidate(

@@ -71,6 +71,7 @@ pub(super) fn construct_entry(bloom: BloomId, member: &Membership, sealed: Seale
             seen_verify_failures: VerifyFailureSet::EMPTY,
             fold_checkpoint: None,
             fold_conflict_evidence: None,
+            reconcile_assembles_base: false,
         },
         DispatchTargets { subject: member.scope_revision, checkout: sealed.base },
         sealed,
@@ -103,6 +104,7 @@ fn splice_join_entry<F: Fn(&WorkpieceId) -> Option<Digest>>(
         seen_verify_failures: VerifyFailureSet::EMPTY,
         fold_checkpoint: None,
         fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
     };
     let advance = Decision::AdvanceStage { bloom, workpiece: member.workpiece.clone(), progress };
     let splice =

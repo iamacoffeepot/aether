@@ -82,6 +82,7 @@ pub(super) fn composition_progress(stage: StageId, attempt: u32, weave: Candidat
         seen_verify_failures: VerifyFailureSet::EMPTY,
         fold_checkpoint: None,
         fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
     }
 }
 

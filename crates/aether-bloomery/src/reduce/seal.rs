@@ -716,6 +716,7 @@ fn verify_reentry(
             seen_verify_failures: VerifyFailureSet::EMPTY,
             fold_checkpoint: None,
             fold_conflict_evidence: None,
+            reconcile_assembles_base: false,
         },
         DispatchTargets { subject: candidate.tree, checkout: candidate.checkout },
         sealed,
