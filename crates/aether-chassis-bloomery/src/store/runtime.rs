@@ -2072,7 +2072,9 @@ impl StoreBackend for SqliteStore {
                 ],
             )?;
         }
-        for row in ledger.day_rows() {
+        // The store holds no artifacts handle; metric_day rows are a write-only
+        // cache nothing decodes, so dollars stay unresolved here rather than a claim of zero spend.
+        for row in ledger.day_rows(|_| None) {
             let payload = encode_metric(&row)?;
             tx.execute(
                 "INSERT OR REPLACE INTO metric_day (label, payload) VALUES (?1, ?2)",

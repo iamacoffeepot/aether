@@ -36,13 +36,13 @@
 //! # What is deliberately not here
 //!
 //! The daily digest the issue asks for — blooms landed, members shipped,
-//! members superseded or ejected, lines changed, for the day just closed — has
-//! no ledger behind it. [`MetricDay`](aether_bloomery::MetricDay) carries
-//! `{label, dispatches}` and nothing else: there is no landed/shipped/ejected
-//! rollup anywhere, and nothing in the estate counts lines changed at all. So
-//! the digest would have to invent three of its four numbers, which is worse
-//! than not sending it. Building the rollup is its own slice; this one ships
-//! the per-transition stream, which is the half that has a source of truth.
+//! members superseded or ejected, lines changed, for the day just closed — is
+//! still not sent. [`MetricDay`](aether_bloomery::MetricDay) now carries
+//! landings, wedges, spend, and cycle time, so landed count and dollars are
+//! no longer invented. Members shipped, superseded, or ejected, and lines
+//! changed, still have no rollup; the digest would have to invent those.
+//! Building that remainder is its own slice; this one ships the
+//! per-transition stream, which is the half that has a source of truth.
 //!
 //! Mounted only in the GitHub branch of the chassis, because that is where the
 //! outbound HTTP client lives ([`aether_bloomery_github::WebhookSink`]).

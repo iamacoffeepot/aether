@@ -1138,11 +1138,13 @@ fn metrics_response(state: &mut ControlCoreState, query: MetricsQuery) -> Metric
             encode_metrics(state.metrics.summary(active, |digest| records.get(digest).copied()), notice)
         }
         MetricsView::Days => {
-            let mut rows = state.metrics.day_rows();
+            let records = load_study_records(state.artifacts.as_mut(), &state.snapshot);
+            let mut rows = state.metrics.day_rows(|digest| records.get(digest).copied());
             let cap = usize::try_from(DAYS_CAP).unwrap_or(usize::MAX);
-            if rows.len() > cap {
-                let start = rows.len() - cap;
-                rows = rows.split_off(start);
+            let reconstructed_prefix = usize::from(rows.first().is_some_and(|row| row.reconstructed));
+            let dated = rows.len() - reconstructed_prefix;
+            if dated > cap {
+                rows.drain(reconstructed_prefix..reconstructed_prefix + (dated - cap));
             }
             encode_metrics(rows, notice)
         }

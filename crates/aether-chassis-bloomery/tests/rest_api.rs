@@ -965,6 +965,16 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
     let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
     assert_eq!(status, 200, "seal the draft carrying the authored catalog: {sealed:?}");
 
+    let (status, days) = get_json(http_port, "/metrics/days");
+    assert_eq!(status, 200, "days after a construct dispatch: {days:?}");
+    assert!(days.is_array(), "a fattened days document must render as an array, not a summary object: {days:?}");
+    let row = days.as_array().and_then(|rows| rows.last()).expect("a construct dispatch fills a dated day");
+    assert!(
+        row.get("label").and_then(Value::as_str).is_some_and(|label| label.starts_with("bloomery/daily/")),
+        "the newest row is a civil day: {row:?}"
+    );
+    assert!(row.get("spend_micro_usd").is_some(), "days columns survived the summary-first renderer: {row:?}");
+
     let mut store = SqliteStore::open(store_path).unwrap();
     let entries = store.drain_topic(Topic::Dispatch).unwrap();
     assert_eq!(entries.len(), 1, "sealing dispatches the member's Construct attempt");
@@ -1233,6 +1243,10 @@ fn rest_endpoint_laws_clamp_decode_and_unify_refusals() {
             notice.as_deref().is_some_and(|text| text.contains("clamped") && text.contains("1001")),
             "metrics names the clamp on x-aether-notice (the body is a bare array): {notice:?}"
         );
+
+        let (status, days) = get_json(http_port, "/metrics/days");
+        assert_eq!(status, 200, "empty days still 200: {days:?}");
+        assert!(days.is_array(), "days is a bare array even when empty, not a summary object: {days:?}");
 
         // `%C3%A9` is UTF-8 `é`. Decoding each escaped byte as a char would
         // produce Latin-1 mojibake; either way the query parses, so a `400` is
