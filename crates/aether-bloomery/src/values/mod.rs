@@ -6,6 +6,7 @@
 //! DAG is built from; they are plain data — no I/O, no engine boot, no
 //! GitHub types — and are content-addressed the same way (`digest_of`).
 
+mod adr;
 mod approval;
 mod bloom;
 mod commission;
@@ -27,6 +28,7 @@ mod study;
 mod timeout;
 mod verify;
 
+pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
 pub use approval::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection};
 pub use bloom::{
     BloomDraft, BloomSpec, DependencyError, LandingReceipt, MemberCandidate, MemberDependency, MemberSubject,

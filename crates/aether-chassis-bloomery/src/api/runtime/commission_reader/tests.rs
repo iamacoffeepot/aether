@@ -24,6 +24,7 @@ fn revision(id: &str, problem: &str) -> ScopeRevision {
         routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
         dependencies: Vec::new(),
         description: "advisory".to_owned(),
+        implements: Vec::new(),
     }
 }
 

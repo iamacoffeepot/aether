@@ -77,6 +77,11 @@ mod correspondence;
 pub use correspondence::SqliteCorrespondence;
 
 #[cfg(feature = "runtime")]
+mod adr;
+#[cfg(feature = "runtime")]
+pub use adr::{AdrBackend, AdrError, AdrView};
+
+#[cfg(feature = "runtime")]
 mod commission;
 #[cfg(feature = "runtime")]
 pub use commission::{

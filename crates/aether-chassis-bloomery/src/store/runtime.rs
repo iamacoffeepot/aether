@@ -588,7 +588,10 @@ impl SqliteStore {
 ///
 /// `8` is the commission replica-issue number (`commission_projections`).
 /// Empty on creation; nothing is backfilled — a GitHub issue is not adopted.
-const SCHEMA_VERSION: i64 = 8;
+///
+/// `9` is the ADR store (ADR-0201): `adrs`, `adr_transitions`. Empty on
+/// creation; nothing is backfilled — a markdown file is not a signed ADR.
+const SCHEMA_VERSION: i64 = 9;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -692,6 +695,13 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // creation; a pre-existing store has no owned issues to invent.
     if !has_table(&migration, "commission_projections")? {
         migration.execute_batch(super::commission::COMMISSION_PROJECTION_TABLE)?;
+    }
+
+    // Version 9 (ADR-0201): architecture decision records. Empty on
+    // creation; a pre-existing store has no signed ADRs to invent from
+    // markdown files.
+    if !has_table(&migration, "adrs")? {
+        migration.execute_batch(super::adr::ADR_TABLES)?;
     }
 
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;

@@ -66,6 +66,7 @@ fn revision(id: &str) -> ScopeRevision {
         routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
         dependencies: Vec::new(),
         description: String::new(),
+        implements: Vec::new(),
     }
 }
 
