@@ -184,7 +184,7 @@ struct CollectRequest<'a> {
 }
 
 fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<DoctorReport> {
-    let (snapshot, landed_heads) = replay(request.store)?;
+    let replayed = replay(request.store)?;
     let outstanding_rows = outstanding(request.store)?;
     let outstanding: Vec<OpenDispatch<'_>> = outstanding_rows
         .iter()
@@ -218,12 +218,14 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
     let ancestry = |from: &Digest, to: &Digest| request.source.and_then(|source| source.is_fast_forward(from, to).ok());
 
     Ok(evaluate(&LiveState {
-        snapshot: &snapshot,
+        snapshot: &replayed.snapshot,
         claims: &claims,
         actual_head,
         actual_head_sha: actual_head_sha.as_deref(),
         correspondence: &pairs,
-        landed_heads: &landed_heads,
+        landed_heads: &replayed.landed_heads,
+        land_sequences: &replayed.land_sequences,
+        journaled_heads: &replayed.journaled_heads,
         ancestry: Some(&ancestry),
         replica: &replica,
         outstanding: &outstanding,
@@ -232,7 +234,14 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
     }))
 }
 
-fn replay(store: &mut dyn StoreBackend) -> rusqlite::Result<(Snapshot, Vec<(BloomId, Digest)>)> {
+struct Replay {
+    snapshot: Snapshot,
+    landed_heads: Vec<(BloomId, Digest)>,
+    land_sequences: Vec<(BloomId, u64)>,
+    journaled_heads: Vec<(Digest, u64)>,
+}
+
+fn replay(store: &mut dyn StoreBackend) -> rusqlite::Result<Replay> {
     let mut configs = ResolvedConfigs::default();
     for record in store.load_configs()? {
         let Some(address) = Digest::from_slice(&record.digest) else {
@@ -242,7 +251,9 @@ fn replay(store: &mut dyn StoreBackend) -> rusqlite::Result<(Snapshot, Vec<(Bloo
     }
 
     let mut snapshot = Snapshot::default();
-    let mut landed = Vec::new();
+    let mut landed_heads = Vec::new();
+    let mut land_sequences = Vec::new();
+    let mut journaled_heads = Vec::new();
     for record in store.replay_journal()? {
         let Ok(event) = from_bytes::<Event>(&record.event) else {
             tracing::warn!(
@@ -261,14 +272,21 @@ fn replay(store: &mut dyn StoreBackend) -> rusqlite::Result<(Snapshot, Vec<(Bloo
             continue;
         };
         snapshot = snapshot.apply(&event, &decisions, &configs);
-        if let Fact::Land { bloom, new_head } = event.fact
-            && snapshot.blooms.get(&bloom).is_some_and(|record| record.status == BloomStatus::Landed)
-        {
-            landed.retain(|(id, _)| id != &bloom);
-            landed.push((bloom, new_head));
+        match event.fact {
+            Fact::Land { bloom, new_head }
+                if snapshot.blooms.get(&bloom).is_some_and(|record| record.status == BloomStatus::Landed) =>
+            {
+                landed_heads.retain(|(id, _)| id != &bloom);
+                landed_heads.push((bloom, new_head));
+                land_sequences.retain(|(id, _)| id != &bloom);
+                land_sequences.push((bloom, record.sequence));
+                journaled_heads.push((new_head, record.sequence));
+            }
+            Fact::ObserveMainline { head } => journaled_heads.push((head, record.sequence)),
+            _ => {}
         }
     }
-    Ok((snapshot, landed))
+    Ok(Replay { snapshot, landed_heads, land_sequences, journaled_heads })
 }
 
 struct OutstandingRow {
