@@ -28,6 +28,7 @@ mod statement;
 mod study;
 mod timeout;
 mod verify;
+mod workpiece_builder;
 
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
 pub use approval::{ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, surface_intersection};
@@ -69,6 +70,7 @@ pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use study::{StudyCall, StudyCost, StudyRecord};
 pub use timeout::TimeoutRecord;
 pub use verify::{VerifyFailure, VerifyFailureSet};
+pub use workpiece_builder::{FIELD_ENTRY_SCHEMA, FieldEntry, WorkpieceBuilder, WorkpieceRefusal};
 
 use alloc::string::String;
 use alloc::vec::Vec;
