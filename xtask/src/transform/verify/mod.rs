@@ -21,6 +21,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::cargo::{self, WASM_TARGET, run_captured, write_json_pretty};
+use crate::fixtures::annotate_findings;
 use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache, Counters};
 use crate::transform::verify::closure::Closure;
@@ -1769,7 +1770,7 @@ fn distil_member(id: &str, log: &str) -> Option<String> {
     if id == "verify.test"
         && let Some(failures) = nextest::classify(log, None).as_ref().and_then(nextest::ClassifiedRun::findings)
     {
-        return Some(failures);
+        return Some(annotate_findings(&failures));
     }
 
     distil_diagnostics(log)
@@ -2986,6 +2987,24 @@ error: test run failed
         assert!(findings.contains("asset_rides_a_named_custom_section_byte_exact"), "the test is named");
         assert!(findings.contains("crates/aether-actor/tests/asset_sections.rs:85:9"), "with its file and line");
         assert!(findings.contains("wasm not pre-built"), "and what it said");
+    }
+
+    #[test]
+    fn a_stale_golden_fixture_names_the_regen_command() {
+        let log = "\
+        FAIL [   0.008s] ( 156/3737) aether-bloomery::golden_decisions decisions_wire_bytes_match_pinned_golden
+
+--- STDERR:              aether-bloomery::golden_decisions decisions_wire_bytes_match_pinned_golden ---
+thread 'decisions_wire_bytes_match_pinned_golden' panicked at crates/aether-bloomery/tests/golden_decisions/main.rs:46:5:
+assertion `left == right` failed
+
+     Summary [  74.644s] 3737 tests run: 3736 passed, 1 failed, 20 skipped
+error: test run failed
+";
+
+        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)]).expect("findings");
+
+        assert!(findings.contains("run `cargo xtask fixtures regen decisions`"));
     }
 
     #[test]
