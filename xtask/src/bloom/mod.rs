@@ -500,7 +500,7 @@ mod tests {
                         }]
                     }),
                 ),
-                ("GET", "/journal") => (
+                (method, path) if method == "GET" && path.starts_with("/journal") => (
                     200,
                     json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
                 ),
@@ -578,7 +578,7 @@ mod tests {
                         }]
                     }),
                 ),
-                ("GET", "/journal") => (
+                (method, path) if method == "GET" && path.starts_with("/journal") => (
                     200,
                     json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
                 ),
@@ -638,7 +638,7 @@ mod tests {
                         }]
                     }),
                 ),
-                ("GET", "/journal") => (
+                (method, path) if method == "GET" && path.starts_with("/journal") => (
                     200,
                     json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
                 ),
@@ -695,7 +695,7 @@ mod tests {
                         }]
                     }),
                 ),
-                ("GET", "/journal") => (
+                (method, path) if method == "GET" && path.starts_with("/journal") => (
                     200,
                     json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
                 ),
@@ -750,7 +750,7 @@ mod tests {
                         }]
                     }),
                 ),
-                ("GET", "/journal") => (
+                (method, path) if method == "GET" && path.starts_with("/journal") => (
                     200,
                     json!({ "records": [{ "sequence": 1, "idempotency_key": "k", "event": { "idempotency_key": "k", "fact": { "Seal": spec_for_journal } } }] }),
                 ),

@@ -250,10 +250,29 @@ pub struct SupersedeRequest {
 #[derive(Debug, Deserialize)]
 pub struct JournalView {
     pub records: Vec<JournalEntry>,
+    #[serde(default)]
+    pub total_matched: u64,
+    #[serde(default)]
+    pub shown: u64,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub next_from_sequence: Option<u64>,
+}
+
+impl JournalView {
+    /// Inclusive sequence span of records that carried a sequence, if any.
+    pub fn journal_span(&self) -> Option<(u64, u64)> {
+        let mut sequences = self.records.iter().filter_map(|record| record.sequence);
+        let first = sequences.next()?;
+        Some(sequences.fold((first, first), |(lo, hi), sequence| (lo.min(sequence), hi.max(sequence))))
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct JournalEntry {
+    #[serde(default)]
+    pub sequence: Option<u64>,
     pub event: JournalEvent,
 }
 
