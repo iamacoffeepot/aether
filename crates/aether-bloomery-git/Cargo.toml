@@ -29,6 +29,10 @@ testing = ["aether-bloomery/testing"]
 # Feature-unify the control-core fixture module into this crate's unit tests
 # (`cfg(test)` does not enable a dependency's features on its own).
 aether-bloomery = { path = "../aether-bloomery", default-features = false, features = ["testing"] }
+# Self-dependency with `testing` on so integration tests (`tests/`) see the
+# `FakeGithub` double — an integration test links the lib without the `test`
+# cfg, so the feature is the only way to reach a test-only module from `tests/`.
+aether-bloomery-git = { path = ".", features = ["testing"] }
 # The object-repo mode mints real git objects, so the tests that pin it need a
 # real repository to mint them in.
 tempfile = "3"

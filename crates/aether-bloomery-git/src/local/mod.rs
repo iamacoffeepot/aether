@@ -9,23 +9,10 @@ use std::path::{Path, PathBuf};
 
 use crate::client::{GitCommit, GitDataApi, GitDataError, GitRef, MergeResult, RefTxnOp, strip_heads};
 
-mod command;
+pub(crate) mod command;
 
 #[cfg(test)]
 mod tests;
-
-/// The identity every locally minted commit carries. Pinned so a retry of
-/// `create_commit` with the same `(message, tree, parents)` hashes to the same
-/// object — `GitSource::integrate` recovers from a fault between commit and
-/// ref update only because of that.
-const BLOOMERY_IDENTITY: [(&str, &str); 6] = [
-    ("GIT_AUTHOR_NAME", "bloomery"),
-    ("GIT_AUTHOR_EMAIL", "bloomery@aether.invalid"),
-    ("GIT_AUTHOR_DATE", "@0 +0000"),
-    ("GIT_COMMITTER_NAME", "bloomery"),
-    ("GIT_COMMITTER_EMAIL", "bloomery@aether.invalid"),
-    ("GIT_COMMITTER_DATE", "@0 +0000"),
-];
 
 /// A [`GitDataApi`] backed by `git` against one absolute repository path.
 #[derive(Clone, Debug)]
@@ -102,45 +89,12 @@ impl LocalGitData {
     }
 
     fn conflicted_paths(&self, base: &str, head: &str) -> Vec<String> {
-        let Ok(output) = command::run(&self.repo, &["merge-tree", "--write-tree", "--name-only", base, head]) else {
-            return Vec::new();
-        };
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !is_git_oid(line))
-            .map(ToOwned::to_owned)
-            .collect()
+        command::conflicted_paths(&self.repo, base, head)
     }
 
     fn conflict_patch(&self, base: &str, head: &str) -> String {
         command::run_ok(&self.repo, &["diff", base, head]).unwrap_or_default()
     }
-}
-
-fn is_git_oid(line: &str) -> bool {
-    (line.len() == 40 || line.len() == 64) && line.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-fn not_a_valid_commit(stderr: &str) -> bool {
-    stderr.to_ascii_lowercase().contains("not a valid commit")
-}
-
-fn parse_commit(sha: &str, body: &str) -> Result<GitCommit, GitDataError> {
-    let mut tree = None;
-    let mut message_start = None;
-    for (index, line) in body.lines().enumerate() {
-        if let Some(value) = line.strip_prefix("tree ") {
-            tree = Some(value.trim().to_owned());
-        } else if line.is_empty() {
-            message_start = Some(index + 1);
-            break;
-        }
-    }
-    let tree = tree.ok_or_else(|| GitDataError::Command(format!("commit {sha} has no tree header")))?;
-    let message =
-        message_start.map_or_else(String::new, |start| body.lines().skip(start).collect::<Vec<_>>().join("\n"));
-    Ok(GitCommit { sha: sha.to_owned(), tree, message })
 }
 
 impl GitDataApi for LocalGitData {
@@ -206,16 +160,7 @@ impl GitDataApi for LocalGitData {
     }
 
     fn get_commit(&self, sha: &str) -> Result<GitCommit, GitDataError> {
-        let kind = command::run(&self.repo, &["cat-file", "-t", sha])?;
-        if !kind.status.success() {
-            return Err(GitDataError::MissingObject(format!("no commit {sha}")));
-        }
-        if String::from_utf8_lossy(&kind.stdout).trim() != "commit" {
-            return Err(GitDataError::MissingObject(format!("no commit {sha}")));
-        }
-        let body = command::run_ok(&self.repo, &["cat-file", "commit", sha])
-            .map_err(|_| GitDataError::MissingObject(format!("no commit {sha}")))?;
-        parse_commit(sha, &body)
+        command::read_commit(&self.repo, sha)
     }
 
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GitDataError> {
@@ -227,7 +172,7 @@ impl GitDataApi for LocalGitData {
         args.push("-m".to_owned());
         args.push(message.to_owned());
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-        let output = command::run_env(&self.repo, &borrowed, &BLOOMERY_IDENTITY)?;
+        let output = command::run_env(&self.repo, &borrowed, &command::BLOOMERY_IDENTITY)?;
         if !output.status.success() {
             return Err(GitDataError::Command(format!(
                 "git commit-tree {tree}: {}",
@@ -239,22 +184,7 @@ impl GitDataApi for LocalGitData {
     }
 
     fn is_ancestor(&self, ancestor: &str, commit: &str) -> Result<bool, GitDataError> {
-        if ancestor == commit {
-            return Ok(true);
-        }
-        let output = command::run(&self.repo, &["merge-base", "--is-ancestor", ancestor, commit])?;
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            Some(128) if not_a_valid_commit(&stderr) => {
-                Err(GitDataError::MissingObject(format!("missing ancestor {ancestor} or commit {commit}")))
-            }
-            _ => Err(GitDataError::Command(format!(
-                "git merge-base --is-ancestor {ancestor} {commit}: {}",
-                stderr.trim()
-            ))),
-        }
+        command::is_ancestor(&self.repo, ancestor, commit)
     }
 
     fn merge(&self, base: &str, head: &str, message: &str) -> Result<MergeResult, GitDataError> {
