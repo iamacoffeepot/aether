@@ -111,7 +111,12 @@ fn a_clean_issue_imports_a_revision_and_no_approval() {
     let report = import(
         &mut store,
         &ImportRequest {
-            issues: vec![IssueSnapshot { number: 10, workpiece: workpiece("issue-10"), body: clean_body() }],
+            issues: vec![IssueSnapshot {
+                number: 10,
+                workpiece: workpiece("issue-10"),
+                title: "Need a commission store".to_owned(),
+                body: clean_body(),
+            }],
             sealed: Vec::new(),
         },
     )
@@ -143,6 +148,7 @@ fn an_ambiguous_issue_imports_without_a_revision() {
             issues: vec![IssueSnapshot {
                 number: 11,
                 workpiece: workpiece("issue-11"),
+                title: "just a title".to_owned(),
                 body: "just a title and some prose\n".to_owned(),
             }],
             sealed: Vec::new(),
@@ -212,12 +218,37 @@ fn import_paths_reads_only_the_named_bodies() {
     fs::write(&manifest, r#"{"issues":[{"number":10,"id":"issue-10","body":"10.md"}]}"#).expect("write manifest");
 
     let report = super::import_paths(&manifest, &store_path, None).expect("import paths");
+    assert!(report.starts_with("imported 1\n"), "count leads the report: {report}");
     assert!(report.contains("issue-10"), "{report}");
     assert!(!report.contains("issue-999"), "unnamed snapshot must stay out: {report}");
 
     let mut store = SqliteStore::open(store_path.to_str().expect("utf-8")).expect("reopen");
     assert!(store.load(&workpiece("issue-10")).expect("load").is_some());
     assert!(store.load(&workpiece("issue-999")).expect("load").is_none());
+}
+
+#[test]
+fn import_report_names_count_and_titles() {
+    // The operator verifies the one-shot backfill by count and title, not by
+    // re-reading GitHub after import. Dropping a title from the report would
+    // make that check a hand count of workpiece ids.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let first = dir.path().join("10.md");
+    let second = dir.path().join("11.md");
+    let manifest = dir.path().join("manifest.json");
+    let store_path = dir.path().join("journal.sqlite");
+    fs::write(&first, clean_body()).expect("write first");
+    fs::write(&second, "not a plan\n").expect("write second");
+    fs::write(
+        &manifest,
+        r#"{"issues":[{"number":10,"id":"issue-10","title":"Need a commission store","body":"10.md"},{"number":11,"id":"issue-11","title":"Ambiguous leftover","body":"11.md"}]}"#,
+    )
+    .expect("write manifest");
+
+    let report = super::import_paths(&manifest, &store_path, None).expect("import paths");
+    assert!(report.starts_with("imported 2\n"), "count is the first line: {report}");
+    assert!(report.contains("issue-10 Need a commission store"), "{report}");
+    assert!(report.contains("issue-11 Ambiguous leftover"), "{report}");
 }
 
 #[test]

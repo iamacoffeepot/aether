@@ -428,6 +428,9 @@ impl ApiCapabilityState {
             let Some(description) = descriptions.get(&member.workpiece.0) else {
                 continue;
             };
+            if description.trim().is_empty() {
+                continue;
+            }
             let record = RecordDispatchDescription {
                 bloom: bloom.clone(),
                 workpiece: member.workpiece.0.clone(),

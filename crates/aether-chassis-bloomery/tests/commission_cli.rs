@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use aether_bloomery::{AuthorityDoor, Digest, KeyId, SignatureEnvelope, authorization_message};
 use aether_chassis_bloomery::commission;
-use common::{Coordinator, free_port};
+use common::Coordinator;
+use common::client::spawn_and_connect;
 use ed25519_dalek::{Signer, SigningKey};
 use tempfile::TempDir;
 
@@ -47,15 +48,13 @@ fn utf8_path(path: &Path) -> &str {
     path.to_str().unwrap_or_else(|| panic!("{} is UTF-8", path.display()))
 }
 
-fn spawn(http_port: u16, policy_path: &str) -> Coordinator {
-    let http = http_port.to_string();
+fn spawn(policy_path: &str, allowlist: &str) -> Coordinator {
     Coordinator::spawn(
-        free_port(),
+        0,
         &[
-            ("AETHER_HTTP_PORT", &http),
             ("AETHER_STORE_PATH", ":memory:"),
             ("AETHER_HTTP_CONTROL_TOKEN", TOKEN),
-            ("AETHER_SIGNING_ALLOWLIST", &owner_allowlist()),
+            ("AETHER_SIGNING_ALLOWLIST", allowlist),
             ("AETHER_APPROVAL_POLICY_FILE", policy_path),
         ],
     )
@@ -69,14 +68,30 @@ fn cli(http_port: u16, rest: &[&str]) -> Result<String, anyhow::Error> {
     commission::run(invocation)
 }
 
-fn wait_ready(port: u16) {
+/// Fork with OS-assigned RPC and HTTP, handshake the child we spawned, then
+/// wait until that child's HTTP answers `list`. A reserved `free_port` here
+/// burns the ready deadline against a closed socket once a sibling steals
+/// the bind — the full-suite flake at this panic.
+fn spawn_ready(policy_path: &str) -> (u16, Coordinator) {
+    let allowlist = owner_allowlist();
+    let (coordinator, stream) =
+        spawn_and_connect("commission-cli", Duration::from_mins(1), || (0, spawn(policy_path, &allowlist)));
+    let rpc_port = stream.peer_addr().unwrap_or_else(|error| panic!("rpc peer: {error}")).port();
+    (wait_http(&coordinator, rpc_port), coordinator)
+}
+
+fn wait_http(coordinator: &Coordinator, rpc_port: u16) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(30);
+    let mut last = String::from("HTTP never listened");
     loop {
-        match cli(port, &["list"]) {
-            Ok(_) => return,
-            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
-            Err(error) => panic!("coordinator never became ready for commission list: {error}"),
+        if let Some(port) = coordinator.listening_ports().into_iter().find(|port| *port != rpc_port) {
+            match cli(port, &["list"]) {
+                Ok(_) => return port,
+                Err(error) => last = error.to_string(),
+            }
         }
+        assert!(Instant::now() < deadline, "coordinator HTTP never became ready for commission list: {last}");
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -120,33 +135,19 @@ fn the_commission_cli_is_a_sibling_binary() {
 
 #[test]
 fn a_bare_bloomery_invocation_still_starts_the_daemon() {
-    let http_port = free_port();
-    let http = http_port.to_string();
     let dir = temp_dir();
     let policy = dir.path().join("policy.toml");
     write_file(&policy, b"default = \"judge\"\n");
-    let policy_path = utf8_path(&policy);
-    let mut coordinator = Coordinator::spawn(
-        free_port(),
-        &[
-            ("AETHER_HTTP_PORT", &http),
-            ("AETHER_STORE_PATH", ":memory:"),
-            ("AETHER_HTTP_CONTROL_TOKEN", TOKEN),
-            ("AETHER_APPROVAL_POLICY_FILE", policy_path),
-        ],
-    );
-    wait_ready(http_port);
+    let (_http_port, mut coordinator) = spawn_ready(utf8_path(&policy));
     assert!(coordinator.is_alive(), "a bare bloomery must still be the daemon process");
 }
 
 #[test]
 fn create_scope_approve_show_and_list_round_trip() {
-    let http_port = free_port();
     let dir = temp_dir();
     let policy = dir.path().join("policy.toml");
     write_file(&policy, b"default = \"judge\"\n");
-    let _coordinator = spawn(http_port, utf8_path(&policy));
-    wait_ready(http_port);
+    let (http_port, _coordinator) = spawn_ready(utf8_path(&policy));
 
     let intent = dir.path().join("intent.txt");
     write_file(&intent, b"ship the commission CLI");

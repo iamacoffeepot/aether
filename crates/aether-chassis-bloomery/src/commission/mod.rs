@@ -10,7 +10,7 @@
 mod client;
 mod hex;
 pub(crate) mod import;
-mod scope;
+pub(crate) mod scope;
 
 use std::ffi::OsString;
 use std::fs;

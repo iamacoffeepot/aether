@@ -77,6 +77,24 @@ fn a_verified_row_materializes_the_workpiece_and_the_frozen_projection() {
 }
 
 #[test]
+fn an_empty_description_renders_the_signed_work_order() {
+    // The CLI stores structured fields and leaves description empty. Seal
+    // must still persist a construct task; falling back to a GitHub issue
+    // body would be the inbound surface this door closed.
+    let mut revision = revision("wp-local", "Need a CLI.");
+    revision.description.clear();
+    revision.design = "Separate binary.".to_owned();
+    revision.plan = "Ship bloomery-commission.".to_owned();
+    let digest = digest_of(&revision);
+    let admitted = admit_member(digest, loaded("wp-local", &revision, vec![auto_approval(digest)])).expect("admitted");
+
+    assert!(admitted.description.contains("Need a CLI."), "problem is the task: {}", admitted.description);
+    assert!(admitted.description.contains("## Design notes"), "{}", admitted.description);
+    assert!(admitted.description.contains("Ship bloomery-commission."), "{}", admitted.description);
+    assert!(!admitted.description.contains("advisory"), "empty description must not keep a placeholder");
+}
+
+#[test]
 fn digest_mismatch_is_not_a_stale_scope() {
     // The index column names digest A but the canonical bytes hash to B.
     // Treating that as stale would hide corruption behind a "write a new
@@ -260,6 +278,7 @@ crates/aether-chassis-bloomery/src/commission/import/**
             issues: vec![IssueSnapshot {
                 number: 10,
                 workpiece: WorkpieceId("issue-10".to_owned()),
+                title: "Need a commission store".to_owned(),
                 body: body.to_owned(),
             }],
             sealed: Vec::new(),

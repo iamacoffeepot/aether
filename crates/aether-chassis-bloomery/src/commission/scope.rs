@@ -42,6 +42,63 @@ pub fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Diges
     })
 }
 
+/// Work-order text the seal persists for construct.
+///
+/// A stored advisory description wins when the operator put one on the
+/// revision. Otherwise the signed managed headings are rendered. A GitHub
+/// issue body is never an input.
+pub fn task_text(revision: &ScopeRevision) -> String {
+    if !revision.description.trim().is_empty() {
+        return revision.description.clone();
+    }
+    render_work_order(revision)
+}
+
+fn render_work_order(revision: &ScopeRevision) -> String {
+    let mut out = String::new();
+    push_section(&mut out, PROBLEM, &revision.problem);
+    push_section(&mut out, DESIGN, &revision.design);
+    out.push_str("## ");
+    out.push_str(PLAN);
+    out.push_str("\n\n");
+    out.push_str(revision.plan.trim());
+    out.push_str("\n\n**Size:** ");
+    out.push_str(&revision.routing.size);
+    out.push_str("\n**Implementation model:** ");
+    out.push_str(&revision.routing.model);
+    out.push('\n');
+    if !revision.dependencies.is_empty() {
+        out.push_str("\n## ");
+        out.push_str(DEPENDS);
+        out.push_str("\n\n");
+        for dep in &revision.dependencies {
+            out.push_str("- ");
+            out.push_str(&dep.0);
+            out.push('\n');
+        }
+    }
+    out.push_str("\n## ");
+    out.push_str(SURFACE);
+    out.push_str("\n\n");
+    for glob in &revision.declared_surface {
+        out.push_str(glob);
+        out.push('\n');
+    }
+    if !revision.dogfood_brief.trim().is_empty() {
+        out.push('\n');
+        push_section(&mut out, DOGFOOD, &revision.dogfood_brief);
+    }
+    out
+}
+
+fn push_section(out: &mut String, name: &str, body: &str) {
+    out.push_str("## ");
+    out.push_str(name);
+    out.push_str("\n\n");
+    out.push_str(body.trim());
+    out.push_str("\n\n");
+}
+
 /// Load `path` and parse it as a revision for `workpiece`.
 pub(super) fn load_revision(workpiece: &str, path: &Path, predecessor: Option<Digest>) -> Result<ScopeRevision> {
     let markdown = fs::read_to_string(path).map_err(|error| anyhow!("read {}: {error}", path.display()))?;
@@ -190,7 +247,7 @@ fn parse_workpieces(span: &str) -> Vec<WorkpieceId> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_revision;
+    use super::{parse_revision, task_text};
 
     fn fixture() -> &'static str {
         "\
@@ -234,6 +291,14 @@ Create then show.\n"
         assert_eq!(revision.declared_surface, ["crates/aether-chassis-bloomery/src/commission/**"]);
         assert_eq!(revision.dogfood_brief, "Create then show.");
         assert!(revision.predecessor.is_none());
+        assert!(revision.description.is_empty(), "the CLI stores structured fields, not a parallel body");
+
+        let task = task_text(&revision);
+        assert!(task.contains("## Problem statement"), "seal renders the managed heading: {task}");
+        assert!(task.contains("Need a CLI."), "seal reads the commission problem, not a GitHub issue: {task}");
+        assert!(task.contains("## Design notes") && task.contains("Separate binary."), "{task}");
+        assert!(task.contains("**Size:** m") && task.contains("**Implementation model:** sonnet"), "{task}");
+        assert!(task.contains("crates/aether-chassis-bloomery/src/commission/**"), "{task}");
     }
 
     #[test]

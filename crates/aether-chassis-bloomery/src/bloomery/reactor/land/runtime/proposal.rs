@@ -7,12 +7,12 @@
 //! bloom's membership addresses.
 //!
 //! Everything here **falls back to a valid title, never to a blocked landing**.
-//! A member that named nothing, a message whose subject the repository's `Lint
-//! title` check would refuse, an issue the repository no longer holds, a source
-//! that will not answer — each drops one rung and lands anyway.
+//! A member that named nothing, or a message whose subject the repository's
+//! `Lint title` check would refuse, drops to the floor title. A GitHub issue
+//! title is not a rung — GitHub is a replica.
 
 use aether_bloomery::{Adjudication, BloomId, Disposition, Event, Fact};
-use aether_bloomery_github::{LandingProposal, LandingSource, canonical_issue_number};
+use aether_bloomery_github::{LandingProposal, canonical_issue_number};
 use aether_data::wire::from_bytes;
 
 use crate::store::StoreBackend;
@@ -26,8 +26,6 @@ const ACCEPTED_TYPES: [&str; 7] = ["feat", "fix", "chore", "docs", "perf", "refa
 /// One member's contribution to the proposal: the message its lane wrote, and
 /// the object its workpiece addresses.
 struct Member {
-    /// The member's workpiece id, as the roster spells it.
-    workpiece: String,
     /// The commit message the member's resolving candidate was captured under,
     /// when its lane wrote one.
     message: Option<String>,
@@ -40,16 +38,12 @@ struct Member {
 /// Assemble `bloom`'s landing proposal.
 ///
 /// A store fault propagates: the caller stops its ack prefix and re-drains, which
-/// is the same answer every other store read in the drain loop gives. A source
-/// fault does not — see [`fallback_title`].
-pub(super) fn assemble(
-    store: &mut dyn StoreBackend,
-    source: &dyn LandingSource,
-    bloom: &BloomId,
-) -> rusqlite::Result<LandingProposal> {
+/// is the same answer every other store read in the drain loop gives. A GitHub
+/// issue title is not a fallback — GitHub is a replica, never an input.
+pub(super) fn assemble(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<LandingProposal> {
     let members = roster(store, bloom)?;
     let waived = adjudications(store, bloom)?;
-    Ok(LandingProposal { title: title_for(source, &members), body: body_for(&members, &waived) })
+    Ok(LandingProposal { title: title_for(&members), body: body_for(&members, &waived) })
 }
 
 /// The operator adjudications this bloom carries, oldest first (#4957).
@@ -127,7 +121,7 @@ fn roster(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec
         .map(|workpiece| {
             let message = store.lookup_candidate_commit_message(bloom.0.as_bytes(), &workpiece)?;
             let issue = canonical_issue_number(&workpiece);
-            Ok(Member { workpiece, message, issue })
+            Ok(Member { message, issue })
         })
         .collect()
 }
@@ -138,40 +132,11 @@ fn roster(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec
 /// several-member bloom is several changes, and picking one member's subject to
 /// stand for all of them would name the mainline commit after a fraction of what
 /// it carries.
-fn title_for(source: &dyn LandingSource, members: &[Member]) -> Option<String> {
+fn title_for(members: &[Member]) -> Option<String> {
     let [member] = members else {
         return None;
     };
-    member
-        .message
-        .as_deref()
-        .and_then(subject_of)
-        .filter(|subject| title_is_lint_valid(subject))
-        .map(str::to_owned)
-        .or_else(|| fallback_title(source, member))
-}
-
-/// The member's source issue title, when the repository holds one the gate would
-/// accept.
-///
-/// A source that will not answer folds to `None` with a warn rather than an
-/// error: this is the *fallback* path, so a transport fault here must cost the
-/// proposal its title and not its landing.
-fn fallback_title(source: &dyn LandingSource, member: &Member) -> Option<String> {
-    let issue = member.issue?;
-    match source.issue_title(issue) {
-        Ok(title) => title.filter(|title| title_is_lint_valid(title)),
-        Err(error) => {
-            tracing::warn!(
-                target: "aether_chassis_bloomery::land",
-                workpiece = member.workpiece.as_str(),
-                issue,
-                %error,
-                "could not read the member's source issue title; landing under the floor title",
-            );
-            None
-        }
-    }
+    member.message.as_deref().and_then(subject_of).filter(|subject| title_is_lint_valid(subject)).map(str::to_owned)
 }
 
 /// The proposal's body: what the lanes wrote, then whatever an operator waived
