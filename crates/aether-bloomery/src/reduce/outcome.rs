@@ -641,6 +641,20 @@ pub enum Outcome {
     },
     /// A fold-refusal admission was refused — no sealed bloom with that id.
     FoldRefusalRejected,
+    /// A construct lane concluded without a candidate (#5292): the member parks
+    /// rather than retrying, spending no attempt and no repair roll. Recovery
+    /// is a different declared surface, not a grant. Appended so every prior
+    /// outcome keeps its wire discriminant.
+    AttemptParked {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The parked member.
+        workpiece: WorkpieceId,
+        /// The stage that declined — Construct, the only stage that parks this way.
+        stage: StageId,
+        /// The lane's evidence artifact — the diagnosis an operator reads.
+        reason: Digest,
+    },
 }
 
 impl Outcome {

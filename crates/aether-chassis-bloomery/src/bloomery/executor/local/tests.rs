@@ -642,12 +642,30 @@ fn evidence_for_a_different_nonce_fails_closed_before_its_claims_are_read() {
 }
 
 #[test]
-fn construct_gate_fails_an_empty_candidate_run_despite_a_clean_exit() {
-    // The exact 2026-07-17 bloom-trial bug: is_error == false and the child exits
-    // zero, but the run left no candidate — nothing to review, so it must NOT
-    // advance the member. The old `exited_success` fallthrough passed this.
+fn construct_gate_parks_an_empty_candidate_run_despite_a_clean_exit() {
+    // A clean conclusion with no candidate is a refusal, not a crash (#5292):
+    // is_error == false and the child exits zero, but the run left nothing to
+    // review. Treating that as a failed attempt burned retries on the same
+    // diagnosis. The 2026-07-17 bloom-trial bug (advancing on exit-zero) stays
+    // covered: this still must not pass.
     let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":false,"result_record":{"is_error":false,"result":{"num_turns":6}}}"#;
-    assert_eq!(construct_verdict(ev), StageVerdict::VerificationFailed);
+    assert_eq!(construct_verdict(ev), StageVerdict::Parked);
+}
+
+#[test]
+fn a_declined_construct_keeps_the_lane_findings_on_the_evidence_ref() {
+    let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":false,"findings":"the work lies outside the declared surface","result_record":{"is_error":false,"result":{"num_turns":4}}}"#;
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, ev, RunLifecycle::Exited { success: true });
+    let handle = exec.submit(&construct_order(digest(5), "n-g")).unwrap();
+    let refs = exec.stream_evidence(&handle).unwrap();
+    let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes");
+    assert_eq!(upload.verdict, StageVerdict::Parked);
+    assert_eq!(
+        refs[0].findings.as_deref(),
+        Some("the work lies outside the declared surface"),
+        "the lane's stated reason has to ride the ref so a park can name it",
+    );
 }
 
 #[test]

@@ -2,6 +2,7 @@
 //! render without querying back into the store (ADR-0149 §The boundary).
 
 use super::readiness::blocking_ancestor;
+use super::snapshot::MemberPark;
 use super::{BloomRecord, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
@@ -24,7 +25,9 @@ use crate::values::Question;
 /// workpiece from the record's accumulated claims — its resolution claim once
 /// integrated (`None` until then), — matched by workpiece from the
 /// [`Question`] each open hold resolves to — its pending-decision hold (`None`
-/// when the member is not held), its wedge if it has stopped dispatching
+/// when the member is not held), a construct-declined park (#5292) when the
+/// snapshot holds one (so a live-query path that cannot resolve a Question
+/// still names the refusal), its wedge if it has stopped dispatching
 /// for good (`None` while it is still working), — when the sealed graph
 /// is holding it out of the line — the ancestor it is waiting on, and — from
 /// [`BloomRecord::progress`] — its stage cursor (`None` until it has been
@@ -102,6 +105,20 @@ fn held_decisions(
         .collect()
 }
 
+/// A construct-declined park (#5292) is not an ADR-0151 question artifact, so
+/// `resolve_question` cannot fill the pending-decision. The snapshot names the
+/// member and the evidence; this is the prompt that distinguishes a park from
+/// a wedge on the served view.
+fn construct_park_view(park: &MemberPark) -> PendingDecisionView {
+    PendingDecisionView {
+        question: park.evidence,
+        stage: park.stage,
+        prompt: "construct concluded without a candidate".into(),
+        options: Vec::new(),
+        blocked: "the declared surface has to change; more attempts replay the same refusal".into(),
+    }
+}
+
 fn member_views(
     record: &BloomRecord,
     snapshot: &Snapshot,
@@ -119,7 +136,8 @@ fn member_views(
             pending_decision: held
                 .iter()
                 .find(|(workpiece, _)| *workpiece == member.workpiece)
-                .map(|(_, view)| view.clone()),
+                .map(|(_, view)| view.clone())
+                .or_else(|| snapshot.member_park(&record.spec.id(), &member.workpiece).map(construct_park_view)),
             wedge: record.wedged.get(&member.workpiece).copied(),
             blocked_by: blocking_ancestor(record, &member.workpiece),
             host_fault: record
@@ -319,6 +337,70 @@ mod tests {
         let hold = view.blooms[0].members[0].host_fault.as_ref().expect("the member is held on the host");
         assert_eq!(hold.findings, findings, "the missing tools are what the operator reads");
         assert!(view.blooms[0].members[0].wedge.is_none(), "a host fault is not a wedge");
+    }
+
+    // The plausible bug: a parked construct and a wedged construct render the
+    // same on `/view`, so the operator reaches for `grant` instead of the
+    // declared surface (#5292).
+    #[test]
+    fn a_parked_construct_is_distinguishable_from_a_wedged_one() {
+        let spec = BloomDraft { proposals: vec![membership("wp", 1)], base: digest(0), ..BloomDraft::default() }.seal();
+        let bloom = spec.id();
+        let reason = digest(91);
+        let mut parked = Snapshot::new(digest(0));
+        parked = step(&parked, &event("seal-p", Fact::Seal(spec.clone()))).0;
+        parked = step(
+            &parked,
+            &event(
+                "decline",
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Construct,
+                    passed: false,
+                    evidence: Evidence { subject: digest(1), kind: EvidenceKind::ConstructDeclined, detail: reason },
+                    candidate: None,
+                },
+            ),
+        )
+        .0;
+        let parked_view = view_of(&parked, |_| None).blooms[0].members[0].clone();
+        let pending = parked_view.pending_decision.as_ref().expect("the park is on the served view");
+        assert_eq!(pending.question, reason, "the pending decision names the lane's evidence");
+        assert_eq!(pending.prompt, "construct concluded without a candidate");
+        assert!(
+            pending.blocked.contains("declared surface"),
+            "the park names the remedy a grant would miss: {}",
+            pending.blocked
+        );
+        assert!(parked_view.wedge.is_none(), "a parked member is not wedged");
+
+        let mut wedged = Snapshot::new(digest(0));
+        wedged = step(&wedged, &event("seal-w", Fact::Seal(spec))).0;
+        for (key, detail) in [("c-die-1", 70_u8), ("c-die-2", 71)] {
+            wedged = step(
+                &wedged,
+                &event(
+                    key,
+                    Fact::AttemptCompleted {
+                        bloom,
+                        workpiece: WorkpieceId("wp".into()),
+                        stage: StageId::Construct,
+                        passed: false,
+                        evidence: Evidence {
+                            subject: digest(1),
+                            kind: EvidenceKind::VerificationResult,
+                            detail: digest(detail),
+                        },
+                        candidate: None,
+                    },
+                ),
+            )
+            .0;
+        }
+        let wedged_view = view_of(&wedged, |_| None).blooms[0].members[0].clone();
+        assert!(wedged_view.wedge.is_some(), "a budget-spent construct still wedges");
+        assert!(wedged_view.pending_decision.is_none(), "a wedge is not a park");
     }
 
     // The plausible bug: a member that exhausted its machinery budget renders

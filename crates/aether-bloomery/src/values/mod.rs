@@ -224,6 +224,16 @@ pub enum EvidenceKind {
     /// [`Self::RepairTriage`] so the prior kinds' wire discriminants are
     /// unchanged.
     ReviewAdvisory,
+    /// A construct lane that concluded cleanly and reported it produced no
+    /// candidate (#5292). Riding [`crate::Fact::AttemptCompleted`] so the
+    /// reducer can park the member instead of retrying: a dead construct
+    /// also captures nothing, and inferring the refusal from that absence
+    /// would convert a genuine retry into a park.
+    ///
+    /// Its `detail` names the lane's evidence artifact — the diagnosis the
+    /// operator reads. Appended past [`Self::ReviewAdvisory`] so the prior
+    /// kinds' wire discriminants are unchanged.
+    ConstructDeclined,
 }
 
 /// The sealed forecast of what a bloom's set will spend — what a study report

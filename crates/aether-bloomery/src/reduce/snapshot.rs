@@ -99,6 +99,14 @@ pub struct Snapshot {
     /// precedent.
     #[serde(default)]
     pub fold_refusals: BTreeMap<BloomId, RecordedRefusal>,
+    /// A construct that concluded without a candidate (#5292), keyed by bloom
+    /// then workpiece. Folded from a declining [`Fact::AttemptCompleted`]
+    /// the way construct checkpoints are folded from a failing one — the fact
+    /// already names the member and the evidence, so no new [`Decision`]
+    /// enters the frozen graph. Snapshot-level rather than a [`BloomRecord`]
+    /// field so every existing `BloomRecord { … }` literal stays compiling.
+    #[serde(default)]
+    pub member_parks: BTreeMap<BloomId, BTreeMap<WorkpieceId, MemberPark>>,
 }
 
 impl Snapshot {
@@ -127,6 +135,12 @@ impl Snapshot {
     #[must_use]
     pub fn fold_refusal(&self, bloom: &BloomId) -> Option<&RecordedRefusal> {
         self.fold_refusals.get(bloom)
+    }
+
+    /// The construct-declined park recorded for `workpiece` in `bloom`.
+    #[must_use]
+    pub fn member_park(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&MemberPark> {
+        self.member_parks.get(bloom)?.get(workpiece)
     }
 }
 
@@ -427,6 +441,21 @@ pub struct BloomRecord {
     pub superseded_by: Option<BloomId>,
 }
 
+/// A construct that concluded without a candidate (#5292) — the member is
+/// parked, not wedged: attempts and repair rolls did not move, and the
+/// operator's remedy is the declared surface rather than a grant.
+///
+/// Projection state, not a journal row: the durable write is the declining
+/// [`Fact::AttemptCompleted`]. `evidence` is the lane's artifact digest, the
+/// same value [`Outcome::AttemptParked`] carries as `reason`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct MemberPark {
+    /// The stage that declined — Construct.
+    pub stage: StageId,
+    /// The lane's evidence artifact — the diagnosis an operator reads.
+    pub evidence: Digest,
+}
+
 /// A member held at Verify because the host could not run the gates (#5020).
 ///
 /// Projection state, not a journal row: the durable write is
@@ -592,6 +621,7 @@ impl Snapshot {
             next.apply_effect(effect);
         }
         next.record_construct_checkpoint(event, decisions);
+        next.record_construct_park(event, decisions);
         next.record_fold_refusal(event, decisions);
         next
     }
@@ -620,6 +650,28 @@ impl Snapshot {
             return;
         };
         self.member_checkpoints.entry(*bloom).or_default().insert(workpiece.clone(), *checkpoint);
+    }
+
+    /// Record a construct that concluded without a candidate as a member park.
+    ///
+    /// Gated on [`Outcome::AttemptParked`]: a refused completion cannot plant
+    /// a park the reducer rejected, and a dead construct that retried or
+    /// wedged is not this case. Raises no hold and does not write the stage
+    /// cursor — attempts and repair rolls stay where they were.
+    fn record_construct_park(&mut self, event: &Event, decisions: &Decisions) {
+        let Outcome::AttemptParked { bloom, workpiece, stage, reason } = &decisions.outcome else {
+            return;
+        };
+        let Fact::AttemptCompleted { stage: StageId::Construct, passed: false, evidence, .. } = &event.fact else {
+            return;
+        };
+        if evidence.kind != EvidenceKind::ConstructDeclined {
+            return;
+        }
+        self.member_parks
+            .entry(*bloom)
+            .or_default()
+            .insert(workpiece.clone(), MemberPark { stage: *stage, evidence: *reason });
     }
 
     /// Record (or clear) a fold refusal from the admitted fact (ADR-0206).
@@ -1233,7 +1285,11 @@ impl BloomRecord {
             // whether the bloom went on to re-weave or to resolve.
             | EvidenceKind::FoldConflict
             | EvidenceKind::RepairTriage
-            | EvidenceKind::ReviewAdvisory => {}
+            | EvidenceKind::ReviewAdvisory
+            // A construct-declined park binds the member through
+            // `Snapshot::member_parks`, not a pending-decision hold: an
+            // adopting answer would re-dispatch the same refused work.
+            | EvidenceKind::ConstructDeclined => {}
         }
     }
 }
