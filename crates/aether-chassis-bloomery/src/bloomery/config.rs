@@ -161,13 +161,14 @@ pub struct CoordinatorConfig {
     #[config(default = true)]
     pub local_lane_enabled: bool,
     /// The comma-separated command-id prefixes the executor routes to the local
-    /// backend (the rest go to Actions). The default routes both model-driven
-    /// lanes local — `construct.` (construct/refine) and `review.` (the critic,
-    /// which needs the model API the zero-secret runner deliberately lacks);
-    /// adding e.g. `verify.` is the release valve that flips a heavy mechanical
-    /// lane local (Actions outage, quota, offline work). Parsed by
+    /// backend (the rest go to Actions). The default routes the model-driven
+    /// lanes local — `construct.` (construct/refine), `review.` (the critic),
+    /// and `scope.` (the scoper) — each forks an agent CLI under an ambient
+    /// credential the zero-secret runner deliberately lacks; adding e.g.
+    /// `verify.` is the release valve that flips a heavy mechanical lane local
+    /// (Actions outage, quota, offline work). Parsed by
     /// [`local_lane_prefixes`](Self::local_lane_prefixes).
-    #[config(default = "construct.,review.")]
+    #[config(default = "construct.,review.,scope.")]
     pub local_lane_commands: String,
     /// The scratch-worktree base dir the local backend checks each order's subject
     /// into (keyed by nonce). Should be absolute in production so the checkout
@@ -434,7 +435,7 @@ impl Default for CoordinatorConfig {
             store_path: ":memory:".to_owned(),
             approval_policy_file: "approval-policy.toml".to_owned(),
             local_lane_enabled: true,
-            local_lane_commands: "construct.,review.".to_owned(),
+            local_lane_commands: "construct.,review.,scope.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
             local_lane_program: DEFAULT_LANE_PROGRAM.to_owned(),
             max_concurrent_lanes: 3,
@@ -826,7 +827,7 @@ xAtw6HCuoUIzjbWZe1H+wS8KmJmYkTvf8f70x0/jMYRUyvMQy3beUUQ=
         assert_eq!(connection.executor_workflow_file, "transform.yml");
         assert_eq!(connection.executor_model_workflow_file, "transform-model.yml");
         assert_eq!(coordinator.poll_interval_secs, 5);
-        assert_eq!(coordinator.local_lane_prefixes(), ["construct.", "review."]);
+        assert_eq!(coordinator.local_lane_prefixes(), ["construct.", "review.", "scope."]);
         assert_eq!(coordinator.store_path, ":memory:");
         assert_eq!(coordinator.heartbeat_silence_secs, 600);
         assert_eq!(coordinator.heartbeat_silence_secs().expect("the default is nonzero"), 600);

@@ -88,12 +88,12 @@ mod tests {
         let config = CoordinatorConfig { local_lane_commands: " construct. , verify. ,".into(), ..Default::default() };
         assert_eq!(config.local_lane_prefixes(), vec!["construct.".to_owned(), "verify.".to_owned()]);
 
-        // The default routes both model-driven lanes local — construct/refine
-        // and the review critic, which needs the model API the zero-secret
-        // runner deliberately lacks.
+        // The default routes the model-driven lanes local — construct/refine,
+        // the review critic, and the scoper — each forks an agent CLI under an
+        // ambient credential the zero-secret runner deliberately lacks.
         assert_eq!(
             CoordinatorConfig::default().local_lane_prefixes(),
-            vec!["construct.".to_owned(), "review.".to_owned()]
+            vec!["construct.".to_owned(), "review.".to_owned(), "scope.".to_owned()]
         );
     }
 }
