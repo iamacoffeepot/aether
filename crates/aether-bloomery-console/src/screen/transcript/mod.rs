@@ -6,11 +6,12 @@ mod event;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use crate::dto::DispatchFilePage;
 use crate::keys::{KeyHint, Outcome};
+use crate::palette;
 use crate::store::{ResourceKey, Store, TranscriptQuery};
 use crate::warroom::Focus;
 
@@ -105,17 +106,6 @@ impl Transcript {
         HINTS
     }
 
-    #[must_use]
-    pub fn selected_is_first(&self) -> bool {
-        if self.follow {
-            return false;
-        }
-        match self.selected.and_then(|id| self.buffer.index_of(id)) {
-            Some(0) | None => true,
-            Some(_) => false,
-        }
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent, _store: &Store) -> Outcome {
         if self.search.editing {
             return self.handle_search_edit(key);
@@ -188,7 +178,7 @@ impl Transcript {
             .split(area);
 
         if let Some(banner) = banner {
-            frame.render_widget(Paragraph::new(banner).style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
+            frame.render_widget(Paragraph::new(banner).style(palette::body().add_modifier(Modifier::BOLD)), chunks[0]);
         }
 
         if let Some(id) = self.expanded {
@@ -196,7 +186,7 @@ impl Transcript {
         } else {
             self.render_list(frame, chunks[1]);
         }
-        frame.render_widget(Paragraph::new(self.status_line()), chunks[2]);
+        frame.render_widget(Paragraph::new(self.status_line()).style(palette::body()), chunks[2]);
     }
 
     fn query(&self) -> TranscriptQuery {
@@ -411,8 +401,7 @@ impl Transcript {
             items.push(ListItem::new(self.empty_label()));
         }
         let highlight = selected.map(|index| index.saturating_sub(self.scroll));
-        let list =
-            List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED)).highlight_symbol("> ");
+        let list = List::new(items).style(palette::body()).highlight_style(palette::cursor()).highlight_symbol("> ");
         let mut state = ListState::default().with_selected(highlight);
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -426,7 +415,7 @@ impl Transcript {
         let lines = wrap(&body, usize::from(area.width.max(1)));
         let offset = self.expand_scroll.min(lines.len().saturating_sub(1));
         let items: Vec<ListItem> = lines.into_iter().skip(offset).map(ListItem::new).collect();
-        frame.render_widget(List::new(items), area);
+        frame.render_widget(List::new(items).style(palette::body()), area);
     }
 
     fn empty_label(&self) -> String {

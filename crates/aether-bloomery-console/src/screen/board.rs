@@ -3,13 +3,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
 use crate::dto::{BloomStatus, DigestHex, MemberView, TimelineSpan, ViewDocument};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
+use crate::palette;
 use crate::store::{ResourceKey, Store};
 use crate::warroom::Focus;
 
@@ -208,13 +209,6 @@ impl Board {
         });
     }
 
-    /// True when k should leave the table for the chrome above it.
-    #[must_use]
-    pub fn selected_is_first(&self, store: &Store) -> bool {
-        let rows = rows_from(store, self.lane);
-        matches!(self.cursor.selected_index(&rows, BoardRow::id), Some(0) | None)
-    }
-
     pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store) {
         let rows = rows_from(store, self.lane);
         let dimmed = store.view().is_stale();
@@ -223,16 +217,16 @@ impl Board {
 
     fn render_table(&mut self, frame: &mut Frame<'_>, area: Rect, store: &Store, rows: &[BoardRow], dimmed: bool) {
         let muted = if dimmed {
-            Style::default().add_modifier(Modifier::DIM)
+            palette::body().add_modifier(Modifier::DIM)
         } else {
-            Style::default()
+            palette::body()
         };
         let title = match self.lane {
             BoardLane::Live => "BLOOM / MEMBER",
             BoardLane::History => "HISTORY (landed · superseded)",
         };
         let header = Row::new([title, "STATE", "ELAPSED", "COST", "LANE"])
-            .style(Style::default().add_modifier(Modifier::BOLD).patch(muted));
+            .style(palette::body().add_modifier(Modifier::BOLD).patch(muted));
         let extras = metrics_of(store);
         let table_rows = rows.iter().map(|row| match row {
             BoardRow::Bloom(bloom) => {
@@ -244,7 +238,7 @@ impl Board {
                     Cell::from(extra.map_or("", |extra| extra.cost.as_str())),
                     Cell::from(extra.map_or("", |extra| extra.lane.as_str())),
                 ])
-                .style(Style::default().add_modifier(Modifier::BOLD).patch(muted))
+                .style(palette::body().add_modifier(Modifier::BOLD).patch(muted))
             }
             BoardRow::Member(member) => Row::new([
                 Cell::from(format!("  {}", member.workpiece)),
@@ -265,8 +259,9 @@ impl Board {
                 Constraint::Min(10),
             ],
         )
+        .style(palette::body())
         .header(header)
-        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .row_highlight_style(palette::cursor())
         .highlight_symbol("> ");
         let mut table_state = TableState::default()
             .with_selected(self.cursor.selected_index(rows, BoardRow::id))
@@ -415,8 +410,12 @@ mod tests {
         BloomStatus, BloomView, DigestHex, MemberView, PendingDecisionView, Present, ViewDocument, WedgeCause,
     };
     use crate::keys::{Outcome, assert_footer_honest};
+    use crate::palette::{Depth, with_depth};
     use crate::store::Store;
     use crossterm::event::KeyEvent;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Cell;
     use std::time::Duration;
 
     fn digest(byte: u8) -> DigestHex {
@@ -537,6 +536,28 @@ mod tests {
         let mut board = Board::new();
         assert_footer_honest(board.key_hints(), |code| {
             board.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+        });
+    }
+
+    #[test]
+    fn fallback_board_row_keeps_the_severity_glyph() {
+        // The plausible bug: 256-color fallback paints severity by color
+        // alone and drops the WEDGED token the operator has to read.
+        with_depth(Depth::Indexed, || {
+            let mut store = Store::new(Duration::from_secs(1));
+            store.apply_view(Ok(ViewDocument {
+                blooms: vec![BloomView {
+                    id: digest(1),
+                    members: vec![MemberView { wedge: Some(Present {}), ..member("wp-wedge") }],
+                    ..BloomView::default()
+                }],
+                ..ViewDocument::default()
+            }));
+            let mut board = Board::new();
+            let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("test backend");
+            terminal.draw(|frame| board.render(frame, frame.area(), &store)).expect("draw");
+            let text: String = terminal.backend().buffer().content().iter().map(Cell::symbol).collect();
+            assert!(text.contains("WEDGED"), "{text}");
         });
     }
 }

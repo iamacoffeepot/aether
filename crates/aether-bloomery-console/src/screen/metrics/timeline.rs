@@ -5,12 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
 use crate::dto::{BloomStatus, DigestHex, MemberView, MetricsTimeline, TimelineSpan};
 use crate::keys::{KeyHint, Outcome};
+use crate::palette;
 use crate::screen::board::member_status_state;
 use crate::store::{ResourceKey, Store};
 
@@ -55,12 +56,6 @@ impl Timeline {
         HINTS
     }
 
-    #[must_use]
-    pub fn selected_is_first(&self, store: &Store) -> bool {
-        let rows = self.rows(store);
-        matches!(self.cursor.selected_index(&rows, |row| row.workpiece.clone()), Some(0) | None)
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
         let rows = self.rows(store);
         match key.code {
@@ -99,7 +94,7 @@ impl Timeline {
             "DUR".to_owned(),
             "SPANS".to_owned(),
         ])
-        .style(Style::default().add_modifier(if reconstructed {
+        .style(palette::body().add_modifier(if reconstructed {
             Modifier::DIM | Modifier::BOLD
         } else {
             Modifier::BOLD
@@ -121,8 +116,9 @@ impl Timeline {
                 Constraint::Length(area.width.saturating_sub(36).max(8)),
             ],
         )
+        .style(palette::body())
         .header(header)
-        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .row_highlight_style(palette::cursor())
         .highlight_symbol("> ");
         let mut state = TableState::default()
             .with_selected(self.cursor.selected_index(&rows, |row| row.workpiece.clone()))

@@ -3,11 +3,12 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::widgets::{Cell, Row, Table, TableState};
 
 use crate::cursor::Cursor;
 use crate::keys::{KeyHint, Outcome};
+use crate::palette;
 use crate::store::{ResourceKey, Store};
 
 use super::cost::{CostAxis, CostGroup, groups_from_members, groups_from_seats, groups_from_spend, mean_of};
@@ -48,12 +49,6 @@ impl Breakdown {
     #[must_use]
     pub fn key_hints() -> &'static [KeyHint] {
         HINTS
-    }
-
-    #[must_use]
-    pub fn selected_is_first(&self, store: &Store) -> bool {
-        let rows = self.groups(store);
-        matches!(self.cursor.selected_index(&rows, |row| row.label.clone()), Some(0) | None)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, store: &Store) -> Outcome {
@@ -99,7 +94,7 @@ impl Breakdown {
             "UNPR".to_owned(),
             "BAR".to_owned(),
         ])
-        .style(Style::default().add_modifier(Modifier::BOLD));
+        .style(palette::body().add_modifier(Modifier::BOLD));
         let table_rows = rows.iter().map(|row| {
             Row::new([
                 Cell::from(row.label.clone()),
@@ -121,8 +116,9 @@ impl Breakdown {
                 Constraint::Length(12),
             ],
         )
+        .style(palette::body())
         .header(header)
-        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .row_highlight_style(palette::cursor())
         .highlight_symbol("> ");
         let mut state = TableState::default()
             .with_selected(self.cursor.selected_index(&rows, |row| row.label.clone()))

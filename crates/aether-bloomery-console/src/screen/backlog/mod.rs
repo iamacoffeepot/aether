@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
 
@@ -23,6 +23,7 @@ use crate::cursor::Cursor;
 use crate::dto::{CommissionHeadView, DigestHex};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
+use crate::palette;
 use crate::store::{CommissionCapability, ResourceKey, Store};
 use crate::warroom::Focus;
 
@@ -78,12 +79,6 @@ impl Backlog {
     #[must_use]
     pub fn key_hints() -> &'static [KeyHint] {
         HINTS
-    }
-
-    #[must_use]
-    pub fn selected_is_first(&self, store: &Store) -> bool {
-        let rows = rows_from(store);
-        matches!(self.cursor.selected_index(&rows, |row| row.id.clone()), Some(0) | None)
     }
 
     #[must_use]
@@ -157,7 +152,7 @@ impl Backlog {
             .split(area);
         if band_height > 0 {
             let bands: Vec<Line> = walked.cycles.iter().map(|cycle| Line::from(cycle_line(cycle))).collect();
-            frame.render_widget(Paragraph::new(bands).style(Style::default().add_modifier(Modifier::BOLD)), chunks[0]);
+            frame.render_widget(Paragraph::new(bands).style(palette::body().add_modifier(Modifier::BOLD)), chunks[0]);
         }
 
         let rows = rows_from(store);
@@ -167,15 +162,16 @@ impl Backlog {
             Row::new([
                 Cell::from(Line::from(vec![
                     Span::raw(format!("{indent}{}", row.id)),
-                    Span::styled(format!("  {annotation}"), Style::default().add_modifier(Modifier::DIM)),
+                    Span::styled(format!("  {annotation}"), palette::body().add_modifier(Modifier::DIM)),
                 ])),
                 Cell::from(row.status.clone()),
                 Cell::from(row.intent.clone()),
             ])
         });
         let table = Table::new(table_rows, [Constraint::Length(28), Constraint::Length(10), Constraint::Min(16)])
-            .header(Row::new(["WORKPIECE", "STATE", "INTENT"]).style(Style::default().add_modifier(Modifier::BOLD)))
-            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .style(palette::body())
+            .header(Row::new(["WORKPIECE", "STATE", "INTENT"]).style(palette::body().add_modifier(Modifier::BOLD)))
+            .row_highlight_style(palette::cursor())
             .highlight_symbol("> ");
         let mut state = TableState::default()
             .with_selected(self.cursor.selected_index(&rows, |row| row.id.clone()))

@@ -3,13 +3,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::cursor::Cursor;
 use crate::dto::{BloomView, CompositionFinding, CompositionView, DigestHex, MemberView, ViewDocument};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
+use crate::palette;
 use crate::store::{ResourceKey, Store};
 use crate::warroom::Focus;
 
@@ -98,11 +99,6 @@ impl Detail {
         self.selected_line().and_then(|line| line.digest)
     }
 
-    #[must_use]
-    pub fn selected_is_first(&self) -> bool {
-        matches!(self.cursor.selected_index(&self.lines, |line| line.key.clone()), Some(0) | None)
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent, _store: &Store) -> Outcome {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
@@ -160,14 +156,13 @@ impl Detail {
         }
         let dimmed = self.vanished || store.view().is_stale();
         let muted = if dimmed {
-            Style::default().add_modifier(Modifier::DIM)
+            palette::body().add_modifier(Modifier::DIM)
         } else {
-            Style::default()
+            palette::body()
         };
         let items: Vec<ListItem> =
             self.lines.iter().map(|line| ListItem::new(line.text.clone()).style(muted)).collect();
-        let list =
-            List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED)).highlight_symbol("> ");
+        let list = List::new(items).style(palette::body()).highlight_style(palette::cursor()).highlight_symbol("> ");
         let mut state = ListState::default()
             .with_selected(self.cursor.selected_index(&self.lines, |line| line.key.clone()))
             .with_offset(self.scroll);
@@ -199,8 +194,9 @@ impl Detail {
     fn rebuild(&mut self, view: &ViewDocument) {
         self.lines = match &self.focus {
             Focus::Bloom { id } => bloom_lines(view, *id),
-            Focus::Member { bloom, workpiece } => member_lines(view, *bloom, workpiece, false),
-            Focus::Dispatch { bloom, workpiece } => member_lines(view, *bloom, workpiece, true),
+            Focus::Member { bloom, workpiece } | Focus::Dispatch { bloom, workpiece } => {
+                member_lines(view, *bloom, workpiece)
+            }
             Focus::Composition { bloom } => composition_lines(view, *bloom),
             Focus::Seal => seal_lines(view),
             Focus::Record { sequence } => vec![label(RowKey::Identity, format!("record {sequence}"))],
@@ -330,19 +326,16 @@ fn push_finding(lines: &mut Vec<Line>, finding: &CompositionFinding, index: usiz
     lines.push(digest_line(RowKey::Digest(finding.detail), "  detail", finding.detail));
 }
 
-fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str, dispatch: bool) -> Vec<Line> {
+fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<Line> {
     let Some((bloom, member)) = find_member(view, bloom, workpiece) else {
         return Vec::new();
     };
-    let title = if dispatch {
-        "dispatch"
-    } else {
-        "member"
-    };
-    let mut lines = vec![label(
-        RowKey::Identity,
-        format!("{title} {workpiece}  bloom {}  {}", bloom.id.prefix(), bloom.id.as_hex()),
-    )];
+    let mut lines = vec![Line {
+        key: RowKey::Identity,
+        text: format!("member {workpiece}  bloom {}  {}", bloom.id.prefix(), bloom.id.as_hex()),
+        enter: Some(Nav::focus(Focus::dispatch(bloom.id, member.workpiece.clone()))),
+        digest: None,
+    }];
     lines.push(label(RowKey::Other(0), format!("state  {}", member_status_state(member, false))));
     if let Some(blocked) = member.blocked_by.as_deref().filter(|name| !name.is_empty()) {
         lines.push(Line {

@@ -401,6 +401,32 @@ pub struct OperatorHoldView {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Present {}
 
+/// `GET /blooms/{id}/dispatches` — attempts the coordinator served for one bloom.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BloomDispatchesView {
+    #[serde(default)]
+    pub dispatches: Vec<BloomDispatchView>,
+}
+
+/// One attempt: nonce, stage, attempt rank, verdict, cost, retention.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BloomDispatchView {
+    #[serde(default)]
+    pub nonce: String,
+    #[serde(default)]
+    pub workpiece: String,
+    #[serde(default)]
+    pub stage: StageId,
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default)]
+    pub verdict: Option<String>,
+    #[serde(default)]
+    pub cost: Option<u64>,
+    #[serde(default)]
+    pub evidence_retained: bool,
+}
+
 /// One bounded `GET /journal` page.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct JournalPage {
