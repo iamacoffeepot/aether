@@ -12,6 +12,7 @@
 //! rebuild that lands in a different target directory both succeed, and both
 //! cost a day of blooms before anyone reads a log.
 
+mod coverage;
 mod cut;
 mod day;
 mod preconditions;
@@ -19,6 +20,7 @@ mod replica;
 mod shell;
 mod sync;
 
+use aether_bloomery_git::DayCoverage;
 use anyhow::{Result, bail};
 use clap::Args;
 
@@ -48,15 +50,16 @@ pub struct RollArgs {
 }
 
 pub fn run(client: &Client<'_>, args: &RollArgs) -> Result<String> {
-    roll(&client.view()?, &shell::Host, &aether_bloomery_git::DayCoverage::green(), args)
+    let view = client.view()?;
+    let coverage = match client.journal() {
+        Ok(journal) => coverage::day_coverage(&view, &journal),
+        Err(error) => DayCoverage::hold(error.to_string()),
+    };
+
+    roll(&view, &shell::Host, &coverage, args)
 }
 
-fn roll(
-    view: &ViewDocument,
-    shell: &impl Shell,
-    coverage: &aether_bloomery_git::DayCoverage,
-    args: &RollArgs,
-) -> Result<String> {
+fn roll(view: &ViewDocument, shell: &impl Shell, coverage: &DayCoverage, args: &RollArgs) -> Result<String> {
     let from = sync_from(&args.from)?;
     preconditions::screen(view, shell, &args.date, &args.remote)?;
     let synced = sync::merge(shell, &args.remote, &from, coverage)?;
