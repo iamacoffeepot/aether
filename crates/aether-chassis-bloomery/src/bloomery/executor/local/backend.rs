@@ -27,7 +27,8 @@ use super::process_runner::{CaptureIdentity, ProcessTransformRunner};
 use super::quarantine;
 use super::runner::{RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use super::session_reuse::{
-    AcquireRequest, DEFAULT_PRICING_CLIFF_TOKENS, MissReason, RefineResume, ReuseArm, SPLICED_RESET_NOTE,
+    AcquireRequest, DEFAULT_CACHE_TTL_SECS, DEFAULT_DEPENDENCY_INCREMENT_TOKENS, DEFAULT_PRICING_CLIFF_TOKENS,
+    MissReason, PredecessorCandidate, RefineResume, ReuseArm, SPLICED_RESET_NOTE, decide_predecessor_resume,
     decide_refine_resume, plan_for, usable_session_id,
 };
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
@@ -754,6 +755,9 @@ impl LocalExecutor {
         if let Some(plan) = self.journaled_refine_plan(pending, worktree_dir) {
             return Some(plan);
         }
+        if let Some(plan) = self.journaled_predecessor_plan(pending, worktree_dir) {
+            return Some(plan);
+        }
         let sessions = self.sessions.as_ref()?;
         // Every harness keys into the pool the same way — the arm comes from
         // the two static rules and the pool, never from the harness name.
@@ -798,6 +802,67 @@ impl LocalExecutor {
         })
     }
 
+    /// Dependent Construct resume from a predecessor's journaled session.
+    /// Missing graph or an already-journaled own session fall through to the
+    /// pool; a considered predecessor that fails a gate launches fresh.
+    fn journaled_predecessor_plan(&self, pending: &PendingRun, worktree_dir: &Path) -> Option<super::ReusePlan> {
+        let (bloom, workpiece, stage) = self.order_identity(&pending.nonce)?;
+        if stage != StageId::Construct {
+            return None;
+        }
+        let candidates = self.predecessor_resume_candidates(&bloom, &workpiece)?;
+        let profile = pending.profile.as_ref()?;
+        let sessions = self.sessions.as_ref();
+        let cliff =
+            sessions.map_or(DEFAULT_PRICING_CLIFF_TOKENS, super::session_reuse::SessionReuse::pricing_cliff_tokens);
+        let increment = sessions.map_or(
+            DEFAULT_DEPENDENCY_INCREMENT_TOKENS,
+            super::session_reuse::SessionReuse::dependency_increment_tokens,
+        );
+        let warmth = sessions.map_or(DEFAULT_CACHE_TTL_SECS, super::session_reuse::SessionReuse::cache_ttl_secs);
+        let now = sessions.map_or_else(unix_now_secs, super::session_reuse::SessionReuse::unix_now);
+        let task = super::session_reuse::pool_task(&pending.command, pending.task.as_deref());
+        let request = AcquireRequest {
+            model: &profile.model,
+            effort: profile.effort.as_str(),
+            task: &task,
+            worktree: worktree_dir,
+            command: &pending.command,
+        };
+        Some(match decide_predecessor_resume(&candidates, now, warmth, increment, cliff) {
+            RefineResume::Resumed(id) => {
+                let mut plan = plan_for(&request, ReuseArm::Resumed, None, Some(id));
+                plan.edge = true;
+                plan
+            }
+            RefineResume::Fresh { miss } => plan_for(&request, ReuseArm::Fresh, miss, None),
+        })
+    }
+
+    /// Predecessor sessions this Construct may resume. `None` when the member
+    /// has no graph or already journaled its own handle (a retry uses the pool).
+    fn predecessor_resume_candidates(&self, bloom: &[u8], workpiece: &str) -> Option<Vec<PredecessorCandidate>> {
+        let messages = self.messages.as_ref()?;
+        let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
+        if store.lookup_construct_session(bloom, workpiece).ok().flatten().is_some() {
+            return None;
+        }
+        let predecessors = store.lookup_predecessors(bloom, workpiece).ok()?;
+        if predecessors.is_empty() {
+            return None;
+        }
+        let candidates = predecessors
+            .iter()
+            .filter_map(|predecessor| {
+                let (session_id, context_tokens, deposited_unix) =
+                    store.lookup_construct_session_meta(bloom, predecessor).ok().flatten()?;
+                Some(PredecessorCandidate { session_id, context_tokens, deposited_unix })
+            })
+            .collect();
+        drop(store);
+        Some(candidates)
+    }
+
     fn order_identity(&self, nonce: &str) -> Option<(Vec<u8>, String, StageId)> {
         let messages = self.messages.as_ref()?;
         let mut store = messages.lock().unwrap_or_else(PoisonError::into_inner);
@@ -833,7 +898,15 @@ impl LocalExecutor {
                     if stage != StageId::Construct {
                         return Ok(());
                     }
-                    store.record_construct_session(&order.bloom, &order.workpiece, &session_id, context)
+                    let deposited_unix =
+                        self.sessions.as_ref().map_or_else(unix_now_secs, super::session_reuse::SessionReuse::unix_now);
+                    store.record_construct_session_at(
+                        &order.bloom,
+                        &order.workpiece,
+                        &session_id,
+                        context,
+                        deposited_unix,
+                    )
                 })
             })
         };
@@ -2067,6 +2140,10 @@ fn parse_failed_verifiers(bytes: &[u8]) -> Option<VerifyFailureSet> {
 // The evidence's top-level `findings` prose — what the review critic stamped
 // (#3656), threaded onto a later Refine re-entry. Presence-driven: a lane that
 // stamps none yields `None`, no lane flag needed.
+fn unix_now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs())
+}
+
 fn parse_findings(bytes: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     value.get("findings").and_then(serde_json::Value::as_str).map(str::to_owned)

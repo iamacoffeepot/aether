@@ -28,9 +28,9 @@ use aether_actor::runtime;
 // package cycle (the actor lives there; host depends on it). Host imports them
 // inward for its `StoreCapability` handlers (issue #3497).
 use aether_bloomery::{
-    Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Event, JournalRecord, LoadConfigs, LoadConfigsResult,
-    MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal, ReplayJournalResult,
-    ScopeRevision, Statement, WorkpieceId, decode_recorded_decisions,
+    Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Event, JournalRecord, LoadConfigs,
+    LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
+    ReplayJournalResult, ScopeRevision, Statement, WorkpieceId, decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
@@ -387,6 +387,28 @@ pub trait StoreBackend: Send {
     /// The construct session recorded for (`bloom`, `workpiece`), or `None`
     /// when construct never journaled a handle — Refine then launches fresh.
     fn lookup_construct_session(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<(String, u64)>>;
+    /// The construct session plus its deposit time, for a predecessor-resume
+    /// warmth gate (#5178). `deposited_unix` is `None` on a pre-column row.
+    fn lookup_construct_session_meta(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+    ) -> rusqlite::Result<Option<(String, u64, Option<u64>)>>;
+    /// Record the construct session at an explicit unix-seconds deposit time —
+    /// the clock the warmth gate compares.
+    fn record_construct_session_at(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        session_id: &str,
+        context_tokens: u64,
+        deposited_unix: u64,
+    ) -> rusqlite::Result<()>;
+    /// Replace the sealed member-dependency graph for `bloom` (#5178). Each
+    /// pair is `(member, depends_on)`.
+    fn record_member_dependencies(&mut self, bloom: &[u8], edges: &[(String, String)]) -> rusqlite::Result<()>;
+    /// Direct predecessors of `workpiece` on `bloom`, in workpiece order.
+    fn lookup_predecessors(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Vec<String>>;
     /// Record the diff a lane's captured candidate carries, keyed by the nonce
     /// of the order that produced it (#4959) — what the repair-lap triage reads
     /// before a passing `Refine` result is admitted. Written by an executor
@@ -609,7 +631,12 @@ impl SqliteStore {
 /// `10` is the per-member construct session handle (#5177):
 /// `construct_session`. Empty on creation; nothing is backfilled — a
 /// session id that was never captured is not invented.
-const SCHEMA_VERSION: i64 = 10;
+///
+/// `11` is the predecessor-resume journal (#5178): `construct_session`
+/// gains `deposited_unix` (warmth), and `member_dependency` holds the sealed
+/// graph a dependent construct looks up at unblock. Empty on creation; a
+/// pre-column row stays `NULL` (not assumed warm) and nothing is backfilled.
+const SCHEMA_VERSION: i64 = 11;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -726,6 +753,16 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // Empty on creation; a pre-existing store has no captured handles to invent.
     if !has_table(&migration, "construct_session")? {
         migration.execute_batch(CONSTRUCT_SESSION_TABLE)?;
+    }
+
+    // Version 11 (#5178): deposit time on the construct session, and the sealed
+    // member graph a dependent looks up at unblock. No backfill — a missing
+    // deposit is stale, and a missing graph launches the dependent fresh.
+    if has_table(&migration, "construct_session")? && !has_column(&migration, "construct_session", "deposited_unix")? {
+        migration.execute_batch("ALTER TABLE construct_session ADD COLUMN deposited_unix INTEGER;")?;
+    }
+    if !has_table(&migration, "member_dependency")? {
+        migration.execute_batch(MEMBER_DEPENDENCY_TABLE)?;
     }
 
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -924,11 +961,18 @@ CREATE TABLE IF NOT EXISTS metric_cursor (
     through_sequence INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS construct_session (
-    bloom          BLOB NOT NULL,
-    workpiece      TEXT NOT NULL,
-    session_id     TEXT NOT NULL,
-    context_tokens INTEGER NOT NULL,
+    bloom           BLOB NOT NULL,
+    workpiece       TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    context_tokens  INTEGER NOT NULL,
+    deposited_unix  INTEGER,
     PRIMARY KEY (bloom, workpiece)
+);
+CREATE TABLE IF NOT EXISTS member_dependency (
+    bloom      BLOB NOT NULL,
+    member     TEXT NOT NULL,
+    depends_on TEXT NOT NULL,
+    PRIMARY KEY (bloom, member, depends_on)
 );
 ";
 
@@ -948,11 +992,22 @@ CREATE TABLE IF NOT EXISTS proof_facts (
 /// The per-member construct session a same-member refine resumes (#5177).
 const CONSTRUCT_SESSION_TABLE: &str = "\
 CREATE TABLE IF NOT EXISTS construct_session (
-    bloom          BLOB NOT NULL,
-    workpiece      TEXT NOT NULL,
-    session_id     TEXT NOT NULL,
-    context_tokens INTEGER NOT NULL,
+    bloom           BLOB NOT NULL,
+    workpiece       TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    context_tokens  INTEGER NOT NULL,
+    deposited_unix  INTEGER,
     PRIMARY KEY (bloom, workpiece)
+);
+";
+
+/// The sealed member-dependency graph a dependent construct looks up (#5178).
+const MEMBER_DEPENDENCY_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS member_dependency (
+    bloom      BLOB NOT NULL,
+    member     TEXT NOT NULL,
+    depends_on TEXT NOT NULL,
+    PRIMARY KEY (bloom, member, depends_on)
 );
 ";
 
@@ -1034,6 +1089,10 @@ fn deadline_column(order: &OutstandingOrder) -> i64 {
 #[must_use]
 pub fn now_unix_millis() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs())
 }
 
 /// One admission stamp as the signed integer the column stores, saturating at
@@ -1288,23 +1347,72 @@ impl StoreBackend for SqliteStore {
         session_id: &str,
         context_tokens: u64,
     ) -> rusqlite::Result<()> {
+        self.record_construct_session_at(bloom, workpiece, session_id, context_tokens, unix_now_secs())
+    }
+
+    fn record_construct_session_at(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        session_id: &str,
+        context_tokens: u64,
+        deposited_unix: u64,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO construct_session (bloom, workpiece, session_id, context_tokens) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![bloom, workpiece, session_id, i64::try_from(context_tokens).unwrap_or(i64::MAX)],
+            "INSERT OR REPLACE INTO construct_session \
+             (bloom, workpiece, session_id, context_tokens, deposited_unix) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                bloom,
+                workpiece,
+                session_id,
+                i64::try_from(context_tokens).unwrap_or(i64::MAX),
+                i64::try_from(deposited_unix).unwrap_or(i64::MAX),
+            ],
         )?;
         Ok(())
     }
 
     fn lookup_construct_session(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<(String, u64)>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT session_id, context_tokens FROM construct_session WHERE bloom = ?1 AND workpiece = ?2")?;
+        Ok(self.lookup_construct_session_meta(bloom, workpiece)?.map(|(id, context, _)| (id, context)))
+    }
+
+    fn lookup_construct_session_meta(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+    ) -> rusqlite::Result<Option<(String, u64, Option<u64>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, context_tokens, deposited_unix FROM construct_session \
+             WHERE bloom = ?1 AND workpiece = ?2",
+        )?;
         let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| {
             let session_id = row.get::<_, String>(0)?;
             let context = row.get::<_, i64>(1)?;
-            Ok((session_id, u64::try_from(context).unwrap_or(0)))
+            let deposited = row.get::<_, Option<i64>>(2)?.and_then(|unix| u64::try_from(unix).ok());
+            Ok((session_id, u64::try_from(context).unwrap_or(0), deposited))
         })?;
         rows.next().transpose()
+    }
+
+    fn record_member_dependencies(&mut self, bloom: &[u8], edges: &[(String, String)]) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM member_dependency WHERE bloom = ?1", rusqlite::params![bloom])?;
+        for (member, depends_on) in edges {
+            tx.execute(
+                "INSERT INTO member_dependency (bloom, member, depends_on) VALUES (?1, ?2, ?3)",
+                rusqlite::params![bloom, member, depends_on],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn lookup_predecessors(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT depends_on FROM member_dependency WHERE bloom = ?1 AND member = ?2 ORDER BY depends_on")?;
+        let rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
+        rows.collect()
     }
 
     fn record_capture_diff(&mut self, nonce: &str, diff: &str) -> rusqlite::Result<()> {
@@ -1419,6 +1527,7 @@ impl StoreBackend for SqliteStore {
         }
         tx.commit()?;
         let _ = self.upsert_metrics_from_write(sequence, write, recorded_unix_millis);
+        self.persist_member_graph(write.decisions);
         Ok(CommitOutcome::Applied(sequence))
     }
 
@@ -1443,6 +1552,7 @@ impl StoreBackend for SqliteStore {
             // A rowid is a non-negative i64; the fallback never triggers.
             let sequence = u64::try_from(self.conn.last_insert_rowid()).unwrap_or_default();
             let _ = self.upsert_metrics_from_write(sequence, write, recorded_from_column(Some(recorded)));
+            self.persist_member_graph(write.decisions);
             Ok(AppendOutcome::Applied(sequence))
         }
     }
@@ -1855,6 +1965,34 @@ impl StoreBackend for SqliteStore {
 }
 
 impl SqliteStore {
+    fn persist_member_graph(&mut self, decisions: &[u8]) {
+        let Ok(decoded) = decode_recorded_decisions(decisions, Some(DECISIONS_SCHEMA)) else {
+            return;
+        };
+        for effect in decoded.effects {
+            let Decision::RecordMemberDependencies { bloom, edges } = effect else {
+                continue;
+            };
+            let digest = bloom.0;
+            if self
+                .conn
+                .execute(
+                    "DELETE FROM member_dependency WHERE bloom = ?1",
+                    rusqlite::params![digest.as_bytes().as_slice()],
+                )
+                .is_err()
+            {
+                return;
+            }
+            for edge in edges {
+                let _ = self.conn.execute(
+                    "INSERT INTO member_dependency (bloom, member, depends_on) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![digest.as_bytes().as_slice(), edge.member.0, edge.depends_on.0],
+                );
+            }
+        }
+    }
+
     fn upsert_metrics_from_write(
         &mut self,
         sequence: u64,
