@@ -273,10 +273,11 @@ impl SourceShell {
         self.backend.integrate_merge(bloom, candidate_ref, expected)
     }
 
-    /// Adopt `predecessor`'s candidate ref for `workpiece` into `successor`'s
-    /// namespace, so a bloom that inherited the claim can fold the work behind
-    /// it. Adopt-if-absent: a ref the successor already carries stands. `false`
-    /// when neither namespace holds one.
+    /// Adopt a candidate ref for `workpiece` into `successor`'s namespace,
+    /// walking the supersession chain from `predecessor` until the ref is found
+    /// or the chain is exhausted, so a bloom that inherited the claim can fold
+    /// the work behind it. Adopt-if-absent: a ref the successor already carries
+    /// stands. `false` when no ancestor namespace holds one.
     ///
     /// # Errors
     /// The ref could not be read or written.

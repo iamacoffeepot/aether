@@ -327,9 +327,14 @@ pub trait SourceBackend {
     /// successor: a ref the successor already carries is left exactly as it is,
     /// so a re-drained fold re-adopts harmlessly and a member that re-ran under
     /// the successor keeps the capture it produced instead of having the
-    /// predecessor's superseded candidate written over it. `Ok(false)` says the
-    /// ref is absent from both namespaces — the member has no captured candidate
-    /// to fold at all, which the caller reads rather than treating as a fault.
+    /// predecessor's superseded candidate written over it.
+    ///
+    /// Walks the supersession chain rather than one link of it: the successor,
+    /// then `predecessor`, then any remaining bloom namespace that still holds
+    /// this workpiece's candidate, stopping when the ref is found or the chain
+    /// is exhausted. `Ok(false)` says the ref exists nowhere in that chain —
+    /// the member has no captured candidate to fold at all, which the caller
+    /// reads rather than treating as a fault.
     ///
     /// # Errors
     /// Backend-defined — e.g. the ref could not be read or written.

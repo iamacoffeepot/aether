@@ -561,6 +561,25 @@ impl<C: GitDataApi> GitSource<C> {
         format!("heads/{}", landing_branch(bloom))
     }
 
+    /// Copy the first remaining bloom-namespace candidate for `workpiece` onto
+    /// `target`. The immediate predecessor has already been tried and missed;
+    /// this is the rest of the supersession chain, bounded so a large ref
+    /// listing cannot run unbounded.
+    fn adopt_from_chain(&self, target: &str, workpiece: &str) -> Result<bool, SourceError> {
+        const ADOPTION_CHAIN_BUDGET: usize = 256;
+        let suffix = format!("/candidate/{}", sanitize_ref_segment(workpiece));
+        for (index, git_ref) in self.client.list_matching_refs("heads/bloom/")?.into_iter().enumerate() {
+            if index >= ADOPTION_CHAIN_BUDGET {
+                break;
+            }
+            if !git_ref.name.ends_with(&suffix) || git_ref.name == target {
+                continue;
+            }
+            return self.client.create_ref(target, &git_ref.sha).map(|_| true).map_err(SourceError::Git);
+        }
+        Ok(false)
+    }
+
     fn working_ref_prefix(bloom: &BloomId) -> String {
         format!("heads/bloom/{}/", short_hex(&bloom.0))
     }
@@ -1132,16 +1151,19 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // a ref it already wrote; skipping is idempotent for that case too, so
         // the guarantee is kept and the clobber is structurally unreachable
         // rather than avoided by a caller getting the member set right.
+        //
+        // Walk the chain, not one link of it. A bloom superseded twice still
+        // has its inherited candidate parked under a grandparent; looking only
+        // at the immediate predecessor refuses a set that has the work.
         let target = candidate_ref(successor, workpiece);
         if self.client.get_ref(&target)?.is_some() {
             return Ok(true);
         }
+        if let Some(source) = self.client.get_ref(&candidate_ref(predecessor, workpiece))? {
+            return self.client.create_ref(&target, &source.sha).map(|_| true).map_err(SourceError::Git);
+        }
 
-        let Some(source) = self.client.get_ref(&candidate_ref(predecessor, workpiece))? else {
-            return Ok(false);
-        };
-
-        self.client.create_ref(&target, &source.sha).map(|_| true).map_err(SourceError::Git)
+        self.adopt_from_chain(&target, workpiece)
     }
 
     fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, Self::Error> {
@@ -1505,6 +1527,35 @@ mod tests {
         assert!(fake.ref_exists(&GitSource::<FakeGithub>::attempt_ref(&bloom, 1)), "attempt refs stay");
         assert!(fake.ref_exists(ADMISSION_REF), "the admission claim ref stays");
         assert!(fake.ref_exists(&claim_ref(&workpiece("wp-live"))), "a workpiece claim ref stays");
+    }
+
+    #[test]
+    fn adopt_candidate_walks_past_the_immediate_predecessor() {
+        // Tripwire: a bloom superseded twice still has the inherited candidate
+        // under the grandparent. Looking only at the parent refuses a set that
+        // has the work.
+        let (fake, successor, _base) = seeded();
+        let source = git_source(&fake, false);
+        let parent = bloom_id(2);
+        let grandparent = bloom_id(3);
+        let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        fake.seed_ref(candidate_ref_name(&grandparent, "wp-0").trim_start_matches("refs/"), sha);
+
+        assert!(source.adopt_candidate(&parent, &successor, "wp-0").unwrap(), "the grandparent's ref is adopted");
+        assert_eq!(
+            fake.ref_target(candidate_ref_name(&successor, "wp-0").trim_start_matches("refs/")).as_deref(),
+            Some(sha),
+        );
+    }
+
+    #[test]
+    fn adopt_candidate_still_refuses_when_the_ref_exists_nowhere() {
+        let (fake, successor, _base) = seeded();
+        let source = git_source(&fake, false);
+        assert!(
+            !source.adopt_candidate(&bloom_id(2), &successor, "wp-0").unwrap(),
+            "a member with no candidate in the chain has nothing to fold"
+        );
     }
 
     #[test]
