@@ -13,6 +13,12 @@
 //! change can read it; the acquire path no longer consults it. Each lap's
 //! evidence stamps the sealed-table price of the observed calls beside the
 //! replayed other-arm counterfactual.
+//!
+//! Same-member Refine additionally resumes the construct session journaled on
+//! the dispatch record when the stored context plus a fixed successor increment
+//! projects under the harness pricing-cliff threshold (#5177). That path is
+//! keyed by (bloom, workpiece), not the pool task text, so a findings overlay
+//! cannot hide the handle.
 
 use std::collections::HashMap;
 use std::fs;
@@ -40,6 +46,13 @@ pub const SPLICED_RESET_NOTE: &str = "The working tree was reset to the spliced 
 const TURN_OBSERVATION_CAP: u64 = 32;
 /// Per-sample terminal-context cap, matching the pool's default ceiling.
 const CONTEXT_OBSERVATION_CAP: u64 = 150_000;
+/// Tokens a refine prompt is projected to add on top of the stored construct
+/// context (findings overlay plus successor framing). The cliff is the knob;
+/// this increment is fixed (#5177).
+const SUCCESSOR_INCREMENT_TOKENS: u64 = 8_000;
+/// Default prompt-token threshold a resumed refine must project under.
+/// Matches grok-4.6's measured long-context pricing cliff.
+pub(super) const DEFAULT_PRICING_CLIFF_TOKENS: u64 = 200_000;
 
 /// Which way a lap actually went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +86,11 @@ pub enum MissReason {
     HeadHash,
     /// The pooled session was deposited from a different lane slot.
     SlotMismatch,
+    /// The stored construct context plus the successor increment projects at
+    /// or over the harness pricing-cliff threshold.
+    PricingCliff,
+    /// The harness refused the resume handle before a billed turn.
+    ResumeRefused,
 }
 
 impl MissReason {
@@ -84,8 +102,44 @@ impl MissReason {
             Self::ContextCap => "context_cap",
             Self::HeadHash => "head_hash",
             Self::SlotMismatch => "slot_mismatch",
+            Self::PricingCliff => "pricing_cliff",
+            Self::ResumeRefused => "resume_refused",
         }
     }
+}
+
+/// Whether a same-member refine should resume the journaled construct session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefineResume {
+    /// Resume this harness session id.
+    Resumed(String),
+    /// Launch fresh. `miss` names why when a journaled handle was considered.
+    Fresh {
+        /// Why a journaled handle was not resumed, when one existed.
+        miss: Option<MissReason>,
+    },
+}
+
+/// Decide whether a journaled construct session is worth resuming.
+///
+/// An empty or whitespace-only id is unparseable and launches fresh. A
+/// projection of `context + SUCCESSOR_INCREMENT_TOKENS` at or over `cliff`
+/// launches fresh so the refine lap does not cross the pricing band.
+#[must_use]
+pub fn decide_refine_resume(session_id: &str, context_tokens: u64, pricing_cliff_tokens: u64) -> RefineResume {
+    if !usable_session_id(session_id) {
+        return RefineResume::Fresh { miss: None };
+    }
+    if context_tokens.saturating_add(SUCCESSOR_INCREMENT_TOKENS) >= pricing_cliff_tokens {
+        return RefineResume::Fresh { miss: Some(MissReason::PricingCliff) };
+    }
+    RefineResume::Resumed(session_id.to_owned())
+}
+
+/// A session id the harness can be asked to resume — non-empty after trim.
+#[must_use]
+pub fn usable_session_id(session_id: &str) -> bool {
+    !session_id.trim().is_empty()
 }
 
 /// The acquire decision remembered on a run so `stream_evidence` can stamp it
@@ -120,6 +174,7 @@ pub struct SessionReuse {
     now: Mutex<Option<u64>>,
     head_hash: Mutex<Option<String>>,
     state: Mutex<ReuseState>,
+    pricing_cliff_tokens: Mutex<u64>,
 }
 
 #[derive(Default)]
@@ -145,6 +200,7 @@ impl SessionReuse {
             now: Mutex::new(None),
             head_hash: Mutex::new(None),
             state: Mutex::new(ReuseState::default()),
+            pricing_cliff_tokens: Mutex::new(DEFAULT_PRICING_CLIFF_TOKENS),
         }
     }
 
@@ -183,6 +239,7 @@ impl SessionReuse {
         )?;
         let snapshot = pool.routing_snapshot()?;
         let reuse = Self::new(Box::new(pool));
+        *lock(&reuse.pricing_cliff_tokens) = session.pricing_cliff_tokens;
         reuse.restore_snapshot(snapshot);
         Ok(reuse)
     }
@@ -207,6 +264,17 @@ impl SessionReuse {
     /// Pin the static-prefix hash acquire/deposit use — tests only.
     pub fn set_head_hash(&self, hash: impl Into<String>) {
         *lock(&self.head_hash) = Some(hash.into());
+    }
+
+    /// Pin the pricing-cliff threshold — tests only.
+    pub fn set_pricing_cliff_tokens(&self, tokens: u64) {
+        *lock(&self.pricing_cliff_tokens) = tokens;
+    }
+
+    /// The prompt-token cliff a same-member refine resume must project under.
+    #[must_use]
+    pub fn pricing_cliff_tokens(&self) -> u64 {
+        *lock(&self.pricing_cliff_tokens)
     }
 
     /// Seed a deposited session so a later acquire can hit or miss it.
@@ -484,6 +552,32 @@ pub fn is_builder_command(command: &str) -> bool {
     !is_judge_command(command)
 }
 
+/// A reuse plan that does not lease from the pool — same-member refine resume
+/// from a journaled construct handle, or the fresh fallback that handle produces.
+#[must_use]
+pub fn plan_for(
+    request: &AcquireRequest<'_>,
+    arm: ReuseArm,
+    miss: Option<MissReason>,
+    resume: Option<String>,
+) -> ReusePlan {
+    ReusePlan {
+        arm,
+        miss,
+        resume,
+        lease: None,
+        key: SessionKey {
+            model: request.model.to_owned(),
+            effort: request.effort.to_owned(),
+            task: request.task.to_owned(),
+        },
+        head_hash: static_prefix_hash(request.worktree),
+        slot_path: canonical_slot(request.worktree),
+        edge: false,
+        is_builder: is_builder_command(request.command),
+    }
+}
+
 /// The calibration key's family axis: the command's leading segment, so
 /// `construct.implement` and a construct retry share a cell while `review`
 /// stays isolated. A pool `task` (`command` or `command\\ndescription`) is
@@ -571,6 +665,7 @@ pub fn stamp_reuse(
             "cache_read_tokens": actuals.cache_read_tokens,
             "cache_write_tokens": actuals.cache_write_tokens,
             "output_tokens": actuals.output_tokens,
+            "duration_millis": actuals.duration_millis,
             "priced_micro_usd": priced_micro_usd,
             "counterfactual_micro_usd": counterfactual,
             "edge": plan.edge,
@@ -621,6 +716,8 @@ pub struct ReuseActuals {
     pub cache_write_tokens: u64,
     /// Output tokens.
     pub output_tokens: u64,
+    /// Wall-clock duration the harness reported, in milliseconds.
+    pub duration_millis: Option<u64>,
     /// What those columns are worth under the sealed [`PriceTable`], or `None`
     /// when the table prices no such model.
     pub priced_micro_usd: Option<u64>,
@@ -686,6 +783,7 @@ pub fn parse_token_actuals(bytes: &[u8]) -> ReuseActuals {
         cache_read_tokens: number("cache_read"),
         cache_write_tokens: number("cache_write"),
         output_tokens: number("output"),
+        duration_millis: record.get("duration_ms").and_then(serde_json::Value::as_u64),
         priced_micro_usd: None,
     }
 }
@@ -850,9 +948,10 @@ mod tests {
             cache_read_tokens: 12_000,
             cache_write_tokens: 500,
             output_tokens: 200,
+            duration_millis: Some(1_200),
             priced_micro_usd: None,
         };
-        let envelope = br#"{"command":"construct.implement","result_record":{"num_turns":12,"input":3000,"cache_read":12000,"cache_write":500}}"#;
+        let envelope = br#"{"command":"construct.implement","result_record":{"num_turns":12,"input":3000,"cache_read":12000,"cache_write":500,"duration_ms":1200}}"#;
         let stamped = stamp_reuse(envelope, &plan, &actuals, &prices, Some(&calls));
         let value: serde_json::Value =
             serde_json::from_slice(&stamped).expect("stamp_reuse emits JSON beside the result record");
@@ -870,10 +969,34 @@ mod tests {
         assert_eq!(value["session_reuse"]["priced_micro_usd"], priced_micro_usd);
         assert_eq!(value["session_reuse"]["counterfactual_micro_usd"], counterfactual);
         assert_eq!(value["session_reuse"]["input_tokens"], 3_000);
+        assert_eq!(value["session_reuse"]["output_tokens"], 200);
+        assert_eq!(value["session_reuse"]["duration_millis"], 1_200);
         assert_eq!(value["result_record"]["num_turns"], 12, "the actuals stay on the record");
         assert_eq!(value["result_record"]["input"], 3_000, "result_record columns stay untouched");
         assert_eq!(value["result_record"]["cache_read"], 12_000);
         assert_eq!(value["result_record"]["cache_write"], 500);
+    }
+
+    #[test]
+    fn a_journaled_construct_session_resumes_only_under_the_pricing_cliff() {
+        // Plausible bug: treating the stored context as the whole projection
+        // (so a session sitting just under the cliff still resumes) or treating
+        // an empty handle as resumable (so a missing parse wedges the lap).
+        assert_eq!(
+            super::decide_refine_resume("sess-1", 8_000, 200_000),
+            super::RefineResume::Resumed("sess-1".to_owned()),
+        );
+        assert_eq!(
+            super::decide_refine_resume("sess-1", 192_000, 200_000),
+            super::RefineResume::Fresh { miss: Some(MissReason::PricingCliff) },
+            "192k + the 8k successor increment is the cliff, not under it",
+        );
+        assert_eq!(
+            super::decide_refine_resume("   ", 8_000, 200_000),
+            super::RefineResume::Fresh { miss: None },
+            "whitespace is an unparseable handle, not a session to resume",
+        );
+        assert_eq!(super::decide_refine_resume("", 8_000, 200_000), super::RefineResume::Fresh { miss: None });
     }
 
     #[test]
