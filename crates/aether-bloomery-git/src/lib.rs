@@ -35,6 +35,7 @@ mod executor {
 }
 
 pub mod client;
+pub mod command;
 pub mod correspondence;
 pub mod local;
 pub mod mainline;

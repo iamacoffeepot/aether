@@ -489,22 +489,23 @@ pub enum Fact {
         intersection: Vec<String>,
     },
     /// A seal or supersede that carries the door-resolved member-dependency
-    /// graph (ADR-0196).
+    /// graph (ADR-0196 / ADR-0204).
     ///
     /// `Fact::Seal` / `Fact::Supersede` remain the edgeless shapes — an empty
     /// graph is those facts plus an empty
     /// [`Decision::RecordMemberDependencies`](crate::Decision::RecordMemberDependencies)
-    /// appended to their effects. This variant is only the non-empty graph, so
-    /// an edgeless seal's event bytes stay today's `Seal`/`Supersede`. Appended
-    /// past [`Fact::SurfaceOverlap`] so every prior fact keeps its wire
-    /// discriminant.
+    /// appended to their effects. This variant is only the non-empty
+    /// **declared** graph: a surface-derived overlap is not a dispatch gate
+    /// and does not ride here, so two overlapping members with no authored
+    /// edge stay `Seal`/`Supersede`. Appended past [`Fact::SurfaceOverlap`]
+    /// so every prior fact keeps its wire discriminant.
     GraphSeal {
         /// The predecessor this seal supersedes, or `None` for a first seal.
         predecessor: Option<BloomId>,
         /// The spec being admitted — the same payload [`Fact::Seal`] /
         /// [`Fact::Supersede`] carry.
         spec: BloomSpec,
-        /// The non-empty resolved edge set the door decided.
+        /// The non-empty declared edge set the door decided (ADR-0204).
         edges: Vec<MemberDependency>,
     },
     /// A dispatched member Verify could not run because the host is missing a

@@ -612,15 +612,19 @@ fn resolve_seal_memberships(
     Ok((sealed_proposals, pending_verifications))
 }
 
-/// Resolve the seal's member-dependency graph (ADR-0196): declared edges
-/// unioned with one ordering edge per overlapping declared-surface pair, in
-/// canonical workpiece order. A cycle, an edge naming a non-member, or a member
-/// with no matching projection is a fail-closed `422` — the graph is decided
-/// here, before any admit. A missing projection is a malformed request, not an
-/// edgeless member: dropping it would derive a graph that pretends the member
-/// was never there. The door matches projections by `{workpiece, scope_revision}`
-/// and leaves order independence to the resolver, so a permuted request of the
-/// same member set journals the graph its canonical [`BloomSpec`] implies.
+/// Resolve the seal's member-dependency graph (ADR-0196 / ADR-0204).
+///
+/// Cycle detection still walks the union of declared edges and one ordering
+/// edge per overlapping declared-surface pair. What the door journals — and
+/// what construct dispatch waits on — is the **declared** subset. A derived
+/// overlap is not a dispatch gate: two members that share a glob and name no
+/// edge both enter Construct at seal. A cycle, an edge naming a non-member,
+/// or a member with no matching projection is a fail-closed `422`. A missing
+/// projection is a malformed request, not an edgeless member: dropping it
+/// would derive a graph that pretends the member was never there. The door
+/// matches projections by `{workpiece, scope_revision}` and leaves order
+/// independence to the resolver, so a permuted request of the same member
+/// set journals the graph its canonical [`BloomSpec`] implies.
 fn resolve_seal_graph(
     members: &[Membership],
     projections: &[MemberProjection],
@@ -639,7 +643,7 @@ fn resolve_seal_graph(
         listed.push((member.workpiece.clone(), projection.declared_surface.as_slice()));
     }
     match resolve_member_dependencies(&listed, declared) {
-        Ok(edges) => Ok(edges),
+        Ok(resolved) => Ok(resolved.declared),
         Err(DependencyError::UnknownWorkpiece(workpiece)) => Err(error_response(
             422,
             &format!("edge names workpiece {} which is not a member of this bloom", workpiece.0),
@@ -915,9 +919,9 @@ mod tests {
 
     #[test]
     fn the_door_derives_an_ordering_edge_from_overlapping_surfaces() {
-        // Surfaces ride the request, not the spec. If the door handed the
-        // resolver empty surfaces, overlapping members would seal with no
-        // graph and collide at fold time — the bug derived edges exist to close.
+        // Surfaces ride the request, not the spec. Overlap still feeds cycle
+        // detection, but ADR-0204 demotes it: a derived edge is not a dispatch
+        // gate. Pre-fix, this test required the later member to wait.
         let members = [member("wp-a", 1), member("wp-b", 2)];
         let projections = [
             projection("wp-a", 1, &["crates/aether-bloomery/**"]),
@@ -925,10 +929,7 @@ mod tests {
         ];
 
         let edges = resolve_seal_graph(&members, &projections, &[]).expect("acyclic overlap");
-        assert_eq!(
-            edges,
-            [MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) }]
-        );
+        assert!(edges.is_empty(), "an overlap without a declared edge journals no dispatch gate: {edges:?}");
     }
 
     #[test]
@@ -955,19 +956,32 @@ mod tests {
 
         let forward = resolve_seal_graph(&members, &projections, &[]).expect("acyclic");
         let reversed = resolve_seal_graph(&reversed_members, &reversed_projections, &[]).expect("acyclic");
-        assert_eq!(forward, reversed, "request order must not change the derived graph");
+        assert_eq!(forward, reversed, "request order must not change the journaled graph");
 
         let spec_forward = BloomDraft { proposals: members.to_vec(), ..BloomDraft::default() }.seal();
         let spec_reversed = BloomDraft { proposals: reversed_members.to_vec(), ..BloomDraft::default() }.seal();
         assert_eq!(spec_forward.id(), spec_reversed.id(), "the same member set seals to one BloomId");
-        assert_eq!(
-            forward,
-            [
-                MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) },
-                MemberDependency { member: WorkpieceId("wp-c".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) },
-                MemberDependency { member: WorkpieceId("wp-c".to_owned()), depends_on: WorkpieceId("wp-b".to_owned()) },
-            ]
+        assert!(
+            forward.is_empty(),
+            "overlap-only members journal no declared gate, regardless of request order: {forward:?}"
         );
+    }
+
+    #[test]
+    fn a_declared_edge_still_journals_when_surfaces_also_overlap() {
+        // A declared dependency that the surfaces would also derive must
+        // still gate dispatch. Dropping it because overlap "already named
+        // it" would leave an authored wait as an optimistic Construct.
+        let members = [member("wp-a", 1), member("wp-b", 2)];
+        let projections = [
+            projection("wp-a", 1, &["crates/aether-bloomery/**"]),
+            projection("wp-b", 2, &["crates/aether-bloomery/src/lib.rs"]),
+        ];
+        let declared =
+            [MemberDependency { member: WorkpieceId("wp-b".to_owned()), depends_on: WorkpieceId("wp-a".to_owned()) }];
+
+        let edges = resolve_seal_graph(&members, &projections, &declared).expect("acyclic");
+        assert_eq!(edges, declared);
     }
 
     #[test]

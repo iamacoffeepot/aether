@@ -10,9 +10,9 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::path::Path;
-use std::process::Command;
 
 use aether_bloomery::{BackendObjectId, BloomId, CandidateRef, Correspondence, CorrespondenceError, Digest};
+use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name};
 
 use super::{candidate_tree_digest, capture_commit_digest};
@@ -162,9 +162,11 @@ fn source_label(source: CandidateSource<'_>, commit_hex: &str) -> String {
 }
 
 fn worktree_head(path: &Path) -> Result<String, PrepareError> {
-    git_in(path, &["rev-parse", "--verify", "--end-of-options", "HEAD"]).map_err(|detail| PrepareError::Unreachable {
-        source: path.display().to_string(),
-        detail: format!("could not read HEAD: {detail}"),
+    command::run_ok(path, &["rev-parse", "--verify", "--end-of-options", "HEAD"]).map_err(|detail| {
+        PrepareError::Unreachable {
+            source: path.display().to_string(),
+            detail: format!("could not read HEAD: {detail}"),
+        }
     })
 }
 
@@ -173,11 +175,11 @@ fn resolve_commit(repo: &Path, revision: &str, source: &str) -> Result<ResolvedO
         return Err(PrepareError::Unreachable { source: source.to_owned(), detail: "no commit was named".to_owned() });
     }
     let commit_peel = format!("{revision}^{{commit}}");
-    let commit_hex = git_in(repo, &["rev-parse", "--verify", "--end-of-options", &commit_peel])
-        .map_err(|detail| PrepareError::Unreachable { source: source.to_owned(), detail })?;
+    let commit_hex = command::run_ok(repo, &["rev-parse", "--verify", "--end-of-options", &commit_peel])
+        .map_err(|detail| PrepareError::Unreachable { source: source.to_owned(), detail: detail.to_string() })?;
     let tree_peel = format!("{commit_hex}^{{tree}}");
-    let tree_hex = git_in(repo, &["rev-parse", "--verify", "--end-of-options", &tree_peel])
-        .map_err(|detail| PrepareError::Unreachable { source: source.to_owned(), detail })?;
+    let tree_hex = command::run_ok(repo, &["rev-parse", "--verify", "--end-of-options", &tree_peel])
+        .map_err(|detail| PrepareError::Unreachable { source: source.to_owned(), detail: detail.to_string() })?;
     let commit = object_id(&commit_hex, source, "commit")?;
     let tree = object_id(&tree_hex, source, "tree")?;
     Ok(ResolvedObjects { commit_hex, commit, tree })
@@ -207,20 +209,6 @@ fn record_unique(
         return Err(PrepareError::ReverseCollision { axis, object: object.clone(), existing, requested: *digest });
     }
     correspondence.record(digest, object).map_err(PrepareError::Correspondence)
-}
-
-fn git_in(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git").current_dir(dir).args(args).output().map_err(|error| error.to_string())?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(if stderr.is_empty() {
-            format!("git {args:?} failed")
-        } else {
-            stderr
-        })
-    }
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {

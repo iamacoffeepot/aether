@@ -8,8 +8,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::client::{GitCommit, GitDataApi, GitDataError, GitRef, MergeResult, RefTxnOp, strip_heads};
-
-pub(crate) mod command;
+use crate::command;
 
 #[cfg(test)]
 mod tests;

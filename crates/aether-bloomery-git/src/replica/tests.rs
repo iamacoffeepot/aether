@@ -12,6 +12,7 @@ use std::thread;
 use tempfile::TempDir;
 
 use super::{GitSourceReplica, ReplicaError, SourceReplica, published_refspecs};
+use crate::command::GitCommandError;
 use crate::mainline::MainlineRef;
 
 #[test]
@@ -64,8 +65,7 @@ fn a_replica_push_sends_basic_x_access_token_and_keeps_the_token_out_of_argv() {
     const TOKEN: &str = "secret-token";
     let replica =
         GitSourceReplica::new("/authority", "https://github.com/octo/shadow.git", MainlineRef::default(), TOKEN);
-    let command = replica.git_push_command(&published_refspecs(&MainlineRef::default(), ["refs/heads/main"]));
-    let argv: Vec<String> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+    let argv = replica.push_invocation_args(&published_refspecs(&MainlineRef::default(), ["refs/heads/main"]));
 
     assert!(argv.iter().all(|arg| !arg.contains(TOKEN)), "the raw token must stay out of argv: {argv:?}");
     let header =
@@ -224,7 +224,11 @@ fn identical_transient_redrive_beyond_the_bound_escalates() {
 
 #[test]
 fn a_missing_git_binary_classifies_as_deterministic() {
-    let error = ReplicaError::from(io::Error::new(io::ErrorKind::NotFound, "No such file or directory"));
+    let error = ReplicaError::from(GitCommandError::Spawn {
+        args: "[\"push\"]".into(),
+        repo: None,
+        source: io::Error::new(io::ErrorKind::NotFound, "No such file or directory"),
+    });
     assert!(
         matches!(error, ReplicaError::Deterministic(_)),
         "a missing git binary must not redrive as Transient, got {error}"
