@@ -104,8 +104,10 @@ pub struct MemberProjection {
     /// change those crates, and into nothing at all when no co-member does.
     ///
     /// The gate never reads this: a read is not authority, so it lifts no
-    /// tier and widens no surface. Defaulted so a projection written before
-    /// the block existed reads back as declaring no reads.
+    /// tier and widens no surface. It is therefore outside the approval digest,
+    /// which is why this field may be appended to freely. Defaulted so a
+    /// projection written before the block existed reads back as declaring no
+    /// reads.
     #[serde(default)]
     pub declared_reads: Vec<String>,
     /// The nine completeness facts the gate fails closed on.
@@ -117,7 +119,8 @@ pub struct MemberProjection {
     pub pre_approved: bool,
     /// The owner-signed statement for an above-`auto` member. Consumed by the
     /// deferred-verify enforcement (its live wiring is the follow-up child #3599);
-    /// an above-`auto` member fails closed until then.
+    /// an above-`auto` member fails closed until then. The gate never reads this,
+    /// so it is outside the approval digest and may be appended to freely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_statement: Option<Statement>,
 }

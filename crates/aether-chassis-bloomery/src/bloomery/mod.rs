@@ -43,7 +43,7 @@ mod verify;
 
 pub use approve::{
     AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, PolicyError,
-    StatementRejected, Tier, approval_from_statement, load_policy, parse_policy, precheck_statement,
+    StatementRejected, Tier, approval_from_statement, load_policy, parse_policy, precheck_statement, projection_digest,
     verified_statement_approval,
 };
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};

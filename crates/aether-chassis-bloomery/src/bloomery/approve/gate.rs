@@ -5,6 +5,7 @@
 use aether_bloomery::{
     DRAFT_ADMISSION_GATE, Digest, Evidence, EvidenceKind, Observation, Provenance, Read, Refusal, Statement, digest_of,
 };
+use aether_data::wire::to_vec;
 use serde::{Deserialize, Serialize};
 
 use super::policy::{ApprovalPolicy, Tier};
@@ -36,12 +37,38 @@ pub struct AdmissionRequest {
     /// present — waives the tier (to `auto`), never the gate checks, and never a
     /// firing ADR gate.
     pub pre_approved: bool,
-    /// The digest of the exact projection facts the gate evaluated (issue #3583,
-    /// rider 3). An `auto`-tier approval folds this into its supporting record so
-    /// the sealed evidence attests precisely which facts the gate saw — the same
-    /// projection bytes, hashed, cannot then be swapped without moving the
-    /// approval's `detail`.
+    /// [`projection_digest()`] of the fields this request carries — the facts
+    /// the gate evaluated (issue #3583, rider 3). An `auto`-tier approval folds
+    /// this into its supporting record so the sealed evidence attests precisely
+    /// which facts the gate saw. A swapped input moves this digest, and the
+    /// digest is folded into `detail`.
     pub projection_digest: Digest,
+}
+
+/// Digest of the fields the gate evaluated — the definition of what an auto
+/// approval binds.
+///
+/// Each input is named here, in this order: subject, declared surface, declared
+/// crates, completeness, adr touch, pre-approved. A field appended to the
+/// transport DTO re-keys nothing; a field added to the gate is a visible edit to
+/// this function and re-keys deliberately.
+///
+/// # Panics
+///
+/// Panics if a gate input fails to wire-encode — some length exceeds the
+/// ADR-0118 `u32` ceiling. Admission facts never approach that size.
+#[must_use]
+pub fn projection_digest(request: &AdmissionRequest) -> Digest {
+    let bytes = to_vec(&(
+        request.subject,
+        &request.declared_surface,
+        &request.declared_crates,
+        request.completeness,
+        request.adr_touch,
+        request.pre_approved,
+    ))
+    .expect("admission facts never exceed the ADR-0118 u32 wire-length ceiling");
+    Digest::of_wire_bytes(&bytes)
 }
 
 /// The completeness facts a scope revision must satisfy before it is admissible.
