@@ -8,7 +8,8 @@ use aether_bloomery::{
 use aether_data::wire::to_vec;
 
 use super::{AdmissionRefusal, AdmitError, admit_member, workpiece_from_listed, workpieces_from_list};
-use crate::store::{ListCommissionsResult, ListedCommission, LoadCommissionResult};
+use crate::commission::import::{ImportRequest, IssueSnapshot, import};
+use crate::store::{CommissionBackend, ListCommissionsResult, ListedCommission, LoadCommissionResult, SqliteStore};
 
 fn revision(id: &str, problem: &str) -> ScopeRevision {
     ScopeRevision {
@@ -221,4 +222,65 @@ fn a_cancelled_head_is_not_listed_as_a_workpiece() {
     let mut head = listed("wp-1", Some(digest_of(&revision)));
     head.status = "cancelled".to_owned();
     assert_eq!(workpiece_from_listed(&head).expect("decode"), None);
+}
+
+#[test]
+fn an_imported_unsigned_commission_cannot_seal() {
+    // Import writes observation-attested intent and a revision, and must not
+    // insert an approval. If it did, admit_member would treat GitHub trust
+    // as enough to seal.
+    let mut store = SqliteStore::open(":memory:").expect("in-memory store opens");
+    let body = "\
+## Problem statement
+
+Need a commission store.
+
+## Design notes
+
+Import without granting authority.
+
+## Implementation plan
+
+Write the offline importer.
+
+**Size:** m
+**Implementation model:** sonnet
+**Routing reason:** migration rehearsal
+
+## Declared surface
+
+```text
+crates/aether-chassis-bloomery/src/commission/import/**
+```
+";
+    import(
+        &mut store,
+        &ImportRequest {
+            issues: vec![IssueSnapshot {
+                number: 10,
+                workpiece: WorkpieceId("issue-10".to_owned()),
+                body: body.to_owned(),
+            }],
+            sealed: Vec::new(),
+        },
+    )
+    .expect("import");
+    let view = store.load(&WorkpieceId("issue-10".to_owned())).expect("load").expect("exists");
+    let scope = view.head.current_revision.expect("clean body writes a revision");
+    let approvals = store.load_approvals(scope).expect("approvals");
+    let result = LoadCommissionResult::Ok {
+        id: "issue-10".to_owned(),
+        intent: view.head.intent.as_bytes().to_vec(),
+        current_revision: Some(scope.as_bytes().to_vec()),
+        current_ordinal: view.head.current_ordinal,
+        status: view.head.status.as_str().to_owned(),
+        current: view.current.map(|revision| revision.to_canonical()),
+        approvals: approvals.iter().map(|statement| to_vec(statement).expect("encode")).collect(),
+    };
+    match admit_member(scope, result) {
+        Err(AdmitError::Refused(refusal @ AdmissionRefusal::AbsentApproval { .. })) => {
+            assert!(refusal.message().contains("no stored approval"), "{}", refusal.message());
+        }
+        other => panic!("imported unsigned commission must not admit, got {other:?}"),
+    }
 }

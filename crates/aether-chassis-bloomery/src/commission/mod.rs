@@ -1,12 +1,15 @@
 //! Operator CLI for commission authoring (ADR-0199 slice 2).
 //!
-//! A sibling binary of `bloomery`, not a subcommand of it. Every verb talks
-//! to the coordinator's authenticated control API and never opens `SQLite`.
-//! `approve` and `cancel` submit an already-produced [`SignatureEnvelope`];
-//! this crate does not hold private keys.
+//! A sibling binary of `bloomery`, not a subcommand of it. Authoring verbs
+//! talk to the coordinator's authenticated control API and never open
+//! `SQLite`. `import` is the offline exception: it writes an explicit
+//! snapshot into a journal file while commission creation and sealing are
+//! quiesced. `approve` and `cancel` submit an already-produced
+//! [`SignatureEnvelope`]; this crate does not hold private keys.
 
 mod client;
 mod hex;
+pub(crate) mod import;
 mod scope;
 
 use std::ffi::OsString;
@@ -99,6 +102,18 @@ enum Command {
         #[arg(long)]
         envelope: PathBuf,
     },
+    /// Import an explicit snapshot of planned issues into a local journal.
+    Import {
+        /// JSON listing the named issues and their body files. Never a directory sweep.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// `SQLite` journal to write. This verb opens the file; the coordinator stays quiesced.
+        #[arg(long)]
+        store_path: PathBuf,
+        /// Optional sealed-bloom reconstructions whose rows must match the pinned digests.
+        #[arg(long)]
+        sealed: Option<PathBuf>,
+    },
 }
 
 /// Parse `args` (including argv0) and run the named verb. Returns the text
@@ -125,6 +140,9 @@ fn dispatch(cli: CommissionCli) -> Result<String> {
         Command::Show { id, json } => show(&api, &id, json),
         Command::List { status } => list(&api, status.as_deref()),
         Command::Cancel { id, reason, envelope } => cancel(&api, &id, &reason, &envelope),
+        Command::Import { manifest, store_path, sealed } => {
+            import::import_paths(&manifest, &store_path, sealed.as_deref())
+        }
     }
 }
 
@@ -259,7 +277,7 @@ fn digest_from_hex(hex: &str) -> Result<Digest> {
 mod tests {
     use std::fs;
 
-    use super::{CommissionCli, load_intent, signed_statement};
+    use super::{Command, CommissionCli, load_intent, signed_statement};
     use clap::Parser;
 
     #[test]
@@ -269,6 +287,23 @@ mod tests {
                 .unwrap_or_else(|error| panic!("list must parse: {error}"));
         assert_eq!(cli.http_port, 8910);
         assert_eq!(cli.token, "secret");
+    }
+
+    #[test]
+    fn import_is_a_verb_on_the_sibling_binary() {
+        let cli = CommissionCli::try_parse_from([
+            "bloomery-commission",
+            "import",
+            "--manifest",
+            "manifest.json",
+            "--store-path",
+            "journal.sqlite",
+        ])
+        .unwrap_or_else(|error| panic!("import must parse: {error}"));
+        match cli.command {
+            Command::Import { .. } => {}
+            other => panic!("expected import, got {other:?}"),
+        }
     }
 
     #[test]

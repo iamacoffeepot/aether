@@ -17,7 +17,7 @@ const DOGFOOD: &str = "Dogfood brief";
 const MANAGED: &[&str] = &[PROBLEM, DESIGN, PLAN, "Sub-issues", DEPENDS, SURFACE, DOGFOOD, "Side findings"];
 
 /// Render `markdown` as the next scope revision for `workpiece`.
-pub(super) fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Digest>) -> Result<ScopeRevision> {
+pub fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Digest>) -> Result<ScopeRevision> {
     let sections = managed_sections(markdown)?;
     let problem = required_body(&sections, PROBLEM)?;
     let design = required_body(&sections, DESIGN)?;
