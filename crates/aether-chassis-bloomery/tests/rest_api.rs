@@ -32,7 +32,7 @@ use aether_bloomery::{
     ToolPolicy, Topic, WorkpieceId, authorization_message,
 };
 use aether_chassis_bloomery::bloomery::TopicOutbox;
-use aether_chassis_bloomery::store::SqliteStore;
+use aether_chassis_bloomery::store::{SqliteStore, StoreBackend};
 use aether_data::wire::from_bytes;
 use common::{Coordinator, free_port};
 use ed25519_dalek::{Signer, SigningKey};
@@ -81,6 +81,18 @@ fn seed_commission(port: u16, id: &str, surface: &[&str]) -> Digest {
 
 /// Persist a commission; `approve` submits the owner-signed approval.
 fn seed_commission_with(port: u16, id: &str, surface: &[&str], problem: &str, approve: bool) -> Digest {
+    seed_commission_described(port, id, surface, problem, &format!("task for {id}"), approve)
+}
+
+/// Persist a commission whose revision carries an explicit description.
+fn seed_commission_described(
+    port: u16,
+    id: &str,
+    surface: &[&str],
+    problem: &str,
+    description: &str,
+    approve: bool,
+) -> Digest {
     let intent = Statement {
         words: format!("intent {id}").into_bytes(),
         provenance: Provenance::ObservationAttestation(Observation { source: "rest-api".to_owned() }),
@@ -100,7 +112,7 @@ fn seed_commission_with(port: u16, id: &str, surface: &[&str], problem: &str, ap
         dogfood_brief: "dogfood".to_owned(),
         routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
         dependencies: Vec::new(),
-        description: format!("task for {id}"),
+        description: description.to_owned(),
         implements: Vec::new(),
     };
     let (status, written) =
@@ -440,6 +452,52 @@ fn rest_api_drives_a_bloom_end_to_end() {
     assert_eq!(status, 404, "missing artifact");
 
     assert_answer_door_binds_its_question(http_port, &bloom_id);
+}
+
+#[test]
+fn a_seal_reads_commission_task_text_without_a_github_issue() {
+    // Acceptance: the door seals a commission that never had a GitHub home,
+    // and construct's task is the signed work order — not a gh issue view,
+    // and not an empty advisory field.
+    let http_port = free_port();
+    let rpc_port = free_port();
+    let (_policy_dir, policy_path) = test_policy();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store_path = store_dir.path().join("bloomery.db");
+    let store_path = store_path.to_str().unwrap();
+    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+
+    wait_for_200(http_port, "/drafts");
+    wait_for_200(http_port, "/view");
+
+    let revision = seed_commission_described(http_port, "wp-local", &["docs/guide/**"], "Need a CLI.", "", true);
+    let draft_id = patch_draft(http_port, &serde_json::to_value(valid_draft("wp-local", revision)).unwrap());
+    let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
+    assert_eq!(status, 200, "a commission with no GitHub issue seals: {sealed:?}");
+    let bloom = digest_at(&sealed["outcome"]["Sealed"]);
+
+    let task = wait_for_dispatch_description(store_path, bloom.as_bytes(), "wp-local");
+    assert!(task.contains("Need a CLI."), "seal persisted the commission problem: {task}");
+    assert!(task.contains("## Design notes"), "seal rendered the signed headings: {task}");
+    assert!(task.contains("plan"), "seal rendered the signed plan: {task}");
+}
+
+/// Persist is fire-and-forget beside the seal admit, so a second connection
+/// has to wait for the row rather than assume the HTTP 200 implies it.
+fn wait_for_dispatch_description(store_path: &str, bloom: &[u8], workpiece: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut store = SqliteStore::open(store_path).unwrap();
+        if let Ok(Some(text)) = store.lookup_dispatch_description(bloom, workpiece)
+            && !text.trim().is_empty()
+        {
+            return text;
+        }
+        if Instant::now() >= deadline {
+            panic!("dispatch description for {workpiece} never persisted");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// The above-auto deferred-verify seal path (#3599): an above-auto member whose

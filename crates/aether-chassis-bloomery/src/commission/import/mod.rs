@@ -4,7 +4,9 @@
 //! explicit snapshot. GitHub provenance is observation metadata only:
 //! `ObservationAttestation` cannot authorize, and this path never inserts an
 //! approval from a hidden `aether-approval` marker. The operator signs the
-//! imported digest through `AuthorityDoor::Approve` after review.
+//! imported digest through `AuthorityDoor::Approve` after review. The report
+//! leads with imported count and each snapshot title so the operator can
+//! verify the one-shot backfill against the open set.
 //!
 //! Sealed blooms are reconstructed as exact store rows for their pinned
 //! [`Membership::scope_revision`](aether_bloomery::Membership::scope_revision)
@@ -36,6 +38,10 @@ pub struct IssueSnapshot {
     pub number: u64,
     /// Workpiece the imported commission is.
     pub workpiece: WorkpieceId,
+    /// GitHub issue title at snapshot time. Recorded so the operator can
+    /// verify count-and-title match against the open set; never an input to
+    /// seal or dispatch.
+    pub title: String,
     /// Exact issue-body bytes at snapshot time.
     pub body: String,
 }
@@ -150,6 +156,8 @@ struct ManifestFile {
 struct ManifestIssue {
     number: u64,
     id: String,
+    #[serde(default)]
+    title: String,
     body: String,
 }
 
@@ -163,7 +171,7 @@ fn load_request(manifest: &Path, sealed: Option<&Path>) -> Result<ImportRequest>
     for issue in parsed.issues {
         let path = parent.join(&issue.body);
         let body = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        issues.push(IssueSnapshot { number: issue.number, workpiece: WorkpieceId(issue.id), body });
+        issues.push(IssueSnapshot { number: issue.number, workpiece: WorkpieceId(issue.id), title: issue.title, body });
     }
 
     let sealed = match sealed {
@@ -180,9 +188,16 @@ fn load_request(manifest: &Path, sealed: Option<&Path>) -> Result<ImportRequest>
 
 fn format_report(report: &ImportReport) -> String {
     let mut out = String::new();
+    out.push_str("imported ");
+    out.push_str(&report.imported.len().to_string());
+    out.push('\n');
     for entry in &report.entries {
         out.push_str(&entry.workpiece.0);
         out.push(' ');
+        if !entry.title.is_empty() {
+            out.push_str(&entry.title);
+            out.push(' ');
+        }
         match &entry.parse {
             ParseStatus::Clean { scope } => {
                 out.push_str("clean unsigned scope ");

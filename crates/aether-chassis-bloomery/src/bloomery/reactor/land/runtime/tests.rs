@@ -185,11 +185,10 @@ fn a_single_member_lands_under_the_message_its_lane_wrote() {
 }
 
 #[test]
-fn an_unusable_subject_falls_back_to_the_issue_title_and_still_lands() {
-    // Acceptance 2, first rung. `Lint title` is a required check, so a subject it
-    // would refuse cannot be the title — but refusing to land over it would strand
-    // a bloom that has already resolved, which is why this falls back rather than
-    // failing.
+fn an_unusable_subject_does_not_read_a_github_issue_title() {
+    // A GitHub issue title is replica text, not an input. An unusable lane
+    // subject used to stand in the live title; after ADR-0199 that would be
+    // the last inbound GitHub surface, so the floor title is the fallback.
     let (fake, base) = seeded();
     let new_head = digest(90);
     fake.seed_git_object(&new_head);
@@ -203,7 +202,11 @@ fn an_unusable_subject_falls_back_to_the_issue_title_and_still_lands() {
     drain_and_land(&mut store, &source).unwrap();
 
     let (title, body) = proposal_of(&fake, bloom);
-    assert_eq!(title, "fix(crate:aether-fs): reject a traversing path", "the member's source issue title stands in");
+    assert_eq!(
+        title,
+        format!("chore(meta): land bloom {}", short_hex(&bloom.0)),
+        "a GitHub issue title is not a landing input: {title}"
+    );
     assert!(body.contains("It was wrong."), "the unusable subject costs the title, never the prose: {body}");
     assert!(body.contains("Closes #4242"));
 }

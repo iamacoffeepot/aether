@@ -400,7 +400,7 @@ fn drain_and_land_emitting(
         // Assemble the proposal from what the bloom's own lanes wrote, before the
         // land: the title is the mainline commit's subject forever, so it is
         // authored here rather than defaulted in the adapter.
-        let assembled = proposal::assemble(store, source, &bloom)?;
+        let assembled = proposal::assemble(store, &bloom)?;
         match source.land_proposal(&bloom, &payload.expected_base, &payload.new_head, Some(&assembled)) {
             Ok(ProposalOutcome::Proposed { number }) => {
                 match watch_proposal(source, &bloom, &payload, number) {
