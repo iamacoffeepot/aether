@@ -141,15 +141,29 @@ headless, so any rendered-output assertion has to use SubstrateHarness plus its 
 extension, and any
 externally-addressable-over-the-wire assertion has to be FleetHarness.
 
-Bloomery coordinator behavior has a third boundary: use
-**LaneHarness** for a scenario that must prove the coordinator makes progress
-through its durable work loop, rather than merely that a reducer or runner
-returns an expected value. It forks the production coordinator and drives its
-real local-lane boundary while replacing only the expensive transform program
-and GitHub service. That makes it the right tier for dispatch, evidence, retry,
-wedge, aggregate, and liveness contracts; it is not a model-quality evaluation
-or proof that the real transform program, live credentials, or GitHub transport
-work. See [SubstrateHarness, FleetHarness, and LaneHarness](testing/substrateharness-and-fleetharness.md#laneharness-topology).
+Bloomery coordinator behavior has a third boundary: the **scenario harness**
+in `crates/aether-chassis-bloomery/tests/harness/`. Variation is three builder
+axes — backend (fixture / local repo), coordinator (in-process / forked), lane
+(off / scripted) — so a new scenario picks a cell instead of writing a fourth
+copy of the boot loop. Named cells:
+
+- **FixtureHarness** — fixture + in-process + lane off. Reactor-to-reactor
+  handoff, one explicit tick at a time. One start per test binary:
+  `shared_fixture` is process-global.
+- **LaneHarness** — local repo + forked + scripted. The durable work loop
+  below the spawn: `git worktree add`, the child, `evidence.json`, candidate
+  capture. Replaces only the expensive transform program and GitHub service.
+- **local_authority** — local repo + in-process + scripted. A fleet-local
+  bare authority, real capture and publication, a restart against the same
+  journal.
+
+Reach for LaneHarness when the scenario must prove the coordinator makes
+progress through its durable work loop, rather than merely that a reducer or
+runner returns an expected value. That makes it the right tier for dispatch,
+evidence, retry, wedge, aggregate, and liveness contracts; it is not a
+model-quality evaluation or proof that the real transform program, live
+credentials, or GitHub transport work. See
+[SubstrateHarness, FleetHarness, and LaneHarness](testing/substrateharness-and-fleetharness.md#laneharness-topology).
 
 A LaneHarness scenario about a lane that hangs needs the sealed dispatch deadline
 (ADR-0177), not a scenario-side timeout. Every dispatched order carries an
@@ -211,7 +225,7 @@ lifetime.
 The advisory `stale_warn_after_secs` sweep is unrelated to both — it warns about
 an unresolved handle and terminates nothing, so no scenario should wait on it.
 
-Beside it sits the **fixture harness** (`crates/aether-chassis-bloomery/tests/fixture/`),
+Beside it sits the **fixture cell** (`FixtureHarness` over the same builder),
 which boots the same production chassis inside the test process and steps it one
 explicit reactor tick at a time. Its reason for existing is the handoff *between*
 reactors: each reactor's own unit tests hand-place the outbox row its upstream would

@@ -13,6 +13,7 @@
 
 mod common;
 pub mod fixture;
+pub mod harness;
 
 use aether_bloomery::BloomStatus;
 use fixture::{FixtureHarness, captured, digest, passed};

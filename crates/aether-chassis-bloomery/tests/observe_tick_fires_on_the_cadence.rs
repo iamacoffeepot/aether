@@ -13,6 +13,7 @@
 
 mod common;
 pub mod fixture;
+pub mod harness;
 
 use std::thread;
 use std::time::{Duration, Instant};
