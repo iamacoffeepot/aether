@@ -11,12 +11,8 @@
 //! the land reactor itself merges the proposal it opened — nobody presses the
 //! button, and check state is not consulted (#5110).
 
-mod common;
-pub mod fixture;
-pub mod harness;
-
 use aether_bloomery::BloomStatus;
-use fixture::{FixtureHarness, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, passed};
 
 /// The workpiece the single sealed member covers.
 const WORKPIECE: &str = "wp";

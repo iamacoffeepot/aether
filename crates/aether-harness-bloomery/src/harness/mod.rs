@@ -23,9 +23,9 @@
 //!
 //! A new scenario picks a cell. It does not write a fourth `struct Harness`.
 //!
-//! Shared pieces live next door: [`Repo`](crate::common::repo::Repo) for a real
-//! repository, [`Wire`](crate::common::wire::Wire) for handshake-retry / `call` /
-//! view, [`MapCorrespondence`](crate::common::correspondence::MapCorrespondence)
+//! Shared pieces live next door: [`Repo`] for a real
+//! repository, [`Wire`](crate::support::wire::Wire) for handshake-retry / `call` /
+//! view, [`MapCorrespondence`](crate::support::correspondence::MapCorrespondence)
 //! for an in-memory correspondence store.
 //!
 //! Consumers declare `pub mod harness` so the cell surface stays reachable in
@@ -33,7 +33,6 @@
 //! `pub mod fixture`.
 
 pub mod drive;
-pub mod liveness;
 mod scenario;
 
 use std::ops::{Deref, DerefMut};
@@ -45,12 +44,16 @@ use std::time::Duration;
 use aether_chassis_bloomery::bloomery::mock_lane::LaneScript;
 use tempfile::TempDir;
 
-use crate::common::repo::Repo;
+use crate::support::repo::Repo;
 
 #[doc(inline)]
 pub use aether_bloomery::testing::digest;
 pub use drive::{draft, passed};
 pub use scenario::ScenarioHarness;
+
+/// The promoted [`ScenarioHarness`], named to match the crate the way
+/// `FleetHarness` matches its own.
+pub type BloomeryHarness = ScenarioHarness;
 
 /// A poll cadence far enough out that no reactor's timer fires inside a
 /// scenario. There is no "never" — `poll_interval_secs.max(1)` — so a day
@@ -325,6 +328,14 @@ impl HarnessBuilder {
         self.shared_store = Some(roots.store_path());
         self.shared_artifacts = Some(roots.artifacts_root());
         self.shared_worktree = Some(roots.worktree_base());
+        self
+    }
+
+    /// Keep `repo` alive for the life of the harness — local-authority start
+    /// copies the path but the `TempDir` still has to outlive the coordinator.
+    #[must_use]
+    pub fn hold_repo(mut self, repo: Repo) -> Self {
+        self.repo = Some(repo);
         self
     }
 

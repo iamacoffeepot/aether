@@ -89,7 +89,13 @@ fn environment_findings() -> String {
 /// `nonce` is stamped into the evidence the way the real lanes stamp theirs.
 #[must_use]
 pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
-    let body = |value: &Value| Some(serde_json::to_vec_pretty(value).unwrap_or_default());
+    outcome_for(command, nonce, mode, None)
+}
+
+/// [`outcome`], with the `--subject` the coordinator displayed so
+/// [`LaneMode::WrongSubject`] can bind a different digest.
+#[must_use]
+pub fn outcome_for(command: &str, nonce: &str, mode: LaneMode, subject: Option<&str>) -> Outcome {
     let evidence_nonce = if mode == LaneMode::MismatchedNonce {
         "mismatched-nonce"
     } else {
@@ -103,96 +109,128 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
         LaneMode::MalformedEvidence => {
             return Outcome { evidence: Some(b"{not json".to_vec()), exit_code: 0, candidate: None };
         }
-        // Handled per lane family below.
         LaneMode::Pass
         | LaneMode::Fail
         | LaneMode::Environment
         | LaneMode::ConcludesWithoutWriting
         | LaneMode::MismatchedNonce
-        | LaneMode::NeverExits => {}
+        | LaneMode::NeverExits
+        | LaneMode::Declines
+        | LaneMode::WrongSubject => {}
     }
 
     if command == CONSTRUCT_IMPLEMENT_COMMAND {
-        // The construct lane's only claim is whether it produced a candidate;
-        // it stamps no status, so the coordinator's construct gate is what
-        // decides. `ConcludesWithoutWriting` is the interesting one: it claims a
-        // candidate and leaves the tree clean, which the capture must catch.
-        let produced = matches!(
-            mode,
-            LaneMode::Pass | LaneMode::ConcludesWithoutWriting | LaneMode::MismatchedNonce | LaneMode::NeverExits
-        );
-        return Outcome {
-            evidence: body(&json!({
-                "command": command,
-                "nonce": evidence_nonce,
-                "produced_candidate": produced,
-                "result_record": result_record(false, Some("wrote the candidate.")),
-            })),
-            exit_code: 0,
-            candidate: matches!(mode, LaneMode::Pass | LaneMode::MismatchedNonce | LaneMode::NeverExits)
-                .then(|| format!("the candidate a mock construct lane left for run {nonce}.\n")),
-        };
+        return construct_outcome(command, nonce, evidence_nonce, mode, subject);
     }
-
     if command == REVIEW_CRITIC_COMMAND {
-        let passed = matches!(mode, LaneMode::Pass | LaneMode::MismatchedNonce | LaneMode::NeverExits);
-        let findings = match mode {
-            LaneMode::Environment => Value::String(environment_findings()),
-            _ if passed => Value::Null,
-            _ => Value::String(
-                "pillar 2: the candidate reintroduces the bug it claims to fix.\nVERDICT: finding".to_owned(),
-            ),
-        };
-        // Three statuses, exactly as the real lane stamps them (ADR-0176): an
-        // `environment` run judged no candidate, so it is neither the pass it
-        // cannot claim nor the fail a candidate could repair.
-        let status = match mode {
-            LaneMode::Environment => "environment",
-            _ if passed => "pass",
-            _ => "fail",
-        };
-        return Outcome {
-            evidence: body(&json!({
-                "command": command,
-                "nonce": evidence_nonce,
-                "status": status,
-                "findings": findings,
-                "result_record": result_record(false, findings.as_str()),
-            })),
-            exit_code: 0,
-            candidate: None,
-        };
+        return review_outcome(command, evidence_nonce, mode, subject);
     }
-
-    // Every remaining command is a mechanical verify lane.
-    // `Environment` is the umbrella preflight miss: status fail, the
-    // synthetic host-fault identity, and the operator-facing findings the
-    // real lane stamps when a gate tool is absent (#5020).
     if mode == LaneMode::Environment {
-        let findings = "Verification did not run. This host is missing tools or toolchain targets the verify lane \
-             needs, so it cannot compute whether the candidate passes — which is not the same as the \
-             candidate failing, and no change to the candidate can fix it.\n\n\
-             - `jscpd` — npm install -g jscpd\n\n\
-             Install these on the executor host and re-dispatch.";
-        return Outcome {
-            evidence: body(&json!({
-                "command": command,
-                "nonce": evidence_nonce,
-                "status": "fail",
-                "exit_code": 1,
-                "log": format!("{command}.log"),
-                "failed_verifiers": VerifyFailureSet::one(VerifyFailure::Preflight),
-                "findings": findings,
-            })),
-            exit_code: 1,
-            candidate: None,
-        };
+        return verify_environment_outcome(command, evidence_nonce);
     }
+    verify_outcome(command, evidence_nonce, mode, subject)
+}
 
-    let passed = matches!(
-        mode,
-        LaneMode::Pass | LaneMode::ConcludesWithoutWriting | LaneMode::MismatchedNonce | LaneMode::NeverExits
-    );
+fn evidence_bytes(value: &Value) -> Vec<u8> {
+    serde_json::to_vec_pretty(value).unwrap_or_default()
+}
+
+fn stamp_claimed_subject(evidence: &mut Value, mode: LaneMode, subject: Option<&str>) {
+    if mode == LaneMode::WrongSubject
+        && let Some(object) = evidence.as_object_mut()
+    {
+        object.insert("claimed_subject".to_owned(), Value::String(wrong_subject(subject)));
+    }
+}
+
+fn authored_pass(mode: LaneMode) -> bool {
+    matches!(mode, LaneMode::Pass | LaneMode::MismatchedNonce | LaneMode::NeverExits | LaneMode::WrongSubject)
+}
+
+fn construct_outcome(
+    command: &str,
+    nonce: &str,
+    evidence_nonce: &str,
+    mode: LaneMode,
+    subject: Option<&str>,
+) -> Outcome {
+    // The construct lane's only claim is whether it produced a candidate; it
+    // stamps no status, so the coordinator's construct gate is what decides.
+    // `ConcludesWithoutWriting` claims a candidate and leaves the tree clean,
+    // which the capture must catch. `Declines` is the clean refusal: no
+    // candidate, terminal `is_error: false`, which intake maps onto
+    // ConstructDeclined.
+    let produced = authored_pass(mode) || mode == LaneMode::ConcludesWithoutWriting;
+    let mut evidence = json!({
+        "command": command,
+        "nonce": evidence_nonce,
+        "produced_candidate": produced,
+        "result_record": result_record(false, Some("wrote the candidate.")),
+    });
+    if mode == LaneMode::Declines
+        && let Some(object) = evidence.as_object_mut()
+    {
+        object.insert("findings".to_owned(), Value::String("the work lies outside the declared surface".to_owned()));
+    }
+    stamp_claimed_subject(&mut evidence, mode, subject);
+    Outcome {
+        evidence: Some(evidence_bytes(&evidence)),
+        exit_code: 0,
+        candidate: authored_pass(mode).then(|| format!("the candidate a mock construct lane left for run {nonce}.\n")),
+    }
+}
+
+fn review_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: Option<&str>) -> Outcome {
+    let passed = authored_pass(mode);
+    let findings = match mode {
+        LaneMode::Environment => Value::String(environment_findings()),
+        _ if passed => Value::Null,
+        _ => {
+            Value::String("pillar 2: the candidate reintroduces the bug it claims to fix.\nVERDICT: finding".to_owned())
+        }
+    };
+    // Three statuses, exactly as the real lane stamps them (ADR-0176): an
+    // `environment` run judged no candidate, so it is neither the pass it
+    // cannot claim nor the fail a candidate could repair.
+    let status = match mode {
+        LaneMode::Environment => "environment",
+        _ if passed => "pass",
+        _ => "fail",
+    };
+    let mut review = json!({
+        "command": command,
+        "nonce": evidence_nonce,
+        "status": status,
+        "findings": findings,
+        "result_record": result_record(false, findings.as_str()),
+    });
+    stamp_claimed_subject(&mut review, mode, subject);
+    Outcome { evidence: Some(evidence_bytes(&review)), exit_code: 0, candidate: None }
+}
+
+fn verify_environment_outcome(command: &str, evidence_nonce: &str) -> Outcome {
+    let findings = "Verification did not run. This host is missing tools or toolchain targets the verify lane \
+         needs, so it cannot compute whether the candidate passes — which is not the same as the \
+         candidate failing, and no change to the candidate can fix it.\n\n\
+         - `jscpd` — npm install -g jscpd\n\n\
+         Install these on the executor host and re-dispatch.";
+    Outcome {
+        evidence: Some(evidence_bytes(&json!({
+            "command": command,
+            "nonce": evidence_nonce,
+            "status": "fail",
+            "exit_code": 1,
+            "log": format!("{command}.log"),
+            "failed_verifiers": VerifyFailureSet::one(VerifyFailure::Preflight),
+            "findings": findings,
+        }))),
+        exit_code: 1,
+        candidate: None,
+    }
+}
+
+fn verify_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: Option<&str>) -> Outcome {
+    let passed = authored_pass(mode) || mode == LaneMode::ConcludesWithoutWriting;
     let mut evidence = json!({
         "command": command,
         "nonce": evidence_nonce,
@@ -204,8 +242,27 @@ pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
         object.insert("failed_verifiers".to_owned(), json!(VerifyFailureSet::one(VerifyFailure::Clippy)));
         object.insert("findings".to_owned(), Value::String(verify_findings(command)));
     }
+    stamp_claimed_subject(&mut evidence, mode, subject);
+    Outcome { evidence: Some(evidence_bytes(&evidence)), exit_code: i32::from(!passed), candidate: None }
+}
 
-    Outcome { evidence: body(&evidence), exit_code: i32::from(!passed), candidate: None }
+/// A digest that is not the one the order displayed.
+fn wrong_subject(displayed: Option<&str>) -> String {
+    match displayed {
+        Some(hex) if hex.len() == 64 => {
+            let mut flipped = hex.to_owned();
+            flipped.replace_range(
+                ..1,
+                if hex.starts_with('0') {
+                    "f"
+                } else {
+                    "0"
+                },
+            );
+            flipped
+        }
+        _ => "ee".repeat(32),
+    }
 }
 
 /// Apply an outcome: write the candidate into `worktree` when there is one, and

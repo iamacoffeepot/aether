@@ -44,6 +44,13 @@ pub enum StageVerdict {
     /// rather than inventing them. Appended past [`StageVerdict::Parked`] so the
     /// prior verdicts' wire discriminants are unchanged.
     ExecutorFault,
+    /// A construct or refine lane concluded without a candidate (#5292 / #5332).
+    /// Distinct from [`StageVerdict::Parked`]: a park is an ADR-0151 question,
+    /// and this is a refusal to produce work. Normalizes to
+    /// [`EvidenceKind::ConstructDeclined`]. Appended past
+    /// [`StageVerdict::ExecutorFault`] so the prior verdicts' discriminants are
+    /// unchanged.
+    Declined,
 }
 
 impl StageVerdict {
@@ -54,6 +61,7 @@ impl StageVerdict {
             Self::ReviewFinding => EvidenceKind::ReviewFinding,
             Self::Parked => EvidenceKind::Question,
             Self::ExecutorFault => EvidenceKind::ExecutorFault,
+            Self::Declined => EvidenceKind::ConstructDeclined,
         }
     }
 }
@@ -190,6 +198,8 @@ mod tests {
             (StageVerdict::VerificationFailed, EvidenceKind::VerificationResult),
             (StageVerdict::ReviewFinding, EvidenceKind::ReviewFinding),
             (StageVerdict::Parked, EvidenceKind::Question),
+            (StageVerdict::ExecutorFault, EvidenceKind::ExecutorFault),
+            (StageVerdict::Declined, EvidenceKind::ConstructDeclined),
         ];
         for (verdict, kind) in cases {
             let result = StageResult { subject, verdict, detail: digest(0) };

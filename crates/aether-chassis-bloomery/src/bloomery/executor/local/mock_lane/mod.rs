@@ -109,7 +109,7 @@ pub fn run<I: IntoIterator<Item = String>>(args: I, worktree: &Path) -> Result<i
         },
     )?;
 
-    let outcome = evidence::outcome(&args.command, &args.nonce, mode);
+    let outcome = evidence::outcome_for(&args.command, &args.nonce, mode, args.subject.as_deref());
     evidence::apply(&outcome, worktree, &args.out)?;
 
     if mode == LaneMode::NeverExits {

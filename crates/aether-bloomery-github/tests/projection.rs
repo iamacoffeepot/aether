@@ -50,6 +50,7 @@ fn member(number: u64, revision: u8) -> MemberView {
         machinery_budget: 0,
         wedge_cause: None,
         cursor: None,
+        park: None,
     }
 }
 

@@ -8,15 +8,11 @@
 //! day-long cadence, so a proposal that opens can only have come from the
 //! post-commit nudge.
 
-mod common;
-pub mod fixture;
-pub mod harness;
-
 use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::BloomId;
-use fixture::{FixtureHarness, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, passed};
 
 /// The workpiece the single sealed member covers.
 const WORKPIECE: &str = "wp";

@@ -239,6 +239,7 @@ impl Default for MemberView {
             machinery_budget: 0,
             wedge_cause: None,
             cursor: None,
+            park: None,
         }
     }
 }

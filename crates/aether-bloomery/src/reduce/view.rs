@@ -2,7 +2,6 @@
 //! render without querying back into the store (ADR-0149 §The boundary).
 
 use super::readiness::blocking_ancestor;
-use super::snapshot::MemberPark;
 use super::{BloomRecord, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
@@ -105,20 +104,6 @@ fn held_decisions(
         .collect()
 }
 
-/// A construct-declined park (#5292) is not an ADR-0151 question artifact, so
-/// `resolve_question` cannot fill the pending-decision. The snapshot names the
-/// member and the evidence; this is the prompt that distinguishes a park from
-/// a wedge on the served view.
-fn construct_park_view(park: &MemberPark) -> PendingDecisionView {
-    PendingDecisionView {
-        question: park.evidence,
-        stage: park.stage,
-        prompt: "construct concluded without a candidate".into(),
-        options: Vec::new(),
-        blocked: "the declared surface has to change; more attempts replay the same refusal".into(),
-    }
-}
-
 fn member_views(
     record: &BloomRecord,
     snapshot: &Snapshot,
@@ -136,8 +121,7 @@ fn member_views(
             pending_decision: held
                 .iter()
                 .find(|(workpiece, _)| *workpiece == member.workpiece)
-                .map(|(_, view)| view.clone())
-                .or_else(|| snapshot.member_park(&record.spec.id(), &member.workpiece).map(construct_park_view)),
+                .map(|(_, view)| view.clone()),
             wedge: record.wedged.get(&member.workpiece).copied(),
             blocked_by: blocking_ancestor(record, &member.workpiece),
             host_fault: record
@@ -161,6 +145,7 @@ fn member_views(
                 }
             }),
             cursor: stage_cursor(record, &member.workpiece),
+            park: snapshot.member_park(&record.spec.id(), &member.workpiece).copied(),
         })
         .collect()
 }
@@ -365,14 +350,10 @@ mod tests {
         )
         .0;
         let parked_view = view_of(&parked, |_| None).blooms[0].members[0].clone();
-        let pending = parked_view.pending_decision.as_ref().expect("the park is on the served view");
-        assert_eq!(pending.question, reason, "the pending decision names the lane's evidence");
-        assert_eq!(pending.prompt, "construct concluded without a candidate");
-        assert!(
-            pending.blocked.contains("declared surface"),
-            "the park names the remedy a grant would miss: {}",
-            pending.blocked
-        );
+        let park = parked_view.park.as_ref().expect("the park is on the served view");
+        assert_eq!(park.evidence, reason, "the park names the lane's evidence");
+        assert_eq!(park.stage, StageId::Construct);
+        assert!(parked_view.pending_decision.is_none(), "a park is not an ADR-0151 question");
         assert!(parked_view.wedge.is_none(), "a parked member is not wedged");
 
         let mut wedged = Snapshot::new(digest(0));

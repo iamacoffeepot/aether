@@ -448,7 +448,7 @@ pub struct BloomRecord {
 /// Projection state, not a journal row: the durable write is the declining
 /// [`Fact::AttemptCompleted`]. `evidence` is the lane's artifact digest, the
 /// same value [`Outcome::AttemptParked`] carries as `reason`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(aether_data::Schema, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MemberPark {
     /// The stage that declined — Construct.
     pub stage: StageId,

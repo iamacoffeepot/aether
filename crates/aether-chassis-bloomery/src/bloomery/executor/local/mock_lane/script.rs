@@ -70,6 +70,16 @@ pub enum LaneMode {
     ExitsNonZero,
     /// Never exit. The harness's own budget is what ends the run.
     NeverExits,
+    /// The lane concluded and refused to produce work: a construct/refine
+    /// run that stamps `produced_candidate: false` with a terminal
+    /// `is_error: false` result. Intake mints [`aether_bloomery::EvidenceKind::ConstructDeclined`]
+    /// so the member parks rather than burning retry budget (#5292 / #5332).
+    Declines,
+    /// Write otherwise-valid evidence bound to a digest other than the one
+    /// the order displayed. Intake refuses `DigestMismatch` so an in-flight
+    /// worker can still deliver; a completed run is recovered as a machinery
+    /// fault so the order cannot outlive the lane.
+    WrongSubject,
 }
 
 impl fmt::Display for LaneMode {
