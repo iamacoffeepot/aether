@@ -19,6 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
+use aether_bloomery::testing::{approved, digest};
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, BloomStatus, BloomView, ConfigRegistry, Correspondence, Digest, Event,
     Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Outcome, ProjectedReceipt, ProjectionBackend, Query,
@@ -428,19 +429,13 @@ fn control_mailbox() -> MailboxId {
     <ControlCore as Addressable>::resolve(0, ())
 }
 
-fn digest(seed: u8) -> Digest {
-    Digest::from_bytes([seed; 32])
-}
-
 fn member(workpiece: &str, scope_revision: Digest) -> Membership {
-    let mut member = Membership {
+    approved(Membership {
         workpiece: WorkpieceId(workpiece.to_owned()),
         scope_revision,
         configs: ConfigRegistry::default(),
         approval: Evidence { subject: Digest::default(), kind: EvidenceKind::Approval, detail: digest(200) },
-    };
-    member.approval.subject = member.subject();
-    member
+    })
 }
 
 fn draft(base: Digest, members: &[Membership]) -> aether_bloomery::BloomSpec {

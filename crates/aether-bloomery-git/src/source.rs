@@ -1392,6 +1392,7 @@ mod tests {
 
     use crate::correspondence::GitObjectId;
 
+    use aether_bloomery::testing::{digest, workpiece};
     use aether_bloomery::{
         BackendObjectId, BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState,
         ClaimReleaseOutcome, Correspondence as DomainCorrespondence, CorrespondenceError, Digest, IntegrateOutcome,
@@ -1416,10 +1417,6 @@ mod tests {
     use crate::client::{GitDataApi, GitDataError};
     use crate::short_hex;
     use crate::testing::FakeGithub;
-
-    fn digest(seed: u8) -> Digest {
-        Digest::from_bytes([seed; 32])
-    }
 
     // The Git-object view of a recorded correspondence — the same forward
     // resolution plus adapter-edge conversion the port itself performs, so an
@@ -1447,10 +1444,6 @@ mod tests {
 
     fn bloom_id(seed: u8) -> BloomId {
         BloomId(digest(seed))
-    }
-
-    fn workpiece(name: &str) -> WorkpieceId {
-        WorkpieceId(name.to_owned())
     }
 
     // The `heads/…`-form claim ref for a workpiece, the address the tests assert

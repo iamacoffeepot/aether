@@ -487,10 +487,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use aether_bloomery::testing::digest;
     use aether_bloomery::{
-        BloomDraft, BloomId, ConfigRegistry, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey,
-        LandingReceipt, Membership, ProjectedReceipt, ResolvedConfigs, Snapshot, SourceReplicaPayload, Topic,
-        WorkpieceId, reduce, view_of,
+        BloomDraft, BloomId, ConfigRegistry, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandingReceipt,
+        Membership, ProjectedReceipt, ResolvedConfigs, Snapshot, SourceReplicaPayload, Topic, WorkpieceId, reduce,
+        view_of,
     };
     use aether_bloomery_github::{GithubProjection, ReplicaError, SourceReplica, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
@@ -508,10 +509,6 @@ mod tests {
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::store::{SqliteStore, StoreBackend};
-
-    fn digest(seed: u8) -> Digest {
-        Digest::from_bytes([seed; 32])
-    }
 
     /// Drain egress collecting the payloads of every `UnresolvedMail` carrying
     /// kind `K`, until `want` of them have arrived (each cross-cap send bubbles

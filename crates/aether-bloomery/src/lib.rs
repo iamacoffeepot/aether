@@ -79,6 +79,8 @@ pub mod reduce;
 pub mod sign;
 pub mod spend;
 pub mod study_report;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod values;
 
 pub use calibration::{
