@@ -32,11 +32,11 @@ use crate::bloomery::doctor::KitReport;
 use crate::bloomery::driver::BloomeryDriverCapability;
 #[cfg(feature = "github")]
 use crate::bloomery::{
-    CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, ExecutorReactorCapability,
-    ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig, IntegrateReactorCapability, IntegrateReactorSetup,
-    JanitorReactorCapability, JanitorReactorSetup, LandReactorCapability, LandReactorSetup, LaneProgram,
-    MirrorReactorCapability, MirrorReactorSetup, ProjectionShell, SourceReplicaShell, SourceShell, candidate_push_at,
-    github_push_url,
+    CandidatePush, ClaimReleaseReactorCapability, ClaimReleaseReactorSetup, DoctorBoard, DoctorReactorCapability,
+    DoctorReactorSetup, ExecutorReactorCapability, ExecutorReactorSetup, ExecutorShell, GithubConnectionConfig,
+    IntegrateReactorCapability, IntegrateReactorSetup, JanitorReactorCapability, JanitorReactorSetup,
+    LandReactorCapability, LandReactorSetup, LaneProgram, MirrorReactorCapability, MirrorReactorSetup, ProjectionShell,
+    SourceReplicaShell, SourceShell, candidate_push_at, github_push_url,
 };
 use crate::control::{ControlCore, ControlSetup};
 use crate::session::{SessionConfig, SessionPoolCapability};
@@ -109,9 +109,11 @@ struct BloomeryActorSetups {
     integrate: IntegrateReactorSetup,
     claim_release: ClaimReleaseReactorSetup,
     janitor: JanitorReactorSetup,
+    doctor: DoctorReactorSetup,
     source: SourceSetup,
     correspondence: SharedCorrespondence,
     pusher: Arc<dyn CandidatePush>,
+    doctor_board: DoctorBoard,
 }
 
 #[cfg(feature = "github")]
@@ -211,6 +213,7 @@ fn actor_setups(
     let refuse_origin =
         (cfg!(any(test, feature = "testing")) || github.uses_fixture()) && !coordinator.uses_local_authority();
     let pusher = candidate_push_at(refuse_origin, repo.clone(), coordinator.candidate_remote());
+    let doctor_board = DoctorBoard::default();
 
     Ok(BloomeryActorSetups {
         mirror: MirrorReactorSetup {
@@ -282,9 +285,19 @@ fn actor_setups(
             poll_interval_secs: coordinator.poll_interval_secs,
             repo: repo.display().to_string(),
         },
+        doctor: DoctorReactorSetup {
+            source: source_configured.then(|| source.clone()),
+            executor: executor.clone(),
+            correspondence: Some(Arc::clone(&correspondence)),
+            store_path: coordinator.store_path.clone(),
+            worktree_base: coordinator.local_worktree_base.clone(),
+            poll_interval_secs: coordinator.poll_interval_secs,
+            board: doctor_board.clone(),
+        },
         source: SourceSetup { shell: source, claims_enabled: source_configured, mainline: coordinator.mainline() },
         correspondence,
         pusher,
+        doctor_board,
     })
 }
 
@@ -536,6 +549,11 @@ impl BootableChassis for BloomeryChassis {
             // refs, so a kill or crash does not wait for the next boot to
             // reclaim what the happy-path release missed.
             .with_actor::<JanitorReactorCapability>(setups.janitor)
+            // The doctor: evaluates the seed cross-source invariants against
+            // the journal, fleet refs, and /view, once at boot and on the
+            // coordinator cadence, and posts violations through the operator
+            // channel (#5176).
+            .with_actor::<DoctorReactorCapability>(setups.doctor)
             // The integrate reactor (#3650, ADR-0152): drains the reducer's
             // `aether.bloomery.integrate` decisions, folds the claimed candidate
             // onto the bloom's integration branch, and admits `Fact::Resolve`
@@ -582,6 +600,7 @@ impl BootableChassis for BloomeryChassis {
                 worktree_base,
                 artifacts_root,
                 control_token: coordinator.http_control_token,
+                doctor: Some(setups.doctor_board),
             }))
     }
     #[cfg(not(feature = "github"))]

@@ -87,6 +87,17 @@ fn map_err(error: rusqlite::Error) -> CorrespondenceError {
     CorrespondenceError::new(error.to_string())
 }
 
+/// Un-decoded correspondence rows: digest bytes and backend-object bytes.
+type RawPairs = Vec<(Vec<u8>, Vec<u8>)>;
+
+fn load_pairs(conn: &Connection) -> Result<RawPairs, CorrespondenceError> {
+    let mut stmt = conn.prepare("SELECT digest, backend_object FROM backend_correspondence").map_err(map_err)?;
+    stmt.query_map([], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)))
+        .map_err(map_err)?
+        .collect::<Result<RawPairs, _>>()
+        .map_err(map_err)
+}
+
 impl Correspondence for SqliteCorrespondence {
     fn record(&self, digest: &Digest, object: &BackendObjectId) -> Result<(), CorrespondenceError> {
         // Last-writer-wins on BOTH keys: `digest` is the primary key and
@@ -138,6 +149,17 @@ impl Correspondence for SqliteCorrespondence {
                 Ok(Digest::from_bytes(array))
             })
             .transpose()
+    }
+
+    fn pairs(&self) -> Result<Vec<(Digest, BackendObjectId)>, CorrespondenceError> {
+        load_pairs(&self.lock())?
+            .into_iter()
+            .map(|(digest, object)| {
+                let array: [u8; 32] =
+                    digest.try_into().map_err(|_| CorrespondenceError::new("stored digest is not 32 bytes"))?;
+                Ok((Digest::from_bytes(array), BackendObjectId::new(object)))
+            })
+            .collect()
     }
 }
 
