@@ -156,9 +156,22 @@ pub(super) fn run(
     cache: Option<&CompilerCache>,
     peak: &PeakMemory,
 ) -> Result<serde_json::Value> {
+    run_at(MUSE, prompt, args, scratch, cache, peak)
+}
+
+/// [`run`] against an explicit `program` — production passes [`MUSE`]; tests
+/// pass a grammar-recording stand-in.
+fn run_at(
+    program: &str,
+    prompt: &str,
+    args: &TransformArgs,
+    scratch: &Scratch,
+    cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
+) -> Result<serde_json::Value> {
     let session = args.resume.clone().unwrap_or_else(|| mint_session_id(args.nonce.as_deref()));
     let prompt_file = write_prompt(&args.out, &resumed_prompt(prompt, args.resume.as_deref()))?;
-    let mut command = peak.command(MUSE);
+    let mut command = peak.command(program);
     command
         .args(muse_argv(&prompt_file.to_string_lossy(), args.model.as_deref(), args.effort.as_deref(), &session))
         .stdin(Stdio::null())
@@ -180,7 +193,12 @@ pub(super) fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_terminal, mint_session_id, muse_argv, muse_effort, uuid_from_seed};
+    use super::{derive_terminal, mint_session_id, muse_argv, muse_effort, run_at, uuid_from_seed};
+    use crate::transform::TransformArgs;
+    use crate::transform::construct::CONSTRUCT_IMPLEMENT;
+    use crate::transform::harness_stub::{self, Stub};
+    use crate::transform::peak_memory;
+    use crate::transform::scratch::Scratch;
 
     #[test]
     fn argv_runs_headless_and_carries_the_resolved_profile() {
@@ -272,5 +290,46 @@ mod tests {
             derive_terminal(r#"{"payload_type":"run.lifecycle.started","payload":{"kind":"run_started"}}"#).is_none()
         );
         assert!(derive_terminal("").is_none());
+    }
+
+    fn drive(stub: &Stub, args: &TransformArgs, prompt: &str) -> anyhow::Result<serde_json::Value> {
+        let scratch = Scratch::prepare(&args.out, args.nonce.as_deref()).expect("scratch");
+        run_at(stub.program(), prompt, args, &scratch, None, &peak_memory::detect())
+    }
+
+    // Tripwire: Muse names a new session and a continued one with the same
+    // `--session-id`, so a cold lap that omitted the flag would let Muse mint
+    // an id the pool never sees. The transcript's own id wins over the one
+    // that was asked for, which is what a later lap has to resume.
+    #[test]
+    fn a_cold_launch_names_a_uuid_session_and_records_the_transcripts_id() {
+        let stub = Stub::succeed();
+        let args = harness_stub::args(CONSTRUCT_IMPLEMENT, stub.out());
+        let record = drive(&stub, &args, "assembled muse prompt").expect("cold muse");
+
+        let launches = stub.launches();
+        assert_eq!(launches.len(), 1, "a cold launch forks once");
+        assert_eq!(launches[0].argv.first().map(String::as_str), Some("exec"));
+        assert!(launches[0].has("--json"), "the transcript is what the record derives from");
+        assert!(launches[0].has("--disable-approval"), "headless needs the approval prompt gone");
+        let requested = launches[0].flag("--session-id").expect("a cold lap names its session too");
+        let fields: Vec<&str> = requested.split('-').collect();
+        assert_eq!(fields.iter().map(|field| field.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12]);
+        assert_eq!(
+            record["session_id"], "aaaaaaaa-bbbb-8ccc-8ddd-eeeeeeeeeeee",
+            "the transcript's stream id wins over the requested handle"
+        );
+        assert_ne!(record["session_id"], requested, "a declined request must not be what the pool deposits");
+    }
+
+    // Tripwire: Muse does not relaunch cold on a rejected handle. A stub that
+    // exits nonzero after emitting output must fail the lane after one fork,
+    // not pay for a second full-price run.
+    #[test]
+    fn a_nonzero_exit_fails_the_lane_after_exactly_one_launch() {
+        let stub = Stub::fail_after_output();
+        let args = harness_stub::args(CONSTRUCT_IMPLEMENT, stub.out());
+        drive(&stub, &args, "assembled muse prompt").expect_err("a nonzero muse exit fails the lane");
+        assert_eq!(stub.launches().len(), 1, "muse does not fall back cold");
     }
 }
