@@ -57,6 +57,7 @@ mod blooms;
 mod calibration;
 #[cfg(feature = "github")]
 mod claims;
+mod commissions;
 mod configs;
 mod drafts;
 mod evidence;
@@ -105,7 +106,11 @@ use crate::artifacts::{ArtifactsCapabilityState, GetRange, GetRangeResult, resol
 use crate::bloomery::CandidatePush;
 use crate::bloomery::load_policy;
 use crate::signing::VerifyResult;
-use crate::store::{PageJournal, PageJournalResult, RecordConfigResult, RecordDispatchDescriptionResult};
+use crate::store::{
+    CancelCommissionResult, CreateCommissionResult, ListCommissionsResult, LoadCommissionResult, PageJournal,
+    PageJournalResult, RecordCommissionApprovalResult, RecordConfigResult, RecordDispatchDescriptionResult,
+    WriteScopeRevisionResult,
+};
 
 /// The claim routes' bodies for a build with no GitHub source runtime: an
 /// immediate `503` rather than a deferral onto a `SourceCapability` mailbox that
@@ -184,6 +189,9 @@ pub struct ApiParams {
     /// Artifacts root used to resolve study cost on the dispatch list. `None`
     /// leaves every cost `null`.
     pub artifacts_root: Option<String>,
+    /// Bearer token commission routes require. Empty refuses every commission
+    /// request so an unconfigured host cannot approve work.
+    pub control_token: String,
 }
 
 #[http::router]
@@ -239,6 +247,9 @@ impl NativeActor for BloomeryApiCapability {
             seals: HashMap::new(),
             next_seal: 1,
             seal_verifications: HashMap::new(),
+            control_token: params.control_token,
+            commission_verifying: HashMap::new(),
+            commission_writing: HashMap::new(),
         })
     }
 
@@ -251,6 +262,68 @@ impl NativeActor for BloomeryApiCapability {
     /// registered on the HTTP ingress cap (ADR-0130) post-init (#3672).
     fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
         load_configs(ctx);
+    }
+
+    /// `POST /commissions` — persist a new open commission.
+    #[http::route(Post, "/commissions")]
+    fn on_post_commissions(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = state.create_commission(ctx.request());
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /commissions` — list commissions, optionally `?status=`.
+    #[http::route(Get, "/commissions")]
+    fn on_get_commissions(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = state.list_commissions(ctx.request());
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /commissions/{id}` — show one commission.
+    #[http::route(Get, "/commissions/{id}")]
+    fn on_get_commission(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.show_commission(ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /commissions/{id}/revisions` — write a scope revision.
+    #[http::route(Post, "/commissions/{id}/revisions")]
+    fn on_post_commission_revision(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.write_commission_revision(ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /commissions/{id}/approvals` — verify and insert an approval.
+    #[http::route(Post, "/commissions/{id}/approvals")]
+    fn on_post_commission_approval(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.submit_commission_approval(&ctx, ctx.request(), &id);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /commissions/{id}/cancel` — verify a cancel envelope and close.
+    #[http::route(Post, "/commissions/{id}/cancel")]
+    fn on_post_commission_cancel(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.cancel_commission(&ctx, ctx.request(), &id);
+        finish(state, ctx, routed)
     }
 
     /// `POST /workpieces` — stage a workpiece for later draft membership.
@@ -806,6 +879,8 @@ impl NativeActor for BloomeryApiCapability {
         let correlation = ctx.reply_target().correlation_id;
         if state.seal_verifications.contains_key(&correlation) {
             state.resolve_seal_verify(ctx, correlation, mail);
+        } else if state.commission_verifying.contains_key(&correlation) {
+            state.resolve_commission_verify(ctx, mail);
         } else {
             state.resolve_verify(ctx, mail);
         }
@@ -827,6 +902,60 @@ impl NativeActor for BloomeryApiCapability {
         mail: RecordConfigResult,
     ) -> HttpServerResponse {
         config_response(state, mail)
+    }
+
+    #[http::reply]
+    fn on_create_commission_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: CreateCommissionResult,
+    ) -> HttpServerResponse {
+        commissions::create_response(mail)
+    }
+
+    #[http::reply]
+    fn on_write_scope_revision_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: WriteScopeRevisionResult,
+    ) -> HttpServerResponse {
+        commissions::revision_response(mail)
+    }
+
+    #[handler::manual]
+    fn on_record_commission_approval_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: RecordCommissionApprovalResult,
+    ) {
+        state.answer_commission_write(ctx, &commissions::approval_response(mail));
+    }
+
+    #[http::reply]
+    fn on_load_commission_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: LoadCommissionResult,
+    ) -> HttpServerResponse {
+        commissions::show_response(mail)
+    }
+
+    #[http::reply]
+    fn on_list_commissions_result(
+        _state: &mut ApiCapabilityState,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: ListCommissionsResult,
+    ) -> HttpServerResponse {
+        commissions::list_response(mail)
+    }
+
+    #[handler::manual]
+    fn on_cancel_commission_result(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: CancelCommissionResult,
+    ) {
+        state.answer_commission_write(ctx, &commissions::cancel_response(mail));
     }
 
     /// The store's reply to the boot configuration read (#4616). Fills the
@@ -867,6 +996,12 @@ impl NativeActor for BloomeryApiCapability {
             inbound.reply(&error_response(504, "control-plane request settled without a reply"));
         } else if let Some(VerifyPending { inbound, .. }) = state.verifying.remove(&mail.root.correlation_id) {
             inbound.reply(&error_response(504, "signature verification settled without a reply"));
+        } else if let Some(commissions::CommissionVerify { inbound, .. }) =
+            state.commission_verifying.remove(&mail.root.correlation_id)
+        {
+            inbound.reply(&error_response(504, "signature verification settled without a reply"));
+        } else if let Some(inbound) = state.commission_writing.remove(&mail.root.correlation_id) {
+            inbound.reply(&error_response(504, "commission store write settled without a reply"));
         } else if let Some(SealVerify { seal, .. }) = state.seal_verifications.remove(&mail.root.correlation_id) {
             // An above-auto member's verify chain settled without a reply — the
             // whole seal cannot complete, so fail it closed and tear down its

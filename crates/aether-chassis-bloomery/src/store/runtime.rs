@@ -9,6 +9,12 @@
 //! writer the WAL journal wants.
 
 use super::StoreCapability;
+use super::commission::{
+    CancelCommission, CancelCommissionResult, CommissionBackend, CommissionError, CreateCommission,
+    CreateCommissionResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
+    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, WriteScopeRevision,
+    WriteScopeRevisionResult,
+};
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, BloomDispatchLive, BloomDispatchRollup, ClaimSeal,
     ClaimSealResult, DrainOutbox, DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, ListBloomDispatches,
@@ -23,8 +29,8 @@ use aether_actor::runtime;
 // inward for its `StoreCapability` handlers (issue #3497).
 use aether_bloomery::{
     Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Event, JournalRecord, LoadConfigs, LoadConfigsResult,
-    MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal, ReplayJournalResult, WorkpieceId,
-    decode_recorded_decisions,
+    MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal, ReplayJournalResult,
+    ScopeRevision, Statement, WorkpieceId, decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
@@ -1826,13 +1832,13 @@ fn resolved_configs(store: &mut SqliteStore) -> rusqlite::Result<aether_bloomery
 /// Runtime state for [`StoreCapability`]: the one durable backend the
 /// dispatcher owns.
 pub struct StoreCapabilityState {
-    backend: Box<dyn StoreBackend>,
+    backend: SqliteStore,
 }
 
 impl StoreCapabilityState {
-    /// Build state over an explicit backend — the seam the handler tests drive.
+    /// Build state over an explicit store — the seam the handler tests drive.
     #[must_use]
-    pub fn new(backend: Box<dyn StoreBackend>) -> Self {
+    pub fn new(backend: SqliteStore) -> Self {
         Self { backend }
     }
 }
@@ -1847,7 +1853,7 @@ impl NativeActor for StoreCapability {
     fn init(config: super::StoreConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<StoreCapabilityState, BootError> {
         let store = SqliteStore::open(&config.path).map_err(|error| BootError::Other(Box::new(error)))?;
         tracing::info!(target: "aether_chassis_bloomery::store", path = %config.path, "store opened (WAL)");
-        Ok(StoreCapabilityState { backend: Box::new(store) })
+        Ok(StoreCapabilityState { backend: store })
     }
 
     #[handler::single]
@@ -2026,6 +2032,164 @@ impl NativeActor for StoreCapability {
         }
         LookupDispatchResult::NotFound
     }
+
+    #[handler::single]
+    fn on_create_commission(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: CreateCommission,
+    ) -> CreateCommissionResult {
+        let CreateCommission { id, intent } = mail;
+        let intent: Statement = match from_bytes(&intent) {
+            Ok(intent) => intent,
+            Err(error) => return CreateCommissionResult::Err { error: error.to_string() },
+        };
+        match state.backend.create(&WorkpieceId(id.clone()), &intent) {
+            Ok(digest) => CreateCommissionResult::Ok { id, digest: digest.as_bytes().to_vec() },
+            Err(CommissionError::DuplicateCommission(id)) => CreateCommissionResult::Duplicate { id },
+            Err(error) => CreateCommissionResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_write_scope_revision(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: WriteScopeRevision,
+    ) -> WriteScopeRevisionResult {
+        let WriteScopeRevision { canonical } = mail;
+        let revision = match ScopeRevision::from_canonical(&canonical) {
+            Ok(revision) => revision,
+            Err(error) => return write_revision_error(CommissionError::from(error)),
+        };
+        match state.backend.write_revision(&revision) {
+            Ok(digest) => WriteScopeRevisionResult::Ok { digest: digest.as_bytes().to_vec() },
+            Err(error) => write_revision_error(error),
+        }
+    }
+
+    #[handler::single]
+    fn on_record_commission_approval(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: RecordCommissionApproval,
+    ) -> RecordCommissionApprovalResult {
+        let statement: Statement = match from_bytes(&mail.statement) {
+            Ok(statement) => statement,
+            Err(error) => return RecordCommissionApprovalResult::Err { error: error.to_string() },
+        };
+        match state.backend.record_verified_approval(&WorkpieceId(mail.id.clone()), &statement) {
+            Ok(digest) => {
+                RecordCommissionApprovalResult::Ok { digest: digest.as_bytes().to_vec(), statement: mail.statement }
+            }
+            Err(CommissionError::MissingRevision) => RecordCommissionApprovalResult::MissingRevision,
+            Err(CommissionError::StaleRevision) => RecordCommissionApprovalResult::Stale,
+            Err(error @ (CommissionError::WrongSubject | CommissionError::WrongProvenance)) => {
+                RecordCommissionApprovalResult::Refused { error: error.to_string() }
+            }
+            Err(error) => RecordCommissionApprovalResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_load_commission(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: LoadCommission,
+    ) -> LoadCommissionResult {
+        match state.backend.load(&WorkpieceId(mail.id.clone())) {
+            Ok(None) => LoadCommissionResult::Missing { id: mail.id },
+            Ok(Some(view)) => {
+                let approvals = match view.head.current_revision {
+                    Some(digest) => match state.backend.load_approvals(digest) {
+                        Ok(approvals) => approvals,
+                        Err(error) => return LoadCommissionResult::Err { error: error.to_string() },
+                    },
+                    None => Vec::new(),
+                };
+                let approvals = match encode_statements(&approvals) {
+                    Ok(approvals) => approvals,
+                    Err(error) => return LoadCommissionResult::Err { error },
+                };
+                LoadCommissionResult::Ok {
+                    id: view.head.id.0,
+                    intent: view.head.intent.as_bytes().to_vec(),
+                    current_revision: view.head.current_revision.map(|digest| digest.as_bytes().to_vec()),
+                    current_ordinal: view.head.current_ordinal,
+                    status: view.head.status.as_str().to_owned(),
+                    current: view.current.map(|revision| revision.to_canonical()),
+                    approvals,
+                }
+            }
+            Err(error) => LoadCommissionResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_list_commissions(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: ListCommissions,
+    ) -> ListCommissionsResult {
+        let ListCommissions { status } = mail;
+        let status = match status.as_deref() {
+            None => None,
+            Some(raw) => match aether_bloomery::CommissionStatus::parse(raw) {
+                Some(status) => Some(status),
+                None => return ListCommissionsResult::Err { error: format!("unknown commission status `{raw}`") },
+            },
+        };
+        match state.backend.list(status) {
+            Ok(heads) => ListCommissionsResult::Ok {
+                commissions: heads
+                    .into_iter()
+                    .map(|head| ListedCommission {
+                        id: head.id.0,
+                        intent: head.intent.as_bytes().to_vec(),
+                        current_revision: head.current_revision.map(|digest| digest.as_bytes().to_vec()),
+                        current_ordinal: head.current_ordinal,
+                        status: head.status.as_str().to_owned(),
+                    })
+                    .collect(),
+            },
+            Err(error) => ListCommissionsResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_cancel_commission(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: CancelCommission,
+    ) -> CancelCommissionResult {
+        let statement: Statement = match from_bytes(&mail.statement) {
+            Ok(statement) => statement,
+            Err(error) => return CancelCommissionResult::Err { error: error.to_string() },
+        };
+        match state.backend.cancel(&WorkpieceId(mail.id.clone()), &statement) {
+            Ok(digest) => CancelCommissionResult::Ok { id: mail.id, digest: digest.as_bytes().to_vec() },
+            Err(CommissionError::MissingCommission(id)) => CancelCommissionResult::Missing { id },
+            Err(CommissionError::NotOpen) => CancelCommissionResult::NotOpen,
+            Err(CommissionError::WrongSubject) => CancelCommissionResult::WrongSubject,
+            Err(error) => CancelCommissionResult::Err { error: error.to_string() },
+        }
+    }
+}
+
+fn write_revision_error(error: CommissionError) -> WriteScopeRevisionResult {
+    match error {
+        CommissionError::MissingCommission(id) => WriteScopeRevisionResult::Missing { id },
+        CommissionError::StaleRevision => WriteScopeRevisionResult::Stale,
+        CommissionError::DuplicateRevision => WriteScopeRevisionResult::Duplicate,
+        CommissionError::OrdinalViolation { expected } => WriteScopeRevisionResult::Ordinal { expected },
+        CommissionError::UnsupportedSchema(schema) => WriteScopeRevisionResult::UnsupportedSchema { schema },
+        CommissionError::MalformedCanonical => WriteScopeRevisionResult::Malformed,
+        error => WriteScopeRevisionResult::Err { error: error.to_string() },
+    }
+}
+
+fn encode_statements(statements: &[Statement]) -> Result<Vec<Vec<u8>>, String> {
+    statements.iter().map(|statement| to_vec(statement).map_err(|error| error.to_string())).collect()
 }
 
 /// The nonce as given, then the `dispatch-` / `redispatch-` alternate if either

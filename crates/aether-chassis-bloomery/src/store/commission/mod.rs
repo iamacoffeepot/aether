@@ -17,6 +17,13 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use super::SqliteStore;
 
+mod kinds;
+pub use kinds::{
+    CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, ListCommissions,
+    ListCommissionsResult, ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval,
+    RecordCommissionApprovalResult, WriteScopeRevision, WriteScopeRevisionResult,
+};
+
 #[cfg(test)]
 mod tests;
 
@@ -123,6 +130,8 @@ pub enum CommissionError {
     WrongProvenance,
     /// A store-level failure, including a CHECK or FOREIGN KEY backstop.
     Store(String),
+    /// The commission is not open, so a cancel cannot land.
+    NotOpen,
 }
 
 impl fmt::Display for CommissionError {
@@ -145,6 +154,7 @@ impl fmt::Display for CommissionError {
             Self::WrongSubject => write!(f, "approval words are not the scope digest"),
             Self::WrongProvenance => write!(f, "approval provenance is neither signed nor auto"),
             Self::Store(message) => write!(f, "commission store: {message}"),
+            Self::NotOpen => write!(f, "commission is not open"),
         }
     }
 }
@@ -154,6 +164,15 @@ impl Error for CommissionError {}
 impl From<rusqlite::Error> for CommissionError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Store(error.to_string())
+    }
+}
+
+impl From<CommissionValueError> for CommissionError {
+    fn from(error: CommissionValueError) -> Self {
+        match error {
+            CommissionValueError::Malformed => Self::MalformedCanonical,
+            CommissionValueError::UnsupportedSchema(schema) => Self::UnsupportedSchema(schema),
+        }
     }
 }
 
@@ -227,6 +246,19 @@ pub trait CommissionBackend {
     /// Every commission matching `status`, or every commission when `None`,
     /// in workpiece-id order.
     fn list(&mut self, status: Option<CommissionStatus>) -> Result<Vec<CommissionHead>, CommissionError>;
+
+    /// Persist a statement whose signature the caller has already verified,
+    /// after confirming the referenced revision is current and belongs to `id`.
+    ///
+    /// # Errors
+    /// Missing or non-current revision, wrong words, or wrong provenance.
+    fn record_verified_approval(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError>;
+
+    /// Store a signed cancel and close the commission in one transaction.
+    ///
+    /// # Errors
+    /// Missing commission, not open, or words that are not the intent digest.
+    fn cancel(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError>;
 }
 
 impl CommissionBackend for SqliteStore {
@@ -256,6 +288,14 @@ impl CommissionBackend for SqliteStore {
 
     fn list(&mut self, status: Option<CommissionStatus>) -> Result<Vec<CommissionHead>, CommissionError> {
         list_commissions(&self.conn, status)
+    }
+
+    fn record_verified_approval(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError> {
+        persist_approval(&mut self.conn, Some(id), statement)
+    }
+
+    fn cancel(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError> {
+        cancel_commission(&mut self.conn, id, statement)
     }
 }
 
@@ -339,11 +379,20 @@ fn insert_approval(
     keys: &dyn KeyProvider,
 ) -> Result<Digest, CommissionError> {
     let scope = Digest::from_slice(&statement.words).ok_or(CommissionError::WrongSubject)?;
-    let (tier, signature) = classify_approval(statement)?;
+    let (tier, _) = classify_approval(statement)?;
     if tier == CommissionApprovalTier::Signed && !statement.verify_authority(keys, AuthorityDoor::Approve, scope) {
         return Err(CommissionError::Unverified);
     }
+    persist_approval(conn, None, statement)
+}
 
+fn persist_approval(
+    conn: &mut Connection,
+    expected: Option<&WorkpieceId>,
+    statement: &Statement,
+) -> Result<Digest, CommissionError> {
+    let scope = Digest::from_slice(&statement.words).ok_or(CommissionError::WrongSubject)?;
+    let (tier, signature) = classify_approval(statement)?;
     let statement_digest = digest_of(statement);
     let statement_bytes = encode_statement(statement);
     let txn = conn.transaction()?;
@@ -353,6 +402,9 @@ fn insert_approval(
     let Some(head) = load_head(&txn, &revision.workpiece.0)? else {
         return Err(CommissionError::MissingCommission(revision.workpiece.0));
     };
+    if expected.is_some_and(|id| id.0 != revision.workpiece.0) {
+        return Err(CommissionError::WrongSubject);
+    }
     if head.current_revision != Some(scope) {
         return Err(CommissionError::StaleRevision);
     }
@@ -375,6 +427,43 @@ fn insert_approval(
         ],
     )
     .map_err(map_write)?;
+    txn.commit()?;
+    Ok(statement_digest)
+}
+
+fn cancel_commission(
+    conn: &mut Connection,
+    id: &WorkpieceId,
+    statement: &Statement,
+) -> Result<Digest, CommissionError> {
+    let intent = Digest::from_slice(&statement.words).ok_or(CommissionError::WrongSubject)?;
+    let statement_digest = digest_of(statement);
+    let statement_bytes = encode_statement(statement);
+    let txn = conn.transaction()?;
+    let Some(head) = load_head(&txn, &id.0)? else {
+        return Err(CommissionError::MissingCommission(id.0.clone()));
+    };
+    if head.status != CommissionStatus::Open {
+        return Err(CommissionError::NotOpen);
+    }
+    if head.intent != intent {
+        return Err(CommissionError::WrongSubject);
+    }
+
+    txn.execute(
+        "INSERT INTO commission_statements (digest, commission, role, canonical) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![
+            statement_digest.as_bytes().as_slice(),
+            id.0,
+            CommissionStatementRole::Cancel.as_str(),
+            statement_bytes
+        ],
+    )
+    .map_err(map_write)?;
+    txn.execute(
+        "UPDATE commissions SET status = ?1 WHERE id = ?2",
+        rusqlite::params![CommissionStatus::Cancelled.as_str(), id.0],
+    )?;
     txn.commit()?;
     Ok(statement_digest)
 }
