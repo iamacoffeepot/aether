@@ -12,6 +12,7 @@ mod bloom;
 mod commission;
 mod composition;
 mod config;
+mod fields;
 mod finding;
 mod lane;
 mod model_override;
@@ -43,6 +44,7 @@ pub use config::{
     ConfigKind, ConfigRegistry, ConfigResolveError, ConfigScopes, ResolvedConfigs, Unproducible, config_address,
     decode_config,
 };
+pub use fields::{FieldKind, WorkpieceFact, WorkpieceFields};
 pub use finding::{
     CHECK_KEY, CRITICAL_KEY, ClassifiedFinding, ClassifiedFindings, FindingClass, JUDGMENT_TAG, MECHANICAL_TAG,
     classify_findings,
