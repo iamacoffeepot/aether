@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use aether_bloomery::testing::digest;
 use aether_bloomery::{
-    Adjudication, Admit, BloomId, Correspondence, Digest, Disposition, Event, Fact, IdempotencyKey, LandPayload,
-    SourceReplicaPayload, Topic,
+    Adjudication, Admit, BloomId, Correspondence, Decisions, Digest, Disposition, Event, Fact, IdempotencyKey,
+    LandPayload, Outcome, SourceReplicaPayload, StageId, Topic,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -18,6 +18,7 @@ use aether_bloomery_github::{
 };
 use aether_data::wire::{from_bytes, to_vec};
 
+use super::receipt::fixtures::seed_dispatch;
 use super::{drain_and_land, drain_and_land_emitting};
 use crate::bloomery::outbox::TopicOutbox;
 use crate::store::{AppendOutcome, JournalWrite, SqliteStore, StoreBackend};
@@ -290,11 +291,168 @@ fn an_open_proposal_does_not_close_member_issues() {
 }
 
 #[test]
-fn landing_does_not_close_human_source_issues() {
-    // After ADR-0199, GitHub issues Bloomery did not create stay human objects.
-    // Land marks the local commission landed and leaves close to the replica
-    // projector; treating `issue-11` as a close target would write a title
-    // Bloomery does not own.
+fn a_landed_bloom_closes_the_issue_its_member_names() {
+    // Tripwire: a day-branch land fires no GitHub closing keyword, so an
+    // uncalled close leaves every landed issue open forever.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    fake.seed_issue(4242, "the addressing member");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(
+        &mut store,
+        bloom,
+        "issue-4242",
+        Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."),
+    );
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+
+    assert_eq!(fake.issue_is_closed(4242), Some(true));
+    let comments = fake.comments_on(4242);
+    assert_eq!(comments.len(), 1, "the landed issue receives one landing comment");
+    assert!(comments[0].contains(&short_hex(&bloom.0)), "the comment names the bloom: {}", comments[0]);
+}
+
+#[test]
+fn the_landing_comment_carries_the_lane_message_and_the_stages_walked() {
+    // Tripwire: a comment of three hexes tells a reader nothing, and the words
+    // that would have told them are assembled and dropped one call earlier.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    fake.seed_issue(4242, "the addressing member");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(
+        &mut store,
+        bloom,
+        "issue-4242",
+        Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."),
+    );
+    seed_dispatch(&mut store, bloom, "issue-4242", StageId::Construct, 10);
+    seed_dispatch(&mut store, bloom, "issue-4242", StageId::Verify, 11);
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    let (admits, _) = drain_and_land(&mut store, &source).unwrap();
+    let landed_head = match from_bytes::<Event>(&admits[0].event).unwrap().fact {
+        Fact::Land { new_head, .. } => new_head,
+        other => panic!("expected Fact::Land, got {other:?}"),
+    };
+
+    let comments = fake.comments_on(4242);
+    assert_eq!(comments.len(), 1, "the landed issue receives one landing comment");
+    let comment = &comments[0];
+    assert!(
+        comment.contains("### feat(crate:aether-text): shelf-pack the glyph atlas"),
+        "the lane's subject is the heading: {comment}"
+    );
+    assert!(comment.contains("Glyphs arrive one at a time."), "the lane's prose is in the comment: {comment}");
+    assert!(comment.contains("Construct"), "the stages walked name Construct: {comment}");
+    assert!(comment.contains("Verify"), "the stages walked name Verify: {comment}");
+    assert!(comment.contains(&landed_head.to_hex()), "the swap names the landed head in full: {comment}");
+    assert!(!comment.contains("Closes #"), "closing keywords do not close in a comment: {comment}");
+}
+
+#[test]
+fn an_adjudicated_bloom_names_what_was_waived_in_its_landing_comment() {
+    // A landing that only its coordinator knows was overridden reads forever
+    // after as one that passed its gates — the reason waivers_section already
+    // gives for carrying it into the proposal.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    fake.seed_issue(4242, "the addressing member");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(&mut store, bloom, "issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nprose."));
+    journal_adjudication(&mut store, bloom, "the fixture nit is filed forward", Disposition::Deferred { issue: 4958 });
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+
+    let comments = fake.comments_on(4242);
+    assert_eq!(comments.len(), 1, "the landed issue receives one landing comment");
+    let comment = &comments[0];
+    assert!(comment.contains("the fixture nit is filed forward"), "the operator's reason is verbatim: {comment}");
+    assert!(comment.contains("### Adjudicated findings"), "the waiver has its own section: {comment}");
+}
+
+#[test]
+fn a_bloom_with_no_rollup_rows_renders_no_stages_heading() {
+    // The absent case is an absence, not an empty section.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    fake.seed_issue(4242, "the addressing member");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(
+        &mut store,
+        bloom,
+        "issue-4242",
+        Some("feat(crate:aether-text): shelf-pack the glyph atlas\n\nGlyphs arrive one at a time."),
+    );
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+
+    let comments = fake.comments_on(4242);
+    assert_eq!(comments.len(), 1, "the landed issue receives one landing comment");
+    assert!(!comments[0].contains("Stages walked"), "no rollup rows, no heading: {}", comments[0]);
+}
+
+#[test]
+fn a_second_drain_does_not_stack_a_second_landing_comment() {
+    // The Watched::Landed arm re-runs until the journal admits the land.
+    // A blind create would stack a copy per restart; the marker upsert must not.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    fake.seed_issue(4242, "the addressing member");
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(&mut store, bloom, "issue-4242", Some("feat(crate:aether-text): shelf-pack the glyph atlas"));
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+    drain_and_land(&mut store, &source).unwrap();
+
+    assert_eq!(fake.issue_is_closed(4242), Some(true));
+    assert_eq!(fake.comments_on(4242).len(), 1);
+}
+
+#[test]
+fn a_member_that_names_no_object_is_skipped() {
+    // A local-lane workpiece has no GitHub home and must not become a guessed
+    // number. The land still admits.
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake.clone(), true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    seed_member(&mut store, bloom, "reactor-core", Some("feat(crate:aether-text): shelf-pack the glyph atlas"));
+    enqueue_land(&mut store, bloom, base, new_head);
+    let before = fake.issue_count();
+
+    let (admits, _) = drain_and_land(&mut store, &source).unwrap();
+
+    assert_eq!(admits.len(), 1, "a local-lane workpiece does not block the land");
+    assert_eq!(fake.issue_count(), before, "no issue is fabricated for an unaddressable workpiece");
+}
+
+#[test]
+fn landing_closes_only_the_issue_the_member_names() {
+    // The named member is the close target. A non-member and a workpiece that
+    // names a number the repository does not hold must not be guessed at.
     let (fake, base) = seeded();
     let new_head = digest(90);
     fake.seed_git_object(&new_head);
@@ -309,11 +467,11 @@ fn landing_does_not_close_human_source_issues() {
     enqueue_land(&mut store, bloom, base, new_head);
 
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
-    assert_eq!(admits.len(), 1, "leaving human issues open does not block the land");
+    assert_eq!(admits.len(), 1, "an unreachable sibling does not block the land");
     assert_eq!(ack_through, None, "the journal is still the receipt oracle");
 
-    assert_eq!(fake.issue_is_closed(11), Some(false), "a human-authored member issue is not closed");
-    assert!(fake.comments_on(11).is_empty(), "a human-authored member issue is not commented by land");
+    assert_eq!(fake.issue_is_closed(11), Some(true), "the member's source issue closes with the land");
+    assert_eq!(fake.comments_on(11).len(), 1, "the member's source issue receives one landing comment");
     assert_eq!(fake.issue_is_closed(42), Some(false), "an issue that is not a member is left alone");
     assert_eq!(fake.issue_is_closed(9999), None, "a workpiece naming no object does not fabricate one");
 }
@@ -570,10 +728,14 @@ fn journal_adjudication(store: &mut SqliteStore, bloom: BloomId, reason: &str, d
         },
     };
     let bytes = to_vec(&event).unwrap();
+    // Valid empty decisions so a later metrics fold (the landing comment reads
+    // the rollup, which rebuilds when the cursor lags) does not refuse the
+    // comment over a fixture blob.
+    let decisions = to_vec(&Decisions { outcome: Outcome::Duplicate, effects: Vec::new() }).unwrap();
     let write = JournalWrite {
         idempotency_key: &event.idempotency_key.0,
         event: &bytes,
-        decisions: b"decided",
+        decisions: &decisions,
         decider: "test",
     };
     store.append_event(&write).unwrap();

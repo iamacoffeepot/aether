@@ -25,7 +25,7 @@ const ACCEPTED_TYPES: [&str; 7] = ["feat", "fix", "chore", "docs", "perf", "refa
 
 /// One member's contribution to the proposal: the message its lane wrote, and
 /// the object its workpiece addresses.
-struct Member {
+pub(super) struct Member {
     /// The commit message the member's resolving candidate was captured under,
     /// when its lane wrote one.
     message: Option<String>,
@@ -59,7 +59,7 @@ pub(super) fn assemble(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlit
 /// A row that does not decode is skipped rather than propagated. This is the
 /// proposal's prose, and the same rule the title fallbacks follow applies: a
 /// malformed row costs the body a sentence, never the bloom its landing.
-fn adjudications(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec<Adjudication>> {
+pub(super) fn adjudications(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec<Adjudication>> {
     Ok(store
         .list_events()?
         .iter()
@@ -146,7 +146,7 @@ fn finding_count(adjudication: &Adjudication) -> String {
 /// — the same one the aggregate review's findings decomposition attributes
 /// against — because the land outbox payload carries three digests and no
 /// membership.
-fn roster(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec<Member>> {
+pub(super) fn roster(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec<Member>> {
     store
         .list_dispatch_descriptions(bloom.0.as_bytes())?
         .into_iter()
@@ -166,17 +166,22 @@ fn roster(store: &mut dyn StoreBackend, bloom: &BloomId) -> rusqlite::Result<Vec
 /// several-member bloom is several changes, and picking one member's subject to
 /// stand for all of them would name the mainline commit after a fraction of what
 /// it carries.
-fn title_for(members: &[Member]) -> Option<String> {
+pub(super) fn title_for(members: &[Member]) -> Option<String> {
     let [member] = members else {
         return None;
     };
     member.message.as_deref().and_then(subject_of).filter(|subject| title_is_lint_valid(subject)).map(str::to_owned)
 }
 
-/// The proposal's body: what the lanes wrote, then whatever an operator waived
-/// to get here, then one closing line per member that addresses an object. The
-/// provenance footer is the source port's and is appended below this.
-fn body_for(members: &[Member], waived: &[Adjudication], requested: &[(String, SuppressionRequest)]) -> String {
+/// The proposal's prose sections: what the lanes wrote, then whatever an
+/// operator waived to get here, then the standing suppression requests. Closing
+/// lines are the caller's — a landing comment does not carry `Closes` keywords
+/// that do not close.
+pub(super) fn sections_for(
+    members: &[Member],
+    waived: &[Adjudication],
+    requested: &[(String, SuppressionRequest)],
+) -> Vec<String> {
     let mut sections: Vec<String> = match members {
         // One member: the title already carries its subject, so the body is the
         // message's prose and nothing else.
@@ -187,6 +192,14 @@ fn body_for(members: &[Member], waived: &[Adjudication], requested: &[(String, S
     };
     sections.extend(waivers_section(waived));
     sections.extend(requests_section(requested));
+    sections
+}
+
+/// The proposal's body: [`sections_for`] plus one closing line per member that
+/// addresses an object. The provenance footer is the source port's and is
+/// appended below this.
+fn body_for(members: &[Member], waived: &[Adjudication], requested: &[(String, SuppressionRequest)]) -> String {
+    let mut sections = sections_for(members, waived, requested);
     sections.extend(members.iter().filter_map(|member| member.issue).map(|issue| format!("Closes #{issue}")));
     sections.join("\n\n")
 }

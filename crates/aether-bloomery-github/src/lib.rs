@@ -15,7 +15,8 @@
 //! journal that [`aether_bloomery::view_of`] assembles) and mirrors it onto the
 //! objects the repository already holds: each member becomes one marker-keyed
 //! comment on the issue its workpiece addresses, and a landing receipt becomes
-//! one comment per member issue plus one on the landing pull request. Comments
+//! one comment on the landing pull request. The member's own landing comment is
+//! written by the land reactor at close time. Comments
 //! stay comments-only (ADR-0149, amended by [#4663]). Replica issues a
 //! commission has no GitHub home for are a second class of object (ADR-0149
 //! 2026-08-16 amendment, derived from ADR-0199): the projector creates those
