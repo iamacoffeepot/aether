@@ -36,6 +36,7 @@
 //! drain/ack through the store's `DrainOutbox`/`AckOutbox` mail (as the mirror
 //! reactor does) is a follow-up once the registry ops gain a mail surface.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -936,6 +937,187 @@ fn park_composition_refine_without_findings(record: &DispatchRecord, sequence: u
     true
 }
 
+/// Paths listed under `## Conflicting paths` in a fold-conflict overlay.
+///
+/// The integrate reactor writes that section (ADR-0189); the drain reads it
+/// back so overlapping Reconcile re-entries can share one fold at a time.
+fn fold_conflict_paths(overlay: &str) -> BTreeSet<String> {
+    let Some((_, rest)) = overlay.split_once("## Conflicting paths\n") else {
+        return BTreeSet::new();
+    };
+    rest.split("\n## ")
+        .next()
+        .unwrap_or(rest)
+        .lines()
+        .filter_map(|line| line.strip_prefix("- ").map(str::to_owned))
+        .collect()
+}
+
+/// Whether this Reconcile's fold-conflict paths intersect an outstanding
+/// Reconcile in the same bloom — the sibling already building against the fold
+/// this member would also claim.
+fn reconcile_overlaps_outstanding(
+    store: &mut dyn StoreBackend,
+    bloom: &[u8],
+    workpiece: &str,
+) -> rusqlite::Result<bool> {
+    let Some(overlay) = store.lookup_fold_conflict(bloom, workpiece)? else {
+        return Ok(false);
+    };
+    let paths = fold_conflict_paths(&overlay);
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    for live in store.list_bloom_dispatch_live(bloom)? {
+        if live.workpiece == workpiece {
+            continue;
+        }
+        let Ok(stage) = from_bytes::<StageId>(&live.stage) else {
+            continue;
+        };
+        if stage != StageId::Reconcile {
+            continue;
+        }
+        let Some(other) = store.lookup_fold_conflict(bloom, &live.workpiece)? else {
+            continue;
+        };
+        if fold_conflict_paths(&other).intersection(&paths).next().is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Hold this Reconcile when its fold-conflict paths intersect an outstanding
+/// sibling Reconcile in the same bloom. Held, not acked, so the overlay is
+/// composed later against the fold this member will actually build on.
+/// Disjoint path sets return false and dispatch in parallel as before.
+fn hold_overlapping_reconcile(
+    store: &mut dyn StoreBackend,
+    payload: &DispatchPayload,
+    sequence: u64,
+) -> rusqlite::Result<bool> {
+    if payload.stage != StageId::Reconcile {
+        return Ok(false);
+    }
+    if !reconcile_overlaps_outstanding(store, payload.bloom.as_bytes(), &payload.workpiece.0)? {
+        return Ok(false);
+    }
+    tracing::info!(
+        target: "aether_chassis_bloomery::executor",
+        sequence,
+        bloom = %short_hex(&payload.bloom),
+        workpiece = %payload.workpiece.0,
+        "reconcile overlaps an outstanding sibling; holding until that resolution folds",
+    );
+    Ok(true)
+}
+
+/// True when this outbox row already has an outstanding order — submitted on
+/// an earlier drain that could not ack past a held sibling. The nonce is the
+/// sequence, so the row is the proof this entry reached a worker; submitting
+/// again would start a second run for the same outbox row.
+fn dispatch_already_submitted(store: &mut dyn StoreBackend, sequence: u64) -> rusqlite::Result<bool> {
+    Ok(store.lookup_order(&dispatch_nonce(sequence).0)?.is_some())
+}
+
+/// Advance the contiguous ack prefix unless a held Reconcile earlier in this
+/// batch blocked it. Later successes past a hold stay unacked so the hold
+/// re-drains.
+fn ack_if_unblocked(held: bool, ack_through: &mut Option<u64>, sequence: u64) {
+    if !held {
+        *ack_through = Some(sequence);
+    }
+}
+
+/// Outcome of overlaying and submitting one decoded dispatch entry.
+enum DispatchSubmit {
+    Submitted(WorkHandle),
+    Parked,
+    Refused,
+    Transient,
+}
+
+/// Overlay the advisory, park a composition Refine that has no findings, and
+/// submit the order. The caller owns the ack-prefix / hold / stop policy.
+fn submit_dispatch_entry(
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+    payload: DispatchPayload,
+    sequence: u64,
+    now_unix_millis: u64,
+) -> rusqlite::Result<DispatchSubmit> {
+    // The record's axes come from the payload's explicit fields (ADR-0152):
+    // the true scope revision always, and the displayed digest — what the
+    // returning evidence must bind to — the candidate tree when the member
+    // has one, else the scope revision. `subject` (inputs[0]) agrees with
+    // the displayed digest by reducer construction.
+    let displayed = payload.candidate.unwrap_or(payload.scope_revision);
+    let mut record = DispatchRecord {
+        nonce: dispatch_nonce(sequence),
+        bloom: BloomId(payload.bloom),
+        workpiece: payload.workpiece,
+        scope_revision: payload.scope_revision,
+        profile: payload.profile,
+        candidate: displayed,
+        displayed_digest: displayed,
+        stage: payload.stage,
+        transformation: payload.transformation,
+        configs: payload.configs,
+    };
+
+    if let Err(error) = overlay_member_advisory(store, &mut record, sequence) {
+        if let StoreConfigError::Store(error) = error {
+            return Err(error);
+        }
+        // A sealed configuration that will not resolve never resolves on
+        // retry, so this parks like a permanent submit refusal: the entry
+        // leaves the outbox, the queue behind it unblocks, and the member
+        // stalls visibly rather than running under a configuration its
+        // receipt does not attest.
+        tracing::error!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            workpiece = %record.workpiece.0,
+            %error,
+            "sealed configuration did not resolve; parking the dispatch rather than running the default",
+        );
+        return Ok(DispatchSubmit::Parked);
+    }
+    if park_composition_refine_without_findings(&record, sequence) {
+        return Ok(DispatchSubmit::Parked);
+    }
+    match dispatch_and_record(executor, store, &record, now_unix_millis) {
+        Ok(handle) => Ok(DispatchSubmit::Submitted(handle)),
+        Err(error) if error.is_permanent() => {
+            // A permanent refusal never clears on retry, so parking (acking
+            // past it) is what "wedge the member" means here: the entry
+            // leaves the outbox, the queue behind it unblocks, and the error
+            // log is the visible reason (member context + HTTP fault).
+            tracing::error!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                bloom = ?record.bloom.0,
+                workpiece = %record.workpiece.0,
+                stage = ?record.stage,
+                nonce = %record.nonce.0,
+                %error,
+                "dispatch submit refused permanently; parking the entry instead of re-driving",
+            );
+            Ok(DispatchSubmit::Refused)
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                %error,
+                "dispatch submit/record failed; stopping the ack prefix to re-drive",
+            );
+            Ok(DispatchSubmit::Transient)
+        }
+    }
+}
+
 /// Drain the dispatch topic and submit each entry through the executor, recording
 /// its intake context. Returns the newly-tracked handles and the highest
 /// contiguously-submitted outbox sequence to ack (`None` when nothing submitted).
@@ -956,6 +1138,9 @@ fn drain_and_dispatch(
     // drain reached the end of the batch clean, or stopped on a decode/subject
     // fault or a permanent-refusal park (neither re-drives on a timer).
     let mut transient_failure = None;
+    // A Reconcile held for an overlapping sibling is left unacked, so later
+    // successes in this batch must not extend the prefix past it.
+    let mut held = false;
     for entry in entries {
         let Ok(payload) = from_bytes::<DispatchPayload>(&entry.payload) else {
             tracing::warn!(
@@ -965,6 +1150,10 @@ fn drain_and_dispatch(
             );
             break;
         };
+        if dispatch_already_submitted(store, entry.sequence)? {
+            ack_if_unblocked(held, &mut ack_through, entry.sequence);
+            continue;
+        }
         // A retired plan's queued work is retired with it. The dispatch outbox is
         // durable and drains on its own timer, so a bloom superseded between seal
         // and drain leaves orders behind — and running one spends a full model
@@ -984,7 +1173,7 @@ fn drain_and_dispatch(
                 workpiece = %payload.workpiece.0,
                 "dispatch belongs to a bloom that holds no active membership; retiring it undispatched",
             );
-            ack_through = Some(entry.sequence);
+            ack_if_unblocked(held, &mut ack_through, entry.sequence);
             continue;
         }
 
@@ -1000,78 +1189,21 @@ fn drain_and_dispatch(
             );
             break;
         }
-        // The record's axes come from the payload's explicit fields (ADR-0152):
-        // the true scope revision always, and the displayed digest — what the
-        // returning evidence must bind to — the candidate tree when the member
-        // has one, else the scope revision. `subject` (inputs[0]) agrees with
-        // the displayed digest by reducer construction.
-        let displayed = payload.candidate.unwrap_or(payload.scope_revision);
-        let mut record = DispatchRecord {
-            nonce: dispatch_nonce(entry.sequence),
-            bloom: BloomId(payload.bloom),
-            workpiece: payload.workpiece,
-            scope_revision: payload.scope_revision,
-            profile: payload.profile,
-            candidate: displayed,
-            displayed_digest: displayed,
-            stage: payload.stage,
-            transformation: payload.transformation,
-            configs: payload.configs,
-        };
-
-        if let Err(error) = overlay_member_advisory(store, &mut record, entry.sequence) {
-            if let StoreConfigError::Store(error) = error {
-                return Err(error);
-            }
-            // A sealed configuration that will not resolve never resolves on
-            // retry, so this parks like a permanent submit refusal: the entry
-            // leaves the outbox, the queue behind it unblocks, and the member
-            // stalls visibly rather than running under a configuration its
-            // receipt does not attest.
-            tracing::error!(
-                target: "aether_chassis_bloomery::executor",
-                sequence = entry.sequence,
-                workpiece = %record.workpiece.0,
-                %error,
-                "sealed configuration did not resolve; parking the dispatch rather than running the default",
-            );
-            ack_through = Some(entry.sequence);
+        if hold_overlapping_reconcile(store, &payload, entry.sequence)? {
+            held = true;
             continue;
         }
-        if park_composition_refine_without_findings(&record, entry.sequence) {
-            ack_through = Some(entry.sequence);
-            continue;
-        }
-        match dispatch_and_record(executor, store, &record, now_unix_millis) {
-            Ok(handle) => {
+        match submit_dispatch_entry(store, executor, payload, entry.sequence, now_unix_millis)? {
+            DispatchSubmit::Submitted(handle) => {
                 handles.push(handle);
-                ack_through = Some(entry.sequence);
+                ack_if_unblocked(held, &mut ack_through, entry.sequence);
             }
-            Err(error) if error.is_permanent() => {
-                // A permanent refusal never clears on retry, so parking (acking
-                // past it) is what "wedge the member" means here: the entry
-                // leaves the outbox, the queue behind it unblocks, and the error
-                // log is the visible reason (member context + HTTP fault).
-                tracing::error!(
-                    target: "aether_chassis_bloomery::executor",
-                    sequence = entry.sequence,
-                    bloom = ?record.bloom.0,
-                    workpiece = %record.workpiece.0,
-                    stage = ?record.stage,
-                    nonce = %record.nonce.0,
-                    %error,
-                    "dispatch submit refused permanently; parking the entry instead of re-driving",
-                );
-                ack_through = Some(entry.sequence);
+            DispatchSubmit::Parked => ack_if_unblocked(held, &mut ack_through, entry.sequence),
+            DispatchSubmit::Refused => {
+                ack_if_unblocked(held, &mut ack_through, entry.sequence);
                 break;
             }
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_chassis_bloomery::executor",
-                    sequence = entry.sequence,
-                    %error,
-                    "dispatch submit/record failed; stopping the ack prefix to re-drive",
-                );
+            DispatchSubmit::Transient => {
                 transient_failure = Some(entry.sequence);
                 break;
             }
