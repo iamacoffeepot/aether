@@ -11,9 +11,9 @@
 use super::StoreCapability;
 use super::commission::{
     CancelCommission, CancelCommissionResult, CommissionBackend, CommissionError, CreateCommission,
-    CreateCommissionResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
-    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, RecordCommissionProjection,
-    RecordCommissionProjectionResult, WriteScopeRevision, WriteScopeRevisionResult,
+    CreateCommissionResult, EnqueueScopeRun, EnqueueScopeRunResult, ListCommissions, ListCommissionsResult,
+    ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult,
+    RecordCommissionProjection, RecordCommissionProjectionResult, WriteScopeRevision, WriteScopeRevisionResult,
 };
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, BloomDispatchLive, BloomDispatchRollup, ClaimSeal,
@@ -28,14 +28,16 @@ use aether_actor::runtime;
 // package cycle (the actor lives there; host depends on it). Host imports them
 // inward for its `StoreCapability` handlers (issue #3497).
 use aether_bloomery::{
-    Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Digest, Event, JournalRecord, LoadConfigs,
-    LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
+    CommissionStatus, Commit, CommitResult, ConfigRecord, DECISIONS_SCHEMA, Decision, Digest, Event, JournalRecord,
+    LoadConfigs, LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, OutboxPayload, ReplayJournal,
     ReplayJournalResult, ScopeRevision, ScopeVerifyInput, Statement, SuppressionRequest, Topic, WorkpieceId,
     decode_recorded_decisions,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use std::iter::repeat_n;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::bloomery::{ScopeRunRefusal, open_scope_run};
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -784,7 +786,12 @@ impl SqliteStore {
 /// and nothing is backfilled — a revision authored by hand through the REST
 /// door was not produced by a scoping run, and inventing a run for it would put
 /// a lane's name on an operator's work.
-const SCHEMA_VERSION: i64 = 13;
+///
+/// `14` is the per-transition uniqueness on that ledger: `UNIQUE (commission,
+/// ordinal, kind)`. A v13 store created the table without it; this version
+/// installs the matching unique index so a second `enqueued` (or `verdict`)
+/// for one ordinal cannot land twice.
+const SCHEMA_VERSION: i64 = 14;
 
 /// Bring a store opened at [`MIGRATIONS`] up to [`SCHEMA_VERSION`], or refuse it.
 ///
@@ -900,6 +907,14 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     // creation; a revision authored by hand was not produced by a run.
     if !has_table(&migration, "scope_runs")? {
         migration.execute_batch(super::commission::SCOPE_RUNS_TABLE)?;
+    }
+
+    // Version 14: one transition per (commission, ordinal). New stores take
+    // this from the table's UNIQUE; a v13 file needs the index installed.
+    if has_table(&migration, "scope_runs")? {
+        migration.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS scope_runs_unique_transition ON scope_runs (commission, ordinal, kind);",
+        )?;
     }
 
     // Version 9 (ADR-0201): architecture decision records. Empty on
@@ -2747,7 +2762,7 @@ impl NativeActor for StoreCapability {
         let ListCommissions { status } = mail;
         let status = match status.as_deref() {
             None => None,
-            Some(raw) => match aether_bloomery::CommissionStatus::parse(raw) {
+            Some(raw) => match CommissionStatus::parse(raw) {
                 Some(status) => Some(status),
                 None => return ListCommissionsResult::Err { error: format!("unknown commission status `{raw}`") },
             },
@@ -2799,6 +2814,42 @@ impl NativeActor for StoreCapability {
             Err(CommissionError::MissingCommission(id)) => RecordCommissionProjectionResult::Missing { id },
             Err(error) => RecordCommissionProjectionResult::Err { error: error.to_string() },
         }
+    }
+
+    #[handler::single]
+    fn on_enqueue_scope_run(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: EnqueueScopeRun,
+    ) -> EnqueueScopeRunResult {
+        enqueue_scope_run_mail(&mut state.backend, mail)
+    }
+}
+
+fn enqueue_scope_run_mail(store: &mut SqliteStore, mail: EnqueueScopeRun) -> EnqueueScopeRunResult {
+    let Some(base) = Digest::from_slice(&mail.base) else {
+        return EnqueueScopeRunResult::Err { error: "base is not a 32-byte digest".to_owned() };
+    };
+    let id = WorkpieceId(mail.id.clone());
+    let view = match store.load(&id) {
+        Ok(None) => return EnqueueScopeRunResult::Missing { id: mail.id },
+        Ok(Some(view)) => view,
+        Err(error) => return EnqueueScopeRunResult::Err { error: error.to_string() },
+    };
+    if view.head.status != CommissionStatus::Open {
+        return EnqueueScopeRunResult::NotOpen;
+    }
+    match open_scope_run(store, &id, view.head.intent, base) {
+        Ok(opened) => EnqueueScopeRunResult::Ok {
+            id: mail.id,
+            ordinal: opened.ordinal,
+            sequence: opened.sequence,
+            subject: opened.subject.as_bytes().to_vec(),
+        },
+        Err(ScopeRunRefusal::AlreadyInFlight { ordinal }) => EnqueueScopeRunResult::AlreadyInFlight { ordinal },
+        Err(ScopeRunRefusal::AlreadyFrozen) => EnqueueScopeRunResult::AlreadyFrozen,
+        Err(ScopeRunRefusal::Exhausted { attempts }) => EnqueueScopeRunResult::Exhausted { attempts },
+        Err(ScopeRunRefusal::Encode(error) | ScopeRunRefusal::Store(error)) => EnqueueScopeRunResult::Err { error },
     }
 }
 

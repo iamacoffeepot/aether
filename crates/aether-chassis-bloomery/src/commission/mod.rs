@@ -60,6 +60,11 @@ enum Command {
         #[arg(long = "intent-file")]
         intent_file: PathBuf,
     },
+    /// Open a pre-bloom scoping run on the named commission.
+    ScopeRun {
+        /// Workpiece id whose commission is scoped.
+        id: String,
+    },
     /// Parse a managed-heading scope file and write the canonical revision.
     Scope {
         /// Workpiece id whose commission receives the revision.
@@ -142,6 +147,7 @@ fn dispatch(cli: CommissionCli) -> Result<String> {
     let api = ControlApi { port: cli.http_port, token: cli.token };
     match cli.command {
         Command::Create { id, intent_file } => create(&api, &id, &intent_file),
+        Command::ScopeRun { id } => open_scope_run(&api, &id),
         Command::Scope { id, file, approval_policy } => write_scope(&api, &id, &file, &approval_policy),
         Command::Approve { id, scope, envelope } => approve(&api, &id, &scope, &envelope),
         Command::Show { id, json } => show(&api, &id, json),
@@ -187,6 +193,32 @@ struct ListView {
 struct CancelledView {
     id: String,
     status: String,
+}
+
+#[derive(Deserialize)]
+struct ViewMainline {
+    mainline: String,
+}
+
+#[derive(Serialize)]
+struct ScopeRunBody {
+    base: Digest,
+}
+
+#[derive(Deserialize)]
+struct ScopeRunOpened {
+    id: String,
+    ordinal: u64,
+    sequence: u64,
+    subject: String,
+}
+
+fn open_scope_run(api: &ControlApi, id: &str) -> Result<String> {
+    let view: ViewMainline = api.get_json("/view")?;
+    let base = digest_from_hex(&view.mainline)?;
+    let opened: ScopeRunOpened =
+        api.send_json("POST", &format!("/commissions/{id}/scope-runs"), &ScopeRunBody { base })?;
+    Ok(format!("{} ordinal {} sequence {} subject {}\n", opened.id, opened.ordinal, opened.sequence, opened.subject))
 }
 
 fn create(api: &ControlApi, id: &str, intent_file: &Path) -> Result<String> {
@@ -329,6 +361,16 @@ mod tests {
                 .unwrap_or_else(|error| panic!("list must parse: {error}"));
         assert_eq!(cli.http_port, 8910);
         assert_eq!(cli.token, "secret");
+    }
+
+    #[test]
+    fn scope_run_is_a_verb_on_the_sibling_binary() {
+        let cli = CommissionCli::try_parse_from(["bloomery-commission", "scope-run", "issue-1"])
+            .unwrap_or_else(|error| panic!("scope-run must parse: {error}"));
+        match cli.command {
+            Command::ScopeRun { id } => assert_eq!(id, "issue-1"),
+            other => panic!("expected scope-run, got {other:?}"),
+        }
     }
 
     #[test]

@@ -694,6 +694,29 @@ pub struct CommissionCancelledView {
     pub status: String,
 }
 
+/// `POST /commissions/{id}/scope-runs` body: the observed mainline the run
+/// reads code at. The coordinator does not invent a tree; this is
+/// `Snapshot.mainline` as the CLI (or a caller that has just read `GET /view`)
+/// observed it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeRunRequest {
+    /// The observed mainline head.
+    pub base: Digest,
+}
+
+/// `POST /commissions/{id}/scope-runs` reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeRunOpenedView {
+    /// The workpiece this commission is.
+    pub id: WorkpieceId,
+    /// The attempt ordinal opened, from `1`.
+    pub ordinal: u64,
+    /// The outbox sequence the drain will mint a nonce from.
+    pub sequence: u64,
+    /// The run's content-addressed subject.
+    pub subject: Digest,
+}
+
 /// One journald entry as the coordinator log route renders it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoordinatorLogEntry {

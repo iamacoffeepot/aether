@@ -18,14 +18,15 @@ use super::state::{ApiCapabilityState, Routed};
 use crate::api::dto::{
     CancelCommissionRequest, CommissionApprovalView, CommissionCancelledView, CommissionCreatedView,
     CommissionHeadView, CommissionShowView, CommissionsView, CreateCommissionRequest, RevisionProjection,
-    ScopeRevisionWrittenView,
+    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest,
 };
 use crate::bloomery::{StatementRejected, precheck_statement, verified_statement_approval};
 use crate::signing::{SigningCapability, Verify, VerifyResult, authority_bytes};
 use crate::store::{
-    CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, ListCommissions,
-    ListCommissionsResult, ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval,
-    RecordCommissionApprovalResult, StoreCapability, WriteScopeRevision, WriteScopeRevisionResult,
+    CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, EnqueueScopeRun,
+    EnqueueScopeRunResult, ListCommissions, ListCommissionsResult, ListedCommission, LoadCommission,
+    LoadCommissionResult, RecordCommissionApproval, RecordCommissionApprovalResult, StoreCapability,
+    WriteScopeRevision, WriteScopeRevisionResult,
 };
 
 #[cfg(test)]
@@ -108,6 +109,18 @@ impl ApiCapabilityState {
             Err(error) => return Routed::Reply(error_response(500, &format!("intent encode failed: {error}"))),
         };
         Routed::CreateCommission(CreateCommission { id: body.id.0, intent })
+    }
+
+    /// `POST /commissions/{id}/scope-runs` — open a pre-bloom scoping run.
+    pub(super) fn enqueue_scope_run(&self, request: &HttpServerRequest, id: &str) -> Routed {
+        if let Err(response) = authorize(request, &self.control_token) {
+            return Routed::Reply(response);
+        }
+        let body: ScopeRunRequest = match hex::from_slice(&request.body) {
+            Ok(body) => body,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid scope-run body: {error}"))),
+        };
+        Routed::EnqueueScopeRun(EnqueueScopeRun { id: id.to_owned(), base: body.base.as_bytes().to_vec() })
     }
 
     /// `POST /commissions/{id}/revisions` — write a scope revision.
@@ -467,6 +480,26 @@ fn head_view(listed: ListedCommission) -> Result<CommissionHeadView, HttpServerR
         current_ordinal: listed.current_ordinal,
         status: listed.status,
     })
+}
+
+/// Render [`EnqueueScopeRunResult`].
+pub(super) fn scope_run_response(result: EnqueueScopeRunResult) -> HttpServerResponse {
+    match result {
+        EnqueueScopeRunResult::Ok { id, ordinal, sequence, subject } => match digest_of_bytes(&subject) {
+            Ok(subject) => json(201, &ScopeRunOpenedView { id: WorkpieceId(id), ordinal, sequence, subject }),
+            Err(response) => response,
+        },
+        EnqueueScopeRunResult::Missing { id } => error_response(404, &format!("no commission named {id}")),
+        EnqueueScopeRunResult::NotOpen => error_response(409, "commission is not open"),
+        EnqueueScopeRunResult::AlreadyInFlight { ordinal } => {
+            error_response(409, &format!("scoping run {ordinal} is already in flight"))
+        }
+        EnqueueScopeRunResult::AlreadyFrozen => error_response(409, "commission already has a frozen scope revision"),
+        EnqueueScopeRunResult::Exhausted { attempts } => {
+            error_response(409, &format!("scoping run retry budget spent ({attempts} attempts)"))
+        }
+        EnqueueScopeRunResult::Err { error } => error_response(500, &format!("scope-run enqueue failed: {error}")),
+    }
 }
 
 /// Render [`CancelCommissionResult`].

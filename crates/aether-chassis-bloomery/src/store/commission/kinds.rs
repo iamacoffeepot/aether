@@ -306,3 +306,57 @@ pub enum CancelCommissionResult {
         error: String,
     },
 }
+
+/// Open a pre-bloom scoping run (ADR-0208, #5304): write its `enqueued` row
+/// and its `Topic::ScopeDispatch` outbox row in one transaction.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.enqueue_scope_run")]
+pub struct EnqueueScopeRun {
+    /// The workpiece this commission is.
+    pub id: String,
+    /// The observed mainline the run reads code at — `Snapshot.mainline`.
+    #[serde(with = "aether_data::bytes")]
+    pub base: Vec<u8>,
+}
+
+/// Reply to [`EnqueueScopeRun`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.store.enqueue_scope_run_result")]
+pub enum EnqueueScopeRunResult {
+    /// The run was journaled and its outbox row landed at `sequence`.
+    Ok {
+        /// The workpiece this commission is.
+        id: String,
+        /// The attempt ordinal opened, from `1`.
+        ordinal: u64,
+        /// The outbox sequence the drain will mint a nonce from.
+        sequence: u64,
+        /// The run's content-addressed subject.
+        #[serde(with = "aether_data::bytes")]
+        subject: Vec<u8>,
+    },
+    /// No commission exists under this workpiece id.
+    Missing {
+        /// The workpiece id that was missing.
+        id: String,
+    },
+    /// The commission is not open.
+    NotOpen,
+    /// A run on this commission is already dispatched and unanswered.
+    AlreadyInFlight {
+        /// The ordinal already in flight.
+        ordinal: u64,
+    },
+    /// This commission's scoping already froze a revision.
+    AlreadyFrozen,
+    /// The `Scope` binding's retry budget is spent.
+    Exhausted {
+        /// How many attempts were spent.
+        attempts: u64,
+    },
+    /// The write failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}

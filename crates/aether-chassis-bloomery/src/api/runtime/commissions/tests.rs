@@ -5,11 +5,11 @@ use aether_http::{HttpHeader, HttpServerRequest, HttpServerResponse};
 
 use super::{
     approval_response, authorize, cancel_request, cancel_response, create_response, list_response, query_status,
-    revision_response, show_response,
+    revision_response, scope_run_response, show_response,
 };
 use crate::api::dto::CancelCommissionRequest;
 use crate::store::{
-    CancelCommissionResult, CreateCommissionResult, ListCommissionsResult, LoadCommissionResult,
+    CancelCommissionResult, CreateCommissionResult, EnqueueScopeRunResult, ListCommissionsResult, LoadCommissionResult,
     RecordCommissionApprovalResult, WriteScopeRevisionResult,
 };
 
@@ -95,6 +95,16 @@ fn every_route_result_has_a_success_status() {
     );
     assert_eq!(revision_response(WriteScopeRevisionResult::Ok { digest: digest.clone() }).status, 201);
     assert_eq!(
+        scope_run_response(EnqueueScopeRunResult::Ok {
+            id: "wp-1".to_owned(),
+            ordinal: 1,
+            sequence: 1,
+            subject: digest.clone(),
+        })
+        .status,
+        201
+    );
+    assert_eq!(
         show_response(LoadCommissionResult::Ok {
             id: "wp-1".to_owned(),
             intent: digest.clone(),
@@ -111,6 +121,8 @@ fn every_route_result_has_a_success_status() {
     assert_eq!(list_response(ListCommissionsResult::Ok { commissions: Vec::new() }).status, 200);
     assert_eq!(cancel_response(CancelCommissionResult::Ok { id: "wp-1".to_owned(), digest }).status, 200);
     assert_eq!(create_response(CreateCommissionResult::Duplicate { id: "wp-1".to_owned() }).status, 409);
+    assert_eq!(scope_run_response(EnqueueScopeRunResult::Missing { id: "wp-1".to_owned() }).status, 404);
+    assert_eq!(scope_run_response(EnqueueScopeRunResult::AlreadyInFlight { ordinal: 1 }).status, 409);
     assert_eq!(show_response(LoadCommissionResult::Missing { id: "wp-1".to_owned() }).status, 404);
 }
 

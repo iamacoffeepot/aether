@@ -149,6 +149,19 @@ pub fn scope_run_state(rows: &[ScopeRunRow]) -> ScopeRunState {
     }
 }
 
+/// The outbox sequence, attempt ordinal, and subject a successful
+/// [`open_scope_run`] produced — enough for the REST door to name the run
+/// without reading the ledger back.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct OpenedScopeRun {
+    /// The outbox sequence the drain mints its `dispatch_nonce` from.
+    pub sequence: u64,
+    /// The attempt ordinal opened, from `1`.
+    pub ordinal: u64,
+    /// The run's content-addressed subject.
+    pub subject: Digest,
+}
+
 /// Why a scoping run could not be opened.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ScopeRunRefusal {
@@ -177,9 +190,9 @@ pub enum ScopeRunRefusal {
 /// termination rule says the run is over, build the payload, and write the
 /// `enqueued` row and its outbox row in one transaction.
 ///
-/// Returns the outbox sequence the entry landed at — the sequence the drain
-/// mints its `dispatch_nonce` from, so a caller can name the dispatch before it
-/// happens.
+/// Returns the outbox sequence, ordinal, and subject the run landed at — the
+/// sequence the drain mints its `dispatch_nonce` from, so a caller can name
+/// the dispatch before it happens.
 ///
 /// # Errors
 /// A refusal from the termination rule, an encode failure, or a store fault.
@@ -188,7 +201,7 @@ pub fn open_scope_run(
     commission: &WorkpieceId,
     intent: Digest,
     base: Digest,
-) -> Result<u64, ScopeRunRefusal> {
+) -> Result<OpenedScopeRun, ScopeRunRefusal> {
     let rows = store.list_scope_runs(&commission.0).map_err(|error| ScopeRunRefusal::Store(error.to_string()))?;
     match scope_run_state(&rows) {
         ScopeRunState::InFlight { ordinal } => return Err(ScopeRunRefusal::AlreadyInFlight { ordinal }),
@@ -202,7 +215,7 @@ pub fn open_scope_run(
     let payload = scope_dispatch_payload(commission.clone(), ordinal, intent, base);
     let encoded = to_vec(&payload).map_err(|error| ScopeRunRefusal::Encode(error.to_string()))?;
 
-    store
+    let sequence = store
         .enqueue_scope_run(&ScopeRunOpen {
             commission: &commission.0,
             ordinal,
@@ -211,7 +224,8 @@ pub fn open_scope_run(
             subject: payload.subject.as_bytes().as_slice(),
             payload: &encoded,
         })
-        .map_err(|error| ScopeRunRefusal::Store(error.to_string()))
+        .map_err(|error| ScopeRunRefusal::Store(error.to_string()))?;
+    Ok(OpenedScopeRun { sequence, ordinal, subject: payload.subject })
 }
 
 #[cfg(test)]

@@ -17,9 +17,9 @@ use aether_bloomery::testing::digest;
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, BloomId, CandidateRef, Conclusion, ConfigKind, ConfigRegistry,
     Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Harness, ModelOverride, Nonce,
-    ReasoningEffort, RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog, StageId, StageOverride,
-    TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId,
-    pin_workpiece_description,
+    Observation, Provenance, ReasoningEffort, RedispatchPayload, ReviewPass, SharedCorrespondence, StageCatalog,
+    StageId, StageOverride, Statement, TimeoutRecord, Topic, Transformation, VerifyFailure, VerifyFailureSet,
+    WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -35,9 +35,9 @@ use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims,
     Stores, TickClock, TrackedHandle, backoff_delay, candidate_push_at, default_candidate_push, dispatch_origin,
-    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, fold_drain_backoff, is_disabled_mount,
-    is_silent, is_stale, next_backoff, observe_heartbeat, pull_and_admit, push_admitted_candidates, seed_dispatches,
-    seed_tracked, select_stale_handles, silence_from, timeout_verdict,
+    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_dispatch_scope, drain_and_redispatch,
+    fold_drain_backoff, is_disabled_mount, is_silent, is_stale, next_backoff, observe_heartbeat, pull_and_admit,
+    push_admitted_candidates, seed_dispatches, seed_tracked, select_stale_handles, silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -45,13 +45,14 @@ use crate::bloomery::intake::{
     Admission, AdmissionKey, AdmitDecision, DispatchError, DispatchRecord, UploadedEvidence, admit_uploaded,
     attempt_artifact_name, dispatch_nonce, record_dispatch,
 };
+use crate::bloomery::open_scope_run;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{CoordinatorConfig, GithubConnectionConfig};
 use crate::bloomery::{
     ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle, UnconfiguredActionsBackend,
 };
 use crate::session::SessionConfig;
-use crate::store::{JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
+use crate::store::{CommissionBackend, JournalWrite, OutstandingOrder, SqliteStore, StoreBackend};
 use aether_bloomery_github::{LandingSource, candidate_ref_name, member_checkpoint_ref_name};
 
 // A capturing executor backend: it records every submitted `WorkOrder` so a test
@@ -502,6 +503,75 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
     assert!(store.drain_topic(Topic::Dispatch).unwrap().is_empty(), "the acked dispatch does not re-drain");
 }
 
+fn seed_commission(store: &mut SqliteStore, id: &str) -> (WorkpieceId, Digest) {
+    let commission = WorkpieceId(id.to_owned());
+    let intent = Statement {
+        words: format!("scope {id}").into_bytes(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+        parents: Vec::new(),
+    };
+    let digest = store.create(&commission, &intent).expect("create commission");
+    (commission, digest)
+}
+
+#[test]
+fn a_scope_run_drains_with_no_bloom_in_the_store() {
+    // No bloom row at all. If the drain consulted holds_active_membership the
+    // way the member drain does, bloom_still_live would retire the entry
+    // undispatched — a scoping run has no membership by construction.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let (commission, intent) = seed_commission(&mut store, "wp-scope-drain");
+    let opened = open_scope_run(&mut store, &commission, intent, digest(2)).expect("open");
+
+    let (handles, ack_through, transient) = drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    assert_eq!(handles.len(), 1, "the scoping run submits with no bloom in the store");
+    assert_eq!(ack_through, Some(opened.sequence));
+    assert_eq!(transient, None);
+    assert_eq!(backend.orders().len(), 1, "the work order reached the executor");
+    let nonce = dispatch_nonce(opened.sequence);
+    let order = store.lookup_order(&nonce.0).unwrap().expect("the intake registry recorded the order");
+    assert_eq!(order.workpiece, commission.0);
+    assert_eq!(
+        store.lookup_scope_run(&nonce.0).unwrap(),
+        Some((commission.0.clone(), opened.ordinal)),
+        "the dispatched row names the run from its outbox sequence alone",
+    );
+}
+
+#[test]
+fn the_member_topic_is_undisturbed() {
+    // Tripwire: the shared-topic shortcut is the one a later change takes
+    // under time pressure, and the fail-stop decode at drain_and_dispatch
+    // (a foreign payload `break`s without advancing the ack prefix) makes
+    // it a permanent board wedge rather than a degradation.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let (commission, intent) = seed_commission(&mut store, "wp-scope-peer");
+    let opened = open_scope_run(&mut store, &commission, intent, digest(2)).expect("open");
+    let bloom = BloomId(digest(1));
+    let (member_sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
+
+    let (member_handles, member_ack, member_transient) =
+        drain_and_dispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    let (scope_handles, scope_ack, scope_transient) =
+        drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    assert_eq!(member_handles.len(), 1, "the member dispatch still submits");
+    assert_eq!(member_ack, Some(member_sequence));
+    assert_eq!(member_transient, None);
+    assert_eq!(scope_handles.len(), 1, "the scoping run submits on its own topic");
+    assert_eq!(scope_ack, Some(opened.sequence));
+    assert_eq!(scope_transient, None);
+    store.ack_topic(Topic::Dispatch, member_sequence).unwrap();
+    store.ack_topic(Topic::ScopeDispatch, opened.sequence).unwrap();
+    assert!(store.drain_topic(Topic::Dispatch).unwrap().is_empty(), "the member topic acks normally");
+    assert!(store.drain_topic(Topic::ScopeDispatch).unwrap().is_empty(), "the scope topic acks on its own prefix");
+}
+
 // Tripwire: the dispatched construct order runs under the stage catalog's
 // calibrated agent profile. The model used to come from a config knob whose empty
 // default omitted `--model` altogether, so the lane silently ran at the operator's
@@ -944,6 +1014,7 @@ fn a_timeout_is_an_executor_fault_on_every_dispatched_stage() {
         StageId::Reconcile,
         StageId::AggregateVerify,
         StageId::AggregateReview,
+        StageId::Scope,
     ] {
         assert_eq!(
             timeout_verdict(stage),
@@ -952,6 +1023,40 @@ fn a_timeout_is_an_executor_fault_on_every_dispatched_stage() {
         );
     }
     assert_eq!(timeout_verdict(StageId::Integrate), None, "a stage no executor runs cannot expire");
+}
+
+#[test]
+fn an_overdue_scope_order_terminates_once() {
+    // Pre-fix: timeout_verdict(StageId::Scope) was None, so terminate_live_order
+    // cancelled the child and bailed to warn_deferred_timeout, leaving the
+    // registry row for every later sweep. After the Scope arm the order
+    // terminates once and leaves a recorded fault on the run ledger.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let (commission, intent) = seed_commission(&mut store, "wp-scope-overdue");
+    let opened = open_scope_run(&mut store, &commission, intent, digest(2)).expect("open");
+    let (handles, ack_through, _transient) = drain_and_dispatch_scope(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    store.ack_topic(Topic::ScopeDispatch, ack_through.unwrap()).unwrap();
+    let mut tracked = track(handles);
+    let nonce = dispatch_nonce(opened.sequence);
+
+    let admits = tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE);
+
+    assert_eq!(backend.cancelled(), vec![nonce.0.clone()], "the hung scoping run is reclaimed");
+    assert!(admits.is_empty(), "a scoping timeout admits no reducer event");
+    assert!(store.lookup_order(&nonce.0).unwrap().is_none(), "the overdue order is consumed");
+    let rows = store.list_scope_runs(&commission.0).expect("list");
+    let verdict = rows.iter().find(|row| row.kind == "verdict" && row.ordinal == opened.ordinal);
+    assert_eq!(
+        verdict.and_then(|row| row.verdict.as_deref()),
+        Some("ExecutorFault"),
+        "the fault is recorded on the run ledger",
+    );
+    assert!(
+        tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE + 60_000).is_empty(),
+        "the consumed order cannot expire a second time",
+    );
 }
 
 fn tick(store: &mut SqliteStore, shell: &ExecutorShell, tracked: &mut Vec<TrackedHandle>, now: u64) -> Vec<Admit> {
