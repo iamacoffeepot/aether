@@ -207,6 +207,39 @@ pub enum ListCommissionsResult {
     },
 }
 
+/// Persist the GitHub issue number a commission projector created.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.record_commission_projection")]
+pub struct RecordCommissionProjection {
+    /// The workpiece this commission is.
+    pub id: String,
+    /// The issue number recorded from this projector's own create.
+    pub issue_number: u64,
+}
+
+/// Reply to [`RecordCommissionProjection`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.store.record_commission_projection_result")]
+pub enum RecordCommissionProjectionResult {
+    /// The number is now recorded.
+    Ok {
+        /// The workpiece this commission is.
+        id: String,
+        /// The recorded issue number.
+        issue_number: u64,
+    },
+    /// No commission exists under this workpiece id.
+    Missing {
+        /// The workpiece id that was missing.
+        id: String,
+    },
+    /// The write failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
 /// Store a signed cancel and close the commission.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.store.cancel_commission")]

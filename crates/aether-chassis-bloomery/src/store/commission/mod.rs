@@ -9,8 +9,9 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    AuthorityDoor, CommissionApprovalTier, CommissionStatementRole, CommissionStatus, CommissionValueError, Digest,
-    KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, Statement, WorkpieceId, digest_of,
+    AuthorityDoor, CommissionApprovalTier, CommissionProjection, CommissionStatementRole, CommissionStatus,
+    CommissionValueError, Digest, KeyProvider, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
+    Statement, Topic, WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use rusqlite::{Connection, OptionalExtension, Transaction};
@@ -21,7 +22,8 @@ mod kinds;
 pub use kinds::{
     CancelCommission, CancelCommissionResult, CreateCommission, CreateCommissionResult, ListCommissions,
     ListCommissionsResult, ListedCommission, LoadCommission, LoadCommissionResult, RecordCommissionApproval,
-    RecordCommissionApprovalResult, WriteScopeRevision, WriteScopeRevisionResult,
+    RecordCommissionApprovalResult, RecordCommissionProjection, RecordCommissionProjectionResult, WriteScopeRevision,
+    WriteScopeRevisionResult,
 };
 
 #[cfg(test)]
@@ -94,6 +96,15 @@ BEFORE DELETE ON commission_statements
 BEGIN
     SELECT RAISE(ABORT, 'commission_statements rows are immutable');
 END;
+";
+
+/// Schema fragment for the persisted replica-issue number (ADR-0199). The
+/// projector writes title and body only to a number stored here.
+pub const COMMISSION_PROJECTION_TABLE: &str = "\
+CREATE TABLE IF NOT EXISTS commission_projections (
+    commission   TEXT PRIMARY KEY REFERENCES commissions(id),
+    issue_number INTEGER NOT NULL CHECK (issue_number > 0)
+);
 ";
 
 /// Why a commission repository operation was refused.
@@ -259,6 +270,23 @@ pub trait CommissionBackend {
     /// # Errors
     /// Missing commission, not open, or words that are not the intent digest.
     fn cancel(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError>;
+
+    /// Mark an open commission landed and enqueue its replica projection.
+    /// Missing or already-closed commissions are a no-op so a bloom that
+    /// mixed local and GitHub-era workpieces can land without failing closed.
+    ///
+    /// # Errors
+    /// A store-level failure writing the status or the outbox row.
+    fn mark_landed(&mut self, id: &WorkpieceId) -> Result<(), CommissionError>;
+
+    /// Persist the issue number a commission projector created.
+    ///
+    /// # Errors
+    /// [`CommissionError::MissingCommission`] when the id is unknown.
+    fn record_projection(&mut self, id: &WorkpieceId, issue_number: u64) -> Result<(), CommissionError>;
+
+    /// The issue number recorded from this commission's own create, if any.
+    fn load_projection(&mut self, id: &WorkpieceId) -> Result<Option<u64>, CommissionError>;
 }
 
 impl CommissionBackend for SqliteStore {
@@ -297,6 +325,18 @@ impl CommissionBackend for SqliteStore {
     fn cancel(&mut self, id: &WorkpieceId, statement: &Statement) -> Result<Digest, CommissionError> {
         cancel_commission(&mut self.conn, id, statement)
     }
+
+    fn mark_landed(&mut self, id: &WorkpieceId) -> Result<(), CommissionError> {
+        mark_landed(&mut self.conn, id)
+    }
+
+    fn record_projection(&mut self, id: &WorkpieceId, issue_number: u64) -> Result<(), CommissionError> {
+        record_projection(&mut self.conn, id, issue_number)
+    }
+
+    fn load_projection(&mut self, id: &WorkpieceId) -> Result<Option<u64>, CommissionError> {
+        load_projection(&self.conn, id)
+    }
 }
 
 fn create_commission(conn: &mut Connection, id: &WorkpieceId, intent: &Statement) -> Result<Digest, CommissionError> {
@@ -321,6 +361,7 @@ fn create_commission(conn: &mut Connection, id: &WorkpieceId, intent: &Statement
             intent_bytes
         ],
     )?;
+    enqueue_projection(&txn, &id.0)?;
     txn.commit()?;
     Ok(intent_digest)
 }
@@ -369,6 +410,7 @@ fn write_revision(conn: &mut Connection, revision: &ScopeRevision) -> Result<Dig
         "UPDATE commissions SET current_revision = ?1, current_ordinal = ?2 WHERE id = ?3",
         rusqlite::params![digest.as_bytes().as_slice(), ordinal, decoded.workpiece.0],
     )?;
+    enqueue_projection(&txn, &decoded.workpiece.0)?;
     txn.commit()?;
     Ok(digest)
 }
@@ -427,6 +469,7 @@ fn persist_approval(
         ],
     )
     .map_err(map_write)?;
+    enqueue_projection(&txn, &revision.workpiece.0)?;
     txn.commit()?;
     Ok(statement_digest)
 }
@@ -464,8 +507,97 @@ fn cancel_commission(
         "UPDATE commissions SET status = ?1 WHERE id = ?2",
         rusqlite::params![CommissionStatus::Cancelled.as_str(), id.0],
     )?;
+    enqueue_projection(&txn, &id.0)?;
     txn.commit()?;
     Ok(statement_digest)
+}
+
+fn mark_landed(conn: &mut Connection, id: &WorkpieceId) -> Result<(), CommissionError> {
+    let txn = conn.transaction()?;
+    let Some(head) = load_head(&txn, &id.0)? else {
+        return Ok(());
+    };
+    if head.status != CommissionStatus::Open {
+        return Ok(());
+    }
+    txn.execute(
+        "UPDATE commissions SET status = ?1 WHERE id = ?2",
+        rusqlite::params![CommissionStatus::Landed.as_str(), id.0],
+    )?;
+    enqueue_projection(&txn, &id.0)?;
+    txn.commit()?;
+    Ok(())
+}
+
+fn record_projection(conn: &mut Connection, id: &WorkpieceId, issue_number: u64) -> Result<(), CommissionError> {
+    let txn = conn.transaction()?;
+    if load_head(&txn, &id.0)?.is_none() {
+        return Err(CommissionError::MissingCommission(id.0.clone()));
+    }
+    txn.execute(
+        "INSERT INTO commission_projections (commission, issue_number) VALUES (?1, ?2)
+         ON CONFLICT(commission) DO UPDATE SET issue_number = excluded.issue_number",
+        rusqlite::params![id.0, i64::try_from(issue_number).unwrap_or(i64::MAX)],
+    )?;
+    txn.commit()?;
+    Ok(())
+}
+
+fn load_projection(conn: &Connection, id: &WorkpieceId) -> Result<Option<u64>, CommissionError> {
+    load_recorded_issue(conn, &id.0)
+}
+
+fn enqueue_projection(txn: &Transaction<'_>, id: &str) -> Result<(), CommissionError> {
+    let payload = snapshot_projection(txn, id)?;
+    txn.execute(
+        "INSERT INTO outbox (topic, payload) VALUES (?1, ?2)",
+        rusqlite::params![Topic::Commission.as_str(), payload],
+    )?;
+    Ok(())
+}
+
+fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, CommissionError> {
+    let Some(head) = load_head(conn, id)? else {
+        return Err(CommissionError::MissingCommission(id.to_owned()));
+    };
+    let recorded_issue = load_recorded_issue(conn, id)?;
+    let (approval_signer, approval_digest) = match head.current_revision {
+        Some(scope) => first_approval(conn, scope)?,
+        None => (None, None),
+    };
+    to_vec(&CommissionProjection {
+        workpiece: head.id,
+        intent: head.intent,
+        scope_revision: head.current_revision,
+        approval_signer,
+        approval_digest,
+        status: head.status.as_str().to_owned(),
+        recorded_issue,
+    })
+    .map_err(|error| CommissionError::Store(error.to_string()))
+}
+
+fn first_approval(conn: &Connection, scope: Digest) -> Result<(Option<String>, Option<Digest>), CommissionError> {
+    let approvals = load_approvals(conn, scope)?;
+    let Some(statement) = approvals.first() else {
+        return Ok((None, None));
+    };
+    let signer = match &statement.provenance {
+        Provenance::AuthorSignature(envelope) => Some(envelope.signer.0.clone()),
+        Provenance::ObservationAttestation(observation) => Some(observation.source.clone()),
+        Provenance::StageReceipt(_) => None,
+    };
+    Ok((signer, Some(digest_of(statement))))
+}
+
+fn load_recorded_issue(conn: &Connection, id: &str) -> Result<Option<u64>, CommissionError> {
+    let number: Option<i64> = conn
+        .query_row("SELECT issue_number FROM commission_projections WHERE commission = ?1", [id], |row| row.get(0))
+        .optional()?;
+    match number {
+        Some(value) => Ok(Some(u64::try_from(value).map_err(|_| CommissionError::MalformedCanonical)?)),
+        None => Ok(None),
+    }
 }
 
 fn load_commission(conn: &mut Connection, id: &WorkpieceId) -> Result<Option<CommissionView>, CommissionError> {

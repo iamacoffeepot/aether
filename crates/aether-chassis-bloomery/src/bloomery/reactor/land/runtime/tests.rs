@@ -290,11 +290,11 @@ fn an_open_proposal_does_not_close_member_issues() {
 }
 
 #[test]
-fn landing_closes_member_issues_best_effort() {
-    // GitHub closing keywords fire only on a default-branch merge, so the land
-    // reactor closes each member issue itself. A workpiece that names no issue
-    // is skipped; a named issue the repository does not hold is journaled and
-    // must not delay the land — the keyword at sync-back is the backstop.
+fn landing_does_not_close_human_source_issues() {
+    // After ADR-0199, GitHub issues Bloomery did not create stay human objects.
+    // Land marks the local commission landed and leaves close to the replica
+    // projector; treating `issue-11` as a close target would write a title
+    // Bloomery does not own.
     let (fake, base) = seeded();
     let new_head = digest(90);
     fake.seed_git_object(&new_head);
@@ -309,19 +309,51 @@ fn landing_closes_member_issues_best_effort() {
     enqueue_land(&mut store, bloom, base, new_head);
 
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();
-    let number = proposal_number(&fake, bloom);
-    assert_eq!(admits.len(), 1, "a failed close does not block the land");
-    assert_eq!(ack_through, None, "closure is not the receipt; the journal is");
+    assert_eq!(admits.len(), 1, "leaving human issues open does not block the land");
+    assert_eq!(ack_through, None, "the journal is still the receipt oracle");
 
-    assert_eq!(fake.issue_is_closed(11), Some(true), "the addressing member's issue is closed");
-    let comments = fake.comments_on(11);
-    assert_eq!(comments.len(), 1, "the close leaves one comment");
-    assert!(comments[0].contains(&format!("#{number}")), "the comment names the landing pull request: {}", comments[0]);
-    assert!(comments[0].contains(&short_hex(&bloom.0)), "the comment names the bloom: {}", comments[0]);
-
+    assert_eq!(fake.issue_is_closed(11), Some(false), "a human-authored member issue is not closed");
+    assert!(fake.comments_on(11).is_empty(), "a human-authored member issue is not commented by land");
     assert_eq!(fake.issue_is_closed(42), Some(false), "an issue that is not a member is left alone");
-    assert!(fake.comments_on(42).is_empty(), "an issue that is not a member is not commented");
     assert_eq!(fake.issue_is_closed(9999), None, "a workpiece naming no object does not fabricate one");
+}
+
+#[test]
+fn landing_marks_member_commissions_landed_before_any_replica_close() {
+    // Local status is the authority. A land that closed GitHub first and then
+    // failed to stamp the commission would leave the replica open as the
+    // record of a landed workpiece.
+    use crate::store::CommissionBackend;
+    use aether_bloomery::{CommissionStatus, Observation, Provenance, Statement, WorkpieceId};
+
+    let (fake, base) = seeded();
+    let new_head = digest(90);
+    fake.seed_git_object(&new_head);
+    let source = shell(fake, true);
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    store
+        .create(
+            &WorkpieceId("wp-1".to_owned()),
+            &Statement {
+                words: b"intent".to_vec(),
+                provenance: Provenance::ObservationAttestation(Observation { source: "test".to_owned() }),
+                parents: Vec::new(),
+            },
+        )
+        .unwrap();
+    seed_member(&mut store, bloom, "wp-1", Some("fix(crate): land the commission"));
+    enqueue_land(&mut store, bloom, base, new_head);
+
+    drain_and_land(&mut store, &source).unwrap();
+
+    let view = store.load(&WorkpieceId("wp-1".to_owned())).unwrap().expect("commission remains");
+    assert_eq!(view.head.status, CommissionStatus::Landed, "land stamps the local commission first");
+    let queued = store.drain_topic(Topic::Commission).unwrap();
+    assert!(queued.len() >= 2, "create and land each enqueue a replica projection");
+    let last: aether_bloomery::CommissionProjection =
+        from_bytes(&queued.last().unwrap().payload).expect("landed projection");
+    assert_eq!(last.status, "landed");
 }
 
 // The number of the proposal the drain opened for `bloom`.

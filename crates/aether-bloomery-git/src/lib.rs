@@ -52,9 +52,10 @@ pub mod source;
 pub mod testing;
 
 pub use client::{
-    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitDataError, GitRef, GithubApi, GithubError,
-    IssueStateApi, MergeResult, NewComment, NewPullRequest, PullMergeResult, PullRequest, PullRequestApi,
-    PullRequestState, RefTxnOp, RunConclusion, RunStatus, WorkflowRun, strip_heads,
+    ActionsApi, Artifact, ChecksState, Comment, CommissionProjectionApi, GitCommit, GitDataApi, GitDataError, GitRef,
+    GithubApi, GithubError, IssueStateApi, MergeResult, NewComment, NewIssue, NewPullRequest, ProjectedIssue,
+    PullMergeResult, PullRequest, PullRequestApi, PullRequestState, RefTxnOp, RunConclusion, RunStatus, WorkflowRun,
+    strip_heads,
 };
 pub use correspondence::{GitObjectFormat, GitObjectId};
 pub use local::LocalGitData;

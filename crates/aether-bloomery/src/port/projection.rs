@@ -317,6 +317,33 @@ pub struct PendingDecisionView {
     pub blocked: String,
 }
 
+/// The self-contained render input a commission replica needs (ADR-0199).
+///
+/// Wholly from the local commission and its journal view. A caller-supplied
+/// GitHub title or body is not an input — the adapter renders this document
+/// and never reads platform edits back.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct CommissionProjection {
+    /// The workpiece this commission is.
+    pub workpiece: WorkpieceId,
+    /// Digest of the stored intent statement.
+    pub intent: Digest,
+    /// Digest of the current scope revision, when one has been written.
+    pub scope_revision: Option<Digest>,
+    /// The approval's signer identity, when a signed approval is stored.
+    pub approval_signer: Option<String>,
+    /// Digest of the stored approval statement, when one exists.
+    pub approval_digest: Option<Digest>,
+    /// Lifecycle spelling (`open`, `cancelled`, `landed`).
+    pub status: String,
+    /// The issue number recorded from this projector's own create, if any.
+    /// Absent until the first successful create persists. The adapter may
+    /// write title and body only to this number, or to a number `find_issue`
+    /// returns for its own marker.
+    #[serde(default)]
+    pub recorded_issue: Option<u64>,
+}
+
 /// A landing receipt together with the landed bloom's membership — the whole
 /// render input a receipt projection needs.
 ///
@@ -356,4 +383,12 @@ pub trait ProjectionBackend {
     /// # Errors
     /// Backend-defined — e.g. the projection surface is unreachable.
     fn project_receipt(&self, receipt: &ProjectedReceipt) -> Result<(), Self::Error>;
+
+    /// Project one commission as a Bloomery-owned issue. Returns the issue
+    /// number the adapter now owns — recorded from create, or the number
+    /// already recorded on `projection`.
+    ///
+    /// # Errors
+    /// Backend-defined — e.g. the projection surface is unreachable.
+    fn project_commission(&self, projection: &CommissionProjection) -> Result<u64, Self::Error>;
 }

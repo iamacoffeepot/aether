@@ -15,16 +15,19 @@
 //! journal that [`aether_bloomery::view_of`] assembles) and mirrors it onto the
 //! objects the repository already holds: each member becomes one marker-keyed
 //! comment on the issue its workpiece addresses, and a landing receipt becomes
-//! one comment per member issue plus one on the landing pull request. No object
-//! is ever opened, closed, retitled, or rewritten — the projection owns its own
-//! comments and nothing else (ADR-0149, amended by [#4663]). Every projection
-//! carries the internal Bloomery id plus a content digest in stable metadata (an
-//! HTML-comment [`Marker`] in comment bodies, the native `external_id` on
-//! check-runs), so the projection is **idempotent** — reconciling the same
-//! document twice is a no-op — and **rebuildable from the journal** after a
-//! deletion: a deleted comment leaves no marker to find, so the reconcile
-//! recreates it. The projector reads only its own markers; it never
-//! interprets free-form platform content as intent.
+//! one comment per member issue plus one on the landing pull request. Comments
+//! stay comments-only (ADR-0149, amended by [#4663]). Replica issues a
+//! commission has no GitHub home for are a second class of object (ADR-0149
+//! 2026-08-16 amendment, derived from ADR-0199): the projector creates those
+//! and writes their title and body, and only those — never a human-authored
+//! issue it did not create. Every projection carries the internal Bloomery id
+//! plus a content digest in stable metadata (an HTML-comment [`Marker`] in
+//! comment and replica-issue bodies, the native `external_id` on check-runs),
+//! so the projection is **idempotent** — reconciling the same document twice
+//! is a no-op — and **rebuildable from the journal** after a deletion: a
+//! deleted comment leaves no marker to find, so the reconcile recreates it.
+//! The projector reads only its own markers; it never interprets free-form
+//! platform content as intent.
 //!
 //! # Scope of this slice
 //!
@@ -69,12 +72,13 @@ pub use aether_bloomery_git::testing;
 pub use aether_bloomery_git::{correspondence, mainline, marker, source};
 
 pub use aether_bloomery_git::{
-    ActionsApi, Artifact, ChecksState, Comment, GitCommit, GitDataApi, GitDataError, GitObjectFormat, GitObjectId,
-    GitRef, GitSource, GitSourceReplica, GithubApi, GithubError, HostSource, IssueStateApi, LocalGitData, MainlineRef,
-    Marker, MergeResult, NewComment, NewPullRequest, PublishedRefspec, PullMergeResult, PullRequest, PullRequestApi,
-    PullRequestState, RefTxnOp, ReplicaError, RunConclusion, RunStatus, SourceError, SourceReplica, WorkflowRun,
-    candidate_ref_name, check_run_external_id, landing_branch, member_checkpoint_ref_name, parse_check_run_external_id,
-    parse_marker, published_refspecs, render_marker, short_hex, strip_heads, to_hex,
+    ActionsApi, Artifact, ChecksState, Comment, CommissionProjectionApi, GitCommit, GitDataApi, GitDataError,
+    GitObjectFormat, GitObjectId, GitRef, GitSource, GitSourceReplica, GithubApi, GithubError, HostSource,
+    IssueStateApi, LocalGitData, MainlineRef, Marker, MergeResult, NewComment, NewIssue, NewPullRequest,
+    ProjectedIssue, PublishedRefspec, PullMergeResult, PullRequest, PullRequestApi, PullRequestState, RefTxnOp,
+    ReplicaError, RunConclusion, RunStatus, SourceError, SourceReplica, WorkflowRun, candidate_ref_name,
+    check_run_external_id, landing_branch, member_checkpoint_ref_name, parse_check_run_external_id, parse_marker,
+    published_refspecs, render_marker, short_hex, strip_heads, to_hex,
 };
 pub use app_auth::{AppTokenSource, InstallationTokenExchange};
 pub use client::{

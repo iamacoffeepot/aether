@@ -68,6 +68,7 @@ use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandPayload, SourceReplicaPayload,
+    WorkpieceId,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -79,8 +80,7 @@ use serde::{Deserialize, Serialize};
 
 use super::LandReactorCapability;
 use aether_bloomery_github::{
-    LandAcceptance, LandProposal, LandingRefusal, LandingSource, ProposalOutcome, SourceError, canonical_issue_number,
-    short_hex,
+    LandAcceptance, LandProposal, LandingRefusal, LandingSource, ProposalOutcome, SourceError,
 };
 
 use crate::bloomery::LandReactorSetup;
@@ -88,7 +88,7 @@ use crate::bloomery::LandReactorSetup;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::control::ControlCore;
-use crate::store::{SqliteStore, StoreBackend};
+use crate::store::{CommissionBackend, SqliteStore, StoreBackend};
 
 use aether_bloomery::Topic;
 
@@ -354,15 +354,12 @@ fn landed(bloom: &BloomId, payload: &LandPayload, new_head: Digest) -> Result<Wa
 /// (acked, no admit). The factored-out network side, unit-testable against a
 /// `SqliteStore` + a fake-GitHub-backed shell without the mail harness.
 #[cfg(test)]
-fn drain_and_land(
-    store: &mut dyn StoreBackend,
-    source: &dyn LandingSource,
-) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
+fn drain_and_land(store: &mut SqliteStore, source: &dyn LandingSource) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
     drain_and_land_emitting(store, source, false)
 }
 
 fn drain_and_land_emitting(
-    store: &mut dyn StoreBackend,
+    store: &mut SqliteStore,
     source: &dyn LandingSource,
     emit_source_replica: bool,
 ) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
@@ -408,7 +405,7 @@ fn drain_and_land_emitting(
             Ok(ProposalOutcome::Proposed { number }) => {
                 match watch_proposal(source, &bloom, &payload, number) {
                     Ok(Watched::Landed(admit)) => {
-                        close_member_issues(store, source, &bloom, number);
+                        mark_member_commissions_landed(store, &bloom);
                         // External merge is observed; the receipt is not durable
                         // until the journal holds `land_key`. Hold the prefix and
                         // return the idempotent Admit so a miss or restart resends.
@@ -491,35 +488,29 @@ fn drain_and_land_emitting(
     Ok((admits, ack_through))
 }
 
-/// Close each member source issue after a bloom lands. Best-effort: a GitHub
-/// hiccup, a missing object, or a store read that cannot name the roster is
-/// warned and dropped so the land itself still admits. Members whose workpiece
-/// ids do not name an issue are skipped with no write.
-fn close_member_issues(store: &mut dyn StoreBackend, source: &dyn LandingSource, bloom: &BloomId, pull_request: u64) {
+/// Mark each member commission landed before the replica is projected. Local
+/// status is the authority; a missing commission or a store fault is warned
+/// and dropped so the land itself still admits. The mirror then projects
+/// the landed replica and closes it best-effort (ADR-0199).
+fn mark_member_commissions_landed(store: &mut SqliteStore, bloom: &BloomId) {
     let members = match store.list_dispatch_descriptions(bloom.0.as_bytes()) {
         Ok(members) => members,
         Err(error) => {
             tracing::warn!(
                 target: "aether_chassis_bloomery::land",
                 %error,
-                "could not list members to close source issues after land; the landing itself stands",
+                "could not list members to mark commissions landed; the landing itself stands",
             );
             return;
         }
     };
-    let comment = format!("**Landed** — bloom `{}` landed via pull request #{pull_request}.", short_hex(&bloom.0));
     for (workpiece, _) in members {
-        let Some(issue) = canonical_issue_number(&workpiece) else {
-            continue;
-        };
-        if let Err(error) = source.close_issue(issue, &comment) {
+        if let Err(error) = store.mark_landed(&WorkpieceId(workpiece.clone())) {
             tracing::warn!(
                 target: "aether_chassis_bloomery::land",
                 workpiece = workpiece.as_str(),
-                issue,
-                pull_request,
                 %error,
-                "failed to close the member's source issue after land; the landing itself stands",
+                "failed to mark the member commission landed; the landing itself stands",
             );
         }
     }
