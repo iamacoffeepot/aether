@@ -34,9 +34,9 @@ use super::strand::readopt_stranded_dispatches;
 use super::{
     BACKOFF_CAP, COMPOSITION_REFINE_ORDER, CandidatePush, ExecutorReactorState, GitCandidatePush, NameEvidenceClaims,
     Stores, TickClock, TrackedHandle, backoff_delay, candidate_push_at, default_candidate_push, dispatch_origin,
-    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, is_disabled_mount, is_silent, is_stale,
-    next_backoff, observe_heartbeat, pull_and_admit, push_admitted_candidates, seed_dispatches, seed_tracked,
-    select_stale_handles, silence_from, timeout_verdict,
+    drain_and_dispatch, drain_and_dispatch_aggregate, drain_and_redispatch, fold_drain_backoff, is_disabled_mount,
+    is_silent, is_stale, next_backoff, observe_heartbeat, pull_and_admit, push_admitted_candidates, seed_dispatches,
+    seed_tracked, select_stale_handles, silence_from, timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -455,6 +455,31 @@ fn a_superseded_blooms_queued_dispatch_is_retired_rather_than_run() {
     store.ack_topic(Topic::Dispatch, live).unwrap();
     assert!(store.drain_topic(Topic::Dispatch).unwrap().is_empty(), "neither entry re-drains");
     assert!(store.lookup_order(&format!("dispatch-{retired}")).unwrap().is_none(), "no order recorded for it");
+}
+
+#[test]
+fn a_superseded_blooms_queued_redispatch_is_retired_rather_than_replayed() {
+    // Tripwire: the redispatch drain used to skip the membership guard its
+    // sibling applies, so a parked lane of a retired bloom still replayed —
+    // a full model run for a plan the operator had already replaced.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let predecessor = BloomId(digest(1));
+    let successor = BloomId(digest(2));
+    let question = digest(0x9A);
+    store.record_dispatch_description(predecessor.0.as_bytes(), "wp-held", "build the widget").unwrap();
+
+    let sequence = park_and_answer(&mut store, &shell, predecessor, "wp-held", question, "ship it");
+    let orders_before = backend.orders().len();
+    store.supersede(predecessor.0.as_bytes(), successor.0.as_bytes(), &["wp-held".to_owned()]).unwrap();
+
+    let (handles, ack_through, transient) = drain_and_redispatch(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+
+    assert!(handles.is_empty(), "a retired bloom's parked lane must not replay");
+    assert_eq!(ack_through, Some(sequence), "the retired redispatch is acked rather than left to wedge the topic");
+    assert_eq!(transient, None);
+    assert_eq!(backend.orders().len(), orders_before, "the retired plan's replay never reaches the executor");
 }
 
 #[test]
@@ -1527,6 +1552,22 @@ fn next_backoff_grows_on_the_same_sequence_and_clears_on_success() {
     assert!(second.retry_after > first.retry_after, "a grown failure count pushes the retry window further out");
 
     assert!(next_backoff(Some(&second), None).is_none(), "a success (no transient failure) clears the cursor");
+}
+
+#[test]
+fn a_clean_drain_leaves_the_backoff_window_intact() {
+    // Tripwire: the dispatch drain used to fold `next_backoff(..., None)` on a
+    // no-failure pass, which clears the cursor. The other topics share that
+    // window, so an empty dispatch drain on the common path wiped a sibling's
+    // pacing and defeated #3593.
+    let window = next_backoff(None, Some(7)).expect("a transient failure opens a cursor");
+    let failures = window.failures;
+    let kept = fold_drain_backoff(Some(window), None).expect("a clean drain must not wipe a live window");
+    assert_eq!(kept.sequence, 7);
+    assert_eq!(kept.failures, failures, "a clean pass does not grow or reset the consecutive-failure count");
+
+    let grown = fold_drain_backoff(Some(kept), Some(7)).expect("a later failure of the same head still grows");
+    assert_eq!(grown.failures, failures + 1);
 }
 
 #[test]
