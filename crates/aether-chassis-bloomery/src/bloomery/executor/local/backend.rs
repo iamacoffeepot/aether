@@ -741,7 +741,7 @@ impl LocalExecutor {
             if let Some(session_id) = super::session_reuse::parse_session_id(&bytes) {
                 if let Some(context) = super::session_reuse::parse_context_tokens(&bytes) {
                     let concluded = if plan.is_builder {
-                        construct_conclusion(&bytes)
+                        matches!(construct_conclusion(&bytes), ConstructConclusion::Candidate)
                     } else {
                         parse_status(&bytes) == Some(LaneStatus::Pass)
                     };
@@ -1531,11 +1531,11 @@ impl LocalExecutor {
             Some(VerifyFailureSet::EMPTY)
         };
         // Verdict from the run's own evidence, lane-specific. The construct lane's
-        // gate demands a substantive conclusion (#3596) — a terminal `result` with
-        // `is_error == false` AND a produced candidate — and is fail-closed on any
-        // shortfall (dead run, errored run, empty candidate), so it never falls
-        // back to the child's terminal exit (an empty run exits zero). The verify
-        // lane stamps a `status` ("pass"/"fail"); the raw clean-success fallback
+        // gate classifies a terminal `result` with `is_error == false` three ways
+        // (#3596, #5292): a produced candidate advances, a clean empty candidate
+        // parks, and anything else (dead, errored) fails. It never falls back to
+        // the child's terminal exit (an empty run exits zero). The verify lane
+        // stamps a `status` ("pass"/"fail"); the raw clean-success fallback
         // survives only for a non-construct evidence shape that stamps no status.
         let status = parse_status(bytes);
         // An authored `environment` stamp is the lane reporting it could not
@@ -1555,12 +1555,12 @@ impl LocalExecutor {
             );
         }
         let status_passed = status.map_or_else(|| lifecycle.clean_success(), |status| status == LaneStatus::Pass);
-        let concluded = if is_construct {
-            construct_conclusion(bytes)
-        } else if is_verify {
-            failed_verifiers.is_some() && status_passed
-        } else {
-            status_passed
+        let construct = is_construct.then(|| construct_conclusion(bytes));
+        let concluded = match construct {
+            Some(ConstructConclusion::Candidate) => true,
+            Some(ConstructConclusion::Declined | ConstructConclusion::Incomplete) => false,
+            None if is_verify => failed_verifiers.is_some() && status_passed,
+            None => status_passed,
         };
         // A passed construct-lane run's work is captured out of the slot checkout
         // it built in (ADR-0152) — commit + tree recorded as correspondence rows,
@@ -1572,10 +1572,17 @@ impl LocalExecutor {
         // recovered no slot) captures nothing and takes the same downgrade.
         // A dead construct still captures as a member checkpoint, but only after
         // the evidence binds to this handle — a stale body cannot trigger it.
+        // A declined construct captured nothing on purpose and is not a checkpoint.
         let commit_message = is_construct.then(|| parse_commit_message(bytes)).flatten();
-        let candidate = is_construct
-            .then(|| self.construct_capture(worktree_dir.clone(), &handle.nonce, concluded, commit_message.as_deref()))
-            .flatten();
+        let candidate = match construct {
+            Some(ConstructConclusion::Candidate) => {
+                self.construct_capture(worktree_dir.clone(), &handle.nonce, true, commit_message.as_deref())
+            }
+            Some(ConstructConclusion::Incomplete) => {
+                self.construct_capture(worktree_dir.clone(), &handle.nonce, false, commit_message.as_deref())
+            }
+            Some(ConstructConclusion::Declined) | None => None,
+        };
         // File the message against the member the run's order names, while that
         // order is still outstanding — the intake consumes it a moment later, and
         // the land path has no other way back from a bloom to the lane that wrote
@@ -1609,7 +1616,9 @@ impl LocalExecutor {
         // claim for a later retry, so nothing resets the checkout the retry reads.)
         self.retire(&handle.nonce.0);
         self.pump();
-        let mut verdict = if passed {
+        let mut verdict = if matches!(construct, Some(ConstructConclusion::Declined)) {
+            StageVerdict::Parked
+        } else if passed {
             StageVerdict::VerificationPassed
         } else {
             StageVerdict::VerificationFailed
@@ -2290,27 +2299,44 @@ fn parse_peak_resident_bytes(bytes: &[u8]) -> Option<u64> {
     value.get("peak_resident_bytes")?.as_u64()
 }
 
-/// Whether a construct lane's `evidence.json` byte string shows a **substantive
-/// conclusion** (#3596): the run reached a terminal `result` with
-/// `is_error == false` *and* left a candidate change in the working tree
-/// (`produced_candidate == true`). The construct lane's whole job is to produce a
-/// focused candidate change, so a run that merely exited zero with nothing to
-/// review must not advance the member. Fail-closed — a `no_result` record (a run
-/// that died early), an errored run (`is_error == true`), an empty candidate
-/// (`produced_candidate` absent or `false`), or bytes that do not decode all
-/// return `false`.
-fn construct_conclusion(bytes: &[u8]) -> bool {
+/// How a construct lane's `evidence.json` classified (#3596, #5292).
+///
+/// Three states because a clean conclusion with no candidate is not a crash:
+/// collapsing it into "not a candidate" burned attempts on a refusal that
+/// would not change on retry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ConstructConclusion {
+    /// Terminal `result` with `is_error == false` and `produced_candidate == true`.
+    Candidate,
+    /// Terminal `result` with `is_error == false` and no candidate — the lane
+    /// finished and declined to produce work.
+    Declined,
+    /// Died, errored, `no_result`, or bytes that do not decode.
+    Incomplete,
+}
+
+/// Classify a construct lane's `evidence.json` byte string.
+///
+/// A terminal `result` with `is_error == false` is the "the run concluded"
+/// signal; a `no_result` record carries no `is_error` field, and an errored run
+/// carries `is_error == true` — both are [`ConstructConclusion::Incomplete`].
+/// Fail-closed on bytes that do not decode.
+fn construct_conclusion(bytes: &[u8]) -> ConstructConclusion {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return false;
+        return ConstructConclusion::Incomplete;
     };
     let produced_candidate = value.get("produced_candidate").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    // A terminal `result` with is_error == false is the "the run concluded"
-    // signal; a `no_result` record carries no `is_error` field, and an errored run
-    // carries `is_error == true` — both fail this test.
     let concluded =
         value.get("result_record").and_then(|record| record.get("is_error")).and_then(serde_json::Value::as_bool)
             == Some(false);
-    concluded && produced_candidate
+    if !concluded {
+        return ConstructConclusion::Incomplete;
+    }
+    if produced_candidate {
+        ConstructConclusion::Candidate
+    } else {
+        ConstructConclusion::Declined
+    }
 }
 
 #[cfg(test)]

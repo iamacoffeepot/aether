@@ -59,8 +59,8 @@ pub use gate::{Gate, Read, RecordedRead, RecordedRefusal, Refusal};
 pub use outcome::{DECISIONS_SCHEMA, Decisions, DecisionsSchemaError, Outcome, decode_recorded_decisions};
 pub use seal::is_active_unlanded;
 pub use snapshot::{
-    AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, HostFaultHold, MemberMachineryFault, Snapshot,
-    StageProgress,
+    AggregateReviewFault, BloomRecord, BloomStatus, FoldedIntegration, HostFaultHold, MemberMachineryFault, MemberPark,
+    Snapshot, StageProgress,
 };
 pub use view::view_of;
 
