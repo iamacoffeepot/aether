@@ -46,6 +46,7 @@ correspondence = ["dep:rusqlite"]
 # `#[runtime] impl NativeActor` and the chassis assembly reference.
 runtime = [
     "correspondence",
+    "dep:aether-bloomery-git",
     "dep:aether-substrate",
     "dep:aether-http",
     "dep:aether-component",
@@ -83,6 +84,9 @@ aether-data = { path = "../aether-data" }
 # wasm control actor + `export!`) — the host mounts that actor as a wasm component,
 # it never links it natively (issue #3497).
 aether-bloomery = { path = "../aether-bloomery", default-features = false }
+# Public git spawn layer (unified name-only / porcelain flags). Native only:
+# the marker build never shells out. Gated with the rest of the host.
+aether-bloomery-git = { path = "../aether-bloomery-git", optional = true }
 serde = { workspace = true, features = ["derive", "alloc"] }
 # Host bootstrap of the fallback approval policy (`approval-policy.toml`).
 toml = { workspace = true }

@@ -6,13 +6,10 @@
 //! is structurally shared and machine-maintained, so a dependency-graph-neutral
 //! rebuild that touches it is not a violation.
 
-use std::error::Error;
-use std::fmt;
-use std::io;
 use std::path::Path;
-use std::process::Command;
 
 use aether_bloomery::{StageVerdict, SurfacePattern, VerifyFailure, VerifyFailureSet};
+use aether_bloomery_git::command::{self, GitCommandError};
 
 /// The workspace lockfile any member's rebuild may rewrite.
 const LOCKFILE: &str = "Cargo.lock";
@@ -49,50 +46,9 @@ pub fn path_in_surface(surface: &[String], path: &str) -> bool {
 ///
 /// Same read the mechanical umbrella uses to scope a member Verify, so the
 /// containment set and the compile-closure set cannot drift onto different
-/// diffs.
-pub fn changed_paths(repo: &Path, base: &str) -> Result<Vec<String>, ChangedPathsError> {
-    let output = Command::new("git")
-        .current_dir(repo)
-        .args(["diff", "--name-only", "--no-ext-diff", "-z", base, "HEAD"])
-        .output()
-        .map_err(ChangedPathsError::Spawn)?;
-    if !output.status.success() {
-        return Err(ChangedPathsError::Git(String::from_utf8_lossy(&output.stderr).trim().to_owned()));
-    }
-    String::from_utf8(output.stdout).map_or(Err(ChangedPathsError::Encoding), |stdout| {
-        Ok(stdout.split('\0').filter(|path| !path.is_empty()).map(str::to_owned).collect())
-    })
-}
-
-/// Why [`changed_paths`] could not read the candidate diff.
-#[derive(Debug)]
-pub enum ChangedPathsError {
-    /// `git` itself would not start.
-    Spawn(io::Error),
-    /// `git diff` exited non-zero.
-    Git(String),
-    /// The name-only listing was not UTF-8.
-    Encoding,
-}
-
-impl fmt::Display for ChangedPathsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Spawn(error) => write!(f, "spawn git diff: {error}"),
-            Self::Git(stderr) if stderr.is_empty() => write!(f, "git diff failed"),
-            Self::Git(stderr) => write!(f, "git diff failed: {stderr}"),
-            Self::Encoding => write!(f, "git diff produced non-UTF-8 output"),
-        }
-    }
-}
-
-impl Error for ChangedPathsError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Spawn(error) => Some(error),
-            Self::Git(_) | Self::Encoding => None,
-        }
-    }
+/// diffs. Flags (`--no-renames -z`) come from the git command layer.
+pub fn changed_paths(repo: &Path, base: &str) -> Result<Vec<String>, GitCommandError> {
+    command::name_only_paths(repo, base, "HEAD")
 }
 
 /// The verdict, typed set, and findings after the containment gate.
