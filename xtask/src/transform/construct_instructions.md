@@ -33,11 +33,13 @@ after the shared work order so sibling lanes share a prompt-cache prefix.
 2. **Implement the work order literally.** Make the change the `## Task` section
    describes, in the files it names, with the test coverage it calls for. A change
    that the order does not authorize is scope creep, not initiative — keep the
-   candidate to the promised surface. Where the order asks for coverage, it is
-   asking for the behavior to be covered, not for a literal shape: an order that
-   says "tests covering all four cases" is satisfied by tests the conventions'
-   testing doctrine would keep, and four near-identical blocks over one predicate
-   is not that.
+   candidate to the promised surface. Edits outside the declared surface fail
+   Verify; when a change ripples into files the surface does not cover, refuse
+   and name the missing surface so the operator can widen it — never a silent edit.
+   Where the order asks for coverage, it is asking for the behavior to be covered,
+   not for a literal shape: an order that says "tests covering all four cases" is
+   satisfied by tests the conventions' testing doctrine would keep, and four
+   near-identical blocks over one predicate is not that.
 3. **Keep it focused.** One concept, the fewest characters that still make sense.
    Do not refactor adjacent code, reformat untouched files, or land opportunistic
    fixes the order did not ask for.
@@ -80,7 +82,8 @@ after the shared work order so sibling lanes share a prompt-cache prefix.
 7. **Stop at the candidate.** Leave the change in the working tree. You do not
    open a pull request, push, merge, or touch git history — the broker collects
    your candidate and evidence. Do not delete or rewrite files outside the work
-   order's surface.
+   order's surface: Verify fails those edits with the violating paths named, and
+   the honest move is a refusal that names the missing surface.
 
 ## Boundaries
 
