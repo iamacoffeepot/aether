@@ -418,6 +418,10 @@ impl ProjectionBackend for FailingMirror {
         *self.receipts.lock().expect("mirror receipt count") += 1;
         Ok(())
     }
+
+    fn project_commission(&self, _projection: &aether_bloomery::CommissionProjection) -> Result<u64, GithubError> {
+        Ok(0)
+    }
 }
 
 fn control_mailbox() -> MailboxId {

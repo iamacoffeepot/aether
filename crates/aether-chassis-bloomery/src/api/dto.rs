@@ -20,8 +20,6 @@
 //! array on the way in and render hex on the way out — so a body agrees with
 //! the path segments beside it without any type in this file saying so.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "github")]
@@ -43,10 +41,10 @@ pub struct DraftView {
     pub draft: aether_bloomery::BloomDraft,
 }
 
-/// `GET /workpieces` — every staged workpiece.
+/// `GET /workpieces` — every durable open commission that has a current revision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkpiecesView {
-    /// The staged workpieces, in id order.
+    /// The open commissions, materialized as workpieces, in id order.
     pub workpieces: Vec<Workpiece>,
 }
 
@@ -75,14 +73,13 @@ pub struct DraftPatch {
     pub forecast: Option<Forecast>,
 }
 
-/// The seal-time scope projection an operator supplies per draft membership so
-/// the pre-seal approve gate (issue #3583, the enforcement half of #3571) can
-/// decide the member's admission. It mirrors the gate's
+/// The seal-time scope projection the store-backed commission reader
+/// materializes per draft membership so the pre-seal approve gate (issue
+/// #3583 / #5048) can decide the member's admission. It mirrors the gate's
 /// [`AdmissionRequest`](crate::bloomery::AdmissionRequest) inputs, keyed
 /// by `{workpiece, scope_revision}` so the host matches it to the exact draft
-/// proposal. These are seal-time-only inputs the gate consumes; they are never
-/// folded into the immutable sealed `BloomSpec` — the `SealRequest` is their only
-/// home (ADR-0150; the authenticated operator harness attests them).
+/// proposal. These are reconstructed from the frozen scope revision and
+/// stored approval — they are never taken from the seal request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberProjection {
     /// The workpiece this projection describes — matches a draft proposal's
@@ -109,29 +106,20 @@ pub struct MemberProjection {
 
 /// `POST /drafts/{id}/seal` body — optional. The idempotency key defaults to
 /// the sealed bloom's own id, so re-POSTing the same seal is a no-op duplicate.
+///
+/// Scope, approval, description, and completeness are not fields here: the
+/// door loads them from the commission store (#5048). A body that still
+/// carries `projections` or `descriptions` is accepted and those fields are
+/// ignored, so a caller cannot override the signed revision.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SealRequest {
     /// Override the admit idempotency key; defaults to the sealed bloom id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
-    /// The per-member scope projections the pre-seal approve gate decides over
-    /// (issue #3583). Every draft proposal must resolve one, matched by
-    /// `{workpiece, scope_revision}`; a proposal with no projection fails closed
-    /// (the seal is refused), so an empty list refuses any non-empty draft.
-    #[serde(default)]
-    pub projections: Vec<MemberProjection>,
-    /// The operator-supplied, per-member work-order descriptions (#3595), keyed
-    /// by workpiece id. Advisory model context the coordinator persists at seal
-    /// so the construct lane's prompt can name a `## Task` — it binds no evidence
-    /// and never enters the content-addressed spec, so it rides the seal *request*
-    /// rather than the sealed draft. A member absent from the map dispatches with
-    /// no task (the subject-only prompt), never blocking the seal.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub descriptions: BTreeMap<String, String>,
     /// Declared member-dependency edges (ADR-0196): `member` depends on
     /// `depends_on`. The door unions these with derived overlap-ordering
-    /// edges and refuses a cycle or a non-member. Empty (the default) is
-    /// today's edgeless seal.
+    /// edges and with edges frozen on each member's scope revision. Empty
+    /// (the default) is today's edgeless seal plus whatever the store named.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<MemberDependency>,
 }
@@ -145,30 +133,12 @@ pub struct SupersedeRequest {
     /// Override the admit idempotency key; defaults to the successor bloom id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
-    /// One projection per successor member, the same shape [`SealRequest`]
-    /// carries. Supersession is a second door into `active` claiming a fresh
-    /// membership set, so it runs the same approve gate a first seal does and
-    /// takes the gate-authored approval from it (#4638) — a draft's own
-    /// `approval` is a placeholder either way.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub projections: Vec<MemberProjection>,
-    /// The successor's per-member work-order descriptions, keyed by workpiece id
-    /// — the same advisory model context [`SealRequest::descriptions`] carries,
-    /// and required here for the same reason (#4631).
-    ///
-    /// Descriptions are stored per `(bloom, workpiece)`, and a successor is a new
-    /// bloom id by construction, so the predecessor's rows do not resolve for it —
-    /// not even for the members the supersession carries unchanged. Omitting them
-    /// dispatches every member of the successor on a subject-only prompt, which
-    /// warns and continues rather than failing, so the run looks normal and only
-    /// its quality collapses.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub descriptions: BTreeMap<String, String>,
     /// Declared member-dependency edges — the same optional list [`SealRequest::edges`]
     /// carries. The door unions these with derived overlap-ordering edges and
+    /// with edges frozen on each successor member's scope revision, then
     /// refuses a cycle or a non-member. Empty (the default) is the edgeless
-    /// drop-a-subtree supersede: the reducer keeps the predecessor's remaining
-    /// member graph.
+    /// drop-a-subtree supersede plus whatever the store named: the reducer
+    /// keeps the predecessor's remaining member graph.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edges: Vec<MemberDependency>,
 }

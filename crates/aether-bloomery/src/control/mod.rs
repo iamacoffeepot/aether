@@ -202,6 +202,14 @@ topic_vocabulary! {
     /// Appended so the prior topics' display spellings and ordering are
     /// unchanged.
     SourceReplica,
+    /// A commission replica projection (host-minted): the commission store
+    /// enqueues [`CommissionProjection`](crate::port::CommissionProjection)
+    /// payloads on create, scope, approve, and status changes, and the mirror
+    /// reactor drains them onto Bloomery-owned issues. Independent of
+    /// [`Self::ViewDocument`] and [`Self::LandingReceipt`] so one bad issue
+    /// does not stall receipts or source mirroring (ADR-0199). Appended so
+    /// the prior topics' display spellings and ordering are unchanged.
+    Commission,
 }
 
 impl Topic {
@@ -225,6 +233,7 @@ impl Topic {
             Self::OrphanClaimRelease => "topic:orphan_claim_release",
             Self::Splice => "topic:splice",
             Self::SourceReplica => "topic:source_replica",
+            Self::Commission => "topic:commission",
         }
     }
 

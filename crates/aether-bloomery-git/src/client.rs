@@ -31,6 +31,30 @@ pub struct NewComment {
     pub body: String,
 }
 
+/// The fields to create a Bloomery-owned issue projection.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NewIssue {
+    /// The rendered title, wholly from canonical local state.
+    pub title: String,
+    /// The rendered body, marker included.
+    pub body: String,
+}
+
+/// An issue as the commission projector reads it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ProjectedIssue {
+    /// The issue number GitHub assigned.
+    pub number: u64,
+    /// The current title.
+    pub title: String,
+    /// The current body (contains the marker when projected).
+    pub body: String,
+    /// The parsed marker, if the body carries one.
+    pub marker: Option<Marker>,
+    /// Whether the issue is closed.
+    pub closed: bool,
+}
+
 /// How the checks on a commit stand, folded from the check-run list.
 ///
 /// What the land watch turns on: a landing proposal whose checks failed cannot
@@ -144,10 +168,10 @@ pub struct GitCommit {
 /// writes an issue or pull-request title or body, opens an object, or closes
 /// one: a projection owns the marker-keyed comments it wrote and nothing else,
 /// and that bound holds by absence rather than by discipline (ADR-0149 §The
-/// write surface). Closing a landed member's source issue lives on
-/// [`IssueStateApi`] so nothing reachable from a projection can issue it.
-/// Every lookup is scoped to one named object, so no path here enumerates
-/// repository-wide issue history either.
+/// write surface). Creating and owning replica issues lives on
+/// [`CommissionProjectionApi`]; closing a landed member's source issue lives
+/// on [`IssueStateApi`]. Every lookup is scoped to one named object, so no
+/// path here enumerates repository-wide issue history either.
 pub trait GithubApi {
     /// The title of issue `number`, or `None` when the repository holds no such
     /// object — a clean 404 is `Ok(None)`, not an error.
@@ -194,6 +218,47 @@ pub trait GithubApi {
 /// member's source issue itself.
 pub trait IssueStateApi {
     /// Close issue `number`. An already-closed issue is a success.
+    ///
+    /// # Errors
+    /// The surface is unreachable, the issue is absent, or the write was refused.
+    fn close_issue(&self, number: u64) -> Result<(), GithubError>;
+}
+
+/// The create-and-own surface a commission projection drives (ADR-0149
+/// 2026-08-16 amendment, derived from ADR-0199).
+///
+/// A sibling of [`GithubApi`] rather than an extension of it: comment verbs
+/// stay comments-only, and title/body writes live here so they can address
+/// only numbers this trait itself created. The bound holds by construction —
+/// a projection may write an issue's title or body only through a number it
+/// recorded from [`create_issue`](Self::create_issue), or found by its own
+/// marker after a crash between create and persist. An issue that arrived
+/// any other way is unaddressable by that path.
+pub trait CommissionProjectionApi {
+    /// Open a new issue whose title and body Bloomery fully owns.
+    ///
+    /// # Errors
+    /// The surface is unreachable or returned an error status.
+    fn create_issue(&self, new: &NewIssue) -> Result<ProjectedIssue, GithubError>;
+
+    /// Find the issue whose marker carries `key`, if any. The projector's
+    /// idempotency lookup when no issue number has been recorded yet.
+    ///
+    /// # Errors
+    /// The surface is unreachable or returned an error status.
+    fn find_issue(&self, key: &str) -> Result<Option<ProjectedIssue>, GithubError>;
+
+    /// Overwrite the title and body of issue `number`. Callers may pass only
+    /// a number recorded from [`create_issue`](Self::create_issue) or returned
+    /// by [`find_issue`](Self::find_issue) for this projector's marker.
+    ///
+    /// # Errors
+    /// The surface is unreachable, the issue is absent, or the write was refused.
+    fn update_issue(&self, number: u64, title: &str, body: &str) -> Result<(), GithubError>;
+
+    /// Close issue `number`. An already-closed issue is a success. Same verb
+    /// as [`IssueStateApi::close_issue`], living here so a commission
+    /// projector can close what it created without widening [`GithubApi`].
     ///
     /// # Errors
     /// The surface is unreachable, the issue is absent, or the write was refused.
