@@ -10,9 +10,9 @@ use aether_bloomery::{
 use aether_data::wire::{from_bytes, to_vec};
 use ed25519_dalek::{Signer, SigningKey};
 
-use super::{CommissionBackend, CommissionError};
+use super::{CommissionBackend, CommissionError, RecordCommissionApproval, RecordCommissionApprovalResult};
 use crate::bloomery::TopicOutbox;
-use crate::store::runtime::{SqliteStore, StoreBackend};
+use crate::store::runtime::{SqliteStore, StoreBackend, StoreCapabilityState};
 use crate::store::{JournalWrite, now_unix_millis};
 
 fn memory() -> SqliteStore {
@@ -532,4 +532,72 @@ fn cancel_refuses_words_that_are_not_the_intent() {
     };
     assert_eq!(store.cancel(&workpiece("wp-1"), &statement), Err(CommissionError::WrongSubject));
     assert_eq!(store.load(&workpiece("wp-1")).expect("load").expect("exists").head.status, CommissionStatus::Open);
+}
+
+#[test]
+fn unresolved_dependencies_name_uncommissioned_ids_once() {
+    // Approve is the freeze point: a dependency may be created after the
+    // revision is written, but an id with no commission at all is a scope
+    // defect. The store reports those ids so the live approve door can refuse
+    // before a signature is spent.
+    let mut store = memory();
+    seed(&mut store, "wp-1");
+    let mut missing = revision("wp-1", None);
+    missing.dependencies = vec![workpiece("ghost"), workpiece("ghost"), workpiece("wp-2")];
+    let digest = store.write_revision(&missing).expect("write");
+    assert_eq!(
+        store.unresolved_dependencies(digest).expect("probe"),
+        vec![workpiece("ghost"), workpiece("wp-2")],
+        "uncommissioned ids are reported once in declaration order"
+    );
+
+    store.create(&workpiece("wp-2"), &Statement { words: b"ship wp-2".to_vec(), ..intent() }).expect("create wp-2");
+    let mut present = revision("wp-1", Some(digest));
+    present.dependencies = vec![workpiece("wp-2")];
+    let next = store.write_revision(&present).expect("write successor");
+    assert!(
+        store.unresolved_dependencies(next).expect("probe").is_empty(),
+        "a created commission is not an unresolved dependency"
+    );
+}
+
+#[test]
+fn the_live_approve_door_refuses_uncommissioned_dependencies() {
+    // persist_approval is shared with sealed-bloom reconstruction, so the
+    // refusal lives on the mail handler. An open but existing dependency
+    // must still record; closedness is a seal-time check.
+    let mut store = memory();
+    seed(&mut store, "wp-1");
+    let mut missing = revision("wp-1", None);
+    missing.dependencies = vec![workpiece("ghost")];
+    let scope = store.write_revision(&missing).expect("write");
+    let statement = auto_approval(scope);
+    let mut state = StoreCapabilityState::new(store);
+    match state.record_commission_approval(RecordCommissionApproval {
+        id: "wp-1".to_owned(),
+        statement: to_vec(&statement).expect("encode"),
+    }) {
+        RecordCommissionApprovalResult::Refused { error } => {
+            assert!(error.contains("ghost"), "refusal names the missing workpiece: {error}");
+        }
+        other => panic!("uncommissioned dependency must be Refused, got {other:?}"),
+    }
+
+    let mut store = memory();
+    store
+        .create(&workpiece("wp-dep"), &Statement { words: b"ship wp-dep".to_vec(), ..intent() })
+        .expect("create wp-dep");
+    seed(&mut store, "wp-1");
+    let mut open = revision("wp-1", None);
+    open.dependencies = vec![workpiece("wp-dep")];
+    let scope = store.write_revision(&open).expect("write");
+    let statement = auto_approval(scope);
+    let mut state = StoreCapabilityState::new(store);
+    match state.record_commission_approval(RecordCommissionApproval {
+        id: "wp-1".to_owned(),
+        statement: to_vec(&statement).expect("encode"),
+    }) {
+        RecordCommissionApprovalResult::Ok { .. } => {}
+        other => panic!("an existing open dependency must still record, got {other:?}"),
+    }
 }
