@@ -23,7 +23,7 @@ use aether_data::wire::to_vec;
 use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
 
-use super::commission_reader::admit_member;
+use super::commission_reader::{TreeAdrs, admit_member};
 use super::hex::{self, hex_encode};
 use super::response::error_response;
 use super::state::{
@@ -183,7 +183,7 @@ impl ApiCapabilityState {
                     &format!("commission load for {} was not joined", proposal.workpiece.0),
                 ));
             };
-            match admit_member(proposal.scope_revision, result) {
+            match admit_member(proposal.scope_revision, result, &TreeAdrs::working_tree()) {
                 Ok(admitted) => {
                     descriptions.insert(admitted.workpiece.id.0.clone(), admitted.description);
                     edges.extend(admitted.edges);

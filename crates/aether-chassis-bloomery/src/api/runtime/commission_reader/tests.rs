@@ -7,9 +7,15 @@ use aether_bloomery::{
 };
 use aether_data::wire::to_vec;
 
-use super::{AdmissionRefusal, AdmitError, admit_member, workpiece_from_listed, workpieces_from_list};
+use super::adr_touch::{AbsentAdrs, AdrMaturity, SealedAdrStatus};
+use super::{AdmissionRefusal, AdmitError, AdmittedMember, admit_member, workpiece_from_listed, workpieces_from_list};
+use crate::bloomery::{AdmissionRequest, AdrTouch, ApprovalPolicy, Decision, Gate, Tier};
 use crate::commission::import::{ImportRequest, IssueSnapshot, import};
 use crate::store::{CommissionBackend, ListCommissionsResult, ListedCommission, LoadCommissionResult, SqliteStore};
+
+fn admit(expected: Digest, result: LoadCommissionResult) -> Result<AdmittedMember, AdmitError> {
+    admit_member(expected, result, &AbsentAdrs)
+}
 
 fn revision(id: &str, problem: &str) -> ScopeRevision {
     ScopeRevision {
@@ -67,7 +73,7 @@ fn a_verified_row_materializes_the_workpiece_and_the_frozen_projection() {
     // otherwise admit work the operator did not sign.
     let revision = revision("wp-1", "problem");
     let digest = digest_of(&revision);
-    let admitted = admit_member(digest, loaded("wp-1", &revision, vec![auto_approval(digest)])).expect("admitted");
+    let admitted = admit(digest, loaded("wp-1", &revision, vec![auto_approval(digest)])).expect("admitted");
 
     assert_eq!(admitted.workpiece.id.0, "wp-1");
     assert_eq!(admitted.workpiece.scope_revision, digest);
@@ -86,7 +92,7 @@ fn an_empty_description_renders_the_signed_work_order() {
     revision.design = "Separate binary.".to_owned();
     revision.plan = "Ship bloomery-commission.".to_owned();
     let digest = digest_of(&revision);
-    let admitted = admit_member(digest, loaded("wp-local", &revision, vec![auto_approval(digest)])).expect("admitted");
+    let admitted = admit(digest, loaded("wp-local", &revision, vec![auto_approval(digest)])).expect("admitted");
 
     assert!(admitted.description.contains("Need a CLI."), "problem is the task: {}", admitted.description);
     assert!(admitted.description.contains("## Design notes"), "{}", admitted.description);
@@ -106,7 +112,7 @@ fn digest_mismatch_is_not_a_stale_scope() {
         *current_revision = Some(claimed.as_bytes().to_vec());
     }
 
-    let error = admit_member(claimed, result).expect_err("claimed digest is not the bytes");
+    let error = admit(claimed, result).expect_err("claimed digest is not the bytes");
     match error {
         AdmitError::Refused(refusal @ AdmissionRefusal::DigestMismatch { .. }) => {
             assert!(refusal.message().contains("does not match its canonical bytes"), "{}", refusal.message());
@@ -124,8 +130,8 @@ fn a_draft_naming_a_superseded_revision_is_stale() {
     let revision = revision("wp-1", "problem");
     let current = digest_of(&revision);
     let expected = Digest::from_bytes([3; 32]);
-    let error = admit_member(expected, loaded("wp-1", &revision, vec![auto_approval(current)]))
-        .expect_err("draft is behind the tip");
+    let error =
+        admit(expected, loaded("wp-1", &revision, vec![auto_approval(current)])).expect_err("draft is behind the tip");
     match error {
         AdmitError::Refused(refusal @ AdmissionRefusal::StaleScope { .. }) => {
             assert!(refusal.message().contains("stale scope revision"), "{}", refusal.message());
@@ -146,7 +152,7 @@ fn a_current_revision_with_no_approval_is_absent_not_malformed() {
     // that are fine.
     let revision = revision("wp-1", "problem");
     let digest = digest_of(&revision);
-    let error = admit_member(digest, loaded("wp-1", &revision, Vec::new())).expect_err("no approval");
+    let error = admit(digest, loaded("wp-1", &revision, Vec::new())).expect_err("no approval");
     match error {
         AdmitError::Refused(refusal @ AdmissionRefusal::AbsentApproval { .. }) => {
             assert!(refusal.message().contains("no stored approval"), "{}", refusal.message());
@@ -175,7 +181,7 @@ fn garbage_canonical_bytes_are_malformed() {
         current: Some(vec![0xff, 0x00]),
         approvals: vec![auto_approval(digest)],
     };
-    let error = admit_member(digest, result).expect_err("garbage");
+    let error = admit(digest, result).expect_err("garbage");
     match error {
         AdmitError::Refused(refusal @ AdmissionRefusal::MalformedCanonical { .. }) => {
             assert!(refusal.message().contains("malformed"), "{}", refusal.message());
@@ -194,7 +200,7 @@ fn a_missing_commission_is_not_an_absent_approval() {
     // No row at all is not "forgot to approve". The operator has not created
     // the commission; telling them it has no approval would send them to the
     // wrong route.
-    let error = admit_member(Digest::from_bytes([1; 32]), LoadCommissionResult::Missing { id: "wp-1".to_owned() })
+    let error = admit(Digest::from_bytes([1; 32]), LoadCommissionResult::Missing { id: "wp-1".to_owned() })
         .expect_err("missing");
     match error {
         AdmitError::Refused(refusal @ AdmissionRefusal::MissingCommission { .. }) => {
@@ -213,8 +219,8 @@ fn a_missing_commission_is_not_an_absent_approval() {
 fn a_store_fault_is_not_an_admission_refusal() {
     // 5xx names transport; 422 names a closed door. Collapsing a disk error
     // into malformed would make a retryable fault look like bad bytes.
-    let error = admit_member(Digest::from_bytes([1; 32]), LoadCommissionResult::Err { error: "disk".to_owned() })
-        .expect_err("store");
+    let error =
+        admit(Digest::from_bytes([1; 32]), LoadCommissionResult::Err { error: "disk".to_owned() }).expect_err("store");
     assert!(matches!(error, AdmitError::Store(_)), "got {error:?}");
     assert_eq!(error.response().status, 500);
 }
@@ -297,10 +303,71 @@ crates/aether-chassis-bloomery/src/commission/import/**
         current: view.current.map(|revision| revision.to_canonical()),
         approvals: approvals.iter().map(|statement| to_vec(statement).expect("encode")).collect(),
     };
-    match admit_member(scope, result) {
+    match admit(scope, result) {
         Err(AdmitError::Refused(refusal @ AdmissionRefusal::AbsentApproval { .. })) => {
             assert!(refusal.message().contains("no stored approval"), "{}", refusal.message());
         }
         other => panic!("imported unsigned commission must not admit, got {other:?}"),
     }
+}
+
+/// A sealed-base catalog that answers only the listed paths.
+struct Catalog<'a>(&'a [(&'a str, SealedAdrStatus)]);
+
+impl AdrMaturity for Catalog<'_> {
+    fn status(&self, path: &str) -> Option<SealedAdrStatus> {
+        self.0.iter().copied().find(|(candidate, _)| *candidate == path).map(|(_, status)| status)
+    }
+}
+
+fn auto_policy() -> ApprovalPolicy {
+    ApprovalPolicy { default: Tier::Auto, rules: Vec::new() }
+}
+
+fn gate_request(admitted: &AdmittedMember, pre_approved: bool) -> AdmissionRequest {
+    AdmissionRequest {
+        subject: admitted.workpiece.scope_revision,
+        declared_surface: admitted.projection.declared_surface.clone(),
+        completeness: admitted.projection.completeness,
+        adr_touch: admitted.projection.adr_touch,
+        pre_approved,
+        projection_digest: Digest::from_bytes([7; 32]),
+    }
+}
+
+#[test]
+fn a_new_adr_path_routes_to_the_owner_even_when_pre_approved() {
+    // Pre-fix, any docs/adr glob became ProposedOnly, so pre_approved waived the
+    // tier and formed AutoApproved — the hard gate never saw NewOrEstablished.
+    let mut revision = revision("wp-1", "problem");
+    revision.declared_surface = vec!["docs/adr/0999-new-decision.md".to_owned()];
+    let digest = digest_of(&revision);
+    let admitted = admit(digest, loaded("wp-1", &revision, vec![auto_approval(digest)])).expect("admitted");
+
+    assert_eq!(admitted.projection.adr_touch, AdrTouch::NewOrEstablished);
+    assert_eq!(
+        Gate::new(&auto_policy()).evaluate(&gate_request(&admitted, true)),
+        Decision::RequiresStatement(Tier::Human),
+    );
+}
+
+#[test]
+fn a_proposed_adr_path_stays_proposed_only() {
+    let path = "docs/adr/0184-calibration.md";
+    let mut revision = revision("wp-1", "problem");
+    revision.declared_surface = vec![path.to_owned()];
+    let digest = digest_of(&revision);
+    let admitted = admit_member(
+        digest,
+        loaded("wp-1", &revision, vec![auto_approval(digest)]),
+        &Catalog(&[(path, SealedAdrStatus::Proposed)]),
+    )
+    .expect("admitted");
+
+    assert_eq!(admitted.projection.adr_touch, AdrTouch::ProposedOnly);
+    let decision = Gate::new(&auto_policy()).evaluate(&gate_request(&admitted, false));
+    assert!(
+        matches!(decision, Decision::AutoApproved(_)),
+        "a still-Proposed touch defers to the auto policy, got {decision:?}"
+    );
 }
