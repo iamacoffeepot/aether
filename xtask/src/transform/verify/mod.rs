@@ -2903,25 +2903,11 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     }
 
     #[test]
-    fn verify_check_members_are_the_ci_parity_ids_in_order() {
+    fn every_verify_check_member_resolves_via_verify_command() {
         // Tripwire: every id verify.check fans out to must resolve via
-        // verify_command, and the order must match ci.yml's job order — a drift
-        // here breaks the umbrella-membership invariant. All eight of CI's
-        // required gates, because a member CI enforces and the lane skips is a
-        // false green that surfaces at the landing pull request (#4706).
-        assert_eq!(
-            verify_check_members(),
-            &[
-                "verify.suppress",
-                "verify.fmt",
-                "verify.clippy",
-                "verify.docs",
-                "verify.test",
-                "verify.dup",
-                "verify.deps",
-                "verify.lock",
-            ],
-        );
+        // verify_command. A member the umbrella names and the dispatcher cannot
+        // run is a silent skip. Ordering against the workflow is already proven
+        // by `the_umbrella_covers_every_required_ci_job`.
         for &id in verify_check_members() {
             assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
         }
