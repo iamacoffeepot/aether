@@ -15,6 +15,7 @@ pub enum Nav {
     Timeline { bloom: DigestHex },
     Days,
     Cost,
+    Backlog,
 }
 
 impl Nav {
@@ -46,5 +47,10 @@ impl Nav {
     #[must_use]
     pub fn cost() -> Self {
         Self::Cost
+    }
+
+    #[must_use]
+    pub fn backlog() -> Self {
+        Self::Backlog
     }
 }

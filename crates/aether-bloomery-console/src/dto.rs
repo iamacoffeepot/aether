@@ -589,6 +589,66 @@ pub struct MetricDispatch {
     pub study: Option<DigestHex>,
 }
 
+/// `GET /commissions` — every matching commission head.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CommissionsView {
+    #[serde(default)]
+    pub commissions: Vec<CommissionHeadView>,
+}
+
+/// One commission head as the list route renders it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CommissionHeadView {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub intent: DigestHex,
+    #[serde(default)]
+    pub current_revision: Option<DigestHex>,
+    #[serde(default)]
+    pub current_ordinal: Option<u64>,
+    #[serde(default)]
+    pub status: String,
+}
+
+/// `GET /commissions/{id}` — the head, current revision, and current approvals.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CommissionShowView {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub intent: DigestHex,
+    #[serde(default)]
+    pub current_revision: Option<DigestHex>,
+    #[serde(default)]
+    pub current_ordinal: Option<u64>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub current: Option<ScopeRevisionView>,
+    #[serde(default)]
+    pub approvals: Vec<Value>,
+}
+
+/// The current scope revision as the show route renders it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ScopeRevisionView {
+    #[serde(default)]
+    pub workpiece: String,
+    #[serde(default)]
+    pub problem: String,
+    #[serde(default)]
+    pub design: String,
+    #[serde(default)]
+    pub plan: String,
+    #[serde(default)]
+    pub declared_surface: Vec<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub description: String,
+}
+
 /// `GET /spend`. `per_bloom` keys are the REST hex spelling of a bloom id.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SpendWindowView {

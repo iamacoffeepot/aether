@@ -5,8 +5,8 @@ use std::fmt::Display;
 use std::time::{Duration, Instant};
 
 use crate::dto::{
-    DecodedArtifact, DigestHex, DispatchFilePage, JournalPage, JournalRecordView, MetricDay, MetricDispatch,
-    MetricsSeat, MetricsSummary, MetricsTimeline, SpendWindowView, ViewDocument,
+    CommissionShowView, CommissionsView, DecodedArtifact, DigestHex, DispatchFilePage, JournalPage, JournalRecordView,
+    MetricDay, MetricDispatch, MetricsSeat, MetricsSummary, MetricsTimeline, SpendWindowView, ViewDocument,
 };
 
 /// Which coordinator resource a screen can subscribe to.
@@ -22,6 +22,8 @@ pub enum ResourceKey {
     MetricsSeats,
     MetricsDispatches,
     Spend,
+    Commissions,
+    Commission(String),
 }
 
 /// Query identity for one journal page. Filter text lives on the screen.
@@ -87,7 +89,9 @@ impl ResourceKey {
             | Self::MetricsTimeline(_)
             | Self::MetricsSeats
             | Self::MetricsDispatches
-            | Self::Spend => Lane::Bulk,
+            | Self::Spend
+            | Self::Commissions
+            | Self::Commission(_) => Lane::Bulk,
         }
     }
 
@@ -104,8 +108,33 @@ impl ResourceKey {
             Self::MetricsSeats => "/metrics/seats".to_owned(),
             Self::MetricsDispatches => "/metrics/dispatches".to_owned(),
             Self::Spend => "/spend".to_owned(),
+            Self::Commissions => "/commissions".to_owned(),
+            Self::Commission(id) => format!("/commissions/{}", path_segment(id)),
         }
     }
+}
+
+fn path_segment(id: &str) -> String {
+    let mut out = String::new();
+    for byte in id.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(char::from(byte)),
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
+}
+
+/// Whether this connection's coordinator serves the commission read routes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommissionCapability {
+    /// `GET /commissions` returned 404. Cached for the connection.
+    Absent,
+    /// `GET /commissions` returned a document.
+    Present,
 }
 
 /// Last sample of one resource. An error keeps `value` and dims the paint.
@@ -149,6 +178,12 @@ impl<T> Cell<T> {
         self.completed_at = Some(Instant::now());
     }
 
+    fn settle(&mut self) {
+        self.inflight = false;
+        self.error = None;
+        self.completed_at = Some(Instant::now());
+    }
+
     fn on_demand_due(&self) -> bool {
         !self.inflight && self.completed_at.is_none()
     }
@@ -168,6 +203,9 @@ pub struct Store {
     seats: Cell<Vec<MetricsSeat>>,
     dispatches: Cell<Vec<MetricDispatch>>,
     spend: Cell<SpendWindowView>,
+    commission_capability: Option<CommissionCapability>,
+    commissions: Cell<CommissionsView>,
+    commission_shows: HashMap<String, Cell<CommissionShowView>>,
 }
 
 impl Store {
@@ -185,6 +223,9 @@ impl Store {
             seats: Cell::default(),
             dispatches: Cell::default(),
             spend: Cell::default(),
+            commission_capability: None,
+            commissions: Cell::default(),
+            commission_shows: HashMap::new(),
         }
     }
 
@@ -239,6 +280,21 @@ impl Store {
     }
 
     #[must_use]
+    pub fn commission_capability(&self) -> Option<CommissionCapability> {
+        self.commission_capability
+    }
+
+    #[must_use]
+    pub fn commissions(&self) -> &Cell<CommissionsView> {
+        &self.commissions
+    }
+
+    #[must_use]
+    pub fn commission(&self, id: &str) -> Option<&Cell<CommissionShowView>> {
+        self.commission_shows.get(id)
+    }
+
+    #[must_use]
     pub fn record(&self, sequence: u64) -> Option<&JournalRecordView> {
         self.journals
             .values()
@@ -253,12 +309,14 @@ impl Store {
                 self.view_cadence
             }
             ResourceKey::Transcript(query) if query.live => self.view_cadence,
+            ResourceKey::Commissions => self.view_cadence,
             ResourceKey::Journal(_)
             | ResourceKey::Artifact(_)
             | ResourceKey::Transcript(_)
             | ResourceKey::MetricsTimeline(_)
             | ResourceKey::MetricsSeats
-            | ResourceKey::MetricsDispatches => Duration::ZERO,
+            | ResourceKey::MetricsDispatches
+            | ResourceKey::Commission(_) => Duration::ZERO,
         }
     }
 
@@ -286,6 +344,18 @@ impl Store {
             ResourceKey::MetricsSeats => self.seats.on_demand_due(),
             ResourceKey::MetricsDispatches => self.dispatches.on_demand_due(),
             ResourceKey::MetricsTimeline(bloom) => self.timelines.get(bloom).is_none_or(Cell::on_demand_due),
+            ResourceKey::Commissions => {
+                if self.commission_capability == Some(CommissionCapability::Absent) {
+                    return false;
+                }
+                self.polled_due(&self.commissions)
+            }
+            ResourceKey::Commission(id) => {
+                if self.commission_capability == Some(CommissionCapability::Absent) {
+                    return false;
+                }
+                self.commission_shows.get(id).is_none_or(Cell::on_demand_due)
+            }
         }
     }
 
@@ -306,6 +376,8 @@ impl Store {
             ResourceKey::MetricsSeats => self.seats.inflight,
             ResourceKey::MetricsDispatches => self.dispatches.inflight,
             ResourceKey::Spend => self.spend.inflight,
+            ResourceKey::Commissions => self.commissions.inflight,
+            ResourceKey::Commission(id) => self.commission_shows.get(id).is_some_and(|cell| cell.inflight),
         }
     }
 
@@ -321,6 +393,8 @@ impl Store {
             ResourceKey::MetricsSeats => self.seats.inflight = true,
             ResourceKey::MetricsDispatches => self.dispatches.inflight = true,
             ResourceKey::Spend => self.spend.inflight = true,
+            ResourceKey::Commissions => self.commissions.inflight = true,
+            ResourceKey::Commission(id) => self.commission_shows.entry(id.clone()).or_default().inflight = true,
         }
     }
 
@@ -379,6 +453,25 @@ impl Store {
         apply(&mut self.spend, result);
     }
 
+    pub fn apply_commissions(&mut self, result: Result<CommissionsView, String>) {
+        match result {
+            Ok(value) => {
+                self.commission_capability = Some(CommissionCapability::Present);
+                self.commissions.apply_ok(value);
+            }
+            Err(error) => self.commissions.apply_err(error),
+        }
+    }
+
+    pub fn apply_commissions_missing(&mut self) {
+        self.commission_capability = Some(CommissionCapability::Absent);
+        self.commissions.settle();
+    }
+
+    pub fn apply_commission(&mut self, id: String, result: Result<CommissionShowView, String>) {
+        apply(self.commission_shows.entry(id).or_default(), result);
+    }
+
     pub fn apply_err(&mut self, key: &ResourceKey, error: impl Display) {
         match key {
             ResourceKey::View => self.view.apply_err(error),
@@ -391,6 +484,8 @@ impl Store {
             ResourceKey::MetricsSeats => self.seats.apply_err(error),
             ResourceKey::MetricsDispatches => self.dispatches.apply_err(error),
             ResourceKey::Spend => self.spend.apply_err(error),
+            ResourceKey::Commissions => self.commissions.apply_err(error),
+            ResourceKey::Commission(id) => self.commission_shows.entry(id.clone()).or_default().apply_err(error),
         }
     }
 }
@@ -404,7 +499,7 @@ fn apply<T>(cell: &mut Cell<T>, result: Result<T, String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::Store;
+    use super::{CommissionCapability, ResourceKey, Store};
     use crate::dto::{BloomView, DigestHex, MemberView, ViewDocument};
     use std::time::Duration;
 
@@ -433,5 +528,29 @@ mod tests {
         assert_eq!(store.view().value.as_ref().map(|view| view.blooms.len()), Some(1));
         assert_eq!(store.view().error.as_deref(), Some("connection refused"));
         assert!(store.view().fetched_at.is_some());
+    }
+
+    #[test]
+    fn a_missing_commission_route_is_cached_and_does_not_clear_the_board() {
+        // The plausible bug: a 404 on /commissions is retried every cadence
+        // (or treated as a store error that dims /view), so a predating
+        // coordinator keeps failing and the board goes stale with it.
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                members: vec![MemberView { workpiece: "wp-a".to_owned(), ..MemberView::default() }],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let mut store = Store::new(Duration::from_secs(1));
+        store.apply_view(Ok(view));
+        assert!(store.due(&ResourceKey::Commissions));
+        store.apply_commissions_missing();
+        assert_eq!(store.commission_capability(), Some(CommissionCapability::Absent));
+        assert!(!store.due(&ResourceKey::Commissions));
+        assert!(!store.due(&ResourceKey::Commission("wp-a".to_owned())));
+        assert!(!store.view().is_stale());
+        assert_eq!(store.view().value.as_ref().map(|view| view.blooms.len()), Some(1));
     }
 }

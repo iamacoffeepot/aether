@@ -29,13 +29,29 @@ impl Endpoint {
 /// `GET path` and decode the JSON body.
 pub fn get_json<T: DeserializeOwned>(endpoint: &Endpoint, path: &str, timeout: Duration) -> Result<T> {
     let (status, bytes) = exchange(endpoint, "GET", path, timeout)?;
+    decode_json(path, status, &bytes)
+}
+
+/// `GET path` that treats `404` as absence rather than a failed body.
+///
+/// A predating coordinator has no commission routes; the backlog probe
+/// caches that fact and must not treat it as a malformed document.
+pub fn get_json_optional<T: DeserializeOwned>(endpoint: &Endpoint, path: &str, timeout: Duration) -> Result<Option<T>> {
+    let (status, bytes) = exchange(endpoint, "GET", path, timeout)?;
+    if status == 404 {
+        return Ok(None);
+    }
+    decode_json(path, status, &bytes).map(Some)
+}
+
+fn decode_json<T: DeserializeOwned>(path: &str, status: u16, bytes: &[u8]) -> Result<T> {
     if status >= 400 {
-        let detail = serde_json::from_slice::<ErrorBody>(&bytes)
+        let detail = serde_json::from_slice::<ErrorBody>(bytes)
             .ok()
-            .map_or_else(|| String::from_utf8_lossy(&bytes).into_owned(), |body| body.error);
+            .map_or_else(|| String::from_utf8_lossy(bytes).into_owned(), |body| body.error);
         bail!("GET {path} failed ({status}): {detail}");
     }
-    serde_json::from_slice(&bytes)
+    serde_json::from_slice(bytes)
         .with_context(|| format!("GET {path} returned {status} but the body is not the expected JSON shape"))
 }
 

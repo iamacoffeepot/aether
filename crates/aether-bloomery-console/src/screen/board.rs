@@ -71,6 +71,7 @@ const LIVE_HINTS: &[KeyHint] = &[
     KeyHint { keys: "t", action: "timeline" },
     KeyHint { keys: "d", action: "days" },
     KeyHint { keys: "c", action: "cost" },
+    KeyHint { keys: "b", action: "backlog" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
 ];
@@ -82,6 +83,7 @@ const HISTORY_HINTS: &[KeyHint] = &[
     KeyHint { keys: "t", action: "timeline" },
     KeyHint { keys: "d", action: "days" },
     KeyHint { keys: "c", action: "cost" },
+    KeyHint { keys: "b", action: "backlog" },
     KeyHint { keys: "Esc", action: "back" },
     KeyHint { keys: "r", action: "refresh" },
     KeyHint { keys: "q", action: "quit" },
@@ -186,6 +188,7 @@ impl Board {
             }
             KeyCode::Char('d') => Outcome::Push(Nav::days()),
             KeyCode::Char('c') => Outcome::Push(Nav::cost()),
+            KeyCode::Char('b') => Outcome::Push(Nav::backlog()),
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
