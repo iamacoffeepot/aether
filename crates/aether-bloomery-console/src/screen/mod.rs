@@ -32,7 +32,8 @@ use backlog::Workpiece;
 use dispatch::DispatchList;
 use journal::{Journal, Record};
 
-/// One frame on the shell's stack.
+/// One pushed frame. The live board lives in the workspace; History is a
+/// pushed `Board` on this stack.
 pub enum Screen {
     Board(Board),
     Detail(Detail),
@@ -49,11 +50,6 @@ pub enum Screen {
 }
 
 impl Screen {
-    #[must_use]
-    pub fn board() -> Self {
-        Self::Board(Board::new())
-    }
-
     #[must_use]
     pub fn history() -> Self {
         Self::Board(Board::history())

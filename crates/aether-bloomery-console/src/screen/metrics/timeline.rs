@@ -67,7 +67,6 @@ impl Timeline {
                 self.cursor.select_prev(&rows, |row| row.workpiece.clone());
                 Outcome::Handled
             }
-            KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -249,16 +248,15 @@ mod tests {
     use super::{Timeline, lane_title};
     use crate::dto::DigestHex;
     use crate::keys::{Outcome, assert_footer_honest};
-    use crate::store::Store;
+    use crate::nav::Nav;
+    use crate::shell::Shell;
     use crossterm::event::KeyEvent;
-    use std::time::Duration;
 
     #[test]
     fn timeline_footer_keys_are_handled() {
-        let store = Store::new(Duration::from_secs(1));
-        let mut view = Timeline::new(DigestHex::from_bytes([1; 32]));
+        let nav = Nav::timeline(DigestHex::from_bytes([1; 32]));
         assert_footer_honest(Timeline::key_hints(), |code| {
-            view.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+            Shell::probe(nav.clone()).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 

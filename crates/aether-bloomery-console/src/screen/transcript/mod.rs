@@ -152,7 +152,6 @@ impl Transcript {
                 self.pan = self.pan.saturating_sub(4);
                 Outcome::Handled
             }
-            KeyCode::Esc => Outcome::Handled,
             KeyCode::Char('r') => Outcome::Refresh,
             KeyCode::Char('q') => Outcome::Quit,
             _ => Outcome::Ignored,
@@ -475,6 +474,8 @@ mod tests {
     use super::Transcript;
     use crate::dto::DispatchFilePage;
     use crate::keys::{Outcome, assert_footer_honest};
+    use crate::nav::Nav;
+    use crate::shell::Shell;
     use crate::store::{Store, TranscriptQuery};
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::Terminal;
@@ -579,10 +580,8 @@ mod tests {
 
     #[test]
     fn transcript_footer_keys_are_handled() {
-        let store = Store::new(Duration::from_secs(1));
-        let mut view = Transcript::new("dispatch-1");
         assert_footer_honest(Transcript::key_hints(), |code| {
-            view.handle_key(KeyEvent::from(code), &store) != Outcome::Ignored
+            Shell::probe(Nav::transcript("dispatch-1")).handle_key(KeyEvent::from(code)) != Outcome::Ignored
         });
     }
 }

@@ -1,11 +1,12 @@
 //! Read-only live operator board for the Bloomery coordinator.
 //!
-//! A shell owns the endpoint, the resource store, chrome, and the screen
-//! stack. Two fetch threads (`live` / `bulk`) perform HTTP; the event loop
-//! only drains replies. War-room chrome (status, alerts, owner-interrupt
-//! queue) renders at every stack depth. The crate mirrors the REST JSON
-//! locally so hex digests deserialize and unknown enum variants degrade
-//! rather than killing the poll; it never writes back.
+//! A shell owns the endpoint, the resource store, a four-pane workspace,
+//! and a stack of pushed detail frames. Two fetch threads (`live` / `bulk`)
+//! perform HTTP; the event loop only drains replies. At rest the workspace
+//! lays out fleet, board, needs-you, and quiet; a drill-in replaces it with
+//! the top frame. The crate mirrors the REST JSON locally so hex digests
+//! deserialize and unknown enum variants degrade rather than killing the
+//! poll; it never writes back.
 
 pub mod cursor;
 pub mod dto;
