@@ -169,6 +169,7 @@ name = "aether-bloomery-git"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery",
+ "aether-bloomery-git",
  "serde",
  "sha2",
  "tempfile",
