@@ -82,6 +82,8 @@ pub enum WriteScopeRevisionResult {
         /// A human-readable failure reason.
         error: String,
     },
+    /// The commission is not open.
+    NotOpen,
 }
 
 /// Persist an approval whose signature the caller has already verified.
@@ -123,6 +125,8 @@ pub enum RecordCommissionApprovalResult {
         /// A human-readable failure reason.
         error: String,
     },
+    /// The commission is not open.
+    NotOpen,
 }
 
 /// Load one commission and recompute its current revision from canonical bytes.

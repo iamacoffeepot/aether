@@ -78,6 +78,17 @@ fn auto_approval(scope: Digest) -> Statement {
     }
 }
 
+fn cancel_of(intent: Digest) -> Statement {
+    Statement {
+        words: intent.as_bytes().to_vec(),
+        provenance: Provenance::AuthorSignature(SignatureEnvelope {
+            signer: KeyId("owner".to_owned()),
+            signature: vec![1, 2, 3],
+        }),
+        parents: Vec::new(),
+    }
+}
+
 fn seed(store: &mut SqliteStore, id: &str) -> Digest {
     store.create(&workpiece(id), &intent()).expect("create commission")
 }
@@ -426,19 +437,41 @@ fn canonical_index_columns_match_the_decoded_revision() {
 }
 
 #[test]
+fn write_revision_on_a_cancelled_commission_is_not_open() {
+    // Pre-fix, a cancelled commission still accepted a new revision (201,
+    // tip advanced). Seal then misreported the closed door as a stale scope.
+    // The write must refuse and leave the tip unmoved.
+    let mut store = memory();
+    let intent = seed(&mut store, "wp-1");
+    let first = write(&mut store, "wp-1", None);
+    store.cancel(&workpiece("wp-1"), &cancel_of(intent)).expect("cancel");
+    let mut next = revision("wp-1", Some(first));
+    next.problem = "after cancel".to_owned();
+    assert_eq!(store.write_revision(&next), Err(CommissionError::NotOpen));
+    let view = store.load(&workpiece("wp-1")).expect("load").expect("exists");
+    assert_eq!(view.head.current_revision, Some(first), "the refused write must not advance current");
+    assert_eq!(view.head.status, CommissionStatus::Cancelled);
+}
+
+#[test]
+fn persist_approval_on_a_cancelled_commission_is_not_open() {
+    // Approvals on a closed commission used to land because persist checked
+    // only that the named scope was the tip.
+    let mut store = memory();
+    let intent = seed(&mut store, "wp-1");
+    let scope = write(&mut store, "wp-1", None);
+    store.cancel(&workpiece("wp-1"), &cancel_of(intent)).expect("cancel");
+    assert_eq!(store.insert_approval(&auto_approval(scope), &FakeKeyProvider), Err(CommissionError::NotOpen));
+    assert!(store.load_approvals(scope).expect("approvals").is_empty(), "the refused approval must not land");
+}
+
+#[test]
 fn cancel_closes_an_open_commission_and_refuses_a_second_close() {
     // Cancel is a write, not a status flip: the statement is stored and the
     // row is closed in one transaction. A second cancel must not rewrite it.
     let mut store = memory();
     let intent = seed(&mut store, "wp-1");
-    let statement = Statement {
-        words: intent.as_bytes().to_vec(),
-        provenance: Provenance::AuthorSignature(SignatureEnvelope {
-            signer: KeyId("owner".to_owned()),
-            signature: vec![1, 2, 3],
-        }),
-        parents: Vec::new(),
-    };
+    let statement = cancel_of(intent);
     assert!(store.cancel(&workpiece("wp-1"), &statement).is_ok());
     let view = store.load(&workpiece("wp-1")).expect("load").expect("exists");
     assert_eq!(view.head.status, CommissionStatus::Cancelled);

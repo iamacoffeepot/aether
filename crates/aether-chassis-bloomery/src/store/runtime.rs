@@ -2317,6 +2317,7 @@ impl NativeActor for StoreCapability {
             }
             Err(CommissionError::MissingRevision) => RecordCommissionApprovalResult::MissingRevision,
             Err(CommissionError::StaleRevision) => RecordCommissionApprovalResult::Stale,
+            Err(CommissionError::NotOpen) => RecordCommissionApprovalResult::NotOpen,
             Err(error @ (CommissionError::WrongSubject | CommissionError::WrongProvenance)) => {
                 RecordCommissionApprovalResult::Refused { error: error.to_string() }
             }
@@ -2430,6 +2431,7 @@ fn write_revision_error(error: CommissionError) -> WriteScopeRevisionResult {
         CommissionError::OrdinalViolation { expected } => WriteScopeRevisionResult::Ordinal { expected },
         CommissionError::UnsupportedSchema(schema) => WriteScopeRevisionResult::UnsupportedSchema { schema },
         CommissionError::MalformedCanonical => WriteScopeRevisionResult::Malformed,
+        CommissionError::NotOpen => WriteScopeRevisionResult::NotOpen,
         error => WriteScopeRevisionResult::Err { error: error.to_string() },
     }
 }

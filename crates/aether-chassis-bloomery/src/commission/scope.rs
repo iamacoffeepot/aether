@@ -26,7 +26,7 @@ pub fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Diges
     let dogfood_brief = sections.get(DOGFOOD).map(|span| body_of(span)).unwrap_or_default();
     let dependencies = sections.get(DEPENDS).map(|span| parse_workpieces(span)).unwrap_or_default();
 
-    Ok(ScopeRevision {
+    let revision = ScopeRevision {
         schema: SCOPE_REVISION_SCHEMA,
         workpiece: WorkpieceId(workpiece.to_owned()),
         predecessor,
@@ -39,7 +39,8 @@ pub fn parse_revision(workpiece: &str, markdown: &str, predecessor: Option<Diges
         dependencies,
         description: String::new(),
         implements: Vec::new(),
-    })
+    };
+    Ok(ScopeRevision { description: render_work_order(&revision), ..revision })
 }
 
 /// Work-order text the seal persists for construct.
@@ -291,7 +292,11 @@ Create then show.\n"
         assert_eq!(revision.declared_surface, ["crates/aether-chassis-bloomery/src/commission/**"]);
         assert_eq!(revision.dogfood_brief, "Create then show.");
         assert!(revision.predecessor.is_none());
-        assert!(revision.description.is_empty(), "the CLI stores structured fields, not a parallel body");
+        assert!(
+            revision.description.contains("Ship bloomery-commission."),
+            "the verb stores the rendered work order, not an empty parallel body: {}",
+            revision.description
+        );
 
         let task = task_text(&revision);
         assert!(task.contains("## Problem statement"), "seal renders the managed heading: {task}");
