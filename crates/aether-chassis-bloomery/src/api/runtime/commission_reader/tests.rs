@@ -2,19 +2,22 @@
 //! caller cannot mistake one closed door for another.
 
 use aether_bloomery::{
-    Digest, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Statement, WorkpieceId,
-    digest_of,
+    CommissionStatus, Digest, MemberDependency, Observation, Provenance, SCOPE_REVISION_SCHEMA, ScopeRevision,
+    ScopeRouting, Statement, WorkpieceId, digest_of,
 };
 use aether_data::wire::to_vec;
 
 use super::adr_touch::{AbsentAdrs, AdrMaturity, SealedAdrStatus};
-use super::{AdmissionRefusal, AdmitError, AdmittedMember, admit_member, workpiece_from_listed, workpieces_from_list};
+use super::{
+    AdmissionRefusal, AdmitError, AdmittedMember, DependencyResolution, admit_member, workpiece_from_listed,
+    workpieces_from_list,
+};
 use crate::bloomery::{AdmissionRequest, AdrTouch, ApprovalPolicy, Decision, Gate, Tier};
 use crate::commission::import::{ImportRequest, IssueSnapshot, import};
 use crate::store::{CommissionBackend, ListCommissionsResult, ListedCommission, LoadCommissionResult, SqliteStore};
 
 fn admit(expected: Digest, result: LoadCommissionResult) -> Result<AdmittedMember, AdmitError> {
-    admit_member(expected, result, &AbsentAdrs)
+    admit_member(expected, result, &AbsentAdrs, &DependencyResolution::default())
 }
 
 fn revision(id: &str, problem: &str) -> ScopeRevision {
@@ -381,6 +384,7 @@ fn a_proposed_adr_path_stays_proposed_only() {
         digest,
         loaded("wp-1", &revision, vec![auto_approval(digest)]),
         &Catalog(&[(path, SealedAdrStatus::Proposed)]),
+        &DependencyResolution::default(),
     )
     .expect("admitted");
 
@@ -390,4 +394,55 @@ fn a_proposed_adr_path_stays_proposed_only() {
         matches!(decision, Decision::AutoApproved(_)),
         "a still-Proposed touch defers to the auto policy, got {decision:?}"
     );
+}
+
+fn admit_depending(dep: &WorkpieceId, resolution: &DependencyResolution) -> AdmittedMember {
+    let mut revision = revision("wp-a", "problem");
+    revision.dependencies = vec![dep.clone()];
+    let digest = digest_of(&revision);
+    admit_member(digest, loaded("wp-a", &revision, vec![auto_approval(digest)]), &AbsentAdrs, resolution)
+        .expect("member itself admits")
+}
+
+#[test]
+fn a_declared_dependency_is_satisfied_only_as_a_co_sealed_member_or_a_landed_commission() {
+    // Pre-fix, completeness_from wrote the literal true, so an open non-member
+    // still admitted and every dependency became an ordering edge. A co-sealed
+    // sibling is Open by construction; treating "not open" as satisfied would
+    // refuse the primary use of declared edges.
+    let dep = WorkpieceId("wp-dep".to_owned());
+    let member = WorkpieceId("wp-a".to_owned());
+    let none: Vec<(WorkpieceId, CommissionStatus)> = Vec::new();
+    let cases = [
+        ("co-sealed", DependencyResolution::new(vec![dep.clone()], none.clone()), true, true),
+        (
+            "landed",
+            DependencyResolution::new(Vec::<WorkpieceId>::new(), vec![(dep.clone(), CommissionStatus::Landed)]),
+            true,
+            false,
+        ),
+        (
+            "open non-member",
+            DependencyResolution::new(Vec::<WorkpieceId>::new(), vec![(dep.clone(), CommissionStatus::Open)]),
+            false,
+            false,
+        ),
+        (
+            "cancelled",
+            DependencyResolution::new(Vec::<WorkpieceId>::new(), vec![(dep.clone(), CommissionStatus::Cancelled)]),
+            false,
+            false,
+        ),
+        ("missing", DependencyResolution::new(Vec::<WorkpieceId>::new(), none), false, false),
+    ];
+    for (name, resolution, closed, edge) in cases {
+        let admitted = admit_depending(&dep, &resolution);
+        assert_eq!(admitted.projection.completeness.dependencies_all_closed, closed, "{name}: completeness bit");
+        let expected_edges = if edge {
+            vec![MemberDependency { member: member.clone(), depends_on: dep.clone() }]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(admitted.edges, expected_edges, "{name}: derived edges");
+    }
 }
