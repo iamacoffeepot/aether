@@ -59,3 +59,6 @@ pub use janitor::{
 };
 pub use land::{LandReactorCapability, LandReactorSetup, LandReactorState, LandTick};
 pub use mirror::{DrainTick, MirrorReactorCapability, MirrorReactorSetup, MirrorReactorState};
+
+#[cfg(test)]
+mod tests;

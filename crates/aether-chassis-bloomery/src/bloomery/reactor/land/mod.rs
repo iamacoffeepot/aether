@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use aether_actor::actor;
-use aether_bloomery::Topic;
+use aether_bloomery::{AdmitResult, Topic};
 use aether_bloomery_github::LandingSource;
 
 pub use runtime::{LandReactorState, LandTick};

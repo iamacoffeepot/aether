@@ -12,7 +12,7 @@
 
 use crate::bloomery::SourceShell;
 use aether_actor::actor;
-use aether_bloomery::Topic;
+use aether_bloomery::{AdmitResult, Topic};
 
 pub use runtime::{IntegrateReactorState, IntegrateTick};
 
