@@ -7,8 +7,8 @@ use serde_json::Value;
 
 use super::Endpoint;
 use super::dto::{
-    BloomSpec, BloomView, ConfigRequest, ConfigView, DraftPatch, DraftView, JournalView, OutcomeView, SealRequest,
-    SupersedeRequest, ViewDocument,
+    BloomSpec, BloomView, ConfigRequest, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView, OutcomeView,
+    SealRequest, SupersedeRequest, ViewDocument,
 };
 use super::http;
 use super::plan::spec_id;
@@ -28,7 +28,33 @@ impl<'a> Client<'a> {
     }
 
     pub fn journal(&self) -> Result<JournalView> {
-        self.get("/journal")
+        // Matches the coordinator's `JOURNAL_MAX_LIMIT` (`GET /journal`).
+        const JOURNAL_PAGE_LIMIT: u64 = 1000;
+
+        let mut records = Vec::new();
+        let mut from_sequence = None;
+        let mut total_matched;
+        loop {
+            let path = from_sequence.map_or_else(
+                || format!("/journal?limit={JOURNAL_PAGE_LIMIT}"),
+                |from| format!("/journal?limit={JOURNAL_PAGE_LIMIT}&from_sequence={from}"),
+            );
+            let page: JournalView = self.get(&path).with_context(|| walk_stopped(&records, &path))?;
+            if page.truncated && page.next_from_sequence.is_none() {
+                bail!("journal page reports more records but no cursor");
+            }
+
+            total_matched = page.total_matched;
+            let next = page.next_from_sequence.filter(|_| page.truncated);
+            records.extend(page.records);
+            let Some(next) = next else {
+                break;
+            };
+            from_sequence = Some(next);
+        }
+
+        let shown = u64::try_from(records.len()).unwrap_or(u64::MAX);
+        Ok(JournalView { records, total_matched, shown, truncated: false, next_from_sequence: None })
     }
 
     pub fn open_draft(&self) -> Result<DraftView> {
@@ -76,6 +102,13 @@ impl<'a> Client<'a> {
     }
 }
 
+fn walk_stopped(records: &[JournalEntry], path: &str) -> String {
+    records.last().and_then(|entry| entry.sequence).map_or_else(
+        || format!("journal walk stopped at {path}"),
+        |sequence| format!("journal walk stopped at sequence {sequence}"),
+    )
+}
+
 fn spec_in_fact(fact: &Value) -> Option<BloomSpec> {
     let spec = fact
         .get("Seal")
@@ -90,4 +123,150 @@ pub fn bloom_in<'a>(view: &'a ViewDocument, bloom_id: &str) -> Result<&'a BloomV
         .iter()
         .find(|bloom| bloom.id.as_hex() == bloom_id)
         .with_context(|| format!("no bloom {bloom_id} in the live view"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+
+    use super::Client;
+    use crate::bloom::Endpoint;
+
+    #[derive(Clone, Debug)]
+    struct Recorded {
+        method: String,
+        path: String,
+    }
+
+    fn page(sequence: u64, fact: &Value, truncated: bool, next: Option<u64>) -> Value {
+        json!({
+            "records": [{ "sequence": sequence, "event": { "fact": fact } }],
+            "total_matched": 3,
+            "shown": 1,
+            "truncated": truncated,
+            "next_from_sequence": next,
+        })
+    }
+
+    fn from_sequence(path: &str) -> Option<u64> {
+        let query = path.split_once('?')?.1;
+        query.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == "from_sequence").then_some(value)?.parse().ok()
+        })
+    }
+
+    #[test]
+    fn journal_walks_three_pages_in_order() {
+        // A client that stops after the first page would return only n=3.
+        let (journal, log) = with_fake(
+            |request| match (request.method.as_str(), from_sequence(&request.path)) {
+                ("GET", None) => (200, page(3, &json!({ "n": 3 }), true, Some(3))),
+                ("GET", Some(3)) => (200, page(2, &json!({ "n": 2 }), true, Some(2))),
+                ("GET", Some(2)) => (200, page(1, &json!({ "n": 1 }), false, None)),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| Client::new(&Endpoint { host: "127.0.0.1".to_owned(), port }).journal().expect("full walk"),
+        );
+
+        let facts: Vec<_> = journal.records.iter().map(|record| record.event.fact.clone()).collect();
+        assert_eq!(facts, vec![json!({ "n": 3 }), json!({ "n": 2 }), json!({ "n": 1 })]);
+        assert!(!journal.truncated);
+        assert_eq!(journal.shown, 3);
+        assert_eq!(journal.total_matched, 3);
+        assert_eq!(journal.next_from_sequence, None);
+        assert_eq!(
+            log.iter().map(|entry| entry.path.as_str()).collect::<Vec<_>>(),
+            vec!["/journal?limit=1000", "/journal?limit=1000&from_sequence=3", "/journal?limit=1000&from_sequence=2",]
+        );
+    }
+
+    #[test]
+    fn journal_refuses_a_truncated_page_with_no_cursor() {
+        // Returning the one page would silently drop the rest of the journal.
+        let error = with_fake(
+            |request| match request.method.as_str() {
+                "GET" => (200, page(3, &json!({ "n": 3 }), true, None)),
+                _ => (404, json!({ "error": format!("unexpected {} {}", request.method, request.path) })),
+            },
+            |port| {
+                Client::new(&Endpoint { host: "127.0.0.1".to_owned(), port })
+                    .journal()
+                    .expect_err("truncated without cursor")
+            },
+        )
+        .0;
+        assert!(
+            error.to_string().contains("journal page reports more records but no cursor"),
+            "silent short read: {error}"
+        );
+    }
+
+    fn serve_one(mut stream: TcpStream, handler: &impl Fn(&Recorded) -> (u16, Value), log: &Mutex<Vec<Recorded>>) {
+        stream.set_read_timeout(Some(Duration::from_secs(2))).expect("read timeout");
+        let mut buf = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 1024];
+            let n = match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock || err.kind() == io::ErrorKind::TimedOut => break,
+                Err(_) => break,
+            };
+            buf.extend_from_slice(&chunk[..n]);
+            let Some(head_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]);
+            let mut parts = head.split_whitespace();
+            let method = parts.next().unwrap_or("").to_owned();
+            let path = parts.next().unwrap_or("").to_owned();
+            let request = Recorded { method, path };
+            log.lock().expect("log").push(request.clone());
+            let (status, reply) = handler(&request);
+            let payload = serde_json::to_vec(&reply).expect("encode reply");
+            let head = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&payload);
+            break;
+        }
+    }
+
+    fn with_fake<H, T>(handler: H, body: impl FnOnce(u16) -> T) -> (T, Vec<Recorded>)
+    where
+        H: Fn(&Recorded) -> (u16, Value) + Send + Sync,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake coordinator");
+        listener.set_nonblocking(true).expect("nonblocking accept");
+        let port = listener.local_addr().expect("local addr").port();
+        let log = Mutex::new(Vec::new());
+        let stop = AtomicBool::new(false);
+        let result = thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((stream, _)) => serve_one(stream, &handler, &log),
+                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            let result = body(port);
+            stop.store(true, Ordering::Relaxed);
+            result
+        });
+        (result, log.into_inner().expect("log"))
+    }
 }

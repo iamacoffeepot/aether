@@ -32,8 +32,17 @@ pub fn day_coverage(view: &ViewDocument, journal: &JournalView) -> DayCoverage {
     if required.is_subset(&covered) {
         DayCoverage::green()
     } else {
-        DayCoverage::hold(required.difference(&covered).cloned().collect::<Vec<_>>().join("\n"))
+        let members = required.difference(&covered).cloned().collect::<Vec<_>>().join("\n");
+        DayCoverage::hold(format!("{members}\n{}", evaluated_trailer(journal)))
     }
+}
+
+fn evaluated_trailer(journal: &JournalView) -> String {
+    let shown = journal.shown;
+    journal.journal_span().map_or_else(
+        || format!("evaluated journal: {shown} records"),
+        |(first, last)| format!("evaluated journal: {shown} records, sequences {first}..={last}"),
+    )
 }
 
 fn integrate_claim(fact: &Value) -> Option<IntegrateClaimView> {
@@ -76,7 +85,14 @@ mod tests {
     }
 
     fn journal(facts: impl IntoIterator<Item = Value>) -> JournalView {
-        JournalView { records: facts.into_iter().map(|fact| JournalEntry { event: JournalEvent { fact } }).collect() }
+        let records: Vec<_> =
+            facts.into_iter().map(|fact| JournalEntry { sequence: None, event: JournalEvent { fact } }).collect();
+        let shown = u64::try_from(records.len()).unwrap_or(u64::MAX);
+        JournalView { records, total_matched: shown, shown, truncated: false, next_from_sequence: None }
+    }
+
+    fn held(members: &str, journal: &JournalView) -> DayCoverage {
+        DayCoverage::hold(format!("{members}\n{}", super::evaluated_trailer(journal)))
     }
 
     fn integrate(workpiece: &str, kind: EvidenceKind) -> Value {
@@ -96,20 +112,20 @@ mod tests {
 
     #[test]
     fn a_landed_member_with_any_other_evidence_kind_is_held() {
-        assert_eq!(
-            day_coverage(&landed(&["issue-4945"]), &journal([integrate("issue-4945", EvidenceKind::Approval)]),),
-            DayCoverage::hold("issue-4945")
-        );
+        let journal = journal([integrate("issue-4945", EvidenceKind::Approval)]);
+        assert_eq!(day_coverage(&landed(&["issue-4945"]), &journal), held("issue-4945", &journal));
     }
 
     #[test]
     fn a_landed_member_with_no_integrate_fact_is_held() {
-        assert_eq!(day_coverage(&landed(&["issue-4945"]), &journal([])), DayCoverage::hold("issue-4945"));
+        let journal = journal([]);
+        assert_eq!(day_coverage(&landed(&["issue-4945"]), &journal), held("issue-4945", &journal));
     }
 
     #[test]
     fn two_uncovered_members_are_both_named() {
-        assert_eq!(day_coverage(&landed(&["issue-b", "issue-a"]), &journal([])), DayCoverage::hold("issue-a\nissue-b"));
+        let journal = journal([]);
+        assert_eq!(day_coverage(&landed(&["issue-b", "issue-a"]), &journal), held("issue-a\nissue-b", &journal));
     }
 
     #[test]
@@ -124,5 +140,17 @@ mod tests {
             ),
             DayCoverage::green()
         );
+    }
+
+    #[test]
+    fn a_landed_member_whose_proof_sits_past_the_first_page_is_green_on_the_full_walk() {
+        // A map that only saw the first journal page would miss this proof and
+        // hold; the full walk includes it.
+        let mut facts: Vec<Value> = (0..100).map(|n| json!({ "other": n })).collect();
+        facts.push(integrate("issue-4945", EvidenceKind::VerificationResult));
+        let first_page = journal(facts.iter().take(100).cloned());
+        let full = journal(facts);
+        assert_eq!(day_coverage(&landed(&["issue-4945"]), &first_page), held("issue-4945", &first_page));
+        assert_eq!(day_coverage(&landed(&["issue-4945"]), &full), DayCoverage::green());
     }
 }
