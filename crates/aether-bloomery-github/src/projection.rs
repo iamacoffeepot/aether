@@ -129,10 +129,14 @@ impl<C: GithubApi + CommissionProjectionApi> GithubProjection<C> {
     /// 2026-08-16 amendment). Returns the issue number this projector now
     /// owns.
     ///
-    /// Title and body are written only to `projection.recorded_issue` or to
-    /// a number [`CommissionProjectionApi::find_issue`] returns for this
-    /// commission's marker. A workpiece that looks like `issue-<N>` is not
-    /// an address — adopting that number would write a human-authored object.
+    /// Title and body are written only to `projection.recorded_issue` — the
+    /// store row the reactor overlays at drain — or, when that is still
+    /// absent, to a number [`CommissionProjectionApi::find_issue`] returns
+    /// for this commission's marker. Search is advisory crash-recovery
+    /// after a create that has not yet been persisted; it is not the
+    /// create-vs-update authority. A workpiece that looks like `issue-<N>`
+    /// is not an address — adopting that number would write a human-authored
+    /// object.
     pub fn project_owned_commission(&self, projection: &CommissionProjection) -> Result<u64, GithubError> {
         let key = commission_key(&projection.workpiece.0);
         let digest = content_digest("bloomery.commission", projection);
@@ -143,6 +147,9 @@ impl<C: GithubApi + CommissionProjectionApi> GithubProjection<C> {
             render_marker(&Marker { key: key.clone(), digest })
         );
 
+        // The recorded number is the authority. Search recovers a create that
+        // has not been persisted yet; a lagging index must not mint a sibling
+        // when the store already owns a number.
         let owned = match projection.recorded_issue {
             Some(number) => Some(number),
             None => self.client.find_issue(&key)?.map(|issue| issue.number),
@@ -279,7 +286,10 @@ fn commission_key(workpiece: &str) -> String {
 }
 
 fn render_commission_title(projection: &CommissionProjection) -> String {
-    format!("{} — {}", projection.workpiece.0, projection.status)
+    // The replica is not the human board's `issue-N` object. Titling it
+    // `{workpiece} — {status}` collides with that numbering (`issue-5215 — open`
+    // reads as another card for #5215). The replica names itself.
+    format!("Bloomery replica — {}", projection.status)
 }
 
 fn render_commission_body(projection: &CommissionProjection) -> String {
