@@ -8,6 +8,7 @@
 
 mod common;
 pub mod fixture;
+pub mod harness;
 
 use fixture::{FixtureHarness, digest};
 
