@@ -6,8 +6,8 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
-    Digest, EvidenceRef, ExecutionLimits, ExecutionStatus, ExecutorBackend, NetworkProfile, Nonce, Transformation,
-    VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder,
+    Digest, EvidenceRef, ExecutionLimits, ExecutionStatus, ExecutorBackend, LaneObservation, NetworkProfile, Nonce,
+    Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder,
 };
 use aether_bloomery_github::ExecutorError;
 
@@ -176,17 +176,7 @@ fn stream_preserves_the_backend_failure_set_unchanged() {
         nonce: Nonce("n-v".to_owned()),
         artifact_id: 1,
         size_bytes: 10,
-        candidate: None,
-        findings: None,
-        failed_verifiers: failures,
-        cost: None,
-        calls: None,
-        session_reuse_arm: None,
-        session_reuse_saved_micro_usd: None,
-        peak_resident_bytes: None,
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation { failed_verifiers: failures, ..Default::default() },
     };
     let (actions, _actions_seen) = Recorder::<ExecutorError>::new();
     let (local, _local_seen) = Recorder::<LocalExecutorError>::returning(vec![reference.clone()]);

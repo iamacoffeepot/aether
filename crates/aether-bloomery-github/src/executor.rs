@@ -42,7 +42,7 @@ use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::{
-    Conclusion, CorrespondenceError, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce,
+    Conclusion, CorrespondenceError, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, LaneObservation, Nonce,
     SharedCorrespondence, VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
 };
 
@@ -411,27 +411,22 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
         Ok(artifacts
             .into_iter()
             .filter(|a| name_carries_nonce(&a.name, &handle.nonce.0))
-            .map(|a| EvidenceRef {
-                failed_verifiers: artifact_failed_verifiers(&a.name),
-                name: a.name,
-                nonce: handle.nonce.clone(),
-                artifact_id: a.id,
-                size_bytes: a.size_bytes,
-                // The Actions lane is zero-secret and name-only (ADR-0150): its
-                // runner pushes nothing and its artifact bytes are never fetched,
-                // so it reports neither a capture, findings, nor a cost — an
-                // attempt run here is unmeasured and writes no study row, rather
-                // than writing a row of zeroes that would read as free.
-                candidate: None,
-                findings: None,
-                cost: None,
-                calls: None,
-                session_reuse_arm: None,
-                session_reuse_saved_micro_usd: None,
-                peak_resident_bytes: None,
-                violating_paths: Vec::new(),
-                surface_request: None,
-                suppression_requests: Vec::new(),
+            .map(|a| {
+                let failed_verifiers = artifact_failed_verifiers(&a.name);
+                EvidenceRef {
+                    name: a.name,
+                    nonce: handle.nonce.clone(),
+                    artifact_id: a.id,
+                    size_bytes: a.size_bytes,
+                    // The Actions lane is zero-secret and name-only (ADR-0150): its
+                    // runner pushes nothing and its artifact bytes are never fetched,
+                    // so it reports neither a capture, findings, nor a cost — an
+                    // attempt run here is unmeasured and writes no study row, rather
+                    // than writing a row of zeroes that would read as free. The
+                    // failure set is the name's mask; every other observation field
+                    // stays at its empty default.
+                    observation: LaneObservation { failed_verifiers, ..LaneObservation::default() },
+                }
             })
             .collect())
     }
@@ -746,7 +741,7 @@ mod tests {
 
         let evidence = exec.stream_evidence(&handle).unwrap();
         assert_eq!(
-            evidence[0].failed_verifiers,
+            evidence[0].observation.failed_verifiers,
             [VerifyFailure::Fmt, VerifyFailure::Test].into_iter().collect::<VerifyFailureSet>(),
         );
     }

@@ -10,9 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
     BackendObjectId, CandidateRef, Conclusion, ConfigRegistry, ConfigScopes, Digest, EvidenceRef, ExecutionStatus,
-    ExecutorBackend, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SessionSlug, SharedCorrespondence, StageId,
-    StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation, VerifyFailureSet, WorkHandle,
-    WorkOrder, is_model_lane,
+    ExecutorBackend, LaneObservation, Nonce, ObservedLaneWrites, PriceTable, ResolvedModel, SessionSlug,
+    SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation,
+    VerifyFailureSet, WorkHandle, WorkOrder, is_model_lane,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::parse_study;
@@ -2071,17 +2071,19 @@ fn judged_evidence_ref(
         // claim and the size is the file's length.
         artifact_id: 0,
         size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        candidate,
-        findings: overlay.findings,
-        failed_verifiers: overlay.failed_verifiers,
-        cost: parse_cost(bytes),
-        calls: parse_calls(bytes),
-        session_reuse_arm: parse_session_reuse_arm(bytes),
-        session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
-        peak_resident_bytes: parse_peak_resident_bytes(bytes),
-        violating_paths,
-        surface_request,
-        suppression_requests,
+        observation: LaneObservation {
+            candidate,
+            findings: overlay.findings,
+            failed_verifiers: overlay.failed_verifiers,
+            cost: parse_cost(bytes),
+            calls: parse_calls(bytes),
+            session_reuse_arm: parse_session_reuse_arm(bytes),
+            session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
+            peak_resident_bytes: parse_peak_resident_bytes(bytes),
+            violating_paths,
+            surface_request,
+            suppression_requests,
+        },
     }
 }
 
@@ -2106,17 +2108,16 @@ fn executor_fault_ref(
         nonce: handle.nonce.clone(),
         artifact_id: 0,
         size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-        candidate,
-        findings,
-        failed_verifiers: VerifyFailureSet::EMPTY,
-        cost,
-        calls,
-        session_reuse_arm: parse_session_reuse_arm(bytes),
-        session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
-        peak_resident_bytes: parse_peak_resident_bytes(bytes),
-        violating_paths: Vec::new(),
-        surface_request: None,
-        suppression_requests: Vec::new(),
+        observation: LaneObservation {
+            candidate,
+            findings,
+            cost,
+            calls,
+            session_reuse_arm: parse_session_reuse_arm(bytes),
+            session_reuse_saved_micro_usd: parse_session_reuse_saved(bytes),
+            peak_resident_bytes: parse_peak_resident_bytes(bytes),
+            ..LaneObservation::default()
+        },
     }
 }
 

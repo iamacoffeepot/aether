@@ -100,20 +100,10 @@ pub enum Conclusion {
     Neutral,
 }
 
-/// A reference to one piece of evidence a run uploaded — the transport-level
-/// list `stream_evidence` returns, filtered to the order's nonce. Decoding the
-/// referenced bytes into a reducer attempt-result is the sibling
-/// evidence-return path, not this port: the port returns *references*.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct EvidenceRef {
-    /// The uploaded artifact's name.
-    pub name: String,
-    /// The nonce this evidence belongs to (the order's).
-    pub nonce: Nonce,
-    /// The backend-assigned artifact id, for a later fetch.
-    pub artifact_id: u64,
-    /// The artifact's size in bytes.
-    pub size_bytes: u64,
+/// Host-recorded state riding a reference, carried unchanged from the executor
+/// backend to intake. A new evidence channel is a field here and nowhere else.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct LaneObservation {
     /// The candidate the run captured (ADR-0152) — reported by a backend that
     /// commits a model-lane run's work itself (the local executor); `None` from
     /// a zero-secret backend (the Actions lane captures nothing) and from every
@@ -182,6 +172,24 @@ pub struct EvidenceRef {
     /// data channel. Empty from the name-only Actions backend, from every
     /// mechanical run that stated none, and from every model lane.
     pub suppression_requests: Vec<SuppressionRequest>,
+}
+
+/// A reference to one piece of evidence a run uploaded — the transport-level
+/// list `stream_evidence` returns, filtered to the order's nonce. Decoding the
+/// referenced bytes into a reducer attempt-result is the sibling
+/// evidence-return path, not this port: the port returns *references*.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EvidenceRef {
+    /// The uploaded artifact's name.
+    pub name: String,
+    /// The nonce this evidence belongs to (the order's).
+    pub nonce: Nonce,
+    /// The backend-assigned artifact id, for a later fetch.
+    pub artifact_id: u64,
+    /// The artifact's size in bytes.
+    pub size_bytes: u64,
+    /// Host-recorded state riding this reference, carried unchanged to intake.
+    pub observation: LaneObservation,
 }
 
 /// One live construct lane's working tree, as the executor last read it

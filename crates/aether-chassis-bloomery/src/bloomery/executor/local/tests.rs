@@ -218,8 +218,11 @@ fn a_verify_status_field_drives_the_verdict() {
     );
     assert_eq!(upload.subject, subject);
     let expected = [VerifyFailure::Fmt, VerifyFailure::Test].into_iter().collect::<VerifyFailureSet>();
-    assert_eq!(refs[0].failed_verifiers, expected, "the reference carries the body-derived canonical set");
-    assert_eq!(upload.failed_verifiers, expected, "the body-derived set reaches the upload through the name");
+    assert_eq!(refs[0].observation.failed_verifiers, expected, "the reference carries the body-derived canonical set");
+    assert_eq!(
+        upload.observation.failed_verifiers, expected,
+        "the body-derived set reaches the upload through the name"
+    );
 }
 
 #[test]
@@ -240,8 +243,8 @@ fn a_passing_verify_body_projects_the_empty_failure_set() {
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload = NameEvidenceClaims.claim_for(&reference).expect("canonical local name decodes");
 
-    assert!(reference.failed_verifiers.is_empty());
-    assert!(upload.failed_verifiers.is_empty());
+    assert!(reference.observation.failed_verifiers.is_empty());
+    assert!(upload.observation.failed_verifiers.is_empty());
     assert_eq!(upload.verdict, StageVerdict::VerificationPassed);
 }
 
@@ -268,7 +271,7 @@ fn a_malformed_body_failure_set_fails_closed() {
         StageVerdict::ExecutorFault,
         "a verify body whose typed set does not decode rendered no judgment",
     );
-    assert!(upload.failed_verifiers.is_empty(), "invalid body data is never projected as a typed claim");
+    assert!(upload.observation.failed_verifiers.is_empty(), "invalid body data is never projected as a typed claim");
 }
 
 #[test]
@@ -297,7 +300,10 @@ fn an_environment_status_yields_an_executor_fault_rather_than_a_failing_review()
 
     assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
     assert_eq!(upload.subject, subject, "a fault still binds the exact digest the order displayed");
-    assert!(upload.failed_verifiers.is_empty(), "a fault names no verifier identity — nothing was verified");
+    assert!(
+        upload.observation.failed_verifiers.is_empty(),
+        "a fault names no verifier identity — nothing was verified"
+    );
 }
 
 #[test]
@@ -326,8 +332,11 @@ fn a_verify_lane_environment_status_is_an_executor_fault() {
 
     assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
     assert_eq!(upload.subject, subject, "an unjudged verify still binds the exact digest the order displayed");
-    assert!(reference.failed_verifiers.is_empty(), "the reference carries the already-decoded empty set");
-    assert!(upload.failed_verifiers.is_empty(), "no verifier judged the candidate, so none is charged for it");
+    assert!(reference.observation.failed_verifiers.is_empty(), "the reference carries the already-decoded empty set");
+    assert!(
+        upload.observation.failed_verifiers.is_empty(),
+        "no verifier judged the candidate, so none is charged for it"
+    );
     assert_eq!(
         upload.detail,
         Digest::of_wire_bytes(evidence.as_bytes()),
@@ -411,7 +420,7 @@ fn a_signal_killed_run_with_no_evidence_is_a_host_fault() {
     let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized fault decodes");
     assert_eq!(upload.verdict, StageVerdict::ExecutorFault);
     assert_eq!(upload.subject, subject);
-    assert!(upload.failed_verifiers.is_empty());
+    assert!(upload.observation.failed_verifiers.is_empty());
     assert_eq!(
         upload.detail,
         Digest::of_wire_bytes(&synthesized_fault_bytes(nonce, subject, "signaled", Some(9))),
@@ -449,7 +458,7 @@ fn a_valid_authored_failure_is_kept_after_a_nonzero_exit() {
 
     let upload = NameEvidenceClaims.claim_for(&exec.stream_evidence(&handle).unwrap()[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed);
-    assert_eq!(upload.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Fmt));
+    assert_eq!(upload.observation.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Fmt));
     assert_eq!(upload.detail, Digest::of_wire_bytes(evidence.as_bytes()));
 }
 
@@ -467,7 +476,7 @@ fn a_valid_authored_failure_is_kept_after_a_terminating_signal() {
         StageVerdict::VerificationFailed,
         "a bound authored fail is still a judgment after SIGKILL",
     );
-    assert_eq!(upload.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Clippy));
+    assert_eq!(upload.observation.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Clippy));
 }
 
 #[test]
@@ -671,9 +680,9 @@ fn evidence_for_a_different_nonce_fails_closed_before_its_claims_are_read() {
     let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes");
     assert_eq!(upload.verdict, StageVerdict::ExecutorFault, "a stale body cannot advance this order");
     assert_eq!(refs[0].nonce, Nonce(expected.to_owned()), "the authoritative handle remains the claim nonce");
-    assert!(refs[0].candidate.is_none(), "a stale construct body cannot trigger capture");
-    assert!(refs[0].findings.is_none(), "a stale body cannot direct a repair lap");
-    assert!(refs[0].cost.is_none(), "a stale body cannot enter study accounting");
+    assert!(refs[0].observation.candidate.is_none(), "a stale construct body cannot trigger capture");
+    assert!(refs[0].observation.findings.is_none(), "a stale body cannot direct a repair lap");
+    assert!(refs[0].observation.cost.is_none(), "a stale body cannot enter study accounting");
     assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Unknown, "the terminal stale body is consumed");
 }
 
@@ -698,7 +707,7 @@ fn a_declined_construct_keeps_the_lane_findings_on_the_evidence_ref() {
     let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes");
     assert_eq!(upload.verdict, StageVerdict::Declined);
     assert_eq!(
-        refs[0].findings.as_deref(),
+        refs[0].observation.findings.as_deref(),
         Some("the work lies outside the declared surface"),
         "the lane's stated reason has to ride the ref so a park can name it",
     );
@@ -718,7 +727,7 @@ fn a_decline_whose_request_cannot_be_bound_degrades_to_a_plain_park() {
 
     let refs = exec.stream_evidence(&handle).unwrap();
 
-    assert!(refs[0].surface_request.is_none(), "an unbindable request rides nothing");
+    assert!(refs[0].observation.surface_request.is_none(), "an unbindable request rides nothing");
     assert_eq!(
         NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes").verdict,
         StageVerdict::Declined,
@@ -1377,7 +1386,7 @@ fn a_passing_construct_run_captures_its_candidate() {
     let handle = exec.submit(&construct_order(digest(5), "n-cap")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
 
-    let candidate = refs[0].candidate.expect("a passed construct run reports its capture");
+    let candidate = refs[0].observation.candidate.expect("a passed construct run reports its capture");
     let captured = canned_capture();
     assert_eq!(
         store.resolve_backend_object(&candidate.tree).unwrap().as_ref(),
@@ -1392,7 +1401,7 @@ fn a_passing_construct_run_captures_its_candidate() {
     assert_ne!(candidate.tree, candidate.checkout, "the two axes are domain-separated digests");
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationPassed);
-    assert_eq!(upload.candidate, Some(candidate), "the claim carries the capture to the intake");
+    assert_eq!(upload.observation.candidate, Some(candidate), "the claim carries the capture to the intake");
 }
 
 // The lane's commit message reaches both places the host uses it: the capture
@@ -1415,7 +1424,7 @@ fn a_captured_candidates_message_reaches_the_capture_and_its_member_row() {
         .with_message_store(open_store(&store, &member_order("n-msg", "issue-4242")));
 
     let handle = exec.submit(&construct_order(digest(5), "n-msg")).unwrap();
-    assert!(exec.stream_evidence(&handle).unwrap()[0].candidate.is_some(), "the run captured a candidate");
+    assert!(exec.stream_evidence(&handle).unwrap()[0].observation.candidate.is_some(), "the run captured a candidate");
 
     assert_eq!(
         captured_messages.lock().unwrap().as_slice(),
@@ -1450,7 +1459,7 @@ fn a_run_that_captured_nothing_files_no_message() {
     .with_message_store(open_store(&store, &member_order("n-void-msg", "issue-4242")));
 
     let handle = exec.submit(&construct_order(digest(5), "n-void-msg")).unwrap();
-    assert!(exec.stream_evidence(&handle).unwrap()[0].candidate.is_none(), "nothing was captured");
+    assert!(exec.stream_evidence(&handle).unwrap()[0].observation.candidate.is_none(), "nothing was captured");
 
     assert_eq!(
         SqliteStore::open(store.path().join("bloomery.sqlite").to_str().unwrap())
@@ -1510,7 +1519,7 @@ fn a_passing_construct_run_with_nothing_to_capture_fails_closed() {
     let handle = exec.submit(&construct_order(digest(5), "n-void")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
 
-    assert!(refs[0].candidate.is_none());
+    assert!(refs[0].observation.candidate.is_none());
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "a lost capture is a failed attempt");
 }
@@ -1530,13 +1539,13 @@ fn a_killed_construct_captures_its_partial_worktree_and_still_fails() {
     let handle = exec.submit(&construct_order(digest(5), "n-kill")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
 
-    let candidate = refs[0].candidate.expect("a killed construct that wrote something reports its capture");
+    let candidate = refs[0].observation.candidate.expect("a killed construct that wrote something reports its capture");
     let captured = canned_capture();
     assert_eq!(store.resolve_backend_object(&candidate.tree).unwrap().as_ref(), Some(&captured.tree));
     assert_eq!(store.resolve_backend_object(&candidate.checkout).unwrap().as_ref(), Some(&captured.commit));
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "a populated candidate cannot flip passed");
-    assert_eq!(upload.candidate, Some(candidate), "the claim carries the checkpoint to the intake");
+    assert_eq!(upload.observation.candidate, Some(candidate), "the claim carries the checkpoint to the intake");
 }
 
 // A killed lane that died before writing anything captures nothing and does
@@ -1553,7 +1562,7 @@ fn a_killed_construct_with_a_clean_worktree_captures_nothing_and_does_not_warn()
     let handle = exec.submit(&construct_order(digest(5), "n-clean-die")).unwrap();
     let refs = with_default(EventRecorder(Arc::clone(&events)), || exec.stream_evidence(&handle).unwrap());
 
-    assert!(refs[0].candidate.is_none(), "a clean death is not a checkpoint");
+    assert!(refs[0].observation.candidate.is_none(), "a clean death is not a checkpoint");
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed);
     let rendered = events.rendered();
@@ -1600,7 +1609,7 @@ fn a_capture_whose_correspondence_write_faults_fails_closed() {
     let handle = exec.submit(&construct_order(digest(5), "n-fault")).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
 
-    assert!(refs[0].candidate.is_none(), "an unrecordable capture carries no candidate");
+    assert!(refs[0].observation.candidate.is_none(), "an unrecordable capture carries no candidate");
     let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
     assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "an unrecordable capture is a failed attempt");
 }
@@ -1918,7 +1927,7 @@ fn a_readopted_run_that_recorded_no_slot_captures_nothing_rather_than_guessing()
     assert_eq!(report.readopted, vec![Nonce(nonce.clone())], "the evidence dir is still the footprint");
 
     let refs = exec.stream_evidence(&WorkHandle::new(Nonce(nonce))).unwrap();
-    assert!(refs[0].candidate.is_none(), "a run whose checkout cannot be named captures nothing");
+    assert!(refs[0].observation.candidate.is_none(), "a run whose checkout cannot be named captures nothing");
     assert_eq!(
         NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes").verdict,
         StageVerdict::VerificationFailed,
@@ -2376,7 +2385,10 @@ fn a_queued_dispatch_whose_launch_fails_becomes_a_host_fault_rather_than_a_deadl
         .claim_for(refs.first().expect("one synthesized fault"))
         .expect("the synthesized fault is a well-formed attempt claim");
     assert_eq!(claimed.verdict, StageVerdict::ExecutorFault, "a launch that never happened judged nothing");
-    assert!(claimed.failed_verifiers.is_empty(), "and named no verifier, so no repair lap is dispatched for it");
+    assert!(
+        claimed.observation.failed_verifiers.is_empty(),
+        "and named no verifier, so no repair lap is dispatched for it"
+    );
     assert!(
         exec.lane_occupancy().slots.is_empty(),
         "the failed launch hands its lane slot back rather than shrinking the ceiling",
@@ -2762,7 +2774,7 @@ fn a_cross_seat_dependent_never_resumes_the_predecessors_session() {
     let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
     let first = exec.submit(&grok_order(digest(5), &test_nonce("A"), "issue-A")).unwrap();
     let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
+    let checkout = refs[0].observation.candidate.expect("A captured").checkout;
     exec.cancel(&holding).unwrap();
 
     let second = exec.submit(&order_on(claude_order(digest(5), &test_nonce("B"), "issue-B"), checkout)).unwrap();
@@ -2964,7 +2976,7 @@ fn a_dependent_construct_resumes_the_journaled_predecessor_session() {
     let holding = exec.submit(&construct_order(digest(5), &holder)).unwrap();
     let first = exec.submit(&claude_order(digest(5), &predecessor, "issue-A")).unwrap();
     let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
+    let checkout = refs[0].observation.candidate.expect("A captured").checkout;
     let occupying = exec.submit(&construct_order(digest(5), &occupier)).unwrap();
     let _ = occupying;
 
@@ -3015,7 +3027,7 @@ fn a_missing_predecessor_session_does_not_fall_through_to_the_pool() {
 
     let first = exec.submit(&claude_order(digest(5), &predecessor, "issue-A")).unwrap();
     let refs = exec.stream_evidence(&first).unwrap();
-    let checkout = refs[0].candidate.expect("A captured").checkout;
+    let checkout = refs[0].observation.candidate.expect("A captured").checkout;
 
     exec.stream_evidence(&exec.submit(&order_on(claude_order(digest(5), &dependent, "issue-B"), checkout)).unwrap())
         .unwrap();
