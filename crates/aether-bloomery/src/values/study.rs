@@ -22,14 +22,25 @@ use serde::{Deserialize, Serialize};
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::BloomId;
 
-/// The gradeable cost columns a runner result record carries — the subset of
-/// `scripts/agent-usage-record.mjs`'s object the study stage grades. Token
-/// counts and durations are integral by nature; the dollar cost is carried in
-/// **micro-USD** (`total_cost_usd` × `1_000_000`) so the whole record is `Eq`
-/// and content-addressable — a float dollar amount is not a stable address.
+/// The gradeable cost columns of one attempt: the runner's measured usage plus
+/// the micro-USD valuation admission priced against the bloom's sealed
+/// [`PriceTable`](super::PriceTable).
+///
+/// Token, turn, and duration columns are measurements carried from the runner
+/// result record `scripts/agent-usage-record.mjs` derives. The dollar column is
+/// **not**: at durable study admission the chassis prices those tokens from the
+/// sealed table and writes that figure here. Carrying it in **micro-USD** keeps
+/// the whole record `Eq` and content-addressable — a float dollar amount is not
+/// a stable address.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct StudyCost {
-    /// The attempt's total cost in micro-USD (`total_cost_usd` × `1_000_000`).
+    /// Admission-priced valuation of the measured tokens, in micro-USD, under
+    /// the bloom's sealed [`PriceTable`](super::PriceTable).
+    ///
+    /// The runner result record's `total_cost_usd` is a harness claim, not this
+    /// field's source; it is retained outside the durable record. Zero can mean
+    /// unpriced — a missing model or rate row records zero rather than failing
+    /// the artifact — so a zero here does not prove no economic cost.
     pub cost_micro_usd: u64,
     /// The number of agent turns the attempt took (`num_turns`).
     pub turns: u64,
