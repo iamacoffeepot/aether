@@ -15,9 +15,10 @@ These surfaces operate at different scopes:
 
 | Surface | Scope | Mutation |
 |---|---|---|
-| `scripts/ensure-tunnel.sh` while a healthy tunnel answers | harness discovery | none; it exits without replacing the live stack |
-| `scripts/ensure-tunnel.sh` while `:8890` answers but a child is dead | host process stack | replaces the unhealthy tunnel — a bound port is not health |
-| `scripts/ensure-tunnel.sh` on a cold host | host process stack | builds and starts the tunnel, hub, and `aether-mcp` |
+| `scripts/ensure-tunnel.sh` while a healthy tunnel answers | harness discovery | none; it exits 0 without replacing the live stack |
+| `scripts/ensure-tunnel.sh` while `:8890` answers but a child is dead | host process stack | replaces the unhealthy tunnel when `lsof` can name the listener (exit 0 after relaunch) — a bound port is not health; otherwise reports that it could not reclaim the port and exits 1 |
+| `scripts/ensure-tunnel.sh` while `:8890` answers but the holder is not an identifiable aether-tunnel (or `/admin/status` is unreadable) | host process stack | none; it refuses to kill an unidentified holder and exits 1. Free the port, or set `AETHER_TUNNEL_PORT`, and rerun |
+| `scripts/ensure-tunnel.sh` on a cold host | host process stack | builds and starts the tunnel, hub, and `aether-mcp`; exits 0 |
 | `GET /admin/status` | tunnel observation | none; reports child liveness, PIDs, and ports |
 | `terminate_substrate(engine_id)` | one supervised engine | force-stops that engine |
 | `POST /admin/restart-hub` | entire supervised fleet | terminates and replaces the hub process |
