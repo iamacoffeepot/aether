@@ -16,24 +16,39 @@ import resolve_approval_tier as resolver
 ROOT = Path(resolver.__file__).resolve().parents[4]
 CANONICAL_SOURCE = (ROOT / "scripts" / "surface-match.py").read_text(encoding="utf-8")
 POLICY = """\
-default: judge
-rules:
-  - glob: "/Cargo.toml"
-    tier: human
-  - glob: "crates/*/Cargo.toml"
-    tier: human
-  - glob: "crates/aether-data/**"
-    tier: human
-  - glob: "docs/adr/**"
-    tier: human
-  - glob: ".agents/**"
-    tier: human
-  - glob: "docs/guide/**"
-    tier: auto
-  - glob: "crates/aether-kit/**"
-    tier: auto
-  - glob: "crates/aether-render/**"
-    tier: judge
+default = "judge"
+
+[[rules]]
+glob = "/Cargo.toml"
+tier = "human"
+
+[[rules]]
+glob = "crates/*/Cargo.toml"
+tier = "human"
+
+[[rules]]
+glob = "crates/aether-data/**"
+tier = "human"
+
+[[rules]]
+glob = "docs/adr/**"
+tier = "human"
+
+[[rules]]
+glob = ".agents/**"
+tier = "human"
+
+[[rules]]
+glob = "docs/guide/**"
+tier = "auto"
+
+[[rules]]
+glob = "crates/aether-kit/**"
+tier = "auto"
+
+[[rules]]
+glob = "crates/aether-render/**"
+tier = "judge"
 """
 
 
@@ -50,7 +65,7 @@ class ResolverFixture:
 
         files = {
             ".agents/skills/approve/SKILL.md": "approve\n",
-            "approval-policy.yml": policy,
+            resolver.POLICY_PATH: policy,
             "Cargo.toml": "[workspace]\n",
             "Cargo.lock": "# lock\n",
             "crates/aether-render/src/lib.rs": "cap\n",
@@ -213,11 +228,17 @@ class ResolverTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 2)
                 self.assertIn(message, completed.stderr)
 
+    def test_policy_path_names_the_checked_in_file(self) -> None:
+        # Tripwire: the captured-ref resolver git-cats this path; after #4921 the
+        # checked-in policy is TOML, so a leftover .yml name fails every approval
+        # before a tier can be resolved.
+        self.assertTrue((ROOT / resolver.POLICY_PATH).is_file())
+
     def test_malformed_policy_fails(self) -> None:
         self.fixture.close()
         self.fixture = ResolverFixture(
             self,
-            'default: judge\nrules:\n  - glob: "docs/guide/**"\n    tier: owner\n',
+            'default = "judge"\n[[rules]]\nglob = "docs/guide/**"\ntier = "owner"\n',
         )
         completed = self.fixture.invoke(["docs/guide/**"], ["docs/guide/page.md"])
         self.assertEqual(completed.returncode, 2)

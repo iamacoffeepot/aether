@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The declared-surface matcher — the one place gitwildmatch semantics are decided.
 
-An issue's `## Declared surface` is a block of globs; `approval-policy.yml`
+An issue's `## Declared surface` is a block of globs; `approval-policy.toml`
 maps globs to approval tiers. The direct-drive Codex approve skill loads this
 matcher from the captured `origin/main` commit so Plan-to-Ready validation and
 tier resolution use owner-authored semantics. The CLI also retains containment
@@ -49,6 +49,7 @@ Two modes:
 
 import re
 import sys
+import tomllib
 
 
 def compile_glob(pat):
@@ -142,75 +143,46 @@ def read_globs(path):
     ]
 
 
-def _parse_policy_scalar(raw):
-    raw = raw.strip()
-    if not raw:
-        return None
-    if raw[0] in "\"'":
-        if len(raw) < 2 or raw[-1] != raw[0] or raw[0] in raw[1:-1]:
-            return None
-        return raw[1:-1] or None
-    if "\"" in raw or "'" in raw:
-        return None
-    return raw
-
-
 def load_policy_text(text):
     # The file's shape is owned by this repo (a `default` tier plus a list of
-    # {glob, tier} rules), so it is parsed with the standard library rather than
-    # PyYAML, which the runner is not guaranteed to ship: a hand parser keeps the
-    # tier deterministic instead of silently degrading to "?". Tier resolution is
-    # most-restrictive-wins over the matching rules, falling back to the file's
-    # own `default` — the same resolution /approve applies at the Plan->Ready
-    # edge, so both consumers quote the tier a path would actually cost.
+    # {glob, tier} rules). Parse it as typed TOML through the standard library
+    # so the Python matcher and the chassis host (`toml::from_str` into
+    # `ApprovalPolicy`, deny_unknown_fields) refuse the same surprises: unknown
+    # keys, unknown tier spellings, and structural surprises are None rather
+    # than a guessed tier. Tier resolution is most-restrictive-wins over the
+    # matching rules, falling back to the file's own `default` — the same
+    # resolution /approve applies at the Plan->Ready edge, so both consumers
+    # quote the tier a path would actually cost.
     if not text.strip():
         # The fetch failed (no policy on the default branch yet), so the tier is
         # honestly unresolved rather than assumed.
         return None
-    default, rules, pending, saw_rules = None, [], None, False
-    for raw in text.splitlines():
-        line = raw.split("#", 1)[0].rstrip()
-        if not line.strip():
-            continue
-        m = re.match(r"^default:\s*(.*?)\s*$", line)
-        if m:
-            tier = _parse_policy_scalar(m.group(1))
-            if default is not None or tier not in RANK:
-                return None
-            default = tier
-            continue
-        if re.match(r"^rules:\s*$", line):
-            if saw_rules:
-                return None
-            saw_rules = True
-            continue
-        # This parser owns one intentionally small YAML shape. Exact indentation
-        # keeps a missing nested field from consuming an unrelated top-level key.
-        m = re.match(r"^  - glob:\s*(.*?)\s*$", line)
-        if m:
-            if not saw_rules or pending is not None:
-                return None
-            pending = _parse_policy_scalar(m.group(1))
-            if pending is None:
-                return None
-            continue
-        m = re.match(r"^    tier:\s*(.*?)\s*$", line)
-        if m and pending is not None:
-            tier = _parse_policy_scalar(m.group(1))
-            if tier not in RANK:
-                return None
-            if not valid_policy_glob(pending):
-                return None
-            try:
-                matcher = compile_glob(pending)
-            except re.error:
-                return None
-            rules.append((pending, matcher, tier))
-            pending = None
-            continue
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
         return None
-    if default is None or not saw_rules or pending is not None or not rules:
+
+    if not isinstance(parsed, dict) or parsed.keys() - {"default", "rules"}:
         return None
+    default = parsed.get("default")
+    if not isinstance(default, str) or default not in RANK:
+        return None
+    raw_rules = parsed.get("rules")
+    if not isinstance(raw_rules, list) or not raw_rules:
+        return None
+
+    rules = []
+    for item in raw_rules:
+        if not isinstance(item, dict) or item.keys() != {"glob", "tier"}:
+            return None
+        glob, tier = item["glob"], item["tier"]
+        if not isinstance(glob, str) or not isinstance(tier, str) or tier not in RANK or not valid_policy_glob(glob):
+            return None
+        try:
+            matcher = compile_glob(glob)
+        except re.error:
+            return None
+        rules.append((glob, matcher, tier))
     return default, rules
 
 
