@@ -26,10 +26,11 @@ use serde::{Deserialize, Serialize};
 use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind};
 use aether_bloomery::{
     CandidateRef, ConfigRegistry, Digest, Disposition, Event, Forecast, MemberDependency, Membership, Outcome,
-    ScopeRevision, ScopeVerifyInput, ScopeVerifyReport, StageId, Statement, SuppressionVerdict, Workpiece, WorkpieceId,
+    ScopeRevision, ScopeVerifyReport, StageId, Statement, SuppressionVerdict, Workpiece, WorkpieceId,
 };
 
 use crate::bloomery::{AdrTouch, Completeness};
+use crate::store::RevisionEvidence;
 
 /// A draft plus its server-minted handle. The handle keys the in-memory
 /// shaping state, so a subsequent `PATCH` / `seal` names the draft by it.
@@ -610,19 +611,19 @@ pub struct CreateCommissionRequest {
     pub intent: Statement,
 }
 
-/// `POST /commissions/{id}/revisions` body, read for the projection only.
+/// `POST /commissions/{id}/revisions` body — the signed revision and sidecar
+/// evidence about it.
 ///
-/// The same body also decodes as a bare [`ScopeRevision`]; this shape reads the
-/// one field beside it. Kept separate rather than flattened onto the revision
-/// because the revision's bytes are the signed subject and must stay exactly
-/// what the encoder writes.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RevisionProjection {
-    /// The workpiece's field records projected for the freeze check
-    /// (ADR-0208). Absent for a hand-authored revision, which carries no
-    /// records — absence writes no report, never a clean one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope_verify: Option<ScopeVerifyInput>,
+/// The revision's own bytes are the signed subject and must stay exactly what
+/// the encoder writes; [`evidence`](Self::evidence) rides beside them and is
+/// never hashed in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriteRevisionRequest {
+    /// The revision being stored.
+    pub revision: ScopeRevision,
+    /// What is known about the revision without being part of it.
+    #[serde(default)]
+    pub evidence: RevisionEvidence,
 }
 
 /// `POST /commissions` reply.

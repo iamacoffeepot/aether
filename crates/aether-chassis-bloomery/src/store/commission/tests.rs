@@ -13,7 +13,9 @@ use aether_bloomery::{
 use aether_data::wire::{from_bytes, to_vec};
 use ed25519_dalek::{Signer, SigningKey};
 
-use super::{CommissionBackend, CommissionError, RecordCommissionApproval, RecordCommissionApprovalResult};
+use super::{
+    CommissionBackend, CommissionError, RecordCommissionApproval, RecordCommissionApprovalResult, RevisionEvidence,
+};
 use crate::bloomery::{ScopeRunRefusal, TopicOutbox, open_scope_run};
 use crate::store::runtime::{SqliteStore, StoreBackend, StoreCapabilityState};
 use crate::store::{JournalWrite, now_unix_millis};
@@ -144,7 +146,11 @@ fn seed(store: &mut SqliteStore, id: &str) -> Digest {
 }
 
 fn write(store: &mut SqliteStore, id: &str, predecessor: Option<Digest>) -> Digest {
-    store.write_revision(&revision(id, predecessor)).expect("write revision")
+    store.write_revision(&revision(id, predecessor), &RevisionEvidence::default()).expect("write revision")
+}
+
+fn evidence(input: ScopeVerifyInput) -> RevisionEvidence {
+    RevisionEvidence { scope_verify: Some(input) }
 }
 
 #[test]
@@ -254,7 +260,7 @@ fn a_revision_round_trips_the_implemented_adr_list() {
     seed(&mut store, "wp-1");
     let mut revision = revision("wp-1", None);
     revision.implements = vec![Digest::from_bytes([9; 32])];
-    let digest = store.write_revision(&revision).expect("write");
+    let digest = store.write_revision(&revision, &RevisionEvidence::default()).expect("write");
     let loaded = store.load_revision(digest).expect("load").expect("row");
     assert_eq!(loaded.implements, revision.implements);
     assert_eq!(digest_of(&loaded), digest);
@@ -360,7 +366,7 @@ fn a_first_revision_after_one_exists_is_an_ordinal_violation() {
     let mut skipped = revision("wp-1", None);
     skipped.problem = "a different first revision".to_owned();
     assert_eq!(
-        store.write_revision(&skipped),
+        store.write_revision(&skipped, &RevisionEvidence::default()),
         Err(CommissionError::OrdinalViolation { expected: 2 }),
         "a second first-revision must not land"
     );
@@ -444,7 +450,7 @@ fn a_tampered_signed_approval_is_unverified() {
 fn write_revision_for_an_unknown_commission_is_refused() {
     let mut store = memory();
     assert_eq!(
-        store.write_revision(&revision("missing", None)),
+        store.write_revision(&revision("missing", None), &RevisionEvidence::default()),
         Err(CommissionError::MissingCommission("missing".to_owned()))
     );
 }
@@ -497,7 +503,7 @@ fn write_revision_on_a_cancelled_commission_is_not_open() {
     store.cancel(&workpiece("wp-1"), &cancel_of(intent)).expect("cancel");
     let mut next = revision("wp-1", Some(first));
     next.problem = "after cancel".to_owned();
-    assert_eq!(store.write_revision(&next), Err(CommissionError::NotOpen));
+    assert_eq!(store.write_revision(&next, &RevisionEvidence::default()), Err(CommissionError::NotOpen));
     let view = store.load(&workpiece("wp-1")).expect("load").expect("exists");
     assert_eq!(view.head.current_revision, Some(first), "the refused write must not advance current");
     assert_eq!(view.head.status, CommissionStatus::Cancelled);
@@ -594,7 +600,7 @@ fn unresolved_dependencies_name_uncommissioned_ids_once() {
     seed(&mut store, "wp-1");
     let mut missing = revision("wp-1", None);
     missing.dependencies = vec![workpiece("ghost"), workpiece("ghost"), workpiece("wp-2")];
-    let digest = store.write_revision(&missing).expect("write");
+    let digest = store.write_revision(&missing, &RevisionEvidence::default()).expect("write");
     assert_eq!(
         store.unresolved_dependencies(digest).expect("probe"),
         vec![workpiece("ghost"), workpiece("wp-2")],
@@ -604,7 +610,7 @@ fn unresolved_dependencies_name_uncommissioned_ids_once() {
     store.create(&workpiece("wp-2"), &Statement { words: b"ship wp-2".to_vec(), ..intent() }).expect("create wp-2");
     let mut present = revision("wp-1", Some(digest));
     present.dependencies = vec![workpiece("wp-2")];
-    let next = store.write_revision(&present).expect("write successor");
+    let next = store.write_revision(&present, &RevisionEvidence::default()).expect("write successor");
     assert!(
         store.unresolved_dependencies(next).expect("probe").is_empty(),
         "a created commission is not an unresolved dependency"
@@ -620,7 +626,7 @@ fn the_live_approve_door_refuses_uncommissioned_dependencies() {
     seed(&mut store, "wp-1");
     let mut missing = revision("wp-1", None);
     missing.dependencies = vec![workpiece("ghost")];
-    let scope = store.write_revision(&missing).expect("write");
+    let scope = store.write_revision(&missing, &RevisionEvidence::default()).expect("write");
     let statement = auto_approval(scope);
     let mut state = StoreCapabilityState::new(store);
     match state.record_commission_approval(RecordCommissionApproval {
@@ -640,7 +646,7 @@ fn the_live_approve_door_refuses_uncommissioned_dependencies() {
     seed(&mut store, "wp-1");
     let mut open = revision("wp-1", None);
     open.dependencies = vec![workpiece("wp-dep")];
-    let scope = store.write_revision(&open).expect("write");
+    let scope = store.write_revision(&open, &RevisionEvidence::default()).expect("write");
     let statement = auto_approval(scope);
     let mut state = StoreCapabilityState::new(store);
     match state.record_commission_approval(RecordCommissionApproval {
@@ -691,9 +697,9 @@ fn a_workpiece_naming_a_path_outside_its_surface_is_refused_at_the_freeze() {
     seed(&mut store, "issue-5256");
     let surface = &["crates/aether-bloomery/src/**"];
     let revision = revision_with_surface("issue-5256", None, surface);
-    let refused = store.write_revision_verified(
+    let refused = store.write_revision(
         &revision,
-        Some(&projection(&[("crates/aether-chassis-bloomery/src/api/runtime/seal.rs", 2)], surface)),
+        &evidence(projection(&[("crates/aether-chassis-bloomery/src/api/runtime/seal.rs", 2)], surface)),
     );
 
     assert_eq!(
@@ -718,13 +724,13 @@ fn a_refusal_outlives_the_repaired_re_freeze() {
     let refused_revision = revision_with_surface("issue-5256", None, narrow);
     let named = &[("crates/aether-chassis-bloomery/src/api/runtime/seal.rs", 2)];
     store
-        .write_revision_verified(&refused_revision, Some(&projection(named, narrow)))
+        .write_revision(&refused_revision, &evidence(projection(named, narrow)))
         .expect_err("the narrow surface is refused");
 
     let wide = &["crates/aether-bloomery/src/**", "crates/aether-chassis-bloomery/src/**"];
     let repaired = revision_with_surface("issue-5256", None, wide);
     let stored =
-        store.write_revision_verified(&repaired, Some(&projection(named, wide))).expect("the widened surface freezes");
+        store.write_revision(&repaired, &evidence(projection(named, wide))).expect("the widened surface freezes");
 
     let reports = stored_reports(&store, "issue-5256");
     assert_eq!(reports.len(), 2, "both the refusal and the pass are journaled");
@@ -750,6 +756,35 @@ fn a_freeze_with_no_projection_reads_as_absent_rather_than_clean() {
     let view = store.load(&workpiece("issue-hand")).expect("load").expect("exists");
     assert!(view.current.is_some(), "the revision itself froze");
     assert_eq!(view.scope_verify, None, "absence is absence, not a clean report");
+}
+
+#[test]
+fn default_evidence_encodes_as_a_value_not_as_absence() {
+    // Tripwire: empty bytes were the old absent convention. The sidecar is
+    // always an encoding of RevisionEvidence; an empty vector is malformed.
+    let bytes = RevisionEvidence::default().encode();
+    assert!(!bytes.is_empty(), "default evidence must encode as a value");
+    assert_eq!(RevisionEvidence::decode(&bytes).expect("default evidence decodes"), RevisionEvidence::default());
+}
+
+#[test]
+fn the_sidecar_never_enters_the_signed_digest() {
+    // Tripwire: the digest is what an approval signs; a sidecar that leaked
+    // into digest_of would silently invalidate every approval over that
+    // revision.
+    let revision = revision("wp-1", None);
+    let populated = evidence(projection(&[("crates/aether-bloomery/src/lib.rs", 1)], &["crates/aether-bloomery/**"]));
+
+    let mut blank = memory();
+    seed(&mut blank, "wp-1");
+    let empty = blank.write_revision(&revision, &RevisionEvidence::default()).expect("empty sidecar");
+
+    let mut filled = memory();
+    seed(&mut filled, "wp-1");
+    let with_evidence = filled.write_revision(&revision, &populated).expect("populated sidecar");
+
+    assert_eq!(empty, with_evidence);
+    assert_eq!(empty, digest_of(&revision));
 }
 
 #[test]

@@ -178,6 +178,11 @@ struct CreateBody<'a> {
     intent: &'a Statement,
 }
 
+#[derive(Serialize)]
+struct WriteRevisionBody<'a> {
+    revision: &'a ScopeRevision,
+}
+
 #[derive(Deserialize)]
 struct CreatedView {
     id: String,
@@ -253,7 +258,8 @@ fn write_scope(api: &ControlApi, id: &str, file: &Path, approval_policy: &Path) 
     };
     let revision = load_revision(id, file, predecessor)?;
     lint_surface_granularity(&revision, approval_policy)?;
-    let written: DigestView = api.send_json("POST", &format!("/commissions/{id}/revisions"), &revision)?;
+    let written: DigestView =
+        api.send_json("POST", &format!("/commissions/{id}/revisions"), &WriteRevisionBody { revision: &revision })?;
     Ok(format!("{}\n", written.digest))
 }
 

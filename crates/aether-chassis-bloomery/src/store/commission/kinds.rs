@@ -44,15 +44,12 @@ pub struct WriteScopeRevision {
     /// Canonical [`aether_bloomery::ScopeRevision`] bytes.
     #[serde(with = "aether_data::bytes")]
     pub canonical: Vec<u8>,
-    /// Canonical [`aether_bloomery::ScopeVerifyInput`] bytes — the workpiece's
-    /// own field records projected for the freeze check (ADR-0208).
-    ///
-    /// Empty means the caller had no projection to check, which is what a
-    /// hand-authored revision carries. An encoded input is never empty (its
-    /// schema field alone is four bytes), so empty is unambiguously absent, and
-    /// absent writes no report rather than a clean one.
+    /// Encoded [`super::RevisionEvidence`] — what is known about the revision
+    /// without being part of it. Optionality lives inside the sidecar's own
+    /// fields; these bytes are always an encoding of that type, never empty as
+    /// a stand-in for absence.
     #[serde(with = "aether_data::bytes")]
-    pub scope_verify: Vec<u8>,
+    pub evidence: Vec<u8>,
 }
 
 /// Reply to [`WriteScopeRevision`].

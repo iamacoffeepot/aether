@@ -27,9 +27,10 @@ use aether_bloomery::testing::{digest, event};
 use aether_bloomery::{
     AgentProfile, ApprovalPolicy, ApprovalRule, AuthorityDoor, BloomDraft, BloomId, CapabilityLedger, ClaimRefKind,
     ConfigKind, ConfigRegistry, Digest, DispatchPayload, Evidence, EvidenceKind, Harness, KeyId, Membership,
-    MetricsSeat, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, Provenance, ReasoningEffort,
-    SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, SignatureEnvelope, StageCatalog, StageId, Statement, Tier,
-    ToolPolicy, Topic, WorkpieceId, authorization_message,
+    MetricsSeat, NamedPath, ORPHAN_CLAIM_RELEASE_WORDS, Observation, OrphanClaimRelease, PathOrigin, Provenance,
+    ReasoningEffort, SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput,
+    SignatureEnvelope, StageCatalog, StageId, Statement, Tier, ToolPolicy, Topic, WorkpieceId, authorization_message,
+    verify_scope,
 };
 use aether_chassis_bloomery::bloomery::TopicOutbox;
 use aether_chassis_bloomery::store::{CommissionBackend, SqliteStore, StoreBackend};
@@ -135,7 +136,7 @@ fn seed_commission_revision(
         declared_reads: Vec::new(),
     };
     let (status, written) =
-        send_auth(port, "POST", &format!("/commissions/{id}/revisions"), &serde_json::to_value(&revision).unwrap());
+        send_auth(port, "POST", &format!("/commissions/{id}/revisions"), &serde_json::json!({ "revision": revision }));
     assert_eq!(status, 201, "write revision {id}: {written:?}");
     let digest = digest_at(&written["digest"]);
 
@@ -1217,6 +1218,72 @@ fn grant_route_carries_the_selected_count_and_refuses_concurrent_work() {
             "a fresh key still cannot put two workers on one member: {fresh:?}"
         );
     });
+}
+
+#[test]
+fn an_amend_shaped_revision_files_a_scope_verify_report() {
+    // An operator freeze that files no report reads exactly like a hand-authored
+    // one. The xtask client path now carries the sidecar so the report lands.
+    let http_port = free_port();
+    let rpc_port = free_port();
+    let (_policy_dir, policy_path) = test_policy();
+    let store_dir = tempfile::tempdir().unwrap();
+    let store_path = store_dir.path().join("bloomery.db");
+    let store_path = store_path.to_str().unwrap();
+    let _coordinator = spawn_with_store(http_port, rpc_port, &policy_path, store_path);
+
+    wait_for_200(http_port, "/view");
+
+    let intent = Statement {
+        words: b"intent wp-amend".to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "rest-api".to_owned() }),
+        parents: Vec::new(),
+    };
+    let (status, created) =
+        send_auth(http_port, "POST", "/commissions", &serde_json::json!({ "id": "wp-amend", "intent": intent }));
+    assert_eq!(status, 201, "create commission: {created:?}");
+
+    let surface = vec!["docs/guide/**".to_owned()];
+    let revision = ScopeRevision {
+        schema: SCOPE_REVISION_SCHEMA,
+        workpiece: WorkpieceId("wp-amend".to_owned()),
+        predecessor: None,
+        problem: "problem".to_owned(),
+        design: "design".to_owned(),
+        plan: "plan".to_owned(),
+        declared_surface: surface.clone(),
+        dogfood_brief: "dogfood".to_owned(),
+        routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
+        dependencies: Vec::new(),
+        description: "task for wp-amend".to_owned(),
+        implements: Vec::new(),
+        declared_crates: Vec::new(),
+        declared_reads: Vec::new(),
+    };
+    let input = ScopeVerifyInput {
+        schema: SCOPE_VERIFY_SCHEMA,
+        named_paths: vec![NamedPath {
+            path: "docs/guide/SUMMARY.md".to_owned(),
+            origin: PathOrigin::PlanStep { step: 1 },
+        }],
+        named_symbols: Vec::new(),
+        declared_surface: surface,
+    };
+    let (status, written) = send_auth(
+        http_port,
+        "POST",
+        "/commissions/wp-amend/revisions",
+        &serde_json::json!({
+            "revision": revision,
+            "evidence": { "scope_verify": input },
+        }),
+    );
+    assert_eq!(status, 201, "write revision: {written:?}");
+    let digest = digest_at(&written["digest"]);
+
+    let store = SqliteStore::open(store_path).unwrap();
+    let report = store.load_scope_verify_report(digest).expect("load report").expect("the sidecar filed a report");
+    assert_eq!(report, verify_scope(&input));
 }
 
 #[test]

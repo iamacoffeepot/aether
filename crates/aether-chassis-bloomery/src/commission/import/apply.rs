@@ -4,7 +4,7 @@ use aether_bloomery::{Observation, Provenance, Statement, WorkpieceId, digest_of
 
 use super::manifest::parse_issue;
 use super::{ImportError, ImportReport, ImportRequest, SealedWorkpiece};
-use crate::store::{CommissionBackend, CommissionError};
+use crate::store::{CommissionBackend, CommissionError, RevisionEvidence};
 
 /// Import the explicit set. Refuses an empty set rather than scanning anything.
 pub fn import(store: &mut impl CommissionBackend, request: &ImportRequest) -> Result<ImportReport, ImportError> {
@@ -17,7 +17,7 @@ pub fn import(store: &mut impl CommissionBackend, request: &ImportRequest) -> Re
         let parsed = parse_issue(snapshot);
         create_if_absent(store, &snapshot.workpiece, &parsed.intent)?;
         if let Some(revision) = parsed.revision {
-            store.write_revision(&revision)?;
+            store.write_revision(&revision, &RevisionEvidence::default())?;
         }
         report.imported.push(snapshot.workpiece.clone());
         report.entries.push(parsed.entry);
@@ -69,7 +69,7 @@ fn reconstruct(store: &mut impl CommissionBackend, sealed: &SealedWorkpiece) -> 
         parents: Vec::new(),
     };
     create_if_absent(store, id, &intent)?;
-    store.write_revision(&sealed.revision)?;
+    store.write_revision(&sealed.revision, &RevisionEvidence::default())?;
     store.record_verified_approval(id, &sealed.approval)?;
     Ok(())
 }
