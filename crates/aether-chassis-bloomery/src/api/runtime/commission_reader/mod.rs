@@ -15,6 +15,7 @@ use aether_http::HttpServerResponse;
 use super::response::error_response;
 use crate::api::dto::MemberProjection;
 use crate::bloomery::{AdrTouch, Completeness};
+use crate::commission::scope::task_text;
 use crate::store::{ListCommissionsResult, ListedCommission, LoadCommissionResult};
 
 #[cfg(test)]
@@ -201,7 +202,7 @@ fn admit_loaded(
         pre_approved: false,
         signed_statement,
     };
-    Ok(AdmittedMember { workpiece, projection, description: revision.description, edges })
+    Ok(AdmittedMember { workpiece, projection, description: task_text(&revision), edges })
 }
 
 fn completeness_from(revision: &ScopeRevision, status: &str, surface_fresh: bool) -> Completeness {

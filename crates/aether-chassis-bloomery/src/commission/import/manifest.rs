@@ -22,6 +22,8 @@ pub struct ManifestEntry {
     pub issue: u64,
     /// Workpiece the import will create.
     pub workpiece: WorkpieceId,
+    /// GitHub issue title at snapshot time. Verification only.
+    pub title: String,
     /// sha256 of the exact snapshot body.
     pub body_digest: Digest,
     /// Content address of the parsed revision, when the body parsed cleanly.
@@ -72,6 +74,7 @@ pub fn parse_issue(snapshot: &IssueSnapshot) -> ParsedIssue {
         entry: ManifestEntry {
             issue: snapshot.number,
             workpiece: snapshot.workpiece.clone(),
+            title: snapshot.title.clone(),
             body_digest,
             plan_digest,
             base_commit,
