@@ -59,7 +59,9 @@ impl ApiCapabilityState {
     /// unchanged, is an execution decision and belongs here; anything else is a
     /// successor doing real work. Admitting it needs no approve gate — a grant
     /// seals nothing, claims nothing, and alters no field the members' approvals
-    /// bind — so unlike the supersede route it admits straight through.
+    /// bind — so unlike the supersede route it admits straight through. `reason`
+    /// and `operator` are required at this door, as on the other operator
+    /// routes, and a reducer refusal answers `422`.
     pub(super) fn grant(id: &str, body: &[u8]) -> Routed {
         let bloom = match digest_from_hex(id) {
             Some(digest) => BloomId(digest),
@@ -69,9 +71,18 @@ impl ApiCapabilityState {
             Ok(request) => request,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid grant body: {error}"))),
         };
-        let GrantRequest { workpiece, stage, attempts, idempotency_key } = request;
+        let GrantRequest { workpiece, stage, attempts, reason, operator, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+        let audit = OperatorHold { reason, operator };
         let key = idempotency_key.unwrap_or_else(|| {
-            format!("aether.bloomery.grant:{}:{}:{stage:?}:{attempts}", hex_encode(bloom.0.as_bytes()), workpiece.0)
+            format!(
+                "aether.bloomery.grant:{}:{}:{stage:?}:{attempts}:{}",
+                hex_encode(bloom.0.as_bytes()),
+                workpiece.0,
+                hex_encode(digest_of(&audit).as_bytes())
+            )
         });
 
         admit(&Event {
@@ -499,16 +510,15 @@ pub(super) fn admit_response(result: AdmitResult) -> HttpServerResponse {
 /// bytes rather than the authoring route keeping a correlation map (ADR-0154
 /// §3).
 ///
-/// A **refused manager override** answers `422` (#4957). Every other refusal
-/// this renders is the reducer declining a request about the pipeline's own
-/// state, which an operator reads and re-aims; an override refusal is the
-/// reducer declining the operator's *authority* — a finding that was never
-/// raised, a workpiece that is not stopped, a membership that is not approved
-/// (ADR-0181). Answering those `200` would let a script that only checks the
-/// status treat a refused waiver as an applied one, which is the one place in
-/// this API where that mistake lands unapproved work on mainline. The route's
-/// own synchronous refusals use the same status, so the operator sees one
-/// answer for a refused override whichever side caught it.
+/// A **refused operator door** answers `422` — grant, adjudication, repair, and
+/// the brake. Every other refusal this renders is the reducer declining a
+/// request about the pipeline's own state, which an operator reads and re-aims;
+/// an operator-door refusal is the reducer declining the operator's *authority*
+/// — a finding that was never raised, a workpiece that is not stopped, a
+/// membership that is not approved (ADR-0181). Answering those `200` would let a
+/// script that only checks the status treat a refused waiver as an applied one.
+/// The route's own synchronous refusals use the same status, so the operator
+/// sees one answer for a refused override whichever side caught it.
 fn admitted_response(outcome: Outcome) -> HttpServerResponse {
     match &outcome {
         Outcome::OrphanClaimReleaseRequested { request } => {
@@ -548,8 +558,8 @@ pub(super) fn query_response(result: QueryResult) -> HttpServerResponse {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{
-        AdjudicationError, BloomId, Digest, Event, Fact, MemberDependency, OperatorHoldError, OperatorRepairError,
-        Outcome, QueryResult, SpendQuiesce, ViewDocument, WorkpieceId,
+        AdjudicationError, BloomId, Digest, Event, Fact, GrantAttemptsError, MemberDependency, OperatorHoldError,
+        OperatorRepairError, Outcome, QueryResult, SpendQuiesce, ViewDocument, WorkpieceId,
     };
     use aether_data::wire::{from_bytes, to_vec};
 
@@ -596,6 +606,29 @@ mod tests {
             Routed::Reply(response) => Some(response.status),
             _ => None,
         }
+    }
+
+    // Tripwire: a grant that states no reason is refused at the door, the same
+    // way the other operator doors are. The grant's audit fields are why the
+    // extra attempts were bought; a blank one records the extra spend and
+    // nothing about who or why.
+    #[test]
+    fn a_grant_body_without_a_reason_or_an_operator_is_refused() {
+        let grant = |reason: &str, operator: &str| {
+            let body = serde_json::json!({
+                "workpiece": "alpha",
+                "stage": "Construct",
+                "attempts": 1,
+                "reason": reason,
+                "operator": operator,
+            })
+            .to_string();
+            status(&ApiCapabilityState::grant(BLOOM, body.as_bytes()))
+        };
+
+        assert_eq!(grant("  ", "eve"), Some(422), "a whitespace reason says nothing");
+        assert_eq!(grant("sandbox recovered", ""), Some(422), "and a grant has to name who asked");
+        assert_eq!(grant("sandbox recovered", "eve"), None, "a stated grant relays to the reducer");
     }
 
     // Tripwire (#4957): an override that states no reason is refused, not
@@ -652,6 +685,7 @@ mod tests {
         let workpiece = WorkpieceId("alpha".to_owned());
 
         for outcome in [
+            Outcome::GrantAttemptsRejected(GrantAttemptsError::NotWedged(workpiece.clone())),
             Outcome::AdjudicationRejected(AdjudicationError::UnapprovedMember(workpiece.clone())),
             Outcome::OperatorRepairRejected(OperatorRepairError::UnapprovedMember(workpiece)),
             Outcome::AdjudicationRejected(AdjudicationError::UnknownFinding(Digest::from_bytes([2; 32]))),

@@ -636,16 +636,23 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// Whether this outcome is a refused manager override (#4957).
+    /// Whether this outcome is a refused operator door (grant, adjudication,
+    /// repair, or the brake).
     ///
-    /// The REST edge answers a refused override `422` rather than the `200`
-    /// every other write route answers its outcome with, so the two doors need
-    /// one place that says which outcomes those are. It lives here because the
-    /// vocabulary is this enum's: a route matching on variant names would drift
-    /// the moment a third override refusal is appended.
+    /// The REST edge answers those `422` rather than the `200` every other write
+    /// route answers its outcome with, so the doors need one place that says
+    /// which outcomes those are. It lives here because the vocabulary is this
+    /// enum's: a route matching on variant names would drift the moment another
+    /// operator refusal is appended.
     #[must_use]
     pub const fn is_refused_override(&self) -> bool {
-        matches!(self, Self::AdjudicationRejected(_) | Self::OperatorRepairRejected(_) | Self::OperatorHoldRejected(_))
+        matches!(
+            self,
+            Self::GrantAttemptsRejected(_)
+                | Self::AdjudicationRejected(_)
+                | Self::OperatorRepairRejected(_)
+                | Self::OperatorHoldRejected(_)
+        )
     }
 }
 
