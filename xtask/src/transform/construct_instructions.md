@@ -37,6 +37,9 @@ after the shared work order so sibling lanes share a prompt-cache prefix.
    Verify; when a change ripples into files the surface does not cover, refuse
    and name the missing surface in `.bloomery-surface-request` (step 8) so the
    operator can widen it — never a silent edit.
+   Re-derive any protocol literal the order pins against the code at the subject
+   commit before relying on it; if the order's value and the code's symbol
+   disagree, the code wins and the disagreement is a finding.
    Where the order asks for coverage, it is asking for the behavior to be covered,
    not for a literal shape: an order that says "tests covering all four cases" is
    satisfied by tests the conventions' testing doctrine would keep, and four
