@@ -38,7 +38,6 @@
 
 use std::collections::BTreeSet;
 use std::env;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -230,11 +229,7 @@ fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
 /// Render a digest as the lowercase-hex parent string the artifact store records
 /// — the derivation edge from a timeout record to the subject it accounts for.
 fn digest_to_parent(digest: &Digest) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    digest.to_hex()
 }
 
 /// Put a timeout record's canonical bytes into the content store, returning the

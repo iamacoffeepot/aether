@@ -96,7 +96,7 @@ pub use control::{
     SplicePayload, Topic, TransferSeal,
 };
 pub use correspondence::{BackendObjectId, Correspondence, CorrespondenceError, SharedCorrespondence};
-pub use digest::{ContentAddressed, Digest, digest_of};
+pub use digest::{ContentAddressed, Digest, decode_hex, digest_of, encode_hex, hex_nibble};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
 pub use inward::{InwardError, StageResult, StageVerdict, StudyResult, normalize_stage_result, normalize_study_result};
 pub use manifest::{

@@ -23,7 +23,6 @@
 //! atomically inside the commit.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt::Write as _;
 use std::mem;
 #[cfg(test)]
 use std::sync::Arc;
@@ -1569,10 +1568,7 @@ fn admit_ok(outcome: &Outcome) -> AdmitResult {
 }
 
 fn lowercase_hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut text, byte| {
-        write!(&mut text, "{byte:02x}").expect("writing to String cannot fail");
-        text
-    })
+    aether_bloomery::encode_hex(bytes)
 }
 
 /// The source mail that classifies the live head against the snapshot's

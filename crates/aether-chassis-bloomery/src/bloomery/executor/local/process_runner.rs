@@ -411,31 +411,15 @@ fn export_build_env(lane: &mut Command, spec: &RunSpec<'_>) {
 /// This is the Git text boundary of the host capture path, and nothing more: it
 /// converts a rendering, it does not judge the object. Which byte lengths name a
 /// well-formed Git object (20-byte SHA-1, 32-byte SHA-256) is the adapter's
-/// question, so any even length passes here and either hex case is accepted.
-/// Empty, odd-length, or non-hex text is `None` — text git never produces, which
+/// question, so any even length of lowercase hex passes here.
+/// Empty, odd-length, uppercase, or non-hex text is `None` — text git never produces, which
 /// the caller reports as a malformed sha rather than recording bytes that
 /// correspond to no object.
 fn decode_object_hex(sha: &str) -> Option<BackendObjectId> {
-    let raw = sha.as_bytes();
-    if raw.is_empty() || !raw.len().is_multiple_of(2) {
+    if sha.is_empty() {
         return None;
     }
-
-    let mut bytes = Vec::with_capacity(raw.len() / 2);
-    for pair in raw.chunks_exact(2) {
-        bytes.push((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?);
-    }
-    Some(BackendObjectId::new(bytes))
-}
-
-/// One hex character as its `0..=15` nibble, or `None` for a non-hex byte.
-const fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    aether_bloomery::decode_hex(sha).map(BackendObjectId::new)
 }
 
 /// Fetch each sealed order identity the coordinator does not already hold.
@@ -1487,15 +1471,15 @@ mod tests {
     }
 
     #[test]
-    fn object_hex_decodes_either_case_at_any_even_length() {
+    fn object_hex_decodes_lowercase_at_any_even_length() {
         // Tripwire: the decoded bytes are what the candidate digests are taken
         // over and what the correspondence stores, so a nibble swapped, a case
-        // rejected, or a length refused silently mints a candidate that resolves
+        // accepted, or a length refused silently mints a candidate that resolves
         // to the wrong object. Both real git object formats are covered, plus a
         // third even length the host has no business ruling on.
         assert_eq!(decode_object_hex("00ff").unwrap().as_bytes(), [0x00, 0xff], "lowercase decodes");
-        assert_eq!(decode_object_hex("00FF").unwrap().as_bytes(), [0x00, 0xff], "uppercase decodes identically");
-        assert_eq!(decode_object_hex("aB3c").unwrap().as_bytes(), [0xab, 0x3c], "mixed case decodes");
+        assert!(decode_object_hex("00FF").is_none(), "uppercase is refused");
+        assert!(decode_object_hex("aB3c").is_none(), "mixed case is refused");
         assert_eq!(decode_object_hex(&"a".repeat(40)).unwrap().as_bytes().len(), 20, "a SHA-1 sha is 20 bytes");
         assert_eq!(decode_object_hex(&"a".repeat(64)).unwrap().as_bytes().len(), 32, "a SHA-256 sha is 32 bytes");
         assert_eq!(decode_object_hex(&"a".repeat(24)).unwrap().as_bytes().len(), 12, "another even length passes too");

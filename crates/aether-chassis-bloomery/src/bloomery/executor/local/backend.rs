@@ -1683,12 +1683,7 @@ fn executor_fault_ref(
 }
 
 fn hex_digest(digest: &Digest) -> String {
-    let mut hex = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        hex.push(char::from_digit(u32::from(*byte >> 4), 16).unwrap_or('0'));
-        hex.push(char::from_digit(u32::from(*byte & 0x0f), 16).unwrap_or('0'));
-    }
-    hex
+    digest.to_hex()
 }
 
 /// Render a resolved backend object as the lowercase hex sha the `git` argv
@@ -1697,13 +1692,7 @@ fn hex_digest(digest: &Digest) -> String {
 /// opaque bytes, and the rendering exists solely because the subprocess boundary
 /// below is text.
 fn render_object_hex(object: &BackendObjectId) -> String {
-    let bytes = object.as_bytes();
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        hex.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    hex
+    aether_bloomery::encode_hex(object.as_bytes())
 }
 
 impl ExecutorBackend for LocalExecutor {

@@ -469,13 +469,13 @@ impl SeatKey {
 
 fn dispatch_id(acc: &DispatchAcc) -> String {
     let mut id = String::from("fold:");
-    push_hex(&mut id, acc.bloom.0.as_bytes());
+    id.push_str(&acc.bloom.0.to_hex());
     id.push(':');
     id.push_str(&acc.workpiece);
     id.push(':');
     id.push_str(stage_slug(acc.stage));
     id.push(':');
-    push_hex(&mut id, acc.displayed.as_bytes());
+    id.push_str(&acc.displayed.to_hex());
     id
 }
 
@@ -494,13 +494,6 @@ fn stage_slug(stage: StageId) -> &'static str {
         StageId::Land => "land",
         StageId::Study => "study",
         StageId::Reconcile => "reconcile",
-    }
-}
-
-fn push_hex(into: &mut String, bytes: &[u8]) {
-    for byte in bytes {
-        into.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        into.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
     }
 }
 

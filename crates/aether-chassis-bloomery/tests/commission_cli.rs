@@ -23,13 +23,7 @@ fn owner_key() -> SigningKey {
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[usize::from(byte >> 4)] as char);
-        out.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-    out
+    aether_bloomery::encode_hex(bytes)
 }
 
 fn owner_allowlist() -> String {
@@ -109,16 +103,7 @@ fn envelope_for(door: AuthorityDoor, digest_hex: &str) -> Vec<u8> {
 }
 
 fn hex_to_32(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut bytes = [0u8; 32];
-    for (index, slot) in bytes.iter_mut().enumerate() {
-        let high = u8::from_str_radix(&hex[(index * 2)..=(index * 2)], 16).ok()?;
-        let low = u8::from_str_radix(&hex[index * 2 + 1..index * 2 + 2], 16).ok()?;
-        *slot = (high << 4) | low;
-    }
-    Some(bytes)
+    Digest::from_hex(hex).map(|digest| *digest.as_bytes())
 }
 
 fn first_token(output: &str) -> &str {

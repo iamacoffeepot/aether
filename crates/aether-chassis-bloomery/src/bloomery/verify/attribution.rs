@@ -263,11 +263,7 @@ fn probed_result(facts: &DiscriminatedFacts, test_id: &str) -> Option<ProofResul
 }
 
 fn closure_hex(key: &ClosureKey) -> String {
-    key.as_bytes().iter().fold(String::with_capacity(64), |mut hex, byte| {
-        use std::fmt::Write;
-        let _ = write!(hex, "{byte:02x}");
-        hex
-    })
+    aether_bloomery::encode_hex(key.as_bytes())
 }
 
 #[cfg(test)]

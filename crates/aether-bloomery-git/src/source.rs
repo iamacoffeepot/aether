@@ -347,41 +347,18 @@ fn parse_bloom_line(message: &str) -> Result<ClaimHolder, SourceError> {
 /// would be redundant.
 #[must_use]
 pub fn to_hex(digest: &Digest) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
-    }
-    out
-}
-
-// One hex character to its 0..=15 nibble, or `None` for a non-hex byte.
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    digest.to_hex()
 }
 
 /// Parse a 64-hex ref-name segment back into a digest, or `None` if it is not
-/// exactly 64 hex characters — the inverse of [`to_hex`] for the branch
+/// exactly 64 lowercase hex characters — the inverse of [`to_hex`] for the branch
 /// namespace's digest segments (checkpoint enumeration) and the claim-registry
 /// synthetic-tree encoding. **Not** for a git object sha: those are sha1/40 or
 /// sha256/32 and resolve through the [`aether_bloomery::Correspondence`] store. `pub` for the
 /// same private-module reason as [`to_hex`].
 #[must_use]
 pub fn digest_from_hex(sha: &str) -> Option<Digest> {
-    if sha.len() != 64 {
-        return None;
-    }
-    let mut bytes = [0u8; 32];
-    let raw = sha.as_bytes();
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        *byte = (hex_nibble(raw[i * 2])? << 4) | hex_nibble(raw[i * 2 + 1])?;
-    }
-    Some(Digest::from_bytes(bytes))
+    Digest::from_hex(sha)
 }
 
 /// The git source backend over a [`GitDataApi`] client and a persisted

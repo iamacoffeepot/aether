@@ -36,13 +36,13 @@ impl DigestHex {
 
     #[must_use]
     pub fn as_hex(&self) -> String {
-        encode(&self.0)
+        aether_bloomery::encode_hex(&self.0)
     }
 
     /// The short id the board prints for a bloom.
     #[must_use]
     pub fn prefix(&self) -> String {
-        let hex = encode(&self.0);
+        let hex = aether_bloomery::encode_hex(&self.0);
         hex.get(..8).unwrap_or(&hex).to_owned()
     }
 }
@@ -664,25 +664,8 @@ pub struct SpendWindowView {
     pub unpriced_records: u64,
 }
 
-fn encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
 fn decode(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut bytes = [0u8; 32];
-    for (index, slot) in bytes.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
-    }
-    Some(bytes)
+    aether_bloomery::Digest::from_hex(hex).map(|digest| *digest.as_bytes())
 }
 
 /// Accept the REST edge's two spellings: 64 hex characters, or a 32-byte array.
@@ -705,12 +688,12 @@ fn from_json(value: &Value) -> Result<[u8; 32], String> {
 mod tests {
     use super::{
         BloomStatus, BloomView, DigestHex, MemberView, MetricDay, MetricsSeat, SpendQuiesce, SpendWindowView, StageId,
-        TimelineSpan, ViewDocument, WedgeCause, decode, encode,
+        TimelineSpan, ViewDocument, WedgeCause, decode,
     };
     use serde_json::json;
 
     fn hex(byte: u8) -> String {
-        encode(&[byte; 32])
+        aether_bloomery::encode_hex(&[byte; 32])
     }
 
     fn digest(byte: u8) -> DigestHex {
@@ -723,12 +706,12 @@ mod tests {
         // whose deserializer rejects the 64-hex /view rendering, so every
         // poll fails to decode a live coordinator.
         let bytes = [0x5c; 32];
-        let hex = encode(&bytes);
+        let hex = aether_bloomery::encode_hex(&bytes);
         let parsed: DigestHex = serde_json::from_value(json!(hex)).expect("hex digest");
         assert_eq!(parsed.as_bytes(), &bytes);
         let from_array: DigestHex = serde_json::from_value(json!(bytes.to_vec())).expect("byte-array digest");
         assert_eq!(from_array.as_bytes(), &bytes);
-        assert_eq!(decode(&hex.to_ascii_uppercase()), Some(bytes));
+        assert_eq!(decode(&hex.to_ascii_uppercase()), None);
         assert_eq!(parsed.prefix().len(), 8);
     }
 
