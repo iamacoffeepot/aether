@@ -157,6 +157,11 @@ pub struct EvidenceRef {
     pub session_reuse_saved_micro_usd: Option<u64>,
     /// Peak resident bytes from `evidence.json`, when the harness stamped one.
     pub peak_resident_bytes: Option<u64>,
+    /// Paths the candidate changed that no declared-surface glob covers
+    /// (ADR-0209). Host-recorded state riding the reference, like `findings` —
+    /// never part of the artifact-name contract. Empty unless the containment
+    /// overlay named a violation.
+    pub violating_paths: Vec<String>,
 }
 
 /// The disposable-worker boundary (ADR-0149 §The boundary). Exactly the four

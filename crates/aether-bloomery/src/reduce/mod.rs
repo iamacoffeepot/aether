@@ -138,7 +138,8 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::GrantAttempts { bloom, workpiece, stage, attempts } => {
             reduce_grant_attempts(snapshot, bloom, workpiece, *stage, *attempts)
         }
-        Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers } => {
+        Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers }
+        | Fact::ContainmentRefused { bloom, workpiece, evidence, failed_verifiers, violating_paths: _ } => {
             reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers)
         }
         Fact::RequestOrphanClaimRelease { request, authorization } => {

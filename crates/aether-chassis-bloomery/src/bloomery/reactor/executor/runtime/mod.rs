@@ -477,6 +477,7 @@ fn terminate_live_order(
         session_reuse_arm: None,
         session_reuse_saved_micro_usd: None,
         peak_resident_bytes: None,
+        violating_paths: Vec::new(),
     };
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {

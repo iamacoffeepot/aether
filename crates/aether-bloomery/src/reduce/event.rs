@@ -603,6 +603,26 @@ pub enum Fact {
         /// The gate, guard, and values that stopped it.
         refusal: RecordedRefusal,
     },
+    /// A member Verify edited a path no declared-surface glob covers (ADR-0209).
+    ///
+    /// Appended past [`Fact::FoldRefused`] so every prior variant keeps its wire
+    /// discriminant. The reducer routes this through the same repair accounting
+    /// as [`Fact::VerifyFailed`]; the paths are journal payload it never reads.
+    ContainmentRefused {
+        /// The bloom whose member reached outside its surface.
+        bloom: BloomId,
+        /// The member whose current cursor must be terminal Verify.
+        workpiece: WorkpieceId,
+        /// The failure evidence, bound to the member's current candidate tree
+        /// (or its scope revision before a candidate exists).
+        evidence: Evidence,
+        /// The nonempty, canonical verifier identities that failed together,
+        /// always including [`crate::VerifyFailure::Containment`].
+        failed_verifiers: VerifyFailureSet,
+        /// Every repository-relative path the candidate changed that no glob
+        /// in the member's sealed surface covers.
+        violating_paths: Vec<String>,
+    },
 }
 
 impl Fact {

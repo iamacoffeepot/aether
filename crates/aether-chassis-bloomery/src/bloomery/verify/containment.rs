@@ -2,9 +2,10 @@
 //!
 //! A candidate that edits a path no declared-surface glob covers must fail
 //! Verify with that path named. The check is a set-membership test over the
-//! globs sealed at admission: no new stage, no new wire identity. `Cargo.lock`
-//! is structurally shared and machine-maintained, so a dependency-graph-neutral
-//! rebuild that touches it is not a violation.
+//! globs sealed at admission: no new stage; the refusal journals as
+//! `verify.containment` (ADR-0209). `Cargo.lock` is structurally shared and
+//! machine-maintained, so a dependency-graph-neutral rebuild that touches it
+//! is not a violation.
 
 use std::path::Path;
 
@@ -66,11 +67,9 @@ pub struct ContainmentOverlay {
 /// Overlay containment onto a member-Verify result.
 ///
 /// An empty `violations` is a no-op. A nonempty list fails the verdict, names
-/// every path, and — when the mechanical umbrella named nothing — stamps
-/// [`VerifyFailure::Test`] so the reducer enters Refine rather than treating
-/// an empty set as an unjudged re-run. A ninth identity would need a wider
-/// mask; this reuses the "candidate is wrong" class and leaves the paths as
-/// the named failure.
+/// every path, and unions [`VerifyFailure::Containment`] into the typed set so
+/// a concurrent mechanical failure keeps its own identities and a pure
+/// containment refusal is no longer reclassified as [`VerifyFailure::Test`].
 #[must_use]
 pub fn apply_containment(
     verdict: StageVerdict,
@@ -87,11 +86,7 @@ pub fn apply_containment(
         Some(existing) if !existing.is_empty() => format!("{named}\n\n{existing}"),
         _ => named,
     });
-    let failed_verifiers = if failed_verifiers.is_empty() {
-        VerifyFailureSet::one(VerifyFailure::Test)
-    } else {
-        failed_verifiers
-    };
+    let failed_verifiers = failed_verifiers.union(VerifyFailureSet::one(VerifyFailure::Containment));
     ContainmentOverlay { verdict: StageVerdict::VerificationFailed, failed_verifiers, findings }
 }
 
@@ -179,7 +174,7 @@ mod tests {
         );
 
         assert_eq!(overlay.verdict, StageVerdict::VerificationFailed);
-        assert_eq!(overlay.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Test));
+        assert_eq!(overlay.failed_verifiers, VerifyFailureSet::one(VerifyFailure::Containment));
         assert_eq!(
             overlay.findings.as_deref(),
             Some(containment_findings(&["crates/other/src/lib.rs".to_owned()]).as_str()),
@@ -187,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_containment_keeps_a_mechanical_set_and_prepends_findings() {
+    fn apply_containment_unions_containment_onto_a_mechanical_set_and_prepends_findings() {
         let mechanical = VerifyFailureSet::one(VerifyFailure::Clippy);
         let overlay = apply_containment(
             StageVerdict::VerificationFailed,
@@ -197,11 +192,30 @@ mod tests {
         );
 
         assert_eq!(overlay.verdict, StageVerdict::VerificationFailed);
-        assert_eq!(overlay.failed_verifiers, mechanical, "a named mechanical failure stays the accounting identity");
+        assert_eq!(
+            overlay.failed_verifiers,
+            mechanical.union(VerifyFailureSet::one(VerifyFailure::Containment)),
+            "a named mechanical failure keeps its identity and gains containment"
+        );
         let findings = overlay.findings.expect("violations produce findings");
         assert!(findings.starts_with("Candidate edits outside the declared surface:"));
         assert!(findings.contains("- tests/lane/mod.rs"));
         assert!(findings.contains("clippy: unused import"));
+    }
+
+    #[test]
+    fn apply_containment_keeps_a_concurrent_test_failure_and_gains_containment() {
+        let overlay = apply_containment(
+            StageVerdict::VerificationFailed,
+            VerifyFailureSet::one(VerifyFailure::Test),
+            Some("1 test failed".to_owned()),
+            &["docs/guide/x.md".to_owned()],
+        );
+
+        assert_eq!(
+            overlay.failed_verifiers,
+            [VerifyFailure::Test, VerifyFailure::Containment].into_iter().collect::<VerifyFailureSet>(),
+        );
     }
 
     #[test]
