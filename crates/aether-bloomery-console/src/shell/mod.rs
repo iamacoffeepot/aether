@@ -12,6 +12,7 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::Block;
 
 use crate::cursor::Cursor;
 use crate::dto::ViewDocument;
@@ -19,6 +20,7 @@ use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
+use crate::palette;
 use crate::screen::{Screen, compose};
 use crate::store::{ResourceKey, Store};
 use crate::warroom::{self, Alert, ChromeId, Focus, Interrupt};
@@ -112,6 +114,7 @@ impl Shell {
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>) {
+        frame.render_widget(Block::default().style(palette::body()), frame.area());
         let (alerts, interrupts) = self.bands();
         let dashboard = compose(&self.store);
         let filter_height = u16::from(!self.filter.is_empty());

@@ -3,13 +3,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::widgets::{List, ListItem, ListState};
 
 use crate::cursor::Cursor;
 use crate::dto::{BloomView, CompositionFinding, CompositionView, DigestHex, MemberView, ViewDocument};
 use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
+use crate::palette;
 use crate::store::{ResourceKey, Store};
 use crate::warroom::Focus;
 
@@ -160,14 +161,13 @@ impl Detail {
         }
         let dimmed = self.vanished || store.view().is_stale();
         let muted = if dimmed {
-            Style::default().add_modifier(Modifier::DIM)
+            palette::body().add_modifier(Modifier::DIM)
         } else {
-            Style::default()
+            palette::body()
         };
         let items: Vec<ListItem> =
             self.lines.iter().map(|line| ListItem::new(line.text.clone()).style(muted)).collect();
-        let list =
-            List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED)).highlight_symbol("> ");
+        let list = List::new(items).style(palette::body()).highlight_style(palette::cursor()).highlight_symbol("> ");
         let mut state = ListState::default()
             .with_selected(self.cursor.selected_index(&self.lines, |line| line.key.clone()))
             .with_offset(self.scroll);
