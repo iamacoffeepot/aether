@@ -14,8 +14,8 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    CandidateRef, ConfigRegistry, Evidence, Membership, ResolutionClaim, StageBinding, StageCatalog, Transformation,
-    VerifyFailureSet, Wedge,
+    CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, ResolutionClaim, StageBinding, StageCatalog,
+    Transformation, VerifyFailureSet, Wedge,
 };
 
 /// The move-and-dispatch effect pair every cursor move of
@@ -219,8 +219,10 @@ pub(super) fn stage_binding(catalog: &StageCatalog, stage: StageId) -> StageBind
 /// A passing gate advances the cursor to the next member stage and dispatches it
 /// (a passing repair-only `Refine` returns to `Verify` for the delta-confirm,
 /// ADR-0153); a failing gate re-dispatches the same stage while the stage's
-/// `retry_budget` allows and wedges the member once it is exhausted. The
-/// terminal `Verify` never completes here: a pass integrates through
+/// `retry_budget` allows and wedges the member once it is exhausted. A failing
+/// Construct whose evidence is [`EvidenceKind::ConstructDeclined`] parks
+/// instead: attempts and repair rolls stay put. The terminal `Verify` never
+/// completes here: a pass integrates through
 /// [`Fact::Integrate`](crate::Fact::Integrate), while a failure carries its typed
 /// identities through [`Fact::VerifyFailed`](crate::Fact::VerifyFailed).
 pub(super) fn reduce_attempt_completed(
@@ -286,6 +288,20 @@ pub(super) fn reduce_attempt_completed(
             expected: cursor.stage,
             got: stage,
         }));
+    }
+    // A construct that concluded without a candidate is not a failed attempt:
+    // the lane finished its reasoning and refused to produce work. Parking
+    // spends nothing; retrying would reproduce the same refusal against the
+    // same inputs (#5292). A dead construct keeps `VerificationResult` and
+    // still takes `retry_or_wedge` below — that is the case a second attempt
+    // can recover.
+    if !passed && stage == StageId::Construct && evidence.kind == EvidenceKind::ConstructDeclined {
+        return park_declined_construct(
+            *bloom,
+            workpiece,
+            evidence,
+            alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }],
+        );
     }
     // The member's candidate after this completion (ADR-0152): a passing attempt
     // adopts the capture it carried (a mechanical lane carries none — the prior
@@ -567,6 +583,28 @@ fn retry_or_wedge(
     wedged(bloom, workpiece, stage, &wedge_evidence, effects)
 }
 
+/// Park a construct that concluded without a candidate: record the evidence,
+/// leave the cursor (and therefore `attempts` and `repair_rolls`) untouched,
+/// and emit no dispatch. Distinct from [`wedged`]: a wedge spent the budget
+/// and a grant buys more attempts; a park refused before it began and a
+/// grant would buy another lap of the same refusal.
+fn park_declined_construct(
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    evidence: &Evidence,
+    effects: Vec<Decision>,
+) -> Decisions {
+    Decisions {
+        outcome: Outcome::AttemptParked {
+            bloom,
+            workpiece: workpiece.clone(),
+            stage: StageId::Construct,
+            reason: evidence.detail,
+        },
+        effects,
+    }
+}
+
 /// Dispatch targets for a member-line move, or the folded checkpoint when
 /// the member is reconciling a collision (ADR-0189).
 ///
@@ -688,6 +726,20 @@ mod tests {
                 passed: false,
                 evidence: evidence(),
                 candidate: captured,
+            },
+        )
+    }
+
+    fn decline_construct(bloom: BloomId, key: &str, reason: Digest) -> Event {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: WorkpieceId("wp".into()),
+                stage: StageId::Construct,
+                passed: false,
+                evidence: Evidence { subject: digest(1), kind: EvidenceKind::ConstructDeclined, detail: reason },
+                candidate: None,
             },
         )
     }
@@ -942,6 +994,89 @@ mod tests {
             construct_dispatch(&decided).checkout,
             digest(0),
             "a clean death does not invent a checkout to seed from",
+        );
+    }
+
+    // The plausible bug: a construct that concluded without a candidate is
+    // treated as a dead attempt, so attempts increment and the member wedges
+    // once the sealed budget is spent — granting more attempts then replays
+    // the same refusal (#5292).
+    #[test]
+    fn a_declined_construct_parks_without_spending_an_attempt() {
+        let (snapshot, bloom) = sealed();
+        let workpiece = WorkpieceId("wp".into());
+        let before = snapshot.blooms[&bloom].progress[&workpiece];
+        let reason = digest(91);
+        let (after, decided) = step(&snapshot, &decline_construct(bloom, "c-decline", reason));
+
+        assert!(
+            matches!(
+                decided.outcome,
+                Outcome::AttemptParked { stage: StageId::Construct, reason: got, .. } if got == reason
+            ),
+            "a declined construct parks naming the lane's evidence: {decided:?}",
+        );
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+            "a park must not dispatch another construct lap",
+        );
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::AdvanceStage { .. })),
+            "a park must not move the cursor, or attempts would change",
+        );
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::RecordWedge { .. })),
+            "a park is not a wedge",
+        );
+        let after_cursor = after.blooms[&bloom].progress[&workpiece];
+        assert_eq!(after_cursor.attempts, before.attempts, "parking spends no attempt");
+        assert_eq!(after_cursor.repair_rolls, before.repair_rolls, "parking spends no repair roll");
+        assert_eq!(after_cursor.stage, StageId::Construct);
+        assert_eq!(
+            after.member_park(&bloom, &workpiece).map(|park| park.evidence),
+            Some(reason),
+            "the snapshot holds the park so the served view can name the member",
+        );
+        assert!(!after.blooms[&bloom].wedged.contains_key(&workpiece), "a parked member is not wedged");
+    }
+
+    // The plausible bug: inferring a park from `candidate: None` would convert
+    // a genuine crash retry into a park and strand a member that would have
+    // succeeded on a second attempt.
+    #[test]
+    fn a_construct_that_dies_without_a_terminal_record_still_retries() {
+        let (snapshot, bloom) = sealed();
+        let (after, decided) = step(&snapshot, &fail_construct(bloom, "c-die", None));
+        assert!(matches!(decided.outcome, Outcome::AttemptRetried { stage: StageId::Construct, attempt: 2, .. }));
+        assert_eq!(after.blooms[&bloom].progress[&WorkpieceId("wp".into())].attempts, 2);
+        assert_eq!(after.member_park(&bloom, &WorkpieceId("wp".into())), None);
+    }
+
+    // The plausible bug: a construct host fault shares "no candidate" with a
+    // declined construct, so the machinery retry is reclassified as a park and
+    // a recoverable outage becomes a scope problem.
+    #[test]
+    fn a_construct_host_fault_still_retries_rather_than_parking() {
+        let (snapshot, bloom) = sealed();
+        let (_, decided) = step(
+            &snapshot,
+            &event(
+                "fault",
+                Fact::MemberExecutorFault {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Construct,
+                    evidence: Evidence { subject: digest(10), kind: EvidenceKind::ExecutorFault, detail: digest(60) },
+                },
+            ),
+        );
+        assert!(
+            matches!(decided.outcome, Outcome::MachineryRetried { stage: StageId::Construct, .. }),
+            "a construct host fault stays on the machinery axis: {decided:?}",
+        );
+        assert!(
+            !matches!(decided.outcome, Outcome::AttemptParked { .. }),
+            "a host fault must not be reclassified as a construct park",
         );
     }
 }

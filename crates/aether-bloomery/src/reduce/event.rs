@@ -129,8 +129,11 @@ pub enum Fact {
     ///
     /// `passed` is the completion gate's outcome as the intake broker read it from
     /// the worker's verdict — the reducer owns the *advance* decision the gate
-    /// gates (advance / retry / wedge), never delegating that to the host; the
-    /// host only reports the raw pass/fail observation. Appended past
+    /// gates (advance / retry / park / wedge), never delegating that to the host; the
+    /// host only reports the raw pass/fail observation. A failing Construct whose
+    /// evidence kind is [`crate::EvidenceKind::ConstructDeclined`] parks rather
+    /// than retrying: the lane concluded there is no candidate, and
+    /// another attempt would reproduce the same refusal. Appended past
     /// [`Fact::AdoptAnswer`] so the prior facts' wire discriminants are unchanged.
     AttemptCompleted {
         /// The bloom the member belongs to.
