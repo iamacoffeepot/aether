@@ -35,7 +35,7 @@ impl Journal {
         let spec = draft.seal();
         let bloom = spec.id();
         let mut journal = Self {
-            snapshot: Snapshot::new(digest(1)),
+            snapshot: Snapshot::new(digest(1)).with_green_base(digest(1)),
             ledger: MetricsLedger::default(),
             configs,
             bloom,
@@ -145,7 +145,7 @@ fn a_refold_from_the_same_journal_is_byte_identical_and_the_cursor_resumes() {
     {
         let (draft, configs) = draft_with_member_override(1, membership(MEMBER, REVISION), &escalating());
         let spec = draft.seal();
-        let mut snapshot = Snapshot::new(digest(1));
+        let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
         for (index, fact) in [
             Fact::Seal(spec),
             Fact::AttemptCompleted {
@@ -185,7 +185,7 @@ fn a_refold_from_the_same_journal_is_byte_identical_and_the_cursor_resumes() {
     let mut resumed = MetricsLedger::default();
     let (draft, configs) = draft_with_member_override(1, membership(MEMBER, REVISION), &escalating());
     let spec = draft.seal();
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     let first_event = event("row-0", Fact::Seal(spec));
     let first_decisions = reduce(&snapshot, &first_event, &configs, &SpendWindow::default());
     resumed.observe(1, &first_event, &first_decisions, &configs, Some(1_000));

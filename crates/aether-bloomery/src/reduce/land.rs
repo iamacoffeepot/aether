@@ -125,7 +125,7 @@ mod tests {
         let sealed_order: Vec<WorkpieceId> = spec.members().iter().map(|member| member.workpiece.clone()).collect();
 
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
-        let mut snapshot = Snapshot::new(base);
+        let mut snapshot = Snapshot::new(base).with_green_base(base);
         snapshot = snapshot.apply(
             &seal,
             &reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default()),
@@ -157,7 +157,7 @@ mod tests {
         let spec = BloomDraft { proposals: vec![membership("issue-4628", 10)], base, ..BloomDraft::default() }.seal();
         let bloom = spec.id();
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
-        let snapshot = Snapshot::new(base);
+        let snapshot = Snapshot::new(base).with_green_base(base);
         let decided = reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
 
         (snapshot.apply(&seal, &decided, &ResolvedConfigs::default()), bloom)

@@ -25,7 +25,7 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::{BloomStatus, RecordedRefusal};
 use crate::values::{
     CandidateRef, CompositionFinding, Evidence, LandingReceipt, OperatorHold, ResolutionClaim, SpendQuiesce,
-    SurfacePathRequest, Wedge,
+    SurfacePathRequest, VerifyFailure, VerifyFailureSet, Wedge,
 };
 
 /// The self-contained render input a reconcile pushes outward: the current
@@ -52,6 +52,35 @@ pub struct ViewDocument {
     pub spend_quiesce: Option<SpendQuiesce>,
     /// The blooms to mirror, each self-describing.
     pub blooms: Vec<BloomView>,
+    /// A red whole-workspace base receipt, when one is holding the day
+    /// (ADR-0200). Trailing plus `serde(default)` so a reader that predates
+    /// the field still decodes.
+    #[serde(default)]
+    pub base_alert: Option<BaseAlertView>,
+}
+
+/// The day-level stop a red base receipt raises: which tree failed, and which
+/// gates named the failure. `failed` is rendered as
+/// [`VerifyFailure::as_str`] so the console paints gate names without owning
+/// the vocabulary.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BaseAlertView {
+    /// The commit the verify ran at.
+    pub base: Digest,
+    /// The tree it peeled to.
+    pub tree: Digest,
+    /// Gate names that failed, in canonical identity order.
+    pub failed: Vec<String>,
+    /// The evidence digest the red verdict bound.
+    pub evidence: Digest,
+}
+
+impl BaseAlertView {
+    /// Render `failed` from a typed set.
+    #[must_use]
+    pub fn from_failure_set(base: Digest, tree: Digest, failed: VerifyFailureSet, evidence: Digest) -> Self {
+        Self { base, tree, failed: failed.iter().map(VerifyFailure::as_str).map(str::to_owned).collect(), evidence }
+    }
 }
 
 /// One bloom's outward view: its sealed identity, lifecycle status, optional

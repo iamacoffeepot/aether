@@ -210,6 +210,42 @@ fn spawn_with_store(http_port: u16, rpc_port: u16, policy_path: &str, store_path
     )
 }
 
+/// Record a green whole-workspace receipt for `base` so a following HTTP seal
+/// dispatches Construct rather than waiting on `verify.base`.
+fn prove_green_base(rpc_port: u16, base: Digest) {
+    use aether_bloomery::{
+        Admit, AdmitResult, CONTROL_CORE_NAMESPACE, Event, Fact, IdempotencyKey, Outcome, VerifyFailureSet,
+    };
+    use aether_data::mailbox_id_from_path;
+    use aether_data::wire::to_vec;
+    use common::client::{call, connect_and_handshake};
+
+    let mut stream = connect_and_handshake(rpc_port, "prove-base");
+    let control = mailbox_id_from_path(CONTROL_CORE_NAMESPACE);
+    let event = Event {
+        idempotency_key: IdempotencyKey("fixture-base-verify".to_owned()),
+        fact: Fact::BaseVerifyCompleted {
+            base,
+            tree: base,
+            passed: true,
+            evidence: Evidence {
+                subject: base,
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::from_bytes([9; 32]),
+            },
+            failed: VerifyFailureSet::EMPTY,
+        },
+    };
+    let admit = Admit { event: to_vec(&event).unwrap() };
+    match call::<_, AdmitResult>(&mut stream, 1, control, &admit) {
+        AdmitResult::Ok { outcome } => {
+            let outcome: Outcome = from_bytes(&outcome).expect("outcome decodes");
+            assert!(matches!(outcome, Outcome::BaseProven { .. }), "the fixture base proves green: {outcome:?}");
+        }
+        AdmitResult::Err { error } => panic!("fixture base prove failed: {error}"),
+    }
+}
+
 /// One HTTP request over a fresh `Connection: close` socket; returns the status
 /// code and the response body bytes. `Err` when the socket cannot be reached
 /// yet (the bin is still binding).
@@ -925,6 +961,7 @@ fn authored_stage_catalog_reaches_the_dispatch_profile() {
     assert_eq!(fetched["draft"]["configs"], rendered_registry);
 
     wait_for_200(http_port, "/view");
+    prove_green_base(rpc_port, Digest::from_bytes([1; 32]));
     let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
     assert_eq!(status, 200, "seal the draft carrying the authored catalog: {sealed:?}");
 
@@ -1233,7 +1270,7 @@ fn fold_unpriced_construct_seats() -> (Vec<MetricsSeat>, CapabilityLedger) {
     let spec = BloomDraft { proposals: vec![member], base: digest(1), ..BloomDraft::default() }.seal();
     let bloom = spec.id();
 
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     let mut metrics = MetricsLedger::default();
     let mut calibration = CalibrationLedger::default();
     let mut sequence = 0_u64;

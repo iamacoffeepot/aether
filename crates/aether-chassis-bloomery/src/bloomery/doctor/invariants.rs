@@ -495,7 +495,15 @@ fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> 
     let pending: BTreeSet<&str> = live.outstanding.iter().map(|open| open.workpiece).collect();
     let mut divergences = Vec::new();
     for (bloom, record) in &live.snapshot.blooms {
-        if record.status != BloomStatus::Sealed || record.operator_hold.is_some() || record.review_park.is_some() {
+        if record.status != BloomStatus::Sealed
+            || record.operator_hold.is_some()
+            || record.review_park.is_some()
+            // An unproven or red base is a day-level stop (ADR-0200): every
+            // member dispatch is withheld until the whole-workspace receipt is
+            // green, so a cursor with no live lane is the wait, not a lost
+            // member.
+            || !record.base_proven
+        {
             continue;
         }
         for workpiece in record.progress.keys() {

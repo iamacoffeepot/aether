@@ -94,7 +94,7 @@ fn script() -> Vec<Event> {
 /// journal replay (decode the persisted bytes, then reduce), not a second
 /// in-process call over the same in-memory values.
 fn replay(journal: &[Event]) -> (Vec<Decisions>, Snapshot) {
-    let mut snapshot = Snapshot::new(digest(1));
+    let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
     let mut decisions = Vec::with_capacity(journal.len());
     for ev in journal {
         let decoded: Event = from_bytes(&to_vec(ev).unwrap()).unwrap();
@@ -293,9 +293,12 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // returning verify records its half of the join instead of dispatching the
 // critic. The stream is the same script, decided the new way, and it still
 // reaches Landed. An intended, coordinated break, recomputed.
+// Repinned for base admission (ADR-0200): the compiled line gained the
+// `BaseVerify` binding, so `Decision::RecordStageCatalog` carries a fourteenth
+// stage. An intended catalog edit, recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x60, 0x4f, 0x90, 0x5e, 0x44, 0x41, 0x5e, 0x9c, 0x5c, 0x67, 0x2c, 0x5a, 0x12, 0x2c, 0xd0, 0x4f, 0x72, 0xd3, 0xfe,
-    0x1f, 0xcc, 0x2d, 0x7d, 0x86, 0x5d, 0x2b, 0x8c, 0x28, 0x50, 0xa5, 0x3a, 0x25,
+    0x6c, 0xbc, 0xe1, 0x70, 0xf0, 0x4c, 0x42, 0x6f, 0x3c, 0x7c, 0x6b, 0x85, 0x20, 0xf5, 0xc6, 0x28, 0x3a, 0x24, 0x58,
+    0x9e, 0xe2, 0x20, 0xb6, 0x08, 0x20, 0xc3, 0x0c, 0x6d, 0xa4, 0x10, 0x20, 0xb9,
 ];
 
 #[test]

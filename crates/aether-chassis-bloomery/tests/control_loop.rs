@@ -38,7 +38,7 @@ use aether_bloomery::{
     ConfigRegistry, Decision, Decisions, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership,
     ModelOverride, OperatorHold, OperatorRepair, OperatorRepairError, Outcome, Query, QueryResult, ResolutionClaim,
     ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StudyCost, StudyRecord, Unproducible,
-    ViewDocument, WorkpieceId, decode_recorded_decisions, digest_of, reduce,
+    VerifyFailureSet, ViewDocument, WorkpieceId, decode_recorded_decisions, digest_of, reduce,
 };
 use aether_chassis_bloomery::artifacts::{ArtifactsCapabilityState, PutResult};
 use aether_chassis_bloomery::store::{JournalWrite, RecordConfig, RecordConfigResult, SqliteStore, StoreBackend};
@@ -155,6 +155,31 @@ fn seal_event_configured(key: &str, base: u8, workpiece: &str, configs: ConfigRe
     let spec =
         BloomDraft { proposals: vec![member], base: Digest::from_bytes([base; 32]), ..BloomDraft::default() }.seal();
     Event { idempotency_key: IdempotencyKey(key.to_owned()), fact: Fact::Seal(spec) }
+}
+
+/// Record a green whole-workspace receipt for the synthetic `base` seed so a
+/// following seal dispatches Construct rather than waiting on `verify.base`.
+fn prove_base(stream: &mut TcpStream, cid: u64, control: MailboxId, base: u8) -> Outcome {
+    let digest = Digest::from_bytes([base; 32]);
+    admit(
+        stream,
+        cid,
+        control,
+        &Event {
+            idempotency_key: IdempotencyKey(format!("base-verify-{base}")),
+            fact: Fact::BaseVerifyCompleted {
+                base: digest,
+                tree: digest,
+                passed: true,
+                evidence: Evidence {
+                    subject: digest,
+                    kind: EvidenceKind::VerificationResult,
+                    detail: Digest::from_bytes([9; 32]),
+                },
+                failed: VerifyFailureSet::EMPTY,
+            },
+        },
+    )
 }
 
 /// Admit an event's wire bytes and decode the reducer outcome from the reply.
@@ -333,6 +358,9 @@ fn the_capability_ledger_is_measured_live_and_rebuilt_on_replay() {
     let (coordinator, mut stream) = spawn_with_store(db, "calibration-test");
     let control = control_mailbox();
 
+    let proven = prove_base(&mut stream, 1, control, 0);
+    assert!(matches!(proven, Outcome::BaseProven { .. }), "the fixture base proves green: {proven:?}");
+
     // The seal dispatches its one member at the entry stage, which is the one
     // measurement this bloom has made.
     let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
@@ -393,6 +421,8 @@ fn a_calibration_read_fills_cost_columns_from_a_resolved_study_artifact() {
     let (_coordinator, mut stream) = spawn_with_artifacts(db, artifacts_root, "calibration-study");
     let control = control_mailbox();
 
+    let proven = prove_base(&mut stream, 1, control, 0);
+    assert!(matches!(proven, Outcome::BaseProven { .. }), "the fixture base proves green: {proven:?}");
     let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
     let Outcome::Sealed(bloom) = sealed else {
         panic!("the seal admits: {sealed:?}");
@@ -464,6 +494,8 @@ fn an_unresolvable_study_artifact_stays_unaccounted() {
     let (_coordinator, mut stream) = spawn_with_artifacts(db, artifacts_root, "calibration-missing");
     let control = control_mailbox();
 
+    let proven = prove_base(&mut stream, 1, control, 0);
+    assert!(matches!(proven, Outcome::BaseProven { .. }), "the fixture base proves green: {proven:?}");
     let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
     let Outcome::Sealed(bloom) = sealed else {
         panic!("the seal admits: {sealed:?}");

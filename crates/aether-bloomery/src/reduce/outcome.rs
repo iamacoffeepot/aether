@@ -769,6 +769,33 @@ pub enum Outcome {
     },
     /// A suppression disposition was refused.
     SuppressionRejected(SuppressionDispositionError),
+    /// A `verify.base` dispatch was queued for an unproven sealed base
+    /// (ADR-0200). Appended so every prior outcome keeps its wire discriminant.
+    BaseVerifyQueued {
+        /// The commit the queued run will check out.
+        base: Digest,
+    },
+    /// A whole-workspace base verify passed, and the withheld member dispatches
+    /// it was holding went out. Appended so every prior outcome keeps its wire
+    /// discriminant.
+    BaseProven {
+        /// The commit the verify ran at.
+        base: Digest,
+        /// The tree it peeled to.
+        tree: Digest,
+        /// The blooms whose deferred entry dispatches this verdict released.
+        released: Vec<BloomId>,
+    },
+    /// A whole-workspace base verify failed. Member entry stays withheld.
+    /// Appended so every prior outcome keeps its wire discriminant.
+    BaseRefused {
+        /// The commit the verify ran at.
+        base: Digest,
+        /// The tree it peeled to.
+        tree: Digest,
+        /// The verifier identities that failed together.
+        failed: VerifyFailureSet,
+    },
 }
 
 impl Outcome {
@@ -921,6 +948,58 @@ mod tests {
         let bytes = to_vec(&recorded).expect("v2 encodes");
         let decoded = decode_recorded_decisions(&bytes, Some(DECISIONS_SCHEMA)).expect("current identity decodes");
         assert_eq!(decoded, recorded);
+    }
+
+    fn minted_v2_row() -> Decisions {
+        Decisions {
+            outcome: Outcome::Sealed(bloom()),
+            effects: vec![
+                dispatch(),
+                Decision::AdvanceStage {
+                    bloom: bloom(),
+                    workpiece: workpiece(),
+                    progress: crate::StageProgress {
+                        stage: StageId::Construct,
+                        attempts: 1,
+                        candidate: None,
+                        repair_rolls: 0,
+                        seen_verify_failures: VerifyFailureSet::EMPTY,
+                        fold_checkpoint: None,
+                        fold_conflict_evidence: None,
+                        reconcile_assembles_base: true,
+                    },
+                },
+                Decision::RecordObservation { head: digest(9) },
+            ],
+        }
+    }
+
+    // Tripwire: a variant *inserted* rather than appended shifts every later
+    // discriminant and the boot replay misreads the journal, which is the
+    // #5338 abort class. These bytes are a `Decisions` whose effects include
+    // a `DispatchAttempt` followed by at least one further effect, minted
+    // once from the current shape.
+    const V2_ROW: &[u8] = &[
+        1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3,
+        0, 0, 0, 11, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 2, 0, 0, 0, 119, 112, 3, 0, 0, 0, 19, 0, 0, 0, 99, 111, 110, 115, 116, 114, 117, 99, 116, 46, 105, 109,
+        112, 108, 101, 109, 101, 110, 116, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 16, 0, 0, 0, 105, 97, 109, 97, 47, 99, 111, 110, 115, 116, 114,
+        117, 99, 116, 58, 49, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 3, 0, 0, 0, 4, 0, 0, 0, 103, 114, 111, 107, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 12, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 119, 112, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 25, 0,
+        0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+    ];
+
+    #[test]
+    fn appending_base_verify_variants_leaves_a_v2_row_decoding() {
+        // Tripwire: a variant inserted rather than appended shifts every later
+        // discriminant and the boot replay misreads the journal, which is the
+        // #5338 abort class.
+        let expected = minted_v2_row();
+        let stamped = decode_recorded_decisions(V2_ROW, Some(DECISIONS_SCHEMA)).expect("checked-in v2 decodes");
+        assert_eq!(stamped, expected);
     }
 
     #[test]

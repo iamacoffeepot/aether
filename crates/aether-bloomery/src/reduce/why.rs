@@ -327,7 +327,7 @@ mod tests {
     fn sealed(edges: &[MemberDependency]) -> (Snapshot, BloomId) {
         let spec = draft(0, vec![membership("wp-a", 1), membership("wp-b", 2)]).seal();
         let bloom = spec.id();
-        let snapshot = Snapshot::new(digest(0));
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event {
             idempotency_key: IdempotencyKey("seal".into()),
             fact: Fact::GraphSeal { predecessor: None, spec, edges: edges.to_vec() },

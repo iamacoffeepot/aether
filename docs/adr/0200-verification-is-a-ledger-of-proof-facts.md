@@ -60,6 +60,10 @@ Mechanical findings never spend a model lap:
 
 The package graph is the soundness boundary for closure-scoped proof, and the known leaks are priced in rather than wished away: per-package feature unification can differ from workspace unification (the low-frequency full gates — sweeps and the roll — exist precisely to catch what closure scoping cannot); runtime resource contention produces flakes, which wider gates make worse, not better, and which discrimination plus the fact-integrity rule handle; wire-frozen tail-append collisions and inventory registration are visible in the package graph, so the intersection gate catches them.
 
+### Base admission
+
+The base tree is a subject of verification in its own right. A member's work order is withheld until its base tree holds a green receipt under the whole-workspace gate set (`VerifyGateSet::base()`, distinct from a member's closure-narrowed set). An unproven base queues one `verify.base` dispatch rather than refusing the seal; a red base is a day-level stop (`InterruptKind::BaseRed`), not a member's charge. The receipt is the diagnostic set a later slice subtracts at Member-Verify.
+
 ## Consequences
 
 - Verification compute becomes proportional to new information rather than to suite size. Disjoint work lands for free; the full suite runs on idle time and at the roll, not on the land path.
@@ -69,6 +73,7 @@ The package graph is the soundness boundary for closure-scoped proof, and the kn
 - The ledger changes what ADR-0198 leases are for: batching dissolves the shared-prover load case (one large build takes the whole machine and that is correct), and leases retain value for genuinely exclusive resources — the mainline lock, a GPU host, disk. ADR-0198's implementation remains held as recorded.
 - Immediate land composes with ADR-0199's ownership direction; the mainline-protection configuration that permits it is operator-owned, not machinery.
 - A red discovered by a sweep is discovered after its land. This is accepted deliberately: the day branch absorbs it, taint plus auto-repair bounds it, and the roll barrier keeps it from ever reaching main.
+- The day gains a verification position belonging to no bloom, and the seal gains a precondition about the fleet rather than the draft.
 
 ## Alternatives considered
 
@@ -77,3 +82,4 @@ The package graph is the soundness boundary for closure-scoped proof, and the kn
 - **Per-member serial gates without composition** — N members cost N builds; the batch gate produces the same facts from one.
 - **Artifact caching alone (sccache status quo)** — caches compilation, not proof: tests re-execute and failures still attribute by rerun; necessary but not sufficient.
 - **Trust runner-reported results as facts without discrimination** — poisons the ledger with flakes and converts them into certain false attribution; rejected on the integrity precondition.
+- **A memberless bloom running the base verify (ADR-0205's unit)** — rejected; ADR-0205 is unimplemented and self-blocking under the one-active-bloom rule. A base-verify bloom would be a sealed unlanded bloom, so it would block the very member seal it exists to unblock.

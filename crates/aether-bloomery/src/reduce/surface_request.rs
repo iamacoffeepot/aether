@@ -116,7 +116,7 @@ mod tests {
         let bloom = spec.id();
         let workpiece = spec.members()[0].workpiece.clone();
         let scope_revision = spec.members()[0].scope_revision;
-        let snapshot = Snapshot::new(digest(0));
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let snapshot = snapshot.apply(
             &seal,

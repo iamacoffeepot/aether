@@ -176,7 +176,8 @@ mod tests {
     fn member_at_verify() -> (Snapshot, BloomId) {
         let spec = draft(1, vec![membership("alpha", 10)]).seal();
         let bloom = spec.id();
-        let (snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+        let (snapshot, _) =
+            step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
         let (snapshot, _) = step(
             &snapshot,
             &event(

@@ -90,6 +90,10 @@ pub fn classify(document: &ViewDocument, outstanding: &[String]) -> Quiescence {
         ));
     }
 
+    if document.base_alert.is_some() {
+        return Quiescence::Wedged("red base holding the day".to_owned());
+    }
+
     if document.blooms.is_empty() {
         return Quiescence::Stalled("no bloom reached the projection at all".to_owned());
     }

@@ -166,7 +166,7 @@ pub(super) fn reduce_operator_release(snapshot: &Snapshot, bloom: &BloomId, rele
 /// leave the bloom waiting on a gate nothing re-dispatches. A gate whose work
 /// order actually goes out clears its own deferral in the fold — the same
 /// implicit clear a member dispatch uses.
-fn owed_aggregates(record: &BloomRecord, bloom: BloomId) -> Vec<Decision> {
+pub(super) fn owed_aggregates(record: &BloomRecord, bloom: BloomId) -> Vec<Decision> {
     let Some(integration) = record.integration.as_ref() else {
         return Vec::new();
     };
@@ -210,6 +210,27 @@ pub(super) fn owed_dispatch(
     workpiece: &WorkpieceId,
     member_checkpoint: Option<CandidateRef>,
 ) -> Option<[Decision; 2]> {
+    owed_dispatch_lifted(record, bloom, workpiece, member_checkpoint, true)
+}
+
+/// The same re-derived dispatch as [`owed_dispatch`], lifting the base brake
+/// rather than the operator brake.
+pub(super) fn owed_base_dispatch(
+    record: &BloomRecord,
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    member_checkpoint: Option<CandidateRef>,
+) -> Option<[Decision; 2]> {
+    owed_dispatch_lifted(record, bloom, workpiece, member_checkpoint, false)
+}
+
+fn owed_dispatch_lifted(
+    record: &BloomRecord,
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    member_checkpoint: Option<CandidateRef>,
+    operator_release: bool,
+) -> Option<[Decision; 2]> {
     let cursor = record.progress.get(workpiece).copied()?;
     let candidate = cursor.candidate;
     if workpiece.is_composition() {
@@ -224,7 +245,11 @@ pub(super) fn owed_dispatch(
             cursor,
             DispatchTargets { subject: weave.tree, checkout: weave.checkout },
             Some(weave.tree),
-            composition_line(record).released(),
+            if operator_release {
+                composition_line(record).released()
+            } else {
+                composition_line(record).base_released()
+            },
         ));
     }
     let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece)?;
@@ -243,6 +268,10 @@ pub(super) fn owed_dispatch(
         cursor,
         (targets, construct_checkpoint_base),
         candidate.map(|current| current.tree),
-        SealedLine::of(record, member).released(),
+        if operator_release {
+            SealedLine::of(record, member).released()
+        } else {
+            SealedLine::of(record, member).base_released()
+        },
     ))
 }

@@ -12,9 +12,10 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
-    Adjudication, AgentProfile, CandidateRef, CompositionFinding, ConfigRegistry, Evidence, MemberCandidate,
-    MemberDependency, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, ResolutionClaim,
-    ResolvedBloom, SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    Adjudication, AgentProfile, BaseReceipt, CandidateRef, CompositionFinding, ConfigRegistry, Evidence,
+    MemberCandidate, MemberDependency, OperatorHold, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
+    ResolutionClaim, ResolvedBloom, SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
+    Withdrawal,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -829,5 +830,31 @@ pub enum Decision {
         workpiece: Option<WorkpieceId>,
         /// The gate, the guard that failed, and the values it read.
         refusal: RecordedRefusal,
+    },
+    /// File a base-verify receipt in the snapshot ledger, keyed by the tree it
+    /// judged and the whole-workspace gate set (ADR-0200).
+    ///
+    /// Snapshot-folding: writes both the tree index and the receipt map so a
+    /// later seal of the same base (or another commit that peels to the same
+    /// tree) reads one answer. Appended so the prior decisions' wire
+    /// discriminants are unchanged.
+    RecordBaseReceipt {
+        /// The receipt, naming the commit, the peeled tree, the gate set, and
+        /// the pending / green / red verdict.
+        receipt: BaseReceipt,
+    },
+    /// Drive the whole-workspace `verify.base` fan-out against a sealed base
+    /// (ADR-0200) — a snapshot-inert outbox intent on the
+    /// [`Decision::DispatchOrphanClaimRelease`] model. The terminal result folds in later
+    /// from [`crate::Fact::BaseVerifyCompleted`], never from this decision.
+    /// Emitted exactly once per unproven base: a pending or terminal receipt
+    /// already on record enqueues nothing.
+    DispatchBaseVerify {
+        /// The commit the lane checks out.
+        base: Digest,
+        /// The `verify.base` transformation, with no named diff base.
+        transformation: Transformation,
+        /// The catalog-calibrated profile the mechanical lane runs under.
+        profile: AgentProfile,
     },
 }

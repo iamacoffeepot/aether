@@ -21,6 +21,7 @@
 
 mod aggregate_verify;
 mod attempt;
+mod base_verify;
 mod boundary;
 mod composition;
 mod decision;
@@ -82,6 +83,7 @@ use crate::values::{ResolvedConfigs, SpendWindow};
 
 use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::{reduce_attempt_completed, reduce_member_executor_fault};
+use base_verify::reduce_base_verify_completed;
 use evidence::{reduce_admit_evidence, reduce_adopt_answer};
 use fold_conflict::reduce_fold_conflict;
 use fold_refusal::reduce_fold_refused;
@@ -199,6 +201,9 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         }
         Fact::SuppressionDisposition { bloom, workpiece, disposition } => {
             reduce_suppression_disposition(snapshot, bloom, workpiece, disposition)
+        }
+        Fact::BaseVerifyCompleted { base, tree, passed, evidence, failed } => {
+            reduce_base_verify_completed(snapshot, *base, *tree, *passed, evidence, *failed)
         }
     }
 }

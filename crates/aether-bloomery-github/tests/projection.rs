@@ -72,7 +72,13 @@ fn one_bloom(id: BloomId, members: Vec<MemberView>) -> ViewDocument {
         blocker: None,
         leases: Vec::new(),
     };
-    ViewDocument { mainline: digest(0), observed: digest(0), spend_quiesce: None, blooms: vec![bloom] }
+    ViewDocument {
+        mainline: digest(0),
+        observed: digest(0),
+        spend_quiesce: None,
+        blooms: vec![bloom],
+        base_alert: None,
+    }
 }
 
 /// A two-member bloom; the second member is integrated (carries a resolution)

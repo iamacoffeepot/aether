@@ -737,6 +737,21 @@ pub enum Fact {
         /// The answer, naming the requests it closes by digest.
         disposition: SuppressionDisposition,
     },
+    /// A whole-workspace verify of a sealed base completed (ADR-0200).
+    ///
+    /// Appended, not inserted, so prior wire discriminants are unchanged.
+    BaseVerifyCompleted {
+        /// The commit the verify ran at.
+        base: Digest,
+        /// The tree it peeled to — the content key of the receipt.
+        tree: Digest,
+        /// The completion gate's pass/fail outcome.
+        passed: bool,
+        /// The evidence the run produced, bound to the tree it judged.
+        evidence: Evidence,
+        /// The verifier identities that failed together. Empty on a pass.
+        failed: VerifyFailureSet,
+    },
 }
 
 impl Fact {

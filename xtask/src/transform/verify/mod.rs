@@ -569,6 +569,13 @@ fn render_diagnostics(stdout: &str) -> String {
 /// concrete `verify.*` ids `verify_command` maps individually.
 pub(super) const VERIFY_CHECK: &str = "verify.check";
 
+/// The typed id of the whole-workspace base verify. Same
+/// [`verify_check_members`] fan-out as [`VERIFY_CHECK`], but closure resolution
+/// is skipped: with an empty candidate range `Scope::resolve` yields an empty
+/// package set and `args_under` would strip `--workspace` while adding no `-p`,
+/// reporting green over nothing.
+pub(super) const VERIFY_BASE: &str = "verify.base";
+
 /// The log the umbrella writes its computed scope to, alongside its members'
 /// own logs — the receipt that makes a wrong closure visible in the envelope
 /// rather than silent (#4890).
@@ -1697,7 +1704,7 @@ fn environment_observations(members: &[MemberRun]) -> Option<String> {
     (!observed.is_empty()).then(|| observed.join("\n\n"))
 }
 
-/// The `verify.check` umbrella (#3626): runs every member in
+/// The `verify.check` / `verify.base` umbrella (#3626): runs every member in
 /// `verify_check_members()` unconditionally — no short-circuit on first
 /// failure, so a partial failure still leaves every member's log for
 /// diagnosis — then writes one aggregate `evidence.json` whose `status`
@@ -1707,8 +1714,10 @@ fn environment_observations(members: &[MemberRun]) -> Option<String> {
 /// The candidate's reverse-dependency closure is resolved once, before any
 /// member runs, and every member is discriminated against that one answer
 /// (#4895) — recomputing it per member would let a mid-run repository change
-/// give two members two different candidates.
-pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
+/// give two members two different candidates. `full` skips that resolution so
+/// each member keeps its stated `--workspace` argv: an empty candidate range
+/// would otherwise false-green a workspace-wide question.
+pub(super) fn run_verify_check(args: &TransformArgs, full: bool) -> Result<()> {
     let umbrella_started = Instant::now();
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
@@ -1729,7 +1738,12 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
             peak_resident_bytes: None,
             duration_millis: None,
             gates: None,
-            command: VERIFY_CHECK.to_owned(),
+            command: if full {
+                VERIFY_BASE
+            } else {
+                VERIFY_CHECK
+            }
+            .to_owned(),
             nonce: args.nonce.clone(),
             status: "fail",
             exit_code: Some(1),
@@ -1745,7 +1759,7 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
     }
 
     let CheckPass { runs, gates, log_names, first_failure_code, sccache_served, peak_resident_bytes } =
-        check_pass(args, Some(&args.out))?;
+        check_pass(args, Some(&args.out), full)?;
 
     let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
     let failures = failed_verifiers(runs.iter().map(|run| (run.id.as_str(), run.outcome)));
@@ -1756,7 +1770,12 @@ pub(super) fn run_verify_check(args: &TransformArgs) -> Result<()> {
         peak_resident_bytes,
         duration_millis: None,
         gates: None,
-        command: VERIFY_CHECK.to_owned(),
+        command: if full {
+            VERIFY_BASE
+        } else {
+            VERIFY_CHECK
+        }
+        .to_owned(),
         nonce: args.nonce.clone(),
         status,
         exit_code: Some(first_failure_code.unwrap_or(0)),
@@ -1801,20 +1820,32 @@ struct CheckPass {
 /// runs the same members and keeps only what they said, which is what a
 /// precheck needs — its logs are not the lane's evidence and writing them into
 /// the construct output would put a second lane's receipts in that envelope.
-fn check_pass(args: &TransformArgs, logs: Option<&Path>) -> Result<CheckPass> {
+fn check_pass(args: &TransformArgs, logs: Option<&Path>, full: bool) -> Result<CheckPass> {
     // Resolved once for the whole pass, so the counters the evidence carries
     // cover every member's build rather than one member's slice of it, and the
     // peak it reports is the high-water mark of the whole lane.
     let cache = sccache::detect();
     let peak = peak_memory::detect();
-    let closure = closure::resolve(args.diff_base.as_deref());
+    // A whole-workspace run skips closure resolution: `Scope::resolve` of an
+    // empty candidate range yields no packages, and `args_under` would then
+    // strip `--workspace` while adding no `-p`.
+    let closure = if full {
+        None
+    } else {
+        closure::resolve(args.diff_base.as_deref())
+    };
     let mut runner = SpawnRunner { cache: cache.as_ref(), peak: &peak };
 
     // Resolved once, before any member runs, and written out as its own log:
     // the compiling members are only comparable across a run if they all
     // narrowed to the same closure, and a receipt no one can read is not a
-    // receipt (#4890).
-    let scope = Scope::resolve(args.diff_base.as_deref());
+    // receipt (#4890). `full` asks for the workspace, so `packages()` is
+    // `None` and each member's stated argv is used verbatim.
+    let scope = if full {
+        Scope::resolve(None)
+    } else {
+        Scope::resolve(args.diff_base.as_deref())
+    };
     let mut log_names = Vec::new();
     if let Some(dir) = logs {
         let scope_path = dir.join(SCOPE_LOG);
@@ -1898,17 +1929,17 @@ pub(super) fn precheck_findings(args: &TransformArgs) -> Result<Option<String>> 
     if !missing.is_empty() {
         return Ok(None);
     }
-    Ok(verify_findings(&check_pass(args, None)?.runs))
+    Ok(verify_findings(&check_pass(args, None, false)?.runs))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, Scope, VERIFY_CHECK, VerifyInvocation,
-        clippy_verdict, closure, distil_diagnostics, effective_exit_code, environment_observations, failed_verifiers,
-        member_outcome, member_scope_notice, operational_failure_notice, preflight_tools, prepare_failure_log,
-        render_diagnostics, required_targets, required_tools, run_member_discriminated, run_timed_prepare,
-        umbrella_status, verify_check_members, verify_command, verify_findings, workflow,
+        Captured, MAX_FINDING_LINES, MemberOutcome, MemberRun, MemberRunner, Scope, VERIFY_BASE, VERIFY_CHECK,
+        VerifyInvocation, clippy_verdict, closure, distil_diagnostics, effective_exit_code, environment_observations,
+        failed_verifiers, member_outcome, member_scope_notice, operational_failure_notice, preflight_tools,
+        prepare_failure_log, render_diagnostics, required_targets, required_tools, run_member_discriminated,
+        run_timed_prepare, umbrella_status, verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::iter;
 
@@ -3167,7 +3198,9 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // verify.check would silently run as a single (wrong) cargo invocation
         // instead of falling to the unrecognized-id bail!.
         assert!(verify_command(VERIFY_CHECK).is_none());
+        assert!(verify_command(VERIFY_BASE).is_none());
         assert_ne!(VERIFY_CHECK, CONSTRUCT_IMPLEMENT);
+        assert_ne!(VERIFY_BASE, VERIFY_CHECK);
     }
 
     #[test]

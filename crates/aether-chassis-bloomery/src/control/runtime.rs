@@ -38,13 +38,14 @@ pub use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 
 use aether_bloomery::control::{
-    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, CancelDispatchPayload, ClaimResult, ClaimSeal,
-    Commit, CommitResult, CompleteReleaseResult, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, HealOp,
-    IntegratePayload, LandPayload, LoadConfigs, LoadConfigsResult, MemberClaimReleasePayload, MembershipMutation,
-    MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline, ObserveMainlineResult, OrphanClaimReleasePayload,
-    OutboxPayload, Query, QueryResult, ReconcileOp, RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass,
-    SpendQuery, SpendQueryResult, SplicePayload, Topic, TransferSeal, held_to_seal_error, held_to_supersede_error,
-    plan_heals, reconcile_op, release_seal_mail, seal_claim_mail, transfer_seal_mail,
+    Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, CancelDispatchPayload,
+    ClaimResult, ClaimSeal, Commit, CommitResult, CompleteReleaseResult, DispatchPayload, EnumerateClaims,
+    EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, LoadConfigs, LoadConfigsResult,
+    MemberClaimReleasePayload, MembershipMutation, MetricsQuery, MetricsQueryResult, MetricsView, ObserveMainline,
+    ObserveMainlineResult, OrphanClaimReleasePayload, OutboxPayload, Query, QueryResult, ReconcileOp,
+    RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, SpendQuery, SpendQueryResult, SplicePayload,
+    Topic, TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail,
+    seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
     BloomId, CalibrationDocument, CalibrationLedger, ClaimRefKind, ClaimRefState, DAYS_CAP, Decision, Decisions,
@@ -1323,7 +1324,8 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::RequestOrphanClaimRelease { .. }
         | Fact::CompleteOrphanClaimRelease { .. }
-        | Fact::SurfaceOverlap { .. } => None,
+        | Fact::SurfaceOverlap { .. }
+        | Fact::BaseVerifyCompleted { .. } => None,
     }
 }
 
@@ -1423,6 +1425,11 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
             let payload = OrphanClaimReleasePayload { request: *request, target: target.clone() };
             Some(OutboxPayload::new(Topic::OrphanClaimRelease, to_vec(&payload)?))
         }
+        Decision::DispatchBaseVerify { base, transformation, profile } => {
+            let payload =
+                BaseVerifyPayload { base: *base, transformation: transformation.clone(), profile: profile.clone() };
+            Some(OutboxPayload::new(Topic::BaseVerify, to_vec(&payload)?))
+        }
         Decision::CancelDispatch { bloom, workpiece } => {
             let payload = CancelDispatchPayload { bloom: bloom.0, workpiece: workpiece.clone() };
             Some(OutboxPayload::new(Topic::CancelDispatch, to_vec(&payload)?))
@@ -1433,6 +1440,7 @@ fn outbox_payload(effect: &Decision) -> Result<Option<OutboxPayload>, WireError>
         }
         Decision::ClaimMembership { .. }
         | Decision::ReleaseMembership { .. }
+        | Decision::RecordBaseReceipt { .. }
         | Decision::RecordOrphanClaimRelease { .. }
         | Decision::InheritClaim { .. }
         | Decision::RecordResolution { .. }

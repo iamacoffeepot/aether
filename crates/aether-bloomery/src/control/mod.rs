@@ -243,6 +243,12 @@ topic_vocabulary! {
     /// the member line gets its own topic and its own payload". Appended so the
     /// prior topics' display spellings and ordering are unchanged.
     ScopeDispatch,
+    /// A whole-workspace base-verify dispatch (reducer-minted, from
+    /// [`Decision::DispatchBaseVerify`]), drained by the executor reactor,
+    /// which runs `verify.base` against the sealed base under a bloom-less
+    /// order record (ADR-0200). Appended so the prior topics' display
+    /// spellings and ordering are unchanged.
+    BaseVerify,
 }
 
 impl Topic {
@@ -270,6 +276,7 @@ impl Topic {
             Self::CancelDispatch => "topic:cancel_dispatch",
             Self::MemberClaimRelease => "topic:member_claim_release",
             Self::ScopeDispatch => "topic:scope_dispatch",
+            Self::BaseVerify => "topic:base_verify",
         }
     }
 
@@ -293,6 +300,7 @@ impl Topic {
             Decision::DispatchAggregateReview { .. } => Some(Self::AggregateReview),
             Decision::DispatchAggregateVerify { .. } => Some(Self::AggregateVerify),
             Decision::DispatchOrphanClaimRelease { .. } => Some(Self::OrphanClaimRelease),
+            Decision::DispatchBaseVerify { .. } => Some(Self::BaseVerify),
             Decision::CancelDispatch { .. } => Some(Self::CancelDispatch),
             Decision::ReleaseMemberClaimRef { .. } => Some(Self::MemberClaimRelease),
             Decision::ClaimMembership { .. }
@@ -399,7 +407,8 @@ impl Topic {
             // Snapshot-only: a refusal is precisely the statement that no work
             // went out (ADR-0206). What reads it is `/why`, off the record; a
             // topic here would enqueue a row nothing drains.
-            | Decision::RecordRefusal { .. } => None,
+            | Decision::RecordRefusal { .. }
+            | Decision::RecordBaseReceipt { .. } => None,
         }
     }
 }
@@ -631,6 +640,18 @@ pub struct AggregateVerifyPayload {
     pub transformation: Transformation,
     /// The [`AgentProfile`] the bloom's sealed stage catalog calibrates
     /// `AggregateVerify` at (ADR-0174).
+    pub profile: AgentProfile,
+}
+
+/// The payload a [`Topic::BaseVerify`] outbox row carries — the whole-workspace
+/// `verify.base` fan-out against a sealed base (ADR-0200).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct BaseVerifyPayload {
+    /// The commit the lane checks out.
+    pub base: Digest,
+    /// The `verify.base` transformation to submit.
+    pub transformation: Transformation,
+    /// The catalog-calibrated profile the mechanical lane runs under.
     pub profile: AgentProfile,
 }
 

@@ -86,8 +86,8 @@ use crate::store::StoreBackend;
 ///
 /// The other reducer topics (land, integration, receipts, claim releases) do not
 /// mint orders, so they have no nonce to strand.
-const ORDER_BEARING_TOPICS: [Topic; 4] =
-    [Topic::Dispatch, Topic::AggregateReview, Topic::AggregateVerify, Topic::ScopeDispatch];
+const ORDER_BEARING_TOPICS: [Topic; 5] =
+    [Topic::Dispatch, Topic::AggregateReview, Topic::AggregateVerify, Topic::ScopeDispatch, Topic::BaseVerify];
 
 /// Re-queue every acknowledged dispatch whose order was spent without its fact
 /// reaching the journal, returning the nonces put back in flight.

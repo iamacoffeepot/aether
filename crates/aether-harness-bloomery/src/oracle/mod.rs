@@ -93,7 +93,7 @@ fn termination(document: &ViewDocument, outstanding: &[String]) -> Result<(), Vi
         ) {
             continue;
         }
-        if bloom.operator_hold.is_some() || bloom.review_park.is_some() {
+        if bloom.operator_hold.is_some() || bloom.review_park.is_some() || document.base_alert.is_some() {
             continue;
         }
         for member in &bloom.members {

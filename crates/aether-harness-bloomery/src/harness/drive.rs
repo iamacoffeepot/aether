@@ -64,6 +64,12 @@ pub fn passed(order: &OutstandingOrder) -> ScriptedUpload {
     verdict(order, ScriptedVerdict::VerificationPassed)
 }
 
+/// A failing mechanical verdict naming `failed`.
+#[must_use]
+pub fn failed(order: &OutstandingOrder, failed: VerifyFailureSet) -> ScriptedUpload {
+    ScriptedUpload { failed_verifiers: failed, ..verdict(order, ScriptedVerdict::VerificationFailed) }
+}
+
 /// A passing verdict that captured `candidate` — what a construct or refine run
 /// uploads once it has a tree to stand behind.
 #[must_use]

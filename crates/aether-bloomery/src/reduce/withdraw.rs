@@ -228,7 +228,7 @@ mod tests {
         } else {
             Fact::GraphSeal { predecessor: None, spec, edges: graph }
         };
-        (step(&Snapshot::new(digest(0)), &event("seal", fact)).0, bloom)
+        (step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", fact)).0, bloom)
     }
 
     /// Land a resolution claim on `name`, the way a passing terminal Verify does.

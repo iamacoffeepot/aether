@@ -144,7 +144,8 @@ mod tests {
     fn inherit_claimed_successor() -> (Snapshot, BloomId, Digest) {
         let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
         let predecessor = spec.id();
-        let (mut snapshot, _) = step(&Snapshot::new(digest(1)), &event("seal", Fact::Seal(spec)));
+        let (mut snapshot, _) =
+            step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
         for (name, revision, tree, checkout) in [("alpha", 10, 20, 22), ("beta", 11, 21, 23)] {
             snapshot = step(
                 &snapshot,
@@ -170,7 +171,7 @@ mod tests {
             )
             .0;
         }
-        let snapshot = observing(&snapshot, 2);
+        let snapshot = observing(&snapshot, 2).with_green_base(digest(2));
         let successor_spec = draft(2, vec![membership("alpha", 10), membership("beta", 11)]).seal();
         let successor = successor_spec.id();
         let (snapshot, decided) =

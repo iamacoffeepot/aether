@@ -133,6 +133,7 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::SurfaceOverlap { .. }
         | Fact::RequestOrphanClaimRelease { .. }
-        | Fact::CompleteOrphanClaimRelease { .. } => Vec::new(),
+        | Fact::CompleteOrphanClaimRelease { .. }
+        | Fact::BaseVerifyCompleted { .. } => Vec::new(),
     }
 }

@@ -225,6 +225,21 @@ pub struct ViewDocument {
     pub spend_quiesce: Option<SpendQuiesce>,
     #[serde(default)]
     pub blooms: Vec<BloomView>,
+    #[serde(default)]
+    pub base_alert: Option<BaseAlertView>,
+}
+
+/// A red whole-workspace base receipt holding the day.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BaseAlertView {
+    #[serde(default)]
+    pub base: DigestHex,
+    #[serde(default)]
+    pub tree: DigestHex,
+    #[serde(default)]
+    pub failed: Vec<String>,
+    #[serde(default)]
+    pub evidence: DigestHex,
 }
 
 /// One bloom in the live projection.

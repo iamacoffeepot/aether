@@ -2,14 +2,15 @@
 //! render without querying back into the store (ADR-0149 §The boundary).
 
 use super::readiness::blocking_ancestor;
-use super::{AwaitingSurface, BloomRecord, LeaseEviction, Snapshot};
+use super::{AwaitingSurface, BloomRecord, BloomStatus, LeaseEviction, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
-    AwaitingSurfaceView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView,
-    LandingBlock, LeaseEvictionView, LeaseView, MemberView, PendingDecisionView, ReviewParkView, ViewDocument,
-    WedgeCause, WithdrawnView,
+    AwaitingSurfaceView, BaseAlertView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView,
+    HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MemberView, PendingDecisionView, ReviewParkView,
+    ViewDocument, WedgeCause, WithdrawnView,
 };
+use crate::values::BaseVerdict;
 use crate::values::{Question, Withdrawal, WithdrawalCause};
 
 /// Assemble a self-contained [`ViewDocument`] from a snapshot — the pure
@@ -78,7 +79,20 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
         observed: snapshot.observed,
         spend_quiesce: snapshot.spend_quiesce.clone(),
         blooms,
+        base_alert: base_alert_of(snapshot),
     }
+}
+
+/// The red receipt whose base is the sealed bloom's base, or — with no sealed
+/// bloom — the red receipt for `snapshot.observed`.
+fn base_alert_of(snapshot: &Snapshot) -> Option<BaseAlertView> {
+    let sealed = snapshot.blooms.values().find(|record| record.status == BloomStatus::Sealed);
+    let base = sealed.map_or(snapshot.observed, |record| record.spec.base());
+    let receipt = snapshot.base_receipt_for(base)?;
+    let BaseVerdict::Red { evidence, failed } = &receipt.verdict else {
+        return None;
+    };
+    Some(BaseAlertView::from_failure_set(receipt.base, receipt.tree, *failed, evidence.detail))
 }
 
 /// Resolve each open hold once, then bind it to the member it names — a parked
@@ -323,7 +337,7 @@ mod tests {
                 }],
             },
         };
-        let snapshot = Snapshot::new(digest(0));
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let snapshot = snapshot.apply(
             &event,
             &reduce(&snapshot, &event, &ResolvedConfigs::default(), &SpendWindow::default()),
@@ -351,7 +365,7 @@ mod tests {
         let bloom = spec.id();
         let configs = ResolvedConfigs::default();
         let spend = SpendWindow::default();
-        let mut snapshot = Snapshot::new(digest(0));
+        let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &configs, &spend), &configs);
 
@@ -394,7 +408,7 @@ mod tests {
         let spec = BloomDraft { proposals: vec![membership("wp", 1)], base: digest(0), ..BloomDraft::default() }.seal();
         let bloom = spec.id();
         let reason = digest(91);
-        let mut parked = Snapshot::new(digest(0));
+        let mut parked = Snapshot::new(digest(0)).with_green_base(digest(0));
         parked = step(&parked, &event("seal-p", Fact::Seal(spec.clone()))).0;
         parked = step(
             &parked,
@@ -418,7 +432,7 @@ mod tests {
         assert!(parked_view.pending_decision.is_none(), "a park is not an ADR-0151 question");
         assert!(parked_view.wedge.is_none(), "a parked member is not wedged");
 
-        let mut wedged = Snapshot::new(digest(0));
+        let mut wedged = Snapshot::new(digest(0)).with_green_base(digest(0));
         wedged = step(&wedged, &event("seal-w", Fact::Seal(spec))).0;
         for (key, detail) in [("c-die-1", 70_u8), ("c-die-2", 71)] {
             wedged = step(
@@ -455,7 +469,7 @@ mod tests {
         let bloom = spec.id();
         let configs = ResolvedConfigs::default();
         let spend = SpendWindow::default();
-        let mut snapshot = Snapshot::new(digest(0));
+        let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &configs, &spend), &configs);
 
@@ -500,7 +514,7 @@ mod tests {
 
     fn sealed(name: &str) -> Snapshot {
         let spec = BloomDraft { proposals: vec![membership(name, 1)], base: digest(0), ..BloomDraft::default() }.seal();
-        let snapshot = Snapshot::new(digest(0));
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         snapshot.apply(
             &seal,
@@ -546,7 +560,7 @@ mod tests {
         let bloom = spec.id();
         let configs = ResolvedConfigs::default();
         let spend = SpendWindow::default();
-        let mut snapshot = Snapshot::new(digest(0));
+        let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         snapshot = snapshot.apply(&seal, &reduce(&snapshot, &seal, &configs, &spend), &configs);
 
@@ -647,7 +661,7 @@ mod tests {
         }
         .seal();
         let bloom = spec.id();
-        let mut snapshot = Snapshot::new(digest(0));
+        let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         snapshot = snapshot.apply(
             &seal,
@@ -757,7 +771,7 @@ mod tests {
     fn a_composition_wedge_surfaces_its_wedge_and_open_finding() {
         let spec = BloomDraft { proposals: vec![membership("wp", 1)], base: digest(0), ..BloomDraft::default() }.seal();
         let bloom = spec.id();
-        let mut snapshot = Snapshot::new(digest(0));
+        let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         snapshot = step(&snapshot, &event("seal", Fact::Seal(spec))).0;
         snapshot = step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 1, 10) })).0;
         snapshot = step(
@@ -848,7 +862,7 @@ mod tests {
         }
         .seal();
         let bloom = spec.id();
-        let mut snapshot = Snapshot::new(digest(0));
+        let mut snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         snapshot = step(
             &snapshot,
             &event(

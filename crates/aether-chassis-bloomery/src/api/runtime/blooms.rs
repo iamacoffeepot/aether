@@ -740,6 +740,7 @@ mod tests {
                 ceiling_micro_usd: 10,
             }),
             blooms: Vec::new(),
+            base_alert: None,
         };
         let result = QueryResult::Document { document: to_vec(&document).unwrap() };
         let response = query_response(result, None);
@@ -760,6 +761,7 @@ mod tests {
             observed: Digest::from_bytes([2; 32]),
             spend_quiesce: None,
             blooms: Vec::new(),
+            base_alert: None,
         };
         let report = DoctorReport {
             checks: vec![CheckResult {

@@ -201,6 +201,7 @@ pub(super) fn resume_entries(
             catalog: &record.stage_catalog,
             base: just_checkout,
             held: record.operator_hold.is_some(),
+            base_proven: record.base_proven,
         };
         effects.extend(move_effects(
             bloom,
@@ -240,7 +241,7 @@ mod tests {
         let spec = draft(0, vec![membership("wp-a", 1), membership("wp-b", 2)]).seal();
         let bloom = spec.id();
         let members: Vec<WorkpieceId> = spec.members().iter().map(|member| member.workpiece.clone()).collect();
-        let snapshot = Snapshot::new(digest(0));
+        let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
         let seal = Event { idempotency_key: IdempotencyKey("seal".into()), fact: Fact::Seal(spec) };
         let snapshot = snapshot.apply(
             &seal,

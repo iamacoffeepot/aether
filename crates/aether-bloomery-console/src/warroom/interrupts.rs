@@ -26,6 +26,7 @@ pub enum InterruptKind {
     Landing,
     Quiesce,
     Hold,
+    BaseRed,
 }
 
 impl InterruptKind {
@@ -40,6 +41,7 @@ impl InterruptKind {
             Self::Landing => "landing",
             Self::Quiesce => "quiesce",
             Self::Hold => "hold",
+            Self::BaseRed => "base",
         }
     }
 }
@@ -50,6 +52,14 @@ pub fn interrupts(view: &ViewDocument) -> Vec<Interrupt> {
     let mut entries = Vec::new();
     if let Some(quiesce) = &view.spend_quiesce {
         entries.push(quiesce_entry(quiesce));
+    }
+    if let Some(alert) = &view.base_alert {
+        entries.push(Interrupt {
+            kind: InterruptKind::BaseRed,
+            detail: alert.failed.join(", "),
+            focus: Focus::Seal,
+            stage: None,
+        });
     }
     for bloom in &view.blooms {
         push_bloom_interrupts(&mut entries, bloom);

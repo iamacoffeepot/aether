@@ -50,6 +50,8 @@ pub enum LaneScript {
     WrongSubject,
     /// A mechanical gate names these failed verifiers.
     VerifyFail(VerifyFailureSet),
+    /// The bloom-less `verify.base` fan-out names these failed verifiers.
+    BaseVerifyFail(VerifyFailureSet),
 }
 
 /// When and how a successor replaces the sealed bloom.

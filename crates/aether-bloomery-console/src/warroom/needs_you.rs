@@ -46,7 +46,7 @@ fn fold_row(focus: Focus, group: &[Interrupt], alerts: &[Alert]) -> Option<Needs
     Some(NeedsYouRow {
         focus,
         subject,
-        happened: compose_happened(representative),
+        happened: group.iter().map(compose_happened).collect::<Vec<_>>().join(" · "),
         action: action_clause(representative.kind).to_owned(),
         severity: if loud {
             Severity::Loud
@@ -69,11 +69,19 @@ fn action_clause(kind: InterruptKind) -> &'static str {
         InterruptKind::Wedge => "widen the surface or eject",
         InterruptKind::Quiesce => "raise the ceiling or stand down",
         InterruptKind::Hold => "release",
+        InterruptKind::BaseRed => "repair the base",
     }
 }
 
 fn interrupt_is_loud(kind: InterruptKind) -> bool {
-    matches!(kind, InterruptKind::Terminal | InterruptKind::Wedge | InterruptKind::Landing | InterruptKind::Quiesce)
+    matches!(
+        kind,
+        InterruptKind::Terminal
+            | InterruptKind::Wedge
+            | InterruptKind::Landing
+            | InterruptKind::Quiesce
+            | InterruptKind::BaseRed
+    )
 }
 
 fn alert_is_loud(kind: AlertKind) -> bool {
@@ -84,9 +92,9 @@ fn alert_is_loud(kind: AlertKind) -> bool {
 mod tests {
     use super::{Severity, rows};
     use crate::dto::{
-        BloomView, CompositionFinding, CompositionView, DigestHex, ExecutorFaultView, HostFaultView, LandingBlock,
-        MemberView, OperatorHoldView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce, StageId,
-        ViewDocument, WedgeCause,
+        BaseAlertView, BloomView, CompositionFinding, CompositionView, DigestHex, ExecutorFaultView, HostFaultView,
+        LandingBlock, MemberView, OperatorHoldView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce,
+        StageId, ViewDocument, WedgeCause,
     };
     use crate::warroom::{Focus, InterruptKind};
 
@@ -159,6 +167,22 @@ mod tests {
     }
 
     #[test]
+    fn a_red_base_renders_exactly_one_seal_row() {
+        // The plausible bug: a day-level alert that folds into a per-bloom row
+        // is invisible when no bloom is sealed.
+        let view = ViewDocument {
+            base_alert: Some(BaseAlertView { failed: vec!["verify.docs".to_owned()], ..BaseAlertView::default() }),
+            ..ViewDocument::default()
+        };
+        let rows = rows(&view);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].focus, Focus::Seal);
+        assert!(rows[0].happened.contains(InterruptKind::BaseRed.label()));
+        assert_eq!(rows[0].action, "repair the base");
+        assert_eq!(rows[0].severity, Severity::Loud);
+    }
+
+    #[test]
     fn every_interrupt_kind_names_an_action() {
         // The plausible bug: a kind is folded into a row whose action is empty,
         // so the operator still has to open the drill-in to learn the verb.
@@ -168,6 +192,7 @@ mod tests {
                 spent_micro_usd: 12,
                 ceiling_micro_usd: 10,
             }),
+            base_alert: Some(BaseAlertView { failed: vec!["verify.docs".to_owned()], ..BaseAlertView::default() }),
             blooms: vec![
                 BloomView { id: digest(1), review_park: Some(ReviewParkView::default()), ..BloomView::default() },
                 BloomView {
@@ -219,6 +244,7 @@ mod tests {
             InterruptKind::Landing,
             InterruptKind::Quiesce,
             InterruptKind::Hold,
+            InterruptKind::BaseRed,
         ] {
             let label = kind.label();
             let row = rows.iter().find(|row| row.happened.contains(label));

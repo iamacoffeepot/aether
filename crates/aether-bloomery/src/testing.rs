@@ -139,7 +139,7 @@ pub fn observing(snapshot: &Snapshot, head: u8) -> Snapshot {
 pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> (Snapshot, BloomSpec) {
     let spec = draft(mainline, members).seal();
     let bloom = spec.id();
-    let mut snapshot = Snapshot::new(digest(mainline));
+    let mut snapshot = Snapshot::new(digest(mainline)).with_green_base(digest(mainline));
     let seal = event("seal", Fact::Seal(spec.clone()));
     snapshot = snapshot.apply(
         &seal,

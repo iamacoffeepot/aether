@@ -232,7 +232,7 @@ fn verdict_passed(verdict: StageVerdict) -> bool {
 // execution limit, an hour later.
 fn verifier_failure_refusal(stage: StageId, upload: &UploadedEvidence) -> Option<IntakeRefusal> {
     let valid = match (stage, upload.verdict) {
-        (StageId::Verify | StageId::AggregateVerify, StageVerdict::VerificationFailed) => true,
+        (StageId::Verify | StageId::AggregateVerify | StageId::BaseVerify, StageVerdict::VerificationFailed) => true,
         _ => upload.failed_verifiers.is_empty(),
     };
     (!valid).then_some(IntakeRefusal::InvalidVerifierFailures {
@@ -497,6 +497,23 @@ fn thread_triage_note(
 ) -> rusqlite::Result<()> {
     let threaded = format!("{finding}\n\n{}", triage_note(named));
     store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, &threaded)
+}
+
+/// The bloom-less whole-workspace verdict (ADR-0200): the evidence-binding
+/// subject is the tree the fan-out judged. The executor peels the checkout
+/// into `inputs[0]`, and a capture-free run leaves that as the displayed
+/// digest.
+fn base_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::BaseVerify.of(&record.nonce.0),
+        fact: Fact::BaseVerifyCompleted {
+            base: record.transformation.checkout,
+            tree: record.displayed_digest,
+            passed: verdict_passed(upload.verdict),
+            evidence,
+            failed: upload.failed_verifiers,
+        },
+    }
 }
 
 /// Whether a completed attempt at `stage` is a member-line result the reducer
@@ -788,6 +805,8 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 evidence,
             },
         }
+    } else if record.stage == StageId::BaseVerify {
+        base_verify_event(&record, upload, evidence)
     } else {
         // An out-of-line stage never comes from a well-formed dispatch; refuse it
         // rather than folding a non-line result into the member's resolution. The

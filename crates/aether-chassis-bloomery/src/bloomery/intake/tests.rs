@@ -688,7 +688,7 @@ fn sealed_via_reducer(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snaps
     member.approval.subject = member.subject();
     let spec = BloomDraft { proposals: vec![member], base: Digest::default(), ..BloomDraft::default() }.seal();
     let bloom = spec.id();
-    let snapshot = Snapshot::new(Digest::default());
+    let snapshot = Snapshot::new(Digest::default()).with_green_base(Digest::default());
     let seal = Event { idempotency_key: IdempotencyKey("seal".to_owned()), fact: Fact::Seal(spec) };
     let decisions = reduce(&snapshot, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
     let snapshot = snapshot.apply(&seal, &decisions, &ResolvedConfigs::default());

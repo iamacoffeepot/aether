@@ -494,6 +494,7 @@ fn stage_slug(stage: StageId) -> &'static str {
         StageId::Land => "land",
         StageId::Study => "study",
         StageId::Reconcile => "reconcile",
+        StageId::BaseVerify => "base-verify",
     }
 }
 

@@ -46,6 +46,13 @@ pub const SCOPE_FILL_COMMAND: &str = "scope.fill";
 /// fold (ADR-0149 §The line).
 pub const VERIFY_CHECK_COMMAND: &str = "verify.check";
 
+/// The whole-workspace base-verify command — the same eight-member fan-out as
+/// [`VERIFY_CHECK_COMMAND`], dispatched against a sealed base rather than a
+/// member candidate. Named once because the gate-set identity includes this
+/// spelling: a closure-narrowed member proof must not satisfy the base's
+/// whole-workspace question.
+pub const VERIFY_BASE_COMMAND: &str = "verify.base";
+
 /// The execution image the mechanical verify lane runs in — named beside its
 /// command because the same two stages dispatch it, and because
 /// [`VerifyGateSet::lane`](crate::VerifyGateSet::lane) derives the gate-set
@@ -96,6 +103,7 @@ pub(super) fn dispatched_command(stage: StageId) -> Option<&'static str> {
         StageId::Construct | StageId::Refine | StageId::Reconcile => Some(CONSTRUCT_IMPLEMENT_COMMAND),
         StageId::Review | StageId::AggregateReview => Some(REVIEW_CRITIC_COMMAND),
         StageId::Verify | StageId::AggregateVerify => Some(VERIFY_CHECK_COMMAND),
+        StageId::BaseVerify => Some(VERIFY_BASE_COMMAND),
         StageId::Sketch | StageId::Scope | StageId::Approve | StageId::Integrate | StageId::Land | StageId::Study => {
             None
         }
@@ -500,6 +508,13 @@ impl StageCatalog {
                 3_600,
             ),
             StageId::Study => (&["bloom.receipt"], &["bloom.study"], "retrospect", "study-recorded", 1, 3_600),
+            // BaseVerify is the mechanical verify lane's, the same shape
+            // AggregateVerify has: a compiler over a checked-out tree, not a
+            // model. Dispatched by a seal that found no base receipt rather
+            // than by line progression.
+            StageId::BaseVerify => {
+                (&["bloom.base"], &["bloom.base_verify"], "aggregate-verify", "base-ci-green", 2, 3_600)
+            }
         };
         StageBinding {
             stage,
@@ -595,6 +610,7 @@ impl StageCatalog {
             | StageId::Verify
             | StageId::Integrate
             | StageId::AggregateVerify
+            | StageId::BaseVerify
             | StageId::Land => (Harness::Claude, Self::SONNET_MODEL, ReasoningEffort::Medium),
         };
         AgentProfile { harness, model: String::from(model), effort, tools: ToolPolicy::Full }
@@ -783,6 +799,9 @@ impl Transformation {
             StageId::Land => unreachable!(
                 "Land is a host-native source-port CAS (LandReactorCapability, #3559), never a dispatched member transformation"
             ),
+            StageId::BaseVerify => unreachable!(
+                "BaseVerify is a bloom-less whole-workspace gate built by Transformation::for_base_verify, never a member-stage transformation"
+            ),
             StageId::Construct
             | StageId::Refine
             | StageId::Reconcile
@@ -867,6 +886,48 @@ impl Transformation {
             inputs: alloc::vec![subject],
             checkout,
             diff_base: Some(base),
+            outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
+            image: String::from(VERIFY_LANE_IMAGE),
+            limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
+            network: VERIFY_LANE_NETWORK,
+            description: None,
+            model: None,
+        }
+    }
+
+    /// The whole-workspace base-verify transformation: the `verify.base`
+    /// fan-out run against a sealed base rather than a member candidate.
+    ///
+    /// `subject` is the base tree the returning evidence binds, `checkout` the
+    /// base commit the lane checks out. **`diff_base` is `None`**: a named diff
+    /// base is exactly what would empty the package closure and false-green the
+    /// run — `Scope::resolve` of `checkout == diff_base` yields no packages, and
+    /// `args_under` would strip `--workspace` while adding no `-p`.
+    ///
+    /// `binding` is the sealed catalog's `BaseVerify` binding, carrying the
+    /// authored wall-clock limit this fan-out runs under. That pairing is
+    /// checked rather than assumed, but only in a debug build: the sibling
+    /// `for_member_stage` derives its whole lane from an exhaustive
+    /// `match binding.stage`, so cross-pairing is impossible there in every
+    /// profile, while here a debug-only assertion is a test-and-CI tripwire that
+    /// keeps release behavior total.
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, when `binding` is not the `BaseVerify` binding.
+    #[must_use]
+    pub fn for_base_verify(binding: &StageBinding, subject: Digest, checkout: Digest) -> Self {
+        debug_assert_eq!(
+            binding.stage,
+            StageId::BaseVerify,
+            "the dispatched limit must come from the stage being dispatched",
+        );
+
+        Self {
+            command: String::from(VERIFY_BASE_COMMAND),
+            inputs: alloc::vec![subject],
+            checkout,
+            diff_base: None,
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from(VERIFY_LANE_IMAGE),
             limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
@@ -1162,9 +1223,12 @@ mod tests {
     // recalibrates from Claude/opus onto Grok/`grok-4.6`. An intended catalog
     // edit — see `profile_of`, whose harness/model/effort values are refinable
     // without an ADR.
+    // Repinned again because the line gained the base-verify position: a
+    // fourteenth binding, dispatched by a seal that found no base receipt
+    // rather than by member-line progression.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x76, 0x03, 0x98, 0x15, 0x21, 0xd2, 0x6c, 0x09, 0xbc, 0x9d, 0xdd, 0x07, 0x14, 0x28, 0x69, 0xff, 0x22, 0x6f,
-        0xff, 0x39, 0x80, 0x6f, 0x2d, 0xb0, 0x5e, 0x28, 0x7f, 0x3b, 0x69, 0x99, 0xc9, 0x15,
+        0xe0, 0x12, 0xe9, 0x20, 0xc4, 0xce, 0x31, 0xa7, 0xe7, 0x31, 0x7c, 0x8d, 0xf1, 0x11, 0x01, 0xef, 0x75, 0x99,
+        0xda, 0x00, 0x14, 0xfd, 0xcf, 0x4e, 0x56, 0xa6, 0x18, 0x4b, 0xa3, 0xd9, 0xf3, 0xcf,
     ];
 
     // Tripwire: the compiled line passes the same validation an authored catalog

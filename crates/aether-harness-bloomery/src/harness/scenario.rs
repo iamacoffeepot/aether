@@ -12,7 +12,7 @@ use aether_actor::Addressable;
 use aether_bloomery::{
     BackendObjectId, BloomDraft, BloomId, BloomSpec, BloomStatus, BloomView, CandidateRef, ConfigKind, ConfigRegistry,
     Correspondence, Digest, Evidence, EvidenceKind, Fact, MemberDependency, Membership, Outcome, Snapshot,
-    StageCatalog, StageId, ViewDocument, WorkpieceId,
+    StageCatalog, StageId, VerifyFailureSet, ViewDocument, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{GitDataApi, PullRequestApi, candidate_ref_name, landing_branch, short_hex, to_hex};
@@ -28,14 +28,14 @@ use aether_chassis_bloomery::session::SessionConfig;
 use aether_chassis_bloomery::signing::SigningConfig;
 use aether_chassis_bloomery::store::{OutstandingOrder, SqliteCorrespondence, SqliteStore, StoreBackend, StoreConfig};
 use aether_data::Kind;
-use aether_data::wire::to_vec;
+use aether_data::wire::{from_bytes, to_vec};
 use aether_http::HttpServerHandle;
 use aether_rpc::RpcServerHandle;
 use aether_substrate::chassis::builder::BuiltChassis;
 use tempfile::TempDir;
 
 use super::digest;
-use super::drive::member;
+use super::drive::{member, passed};
 use super::{BOOT_BUDGET, Backend, CoordinatorKind, HARNESS_STARTED, HarnessBuilder, Lane, POLL};
 use crate::oracle::{Oracle, liveness};
 use crate::scenario::{LaneScript, Scenario};
@@ -269,8 +269,16 @@ impl ScenarioHarness {
         for item in scripts {
             script = script.then(command, lower_lane_script(item));
         }
+        // BaseVerify is bloom-less: the reserved empty workpiece is the order's
+        // member axis, same as aggregate verify.
         let _ = workpiece;
         script.write_to(Path::new(&self.worktree_base)).expect("the mock-lane script writes");
+    }
+
+    /// The served red-base alert, when one is holding the day.
+    #[must_use]
+    pub fn base_receipt(&mut self) -> Option<aether_bloomery::BaseAlertView> {
+        self.view().base_alert
     }
 
     /// Tick until `predicate` holds or `ticks` is exhausted, checking
@@ -338,6 +346,7 @@ impl ScenarioHarness {
             Outcome::Sealed(sealed) => assert_eq!(sealed, bloom, "the sealed id is the spec's content address"),
             other => panic!("the fixture seal must seal: {other:?}"),
         }
+        self.pass_outstanding_base_verify();
         bloom
     }
 
@@ -375,6 +384,7 @@ impl ScenarioHarness {
             other => panic!("the fixture graph seal must seal: {other:?}"),
         }
         self.sealed = Some(spec);
+        self.pass_outstanding_base_verify();
 
         bloom
     }
@@ -408,6 +418,30 @@ impl ScenarioHarness {
         }
 
         (bloom, outcome)
+    }
+
+    /// Pass a queued `verify.base` so a scenario that is not about base
+    /// admission sees construct orders the way it did before the gate.
+    fn pass_outstanding_base_verify(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            self.dispatch_tick();
+            let orders = self.orders();
+            if let Some(order) = orders
+                .iter()
+                .find(|order| from_bytes::<StageId>(&order.stage).is_ok_and(|stage| stage == StageId::BaseVerify))
+            {
+                self.upload_admitted(&passed(order));
+                return;
+            }
+            if !orders.is_empty() {
+                return;
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
+            thread::sleep(POLL);
+        }
     }
 
     /// Append a line to the named run's streamed transcript.
@@ -540,6 +574,7 @@ impl ScenarioHarness {
     }
 
     fn seal(&mut self, workpiece: &str, configs: ConfigRegistry) {
+        self.prove_base(self.base);
         let mut membership = Membership {
             workpiece: WorkpieceId(workpiece.to_owned()),
             scope_revision: Digest::from_bytes([1; 32]),
@@ -555,6 +590,29 @@ impl ScenarioHarness {
         match self.admit("lane-seal", Fact::Seal(spec)) {
             Outcome::Sealed(_) => {}
             other => panic!("the harness seal must seal: {other:?}"),
+        }
+    }
+
+    /// Stamp a green whole-workspace receipt for `base` so an auto-seal
+    /// dispatches construct without running `verify.base` through the mock
+    /// lane. Scenarios that are *about* base admission use [`Self::try_seal`].
+    fn prove_base(&mut self, base: Digest) {
+        match self.admit(
+            "fixture-base-verify",
+            Fact::BaseVerifyCompleted {
+                base,
+                tree: base,
+                passed: true,
+                evidence: Evidence {
+                    subject: base,
+                    kind: EvidenceKind::VerificationResult,
+                    detail: Digest::from_bytes([9; 32]),
+                },
+                failed: VerifyFailureSet::EMPTY,
+            },
+        ) {
+            Outcome::BaseProven { .. } => {}
+            other => panic!("the fixture base must prove green: {other:?}"),
         }
     }
 
@@ -951,7 +1009,7 @@ impl ScenarioHarness {
         let mut keys = Vec::new();
         for order in &orders {
             assert!(order.workpiece.is_empty(), "a bloom-level order carries no member axis");
-            keys.push(self.upload_admitted(&super::passed(order)));
+            keys.push(self.upload_admitted(&passed(order)));
         }
         assert!(
             keys.iter().any(|key| key.starts_with("aether.bloomery.aggregate_review:")),
@@ -1074,6 +1132,7 @@ fn nonces(orders: &[OutstandingOrder]) -> Vec<&str> {
 fn stage_command(stage: StageId) -> &'static str {
     match stage {
         StageId::Verify | StageId::AggregateVerify => aether_bloomery::VERIFY_CHECK_COMMAND,
+        StageId::BaseVerify => aether_bloomery::VERIFY_BASE_COMMAND,
         StageId::AggregateReview => aether_bloomery::REVIEW_CRITIC_COMMAND,
         _ => aether_bloomery::CONSTRUCT_IMPLEMENT_COMMAND,
     }
@@ -1084,7 +1143,7 @@ fn lower_lane_script(script: &LaneScript) -> LaneMode {
         LaneScript::Candidate => LaneMode::Pass,
         LaneScript::Decline => LaneMode::Declines,
         LaneScript::DeclineRequestingSurface => LaneMode::DeclinesRequestingSurface,
-        LaneScript::OutsideSurface(_) | LaneScript::VerifyFail(_) => LaneMode::Fail,
+        LaneScript::OutsideSurface(_) | LaneScript::VerifyFail(_) | LaneScript::BaseVerifyFail(_) => LaneMode::Fail,
         LaneScript::Die => LaneMode::ExitsNonZero,
         LaneScript::WrongSubject => LaneMode::WrongSubject,
     }

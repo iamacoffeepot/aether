@@ -80,6 +80,7 @@ impl ExecutorReactorCapability {
         Topic::Redispatch,
         Topic::CancelDispatch,
         Topic::ScopeDispatch,
+        Topic::BaseVerify,
     ];
 }
 

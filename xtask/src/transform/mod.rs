@@ -50,7 +50,7 @@ use crate::transform::review::REVIEW_CRITIC;
 use crate::transform::review_reports::REVIEW_REPORT;
 use crate::transform::sccache::{CompilerCache, Counters};
 use crate::transform::scratch::Scratch;
-use crate::transform::verify::{Excused, SuppressionRequest, VERIFY_CHECK};
+use crate::transform::verify::{Excused, SuppressionRequest, VERIFY_BASE, VERIFY_CHECK};
 
 #[derive(Args, Clone)]
 pub struct TransformArgs {
@@ -322,7 +322,10 @@ pub fn run(args: &TransformArgs) -> Result<()> {
         return review_mcp::serve(&args.out);
     }
     if args.command == VERIFY_CHECK {
-        return verify::run_verify_check(args);
+        return verify::run_verify_check(args, false);
+    }
+    if args.command == VERIFY_BASE {
+        return verify::run_verify_check(args, true);
     }
     verify::run_single(args)
 }

@@ -8,6 +8,7 @@
 
 mod adr;
 mod approval;
+mod base_verify;
 mod bloom;
 mod commission;
 mod composition;
@@ -39,6 +40,7 @@ pub use approval::{
     ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, path_in_surface, surface_additions,
     surface_intersection, tier_verdict,
 };
+pub use base_verify::{BaseReceipt, BaseVerdict};
 pub use bloom::{
     BloomDraft, BloomSpec, DependencyError, LandingReceipt, MemberCandidate, MemberDependency, MemberSubject,
     Membership, ResolutionClaim, ResolvedBloom, ResolvedDependencies, resolve_member_dependencies,
@@ -74,8 +76,8 @@ pub use scope_verify::{
 pub use spend::{SpendCeiling, SpendQuiesce, SpendWindow};
 pub use stage::{
     Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, DispatchKey, ExecutionLimits, NetworkProfile,
-    REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_CHECK_COMMAND,
-    VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, is_model_lane,
+    REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_BASE_COMMAND,
+    VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, is_model_lane,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use statement::signed_approval;

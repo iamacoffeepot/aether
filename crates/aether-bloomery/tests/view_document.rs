@@ -55,6 +55,54 @@ fn view_carries_the_spend_quiesce_marker() {
 }
 
 #[test]
+fn view_carries_no_base_alert_when_the_receipt_is_absent_or_green() {
+    let view = view_of(&Snapshot::new(digest(0)), |_| None);
+    assert_eq!(view.base_alert, None);
+
+    let view = view_of(&Snapshot::new(digest(0)).with_green_base(digest(0)), |_| None);
+    assert_eq!(view.base_alert, None, "a green receipt is not a day-level stop");
+}
+
+#[test]
+fn view_carries_a_base_alert_when_the_receipt_is_red() {
+    use aether_bloomery::{BaseReceipt, BaseVerdict, Decision, Decisions, EvidenceKind, VerifyFailure, VerifyGateSet};
+
+    let mut snapshot = Snapshot::new(digest(0));
+    let evidence = Evidence { subject: digest(0), kind: EvidenceKind::VerificationResult, detail: digest(9) };
+    let receipt = BaseReceipt {
+        base: digest(0),
+        tree: digest(0),
+        gate_set: VerifyGateSet::base().digest(),
+        verdict: BaseVerdict::Red { evidence, failed: VerifyFailureSet::one(VerifyFailure::Docs) },
+    };
+    let decided = Decisions {
+        outcome: aether_bloomery::Outcome::BaseRefused {
+            base: digest(0),
+            tree: digest(0),
+            failed: VerifyFailureSet::one(VerifyFailure::Docs),
+        },
+        effects: vec![Decision::RecordBaseReceipt { receipt }],
+    };
+    snapshot = snapshot.apply(
+        &event(
+            "base-red",
+            Fact::BaseVerifyCompleted {
+                base: digest(0),
+                tree: digest(0),
+                passed: false,
+                evidence: Evidence { subject: digest(0), kind: EvidenceKind::VerificationResult, detail: digest(9) },
+                failed: VerifyFailureSet::one(VerifyFailure::Docs),
+            },
+        ),
+        &decided,
+        &ResolvedConfigs::default(),
+    );
+    let view = view_of(&snapshot, |_| None);
+    let alert = view.base_alert.expect("a red receipt populates the alert");
+    assert!(alert.failed.iter().any(|name| name.contains("docs")), "got {:?}", alert.failed);
+}
+
+#[test]
 fn view_carries_the_snapshots_observed_digest() {
     // A boot-fresh snapshot has never recorded an observation, so `observed`
     // is still Digest::default() — the same all-zero genesis sentinel

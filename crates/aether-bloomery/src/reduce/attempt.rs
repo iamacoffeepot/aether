@@ -99,7 +99,7 @@ pub(super) fn move_effects_with_checkpoint(
     sealed: SealedLine<'_>,
 ) -> [Decision; 2] {
     let advance = Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress };
-    if sealed.held {
+    if sealed.withheld() {
         return [advance, Decision::DeferDispatch { bloom, workpiece: workpiece.clone() }];
     }
     let binding = stage_binding(sealed.catalog, progress.stage);
@@ -158,6 +158,10 @@ pub(super) struct SealedLine<'a> {
     /// constructor reads it off the record, and this value is the only way into
     /// [`move_effects_with_candidate`].
     pub held: bool,
+    /// Whether this bloom's sealed base holds a green whole-workspace receipt
+    /// (ADR-0200). Independent of [`Self::held`]: releasing one brake must not
+    /// lift the other.
+    pub base_proven: bool,
 }
 
 impl<'a> SealedLine<'a> {
@@ -170,7 +174,13 @@ impl<'a> SealedLine<'a> {
             catalog: &record.stage_catalog,
             base: member_construct_base(record, &member.workpiece),
             held: record.operator_hold.is_some(),
+            base_proven: record.base_proven,
         }
+    }
+
+    /// Whether either brake is on: the operator hold, or an unproven base.
+    pub(super) fn withheld(&self) -> bool {
+        self.held || !self.base_proven
     }
 
     /// The same line, read as the release itself will leave the record (#4976).
@@ -183,9 +193,22 @@ impl<'a> SealedLine<'a> {
     /// Without lifting the flag here the release would defer the very dispatches
     /// it exists to emit. Named rather than assembled inline so the exemption is
     /// one greppable call with one caller, instead of a `held: false` literal
-    /// that reads like an oversight.
+    /// that reads like an oversight. Clears only the operator half: releasing
+    /// one brake must not lift the other.
     pub(super) fn released(mut self) -> Self {
         self.held = false;
+        self
+    }
+
+    /// The same line, read as a green base receipt will leave the record
+    /// (ADR-0200).
+    ///
+    /// The reducer decides against the record as it stands, where
+    /// `base_proven` is still false, while the effects it returns include the
+    /// [`Decision::RecordBaseReceipt`] that sets it. Clears only the base
+    /// half: releasing one brake must not lift the other.
+    pub(super) fn base_released(mut self) -> Self {
+        self.base_proven = true;
         self
     }
 }
@@ -717,7 +740,8 @@ mod tests {
         let spec =
             BloomDraft { proposals: vec![membership("wp", 10)], base: digest(0), ..BloomDraft::default() }.seal();
         let bloom = spec.id();
-        let (snapshot, _) = step(&Snapshot::new(digest(0)), &event("seal", Fact::Seal(spec)));
+        let (snapshot, _) =
+            step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
         (snapshot, bloom)
     }
 
@@ -816,7 +840,8 @@ mod tests {
         let spec =
             BloomDraft { proposals: vec![membership("wp", 10)], base: digest(0), ..BloomDraft::default() }.seal();
         let bloom = spec.id();
-        let (after, decided) = step(&Snapshot::new(digest(0)), &event("seal", Fact::Seal(spec)));
+        let (after, decided) =
+            step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
         assert_eq!(
             construct_dispatch(&decided).checkout,
             digest(0),
@@ -1193,9 +1218,12 @@ mod tests {
     fn inherited_claim_successor() -> (Snapshot, BloomId) {
         let spec = two_member_spec(0);
         let predecessor = spec.id();
-        let (snapshot, _) = step(&Snapshot::new(digest(0)), &event("seal", Fact::Seal(spec)));
+        let (snapshot, _) =
+            step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
         let snapshot = construct_and_integrate(snapshot, predecessor);
-        let snapshot = step(&snapshot, &event("observe-2", Fact::ObserveMainline { head: digest(2) })).0;
+        let snapshot = step(&snapshot, &event("observe-2", Fact::ObserveMainline { head: digest(2) }))
+            .0
+            .with_green_base(digest(2));
         let successor_spec = two_member_spec(2);
         let successor = successor_spec.id();
         let (snapshot, decided) =
@@ -1235,7 +1263,8 @@ mod tests {
     fn a_member_resolved_in_this_bloom_still_reconciles_back_to_verify() {
         let spec = two_member_spec(0);
         let bloom = spec.id();
-        let (snapshot, _) = step(&Snapshot::new(digest(0)), &event("seal", Fact::Seal(spec)));
+        let (snapshot, _) =
+            step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
         let snapshot = construct_and_integrate(snapshot, bloom);
         let snapshot = fold_beta(&snapshot, bloom, "fold-conflict-beta", 30, 31);
         let captured = CandidateRef { tree: digest(41), checkout: digest(42) };

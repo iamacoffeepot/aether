@@ -17,10 +17,10 @@ use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey, Evidence, EvidenceKind,
-    MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim, ResolvedConfigs,
-    SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet,
-    VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    Adjudication, BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, CompositionFinding, ConfigScopes, DispatchKey,
+    Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorRepair, OrphanClaimReleaseRecord, ResolutionClaim,
+    ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree,
+    VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -171,6 +171,23 @@ pub struct Snapshot {
     /// Dropped when that member's own dispatch is folded.
     #[serde(default)]
     pub member_refusals: BTreeMap<BloomId, BTreeMap<WorkpieceId, RecordedRefusal>>,
+    /// Snapshot-scoped base-verify receipts, keyed by the peeled tree and the
+    /// whole-workspace gate set (ADR-0200).
+    ///
+    /// Snapshot-level rather than a [`BloomRecord`] field so a receipt outlives
+    /// the bloom that asked for it and so every existing `BloomRecord { … }`
+    /// literal stays compiling. `#[serde(default)]` is the
+    /// `member_checkpoints` precedent.
+    #[serde(default)]
+    pub base_receipts: BTreeMap<VerifiedTree, BaseReceipt>,
+    /// Commit → peeled-tree index for [`Self::base_receipts`]. The ledger is
+    /// content-keyed; this map is only the lookup path from a sealed base
+    /// commit.
+    ///
+    /// Snapshot-level so every existing `BloomRecord { … }` literal stays
+    /// compiling. `#[serde(default)]` is the `member_checkpoints` precedent.
+    #[serde(default)]
+    pub base_trees: BTreeMap<Digest, Digest>,
 }
 
 impl Snapshot {
@@ -193,6 +210,45 @@ impl Snapshot {
     #[must_use]
     pub fn member_machinery(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<MemberMachineryFault> {
         self.member_machinery.get(bloom)?.get(workpiece).copied()
+    }
+
+    /// The recorded base-verify receipt for `base`, or `None` when this
+    /// snapshot holds none (ADR-0200).
+    ///
+    /// The one place the two-step lookup happens, so every seal asks the
+    /// question the same way: look the commit up in [`Self::base_trees`], then
+    /// the tree plus [`VerifyGateSet::base`] in [`Self::base_receipts`]. The
+    /// current gate set is recomputed rather than remembered, for the reason
+    /// [`BloomRecord::verify_proof_for`] states: a proof journaled under a
+    /// different verify vocabulary or lane misses instead of answering for
+    /// gates that no longer exist.
+    #[must_use]
+    pub fn base_receipt_for(&self, base: Digest) -> Option<&BaseReceipt> {
+        let tree = self.base_trees.get(&base).copied()?;
+        self.base_receipts.get(&VerifiedTree { tree, gate_set: VerifyGateSet::base().digest() })
+    }
+
+    /// Stamp a green whole-workspace receipt for `base` — the test-and-fixture
+    /// door that lets a scenario start from a proven tree without dispatching
+    /// `verify.base`.
+    #[cfg(any(test, feature = "testing"))]
+    #[must_use]
+    pub fn with_green_base(mut self, base: Digest) -> Self {
+        let receipt = BaseReceipt {
+            base,
+            tree: base,
+            gate_set: VerifyGateSet::base().digest(),
+            verdict: BaseVerdict::Green {
+                evidence: Evidence {
+                    subject: base,
+                    kind: EvidenceKind::VerificationResult,
+                    detail: Digest::from_bytes([0; 32]),
+                },
+            },
+        };
+        self.base_trees.insert(base, base);
+        self.base_receipts.insert(receipt.verified(), receipt);
+        self
     }
 
     /// Why `bloom`'s fold refused, once it has (ADR-0206).
@@ -498,6 +554,11 @@ pub struct BloomRecord {
     /// defaulted so a journal written before the brake existed still decodes.
     #[serde(default)]
     pub operator_hold: Option<OperatorHold>,
+    /// Whether this bloom's sealed base holds a green whole-workspace receipt
+    /// (ADR-0200). Defaults `false` so an unstamped record is treated as
+    /// unproven rather than silently admitted.
+    #[serde(default)]
+    pub base_proven: bool,
     /// The workpieces this bloom owes a dispatch, because the hold swallowed the
     /// one their cursor move earned (#4976).
     ///
@@ -818,7 +879,9 @@ impl Snapshot {
         // Register the bloom the fact seals, before its membership claims
         // land, so the claim/inherit effects have a record to attach to.
         if let Some((spec, id)) = admitted_spec(&event.fact, &decisions.outcome) {
-            next.blooms.insert(id, BloomRecord::sealed(spec.clone(), configs));
+            let mut record = BloomRecord::sealed(spec.clone(), configs);
+            record.base_proven = next.base_receipt_for(spec.base()).is_some_and(BaseReceipt::is_green);
+            next.blooms.insert(id, record);
         }
         for effect in &decisions.effects {
             next.apply_effect(effect);
@@ -1213,9 +1276,11 @@ impl Snapshot {
             // pairs with the dispatch that clears it.
             Decision::RedispatchStage { .. }
             | Decision::DispatchOrphanClaimRelease { .. }
+            | Decision::DispatchBaseVerify { .. }
             | Decision::CancelDispatch { .. }
             | Decision::ReleaseMemberClaimRef { .. }
             | Decision::RecordRefusal { .. } => {}
+            Decision::RecordBaseReceipt { .. } => self.apply_base_verify_effect(effect),
             Decision::RecordOrphanClaimRelease { request, target, completion } => {
                 // Opening the record and completing it write the same entry, so
                 // the completion overwrites rather than inserting beside — a
@@ -1592,6 +1657,34 @@ impl Snapshot {
     /// that when they sit together. Any other decision is a no-op here, and an
     /// unknown bloom is ignored exactly as every other record-scoped arm ignores
     /// one.
+    /// Fold a base-verify receipt into the snapshot ledger (ADR-0200): both
+    /// the commit→tree index and the tree-keyed map, so one decision keeps
+    /// them in step. On green, every sealed bloom whose base resolves to the
+    /// receipt's tree is marked proven.
+    fn apply_base_verify_effect(&mut self, effect: &Decision) {
+        let Decision::RecordBaseReceipt { receipt } = effect else {
+            return;
+        };
+        self.base_trees.insert(receipt.base, receipt.tree);
+        self.base_receipts.insert(receipt.verified(), receipt.clone());
+        let green = receipt.is_green();
+        let tree = receipt.tree;
+        let matching: Vec<BloomId> = self
+            .blooms
+            .iter()
+            .filter_map(|(id, record)| {
+                let spec_base = record.spec.base();
+                let resolved = self.base_trees.get(&spec_base).copied().unwrap_or(spec_base);
+                (resolved == tree).then_some(*id)
+            })
+            .collect();
+        for id in matching {
+            if let Some(record) = self.blooms.get_mut(&id) {
+                record.base_proven = green;
+            }
+        }
+    }
+
     fn apply_verify_memo_effect(&mut self, effect: &Decision) {
         match effect {
             Decision::RecordVerifyProof { bloom, proof } => {
@@ -1677,6 +1770,7 @@ impl BloomRecord {
             adjudications: Vec::new(),
             operator_repairs: Vec::new(),
             operator_hold: None,
+            base_proven: false,
             deferred_dispatches: BTreeSet::new(),
             deferred_aggregates: BTreeSet::new(),
             dependencies: Vec::new(),

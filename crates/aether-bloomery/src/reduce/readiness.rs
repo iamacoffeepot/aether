@@ -50,14 +50,15 @@ pub(super) fn dependencies_resolved<F: Fn(&WorkpieceId) -> bool>(
 
 /// The sealed line a brand-new bloom's entry dispatch runs under. A hold cannot
 /// exist yet — the bloom is what the same decision is creating — so `held` is
-/// always false here.
+/// always false here. `base_proven` is the snapshot's answer at seal time.
 pub(super) fn entry_line<'a>(
     member: &Membership,
     bloom_configs: &ConfigRegistry,
     catalog: &'a StageCatalog,
     base: Digest,
+    base_proven: bool,
 ) -> SealedLine<'a> {
-    SealedLine { configs: member.configs.layered_over(bloom_configs), catalog, base, held: false }
+    SealedLine { configs: member.configs.layered_over(bloom_configs), catalog, base, held: false, base_proven }
 }
 
 /// Seed `member` at the entry stage and dispatch its first construct (or defer
@@ -114,7 +115,7 @@ fn splice_join_entry<F: Fn(&WorkpieceId) -> Option<Digest>>(
     let advance = Decision::AdvanceStage { bloom, workpiece: member.workpiece.clone(), progress };
     let splice =
         Decision::DispatchSplice { bloom, workpiece: member.workpiece.clone(), base: sealed.base, members, adopt_from };
-    if sealed.held {
+    if sealed.withheld() {
         alloc::vec![advance, Decision::DeferDispatch { bloom, workpiece: member.workpiece.clone() }, splice]
     } else {
         alloc::vec![advance, splice]
@@ -162,10 +163,20 @@ pub(super) fn reduce_splice_assembled(
             catalog: &record.stage_catalog,
             base: head,
             held: record.operator_hold.is_some(),
+            base_proven: record.base_proven,
         },
     )
     .to_vec();
     Decisions { outcome: Outcome::SpliceAssembled { bloom: *bloom, workpiece: workpiece.clone() }, effects }
+}
+
+/// Bloom-wide inputs to [`entry_line`]. Grouped so [`ready_entries`] can take
+/// them as one argument rather than four.
+pub(super) struct ReadyLine<'a> {
+    pub bloom_configs: &'a ConfigRegistry,
+    pub catalog: &'a StageCatalog,
+    pub base: Digest,
+    pub base_proven: bool,
 }
 
 /// Entry dispatches for every member of a newly sealed bloom whose
@@ -179,16 +190,18 @@ pub(super) fn ready_entries<F: Fn(&WorkpieceId) -> bool>(
     members: &[Membership],
     edges: &[MemberDependency],
     resolved: &F,
-    bloom_configs: &ConfigRegistry,
-    catalog: &StageCatalog,
-    base: Digest,
+    line: &ReadyLine<'_>,
 ) -> Vec<Decision> {
     let mut effects = Vec::new();
     for member in members {
         if !dependencies_resolved(resolved, edges, &member.workpiece) {
             continue;
         }
-        effects.extend(construct_entry(bloom, member, entry_line(member, bloom_configs, catalog, base)));
+        effects.extend(construct_entry(
+            bloom,
+            member,
+            entry_line(member, line.bloom_configs, line.catalog, line.base, line.base_proven),
+        ));
     }
     effects
 }
@@ -205,6 +218,7 @@ pub(super) fn successor_entries(
     predecessor: &BloomRecord,
     edges: &[MemberDependency],
     catalog: &StageCatalog,
+    base_proven: bool,
 ) -> (bool, Vec<Decision>) {
     let inherited = |workpiece: &WorkpieceId| {
         predecessor.claims.get(workpiece).is_some_and(|claim| {
@@ -230,14 +244,14 @@ pub(super) fn successor_entries(
             SplicedBase::Ready(digest) => effects.extend(construct_entry(
                 successor_id,
                 member,
-                entry_line(member, successor.configs(), catalog, digest),
+                entry_line(member, successor.configs(), catalog, digest, base_proven),
             )),
             SplicedBase::Join { tips } => {
                 let adopt_from = tips.iter().any(|tip| predecessor.claims.contains_key(tip)).then_some(predecessor_id);
                 effects.extend(splice_join_entry(
                     successor_id,
                     member,
-                    &entry_line(member, successor.configs(), catalog, successor.base()),
+                    &entry_line(member, successor.configs(), catalog, successor.base(), base_proven),
                     &tips,
                     &checkout_of,
                     adopt_from,
@@ -291,6 +305,7 @@ pub(super) fn newly_ready_entries(
             catalog: &record.stage_catalog,
             base,
             held: record.operator_hold.is_some(),
+            base_proven: record.base_proven,
         };
         effects.extend(
             EffectBoundary::new(DISPATCH_MEMBER_GATE, bloom, Some(workpiece.clone()))
@@ -512,7 +527,7 @@ mod tests {
     fn seal_graph(members: &[(&str, u8)], edges: Vec<MemberDependency>) -> (Snapshot, BloomSpec) {
         let spec = spec(members);
         let event = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
-        (step(&Snapshot::new(digest(0)), &event).0, spec)
+        (step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event).0, spec)
     }
 
     fn fold_member_order(members: &[(&str, u8)], edges: Vec<MemberDependency>) -> Vec<WorkpieceId> {
@@ -522,7 +537,7 @@ mod tests {
         } else {
             Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges }
         };
-        let (mut snapshot, _) = step(&Snapshot::new(digest(0)), &event("seal", fact));
+        let (mut snapshot, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", fact));
         let mut fold = None;
         for ((name, revision), candidate) in members.iter().zip(10u8..) {
             let integrate = event(
@@ -606,7 +621,7 @@ mod tests {
         let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let edges = vec![edge("wp-b", "wp-a")];
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges });
-        let (after_seal, sealed) = step(&Snapshot::new(digest(0)), &seal);
+        let (after_seal, sealed) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
 
         assert!(matches!(sealed.outcome, Outcome::Sealed(_)));
         assert_eq!(construct_dispatches(&sealed), vec![WorkpieceId("wp-a".into())]);
@@ -636,7 +651,7 @@ mod tests {
     fn independent_roots_dispatch_at_seal() {
         let spec = spec(&[("wp-a", 1), ("wp-c", 3)]);
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec, edges: Vec::new() });
-        let (_, sealed) = step(&Snapshot::new(digest(0)), &seal);
+        let (_, sealed) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         assert_eq!(construct_dispatches(&sealed), vec![WorkpieceId("wp-a".into()), WorkpieceId("wp-c".into())],);
     }
 
@@ -655,7 +670,7 @@ mod tests {
 
         let spec = spec(&[("wp-a", 1), ("wp-b", 2)]);
         let seal = event("seal", Fact::Seal(spec.clone()));
-        let (after, sealed) = step(&Snapshot::new(digest(0)), &seal);
+        let (after, sealed) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         assert_eq!(
             construct_dispatches(&sealed),
             vec![WorkpieceId("wp-a".into()), WorkpieceId("wp-b".into())],
@@ -679,7 +694,7 @@ mod tests {
 
         let spec = spec(&members);
         let (after_declared, declared_seal) = step(
-            &Snapshot::new(digest(0)),
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
             &event("seal-declared", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: declared.clone() }),
         );
         assert_eq!(
@@ -713,7 +728,7 @@ mod tests {
             event("seal", Fact::GraphSeal { predecessor: None, spec: spec.clone(), edges: vec![edge("wp-b", "wp-a")] });
         let integrate = event("a-done", Fact::Integrate { bloom: spec.id(), claim: claim("wp-a", 1, 10) });
 
-        let base = Snapshot::new(digest(0));
+        let base = Snapshot::new(digest(0)).with_green_base(digest(0));
         let sealed = reduce(&base, &seal, &ResolvedConfigs::default(), &SpendWindow::default());
         let after_seal = base.apply(&seal, &sealed, &ResolvedConfigs::default());
         let integrated = reduce(&after_seal, &integrate, &ResolvedConfigs::default(), &SpendWindow::default());
@@ -931,7 +946,7 @@ mod tests {
     fn an_inherited_claim_unblocks_a_successor_dependent() {
         let predecessor_spec = spec(&[("wp-a", 1)]);
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges: vec![] });
-        let (after_seal, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (after_seal, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let integrate = event("a-done", Fact::Integrate { bloom: predecessor_spec.id(), claim: claim("wp-a", 1, 10) });
         let (after_a, _) = step(&after_seal, &integrate);
 
@@ -960,7 +975,7 @@ mod tests {
     fn an_inherited_join_dispatches_splice_for_the_dependent() {
         let predecessor_spec = spec(&[("wp-a", 1), ("wp-c", 3)]);
         let seal = event("seal", Fact::GraphSeal { predecessor: None, spec: predecessor_spec.clone(), edges: vec![] });
-        let (snapshot, _) = step(&Snapshot::new(digest(0)), &seal);
+        let (snapshot, _) = step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &seal);
         let (snapshot, _) = step(
             &snapshot,
             &event("a-done", Fact::Integrate { bloom: predecessor_spec.id(), claim: claim("wp-a", 1, 10) }),
