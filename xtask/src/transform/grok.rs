@@ -12,7 +12,7 @@
 //! Auth is ambient. The child inherits this process's environment, so a
 //! host whose operator is logged in (`apiKeySource: "oauth"`) and a host
 //! carrying only a `GROK_CODE_XAI_API_KEY` both resolve their own credential —
-//! the lane handles no secret, exactly as the Claude and Codex arms do not.
+//! the lane handles no secret, exactly as the Claude arm does not.
 
 use std::process::Stdio;
 
