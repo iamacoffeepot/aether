@@ -40,6 +40,15 @@ The guest/actor SDK is **`aether-actor`** — the `Actor` / `WasmActor` traits, 
 - Format: `cargo fmt` (check-only: `cargo fmt -- --check`)
 - Type/borrow check only: `cargo check`
 
+## Lint expectations
+
+The verify gate judges the candidate under deny-warnings clippy with the repository's configured caps and `disallowed-methods`. Satisfy the posture on the first pass; the gate stays the judge.
+
+- **Deny-warnings clippy**: warnings are errors. Caps and `disallowed-methods` live in the repository's clippy config — naked env reads (`std::env::var` / `var_os`) and hand-hashed mailbox ids (`mailbox_id_from_name` and siblings) are the methods that bite. Do not memorize the lint list; it drifts against `clippy.toml`.
+- **Line width belongs to rustfmt**: write the code, run `cargo fmt`, never hand-wrap or hand-count columns.
+- **Function-length splits**: extracting a helper to clear a length cap is the usual fix; changing how the method takes `self` while doing it is the usual knock-on (`wrong_self_convention`). Keep the receiver honest.
+- **Test-file unwraps**: the suppression gate already permits the exact inner attribute `#![allow(clippy::unwrap_used)]` (that lint alone) on a test file or `#[cfg(test)]` module. Any other allow, expect, ignore, mixed list, or the same allow in production code is a finding.
+
 ## Test harnesses (ADR-0067)
 
 **Tests must earn their place** (`docs/guide/testing.md`). Before writing a test, name the plausible bug it catches; if the only honest answer is "edits the test," do not write it. The decisive question: **what logic owned by *this crate* does the test exercise?** If the answer is "none — it restates a declaration or re-runs machinery another crate owns," it is junk however much ceremony (field-by-field asserts, a big value, a confident doc comment) surrounds it. Do not test code you do not own — std, the compiler, serde, wgpu/tokio/fontdue, any third-party crate, or anything the `Kind`/`Schema`/`Config` derives emit. The recurring junk shapes: a derived-constant mirror (`assert_eq!(NoteOn::NAME, "aether.audio.note_on")` — `NAME` *is* the `#[kind(name)]` literal, no independent truth); a derive-only roundtrip (`decode(encode(x)) == x` over plain `#[derive]`s — symmetric, so it only fails if the macro is broken, tested elsewhere); a derive-emitted registration check (a kind appears in `descriptors::all()` because `#[derive(Kind)]` emits the `inventory::submit!`, nothing to forget); a schema-shape assertion (`matches!(Role::SCHEMA, SchemaType::Enum)` restates the `enum` keyword). A flat assertion against a fixed value is a tripwire (KEEP) only when the pinned value is **computed** — a hash, a serialized byte layout, a derived `KindId` — so it drifts when the producing logic changes; pinning a `const NAME` against its own literal is a mirror, not a tripwire. A genuine tripwire carries a `// Tripwire:` comment naming the invariant; the comment is necessary but not sufficient (a comment over a value that cannot drift is still junk).
