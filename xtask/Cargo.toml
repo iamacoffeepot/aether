@@ -18,6 +18,9 @@ publish = false
 # owns `CONSTRUCT_IMPLEMENT_COMMAND`, so a drifted copy cannot render a harness
 # this entrypoint then refuses to parse.
 aether-bloomery = { path = "../crates/aether-bloomery" }
+# The day roll's coverage-map type (ADR-0203). The git adapter owns the
+# fleet-main compare-and-swap the operator command drives through `git`.
+aether-bloomery-git = { path = "../crates/aether-bloomery-git" }
 aether-chassis = { path = "../crates/aether-chassis" }
 aether-data = { path = "../crates/aether-data" }
 anyhow = { workspace = true }

@@ -1,13 +1,16 @@
-//! `cargo xtask bloom roll` — the ADR-0186 day roll as one command.
+//! `cargo xtask bloom roll` — the ADR-0186 day roll as one command, as
+//! amended by ADR-0203.
 //!
-//! The roll is mechanical: quiesce, sync the day back to main, cut tomorrow
-//! from post-sync main, repoint. What the sequence needs is refusal rather than
+//! The roll is mechanical: quiesce, linearize the day onto fleet main under
+//! the coverage-map barrier, compare-and-swap `refs/heads/main`, cut tomorrow
+//! from that advanced main, repoint. GitHub is a best-effort replica after
+//! the advance, never a gate. What the sequence needs is refusal rather than
 //! judgement — every precondition is checked before anything moves, so a roll
 //! that cannot finish has not started, and the steps that live outside this
 //! repository are printed rather than assumed. The failure modes worth designing
-//! against here are the quiet ones: a cut taken from a stale ref and a rebuild
-//! that lands in a different target directory both succeed, and both cost a day
-//! of blooms before anyone reads a log.
+//! against here are the quiet ones: a cut taken from a stale replica and a
+//! rebuild that lands in a different target directory both succeed, and both
+//! cost a day of blooms before anyone reads a log.
 
 mod cut;
 mod day;
@@ -38,30 +41,35 @@ pub struct RollArgs {
     #[arg(long)]
     from: String,
 
-    /// The remote the cut is taken from and pushed to.
+    /// The GitHub replica the advanced main and the new daily are pushed to.
     #[arg(long, default_value = "origin")]
     remote: String,
 }
 
 pub fn run(client: &Client<'_>, args: &RollArgs) -> Result<String> {
-    roll(&client.view()?, &shell::Host, args)
+    roll(&client.view()?, &shell::Host, &aether_bloomery_git::DayCoverage::green(), args)
 }
 
-fn roll(view: &ViewDocument, shell: &impl Shell, args: &RollArgs) -> Result<String> {
+fn roll(
+    view: &ViewDocument,
+    shell: &impl Shell,
+    coverage: &aether_bloomery_git::DayCoverage,
+    args: &RollArgs,
+) -> Result<String> {
     let from = sync_from(&args.from)?;
     preconditions::screen(view, shell, &args.date, &args.remote)?;
-    let synced = sync::merge(shell, &args.remote, &from)?;
+    let synced = sync::merge(shell, &args.remote, &from, coverage)?;
     cut::create(shell, &args.remote, &args.date)?;
     Ok(handoff(&args.date, &synced))
 }
 
 /// The day branch the sync-back runs from, normalized to the bare branch name
-/// `gh` and `git` take.
+/// `git` takes.
 ///
 /// The operator reads the day off the coordinator's own boot-resolved knob,
-/// which is spelled `refs/heads/…` where a pull request's head and a push
-/// refspec both want the branch alone, and a qualified name in either position
-/// addresses something that is not there.
+/// which is spelled `refs/heads/…` where a push refspec and a local ref both
+/// want the branch alone, and a qualified name in either position addresses
+/// something that is not there.
 fn sync_from(named: &str) -> Result<String> {
     let named = named.trim();
     if named.is_empty() {
@@ -79,7 +87,7 @@ fn sync_from(named: &str) -> Result<String> {
 /// line to set rather than editing an environment file it does not own.
 fn handoff(day: &Day, synced: &str) -> String {
     format!(
-        "synced the day back as #{synced} and rolled onto {branch}.\n\
+        "synced the day onto main as {synced} and rolled onto {branch}.\n\
          \n\
          two steps stay host-side, because the coordinator's mainline ref is boot configuration\n\
          outside this repository:\n\
@@ -102,6 +110,8 @@ mod tests {
 
     use super::shell::Run;
     use super::shell::fake::Fake;
+    use aether_bloomery_git::DayCoverage;
+
     use super::{Day, RollArgs, roll, sync_from};
     use crate::bloom::dto::{BloomView, DigestHex, MemberView, ViewDocument};
 
@@ -131,25 +141,31 @@ mod tests {
 
     fn green() -> Fake<'static> {
         Fake::new(|line| match line {
-            line if line.starts_with("gh api") => Run::ok("true"),
-            line if line.starts_with("gh pr list") => Run::ok("4990"),
-            line if line.starts_with("gh pr checks") => Run::ok(super::sync::GREEN_GATE_JSON),
-            line if line.contains("rev-parse") => Run::ok("tree-day"),
+            line if line.contains("rev-parse") && line.contains("^{tree}") => Run::ok("tree-day"),
+            line if line.contains("rev-parse") && line.contains("refs/heads/main") => {
+                Run::ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            }
+            line if line.contains("rev-parse") => Run::ok("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
             line if line.contains("rev-list") => Run::ok(""),
             _ => Run::ok(""),
         })
     }
 
     #[test]
-    fn a_green_roll_syncs_back_before_it_cuts_tomorrow() {
+    fn a_green_roll_advances_fleet_main_before_it_cuts_tomorrow() {
         let shell = green();
 
-        roll(&drained_view(), &shell, &args("bloomery/daily/2026-08-14")).expect("a drained day rolls");
+        roll(&drained_view(), &shell, &DayCoverage::green(), &args("bloomery/daily/2026-08-14"))
+            .expect("a drained day rolls");
 
         let calls = shell.calls();
-        let merged = calls.iter().position(|line| line.starts_with("gh pr merge")).expect("the day syncs back");
+        let advanced = calls.iter().position(|line| line.contains("update-ref")).expect("the day advances onto main");
         let cut = calls.iter().position(|line| line.starts_with("git branch")).expect("tomorrow is cut");
-        assert!(merged < cut, "the cut is taken after the sync-back merges: {calls:?}");
+        assert!(advanced < cut, "the cut is taken after fleet main advances: {calls:?}");
+        assert!(
+            !calls.iter().any(|line| line.contains("FETCH_HEAD") || line.contains("git fetch")),
+            "the cut is not taken from a GitHub fetch: {calls:?}"
+        );
     }
 
     // Tripwire: the printed knob has to be the one the coordinator reads
@@ -160,7 +176,8 @@ mod tests {
     // ref for a day.
     #[test]
     fn the_handoff_prints_the_repoint_line_verbatim() {
-        let handoff = roll(&drained_view(), &green(), &args("bloomery/daily/2026-08-14")).expect("a drained day rolls");
+        let handoff = roll(&drained_view(), &green(), &DayCoverage::green(), &args("bloomery/daily/2026-08-14"))
+            .expect("a drained day rolls");
 
         assert!(
             handoff.contains("AETHER_BLOOMERY_MAINLINE_REF=refs/heads/bloomery/daily/2026-08-15"),
@@ -170,26 +187,46 @@ mod tests {
     }
 
     // Tripwire: a refused roll has moved nothing. The screen runs against the
-    // live view and the host before the sync-back exists, so an undrained day
+    // live view and the host before fleet main is swapped, so an undrained day
     // costs a re-run rather than a half-rolled repository.
     #[test]
-    fn a_refused_roll_touches_neither_the_pull_request_nor_the_branch() {
+    fn a_refused_roll_touches_neither_main_nor_the_branch() {
         let mut view = drained_view();
         view.blooms[0].status = BloomStatus::Sealed;
         let shell = green();
 
-        roll(&view, &shell, &args("bloomery/daily/2026-08-14")).expect_err("an undrained day is refused");
+        roll(&view, &shell, &DayCoverage::green(), &args("bloomery/daily/2026-08-14"))
+            .expect_err("an undrained day is refused");
 
         let calls = shell.calls();
-        assert!(!calls.iter().any(|line| line.starts_with("gh pr")), "no pull request is opened or merged: {calls:?}");
+        assert!(!calls.iter().any(|line| line.contains("update-ref")), "fleet main is not swapped: {calls:?}");
         assert!(!calls.iter().any(|line| line.starts_with("git branch")), "tomorrow is not cut: {calls:?}");
         assert!(!calls.iter().any(|line| line.starts_with("git push")), "nothing is pushed: {calls:?}");
     }
 
+    #[test]
+    fn a_held_coverage_map_is_a_nonzero_refusal() {
+        let shell = green();
+
+        let refusal = roll(
+            &drained_view(),
+            &shell,
+            &DayCoverage::hold("red test crate::day_head"),
+            &args("bloomery/daily/2026-08-14"),
+        )
+        .expect_err("a non-green map refuses the roll")
+        .to_string();
+
+        assert!(refusal.contains("not green"), "the refusal names the coverage bar: {refusal}");
+        let calls = shell.calls();
+        assert!(!calls.iter().any(|line| line.contains("update-ref")), "a held map does not swap main: {calls:?}");
+        assert!(!calls.iter().any(|line| line.starts_with("git branch")), "tomorrow is not cut: {calls:?}");
+    }
+
     // The operator copies the day off the coordinator's `AETHER_BLOOMERY_MAINLINE_REF`,
-    // which is qualified; `gh pr create --head` and a push refspec both want the
-    // branch alone, so a ref carried through verbatim addresses nothing and the
-    // roll dies between the sync-back and the cut.
+    // which is qualified; a local ref and a push refspec both want the branch
+    // alone, so a ref carried through verbatim addresses nothing and the roll
+    // dies between the advance and the cut.
     #[test]
     fn the_day_branch_is_taken_bare_from_either_spelling() {
         let day = "bloomery/daily/2026-08-14";
