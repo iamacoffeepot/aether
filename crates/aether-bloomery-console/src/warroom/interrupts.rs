@@ -4,7 +4,7 @@
 //! non-terminal executor fault, and a host fault stay out of this queue.
 
 use super::Focus;
-use crate::dto::{BloomView, SpendQuiesce, ViewDocument};
+use crate::dto::{BloomView, SpendQuiesce, StageId, ViewDocument};
 
 /// One row in the interrupt queue.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12,6 +12,7 @@ pub struct Interrupt {
     pub kind: InterruptKind,
     pub detail: String,
     pub focus: Focus,
+    pub stage: Option<StageId>,
 }
 
 /// The eight source fields the queue is built from.
@@ -62,22 +63,29 @@ fn quiesce_entry(quiesce: &SpendQuiesce) -> Interrupt {
             kind: InterruptKind::Quiesce,
             detail: format!("{window}  {spent_micro_usd}/{ceiling_micro_usd}"),
             focus: Focus::Seal,
+            stage: None,
         },
         SpendQuiesce::Bloom { window, bloom, spent_micro_usd, ceiling_micro_usd } => Interrupt {
             kind: InterruptKind::Quiesce,
             detail: format!("{window}  {}  {spent_micro_usd}/{ceiling_micro_usd}", bloom.prefix()),
             focus: Focus::bloom(*bloom),
+            stage: None,
         },
         SpendQuiesce::Unknown => {
-            Interrupt { kind: InterruptKind::Quiesce, detail: "unknown".to_owned(), focus: Focus::Seal }
+            Interrupt { kind: InterruptKind::Quiesce, detail: "unknown".to_owned(), focus: Focus::Seal, stage: None }
         }
     }
 }
 
 fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
     let prefix = bloom.id.prefix();
-    if bloom.review_park.is_some() {
-        entries.push(Interrupt { kind: InterruptKind::Park, detail: prefix.clone(), focus: Focus::bloom(bloom.id) });
+    if let Some(park) = &bloom.review_park {
+        entries.push(Interrupt {
+            kind: InterruptKind::Park,
+            detail: prefix.clone(),
+            focus: Focus::bloom(bloom.id),
+            stage: park.stage,
+        });
     }
     if let Some(block) = &bloom.landing_blocked
         && block.rolls >= block.budget
@@ -86,6 +94,7 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
             kind: InterruptKind::Landing,
             detail: format!("{prefix}  {}/{}", block.rolls, block.budget),
             focus: Focus::bloom(bloom.id),
+            stage: None,
         });
     }
     if bloom.executor_fault.as_ref().is_some_and(|fault| fault.terminal) {
@@ -93,10 +102,16 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
             kind: InterruptKind::Terminal,
             detail: prefix.clone(),
             focus: Focus::bloom(bloom.id),
+            stage: None,
         });
     }
     if bloom.operator_hold.is_some() {
-        entries.push(Interrupt { kind: InterruptKind::Hold, detail: prefix.clone(), focus: Focus::bloom(bloom.id) });
+        entries.push(Interrupt {
+            kind: InterruptKind::Hold,
+            detail: prefix.clone(),
+            focus: Focus::bloom(bloom.id),
+            stage: None,
+        });
     }
     if let Some(composition) = &bloom.composition {
         if !composition.findings.is_empty() {
@@ -104,6 +119,7 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
                 kind: InterruptKind::Findings,
                 detail: prefix.clone(),
                 focus: Focus::composition(bloom.id),
+                stage: None,
             });
         }
         if composition.wedge.is_some() {
@@ -111,15 +127,17 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
                 kind: InterruptKind::Wedge,
                 detail: format!("composition {prefix}"),
                 focus: Focus::composition(bloom.id),
+                stage: None,
             });
         }
     }
     for member in &bloom.members {
-        if member.pending_decision.is_some() {
+        if let Some(pending) = &member.pending_decision {
             entries.push(Interrupt {
                 kind: InterruptKind::Decision,
                 detail: member_detail(bloom, &member.workpiece),
                 focus: Focus::member(bloom.id, member.workpiece.clone()),
+                stage: pending.stage,
             });
         }
         if member.wedge.is_some() {
@@ -127,6 +145,7 @@ fn push_bloom_interrupts(entries: &mut Vec<Interrupt>, bloom: &BloomView) {
                 kind: InterruptKind::Wedge,
                 detail: member_detail(bloom, &member.workpiece),
                 focus: Focus::member(bloom.id, member.workpiece.clone()),
+                stage: None,
             });
         }
     }

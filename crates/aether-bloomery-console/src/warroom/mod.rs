@@ -2,14 +2,17 @@
 //!
 //! Severity lives in [`mod@alerts`]; owner-authority lives in [`mod@interrupts`].
 //! The two files are siblings so the sets cannot drift into each other.
+//! [`mod@needs_you`] folds them into one row per subject.
 
 pub mod alerts;
 pub mod interrupts;
+pub mod needs_you;
 
 use crate::dto::DigestHex;
 
 pub use alerts::{Alert, AlertKind, alerts};
 pub use interrupts::{Interrupt, InterruptKind, interrupts};
+pub use needs_you::{NeedsYouRow, Severity, rows};
 
 /// The subject a chrome token or drill-in frame is about.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +90,20 @@ impl Focus {
         }
     }
 
+    /// Short name the needs-you row uses for this subject.
+    #[must_use]
+    pub fn subject(&self) -> String {
+        match self {
+            Self::Bloom { id } | Self::Composition { bloom: id } | Self::Artifact { digest: id } => id.prefix(),
+            Self::Member { workpiece, .. } | Self::Dispatch { workpiece, .. } | Self::Workpiece { id: workpiece } => {
+                workpiece.clone()
+            }
+            Self::Seal => "seal".to_owned(),
+            Self::Record { sequence } => format!("record {sequence}"),
+            Self::Transcript { nonce } => nonce.clone(),
+        }
+    }
+
     /// Stable parent used when the exact subject has vanished.
     #[must_use]
     pub fn parent(&self) -> Option<Self> {
@@ -101,36 +118,4 @@ impl Focus {
             | Self::Workpiece { .. } => None,
         }
     }
-}
-
-/// One selectable chrome item. Interrupts sort before alerts in the walk.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ChromeId {
-    Interrupt { kind: InterruptKind, focus: Focus },
-    Alert { kind: AlertKind, focus: Focus },
-}
-
-impl ChromeId {
-    #[must_use]
-    pub fn from_interrupt(entry: &Interrupt) -> Self {
-        Self::Interrupt { kind: entry.kind, focus: entry.focus.clone() }
-    }
-
-    #[must_use]
-    pub fn from_alert(alert: &Alert) -> Self {
-        Self::Alert { kind: alert.kind, focus: alert.focus.clone() }
-    }
-
-    #[must_use]
-    pub fn focus(&self) -> &Focus {
-        match self {
-            Self::Interrupt { focus, .. } | Self::Alert { focus, .. } => focus,
-        }
-    }
-}
-
-/// Selectable chrome items: owner queue first, then the louder alert tokens.
-#[must_use]
-pub fn chrome_ids(interrupts: &[Interrupt], alerts: &[Alert]) -> Vec<ChromeId> {
-    interrupts.iter().map(ChromeId::from_interrupt).chain(alerts.iter().map(ChromeId::from_alert)).collect()
 }
