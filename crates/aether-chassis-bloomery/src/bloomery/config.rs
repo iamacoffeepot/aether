@@ -136,10 +136,11 @@ pub struct CoordinatorConfig {
     pub poll_interval_secs: u64,
     /// The `SQLite` store path the executor dispatch reactor ([`super::ExecutorReactorCapability`])
     /// opens its own connection to, to drive the intake registry directly (#3505).
-    /// Reads the **same** `AETHER_STORE_PATH` env the [`StoreConfig`](crate::store::StoreConfig)
-    /// resolves, so the reactor's connection targets the store the `StoreCapability`
-    /// owns; carried on this shared config the same way the executor knobs are (one
-    /// config serves the mirror, source, and executor caps).
+    /// The same journal [`StoreConfig`](crate::store::StoreConfig) opens:
+    /// `--github-store-path` is an alias of `--store-path`, and both read
+    /// `AETHER_STORE_PATH`. [`BloomeryEnv::resolve`](super::BloomeryEnv::resolve)
+    /// collapses the two overlays onto one path so reactors and the store
+    /// capability cannot open different files from one command line.
     #[config(env = "AETHER_STORE_PATH", default = ":memory:")]
     pub store_path: String,
     /// The in-repo tier-policy artifact the pre-seal approve gate
