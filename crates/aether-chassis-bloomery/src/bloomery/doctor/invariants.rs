@@ -10,8 +10,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::time::Duration;
 
 use aether_bloomery::{
-    BackendObjectId, BloomId, BloomStatus, ClaimHolder, ClaimRefKind, ClaimRefState, Digest, Snapshot,
-    is_active_unlanded,
+    BackendObjectId, BloomId, BloomRecord, BloomStatus, ClaimHolder, ClaimRefKind, ClaimRefState, Digest, Excuse,
+    Snapshot, WorkpieceId, is_active_unlanded,
 };
 use serde::{Deserialize, Serialize};
 
@@ -507,22 +507,7 @@ fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> 
             continue;
         }
         for workpiece in record.progress.keys() {
-            if record.wedged.contains_key(workpiece)
-                || record.claims.contains_key(workpiece)
-                || record.host_faults.contains_key(workpiece)
-                || live.snapshot.member_park(bloom, workpiece).is_some()
-                // Awaiting a surface amendment is an accountable stop with an
-                // operator exit (ADR-0207), not a member the machinery lost:
-                // no lane can move it and dispatching one would reproduce the
-                // same refusal.
-                || live.snapshot.awaiting_surface(bloom, workpiece).is_some()
-                // Evicted off a contended file (ADR-0204) is likewise an
-                // accountable stop, and this one names the exact sibling and
-                // path holding the member: it re-dispatches when that sibling
-                // integrates, and dispatching it now would put two lanes back
-                // on one file.
-                || live.snapshot.lease_eviction(bloom, workpiece).is_some()
-            {
+            if Excuse::ALL.iter().copied().any(|excuse| member_carries_excuse(excuse, live, bloom, record, workpiece)) {
                 continue;
             }
             if pending.contains(workpiece.0.as_str()) || live.lanes_running {
@@ -536,6 +521,24 @@ fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> 
         }
     }
     divergences
+}
+
+fn member_carries_excuse(
+    excuse: Excuse,
+    live: &LiveState<'_>,
+    bloom: &BloomId,
+    record: &BloomRecord,
+    workpiece: &WorkpieceId,
+) -> bool {
+    match excuse {
+        Excuse::Wedge => record.wedged.contains_key(workpiece),
+        Excuse::Claim => record.claims.contains_key(workpiece),
+        Excuse::HostFault => record.host_faults.contains_key(workpiece),
+        Excuse::Park => live.snapshot.member_park(bloom, workpiece).is_some(),
+        Excuse::AwaitingSurface => live.snapshot.awaiting_surface(bloom, workpiece).is_some(),
+        Excuse::LeaseEviction => live.snapshot.lease_eviction(bloom, workpiece).is_some(),
+        Excuse::Withdrawal => record.withdrawn.contains_key(workpiece),
+    }
 }
 
 fn deterministic_retry_bound(live: &LiveState<'_>) -> Vec<String> {
