@@ -24,6 +24,13 @@ name = "bloomery-mock-lane"
 path = "src/bin/bloomery_mock_lane.rs"
 required-features = ["runtime", "github"]
 
+# Operator CLI for commission authoring (#5047). A sibling of `bloomery`, not a
+# subcommand of it: a bare `bloomery` still starts the daemon.
+[[bin]]
+name = "bloomery-commission"
+path = "src/bin/bloomery_commission.rs"
+required-features = ["runtime"]
+
 [features]
 # Chassis-target default: the full native host (SQLite store runtime,
 # chassis, RPC/trace caps, signal driver). A wasm/marker consumer does
