@@ -29,6 +29,7 @@ mod dev_component;
 mod dist;
 mod inventory;
 mod package;
+mod symbols;
 mod transform;
 
 use anyhow::Result;
@@ -39,6 +40,7 @@ use crate::bloom::BloomArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::package::PackageArgs;
+use crate::symbols::SymbolsArgs;
 use crate::transform::TransformArgs;
 
 #[derive(Parser)]
@@ -72,6 +74,9 @@ enum Commands {
     /// Drive the Bloomery coordinator REST surface: list blooms, seal a
     /// draft, or supersede a predecessor without composing JSON by hand.
     Bloom(BloomArgs),
+    /// Workspace symbol inventory: build a deterministic table, find by
+    /// name, or diff a working tree against a stored base table.
+    Symbols(SymbolsArgs),
 }
 
 fn main() -> Result<()> {
@@ -83,5 +88,6 @@ fn main() -> Result<()> {
         Commands::Transform(args) => transform::run(&args),
         Commands::Affected(args) => affected::run(&args),
         Commands::Bloom(args) => bloom::run(&args),
+        Commands::Symbols(args) => symbols::run(&args),
     }
 }
