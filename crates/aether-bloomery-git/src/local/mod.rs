@@ -122,6 +122,10 @@ fn is_git_oid(line: &str) -> bool {
     (line.len() == 40 || line.len() == 64) && line.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn not_a_valid_commit(stderr: &str) -> bool {
+    stderr.to_ascii_lowercase().contains("not a valid commit")
+}
+
 fn parse_commit(sha: &str, body: &str) -> Result<GitCommit, GitDataError> {
     let mut tree = None;
     let mut message_start = None;
@@ -181,7 +185,7 @@ impl GitDataApi for LocalGitData {
     fn delete_ref(&self, name: &str) -> Result<(), GitDataError> {
         let qualified = Self::qualified(name);
         let output = command::run(&self.repo, &["update-ref", "-d", &qualified])?;
-        if output.status.success() || command::is_absent_delete(&String::from_utf8_lossy(&output.stderr)) {
+        if output.status.success() {
             return Ok(());
         }
         Err(command::classify_update(&output, name))
@@ -239,13 +243,16 @@ impl GitDataApi for LocalGitData {
             return Ok(true);
         }
         let output = command::run(&self.repo, &["merge-base", "--is-ancestor", ancestor, commit])?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
         match output.status.code() {
             Some(0) => Ok(true),
-            Some(1) if self.object_exists(ancestor) && self.object_exists(commit) => Ok(false),
-            Some(1) => Err(GitDataError::MissingObject(format!("missing ancestor {ancestor} or commit {commit}"))),
+            Some(1) => Ok(false),
+            Some(128) if not_a_valid_commit(&stderr) => {
+                Err(GitDataError::MissingObject(format!("missing ancestor {ancestor} or commit {commit}")))
+            }
             _ => Err(GitDataError::Command(format!(
                 "git merge-base --is-ancestor {ancestor} {commit}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+                stderr.trim()
             ))),
         }
     }

@@ -256,9 +256,9 @@ fn deliver_commission(
 }
 
 /// Coalesce superseded replica requests to the latest sequence and push once.
-/// A transient failure leaves the whole prefix queued; a rejected force
-/// raises an operator-visible alert and still leaves the entry queued so an
-/// operator fix can redrive.
+/// A transient failure leaves the whole prefix queued; a rejected force or
+/// other deterministic refusal raises an operator-visible alert and still
+/// leaves the entry queued so an operator fix can redrive.
 fn publish_replica_batch(replica: &SourceReplicaShell, entries: &[OutboxEntry]) -> Vec<AckOutbox> {
     let Some(latest) = entries.iter().rev().find(|entry| entry.topic == Topic::SourceReplica) else {
         return Vec::new();
@@ -273,6 +273,15 @@ fn publish_replica_batch(replica: &SourceReplicaShell, entries: &[OutboxEntry]) 
                 sequence = latest.sequence,
                 error = %detail,
                 "source replica force-push was rejected; GitHub was not updated",
+            );
+            Vec::new()
+        }
+        Err(ReplicaError::Deterministic(detail)) => {
+            tracing::error!(
+                target: "aether_chassis_bloomery::mirror::alert",
+                sequence = latest.sequence,
+                error = %detail,
+                "source replica push was refused; GitHub was not updated",
             );
             Vec::new()
         }
@@ -794,6 +803,7 @@ mod tests {
     struct FakeReplica {
         fail: bool,
         reject_force: bool,
+        refuse: bool,
         publishes: AtomicUsize,
         alerts: Mutex<Vec<String>>,
     }
@@ -803,6 +813,7 @@ mod tests {
             Arc::new(Self {
                 fail: false,
                 reject_force: false,
+                refuse: false,
                 publishes: AtomicUsize::new(0),
                 alerts: Mutex::new(Vec::new()),
             })
@@ -812,6 +823,7 @@ mod tests {
             Arc::new(Self {
                 fail: true,
                 reject_force: false,
+                refuse: false,
                 publishes: AtomicUsize::new(0),
                 alerts: Mutex::new(Vec::new()),
             })
@@ -821,6 +833,17 @@ mod tests {
             Arc::new(Self {
                 fail: false,
                 reject_force: true,
+                refuse: false,
+                publishes: AtomicUsize::new(0),
+                alerts: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn refusing() -> Arc<Self> {
+            Arc::new(Self {
+                fail: false,
+                reject_force: false,
+                refuse: true,
                 publishes: AtomicUsize::new(0),
                 alerts: Mutex::new(Vec::new()),
             })
@@ -838,6 +861,11 @@ mod tests {
                 let detail = "protected branch hook declined".to_owned();
                 self.alerts.lock().unwrap().push(detail.clone());
                 return Err(ReplicaError::ForceRejected(detail));
+            }
+            if self.refuse {
+                let detail = "invalid credentials".to_owned();
+                self.alerts.lock().unwrap().push(detail.clone());
+                return Err(ReplicaError::Deterministic(detail));
             }
             if self.fail {
                 return Err(ReplicaError::Transient("github unreachable".into()));
@@ -882,6 +910,19 @@ mod tests {
             fake.alerts.lock().unwrap().as_slice(),
             ["protected branch hook declined"],
             "the rejected force is raised as an operator-visible alert rather than retried silently",
+        );
+    }
+
+    #[test]
+    fn a_deterministic_refusal_surfaces_an_operator_visible_alert() {
+        let fake = FakeReplica::refusing();
+        let shell = SourceReplicaShell::new(fake.clone());
+        let acks = publish_replica_batch(&shell, &[replica_entry(3)]);
+        assert!(acks.is_empty(), "a deterministic refusal is not silently acked away");
+        assert_eq!(
+            fake.alerts.lock().unwrap().as_slice(),
+            ["invalid credentials"],
+            "a deterministic refusal is raised as an operator-visible alert rather than retried silently",
         );
     }
 
