@@ -26,7 +26,7 @@ use crate::store::{ResourceKey, Store};
 use crate::warroom::{self, Alert, ChromeId, Focus, Interrupt};
 
 #[cfg(test)]
-use crate::dto::DigestHex;
+use crate::dto::{BloomDispatchesView, DigestHex};
 #[cfg(test)]
 use crate::fetch::FetchProbe;
 #[cfg(test)]
@@ -234,6 +234,16 @@ impl Shell {
             (ResourceKey::MetricsDispatches, Err(error)) => self.store.apply_dispatches(Err(error)),
             (ResourceKey::MetricsDispatches, Ok(_)) => {
                 self.store.apply_dispatches(Err("dispatches lane returned a non-dispatches body".to_owned()));
+            }
+            (ResourceKey::BloomDispatches(bloom), Ok(ResourceBody::BloomDispatches(value))) => {
+                self.store.apply_bloom_dispatches(bloom, Ok(value));
+            }
+            (ResourceKey::BloomDispatches(bloom), Err(error)) => self.store.apply_bloom_dispatches(bloom, Err(error)),
+            (ResourceKey::BloomDispatches(bloom), Ok(_)) => {
+                self.store.apply_bloom_dispatches(
+                    bloom,
+                    Err("bloom-dispatches lane returned a non-dispatches body".to_owned()),
+                );
             }
             (ResourceKey::Spend, Ok(ResourceBody::Spend(value))) => self.store.apply_spend(Ok(value)),
             (ResourceKey::Spend, Err(error)) => self.store.apply_spend(Err(error)),
@@ -464,6 +474,11 @@ impl Shell {
         self.reseat_top();
     }
 
+    fn apply_bloom_dispatches(&mut self, bloom: DigestHex, page: BloomDispatchesView) {
+        self.store.apply_bloom_dispatches(bloom, Ok(page));
+        self.reseat_top();
+    }
+
     fn top_scroll(&self) -> usize {
         self.stack.last().map_or(0, Screen::scroll)
     }
@@ -496,9 +511,9 @@ impl Shell {
 mod tests {
     use super::Shell;
     use crate::dto::{
-        BloomStatus, BloomView, CompositionFinding, CompositionView, DigestHex, ExecutorFaultView, HostFaultView,
-        LandingBlock, MemberView, OperatorHoldView, PendingDecisionView, Present, ReviewParkView, SpendQuiesce,
-        ViewDocument,
+        BloomDispatchView, BloomDispatchesView, BloomStatus, BloomView, CompositionFinding, CompositionView, DigestHex,
+        ExecutorFaultView, HostFaultView, LandingBlock, MemberView, OperatorHoldView, PendingDecisionView, Present,
+        ReviewParkView, SpendQuiesce, StageId, ViewDocument,
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
@@ -823,6 +838,45 @@ mod tests {
         assert!(text.contains("PARK"), "{text}");
         assert!(text.contains("WEDGED"), "{text}");
         assert!(text.contains("bloom"), "{text}");
+    }
+
+    #[test]
+    fn a_member_enter_chain_reaches_the_transcript() {
+        // The plausible bug: Enter on a member pushes Focus::Dispatch into a
+        // titled detail frame, so Nav::transcript is never produced and the
+        // viewer stays unreachable from the operator's seat.
+        let bloom = digest(0xab);
+        let mut shell = Shell::showing(
+            &ViewDocument {
+                blooms: vec![BloomView {
+                    id: bloom,
+                    members: vec![MemberView { workpiece: "wp-a".to_owned(), ..MemberView::default() }],
+                    ..BloomView::default()
+                }],
+                ..ViewDocument::default()
+            },
+            None,
+        );
+        shell.push_nav(Nav::focus(Focus::member(bloom, "wp-a")));
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        assert_eq!(shell.top_focus(), Some(Focus::dispatch(bloom, "wp-a")));
+
+        shell.apply_bloom_dispatches(
+            bloom,
+            BloomDispatchesView {
+                dispatches: vec![BloomDispatchView {
+                    nonce: "dispatch-1".to_owned(),
+                    workpiece: "wp-a".to_owned(),
+                    stage: StageId::Construct,
+                    attempt: 1,
+                    verdict: Some("pass".to_owned()),
+                    cost: Some(1_000_000),
+                    evidence_retained: true,
+                }],
+            },
+        );
+        assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
+        assert_eq!(shell.top_focus(), Some(Focus::transcript("dispatch-1")));
     }
 
     #[test]
