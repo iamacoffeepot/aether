@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Clear};
 
 use crate::fetch::{FetchLanes, FetchReply, ResourceBody};
 use crate::http::Endpoint;
-use crate::keys::{INLINE_HINTS, KeyHint, Outcome};
+use crate::keys::{KeyHint, Outcome};
 use crate::nav::Nav;
 use crate::palette;
 use crate::screen::{Screen, compose};
@@ -141,12 +141,13 @@ impl Shell {
         } else if let Some(screen) = self.stack.last_mut() {
             screen.render(frame, chunks[1], &self.store);
         }
+        let hints = self.footer_hints();
         if self.keys_overlay {
-            let (area, overlay) = chrome::keys_overlay(&self.footer_hints(), chunks[1]);
+            let (area, overlay) = chrome::keys_overlay(&hints, chunks[1]);
             frame.render_widget(Clear, area);
             frame.render_widget(overlay, area);
         }
-        frame.render_widget(chrome::footer(&self.footer_trail(), INLINE_HINTS, chunks[2].width), chunks[2]);
+        frame.render_widget(chrome::footer(&self.footer_trail(), &hints, chunks[2].width), chunks[2]);
     }
 
     fn drain_replies(&mut self) {
@@ -445,7 +446,7 @@ mod tests {
     };
     use crate::fetch::{FetchReply, ResourceBody};
     use crate::http::Endpoint;
-    use crate::keys::{INLINE_HINTS, Outcome, assert_footer_honest, footer_line};
+    use crate::keys::{Outcome, assert_footer_honest, footer_line};
     use crate::nav::Nav;
     use crate::palette::{Role, depth};
     use crate::screen::{Dashboard, RowId};
@@ -974,7 +975,9 @@ mod tests {
             },
         );
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Enter)), Outcome::Handled);
-        let last = draw(&mut shell).lines().last().unwrap_or("").to_owned();
+        let mut terminal = Terminal::new(TestBackend::new(220, 16)).expect("test backend");
+        terminal.draw(|frame| shell.render(frame)).expect("draw");
+        let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
         assert!(last.contains("board › bloom "), "{last}");
         assert!(last.contains("› member issue-1"), "{last}");
         assert!(last.contains("› transcript"), "{last}");
@@ -987,7 +990,9 @@ mod tests {
         // noise on every frame.
         let mut shell = Shell::showing(&ViewDocument::default(), None);
         let last = draw(&mut shell).lines().last().unwrap_or("").to_owned();
-        assert_eq!(last.trim(), footer_line(INLINE_HINTS));
+        assert!(!last.contains('›'), "{last}");
+        assert!(last.contains("? keys"), "{last}");
+        assert!(last.trim_end().ends_with("q quit"), "{last}");
     }
 
     #[test]
@@ -1417,14 +1422,31 @@ mod tests {
         assert!(last.trim_end().ends_with("q quit"), "{last}");
         assert!(last.contains("? keys"), "{last}");
         assert!(!last.contains("landed "), "the metrics live in the header now: {last}");
-        assert!(!last.contains("j/k select"), "the full hint list is behind `?`: {last}");
+    }
+
+    #[test]
+    fn the_footer_paints_the_screen_keys() {
+        // Names the bug: the footer painting a constant instead of the current
+        // screen's set, which is the whole issue.
+        let mut days = Shell::probe(Nav::days());
+        let mut terminal = Terminal::new(TestBackend::new(120, 16)).expect("test backend");
+        terminal.draw(|frame| days.render(frame)).expect("draw");
+        let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
+        assert!(last.contains("r refresh"), "{last}");
+        assert!(last.contains("q quit"), "{last}");
+        assert!(last.contains("? keys"), "{last}");
+
+        let mut root = Shell::showing(&ViewDocument::default(), None);
+        terminal.draw(|frame| root.render(frame)).expect("draw");
+        let last = buffer_text(&terminal).lines().last().unwrap_or("").to_owned();
+        assert!(last.contains("Tab pane"), "{last}");
+        assert!(last.contains("Enter open"), "{last}");
     }
 
     #[test]
     fn the_overlay_lists_every_key_the_seat_advertises() {
-        // Tripwire: the overlay is now the only thing that advertises those
-        // keys — an overlay built from a shorter list re-hides exactly what
-        // the trimmed footer stopped painting.
+        // Tripwire: the overlay lists the full seat; a shorter list hides a
+        // key the footer may already have elided for width.
         let mut shell = Shell::showing(&parked_blooms(3), None);
         assert_eq!(shell.handle_key(KeyEvent::from(KeyCode::Char('?'))), Outcome::Handled);
         let text = draw(&mut shell);
