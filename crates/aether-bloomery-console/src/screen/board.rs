@@ -272,11 +272,11 @@ impl Board {
 }
 
 /// The one-word state `scripts/bloomery-operator.py`'s `member_status_state`
-/// prints. `has_order` is the outstanding-order bit that script reads from
-/// the journal; the console is `/view`-only, so the live board always
-/// passes `false`.
+/// prints. The script's `has_order` bit comes from the journal; `/view` does
+/// not project outstanding orders, so `running` is the member cursor naming
+/// a stage with an attempt underway on a member the host is not holding.
 #[must_use]
-pub fn member_status_state(member: &MemberView, has_order: bool) -> &'static str {
+pub fn member_status_state(member: &MemberView) -> &'static str {
     if member.wedge.is_some() {
         return "WEDGED";
     }
@@ -286,13 +286,18 @@ pub fn member_status_state(member: &MemberView, has_order: bool) -> &'static str
     if member.resolution.is_some() {
         return "integrated";
     }
-    if has_order {
+    if attempt_in_flight(member) {
         return "running";
     }
     if member.blocked_by.as_deref().is_some_and(|name| !name.is_empty()) {
         return "blocked";
     }
     "idle"
+}
+
+fn attempt_in_flight(member: &MemberView) -> bool {
+    member.host_fault.is_none()
+        && member.cursor.as_ref().is_some_and(|cursor| cursor.stage.is_some() && cursor.attempts > 0)
 }
 
 fn rows_from(store: &Store, lane: BoardLane) -> Vec<BoardRow> {
@@ -322,7 +327,7 @@ fn rows_of(view: &ViewDocument, lane: BoardLane) -> Vec<BoardRow> {
             rows.push(BoardRow::Member(MemberRow {
                 bloom: bloom.id,
                 workpiece: member.workpiece.clone(),
-                state: member_status_state(member, false).to_owned(),
+                state: member_status_state(member).to_owned(),
                 machinery: format!("{}/{}", member.machinery_rolls, member.machinery_budget),
                 blocked_by: member.blocked_by.clone().filter(|name| !name.is_empty()).unwrap_or_default(),
                 wedge_cause: member.wedge_cause.map_or_else(String::new, |cause| cause.to_string()),
@@ -407,7 +412,8 @@ fn metrics_of(store: &Store) -> Vec<BloomMetrics> {
 mod tests {
     use super::{Board, BoardLane, BoardRow, member_status_state, rows_of};
     use crate::dto::{
-        BloomStatus, BloomView, DigestHex, MemberView, PendingDecisionView, Present, ViewDocument, WedgeCause,
+        BloomStatus, BloomView, CompositionCursorView, DigestHex, MemberView, PendingDecisionView, Present, StageId,
+        ViewDocument, WedgeCause,
     };
     use crate::keys::{Outcome, assert_footer_honest};
     use crate::palette::{Depth, with_depth};
@@ -426,39 +432,63 @@ mod tests {
         MemberView { workpiece: workpiece.to_owned(), ..MemberView::default() }
     }
 
+    fn in_flight_construct(workpiece: &str) -> MemberView {
+        MemberView {
+            cursor: Some(CompositionCursorView { stage: Some(StageId::Construct), attempts: 1, candidate: None }),
+            ..member(workpiece)
+        }
+    }
+
     #[test]
     fn member_status_state_matches_the_operator_script() {
         // The plausible bug: a dependent carrying blocked_by paints as idle
         // (the mysterious idleness the readiness scheduler exists to name),
         // or a wedge loses to blocked_by / resolution.
+        assert_eq!(member_status_state(&MemberView { blocked_by: Some("wp-a".to_owned()), ..member("wp") }), "blocked");
+        assert_eq!(member_status_state(&in_flight_construct("wp")), "running");
         assert_eq!(
-            member_status_state(&MemberView { blocked_by: Some("wp-a".to_owned()), ..member("wp") }, false),
-            "blocked"
-        );
-        assert_eq!(member_status_state(&member("wp"), true), "running");
-        assert_eq!(
-            member_status_state(
-                &MemberView { resolution: Some(Present {}), blocked_by: Some("wp-a".to_owned()), ..member("wp") },
-                false,
-            ),
+            member_status_state(&MemberView {
+                resolution: Some(Present {}),
+                blocked_by: Some("wp-a".to_owned()),
+                ..member("wp")
+            }),
             "integrated"
         );
         assert_eq!(
-            member_status_state(
-                &MemberView { wedge: Some(Present {}), blocked_by: Some("wp-a".to_owned()), ..member("wp") },
-                false,
-            ),
+            member_status_state(&MemberView {
+                wedge: Some(Present {}),
+                blocked_by: Some("wp-a".to_owned()),
+                ..member("wp")
+            }),
             "WEDGED"
         );
         assert_eq!(
-            member_status_state(
-                &MemberView { pending_decision: Some(PendingDecisionView::default()), ..member("wp") },
-                false,
-            ),
+            member_status_state(&MemberView { pending_decision: Some(PendingDecisionView::default()), ..member("wp") }),
             "held"
         );
-        assert_eq!(member_status_state(&MemberView { blocked_by: Some(String::new()), ..member("wp") }, false), "idle");
-        assert_eq!(member_status_state(&member("wp"), false), "idle");
+        assert_eq!(member_status_state(&MemberView { blocked_by: Some(String::new()), ..member("wp") }), "idle");
+        assert_eq!(member_status_state(&member("wp")), "idle");
+    }
+
+    #[test]
+    fn an_in_flight_construct_renders_running() {
+        // Tripwire: rows_of used to pass has_order=false, so a member whose
+        // cursor names a live Construct attempt painted idle — the mysterious
+        // idleness the ladder's running rung exists to name.
+        let view = ViewDocument {
+            blooms: vec![BloomView {
+                id: digest(1),
+                status: Some(BloomStatus::Sealed),
+                members: vec![in_flight_construct("wp")],
+                ..BloomView::default()
+            }],
+            ..ViewDocument::default()
+        };
+        let rows = rows_of(&view, BoardLane::Live);
+        let BoardRow::Member(member) = &rows[1] else {
+            panic!("second row is the member");
+        };
+        assert_eq!(member.state, "running");
     }
 
     #[test]
