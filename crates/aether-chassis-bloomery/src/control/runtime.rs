@@ -9,8 +9,11 @@
 //! and sends the commit to `aether.store`. Only the *first* admit for a key opens
 //! that entry and forwards a commit; a same-key admit arriving while the commit is
 //! still outstanding gets its own entry and its own commit — the store dedups the
-//! second to a [`CommitResult::Duplicate`] no-op. The store and source caps are
-//! now native siblings addressed by type (`ctx.actor::<StoreCapability>()` /
+//! second to a [`CommitResult::Duplicate`] no-op. An admit whose *bloom* already
+//! has a commit in flight waits for that apply before reducing (#5168): two
+//! set-completing claims in one poll batch would otherwise both see an incomplete
+//! set and never emit [`Decision::DispatchIntegration`]. The store and source caps
+//! are now native siblings addressed by type (`ctx.actor::<StoreCapability>()` /
 //! `ctx.actor::<SourceCapability>()`); the reply routes back by kind, correlated by
 //! the echoed idempotency key ([`CommitResult`]) or the dispatch correlation id
 //! ([`ClaimResult`]), exactly as the former wasm actor's name-addressed sends did.
@@ -122,6 +125,16 @@ struct HeldAdmission {
     raw: Vec<u8>,
 }
 
+/// An admit waiting for a same-bloom commit to apply before it reduces (#5168).
+///
+/// Carries the idempotency key so the per-key in-flight cap still counts a
+/// held entry; the raw bytes are what the resumed admit re-decodes.
+struct HeldBloomAdmit {
+    inbound: InboundMail,
+    raw: Vec<u8>,
+    key: String,
+}
+
 /// The control-core state: the live [`Snapshot`] plus the in-flight admits
 /// awaiting their commit replies, queued per idempotency key.
 ///
@@ -168,6 +181,11 @@ pub struct ControlCoreState {
     /// [`on_replay_result`](ControlCore::on_replay_result) drains them against
     /// the restored snapshot (issue #5066).
     held_admissions: VecDeque<HeldAdmission>,
+    /// Admits waiting because their bloom already has a commit in flight
+    /// (#5168). FIFO per bloom; drained from
+    /// [`on_commit_result`](ControlCore::on_commit_result) once that bloom has
+    /// no remaining pending commit, so the reduce sees the applied snapshot.
+    held_for_bloom: BTreeMap<BloomId, VecDeque<HeldBloomAdmit>>,
     /// Whether the boot journal replay has finished folding. The mainline
     /// observer polls off a wall-clock timer, which starts the moment this cap
     /// mounts, so it has to hold until the snapshot is the one the journal
@@ -213,6 +231,7 @@ impl NativeActor for ControlCore {
             pending_claims: BTreeMap::new(),
             pending_configs: BTreeMap::new(),
             held_admissions: VecDeque::new(),
+            held_for_bloom: BTreeMap::new(),
             replayed: false,
             _timer: timer,
         })
@@ -235,7 +254,9 @@ impl NativeActor for ControlCore {
     /// for a key whose first commit is still outstanding gets its own entry and
     /// its own commit — the store dedups the second to a [`CommitResult::Duplicate`]
     /// no-op — so its inbound chain stays open (held by its `InboundMail`) until it
-    /// is answered.
+    /// is answered. A different-key admit for a bloom that already has a commit
+    /// in flight waits for that apply (#5168) so completeness is decided against
+    /// the snapshot that includes the earlier claim.
     ///
     /// Before boot replay finishes, the raw bytes and reply obligation are
     /// enqueued rather than reduced: deciding against the empty boot snapshot
@@ -286,6 +307,12 @@ impl NativeActor for ControlCore {
             state.pending_configs.insert(mail_id.correlation_id, PendingConfigs { inbound, raw });
             return;
         }
+        if let Some(bloom) = event_bloom(&event)
+            && state.bloom_has_commit_in_flight(&bloom)
+        {
+            state.hold_for_bloom(bloom, inbound, raw, event.idempotency_key.0);
+            return;
+        }
         let decisions = reduce(&state.snapshot, &event, &state.configs, &state.spend);
         finish_admit(state, ctx, inbound, raw, event, decisions);
     }
@@ -313,6 +340,12 @@ impl NativeActor for ControlCore {
                 return;
             }
         };
+        if let Some(bloom) = event_bloom(&event)
+            && state.bloom_has_commit_in_flight(&bloom)
+        {
+            state.hold_for_bloom(bloom, inbound, raw, event.idempotency_key.0);
+            return;
+        }
         let decisions = reduce(&state.snapshot, &event, &state.configs, &state.spend);
         finish_admit(state, ctx, inbound, raw, event, decisions);
     }
@@ -424,6 +457,34 @@ impl NativeActor for ControlCore {
             CommitResult::Err { error, .. } => AdmitResult::Err { error },
         };
         inbound.reply(&result);
+        if let Some(bloom) = event_bloom(&event) {
+            Self::drain_held_for_bloom(state, ctx, bloom);
+        }
+    }
+
+    /// Reduce the next held admit for `bloom` now that its prior commit has
+    /// applied. One at a time: the drained admit commits, and the rest wait
+    /// for *that* apply, so completeness is never decided against a stale
+    /// snapshot. Duplicates and immediate replies loop; a deferral to configs
+    /// or claim-refs stops the drain until that path resumes.
+    fn drain_held_for_bloom(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, bloom: BloomId) {
+        loop {
+            if state.bloom_has_commit_in_flight(&bloom) {
+                return;
+            }
+            let Some(HeldBloomAdmit { inbound, raw, key: _ }) = state.pop_held_for_bloom(&bloom) else {
+                return;
+            };
+            let configs = state.pending_configs.len();
+            let claims = state.pending_claims.len();
+            Self::on_admit_event(state, ctx, inbound, raw);
+            if state.bloom_has_commit_in_flight(&bloom) {
+                return;
+            }
+            if state.pending_configs.len() > configs || state.pending_claims.len() > claims {
+                return;
+            }
+        }
     }
 
     /// The stored-configuration read (ADR-0174). Two arrivals reach here and they
@@ -856,7 +917,27 @@ impl ControlCoreState {
     fn inflight_for_key(&self, key: &str) -> usize {
         let queued = self.pending.get(key).map_or(0, VecDeque::len);
         let claiming = self.pending_claims.values().filter(|claim| claim.event.idempotency_key.0 == key).count();
-        queued + claiming
+        let held = self.held_for_bloom.values().flatten().filter(|held| held.key == key).count();
+        queued + claiming + held
+    }
+
+    /// Whether `bloom` already has a store commit outstanding — the snapshot
+    /// does not yet include that admit, so a sibling claim must wait (#5168).
+    fn bloom_has_commit_in_flight(&self, bloom: &BloomId) -> bool {
+        self.pending.values().flatten().any(|pending| event_bloom(&pending.event).as_ref() == Some(bloom))
+    }
+
+    fn hold_for_bloom(&mut self, bloom: BloomId, inbound: InboundMail, raw: Vec<u8>, key: String) {
+        self.held_for_bloom.entry(bloom).or_default().push_back(HeldBloomAdmit { inbound, raw, key });
+    }
+
+    fn pop_held_for_bloom(&mut self, bloom: &BloomId) -> Option<HeldBloomAdmit> {
+        let queue = self.held_for_bloom.get_mut(bloom)?;
+        let held = queue.pop_front()?;
+        if queue.is_empty() {
+            self.held_for_bloom.remove(bloom);
+        }
+        Some(held)
     }
 
     /// Project a decided event and send its combined [`Commit`] to the store — the
@@ -1116,6 +1197,44 @@ fn release_response(snapshot: &Snapshot, request: &[u8]) -> QueryResult {
     match to_vec(record) {
         Ok(record) => QueryResult::Release { record },
         Err(error) => QueryResult::Err { error: format!("release record encode failed: {error}") },
+    }
+}
+
+/// The bloom an admit mutates, when it names one.
+///
+/// Exhaustive over [`Fact`]: a new variant that carries a bloom must wait
+/// behind that bloom's in-flight commit (#5168), and a variant that does not
+/// must not block one.
+fn event_bloom(event: &Event) -> Option<BloomId> {
+    match &event.fact {
+        Fact::Seal(spec) | Fact::GraphSeal { spec, .. } => Some(spec.id()),
+        Fact::Supersede { successor, .. } => Some(successor.id()),
+        Fact::Integrate { bloom, .. }
+        | Fact::AdmitEvidence { bloom, .. }
+        | Fact::Resolve { bloom, .. }
+        | Fact::Land { bloom, .. }
+        | Fact::AdoptAnswer { bloom, .. }
+        | Fact::AttemptCompleted { bloom, .. }
+        | Fact::AggregateReviewCompleted { bloom, .. }
+        | Fact::AggregateVerifyCompleted { bloom, .. }
+        | Fact::LandingRejected { bloom, .. }
+        | Fact::GrantAttempts { bloom, .. }
+        | Fact::VerifyFailed { bloom, .. }
+        | Fact::AggregateReviewExecutorFault { bloom, .. }
+        | Fact::FoldConflict { bloom, .. }
+        | Fact::OperatorAdjudication { bloom, .. }
+        | Fact::OperatorRepair { bloom, .. }
+        | Fact::OperatorHold { bloom, .. }
+        | Fact::OperatorRelease { bloom, .. }
+        | Fact::VerifyHostFault { bloom, .. }
+        | Fact::ResumeHostFault { bloom, .. }
+        | Fact::SpliceAssembled { bloom, .. }
+        | Fact::MemberExecutorFault { bloom, .. } => Some(*bloom),
+        Fact::ObserveMainline { .. }
+        | Fact::ObserveMainlineDiverged { .. }
+        | Fact::RequestOrphanClaimRelease { .. }
+        | Fact::CompleteOrphanClaimRelease { .. }
+        | Fact::SurfaceOverlap { .. } => None,
     }
 }
 
