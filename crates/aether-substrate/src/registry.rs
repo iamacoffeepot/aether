@@ -1,7 +1,8 @@
-// Mailbox registry. Maps stable string names to `MailboxId`s and records
-// whether each mailbox is a WASM component or a substrate-owned sink.
-// Fixed at substrate boot for milestone 1; dynamic registration is a
-// later-milestone concern (issue #18).
+// Name registries. Two parallel tables: mailboxes (name → MailboxId,
+// tagged component-vs-sink) and kinds (name → u32 kind id, per
+// ADR-0005). Both are populated at substrate boot and frozen when the
+// registry is wrapped in Arc — readers see a stable snapshot and
+// contend on nothing. Post-boot dynamic registration is deferred.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ pub enum MailboxEntry {
 pub struct Registry {
     by_name: HashMap<String, MailboxId>,
     entries: Vec<MailboxEntry>,
+    kind_by_name: HashMap<String, u32>,
 }
 
 impl Registry {
@@ -32,6 +34,7 @@ impl Registry {
         Self {
             by_name: HashMap::new(),
             entries: Vec::new(),
+            kind_by_name: HashMap::new(),
         }
     }
 
@@ -65,6 +68,23 @@ impl Registry {
 
     pub fn entry(&self, id: MailboxId) -> Option<&MailboxEntry> {
         self.entries.get(id.0 as usize)
+    }
+
+    /// Register a mail kind by name. Idempotent — re-registering a name
+    /// returns the id it was first assigned. Ids are dense and assigned
+    /// in insertion order, per ADR-0005's kind-name registry.
+    pub fn register_kind(&mut self, name: impl Into<String>) -> u32 {
+        let name = name.into();
+        if let Some(&id) = self.kind_by_name.get(&name) {
+            return id;
+        }
+        let id = self.kind_by_name.len() as u32;
+        self.kind_by_name.insert(name, id);
+        id
+    }
+
+    pub fn kind_id(&self, name: &str) -> Option<u32> {
+        self.kind_by_name.get(name).copied()
     }
 
     pub fn len(&self) -> usize {
@@ -141,5 +161,33 @@ mod tests {
         let r = Registry::new();
         assert!(r.lookup("nope").is_none());
         assert!(r.entry(MailboxId(42)).is_none());
+    }
+
+    #[test]
+    fn kind_ids_are_dense_and_sequential() {
+        let mut r = Registry::new();
+        let a = r.register_kind("aether.tick");
+        let b = r.register_kind("aether.key");
+        let c = r.register_kind("hello.npc_health");
+        assert_eq!(a, 0);
+        assert_eq!(b, 1);
+        assert_eq!(c, 2);
+    }
+
+    #[test]
+    fn kind_registration_is_idempotent() {
+        let mut r = Registry::new();
+        let first = r.register_kind("aether.tick");
+        let second = r.register_kind("aether.tick");
+        assert_eq!(first, second);
+        assert_eq!(r.register_kind("aether.key"), 1);
+    }
+
+    #[test]
+    fn kind_id_lookup() {
+        let mut r = Registry::new();
+        let id = r.register_kind("aether.tick");
+        assert_eq!(r.kind_id("aether.tick"), Some(id));
+        assert!(r.kind_id("absent").is_none());
     }
 }

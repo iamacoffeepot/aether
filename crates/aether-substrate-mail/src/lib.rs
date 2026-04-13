@@ -3,22 +3,15 @@
 // the substrate dispatches (tick, input), or consume the substrate's
 // sink kinds (draw_triangle). See ADR-0005.
 //
-// Kind ids are hardcoded u32 constants in this PR to keep the wire
-// stable across the crate migration. A follow-up PR replaces them with
-// registry-assigned ids at init, parallel to the existing mailbox-name
-// registry.
+// Kind ids are assigned at substrate boot via `Registry::register_kind`
+// and resolved by name at component init via the `resolve_kind` host
+// function. Consumers never depend on the id's numeric value — only on
+// the `NAME` constants on the `Kind` impls below.
 
 #![no_std]
 
 use aether_mail::Kind;
 use bytemuck::{Pod, Zeroable};
-
-// Kind ids — hardcoded for now, resolved by name in a later PR.
-pub const KIND_TICK: u32 = 1;
-pub const KIND_KEY: u32 = 10;
-pub const KIND_MOUSE_BUTTON: u32 = 11;
-pub const KIND_MOUSE_MOVE: u32 = 12;
-pub const KIND_DRAW_TRIANGLE: u32 = 20;
 
 /// Per-frame signal from the substrate's frame loop. Empty payload for
 /// now; milestone 4 will add an elapsed-seconds field.

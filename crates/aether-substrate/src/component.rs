@@ -35,6 +35,14 @@ impl Component {
             .get_memory(&mut store, "memory")
             .ok_or_else(|| wasmtime::Error::msg("guest exports no `memory`"))?;
         let receive = instance.get_typed_func::<(u32, u32, u32), u32>(&mut store, "receive")?;
+
+        // Optional `init() -> u32` export: called once before the first
+        // `receive`, used for one-shot bootstrap like resolving kind
+        // names to ids. Per ADR-0005's registry-at-init flow.
+        if let Ok(init) = instance.get_typed_func::<(), u32>(&mut store, "init") {
+            init.call(&mut store, ())?;
+        }
+
         Ok(Self {
             store,
             memory,

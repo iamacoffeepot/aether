@@ -1,30 +1,39 @@
 // First real aether component. On each tick the component emits a
-// triangle as KIND_DRAW_TRIANGLE mail to the substrate's render sink.
-// Positions are clip-space; the component has no camera/transform story
-// yet.
+// triangle as a draw-triangle mail to the substrate's render sink.
+// Positions are clip-space; the component has no camera/transform
+// story yet.
 //
-// Kind ids and payload types are imported from `aether-substrate-mail`
-// per ADR-0005 — the substrate's mail vocabulary is a crate components
-// depend on, not a duplicated wire constant.
+// Per ADR-0005, kind ids are resolved by name at component init — the
+// substrate assigns them; the guest caches them in statics. Payload
+// types are imported from `aether-substrate-mail` so wire layout stays
+// in one place.
 //
 // Mailbox ids remain hardcoded (component=0, render sink=1); symbolic
-// name resolution at component init is future work per ADR-0005's
-// kind-registry-at-init follow-up.
+// mailbox resolution is still future work.
 //
-// `#[cfg(target_arch = "wasm32")]` guards the bodies so the crate still
+// `#[cfg(target_arch = "wasm32")]` guards bodies so the crate still
 // compiles for the host target in `cargo test --workspace` (where the
-// `send_mail` import is not resolvable at link time, and where
-// `ptr as u32` would truncate a 64-bit host pointer).
+// `aether` imports aren't linkable and `ptr as u32` would truncate a
+// 64-bit host pointer).
 
 #[cfg(target_arch = "wasm32")]
-use aether_substrate_mail::{DrawTriangle, KIND_DRAW_TRIANGLE, KIND_TICK, Vertex};
+use aether_mail::Kind;
+#[cfg(target_arch = "wasm32")]
+use aether_substrate_mail::{DrawTriangle, Tick, Vertex};
 
 #[cfg(target_arch = "wasm32")]
 const RENDER_SINK: u32 = 1;
 
+// `u32::MAX` sentinel matches the host's KIND_NOT_FOUND — if `init`
+// didn't run or a name is missing, the dispatch below simply no-ops.
+#[cfg(target_arch = "wasm32")]
+static mut KIND_TICK: u32 = u32::MAX;
+#[cfg(target_arch = "wasm32")]
+static mut KIND_DRAW_TRIANGLE: u32 = u32::MAX;
+
 // A fixed clip-space triangle with per-vertex color. Typed as
-// DrawTriangle so the vertex layout is the same type the substrate
-// decodes against; bytemuck handles the &T-to-bytes cast at send time.
+// DrawTriangle so the vertex layout matches the substrate's decode
+// type; bytemuck handles the &T-to-bytes cast at send time.
 #[cfg(target_arch = "wasm32")]
 static TRIANGLE: DrawTriangle = DrawTriangle {
     verts: [
@@ -56,12 +65,37 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
 #[link(wasm_import_module = "aether")]
 unsafe extern "C" {
     fn send_mail(recipient: u32, kind: u32, ptr: u32, len: u32, count: u32) -> u32;
+    fn resolve_kind(name_ptr: u32, name_len: u32) -> u32;
+}
+
+#[cfg(target_arch = "wasm32")]
+unsafe fn resolve(name: &str) -> u32 {
+    unsafe { resolve_kind(name.as_ptr() as u32, name.len() as u32) }
+}
+
+/// Runs once before the first `receive`. Resolves each kind name this
+/// component cares about and caches the assigned id. Return value is
+/// currently informational.
+///
+/// # Safety
+/// Called by the substrate exactly once, before any `receive` call, on
+/// a thread that owns this component's linear memory. The body mutates
+/// the `KIND_*` statics — safe because there is no concurrent reader
+/// until `init` returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init() -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    unsafe {
+        KIND_TICK = resolve(Tick::NAME);
+        KIND_DRAW_TRIANGLE = resolve(DrawTriangle::NAME);
+    }
+    0
 }
 
 /// # Safety
-/// Host contract: `ptr` points to a `count`-item payload for `kind` within
-/// guest linear memory. For this milestone we do not read the inbound
-/// payload; the tick's empty body is unused.
+/// Host contract: `ptr` points to a `count`-item payload for `kind`
+/// within guest linear memory. For this milestone we do not read the
+/// inbound payload; the tick's empty body is unused.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn receive(kind: u32, _ptr: u32, _count: u32) -> u32 {
     #[cfg(target_arch = "wasm32")]
