@@ -28,4 +28,16 @@ Per-workload dimensions:
 
 ## How to plot
 
-Plotting script lands in a follow-up PR. Until then, point your favorite tool (gnuplot, pandas, etc.) at the CSV directly.
+`plot.py` reads the four CSVs and writes corresponding PNGs alongside (also gitignored). It's a uv script with PEP 723 inline dependencies (matplotlib, numpy), so:
+
+```sh
+cd crates/aether-mail-spike-host/results
+uv run plot.py
+```
+
+uv resolves and caches the deps in an isolated environment on first run; subsequent runs are instant. Outputs:
+
+- `broadcast_mean.png`, `broadcast_p99.png` — heatmaps over `n_actors × work_per_actor`. Cells exceeding the 16.67ms 60Hz budget get a red border.
+- `mixed_mean.png`, `mixed_p99.png` — same shape as broadcast.
+- `bulk.png` — two-panel: per-mail latency vs batch size (log-log) and amortized cost per item.
+- `chain.png` — per-frame latency vs depth (mean and p99).
