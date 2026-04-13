@@ -11,8 +11,6 @@ use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 
 const GUEST_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/guest.wasm"));
 
-// --- mail envelope -----------------------------------------------------
-
 type ActorId = u32;
 type MailKind = u32;
 
@@ -30,8 +28,6 @@ struct Mail<'a> {
     batch_bytes: &'a [u8],
     batch_count: u32,
 }
-
-// --- actor -------------------------------------------------------------
 
 /// One wasm instance plus the cached handles needed to deliver mail to it.
 /// One `Store` per actor — wasmtime stores are not shareable across
@@ -68,8 +64,6 @@ impl Actor {
             .call(&mut self.store, (mail.kind, MAIL_OFFSET, mail.batch_count))
     }
 }
-
-// --- broadcast workload ------------------------------------------------
 
 /// Workload 1 from #7. One `tick` mail to every actor each frame; each
 /// actor does `work_per_actor` units of plain-data work; frame ends when
@@ -109,8 +103,6 @@ impl BroadcastWorkload {
         Ok(())
     }
 }
-
-// --- bench harness -----------------------------------------------------
 
 struct CellResult {
     workload: &'static str,
@@ -178,8 +170,6 @@ fn bench_broadcast(
     })
 }
 
-// --- CSV output --------------------------------------------------------
-
 fn write_csv(path: &PathBuf, rows: &[CellResult]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -215,8 +205,6 @@ fn write_csv(path: &PathBuf, rows: &[CellResult]) -> std::io::Result<()> {
     }
     Ok(())
 }
-
-// --- entry point -------------------------------------------------------
 
 fn main() -> wasmtime::Result<()> {
     let engine = Engine::default();
