@@ -16,9 +16,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use aether_mail::{encode, encode_empty};
 use aether_substrate::{
     Component, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
+};
+use aether_substrate_mail::{
+    KIND_KEY, KIND_MOUSE_BUTTON, KIND_MOUSE_MOVE, KIND_TICK, Key, MouseButton, MouseMove, Tick,
 };
 use render::Gpu;
 use wasmtime::{Engine, Linker, Module};
@@ -29,11 +33,6 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 const HELLO_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello_component.wasm"));
-
-const KIND_TICK: u32 = 1;
-const KIND_KEY: u32 = 10;
-const KIND_MOUSE_BUTTON: u32 = 11;
-const KIND_MOUSE_MOVE: u32 = 12;
 
 const WORKERS: usize = 2;
 const LOG_EVERY_FRAMES: u64 = 120;
@@ -77,8 +76,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.queue
-                    .push(Mail::new(self.component_mbox, KIND_TICK, vec![], 1));
+                self.queue.push(Mail::new(
+                    self.component_mbox,
+                    KIND_TICK,
+                    encode_empty::<Tick>(),
+                    1,
+                ));
                 self.queue.wait_idle();
                 let verts = std::mem::take(&mut *self.frame_vertices.lock().unwrap());
                 if let Some(gpu) = self.gpu.as_mut() {
@@ -107,7 +110,7 @@ impl ApplicationHandler for App {
                     self.queue.push(Mail::new(
                         self.component_mbox,
                         KIND_KEY,
-                        code.to_le_bytes().to_vec(),
+                        encode(&Key { code }),
                         1,
                     ));
                 }
@@ -116,13 +119,18 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed,
                 ..
             } => {
-                self.queue
-                    .push(Mail::new(self.component_mbox, KIND_MOUSE_BUTTON, vec![], 1));
+                self.queue.push(Mail::new(
+                    self.component_mbox,
+                    KIND_MOUSE_BUTTON,
+                    encode_empty::<MouseButton>(),
+                    1,
+                ));
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let mut payload = Vec::with_capacity(8);
-                payload.extend_from_slice(&(position.x as f32).to_le_bytes());
-                payload.extend_from_slice(&(position.y as f32).to_le_bytes());
+                let payload = encode(&MouseMove {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                });
                 self.queue
                     .push(Mail::new(self.component_mbox, KIND_MOUSE_MOVE, payload, 1));
             }

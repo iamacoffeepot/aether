@@ -30,6 +30,18 @@ dependencies = [
 [[package]]
 name = "aether-hello-component"
 version = "0.1.0"
+dependencies = [
+ "aether-substrate-mail",
+]
+
+[[package]]
+name = "aether-mail"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "postcard",
+ "serde",
+]
 
 [[package]]
 name = "aether-mail-spike-guest"
@@ -46,11 +58,22 @@ dependencies = [
 name = "aether-substrate"
 version = "0.1.0"
 dependencies = [
+ "aether-mail",
+ "aether-substrate-mail",
+ "bytemuck",
  "pollster",
  "wasmtime",
  "wat",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "aether-substrate-mail"
+version = "0.1.0"
+dependencies = [
+ "aether-mail",
+ "bytemuck",
 ]
 
 [[package]]
