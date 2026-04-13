@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Early-stage Rust project (edition 2024). Vision: a game engine where Claude sits in a harness as assistant/engineer/designer. Architectural direction (see `docs/adr/`): a thin native kernel owns I/O, GPU, audio, and hosts a WASM runtime; engine components run as WASM modules and communicate via a mail system.
+Early-stage Rust project (edition 2024). Vision: a game engine where Claude sits in a harness as assistant/engineer/designer. Architectural direction (see `docs/adr/`): a thin native **substrate** owns I/O, GPU, audio, and hosts a WASM runtime; engine **components** run as WASM modules and communicate via a **mail** system. (The whole system — substrate + components + tooling — is "Aether" or "the engine"; the substrate is just the native base layer.)
 
 ## Workflow
 
