@@ -5,7 +5,9 @@ edition.workspace = true
 build = "build.rs"
 
 [dependencies]
+pollster = "0.4.0"
 wasmtime = "30"
+wgpu = "29.0.1"
 winit = "0.30.13"
 
 [dev-dependencies]

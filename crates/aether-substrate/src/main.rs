@@ -1,11 +1,12 @@
-// Milestone 2 frame-loop driver: winit owns the event loop and ticks
-// the component on each redraw request. Input events are encoded into
-// mail (per-family MailKind, byte payload) and pushed to the component
-// as they arrive. Window close triggers scheduler shutdown via Drop.
+// Milestone 3a frame-loop driver: winit owns the event loop, ticks the
+// component on each redraw, then clears the wgpu surface to a solid
+// color. Input still encodes into mail as in milestone 2; the heartbeat
+// sink still counts.
 //
-// No GPU surface yet — the window is blank. The point of milestone 2
-// is to prove that winit's cadence and events fit the mail envelope
-// without re-architecting the library landed in milestone 1.
+// No triangle yet — the render pass is a clear only. Milestone 3b will
+// add the render sink, shader, pipeline, and a component-driven draw.
+
+mod render;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ use aether_substrate::{
     Component, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
 };
+use render::Gpu;
 use wasmtime::{Engine, Linker, Module};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -40,6 +42,7 @@ struct App {
     heartbeats: Arc<AtomicU64>,
     last_key: Arc<Mutex<Option<u32>>>,
     window: Option<Arc<Window>>,
+    gpu: Option<Gpu>,
     started: Option<Instant>,
     frame: u64,
     // Scheduler is owned so its workers are joined on Drop when the event
@@ -52,21 +55,32 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let window = event_loop
-            .create_window(Window::default_attributes().with_title("aether hello-winit"))
-            .expect("create_window");
+        let window = Arc::new(
+            event_loop
+                .create_window(Window::default_attributes().with_title("aether hello-triangle"))
+                .expect("create_window"),
+        );
+        self.gpu = Some(Gpu::new(Arc::clone(&window)));
         window.request_redraw();
-        self.window = Some(Arc::new(window));
+        self.window = Some(window);
         self.started = Some(Instant::now());
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => {
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.resize(size);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 self.queue
                     .push(Mail::new(self.component_mbox, KIND_TICK, vec![], 1));
                 self.queue.wait_idle();
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.render();
+                }
                 self.frame += 1;
                 if self.frame.is_multiple_of(LOG_EVERY_FRAMES) {
                     let last = *self.last_key.lock().unwrap();
@@ -162,7 +176,9 @@ fn main() -> wasmtime::Result<()> {
     components.insert(component_mbox, component);
     let scheduler = Scheduler::new(registry, Arc::clone(&queue), components, WORKERS);
 
-    eprintln!("aether-substrate: milestone 2 winit loop — {WORKERS} workers, close window to exit");
+    eprintln!(
+        "aether-substrate: milestone 3a wgpu clear — {WORKERS} workers, close window to exit"
+    );
 
     let event_loop = EventLoop::new()?;
     // Poll so RedrawRequested fires continuously; milestone 2 has no pacing
@@ -175,6 +191,7 @@ fn main() -> wasmtime::Result<()> {
         heartbeats: Arc::clone(&heartbeats),
         last_key,
         window: None,
+        gpu: None,
         started: None,
         frame: 0,
         _scheduler: scheduler,
