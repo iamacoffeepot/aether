@@ -1,6 +1,6 @@
 # ADR-0002: Pure-mail actor model on a WASM-hosted substrate
 
-- **Status:** Proposed
+- **Status:** Accepted (elevated from Proposed by ADR-0003)
 - **Date:** 2026-04-13
 
 ## Context
