@@ -4,3 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+wasmtime = "30"
+
+[dev-dependencies]
+wat = "1"
