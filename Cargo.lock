@@ -25,6 +25,10 @@ dependencies = [
 [[package]]
 name = "aether-substrate"
 version = "0.1.0"
+dependencies = [
+ "wasmtime",
+ "wat",
+]
 
 [[package]]
 name = "allocator-api2"
