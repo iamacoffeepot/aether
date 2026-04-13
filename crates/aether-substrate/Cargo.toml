@@ -6,6 +6,7 @@ build = "build.rs"
 
 [dependencies]
 wasmtime = "30"
+winit = "0.30.13"
 
 [dev-dependencies]
 wat = "1"

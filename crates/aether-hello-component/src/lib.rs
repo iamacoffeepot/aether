@@ -1,8 +1,10 @@
 // First real aether component. Each frame the substrate ticks this
-// component, and it replies by sending a heartbeat mail to a sink
-// mailbox. Proves bidirectional host↔component flow for milestone 1.
+// component over mail, and it replies with a heartbeat to the sink.
+// Milestone 2 adds input kinds: the key-press payload (4-byte LE u32
+// key code) is forwarded to the sink so the payload path travels end
+// to end; other kinds produce an empty-bodied heartbeat.
 //
-// Mailbox ids for milestone 1 are hardcoded. The substrate assigns
+// Mailbox ids for milestone 1/2 are hardcoded. The substrate assigns
 // them deterministically at boot (component=0, heartbeat sink=1);
 // symbolic name resolution at component init is future work per
 // issue #18's open sub-questions.
@@ -15,6 +17,8 @@
 const HEARTBEAT_SINK: u32 = 1;
 #[cfg(target_arch = "wasm32")]
 const KIND_HEARTBEAT: u32 = 42;
+#[cfg(target_arch = "wasm32")]
+const KIND_KEY: u32 = 10;
 
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "aether")]
@@ -23,16 +27,23 @@ unsafe extern "C" {
 }
 
 /// # Safety
-/// Host contract: `ptr` points to `count`-item payload for `kind` within
-/// linear memory. Milestone 1's only inbound kind is the tick (the host
-/// pushes a single-item payload we do not read), so no pointer use here.
+/// Host contract: `ptr` points to a `count`-item payload for `kind` within
+/// guest linear memory. For `KIND_KEY` the payload is 4 bytes (LE u32 key
+/// code); for other kinds the body is unused here.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn receive(_kind: u32, _ptr: u32, count: u32) -> u32 {
+pub unsafe extern "C" fn receive(kind: u32, ptr: u32, count: u32) -> u32 {
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        send_mail(HEARTBEAT_SINK, KIND_HEARTBEAT, 0, 0, count);
+        let (forward_ptr, forward_len) = if kind == KIND_KEY { (ptr, 4) } else { (0, 0) };
+        send_mail(
+            HEARTBEAT_SINK,
+            KIND_HEARTBEAT,
+            forward_ptr,
+            forward_len,
+            count,
+        );
     }
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = count;
+    let _ = (kind, ptr, count);
     0
 }
