@@ -166,8 +166,79 @@ def plot_chain(rows: list[Row], out: Path) -> None:
     print(f"wrote {out.name}")
 
 
+def plot_speedup(workload_to_rows: dict[str, list[Row]], out: Path) -> None:
+    """Speedup vs K per N, one subplot per workload. Speedup = T(K=1) / T(K).
+    Ideal linear speedup is drawn as a dashed reference line."""
+    names = list(workload_to_rows.keys())
+    fig, axes = plt.subplots(1, len(names), figsize=(5.2 * len(names), 4.4), sharey=True)
+    if len(names) == 1:
+        axes = [axes]
+
+    for ax, name in zip(axes, names):
+        rows = workload_to_rows[name]
+        ns = sorted({r.dim_a for r in rows})
+        ks = sorted({r.dim_b for r in rows})
+        for n in ns:
+            t_by_k = {r.dim_b: r.mean_us for r in rows if r.dim_a == n}
+            if 1 not in t_by_k:
+                continue
+            baseline = t_by_k[1]
+            xs = [k for k in ks if k in t_by_k]
+            ys = [baseline / t_by_k[k] for k in xs]
+            ax.plot(xs, ys, "o-", label=f"N={n}")
+        max_k = max(ks)
+        ax.plot([1, max_k], [1, max_k], "k--", alpha=0.3, label="ideal")
+        ax.set_xscale("log", base=2)
+        ax.set_xlabel("workers K")
+        ax.set_title(name)
+        ax.grid(True, which="both", alpha=0.4)
+        ax.set_xticks(ks)
+        ax.set_xticklabels([str(k) for k in ks])
+    axes[0].set_ylabel("speedup vs K=1")
+    axes[-1].legend(loc="upper left", fontsize=8)
+    fig.suptitle("scheduler: speedup vs worker count")
+    fig.tight_layout()
+    fig.savefig(out, dpi=120)
+    plt.close(fig)
+    print(f"wrote {out.name}")
+
+
+def plot_dispatch_floor(rows: list[Row], out: Path) -> None:
+    """Per-tick cost = mean_us / N. For churn (work=10), this isolates the
+    scheduler's end-to-end cost per dispatched tick. Flat curves at low K
+    that rise with K are the signature of shared-queue contention."""
+    ns = sorted({r.dim_a for r in rows})
+    ks = sorted({r.dim_b for r in rows})
+
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+    for n in ns:
+        xs, ys = [], []
+        for k in ks:
+            match = [r for r in rows if r.dim_a == n and r.dim_b == k]
+            if not match:
+                continue
+            xs.append(k)
+            ys.append(match[0].mean_us * 1000.0 / n)  # µs → ns, per-tick
+        ax.plot(xs, ys, "o-", label=f"N={n}")
+
+    ax.set_xscale("log", base=2)
+    ax.set_xlabel("workers K")
+    ax.set_ylabel("per-tick cost (ns)")
+    ax.set_title("churn: per-tick scheduler cost vs K\n(rising curves = shared-queue contention)")
+    ax.set_xticks(ks)
+    ax.set_xticklabels([str(k) for k in ks])
+    ax.grid(True, which="both", alpha=0.4)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out, dpi=120)
+    plt.close(fig)
+    print(f"wrote {out.name}")
+
+
 def main() -> int:
     any_done = False
+
+    # Sequential-spike CSVs (issue #7 / ADR-0003).
     for name, dim_a, dim_b in [
         ("broadcast", "n_actors", "work_per_actor"),
         ("mixed", "n_actors", "work_per_actor"),
@@ -189,8 +260,30 @@ def main() -> int:
         plot_fn(load_csv(path), HERE / f"{name}.png")
         any_done = True
 
+    # Concurrent-spike CSVs (issue #14 / ADR-0004).
+    concurrent_workloads = ["parallel_broadcast", "parallel_mixed", "churn"]
+    concurrent_rows: dict[str, list[Row]] = {}
+    for name in concurrent_workloads:
+        path = HERE / f"{name}.csv"
+        if not path.exists():
+            print(f"missing {path.name}, skipping")
+            continue
+        rows = load_csv(path)
+        concurrent_rows[name] = rows
+        plot_matrix(rows, "n_actors", "k_workers", "mean_us", f"{name}: mean per-frame latency", HERE / f"{name}_mean.png")
+        plot_matrix(rows, "n_actors", "k_workers", "p99_us", f"{name}: p99 per-frame latency", HERE / f"{name}_p99.png")
+        any_done = True
+
+    if concurrent_rows:
+        plot_speedup(concurrent_rows, HERE / "scheduler_speedup.png")
+    if "churn" in concurrent_rows:
+        plot_dispatch_floor(concurrent_rows["churn"], HERE / "churn_dispatch_floor.png")
+
     if not any_done:
-        print("no CSVs found — run `cargo run --release -p aether-mail-spike-host` first")
+        print(
+            "no CSVs found — run `cargo run --release -p aether-mail-spike-host` and/or\n"
+            "`cargo run --release -p aether-mail-spike-host --bin concurrent` first"
+        )
         return 1
     return 0
 

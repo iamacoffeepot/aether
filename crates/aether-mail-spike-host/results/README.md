@@ -21,10 +21,16 @@ Per-workload dimensions:
 
 | Workload | dim_a | dim_b | What it sweeps |
 | --- | --- | --- | --- |
-| `broadcast` | `n_actors` | `work_per_actor` | Fanout × per-actor work |
+| `broadcast` | `n_actors` | `work_per_actor` | Fanout × per-actor work (sequential; ADR-0003) |
 | `bulk` | `batch_size` | `work_per_item` | One sender → one receiver, varying batch size; tests batching amortization |
 | `chain` | `depth` | `work_per_link` | Sequential dispatch through D actors |
-| `mixed` | `n_actors` | `work_per_actor` | Broadcast tick + neighbor phase, 2N mails per frame |
+| `mixed` | `n_actors` | `work_per_actor` | Broadcast tick + neighbor phase, 2N mails per frame (sequential) |
+| `parallel_broadcast` | `n_actors` | `k_workers` | Concurrent fanout across K worker threads (issue #14) |
+| `parallel_mixed` | `n_actors` | `k_workers` | Two barriered phases per frame (heavy tick + light neighbor) |
+| `churn` | `n_actors` | `k_workers` | Tiny work per tick — isolates scheduler dispatch floor |
+
+Sequential CSVs come from `cargo run --release -p aether-mail-spike-host`.
+Concurrent CSVs come from `cargo run --release -p aether-mail-spike-host --bin concurrent`.
 
 ## How to plot
 
@@ -41,3 +47,6 @@ uv resolves and caches the deps in an isolated environment on first run; subsequ
 - `mixed_mean.png`, `mixed_p99.png` — same shape as broadcast.
 - `bulk.png` — two-panel: per-mail latency vs batch size (log-log) and amortized cost per item.
 - `chain.png` — per-frame latency vs depth (mean and p99).
+- `parallel_broadcast_{mean,p99}.png`, `parallel_mixed_{mean,p99}.png`, `churn_{mean,p99}.png` — heatmaps over `n_actors × k_workers` for each concurrent workload.
+- `scheduler_speedup.png` — three subplots (one per concurrent workload) showing speedup vs K per N, with an ideal-linear reference line.
+- `churn_dispatch_floor.png` — per-tick scheduler cost (mean_us / N, in ns) vs K for each N; rising curves are the signature of shared-queue contention.
