@@ -1,10 +1,12 @@
-// Milestone 3a frame-loop driver: winit owns the event loop, ticks the
-// component on each redraw, then clears the wgpu surface to a solid
-// color. Input still encodes into mail as in milestone 2; the heartbeat
-// sink still counts.
+// Milestone 3b frame-loop driver: the component emits a triangle as
+// KIND_DRAW_TRIANGLE mail on each tick; a substrate-owned render sink
+// appends the vertex bytes to a per-frame buffer. After wait_idle the
+// main thread drains that buffer and hands it to the GPU, which
+// uploads it to the fixed vertex buffer and issues one draw call.
 //
-// No triangle yet — the render pass is a clear only. Milestone 3b will
-// add the render sink, shader, pipeline, and a component-driven draw.
+// The heartbeat sink from milestones 1/2 is gone — the visible
+// triangle is the proof-of-life, and a `triangles_rendered` counter
+// doubles as a headless sanity signal.
 
 mod render;
 
@@ -39,8 +41,8 @@ const LOG_EVERY_FRAMES: u64 = 120;
 struct App {
     queue: Arc<MailQueue>,
     component_mbox: MailboxId,
-    heartbeats: Arc<AtomicU64>,
-    last_key: Arc<Mutex<Option<u32>>>,
+    frame_vertices: Arc<Mutex<Vec<u8>>>,
+    triangles_rendered: Arc<AtomicU64>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     started: Option<Instant>,
@@ -78,17 +80,16 @@ impl ApplicationHandler for App {
                 self.queue
                     .push(Mail::new(self.component_mbox, KIND_TICK, vec![], 1));
                 self.queue.wait_idle();
+                let verts = std::mem::take(&mut *self.frame_vertices.lock().unwrap());
                 if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.render();
+                    gpu.render(&verts);
                 }
                 self.frame += 1;
                 if self.frame.is_multiple_of(LOG_EVERY_FRAMES) {
-                    let last = *self.last_key.lock().unwrap();
                     eprintln!(
-                        "  frame {:>5}  heartbeats={}  last_key={:?}",
+                        "  frame {:>5}  triangles_rendered={}",
                         self.frame,
-                        self.heartbeats.load(Ordering::Relaxed),
-                        last,
+                        self.triangles_rendered.load(Ordering::Relaxed),
                     );
                 }
                 if let Some(w) = &self.window {
@@ -137,25 +138,22 @@ fn main() -> wasmtime::Result<()> {
     let mut registry = Registry::new();
     let component_mbox = registry.register_component("hello");
 
-    let heartbeats = Arc::new(AtomicU64::new(0));
-    let last_key = Arc::new(Mutex::new(None::<u32>));
+    let frame_vertices = Arc::new(Mutex::new(Vec::<u8>::with_capacity(4096)));
+    let triangles_rendered = Arc::new(AtomicU64::new(0));
 
-    let hb_for_sink = Arc::clone(&heartbeats);
-    let last_key_for_sink = Arc::clone(&last_key);
+    let verts_for_sink = Arc::clone(&frame_vertices);
+    let tris_for_sink = Arc::clone(&triangles_rendered);
     let sink_mbox = registry.register_sink(
-        "heartbeat",
+        "render",
         Arc::new(move |bytes: &[u8], count: u32| {
-            hb_for_sink.fetch_add(u64::from(count), Ordering::Relaxed);
-            if bytes.len() >= 4 {
-                let code = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                *last_key_for_sink.lock().unwrap() = Some(code);
-            }
+            verts_for_sink.lock().unwrap().extend_from_slice(bytes);
+            tris_for_sink.fetch_add(u64::from(count), Ordering::Relaxed);
         }),
     );
 
-    // Same contract as milestone 1: component=0, heartbeat sink=1. The
-    // component hardcodes 1 in send_mail; assert here so a mismatch is a
-    // loud panic, not a silent dropped mail.
+    // Mailbox contract: component=0, render sink=1. The component
+    // hardcodes 1 as its send_mail recipient; assert here so a mismatch
+    // is a loud panic, not a silent dropped mail.
     assert_eq!(component_mbox, MailboxId(0));
     assert_eq!(sink_mbox, MailboxId(1));
 
@@ -177,19 +175,17 @@ fn main() -> wasmtime::Result<()> {
     let scheduler = Scheduler::new(registry, Arc::clone(&queue), components, WORKERS);
 
     eprintln!(
-        "aether-substrate: milestone 3a wgpu clear — {WORKERS} workers, close window to exit"
+        "aether-substrate: milestone 3b hello-triangle — {WORKERS} workers, close window to exit"
     );
 
     let event_loop = EventLoop::new()?;
-    // Poll so RedrawRequested fires continuously; milestone 2 has no pacing
-    // story yet — winit's default Wait would idle between events.
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = App {
         queue,
         component_mbox,
-        heartbeats: Arc::clone(&heartbeats),
-        last_key,
+        frame_vertices,
+        triangles_rendered: Arc::clone(&triangles_rendered),
         window: None,
         gpu: None,
         started: None,
@@ -199,10 +195,10 @@ fn main() -> wasmtime::Result<()> {
 
     event_loop.run_app(&mut app)?;
 
-    let total = heartbeats.load(Ordering::Relaxed);
+    let total = triangles_rendered.load(Ordering::Relaxed);
     let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();
     eprintln!(
-        "\nran {} frames in {:.2}ms ({:.1} fps) — heartbeats received = {}",
+        "\nran {} frames in {:.2}ms ({:.1} fps) — triangles rendered = {}",
         app.frame,
         elapsed.as_secs_f64() * 1000.0,
         app.frame as f64 / elapsed.as_secs_f64().max(0.001),
