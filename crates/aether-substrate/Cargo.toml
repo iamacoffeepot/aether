@@ -2,6 +2,7 @@
 name = "aether-substrate"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [dependencies]
 wasmtime = "30"
