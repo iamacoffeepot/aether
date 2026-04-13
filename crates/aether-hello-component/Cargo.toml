@@ -7,3 +7,4 @@ edition.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+aether-substrate-mail = { path = "../aether-substrate-mail" }

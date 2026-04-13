@@ -1,0 +1,8 @@
+[package]
+name = "aether-substrate-mail"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aether-mail = { path = "../aether-mail" }
+bytemuck = { version = "1.19", features = ["derive"] }
