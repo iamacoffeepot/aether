@@ -5,6 +5,7 @@ edition.workspace = true
 build = "build.rs"
 
 [dependencies]
+aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-mail = { path = "../aether-mail" }
 aether-substrate-mail = { path = "../aether-substrate-mail" }
 bytemuck = "1.19"

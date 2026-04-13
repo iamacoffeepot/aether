@@ -10,6 +10,7 @@
 pub mod component;
 pub mod ctx;
 pub mod host_fns;
+pub mod hub_client;
 pub mod mail;
 pub mod queue;
 pub mod registry;
@@ -17,6 +18,7 @@ pub mod scheduler;
 
 pub use component::Component;
 pub use ctx::SubstrateCtx;
+pub use hub_client::HubClient;
 pub use mail::{Mail, MailKind, MailboxId};
 pub use queue::MailQueue;
 pub use registry::{MailboxEntry, Registry, SinkHandler};

@@ -19,7 +19,7 @@ use std::time::Instant;
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
-    Component, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
+    Component, HubClient, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
 };
 use aether_substrate_mail::{DrawTriangle, Key, MouseButton, MouseMove, Tick};
@@ -197,7 +197,33 @@ fn main() -> wasmtime::Result<()> {
 
     let mut components = HashMap::new();
     components.insert(component_mbox, component);
-    let scheduler = Scheduler::new(registry, Arc::clone(&queue), components, WORKERS);
+    let scheduler = Scheduler::new(
+        Arc::clone(&registry),
+        Arc::clone(&queue),
+        components,
+        WORKERS,
+    );
+
+    // Optional hub connection. If `AETHER_HUB_URL` is set, dial it and
+    // keep the `HubClient` alive for the lifetime of the process so the
+    // reader/heartbeat threads stay spawned. Failure to connect logs and
+    // continues — the substrate still renders locally.
+    let _hub = match std::env::var("AETHER_HUB_URL") {
+        Ok(url) => match HubClient::connect(
+            url.as_str(),
+            "hello-triangle",
+            env!("CARGO_PKG_VERSION"),
+            Arc::clone(&registry),
+            Arc::clone(&queue),
+        ) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("aether-substrate: hub connect to {url} failed: {e}");
+                None
+            }
+        },
+        Err(_) => None,
+    };
 
     eprintln!(
         "aether-substrate: milestone 3b hello-triangle — {WORKERS} workers, close window to exit"
