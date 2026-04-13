@@ -25,7 +25,7 @@ Creates a new ADR in `docs/adr/` from `docs/adr/TEMPLATE.md`. Use when the user 
    - Leave `Status: Proposed` (flip to `Accepted` at merge, or later).
    - Leave the Context / Decision / Consequences / Alternatives sections untouched — those are for the author to fill.
 
-7. **Report back** the new file path and branch name. Ask the user for the substance. Do **not** commit, push, or open a PR yet — the ADR needs content first. Once the content is written, the normal PR flow applies (conventional PR title, e.g. `docs: ADR-NNNN <title>`).
+7. **Report back** the new file path and branch name. Ask the user for the substance. Do **not** commit, push, or open a PR yet — the ADR needs content first. Once the content is written, the normal PR flow applies (conventional PR title, e.g. `docs: add ADR-NNNN <title>`).
 
 ## Constraints and notes
 
