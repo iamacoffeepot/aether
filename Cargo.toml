@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "crates/aether-substrate",
+    "crates/aether-mail-spike-host",
+    "crates/aether-mail-spike-guest",
 ]
 
 [workspace.package]
