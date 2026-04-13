@@ -16,14 +16,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
     Component, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
 };
-use aether_substrate_mail::{
-    KIND_KEY, KIND_MOUSE_BUTTON, KIND_MOUSE_MOVE, KIND_TICK, Key, MouseButton, MouseMove, Tick,
-};
+use aether_substrate_mail::{DrawTriangle, Key, MouseButton, MouseMove, Tick};
 use render::Gpu;
 use wasmtime::{Engine, Linker, Module};
 use winit::application::ApplicationHandler;
@@ -40,6 +39,10 @@ const LOG_EVERY_FRAMES: u64 = 120;
 struct App {
     queue: Arc<MailQueue>,
     component_mbox: MailboxId,
+    kind_tick: u32,
+    kind_key: u32,
+    kind_mouse_button: u32,
+    kind_mouse_move: u32,
     frame_vertices: Arc<Mutex<Vec<u8>>>,
     triangles_rendered: Arc<AtomicU64>,
     window: Option<Arc<Window>>,
@@ -78,7 +81,7 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 self.queue.push(Mail::new(
                     self.component_mbox,
-                    KIND_TICK,
+                    self.kind_tick,
                     encode_empty::<Tick>(),
                     1,
                 ));
@@ -109,7 +112,7 @@ impl ApplicationHandler for App {
                     };
                     self.queue.push(Mail::new(
                         self.component_mbox,
-                        KIND_KEY,
+                        self.kind_key,
                         encode(&Key { code }),
                         1,
                     ));
@@ -121,7 +124,7 @@ impl ApplicationHandler for App {
             } => {
                 self.queue.push(Mail::new(
                     self.component_mbox,
-                    KIND_MOUSE_BUTTON,
+                    self.kind_mouse_button,
                     encode_empty::<MouseButton>(),
                     1,
                 ));
@@ -131,8 +134,12 @@ impl ApplicationHandler for App {
                     x: position.x as f32,
                     y: position.y as f32,
                 });
-                self.queue
-                    .push(Mail::new(self.component_mbox, KIND_MOUSE_MOVE, payload, 1));
+                self.queue.push(Mail::new(
+                    self.component_mbox,
+                    self.kind_mouse_move,
+                    payload,
+                    1,
+                ));
             }
             _ => {}
         }
@@ -145,6 +152,16 @@ fn main() -> wasmtime::Result<()> {
 
     let mut registry = Registry::new();
     let component_mbox = registry.register_component("hello");
+
+    // Pre-register every substrate-owned kind by name so the component
+    // can resolve them during `init` via the `resolve_kind` host fn.
+    // Ids are dense and assigned in the order below; not otherwise
+    // meaningful — consumers always resolve by name.
+    let kind_tick = registry.register_kind(Tick::NAME);
+    let kind_key = registry.register_kind(Key::NAME);
+    let kind_mouse_button = registry.register_kind(MouseButton::NAME);
+    let kind_mouse_move = registry.register_kind(MouseMove::NAME);
+    registry.register_kind(DrawTriangle::NAME);
 
     let frame_vertices = Arc::new(Mutex::new(Vec::<u8>::with_capacity(4096)));
     let triangles_rendered = Arc::new(AtomicU64::new(0));
@@ -192,6 +209,10 @@ fn main() -> wasmtime::Result<()> {
     let mut app = App {
         queue,
         component_mbox,
+        kind_tick,
+        kind_key,
+        kind_mouse_button,
+        kind_mouse_move,
         frame_vertices,
         triangles_rendered: Arc::clone(&triangles_rendered),
         window: None,
