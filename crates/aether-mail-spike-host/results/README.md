@@ -8,13 +8,23 @@ The numbers that *do* land in history go through ADR-0003, which records the ver
 
 ## CSV columns
 
-`workload, n_actors, work_per_actor, iterations, total_ms, frames_per_sec, mails_per_sec, mean_us, p50_us, p95_us, p99_us`
+Each workload writes its own CSV with its own dimension columns. Common columns:
 
-- `workload` — name of the workload (`broadcast`, later `bulk`, `chain`, `mixed`).
-- `n_actors`, `work_per_actor` — the matrix cell.
+`workload, <dim_a>, <dim_b>, iterations, total_ms, frames_per_sec, mean_us, p50_us, p95_us, p99_us`
+
+- `workload` — name of the workload (`broadcast`, `bulk`, `chain`, `mixed`).
 - `iterations` — how many full frames ran inside the per-cell time budget.
-- `frames_per_sec`, `mails_per_sec` — derived throughput.
+- `frames_per_sec` — derived throughput.
 - `mean_us` / `p50_us` / `p95_us` / `p99_us` — per-frame latency distribution in microseconds.
+
+Per-workload dimensions:
+
+| Workload | dim_a | dim_b | What it sweeps |
+| --- | --- | --- | --- |
+| `broadcast` | `n_actors` | `work_per_actor` | Fanout × per-actor work |
+| `bulk` | `batch_size` | `work_per_item` | One sender → one receiver, varying batch size; tests batching amortization |
+| `chain` | `depth` | `work_per_link` | Sequential dispatch through D actors |
+| `mixed` | `n_actors` | `work_per_actor` | Broadcast tick + neighbor phase, 2N mails per frame |
 
 ## How to plot
 
