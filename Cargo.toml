@@ -4,6 +4,7 @@ members = [
     "crates/aether-substrate",
     "crates/aether-substrate-mail",
     "crates/aether-hello-component",
+    "crates/aether-hub",
     "crates/aether-hub-protocol",
     "crates/aether-mail",
     "crates/aether-mail-spike-host",
