@@ -12,8 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use aether_hub_protocol::{
-    EngineId, EngineMailFrame, HubToEngine, KindDescriptor, KindEncoding, MailFrame, SessionToken,
-    Uuid,
+    EngineId, HubToEngine, KindDescriptor, KindEncoding, MailFrame, SessionToken, Uuid,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -30,7 +29,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::encoder::encode_pod;
 use crate::registry::{EngineRecord, EngineRegistry};
-use crate::session::{SessionHandle, SessionRegistry};
+use crate::session::{QueuedMail, SessionHandle, SessionRegistry};
 
 /// Default port the hub binds for MCP clients. Overridable via
 /// `AETHER_MCP_PORT`.
@@ -58,11 +57,10 @@ pub struct Hub {
     state: Arc<HubState>,
     tool_router: ToolRouter<Self>,
     session: Arc<SessionHandle>,
-    /// Drain for this session's inbound observation mail. PR 3 wires
-    /// the `receive_mail` tool to it; wrapping in an `Arc<Mutex<_>>`
-    /// lets clones share the same receiver.
-    #[allow(dead_code)]
-    inbound: Arc<Mutex<mpsc::Receiver<EngineMailFrame>>>,
+    /// Drain for this session's inbound observation mail. `receive_mail`
+    /// pulls from it non-blocking; wrapping in an `Arc<Mutex<_>>` lets
+    /// rmcp's per-tool-call clones share the same receiver.
+    inbound: Arc<Mutex<mpsc::Receiver<QueuedMail>>>,
 }
 
 impl Hub {
@@ -138,6 +136,28 @@ pub struct EngineInfo {
     pub version: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReceiveMailArgs {
+    /// Maximum number of items to return in this call. `None` drains
+    /// everything currently queued. Defaults to unlimited.
+    #[serde(default)]
+    pub max: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ReceivedMail {
+    /// Hub-assigned UUID of the engine that sent this mail.
+    pub engine_id: String,
+    /// Kind name the engine declared at handshake.
+    pub kind_name: String,
+    /// Raw payload bytes. Decode against the engine's kind descriptor
+    /// (via `describe_kinds`) if you need structured fields.
+    pub payload_bytes: Vec<u8>,
+    /// `true` if this mail was addressed to every attached session;
+    /// `false` if it was a reply targeted at this session specifically.
+    pub broadcast: bool,
+}
+
 #[tool_router]
 impl Hub {
     #[tool(
@@ -181,6 +201,30 @@ impl Hub {
         };
         serde_json::to_string(&record.kinds)
             .map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    #[tool(
+        description = "Drain observation mail addressed to this MCP session. Returns everything currently queued (up to `max`, if provided). Each item reports the originating engine_id, the kind name, the raw payload bytes, and a `broadcast` flag indicating whether this mail also went to every other attached session (true) or was targeted specifically at this one (false). Non-blocking: returns an empty array if nothing is queued."
+    )]
+    async fn receive_mail(
+        &self,
+        Parameters(args): Parameters<ReceiveMailArgs>,
+    ) -> Result<String, McpError> {
+        let cap = args.max.map(|n| n as usize).unwrap_or(usize::MAX);
+        let mut rx = self.inbound.lock().await;
+        let mut out = Vec::new();
+        while out.len() < cap {
+            match rx.try_recv() {
+                Ok(m) => out.push(ReceivedMail {
+                    engine_id: m.engine_id.0.to_string(),
+                    kind_name: m.kind_name,
+                    payload_bytes: m.payload,
+                    broadcast: m.broadcast,
+                }),
+                Err(_) => break,
+            }
+        }
+        serde_json::to_string(&out).map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 
     #[tool(description = "List all engines currently connected to the hub.")]
@@ -641,5 +685,116 @@ mod tests {
         };
         let err = hub.describe_kinds(Parameters(args)).await.unwrap_err();
         assert!(format!("{err:?}").contains("unknown engine_id"));
+    }
+
+    async fn push_queued(sessions: &SessionRegistry, token: SessionToken, mail: QueuedMail) {
+        sessions
+            .get(&token)
+            .expect("session")
+            .mail_tx
+            .send(mail)
+            .await
+            .expect("send");
+    }
+
+    fn queued(engine: u128, kind: &str, payload: Vec<u8>, broadcast: bool) -> QueuedMail {
+        QueuedMail {
+            engine_id: EngineId(Uuid::from_u128(engine)),
+            kind_name: kind.into(),
+            payload,
+            broadcast,
+        }
+    }
+
+    async fn drain(hub: &Hub, max: Option<u32>) -> Vec<ReceivedMail> {
+        let json = hub
+            .receive_mail(Parameters(ReceiveMailArgs { max }))
+            .await
+            .unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[tokio::test]
+    async fn receive_mail_empty_queue_returns_empty_array() {
+        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let hub = Hub::new(state);
+        let got = drain(&hub, None).await;
+        assert!(got.is_empty());
+    }
+
+    #[tokio::test]
+    async fn receive_mail_drains_everything_by_default() {
+        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let token = hub.session.token;
+
+        push_queued(
+            &state.sessions,
+            token,
+            queued(7, "aether.observation.ping", vec![1, 2], false),
+        )
+        .await;
+        push_queued(
+            &state.sessions,
+            token,
+            queued(7, "aether.observation.world", vec![9], true),
+        )
+        .await;
+
+        let got = drain(&hub, None).await;
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].kind_name, "aether.observation.ping");
+        assert_eq!(got[0].payload_bytes, vec![1, 2]);
+        assert!(!got[0].broadcast);
+        assert_eq!(got[0].engine_id, Uuid::from_u128(7).to_string());
+        assert!(got[1].broadcast);
+
+        // Queue is now empty.
+        let got = drain(&hub, None).await;
+        assert!(got.is_empty());
+    }
+
+    #[tokio::test]
+    async fn receive_mail_respects_max() {
+        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let token = hub.session.token;
+        for i in 0..5u8 {
+            push_queued(
+                &state.sessions,
+                token,
+                queued(1, "aether.tick", vec![i], false),
+            )
+            .await;
+        }
+
+        let first = drain(&hub, Some(2)).await;
+        assert_eq!(first.len(), 2);
+        let second = drain(&hub, Some(2)).await;
+        assert_eq!(second.len(), 2);
+        let rest = drain(&hub, None).await;
+        assert_eq!(rest.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn receive_mail_scoped_to_own_session() {
+        // Push into session A's queue; session B's drain should see nothing.
+        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let hub_a = Hub::new(Arc::clone(&state));
+        let hub_b = Hub::new(Arc::clone(&state));
+
+        push_queued(
+            &state.sessions,
+            hub_a.session.token,
+            queued(1, "aether.tick", vec![42], false),
+        )
+        .await;
+
+        let got_b = drain(&hub_b, None).await;
+        assert!(got_b.is_empty());
+
+        let got_a = drain(&hub_a, None).await;
+        assert_eq!(got_a.len(), 1);
+        assert_eq!(got_a[0].payload_bytes, vec![42]);
     }
 }

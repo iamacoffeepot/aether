@@ -11,13 +11,25 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use aether_hub_protocol::{EngineMailFrame, SessionToken, Uuid};
+use aether_hub_protocol::{EngineId, SessionToken, Uuid};
 use tokio::sync::mpsc;
 
 /// Bound on the per-session inbound observation queue. Back-pressure
 /// shape: if a Claude session isn't draining fast enough, engine mail
 /// senders await space on the channel.
 pub const SESSION_CHANNEL_CAPACITY: usize = 256;
+
+/// Observation mail queued for a specific Claude session. Wraps the
+/// wire-level `EngineMailFrame` with the hub-known engine id and a
+/// flag so the draining session can tell broadcasts apart from
+/// targeted replies when it pulls via `receive_mail`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueuedMail {
+    pub engine_id: EngineId,
+    pub kind_name: String,
+    pub payload: Vec<u8>,
+    pub broadcast: bool,
+}
 
 /// One entry in the hub's session table. `mail_tx` is how the engine
 /// connection handlers push observation mail at a specific session
@@ -26,7 +38,7 @@ pub const SESSION_CHANNEL_CAPACITY: usize = 256;
 #[derive(Clone, Debug)]
 pub struct SessionRecord {
     pub token: SessionToken,
-    pub mail_tx: mpsc::Sender<EngineMailFrame>,
+    pub mail_tx: mpsc::Sender<QueuedMail>,
 }
 
 /// Thread-safe map of live MCP sessions. Cheap to clone; all clones
@@ -79,7 +91,7 @@ impl SessionHandle {
     /// mpsc, and hand back both the handle and the receiver. The
     /// receiver drains inbound observation mail for this session —
     /// PR 3 wires it to the `receive_mail` MCP tool.
-    pub fn mint(sessions: &SessionRegistry) -> (Self, mpsc::Receiver<EngineMailFrame>) {
+    pub fn mint(sessions: &SessionRegistry) -> (Self, mpsc::Receiver<QueuedMail>) {
         let token = SessionToken(Uuid::new_v4());
         let (tx, rx) = mpsc::channel(SESSION_CHANNEL_CAPACITY);
         sessions.insert(SessionRecord { token, mail_tx: tx });

@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::registry::{EngineRecord, EngineRegistry};
-use crate::session::SessionRegistry;
+use crate::session::{QueuedMail, SessionRegistry};
 
 /// Cadence at which the hub sends `Heartbeat` to each engine.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -157,12 +157,13 @@ async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail
     match address {
         ClaudeAddress::Session(token) => match sessions.get(&token) {
             Some(record) => {
-                let frame = EngineMailFrame {
-                    address: ClaudeAddress::Session(token),
+                let queued = QueuedMail {
+                    engine_id,
                     kind_name,
                     payload,
+                    broadcast: false,
                 };
-                if record.mail_tx.send(frame).await.is_err() {
+                if record.mail_tx.send(queued).await.is_err() {
                     eprintln!(
                         "aether-hub: engine {} mail to session {} dropped: receiver closed",
                         engine_id.0, token.0
@@ -182,12 +183,13 @@ async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail
                 return;
             }
             for record in records {
-                let frame = EngineMailFrame {
-                    address: ClaudeAddress::Broadcast,
+                let queued = QueuedMail {
+                    engine_id,
                     kind_name: kind_name.clone(),
                     payload: payload.clone(),
+                    broadcast: true,
                 };
-                if record.mail_tx.send(frame).await.is_err() {
+                if record.mail_tx.send(queued).await.is_err() {
                     eprintln!(
                         "aether-hub: engine {} broadcast to session {} dropped: receiver closed",
                         engine_id.0, record.token.0
@@ -262,6 +264,8 @@ mod tests {
 
         let got = rx_a.try_recv().expect("frame for a");
         assert_eq!(got.payload, vec![1, 2, 3]);
+        assert_eq!(got.engine_id, engine_id(1));
+        assert!(!got.broadcast, "session address should not set broadcast");
         assert!(rx_b.try_recv().is_err(), "b should not have received");
     }
 
@@ -298,7 +302,8 @@ mod tests {
         for (name, rx) in [("a", &mut rx_a), ("b", &mut rx_b), ("c", &mut rx_c)] {
             let got = rx.try_recv().unwrap_or_else(|_| panic!("{name} no frame"));
             assert_eq!(got.payload, vec![42]);
-            assert_eq!(got.address, ClaudeAddress::Broadcast);
+            assert!(got.broadcast, "{name}: broadcast flag should be set");
+            assert_eq!(got.engine_id, engine_id(1));
         }
     }
 
