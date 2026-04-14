@@ -18,8 +18,14 @@ pub mod scheduler;
 
 pub use component::Component;
 pub use ctx::SubstrateCtx;
-pub use hub_client::HubClient;
+pub use hub_client::{HubClient, HubOutbound};
 pub use mail::{Mail, MailKind, MailboxId};
 pub use queue::MailQueue;
 pub use registry::{MailboxEntry, Registry, SinkHandler};
 pub use scheduler::Scheduler;
+
+/// Well-known mailbox name for fan-out to every attached Claude
+/// session (ADR-0008). A component or substrate-owned sink sends to
+/// this name the same way it sends to any local sink; the forwarder
+/// translates to `EngineToHub::Mail { address: Broadcast, ... }`.
+pub const HUB_CLAUDE_BROADCAST: &str = "hub.claude.broadcast";

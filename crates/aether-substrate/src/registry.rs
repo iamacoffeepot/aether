@@ -7,12 +7,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use aether_hub_protocol::SessionToken;
+
 use crate::mail::MailboxId;
 
 /// Handler invoked when mail is delivered to a substrate-owned sink.
-/// Called on a scheduler worker thread; must be `Send + Sync`. Argument
-/// is the payload bytes; second argument is the kind-implied count.
-pub type SinkHandler = Arc<dyn Fn(&[u8], u32) + Send + Sync + 'static>;
+/// Called on a scheduler worker thread; must be `Send + Sync`.
+/// Arguments: kind name (resolved by the dispatcher so sinks don't
+/// need a reverse lookup), the originating Claude session token for
+/// hub-inbound mail (or `SessionToken::NIL` for substrate-local mail)
+/// per ADR-0008's reply-to-sender primitive, payload bytes, and the
+/// kind-implied count.
+pub type SinkHandler = Arc<dyn Fn(&str, SessionToken, &[u8], u32) + Send + Sync + 'static>;
 
 /// What a given mailbox actually is. The registry records this so the
 /// scheduler can dispatch appropriately without a per-mail type check.
@@ -27,6 +33,11 @@ pub struct Registry {
     by_name: HashMap<String, MailboxId>,
     entries: Vec<MailboxEntry>,
     kind_by_name: HashMap<String, u32>,
+    /// Parallel index: `kind_names[id]` is the canonical name the kind
+    /// was first registered with. Kept in sync with `kind_by_name` so
+    /// `kind_name(id)` is O(1); used by `SinkHandler` dispatch to hand
+    /// sinks the name without forcing them to keep their own map.
+    kind_names: Vec<String>,
 }
 
 impl Registry {
@@ -35,6 +46,7 @@ impl Registry {
             by_name: HashMap::new(),
             entries: Vec::new(),
             kind_by_name: HashMap::new(),
+            kind_names: Vec::new(),
         }
     }
 
@@ -78,13 +90,21 @@ impl Registry {
         if let Some(&id) = self.kind_by_name.get(&name) {
             return id;
         }
-        let id = self.kind_by_name.len() as u32;
+        let id = self.kind_names.len() as u32;
+        self.kind_names.push(name.clone());
         self.kind_by_name.insert(name, id);
         id
     }
 
     pub fn kind_id(&self, name: &str) -> Option<u32> {
         self.kind_by_name.get(name).copied()
+    }
+
+    /// Reverse of `kind_id`: name for a given id, or `None` if the id
+    /// is out of range. Used by the scheduler to hand sink handlers a
+    /// kind name without them keeping their own map.
+    pub fn kind_name(&self, id: u32) -> Option<&str> {
+        self.kind_names.get(id as usize).map(|s| s.as_str())
     }
 
     pub fn len(&self) -> usize {
@@ -124,15 +144,15 @@ mod tests {
         let c2 = Arc::clone(&counter);
         let id = r.register_sink(
             "heartbeat",
-            Arc::new(move |_bytes, count| {
+            Arc::new(move |_kind, _sender, _bytes, count| {
                 c2.fetch_add(count, Ordering::SeqCst);
             }),
         );
         let Some(MailboxEntry::Sink(h)) = r.entry(id) else {
             panic!("expected sink")
         };
-        h(&[], 7);
-        h(&[], 3);
+        h("aether.tick", SessionToken::NIL, &[], 7);
+        h("aether.tick", SessionToken::NIL, &[], 3);
         assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
 
@@ -140,7 +160,7 @@ mod tests {
     fn mailbox_ids_are_dense_and_sequential() {
         let mut r = Registry::new();
         let a = r.register_component("a");
-        let b = r.register_sink("b", Arc::new(|_, _| {}));
+        let b = r.register_sink("b", Arc::new(|_, _, _, _| {}));
         let c = r.register_component("c");
         assert_eq!(a, MailboxId(0));
         assert_eq!(b, MailboxId(1));
@@ -189,5 +209,15 @@ mod tests {
         let id = r.register_kind("aether.tick");
         assert_eq!(r.kind_id("aether.tick"), Some(id));
         assert!(r.kind_id("absent").is_none());
+    }
+
+    #[test]
+    fn kind_name_reverse_lookup() {
+        let mut r = Registry::new();
+        let a = r.register_kind("aether.tick");
+        let b = r.register_kind("aether.key");
+        assert_eq!(r.kind_name(a), Some("aether.tick"));
+        assert_eq!(r.kind_name(b), Some("aether.key"));
+        assert!(r.kind_name(999).is_none());
     }
 }

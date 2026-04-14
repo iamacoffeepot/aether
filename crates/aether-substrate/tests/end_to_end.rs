@@ -50,7 +50,7 @@ fn tick_roundtrip_component_to_sink() {
     let c2 = Arc::clone(&counter);
     let sink_mbox = registry.register_sink(
         "heartbeat",
-        Arc::new(move |_bytes, count| {
+        Arc::new(move |_kind, _sender, _bytes, count| {
             c2.fetch_add(count, Ordering::SeqCst);
         }),
     );

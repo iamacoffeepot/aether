@@ -16,10 +16,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
-    Component, HubClient, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
+    Component, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, MailQueue, Registry, Scheduler,
+    SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
 };
 use aether_substrate_mail::{DrawTriangle, Key, MouseButton, MouseMove, Tick};
@@ -170,11 +172,36 @@ fn main() -> wasmtime::Result<()> {
     let tris_for_sink = Arc::clone(&triangles_rendered);
     let sink_mbox = registry.register_sink(
         "render",
-        Arc::new(move |bytes: &[u8], count: u32| {
+        Arc::new(move |_kind: &str, _sender, bytes: &[u8], count: u32| {
             verts_for_sink.lock().unwrap().extend_from_slice(bytes);
             tris_for_sink.fetch_add(u64::from(count), Ordering::Relaxed);
         }),
     );
+
+    // Reserved well-known sink: mail sent here is forwarded to every
+    // attached Claude session via the hub. If no hub is connected, the
+    // outbound handle is disconnected and the sink silently drops —
+    // the component doesn't have to care either way.
+    let outbound = HubOutbound::disconnected();
+    {
+        let outbound = Arc::clone(&outbound);
+        registry.register_sink(
+            HUB_CLAUDE_BROADCAST,
+            Arc::new(move |kind_name: &str, _sender, bytes: &[u8], _count: u32| {
+                if kind_name.is_empty() {
+                    eprintln!(
+                        "aether-substrate: {HUB_CLAUDE_BROADCAST} received mail with unregistered kind — dropping"
+                    );
+                    return;
+                }
+                outbound.send(EngineToHub::Mail(EngineMailFrame {
+                    address: ClaudeAddress::Broadcast,
+                    kind_name: kind_name.to_owned(),
+                    payload: bytes.to_vec(),
+                }));
+            }),
+        );
+    }
 
     // Mailbox contract: component=0, render sink=1. The component
     // hardcodes 1 as its send_mail recipient; assert here so a mismatch
@@ -216,6 +243,7 @@ fn main() -> wasmtime::Result<()> {
             aether_substrate_mail::descriptors::all(),
             Arc::clone(&registry),
             Arc::clone(&queue),
+            Arc::clone(&outbound),
         ) {
             Ok(c) => Some(c),
             Err(e) => {

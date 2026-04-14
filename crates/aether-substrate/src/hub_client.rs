@@ -1,22 +1,28 @@
 // Substrate-side hub client. Dials an `aether-hub`, performs the
-// Hello/Welcome handshake, then runs two background threads:
+// Hello/Welcome handshake, then runs three background threads:
 //
 //   - a reader that blocks on `HubToEngine` frames and funnels inbound
 //     `Mail` into the scheduler's `MailQueue` after resolving the
 //     recipient and kind against the local `Registry`,
-//   - a heartbeat writer that sends `EngineToHub::Heartbeat` on a fixed
-//     cadence so the hub doesn't reap this connection.
+//   - a writer that drains a `std::sync::mpsc::Receiver<EngineToHub>`
+//     and serialises its frames onto the TCP stream,
+//   - a heartbeat thread that pushes `EngineToHub::Heartbeat` onto the
+//     writer's channel on a fixed cadence.
 //
-// Graceful shutdown is deliberately V0-minimal: when the substrate
-// process exits, the OS closes the TCP socket and both threads drop
-// out of their respective read/write calls. Per ADR-0006's "substrate
-// stays sync" note, this module avoids `tokio` and uses the sync
-// framing helpers from `aether-hub-protocol`.
+// Two threads writing to the same socket would race, so heartbeats and
+// outbound mail frames both go through the single writer. The writer
+// exits when the channel closes (when the HubClient drops) or when the
+// socket errors; that in turn lets the OS close the socket and drop
+// the reader/heartbeat threads.
+//
+// Per ADR-0006's "substrate stays sync" note, this module avoids
+// `tokio` and uses the sync framing helpers from `aether-hub-protocol`.
 
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process;
-use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -33,19 +39,65 @@ use crate::registry::Registry;
 /// tick doesn't trip reaping.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Shared outbound handle for the substrate side of the hub wire.
+/// Registered once at `HubClient::connect` time. Sinks and other
+/// components of the substrate hold an `Arc<HubOutbound>` and call
+/// `send` without caring whether a hub connection is live — if it
+/// isn't, the send silently drops. This lets the broadcast sink be
+/// registered unconditionally, before (or without) a hub connection.
+pub struct HubOutbound {
+    tx: OnceLock<Sender<EngineToHub>>,
+}
+
+impl HubOutbound {
+    /// Fresh unwired handle. No frames are actually sent until a
+    /// `HubClient::connect` attaches its writer channel via `attach`.
+    pub fn disconnected() -> Arc<Self> {
+        Arc::new(Self {
+            tx: OnceLock::new(),
+        })
+    }
+
+    fn attach(&self, tx: Sender<EngineToHub>) {
+        if self.tx.set(tx).is_err() {
+            eprintln!("aether-substrate: HubOutbound attached twice — ignoring second attach");
+        }
+    }
+
+    /// Push a frame onto the writer's channel. Returns `true` if the
+    /// frame was enqueued; `false` if no hub is attached or the writer
+    /// has exited.
+    pub fn send(&self, frame: EngineToHub) -> bool {
+        match self.tx.get() {
+            Some(tx) => tx.send(frame).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Whether this handle has a live outbound channel.
+    pub fn is_connected(&self) -> bool {
+        self.tx.get().is_some()
+    }
+}
+
 /// Live hub connection. Threads are retained so their join handles
-/// aren't dropped; they exit when the TCP socket closes.
+/// aren't dropped; they exit when the TCP socket closes or the
+/// outbound channel is torn down.
 pub struct HubClient {
     pub engine_id: EngineId,
     _reader: JoinHandle<()>,
+    _writer: JoinHandle<()>,
     _heartbeat: JoinHandle<()>,
 }
 
 impl HubClient {
     /// Dial `addr`, send `Hello`, receive `Welcome`, and spawn the
-    /// reader + heartbeat threads. Inbound `Mail` is resolved and
-    /// pushed onto `queue`; unknown recipient or kind names are logged
-    /// and dropped.
+    /// reader / writer / heartbeat threads. Inbound `Mail` is resolved
+    /// and pushed onto `queue`; unknown recipient or kind names are
+    /// logged and dropped.
+    ///
+    /// `outbound` is populated on success so any sink registered
+    /// against it starts forwarding immediately.
     pub fn connect<A: ToSocketAddrs>(
         addr: A,
         name: impl Into<String>,
@@ -53,6 +105,7 @@ impl HubClient {
         kinds: Vec<KindDescriptor>,
         registry: Arc<Registry>,
         queue: Arc<MailQueue>,
+        outbound: Arc<HubOutbound>,
     ) -> io::Result<Self> {
         let mut stream = TcpStream::connect(addr)?;
         let hello = EngineToHub::Hello(Hello {
@@ -76,14 +129,19 @@ impl HubClient {
         };
         eprintln!("aether-substrate: hub registered as engine {}", engine_id.0);
 
+        let (tx, rx) = mpsc::channel::<EngineToHub>();
         let reader_stream = stream.try_clone()?;
-        let heartbeat_stream = stream;
+        let writer_stream = stream;
         let _reader = thread::spawn(move || run_reader(reader_stream, registry, queue));
-        let _heartbeat = thread::spawn(move || run_heartbeat(heartbeat_stream));
+        let _writer = thread::spawn(move || run_writer(writer_stream, rx));
+        let heartbeat_tx = tx.clone();
+        let _heartbeat = thread::spawn(move || run_heartbeat(heartbeat_tx));
+        outbound.attach(tx);
 
         Ok(Self {
             engine_id,
             _reader,
+            _writer,
             _heartbeat,
         })
     }
@@ -109,10 +167,19 @@ fn run_reader(mut stream: TcpStream, registry: Arc<Registry>, queue: Arc<MailQue
     }
 }
 
-fn run_heartbeat(mut stream: TcpStream) {
+fn run_writer(mut stream: TcpStream, rx: mpsc::Receiver<EngineToHub>) {
+    while let Ok(frame) = rx.recv() {
+        if let Err(e) = write_frame(&mut stream, &frame) {
+            eprintln!("aether-substrate: hub write error: {e}");
+            return;
+        }
+    }
+}
+
+fn run_heartbeat(tx: Sender<EngineToHub>) {
     loop {
         thread::sleep(HEARTBEAT_INTERVAL);
-        if write_frame(&mut stream, &EngineToHub::Heartbeat).is_err() {
+        if tx.send(EngineToHub::Heartbeat).is_err() {
             return;
         }
     }
@@ -133,7 +200,7 @@ fn dispatch_mail(frame: MailFrame, registry: &Registry, queue: &MailQueue) {
         );
         return;
     };
-    queue.push(Mail::new(recipient, kind, frame.payload, frame.count));
+    queue.push(Mail::new(recipient, kind, frame.payload, frame.count).with_sender(frame.sender));
 }
 
 fn unix_now() -> u64 {

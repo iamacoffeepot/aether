@@ -11,6 +11,8 @@
 
 use std::sync::Arc;
 
+use aether_hub_protocol::SessionToken;
+
 use crate::mail::{Mail, MailKind, MailboxId};
 use crate::queue::MailQueue;
 use crate::registry::{MailboxEntry, Registry};
@@ -28,7 +30,9 @@ impl SubstrateCtx {
     pub fn send(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32) {
         match self.registry.entry(recipient) {
             Some(MailboxEntry::Sink(handler)) => {
-                handler(&payload, count);
+                let kind_name = self.registry.kind_name(kind).unwrap_or("");
+                // Component-originated mail has no Claude-side sender.
+                handler(kind_name, SessionToken::NIL, &payload, count);
             }
             Some(MailboxEntry::Component) => {
                 self.queue.push(Mail::new(recipient, kind, payload, count));
