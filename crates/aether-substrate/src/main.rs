@@ -1,12 +1,17 @@
-// Milestone 3b frame-loop driver: the component emits a triangle as
-// KIND_DRAW_TRIANGLE mail on each tick; a substrate-owned render sink
-// appends the vertex bytes to a per-frame buffer. After wait_idle the
-// main thread drains that buffer and hands it to the GPU, which
-// uploads it to the fixed vertex buffer and issues one draw call.
+// Frame-loop driver. Substrate boots componentless (ADR-0010): no
+// component is compiled in, no default mailbox is registered for
+// input routing. The render sink is still wired so any runtime-loaded
+// component can emit `aether.draw_triangle` mail and get pixels on
+// screen; until a component is loaded and explicitly mailed, the
+// window clears to its default and no triangles are drawn.
 //
-// The heartbeat sink from milestones 1/2 is gone — the visible
-// triangle is the proof-of-life, and a `triangles_rendered` counter
-// doubles as a headless sanity signal.
+// Keyboard/mouse/tick events from winit target the substrate's
+// optional `default_component` mailbox. It's `None` at boot and stays
+// `None` until something (a future CLI flag, an `aether.control.*`
+// message, or a load handler extension) wires one up. For the current
+// "test component in isolation" workflow, agents drive components via
+// direct mail to the id returned by `load_component`, not via the
+// window's input stream.
 
 mod render;
 
@@ -20,27 +25,28 @@ use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
-    Component, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, MailQueue, Registry, Scheduler,
-    SubstrateCtx, host_fns,
+    HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, MailQueue, Registry, Scheduler, SubstrateCtx,
+    host_fns,
     mail::{Mail, MailboxId},
 };
 use aether_substrate_mail::{FrameStats, Key, MouseButton, MouseMove, Tick};
 use render::Gpu;
-use wasmtime::{Engine, Linker, Module};
+use wasmtime::{Engine, Linker};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
-const HELLO_WASM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/hello_component.wasm"));
-
 const WORKERS: usize = 2;
 const LOG_EVERY_FRAMES: u64 = 120;
 
 struct App {
     queue: Arc<MailQueue>,
-    component_mbox: MailboxId,
+    /// Mailbox that receives `aether.tick`, `aether.key`, and mouse
+    /// events while the window has focus. `None` means "substrate
+    /// boots componentless"; input events are dropped silently.
+    default_component: Option<MailboxId>,
     broadcast_mbox: MailboxId,
     kind_tick: u32,
     kind_key: u32,
@@ -110,12 +116,10 @@ impl ApplicationHandler for App {
                 if self.occluded {
                     return;
                 }
-                self.queue.push(Mail::new(
-                    self.component_mbox,
-                    self.kind_tick,
-                    encode_empty::<Tick>(),
-                    1,
-                ));
+                if let Some(mbox) = self.default_component {
+                    self.queue
+                        .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
+                }
                 self.queue.wait_idle();
                 let verts = std::mem::take(&mut *self.frame_vertices.lock().unwrap());
                 if let Some(gpu) = self.gpu.as_mut() {
@@ -147,41 +151,40 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput {
                 event: key_event, ..
             } => {
-                if key_event.state == ElementState::Pressed && !key_event.repeat {
+                if let Some(mbox) = self.default_component
+                    && key_event.state == ElementState::Pressed
+                    && !key_event.repeat
+                {
                     let code: u32 = match key_event.physical_key {
                         PhysicalKey::Code(k) => k as u32,
                         PhysicalKey::Unidentified(_) => 0,
                     };
-                    self.queue.push(Mail::new(
-                        self.component_mbox,
-                        self.kind_key,
-                        encode(&Key { code }),
-                        1,
-                    ));
+                    self.queue
+                        .push(Mail::new(mbox, self.kind_key, encode(&Key { code }), 1));
                 }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 ..
             } => {
-                self.queue.push(Mail::new(
-                    self.component_mbox,
-                    self.kind_mouse_button,
-                    encode_empty::<MouseButton>(),
-                    1,
-                ));
+                if let Some(mbox) = self.default_component {
+                    self.queue.push(Mail::new(
+                        mbox,
+                        self.kind_mouse_button,
+                        encode_empty::<MouseButton>(),
+                        1,
+                    ));
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let payload = encode(&MouseMove {
-                    x: position.x as f32,
-                    y: position.y as f32,
-                });
-                self.queue.push(Mail::new(
-                    self.component_mbox,
-                    self.kind_mouse_move,
-                    payload,
-                    1,
-                ));
+                if let Some(mbox) = self.default_component {
+                    let payload = encode(&MouseMove {
+                        x: position.x as f32,
+                        y: position.y as f32,
+                    });
+                    self.queue
+                        .push(Mail::new(mbox, self.kind_mouse_move, payload, 1));
+                }
             }
             _ => {}
         }
@@ -190,10 +193,8 @@ impl ApplicationHandler for App {
 
 fn main() -> wasmtime::Result<()> {
     let engine = Arc::new(Engine::default());
-    let module = Module::new(&engine, HELLO_WASM)?;
 
     let registry = Arc::new(Registry::new());
-    let component_mbox = registry.register_component("hello");
 
     // Pre-register every substrate-owned kind with its descriptor so
     // the Registry agrees with what the hub receives at `Hello` and
@@ -223,7 +224,7 @@ fn main() -> wasmtime::Result<()> {
 
     let verts_for_sink = Arc::clone(&frame_vertices);
     let tris_for_sink = Arc::clone(&triangles_rendered);
-    let sink_mbox = registry.register_sink(
+    registry.register_sink(
         "render",
         Arc::new(
             move |_kind: &str, _origin: Option<&str>, _sender, bytes: &[u8], count: u32| {
@@ -265,31 +266,19 @@ fn main() -> wasmtime::Result<()> {
         )
     };
 
-    // Mailbox contract: component=0, render sink=1. The component
-    // hardcodes 1 as its send_mail recipient; assert here so a mismatch
-    // is a loud panic, not a silent dropped mail.
-    assert_eq!(component_mbox, MailboxId(0));
-    assert_eq!(sink_mbox, MailboxId(1));
-
     let queue = Arc::new(MailQueue::new());
 
     let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
     host_fns::register(&mut linker)?;
     let linker = Arc::new(linker);
 
-    let ctx = SubstrateCtx {
-        sender: component_mbox,
-        registry: Arc::clone(&registry),
-        queue: Arc::clone(&queue),
-    };
-    let component = Component::instantiate(&engine, &linker, &module, ctx)?;
-
-    let mut components = HashMap::new();
-    components.insert(component_mbox, component);
+    // Substrate boots componentless (ADR-0010). Runtime load_component
+    // is how components arrive; the scheduler's runtime-mutable table
+    // accepts them as they're instantiated by the control plane.
     let scheduler = Scheduler::new(
         Arc::clone(&registry),
         Arc::clone(&queue),
-        components,
+        HashMap::new(),
         WORKERS,
     );
 
@@ -337,7 +326,8 @@ fn main() -> wasmtime::Result<()> {
     };
 
     eprintln!(
-        "aether-substrate: milestone 3b hello-triangle — {WORKERS} workers, close window to exit"
+        "aether-substrate: componentless boot — {WORKERS} workers, close window to exit. \
+         Load a component via `aether.control.load_component`."
     );
 
     let event_loop = EventLoop::new()?;
@@ -345,7 +335,7 @@ fn main() -> wasmtime::Result<()> {
 
     let mut app = App {
         queue,
-        component_mbox,
+        default_component: None,
         broadcast_mbox,
         kind_tick,
         kind_key,
