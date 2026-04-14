@@ -41,7 +41,7 @@ fn handshake_exchanges_hello_and_welcome() {
     let client_handle = thread::spawn({
         let registry = Arc::clone(&registry);
         let queue = Arc::clone(&queue);
-        move || HubClient::connect(addr, "test-engine", "0.0.0", registry, queue).unwrap()
+        move || HubClient::connect(addr, "test-engine", "0.0.0", vec![], registry, queue).unwrap()
     });
 
     // Server side of the handshake.
@@ -103,7 +103,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     let client_handle = thread::spawn({
         let registry = Arc::clone(&registry);
         let queue = Arc::clone(&queue);
-        move || HubClient::connect(addr, "t", "0", registry, queue).unwrap()
+        move || HubClient::connect(addr, "t", "0", vec![], registry, queue).unwrap()
     });
 
     let mut stream = conn_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -170,7 +170,7 @@ fn client_sends_periodic_heartbeats() {
     let client_handle = thread::spawn({
         let registry = Arc::clone(&registry);
         let queue = Arc::clone(&queue);
-        move || HubClient::connect(addr, "hb", "0", registry, queue).unwrap()
+        move || HubClient::connect(addr, "hb", "0", vec![], registry, queue).unwrap()
     });
 
     let mut stream = conn_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -209,7 +209,7 @@ fn goodbye_stops_reader_thread() {
     let client_handle = thread::spawn({
         let registry = Arc::clone(&registry);
         let queue = Arc::clone(&queue);
-        move || HubClient::connect(addr, "bye", "0", registry, queue).unwrap()
+        move || HubClient::connect(addr, "bye", "0", vec![], registry, queue).unwrap()
     });
 
     let mut stream = conn_rx.recv_timeout(Duration::from_secs(2)).unwrap();

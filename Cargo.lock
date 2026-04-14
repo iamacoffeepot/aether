@@ -99,6 +99,7 @@ dependencies = [
 name = "aether-substrate-mail"
 version = "0.1.0"
 dependencies = [
+ "aether-hub-protocol",
  "aether-mail",
  "bytemuck",
 ]

@@ -213,6 +213,7 @@ fn main() -> wasmtime::Result<()> {
             url.as_str(),
             "hello-triangle",
             env!("CARGO_PKG_VERSION"),
+            aether_substrate_mail::descriptors::all(),
             Arc::clone(&registry),
             Arc::clone(&queue),
         ) {
