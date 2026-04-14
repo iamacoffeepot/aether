@@ -134,6 +134,9 @@ pub struct EngineInfo {
     pub name: String,
     pub pid: u32,
     pub version: String,
+    /// `true` if this engine was spawned by the hub (ADR-0009), `false`
+    /// if it connected externally.
+    pub spawned: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -227,7 +230,9 @@ impl Hub {
         serde_json::to_string(&out).map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 
-    #[tool(description = "List all engines currently connected to the hub.")]
+    #[tool(
+        description = "List all engines currently connected to the hub. Each item reports the hub-assigned engine_id, the engine's self-declared name/pid/version, and a `spawned` flag: `true` if the hub launched this engine as a child process (ADR-0009), `false` if it connected externally."
+    )]
     async fn list_engines(&self) -> Result<String, McpError> {
         let engines: Vec<EngineInfo> = self
             .state
@@ -239,6 +244,7 @@ impl Hub {
                 name: r.name,
                 pid: r.pid,
                 version: r.version,
+                spawned: r.spawned,
             })
             .collect();
         serde_json::to_string(&engines).map_err(|e| McpError::internal_error(e.to_string(), None))
@@ -381,6 +387,7 @@ mod tests {
             version: "test".into(),
             kinds,
             mail_tx: tx,
+            spawned: false,
         };
         (rec, rx)
     }

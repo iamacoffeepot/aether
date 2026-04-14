@@ -12,6 +12,7 @@ mod engine;
 mod mcp;
 mod registry;
 mod session;
+mod spawn;
 
 pub use encoder::{EncodeError, encode_pod};
 
@@ -22,6 +23,7 @@ pub use registry::{EngineRecord, EngineRegistry};
 pub use session::{
     QueuedMail, SESSION_CHANNEL_CAPACITY, SessionHandle, SessionRecord, SessionRegistry,
 };
+pub use spawn::{DEFAULT_HANDSHAKE_TIMEOUT, PendingSpawns, SpawnError, SpawnOpts, spawn_substrate};
 
 /// Default port the hub binds for engine TCP clients. ADR-0006 V0 fixes
 /// this; `AETHER_ENGINE_PORT` overrides.
@@ -34,6 +36,7 @@ pub async fn run_engine_listener(
     addr: SocketAddr,
     registry: EngineRegistry,
     sessions: SessionRegistry,
+    pending: PendingSpawns,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -43,8 +46,9 @@ pub async fn run_engine_listener(
         let (stream, peer) = listener.accept().await?;
         let registry = registry.clone();
         let sessions = sessions.clone();
+        let pending = pending.clone();
         tokio::spawn(async move {
-            if let Err(e) = engine::handle_connection(stream, registry, sessions).await {
+            if let Err(e) = engine::handle_connection(stream, registry, sessions, pending).await {
                 eprintln!("aether-hub: engine {peer} dropped: {e}");
             }
         });
