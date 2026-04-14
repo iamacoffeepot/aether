@@ -6,10 +6,10 @@
 // Per ADR-0005, kind ids are resolved by name at component init — the
 // substrate assigns them; the guest caches them in statics. Payload
 // types are imported from `aether-substrate-mail` so wire layout stays
-// in one place.
-//
-// Mailbox ids remain hardcoded (component=0, render sink=1); symbolic
-// mailbox resolution is still future work.
+// in one place. The render sink's mailbox id is resolved the same way
+// via `resolve_mailbox`; this matters under ADR-0010's empty boot,
+// where the substrate's mailbox allocation order is no longer fixed
+// and hardcoded ids would target the wrong sink.
 //
 // `#[cfg(target_arch = "wasm32")]` guards bodies so the crate still
 // compiles for the host target in `cargo test --workspace` (where the
@@ -21,15 +21,16 @@ use aether_mail::Kind;
 #[cfg(target_arch = "wasm32")]
 use aether_substrate_mail::{DrawTriangle, Tick, Vertex};
 
-#[cfg(target_arch = "wasm32")]
-const RENDER_SINK: u32 = 1;
-
-// `u32::MAX` sentinel matches the host's KIND_NOT_FOUND — if `init`
-// didn't run or a name is missing, the dispatch below simply no-ops.
+// `u32::MAX` sentinel matches the host's KIND_NOT_FOUND /
+// MAILBOX_NOT_FOUND — if `init` didn't run or a name is missing, the
+// dispatch below simply no-ops instead of sending to mailbox 0 or a
+// wrong kind id.
 #[cfg(target_arch = "wasm32")]
 static mut KIND_TICK: u32 = u32::MAX;
 #[cfg(target_arch = "wasm32")]
 static mut KIND_DRAW_TRIANGLE: u32 = u32::MAX;
+#[cfg(target_arch = "wasm32")]
+static mut RENDER_SINK: u32 = u32::MAX;
 
 // A fixed clip-space triangle with per-vertex color. Typed as
 // DrawTriangle so the vertex layout matches the substrate's decode
@@ -66,28 +67,35 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
 unsafe extern "C" {
     fn send_mail(recipient: u32, kind: u32, ptr: u32, len: u32, count: u32) -> u32;
     fn resolve_kind(name_ptr: u32, name_len: u32) -> u32;
+    fn resolve_mailbox(name_ptr: u32, name_len: u32) -> u32;
 }
 
 #[cfg(target_arch = "wasm32")]
-unsafe fn resolve(name: &str) -> u32 {
+unsafe fn resolve_k(name: &str) -> u32 {
     unsafe { resolve_kind(name.as_ptr() as u32, name.len() as u32) }
 }
 
-/// Runs once before the first `receive`. Resolves each kind name this
-/// component cares about and caches the assigned id. Return value is
-/// currently informational.
+#[cfg(target_arch = "wasm32")]
+unsafe fn resolve_m(name: &str) -> u32 {
+    unsafe { resolve_mailbox(name.as_ptr() as u32, name.len() as u32) }
+}
+
+/// Runs once before the first `receive`. Resolves each kind name and
+/// the render-sink mailbox name this component cares about and caches
+/// the assigned ids. Return value is currently informational.
 ///
 /// # Safety
 /// Called by the substrate exactly once, before any `receive` call, on
 /// a thread that owns this component's linear memory. The body mutates
-/// the `KIND_*` statics — safe because there is no concurrent reader
+/// the resolution statics — safe because there is no concurrent reader
 /// until `init` returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn init() -> u32 {
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        KIND_TICK = resolve(Tick::NAME);
-        KIND_DRAW_TRIANGLE = resolve(DrawTriangle::NAME);
+        KIND_TICK = resolve_k(Tick::NAME);
+        KIND_DRAW_TRIANGLE = resolve_k(DrawTriangle::NAME);
+        RENDER_SINK = resolve_m("render");
     }
     0
 }
@@ -100,7 +108,7 @@ pub unsafe extern "C" fn init() -> u32 {
 pub unsafe extern "C" fn receive(kind: u32, _ptr: u32, _count: u32) -> u32 {
     #[cfg(target_arch = "wasm32")]
     unsafe {
-        if kind == KIND_TICK {
+        if kind == KIND_TICK && RENDER_SINK != u32::MAX {
             let ptr = &TRIANGLE as *const DrawTriangle as u32;
             let len = core::mem::size_of::<DrawTriangle>() as u32;
             // count = number of triangles in this payload (one).

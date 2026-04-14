@@ -9,9 +9,11 @@ use wasmtime::{Caller, Linker};
 use crate::ctx::SubstrateCtx;
 use crate::mail::MailboxId;
 
-/// Returned by `resolve_kind` when the requested name has not been
-/// registered. Guests use this as a "lookup failed" sentinel.
+/// Returned by `resolve_kind` / `resolve_mailbox` when the requested
+/// name has not been registered. Guests use this as a "lookup failed"
+/// sentinel.
 pub const KIND_NOT_FOUND: u32 = u32::MAX;
+pub const MAILBOX_NOT_FOUND: u32 = u32::MAX;
 
 /// Register the substrate host functions on `linker`. Components that
 /// want these capabilities must be instantiated via a linker that this
@@ -71,6 +73,39 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                 .registry
                 .kind_id(name)
                 .unwrap_or(KIND_NOT_FOUND)
+        },
+    )?;
+
+    // Symmetric to `resolve_kind`: lookup a mailbox by its registered
+    // name and return the `MailboxId`. Runtime-loaded components rely
+    // on this to reach substrate-owned sinks (`render`,
+    // `hub.claude.broadcast`, `aether.control`) without hardcoding
+    // numeric ids — ADR-0010's empty boot removed the fixed boot
+    // order that such hardcoding used to depend on.
+    linker.func_wrap(
+        "aether",
+        "resolve_mailbox",
+        |mut caller: Caller<'_, SubstrateCtx>, name_ptr: u32, name_len: u32| -> u32 {
+            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return MAILBOX_NOT_FOUND,
+            };
+            let data = memory.data(&caller);
+            let start = name_ptr as usize;
+            let end = match start.checked_add(name_len as usize) {
+                Some(e) if e <= data.len() => e,
+                _ => return MAILBOX_NOT_FOUND,
+            };
+            let name = match std::str::from_utf8(&data[start..end]) {
+                Ok(s) => s,
+                Err(_) => return MAILBOX_NOT_FOUND,
+            };
+            caller
+                .data()
+                .registry
+                .lookup(name)
+                .map(|id| id.0)
+                .unwrap_or(MAILBOX_NOT_FOUND)
         },
     )?;
 
