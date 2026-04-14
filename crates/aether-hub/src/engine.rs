@@ -10,7 +10,8 @@
 use std::time::Duration;
 
 use aether_hub_protocol::{
-    EngineId, EngineToHub, FrameError, HubToEngine, MAX_FRAME_SIZE, Uuid, Welcome,
+    ClaudeAddress, EngineId, EngineMailFrame, EngineToHub, FrameError, HubToEngine, MAX_FRAME_SIZE,
+    Uuid, Welcome,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -18,6 +19,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::registry::{EngineRecord, EngineRegistry};
+use crate::session::SessionRegistry;
 
 /// Cadence at which the hub sends `Heartbeat` to each engine.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -33,6 +35,7 @@ const MAIL_CHANNEL_CAPACITY: usize = 256;
 pub async fn handle_connection(
     stream: TcpStream,
     registry: EngineRegistry,
+    sessions: SessionRegistry,
 ) -> Result<(), FrameError> {
     let (mut reader, mut writer) = stream.into_split();
 
@@ -100,7 +103,7 @@ pub async fn handle_connection(
     // Reader loop: run until the engine goes silent, sends Goodbye, or
     // the socket errors. Removing the registry entry drops the only
     // remaining `mail_tx`, which lets the writer task complete.
-    let result = read_loop(&mut reader).await;
+    let result = read_loop(&mut reader, &sessions, engine_id).await;
 
     registry.remove(&engine_id);
     let _ = writer_task.await;
@@ -112,7 +115,11 @@ pub async fn handle_connection(
     result
 }
 
-async fn read_loop(reader: &mut tokio::net::tcp::OwnedReadHalf) -> Result<(), FrameError> {
+async fn read_loop(
+    reader: &mut tokio::net::tcp::OwnedReadHalf,
+    sessions: &SessionRegistry,
+    engine_id: EngineId,
+) -> Result<(), FrameError> {
     loop {
         let frame = match timeout(READ_TIMEOUT, read_frame_async::<_, EngineToHub>(reader)).await {
             Ok(r) => r?,
@@ -131,17 +138,62 @@ async fn read_loop(reader: &mut tokio::net::tcp::OwnedReadHalf) -> Result<(), Fr
                 )));
             }
             EngineToHub::Heartbeat => {}
-            EngineToHub::Mail(m) => {
-                // PR 2 wires this into session routing; for now
-                // acknowledge on the wire but drop the payload.
+            EngineToHub::Mail(m) => route_engine_mail(sessions, engine_id, m).await,
+            EngineToHub::Goodbye(_) => return Ok(()),
+        }
+    }
+}
+
+/// Fan an `EngineToHub::Mail` frame out to the addressed session(s).
+/// Unknown / disconnected tokens are logged and dropped; the engine
+/// wire has no reply, so there's nowhere to surface "sessionGone" to
+/// today. `Broadcast` to an empty registry is a no-op — not an error.
+async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail: EngineMailFrame) {
+    let EngineMailFrame {
+        address,
+        kind_name,
+        payload,
+    } = mail;
+    match address {
+        ClaudeAddress::Session(token) => match sessions.get(&token) {
+            Some(record) => {
+                let frame = EngineMailFrame {
+                    address: ClaudeAddress::Session(token),
+                    kind_name,
+                    payload,
+                };
+                if record.mail_tx.send(frame).await.is_err() {
+                    eprintln!(
+                        "aether-hub: engine {} mail to session {} dropped: receiver closed",
+                        engine_id.0, token.0
+                    );
+                }
+            }
+            None => {
                 eprintln!(
-                    "aether-hub: engine mail (addr={:?}, kind={:?}, {} bytes) — routing not wired yet",
-                    m.address,
-                    m.kind_name,
-                    m.payload.len()
+                    "aether-hub: engine {} mail dropped: unknown/expired session token {}",
+                    engine_id.0, token.0
                 );
             }
-            EngineToHub::Goodbye(_) => return Ok(()),
+        },
+        ClaudeAddress::Broadcast => {
+            let records = sessions.list();
+            if records.is_empty() {
+                return;
+            }
+            for record in records {
+                let frame = EngineMailFrame {
+                    address: ClaudeAddress::Broadcast,
+                    kind_name: kind_name.clone(),
+                    payload: payload.clone(),
+                };
+                if record.mail_tx.send(frame).await.is_err() {
+                    eprintln!(
+                        "aether-hub: engine {} broadcast to session {} dropped: receiver closed",
+                        engine_id.0, record.token.0
+                    );
+                }
+            }
         }
     }
 }
@@ -176,4 +228,89 @@ where
     let bytes = aether_hub_protocol::encode_frame(msg);
     w.write_all(&bytes).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::SessionHandle;
+
+    fn engine_id(n: u128) -> EngineId {
+        EngineId(Uuid::from_u128(n))
+    }
+
+    fn mail(address: ClaudeAddress, payload: Vec<u8>) -> EngineMailFrame {
+        EngineMailFrame {
+            address,
+            kind_name: "aether.observation.ping".into(),
+            payload,
+        }
+    }
+
+    #[tokio::test]
+    async fn session_address_routes_to_that_session() {
+        let sessions = SessionRegistry::new();
+        let (a, mut rx_a) = SessionHandle::mint(&sessions);
+        let (_b, mut rx_b) = SessionHandle::mint(&sessions);
+
+        route_engine_mail(
+            &sessions,
+            engine_id(1),
+            mail(ClaudeAddress::Session(a.token), vec![1, 2, 3]),
+        )
+        .await;
+
+        let got = rx_a.try_recv().expect("frame for a");
+        assert_eq!(got.payload, vec![1, 2, 3]);
+        assert!(rx_b.try_recv().is_err(), "b should not have received");
+    }
+
+    #[tokio::test]
+    async fn session_address_with_unknown_token_is_dropped() {
+        let sessions = SessionRegistry::new();
+        let (_a, mut rx_a) = SessionHandle::mint(&sessions);
+
+        let nobody = aether_hub_protocol::SessionToken(Uuid::from_u128(0xdead));
+        route_engine_mail(
+            &sessions,
+            engine_id(1),
+            mail(ClaudeAddress::Session(nobody), vec![]),
+        )
+        .await;
+
+        assert!(rx_a.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn broadcast_fans_out_to_every_session() {
+        let sessions = SessionRegistry::new();
+        let (_a, mut rx_a) = SessionHandle::mint(&sessions);
+        let (_b, mut rx_b) = SessionHandle::mint(&sessions);
+        let (_c, mut rx_c) = SessionHandle::mint(&sessions);
+
+        route_engine_mail(
+            &sessions,
+            engine_id(1),
+            mail(ClaudeAddress::Broadcast, vec![42]),
+        )
+        .await;
+
+        for (name, rx) in [("a", &mut rx_a), ("b", &mut rx_b), ("c", &mut rx_c)] {
+            let got = rx.try_recv().unwrap_or_else(|_| panic!("{name} no frame"));
+            assert_eq!(got.payload, vec![42]);
+            assert_eq!(got.address, ClaudeAddress::Broadcast);
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_with_no_sessions_is_noop() {
+        let sessions = SessionRegistry::new();
+        // No panic, no error — just nothing happens.
+        route_engine_mail(
+            &sessions,
+            engine_id(1),
+            mail(ClaudeAddress::Broadcast, vec![]),
+        )
+        .await;
+    }
 }
