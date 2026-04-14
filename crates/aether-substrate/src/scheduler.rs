@@ -13,9 +13,15 @@
 //     If mail for a sink does end up in the queue (e.g. a future
 //     caller chooses to enqueue one), the worker handles it in line
 //     with the component path — lookup, call, decrement.
+//
+// ADR-0010 makes the component table runtime-mutable: load_component
+// inserts, drop_component removes, replace_component rebinds. Reads
+// take the shared lock (one per dispatch); writes are rare and held
+// briefly (insert/remove). The per-component `Mutex` serialises
+// deliver calls for a single component as before.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 
 use crate::component::Component;
@@ -23,13 +29,19 @@ use crate::mail::MailboxId;
 use crate::queue::MailQueue;
 use crate::registry::{MailboxEntry, Registry};
 
+/// Shared, runtime-mutable table of bound components. Cloned into the
+/// scheduler's workers and into the ADR-0010 load handler so both read
+/// and write through the same `RwLock`. The inner `Mutex<Component>`
+/// still serialises deliver calls per-component.
+pub type ComponentTable = Arc<RwLock<HashMap<MailboxId, Mutex<Component>>>>;
+
 /// Owned by the scheduler, shared with every worker. Separate from the
 /// public `Scheduler` handle so workers can keep running even while the
 /// owner thread is asleep waiting on a frame drain.
 struct WorkerContext {
     queue: Arc<MailQueue>,
     registry: Arc<Registry>,
-    components: HashMap<MailboxId, Mutex<Component>>,
+    components: ComponentTable,
 }
 
 pub struct Scheduler {
@@ -49,13 +61,16 @@ impl Scheduler {
     ) -> Self {
         assert!(k_workers >= 1, "need at least one worker");
 
-        let ctx = Arc::new(WorkerContext {
-            queue,
-            registry,
-            components: components
+        let components: ComponentTable = Arc::new(RwLock::new(
+            components
                 .into_iter()
                 .map(|(id, c)| (id, Mutex::new(c)))
                 .collect(),
+        ));
+        let ctx = Arc::new(WorkerContext {
+            queue,
+            registry,
+            components,
         });
 
         let mut workers = Vec::with_capacity(k_workers);
@@ -73,6 +88,41 @@ impl Scheduler {
 
     pub fn registry(&self) -> &Arc<Registry> {
         &self.ctx.registry
+    }
+
+    /// Handle to the runtime-mutable component table. ADR-0010's load
+    /// handler holds a clone and inserts newly instantiated components
+    /// without needing an `Arc<Scheduler>` — which would create a
+    /// cycle through any registry sink closures that referenced back.
+    pub fn components(&self) -> &ComponentTable {
+        &self.ctx.components
+    }
+
+    /// Insert a freshly instantiated component under `id`. Called by
+    /// the load handler once instantiation succeeds and the mailbox
+    /// id has been assigned. Silently replaces any existing component
+    /// at `id` — replacement is an ADR-0010 primitive in its own
+    /// right, wired in a later PR.
+    pub fn add_component(&self, id: MailboxId, component: Component) {
+        self.ctx
+            .components
+            .write()
+            .unwrap()
+            .insert(id, Mutex::new(component));
+    }
+
+    /// Remove and return the component bound to `id`, if any. The
+    /// caller is responsible for ensuring no further mail is dispatched
+    /// to this mailbox; workers that look up `id` after removal log a
+    /// "no component bound" drop, consistent with the pre-ADR-0010
+    /// unknown-mailbox path.
+    pub fn remove_component(&self, id: MailboxId) -> Option<Component> {
+        self.ctx
+            .components
+            .write()
+            .unwrap()
+            .remove(&id)
+            .map(|m| m.into_inner().expect("component mutex poisoned"))
     }
 }
 
@@ -98,19 +148,22 @@ fn worker_loop(ctx: Arc<WorkerContext>) {
                 // inline via `SubstrateCtx::send`, not this path.
                 handler(&kind_name, None, mail.sender, &mail.payload, mail.count);
             }
-            Some(MailboxEntry::Component) => match ctx.components.get(&recipient) {
-                Some(lock) => {
-                    let mut c = lock.lock().unwrap();
-                    c.deliver(&mail).expect("component.deliver failed");
+            Some(MailboxEntry::Component) => {
+                let components = ctx.components.read().unwrap();
+                match components.get(&recipient) {
+                    Some(lock) => {
+                        let mut c = lock.lock().unwrap();
+                        c.deliver(&mail).expect("component.deliver failed");
+                    }
+                    None => {
+                        eprintln!(
+                            "substrate: mail to registered-component mailbox {:?} \
+                             but no component bound to it — dropped",
+                            recipient
+                        );
+                    }
                 }
-                None => {
-                    eprintln!(
-                        "substrate: mail to registered-component mailbox {:?} \
-                         but no component bound to it — dropped",
-                        recipient
-                    );
-                }
-            },
+            }
             None => {
                 eprintln!(
                     "substrate: mail to unknown mailbox {:?} — dropped",
