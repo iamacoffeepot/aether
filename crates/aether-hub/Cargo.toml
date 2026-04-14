@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 aether-hub-protocol = { path = "../aether-hub-protocol" }
 axum = "0.8"
-http = "1"
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 rmcp = { version = "0.8", features = [
     "server",

@@ -41,7 +41,6 @@ version = "0.1.0"
 dependencies = [
  "aether-hub-protocol",
  "axum",
- "http",
  "postcard",
  "rmcp",
  "schemars",

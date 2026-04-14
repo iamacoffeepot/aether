@@ -1,22 +1,20 @@
-// Claude-facing MCP tool surface. ADR-0006 V0: three tools —
-// `send_mail` forwards to a specific engine, `list_engines` and
-// `list_claudes` are read-only introspection.
+// Claude-facing MCP tool surface. ADR-0006 V0: two tools —
+// `send_mail` forwards to a specific engine, `list_engines` is
+// read-only introspection.
 //
 // The rmcp `Service` factory is invoked per session, so `Hub` is cheap
 // to clone and shares a single `HubState` via `Arc`. Per-tool output is
 // returned as a JSON-encoded `String`; rmcp wraps it into a
 // `Content::text` automatically via `IntoContents`.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
 
 use aether_hub_protocol::{EngineId, HubToEngine, MailFrame, Uuid};
-use http::request::Parts;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
-    handler::server::{router::tool::ToolRouter, tool::Extension, wrapper::Parameters},
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -31,47 +29,15 @@ use crate::registry::EngineRegistry;
 /// `AETHER_MCP_PORT`.
 pub const DEFAULT_MCP_PORT: u16 = 8888;
 
-/// Tracks when each Claude MCP session was first seen. Populated on
-/// any tool call (no session-lifecycle hook is available to us in V0),
-/// so sessions that connect and never invoke a tool won't appear in
-/// `list_claudes`. Acceptable limitation for V0.
-#[derive(Default)]
-struct ClaudeSessions {
-    first_seen: Mutex<HashMap<String, u64>>,
-}
-
-impl ClaudeSessions {
-    fn touch(&self, session_id: &str) {
-        let mut m = self.first_seen.lock().unwrap();
-        m.entry(session_id.to_owned()).or_insert_with(unix_now);
-    }
-
-    fn list(&self) -> Vec<ClaudeInfo> {
-        self.first_seen
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, ts)| ClaudeInfo {
-                session_id: id.clone(),
-                connected_since_unix: *ts,
-            })
-            .collect()
-    }
-}
-
 /// Shared state across all rmcp sessions. Cheap to `Arc::clone` into
 /// each per-session `Hub` instance.
 pub struct HubState {
     engines: EngineRegistry,
-    claudes: ClaudeSessions,
 }
 
 impl HubState {
     pub fn new(engines: EngineRegistry) -> Arc<Self> {
-        Arc::new(Self {
-            engines,
-            claudes: ClaudeSessions::default(),
-        })
+        Arc::new(Self { engines })
     }
 }
 
@@ -121,12 +87,6 @@ pub struct EngineInfo {
     pub version: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ClaudeInfo {
-    pub session_id: String,
-    pub connected_since_unix: u64,
-}
-
 #[tool_router]
 impl Hub {
     #[tool(
@@ -135,10 +95,7 @@ impl Hub {
     async fn send_mail(
         &self,
         Parameters(args): Parameters<SendMailArgs>,
-        Extension(parts): Extension<Parts>,
     ) -> Result<String, McpError> {
-        self.touch_session(&parts);
-
         let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
             McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
         })?;
@@ -164,9 +121,7 @@ impl Hub {
     }
 
     #[tool(description = "List all engines currently connected to the hub.")]
-    async fn list_engines(&self, Extension(parts): Extension<Parts>) -> Result<String, McpError> {
-        self.touch_session(&parts);
-
+    async fn list_engines(&self) -> Result<String, McpError> {
         let engines: Vec<EngineInfo> = self
             .state
             .engines
@@ -181,36 +136,21 @@ impl Hub {
             .collect();
         serde_json::to_string(&engines).map_err(|e| McpError::internal_error(e.to_string(), None))
     }
-
-    #[tool(description = "List Claude MCP sessions the hub has seen invoke a tool this lifetime.")]
-    async fn list_claudes(&self, Extension(parts): Extension<Parts>) -> Result<String, McpError> {
-        self.touch_session(&parts);
-
-        let claudes = self.state.claudes.list();
-        serde_json::to_string(&claudes).map_err(|e| McpError::internal_error(e.to_string(), None))
-    }
-}
-
-impl Hub {
-    fn touch_session(&self, parts: &Parts) {
-        if let Some(id) = parts
-            .headers
-            .get("mcp-session-id")
-            .and_then(|v| v.to_str().ok())
-        {
-            self.state.claudes.touch(id);
-        }
-    }
 }
 
 #[tool_handler]
-impl ServerHandler for Hub {}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+impl ServerHandler for Hub {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            server_info: Implementation {
+                name: "aether-hub".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
 }
 
 /// Bind an axum server on `addr` exposing the MCP tool surface at
@@ -237,10 +177,6 @@ mod tests {
     use aether_hub_protocol::EngineId;
     use tokio::sync::mpsc;
 
-    fn empty_parts() -> Parts {
-        http::Request::builder().body(()).unwrap().into_parts().0
-    }
-
     fn record(id_u128: u128) -> (EngineRecord, mpsc::Receiver<HubToEngine>) {
         let (tx, rx) = mpsc::channel(16);
         let rec = EngineRecord {
@@ -261,10 +197,9 @@ mod tests {
         engines.insert(a);
         engines.insert(b);
         let state = HubState::new(engines);
-        let hub = Hub::new(Arc::clone(&state));
+        let hub = Hub::new(state);
 
-        let parts = empty_parts();
-        let json = hub.list_engines(Extension(parts)).await.unwrap();
+        let json = hub.list_engines().await.unwrap();
         let list: Vec<EngineInfo> = serde_json::from_str(&json).unwrap();
         assert_eq!(list.len(), 2);
     }
@@ -276,7 +211,7 @@ mod tests {
         let id = rec.id;
         engines.insert(rec);
         let state = HubState::new(engines);
-        let hub = Hub::new(Arc::clone(&state));
+        let hub = Hub::new(state);
 
         let args = SendMailArgs {
             engine_id: id.0.to_string(),
@@ -285,10 +220,7 @@ mod tests {
             payload: vec![9, 9],
             count: 3,
         };
-        let ack = hub
-            .send_mail(Parameters(args), Extension(empty_parts()))
-            .await
-            .unwrap();
+        let ack = hub.send_mail(Parameters(args)).await.unwrap();
         assert_eq!(ack, "delivered");
 
         let frame = rx.try_recv().expect("expected a frame");
@@ -315,27 +247,7 @@ mod tests {
             payload: vec![],
             count: 1,
         };
-        let err = hub
-            .send_mail(Parameters(args), Extension(empty_parts()))
-            .await
-            .unwrap_err();
+        let err = hub.send_mail(Parameters(args)).await.unwrap_err();
         assert!(format!("{err:?}").contains("unknown engine_id"));
-    }
-
-    #[tokio::test]
-    async fn list_claudes_records_first_seen() {
-        let state = HubState::new(EngineRegistry::new());
-        let hub = Hub::new(Arc::clone(&state));
-
-        let mut parts = empty_parts();
-        parts
-            .headers
-            .insert("mcp-session-id", "session-abc".parse().unwrap());
-        let _ = hub.list_claudes(Extension(parts.clone())).await.unwrap();
-        let _ = hub.list_claudes(Extension(parts)).await.unwrap();
-
-        let claudes = state.claudes.list();
-        assert_eq!(claudes.len(), 1);
-        assert_eq!(claudes[0].session_id, "session-abc");
     }
 }
