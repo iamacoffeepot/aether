@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aether_hub_protocol::EngineId;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
 
 use crate::registry::EngineRegistry;
@@ -28,6 +28,10 @@ use crate::registry::EngineRegistry;
 /// Default grace period the hub waits for a spawned substrate to
 /// complete its `Hello` handshake before declaring the spawn failed.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default time the hub waits after SIGTERM before escalating to
+/// SIGKILL during `terminate_substrate`.
+pub const DEFAULT_TERMINATE_GRACE: Duration = Duration::from_secs(2);
 
 /// Inputs to `spawn_substrate`. All fields except `binary_path` are
 /// optional; callers that want full control pass a populated struct.
@@ -197,6 +201,53 @@ pub async fn spawn_substrate(
     }
 }
 
+/// Outcome of `terminate_substrate`. `sigkilled` is `true` if the
+/// grace window expired and the hub escalated to SIGKILL.
+#[derive(Debug, Clone, Copy)]
+pub struct TerminateOutcome {
+    pub exit_code: Option<i32>,
+    pub sigkilled: bool,
+}
+
+/// Gracefully shut down a spawned substrate. Sends SIGTERM (no-op on
+/// non-unix — tokio's `Child` has no cross-platform SIGTERM primitive),
+/// waits up to `grace` for the child to exit on its own, then escalates
+/// to SIGKILL via `Child::kill`. Always awaits the reap so the caller
+/// sees a final `ExitStatus` and no zombies are left behind.
+pub async fn terminate_substrate(
+    mut child: Child,
+    grace: Duration,
+) -> Result<TerminateOutcome, std::io::Error> {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: `libc::kill` is always sound to call; a bad pid just
+        // returns an error we don't need to inspect — if the process is
+        // already gone, the subsequent `child.wait()` resolves fast.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+
+    match tokio::time::timeout(grace, child.wait()).await {
+        Ok(status) => {
+            let status = status?;
+            Ok(TerminateOutcome {
+                exit_code: status.code(),
+                sigkilled: false,
+            })
+        }
+        Err(_) => {
+            // Grace expired. Force-kill and reap.
+            child.kill().await?;
+            let status = child.wait().await?;
+            Ok(TerminateOutcome {
+                exit_code: status.code(),
+                sigkilled: true,
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +321,55 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(2));
 
         assert_eq!(pending.len(), 0, "pending entry should be cleaned up");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn terminate_sigterm_exits_within_grace() {
+        // sh exits on SIGTERM without needing the grace to expire.
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 60")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sh");
+
+        let start = std::time::Instant::now();
+        let outcome = terminate_substrate(child, Duration::from_secs(5))
+            .await
+            .expect("terminate");
+        assert!(!outcome.sigkilled, "grace should have been sufficient");
+        // Should resolve fast — sh handles SIGTERM immediately.
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn terminate_escalates_to_sigkill_when_grace_expires() {
+        // Busy loop inside an ignoring trap: SIGTERM is dropped, there's
+        // no blocking syscall for it to interrupt anyway, and only
+        // SIGKILL (delivered after the grace window) takes it down.
+        // Burns a sliver of CPU for the duration of the grace — fine.
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("trap '' TERM; while :; do :; done")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sh");
+
+        // Give sh a beat to actually install the trap — if we SIGTERM
+        // before the script's first statement has run, the default
+        // handler fires and the process exits within grace.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let outcome = terminate_substrate(child, Duration::from_millis(200))
+            .await
+            .expect("terminate");
+        assert!(
+            outcome.sigkilled,
+            "expected SIGKILL escalation, got {outcome:?}"
+        );
     }
 }

@@ -23,7 +23,10 @@ pub use registry::{EngineRecord, EngineRegistry};
 pub use session::{
     QueuedMail, SESSION_CHANNEL_CAPACITY, SessionHandle, SessionRecord, SessionRegistry,
 };
-pub use spawn::{DEFAULT_HANDSHAKE_TIMEOUT, PendingSpawns, SpawnError, SpawnOpts, spawn_substrate};
+pub use spawn::{
+    DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, PendingSpawns, SpawnError, SpawnOpts,
+    TerminateOutcome, spawn_substrate, terminate_substrate,
+};
 
 /// Default port the hub binds for engine TCP clients. ADR-0006 V0 fixes
 /// this; `AETHER_ENGINE_PORT` overrides.
