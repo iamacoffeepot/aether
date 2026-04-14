@@ -16,8 +16,8 @@ use aether_hub_protocol::{KindDescriptor, KindEncoding, PodField, PodFieldType, 
 use aether_mail::Kind;
 
 use crate::{
-    DrawTriangle, DropComponent, FrameStats, Key, LoadComponent, LoadResult, MouseButton,
-    MouseMove, ReplaceComponent, Tick,
+    DrawTriangle, DropComponent, DropResult, FrameStats, Key, LoadComponent, LoadResult,
+    MouseButton, MouseMove, ReplaceComponent, ReplaceResult, Tick,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -53,6 +53,8 @@ pub fn all() -> Vec<KindDescriptor> {
         opaque(ReplaceComponent::NAME),
         opaque(DropComponent::NAME),
         opaque(LoadResult::NAME),
+        opaque(DropResult::NAME),
+        opaque(ReplaceResult::NAME),
     ]
 }
 
@@ -101,6 +103,8 @@ mod tests {
         assert!(names.contains(&ReplaceComponent::NAME));
         assert!(names.contains(&DropComponent::NAME));
         assert!(names.contains(&LoadResult::NAME));
+        assert!(names.contains(&DropResult::NAME));
+        assert!(names.contains(&ReplaceResult::NAME));
     }
 
     #[test]
@@ -111,6 +115,8 @@ mod tests {
             ReplaceComponent::NAME,
             DropComponent::NAME,
             LoadResult::NAME,
+            DropResult::NAME,
+            ReplaceResult::NAME,
         ] {
             let d = descs.iter().find(|d| d.name == name).unwrap();
             assert_eq!(d.encoding, KindEncoding::Opaque, "{name}");
