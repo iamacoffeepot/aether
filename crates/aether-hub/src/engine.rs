@@ -20,6 +20,7 @@ use tokio::time::timeout;
 
 use crate::registry::{EngineRecord, EngineRegistry};
 use crate::session::{QueuedMail, SessionRegistry};
+use crate::spawn::PendingSpawns;
 
 /// Cadence at which the hub sends `Heartbeat` to each engine.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -36,6 +37,7 @@ pub async fn handle_connection(
     stream: TcpStream,
     registry: EngineRegistry,
     sessions: SessionRegistry,
+    pending: PendingSpawns,
 ) -> Result<(), FrameError> {
     let (mut reader, mut writer) = stream.into_split();
 
@@ -55,9 +57,15 @@ pub async fn handle_connection(
     let welcome = HubToEngine::Welcome(Welcome { engine_id });
     write_frame_async(&mut writer, &welcome).await?;
 
+    // If this engine was spawned by the hub, fulfil the waiting spawn
+    // with the freshly minted engine id. A `false` return just means
+    // the engine was started externally — equally valid, different
+    // ownership.
+    let spawned = pending.fulfill(hello.pid, engine_id);
+
     eprintln!(
-        "aether-hub: engine registered id={} name={} pid={} version={}",
-        engine_id.0, hello.name, hello.pid, hello.version
+        "aether-hub: engine registered id={} name={} pid={} version={} spawned={}",
+        engine_id.0, hello.name, hello.pid, hello.version, spawned
     );
 
     let (mail_tx, mut mail_rx) = mpsc::channel::<HubToEngine>(MAIL_CHANNEL_CAPACITY);
@@ -68,6 +76,7 @@ pub async fn handle_connection(
         version: hello.version.clone(),
         kinds: hello.kinds,
         mail_tx,
+        spawned,
     });
 
     // Writer task: drains the mpsc into the socket and injects

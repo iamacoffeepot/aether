@@ -4,7 +4,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use aether_hub::{EngineRegistry, SessionRegistry, run_engine_listener};
+use aether_hub::{EngineRegistry, PendingSpawns, SessionRegistry, run_engine_listener};
 use aether_hub_protocol::{EngineToHub, Goodbye, Hello, HubToEngine, encode_frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -17,10 +17,12 @@ async fn spawn_hub() -> (SocketAddr, EngineRegistry, SessionRegistry) {
     drop(listener);
     let registry = EngineRegistry::new();
     let sessions = SessionRegistry::new();
+    let pending = PendingSpawns::new();
     tokio::spawn(run_engine_listener(
         addr,
         registry.clone(),
         sessions.clone(),
+        pending,
     ));
     // Give the listener a beat to bind.
     tokio::time::sleep(Duration::from_millis(50)).await;

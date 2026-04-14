@@ -5,8 +5,8 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use aether_hub::{
-    DEFAULT_ENGINE_PORT, DEFAULT_MCP_PORT, EngineRegistry, HubState, SessionRegistry,
-    run_engine_listener, run_mcp_server,
+    DEFAULT_ENGINE_PORT, DEFAULT_MCP_PORT, EngineRegistry, HubState, PendingSpawns,
+    SessionRegistry, run_engine_listener, run_mcp_server,
 };
 
 #[tokio::main]
@@ -18,9 +18,15 @@ async fn main() -> std::io::Result<()> {
 
     let registry = EngineRegistry::new();
     let sessions = SessionRegistry::new();
+    let pending = PendingSpawns::new();
     let state = HubState::new(registry.clone(), sessions.clone());
 
-    let engine_task = tokio::spawn(run_engine_listener(engine_addr, registry, sessions));
+    let engine_task = tokio::spawn(run_engine_listener(
+        engine_addr,
+        registry,
+        sessions,
+        pending,
+    ));
     let mcp_task = tokio::spawn(run_mcp_server(mcp_addr, state));
 
     tokio::select! {
