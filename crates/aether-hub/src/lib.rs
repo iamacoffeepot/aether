@@ -7,9 +7,12 @@ use std::net::SocketAddr;
 
 use tokio::net::TcpListener;
 
+mod encoder;
 mod engine;
 mod mcp;
 mod registry;
+
+pub use encoder::{EncodeError, encode_pod};
 
 pub use engine::HEARTBEAT_INTERVAL;
 pub use engine::READ_TIMEOUT;
