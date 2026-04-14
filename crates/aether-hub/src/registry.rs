@@ -93,6 +93,17 @@ impl EngineRegistry {
         inner.spawned_children.remove(id);
     }
 
+    /// Replace the cached kind descriptors for an engine. Called when
+    /// the substrate reports `EngineToHub::KindsChanged` post-load
+    /// (ADR-0010 §4) so subsequent `describe_kinds` calls see the
+    /// newly-registered vocabulary. No-op if the engine is unknown —
+    /// the engine may have dropped concurrently.
+    pub fn update_kinds(&self, id: &EngineId, kinds: Vec<KindDescriptor>) {
+        if let Some(record) = self.inner.lock().unwrap().records.get_mut(id) {
+            record.kinds = kinds;
+        }
+    }
+
     pub fn list(&self) -> Vec<EngineRecord> {
         self.inner
             .lock()
@@ -162,5 +173,29 @@ mod tests {
         assert!(!reg.has_child(&id));
         reg.remove(&id);
         assert!(reg.get(&id).is_none());
+    }
+
+    #[test]
+    fn update_kinds_replaces_cached_descriptors() {
+        use aether_hub_protocol::{KindDescriptor, KindEncoding};
+        let reg = EngineRegistry::new();
+        let r = record(3);
+        let id = r.id;
+        reg.insert(r);
+        assert!(reg.get(&id).unwrap().kinds.is_empty());
+
+        let new_kinds = vec![KindDescriptor {
+            name: "physics.contact".into(),
+            encoding: KindEncoding::Opaque,
+        }];
+        reg.update_kinds(&id, new_kinds.clone());
+        assert_eq!(reg.get(&id).unwrap().kinds, new_kinds);
+    }
+
+    #[test]
+    fn update_kinds_for_unknown_engine_is_noop() {
+        let reg = EngineRegistry::new();
+        let unknown = EngineId(Uuid::from_u128(999));
+        reg.update_kinds(&unknown, vec![]);
     }
 }
