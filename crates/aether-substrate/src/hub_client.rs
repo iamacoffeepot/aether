@@ -59,6 +59,9 @@ impl HubClient {
             pid: process::id(),
             started_unix: unix_now(),
             version: version.into(),
+            // PR 2 of the ADR-0007 arc replaces this with descriptors
+            // collected from aether-substrate-mail.
+            kinds: vec![],
         });
         write_frame(&mut stream, &hello).map_err(io::Error::other)?;
 

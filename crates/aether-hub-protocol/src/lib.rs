@@ -109,6 +109,7 @@ mod tests {
             pid: 8910,
             started_unix: 1_712_345_678,
             version: "0.1.0".into(),
+            kinds: vec![],
         });
 
         let mut buf = Vec::new();
@@ -123,6 +124,79 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn hello_with_kinds_roundtrip() {
+        let hello = EngineToHub::Hello(Hello {
+            name: "hello-triangle".into(),
+            pid: 1,
+            started_unix: 0,
+            version: "0".into(),
+            kinds: vec![
+                KindDescriptor {
+                    name: "aether.tick".into(),
+                    encoding: KindEncoding::Signal,
+                },
+                KindDescriptor {
+                    name: "aether.key".into(),
+                    encoding: KindEncoding::Pod {
+                        fields: vec![PodField {
+                            name: "code".into(),
+                            ty: PodFieldType::Scalar(PodPrimitive::U32),
+                        }],
+                    },
+                },
+                KindDescriptor {
+                    name: "aether.draw_triangle".into(),
+                    encoding: KindEncoding::Opaque,
+                },
+            ],
+        });
+
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &hello).unwrap();
+        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
+        let EngineToHub::Hello(h) = back else {
+            panic!("wrong variant")
+        };
+        assert_eq!(h.kinds.len(), 3);
+        assert_eq!(h.kinds[0].encoding, KindEncoding::Signal);
+        let KindEncoding::Pod { fields } = &h.kinds[1].encoding else {
+            panic!("expected Pod")
+        };
+        assert_eq!(fields[0].name, "code");
+        assert_eq!(fields[0].ty, PodFieldType::Scalar(PodPrimitive::U32));
+        assert_eq!(h.kinds[2].encoding, KindEncoding::Opaque);
+    }
+
+    #[test]
+    fn pod_field_array_roundtrip() {
+        let desc = KindDescriptor {
+            name: "aether.mouse_move".into(),
+            encoding: KindEncoding::Pod {
+                fields: vec![
+                    PodField {
+                        name: "x".into(),
+                        ty: PodFieldType::Scalar(PodPrimitive::F32),
+                    },
+                    PodField {
+                        name: "y".into(),
+                        ty: PodFieldType::Scalar(PodPrimitive::F32),
+                    },
+                    PodField {
+                        name: "pad".into(),
+                        ty: PodFieldType::Array {
+                            element: PodPrimitive::U8,
+                            len: 4,
+                        },
+                    },
+                ],
+            },
+        };
+        let bytes = postcard::to_allocvec(&desc).unwrap();
+        let back: KindDescriptor = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, desc);
     }
 
     #[test]
@@ -178,6 +252,7 @@ mod tests {
             pid: 1,
             started_unix: 0,
             version: "0".into(),
+            kinds: vec![],
         });
         let b = EngineToHub::Heartbeat;
         let c = EngineToHub::Goodbye(Goodbye {
