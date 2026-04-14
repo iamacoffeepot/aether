@@ -1,6 +1,6 @@
 # ADR-0007: Schema-driven mail encoding at the hub
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-13
 
 ## Context
