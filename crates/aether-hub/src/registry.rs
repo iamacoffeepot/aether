@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use aether_hub_protocol::{EngineId, HubToEngine};
+use aether_hub_protocol::{EngineId, HubToEngine, KindDescriptor};
 use tokio::sync::mpsc;
 
 /// One entry in the hub's engine table. The `mail_tx` side is how any
@@ -18,6 +18,10 @@ pub struct EngineRecord {
     pub name: String,
     pub pid: u32,
     pub version: String,
+    /// Kind vocabulary the engine declared at Hello. Used by the MCP
+    /// tool surface for `describe_kinds` and, once PR 5 lands, for
+    /// schema-driven encoding on `send_mail`.
+    pub kinds: Vec<KindDescriptor>,
     pub mail_tx: mpsc::Sender<HubToEngine>,
 }
 

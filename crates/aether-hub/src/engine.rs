@@ -63,6 +63,7 @@ pub async fn handle_connection(
         name: hello.name.clone(),
         pid: hello.pid,
         version: hello.version.clone(),
+        kinds: hello.kinds,
         mail_tx,
     });
 

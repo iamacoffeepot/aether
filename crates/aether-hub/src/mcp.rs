@@ -59,6 +59,12 @@ impl Hub {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct DescribeKindsArgs {
+    /// Hub-assigned engine UUID as a string (from `list_engines`).
+    pub engine_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMailArgs {
     /// Hub-assigned engine UUID as a string (from `list_engines`).
     pub engine_id: String,
@@ -120,6 +126,27 @@ impl Hub {
         Ok("delivered".into())
     }
 
+    #[tool(
+        description = "List every kind the given engine declared at handshake, with enough structural detail for clients to build params for send_mail. Signal kinds take no payload; Pod kinds list their fields and primitive types; Opaque kinds must use the payload_bytes escape hatch on send_mail."
+    )]
+    async fn describe_kinds(
+        &self,
+        Parameters(args): Parameters<DescribeKindsArgs>,
+    ) -> Result<String, McpError> {
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+        let Some(record) = self.state.engines.get(&id) else {
+            return Err(McpError::invalid_params(
+                format!("unknown engine_id {}", args.engine_id),
+                None,
+            ));
+        };
+        serde_json::to_string(&record.kinds)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
     #[tool(description = "List all engines currently connected to the hub.")]
     async fn list_engines(&self) -> Result<String, McpError> {
         let engines: Vec<EngineInfo> = self
@@ -178,12 +205,20 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn record(id_u128: u128) -> (EngineRecord, mpsc::Receiver<HubToEngine>) {
+        record_with_kinds(id_u128, vec![])
+    }
+
+    fn record_with_kinds(
+        id_u128: u128,
+        kinds: Vec<aether_hub_protocol::KindDescriptor>,
+    ) -> (EngineRecord, mpsc::Receiver<HubToEngine>) {
         let (tx, rx) = mpsc::channel(16);
         let rec = EngineRecord {
             id: EngineId(Uuid::from_u128(id_u128)),
             name: format!("engine-{id_u128}"),
             pid: 42,
             version: "test".into(),
+            kinds,
             mail_tx: tx,
         };
         (rec, rx)
@@ -248,6 +283,46 @@ mod tests {
             count: 1,
         };
         let err = hub.send_mail(Parameters(args)).await.unwrap_err();
+        assert!(format!("{err:?}").contains("unknown engine_id"));
+    }
+
+    #[tokio::test]
+    async fn describe_kinds_returns_descriptors() {
+        use aether_hub_protocol::{KindDescriptor, KindEncoding};
+
+        let kinds = vec![
+            KindDescriptor {
+                name: "aether.tick".into(),
+                encoding: KindEncoding::Signal,
+            },
+            KindDescriptor {
+                name: "hello.custom".into(),
+                encoding: KindEncoding::Opaque,
+            },
+        ];
+        let engines = EngineRegistry::new();
+        let (rec, _rx) = record_with_kinds(11, kinds.clone());
+        let id = rec.id;
+        engines.insert(rec);
+        let state = HubState::new(engines);
+        let hub = Hub::new(state);
+
+        let args = DescribeKindsArgs {
+            engine_id: id.0.to_string(),
+        };
+        let json = hub.describe_kinds(Parameters(args)).await.unwrap();
+        let back: Vec<KindDescriptor> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, kinds);
+    }
+
+    #[tokio::test]
+    async fn describe_kinds_unknown_engine_errors() {
+        let state = HubState::new(EngineRegistry::new());
+        let hub = Hub::new(state);
+        let args = DescribeKindsArgs {
+            engine_id: Uuid::from_u128(1).to_string(),
+        };
+        let err = hub.describe_kinds(Parameters(args)).await.unwrap_err();
         assert!(format!("{err:?}").contains("unknown engine_id"));
     }
 }
