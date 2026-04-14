@@ -73,6 +73,18 @@ impl EngineRegistry {
             .insert(id, child);
     }
 
+    /// Remove and return the `Child` for a spawned engine without
+    /// touching the record. Callers (notably `terminate_substrate`)
+    /// use this to take ownership of the child before signalling and
+    /// awaiting its exit — leaving the record in place so the engine
+    /// connection task can continue reading until the socket drops,
+    /// at which point the standard `remove` path fires.
+    ///
+    /// Returns `None` for unknown or externally connected engines.
+    pub fn take_child(&self, id: &EngineId) -> Option<Child> {
+        self.inner.lock().unwrap().spawned_children.remove(id)
+    }
+
     pub fn remove(&self, id: &EngineId) {
         let mut inner = self.inner.lock().unwrap();
         inner.records.remove(id);

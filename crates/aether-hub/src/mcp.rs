@@ -32,7 +32,7 @@ use tokio::sync::{Mutex, mpsc};
 use crate::encoder::encode_pod;
 use crate::registry::{EngineRecord, EngineRegistry};
 use crate::session::{QueuedMail, SessionHandle, SessionRegistry};
-use crate::spawn::{DEFAULT_HANDSHAKE_TIMEOUT, PendingSpawns, SpawnOpts};
+use crate::spawn::{DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, PendingSpawns, SpawnOpts};
 
 /// Default port the hub binds for MCP clients. Overridable via
 /// `AETHER_MCP_PORT`.
@@ -187,6 +187,28 @@ pub struct SpawnResult {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TerminateSubstrateArgs {
+    /// Hub-assigned engine UUID (from `list_engines`).
+    pub engine_id: String,
+    /// SIGTERM grace period in milliseconds. Defaults to 2 seconds —
+    /// long enough for a well-behaved substrate to drain, short enough
+    /// not to stall interactive agent flows.
+    #[serde(default)]
+    pub grace_ms: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct TerminateResult {
+    pub engine_id: String,
+    /// `true` if the child ignored SIGTERM and the hub escalated to
+    /// SIGKILL after the grace window. `false` for clean exits.
+    pub sigkilled: bool,
+    /// Exit code if the child exited normally; `null` if it was killed
+    /// by a signal (the common case when `sigkilled` is true).
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReceiveMailArgs {
     /// Maximum number of items to return in this call. `None` drains
     /// everything currently queued. Defaults to unlimited.
@@ -312,6 +334,52 @@ impl Hub {
         let result = SpawnResult {
             engine_id: engine_id.0.to_string(),
             pid,
+        };
+        serde_json::to_string(&result).map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    #[tool(
+        description = "Terminate a substrate the hub previously spawned. Sends SIGTERM, waits up to `grace_ms` milliseconds (default 2000) for the child to exit, then escalates to SIGKILL if it's still running. Returns the exit code (if any) and a `sigkilled` flag indicating whether escalation was necessary. Errors if the engine id is unknown or refers to an externally connected substrate — the hub only terminates children it owns."
+    )]
+    async fn terminate_substrate(
+        &self,
+        Parameters(args): Parameters<TerminateSubstrateArgs>,
+    ) -> Result<String, McpError> {
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+
+        if self.state.engines.get(&id).is_none() {
+            return Err(McpError::invalid_params(
+                format!("unknown engine_id {}", args.engine_id),
+                None,
+            ));
+        }
+
+        let Some(child) = self.state.engines.take_child(&id) else {
+            return Err(McpError::invalid_params(
+                format!(
+                    "engine {} is not hub-spawned; terminate it externally",
+                    args.engine_id
+                ),
+                None,
+            ));
+        };
+
+        let grace = args
+            .grace_ms
+            .map(|ms| Duration::from_millis(ms as u64))
+            .unwrap_or(DEFAULT_TERMINATE_GRACE);
+
+        let outcome = crate::spawn::terminate_substrate(child, grace)
+            .await
+            .map_err(|e| McpError::internal_error(format!("terminate failed: {e}"), None))?;
+
+        let result = TerminateResult {
+            engine_id: args.engine_id,
+            sigkilled: outcome.sigkilled,
+            exit_code: outcome.exit_code,
         };
         serde_json::to_string(&result).map_err(|e| McpError::internal_error(e.to_string(), None))
     }
@@ -925,6 +993,94 @@ mod tests {
             .unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("spawn failed"), "unexpected error: {msg}");
+    }
+
+    #[tokio::test]
+    async fn terminate_substrate_rejects_unknown_engine() {
+        let state = HubState::new(
+            EngineRegistry::new(),
+            SessionRegistry::new(),
+            PendingSpawns::new(),
+            "127.0.0.1:1".parse().unwrap(),
+        );
+        let hub = Hub::new(state);
+        let err = hub
+            .terminate_substrate(Parameters(TerminateSubstrateArgs {
+                engine_id: Uuid::from_u128(0xdead).to_string(),
+                grace_ms: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("unknown engine_id"));
+    }
+
+    #[tokio::test]
+    async fn terminate_substrate_rejects_externally_connected_engine() {
+        let engines = EngineRegistry::new();
+        let (rec, _rx) = record(77);
+        let id = rec.id;
+        // rec.spawned is false (default) and no child is adopted.
+        engines.insert(rec);
+        let state = HubState::new(
+            engines,
+            SessionRegistry::new(),
+            PendingSpawns::new(),
+            "127.0.0.1:1".parse().unwrap(),
+        );
+        let hub = Hub::new(state);
+
+        let err = hub
+            .terminate_substrate(Parameters(TerminateSubstrateArgs {
+                engine_id: id.0.to_string(),
+                grace_ms: None,
+            }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("not hub-spawned"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn terminate_substrate_tool_kills_spawned_child() {
+        use std::process::Stdio;
+        use tokio::process::Command;
+
+        let engines = EngineRegistry::new();
+        let (mut rec, _rx) = record(88);
+        rec.spawned = true;
+        let id = rec.id;
+        engines.insert(rec);
+
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 60")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sh");
+        engines.adopt_child(id, child);
+
+        let state = HubState::new(
+            engines.clone(),
+            SessionRegistry::new(),
+            PendingSpawns::new(),
+            "127.0.0.1:1".parse().unwrap(),
+        );
+        let hub = Hub::new(state);
+
+        let json = hub
+            .terminate_substrate(Parameters(TerminateSubstrateArgs {
+                engine_id: id.0.to_string(),
+                grace_ms: Some(2000),
+            }))
+            .await
+            .expect("terminate ok");
+        let result: TerminateResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(result.engine_id, id.0.to_string());
+        assert!(!result.sigkilled, "sh should exit on SIGTERM within grace");
+
+        // Child entry is gone from the registry (take_child fired).
+        assert!(!engines.has_child(&id));
     }
 
     #[tokio::test]
