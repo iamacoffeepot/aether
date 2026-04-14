@@ -339,6 +339,13 @@ impl Registry {
             .cloned()
     }
 
+    /// Snapshot of every kind descriptor currently registered, in id
+    /// order. Used by the control plane to ship an authoritative view
+    /// to the hub after a runtime load or replace (ADR-0010 §4).
+    pub fn list_kind_descriptors(&self) -> Vec<KindDescriptor> {
+        self.inner.read().unwrap().kind_descriptors.clone()
+    }
+
     pub fn len(&self) -> usize {
         self.inner.read().unwrap().entries.len()
     }

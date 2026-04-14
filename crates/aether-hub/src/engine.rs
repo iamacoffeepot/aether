@@ -112,7 +112,7 @@ pub async fn handle_connection(
     // Reader loop: run until the engine goes silent, sends Goodbye, or
     // the socket errors. Removing the registry entry drops the only
     // remaining `mail_tx`, which lets the writer task complete.
-    let result = read_loop(&mut reader, &sessions, engine_id).await;
+    let result = read_loop(&mut reader, &registry, &sessions, engine_id).await;
 
     registry.remove(&engine_id);
     let _ = writer_task.await;
@@ -126,6 +126,7 @@ pub async fn handle_connection(
 
 async fn read_loop(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
+    registry: &EngineRegistry,
     sessions: &SessionRegistry,
     engine_id: EngineId,
 ) -> Result<(), FrameError> {
@@ -148,6 +149,7 @@ async fn read_loop(
             }
             EngineToHub::Heartbeat => {}
             EngineToHub::Mail(m) => route_engine_mail(sessions, engine_id, m).await,
+            EngineToHub::KindsChanged(kinds) => registry.update_kinds(&engine_id, kinds),
             EngineToHub::Goodbye(_) => return Ok(()),
         }
     }

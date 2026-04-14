@@ -158,12 +158,17 @@ pub struct Goodbye {
 
 /// Frames an engine sends to the hub. `Mail` is the observation path
 /// (ADR-0008): engine-originated mail addressed to a Claude session
-/// or broadcast to all sessions.
+/// or broadcast to all sessions. `KindsChanged` (ADR-0010 §4) tells
+/// the hub to replace its cached descriptor list for this engine —
+/// needed after `aether.control.load_component` /
+/// `aether.control.replace_component` registers a new kind, which the
+/// hub would otherwise miss since its cache is pinned at `Hello`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineToHub {
     Hello(Hello),
     Heartbeat,
     Mail(EngineMailFrame),
+    KindsChanged(Vec<KindDescriptor>),
     Goodbye(Goodbye),
 }
 

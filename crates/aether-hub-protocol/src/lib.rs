@@ -281,6 +281,31 @@ mod tests {
     }
 
     #[test]
+    fn kinds_changed_roundtrip() {
+        let msg = EngineToHub::KindsChanged(vec![
+            KindDescriptor {
+                name: "aether.tick".into(),
+                encoding: KindEncoding::Signal,
+            },
+            KindDescriptor {
+                name: "physics.contact".into(),
+                encoding: KindEncoding::Opaque,
+            },
+        ]);
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
+        match back {
+            EngineToHub::KindsChanged(k) => {
+                assert_eq!(k.len(), 2);
+                assert_eq!(k[0].name, "aether.tick");
+                assert_eq!(k[1].name, "physics.contact");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn heartbeat_both_directions() {
         for buf in [
             encode_frame(&EngineToHub::Heartbeat),

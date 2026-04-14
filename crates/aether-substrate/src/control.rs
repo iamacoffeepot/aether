@@ -230,6 +230,7 @@ impl ControlPlane {
         };
 
         self.insert_component(mailbox, component);
+        self.announce_kinds();
 
         LoadResultPayload::Ok {
             mailbox_id: mailbox.0,
@@ -341,6 +342,7 @@ impl ControlPlane {
         // Atomic swap in the scheduler table. The returned old
         // Component is dropped at end of scope — wasmtime reclaims.
         let _old = self.swap_component(id, new_component);
+        self.announce_kinds();
         ReplaceResultPayload::Ok
     }
 
@@ -366,6 +368,20 @@ impl ControlPlane {
             .map(|m| m.into_inner().expect("component mutex poisoned"));
         table.insert(id, std::sync::Mutex::new(new_component));
         old
+    }
+
+    /// Ship the complete current kind vocabulary to the hub so its
+    /// per-engine descriptor cache (ADR-0007) reflects kinds that were
+    /// registered at runtime (ADR-0010 §4). Called after a successful
+    /// load or replace; drop doesn't affect the vocabulary.
+    ///
+    /// The substrate is authoritative on what it has registered, so we
+    /// send the full list rather than a delta — simpler protocol, no
+    /// ordering hazard, trivial on the wire (descriptors are small).
+    /// If no hub is attached the outbound silently drops — harmless.
+    fn announce_kinds(&self) {
+        let kinds = self.registry.list_kind_descriptors();
+        self.outbound.send(EngineToHub::KindsChanged(kinds));
     }
 
     fn reply<T: Serialize>(
