@@ -1,6 +1,6 @@
 # ADR-0011: Origin attribution on observation mail
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-14
 
 ## Context

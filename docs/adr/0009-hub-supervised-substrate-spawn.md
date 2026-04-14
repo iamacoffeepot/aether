@@ -1,6 +1,6 @@
 # ADR-0009: Hub-supervised substrate spawn
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-14
 
 ## Context

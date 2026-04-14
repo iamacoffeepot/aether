@@ -1,6 +1,6 @@
 # ADR-0010: Runtime component loading and replacement
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-14
 
 ## Context

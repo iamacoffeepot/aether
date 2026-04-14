@@ -1,6 +1,6 @@
 # ADR-0008: Engine-to-Claude mail (observation path)
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-14
 
 ## Context
