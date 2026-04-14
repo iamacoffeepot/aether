@@ -45,6 +45,10 @@ impl EngineRegistry {
         self.inner.lock().unwrap().values().cloned().collect()
     }
 
+    pub fn get(&self, id: &EngineId) -> Option<EngineRecord> {
+        self.inner.lock().unwrap().get(id).cloned()
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().len()
     }

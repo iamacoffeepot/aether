@@ -1,32 +1,45 @@
-// Thin binary entry point: parse port from env, spin up the engine
-// listener, wait for Ctrl-C. The Claude-facing rmcp transport lands in
-// PR 4; until then the hub is engine-only.
+// Thin binary entry point: parse ports from env, spin up the engine
+// TCP listener and the MCP (streamable-HTTP) listener concurrently,
+// wait for Ctrl-C.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use aether_hub::{DEFAULT_ENGINE_PORT, EngineRegistry, run_engine_listener};
+use aether_hub::{
+    DEFAULT_ENGINE_PORT, DEFAULT_MCP_PORT, EngineRegistry, HubState, run_engine_listener,
+    run_mcp_server,
+};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let port: u16 = std::env::var("AETHER_ENGINE_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_ENGINE_PORT);
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let engine_port: u16 = env_port("AETHER_ENGINE_PORT").unwrap_or(DEFAULT_ENGINE_PORT);
+    let mcp_port: u16 = env_port("AETHER_MCP_PORT").unwrap_or(DEFAULT_MCP_PORT);
+    let engine_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), engine_port);
+    let mcp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), mcp_port);
 
     let registry = EngineRegistry::new();
-    let listener = tokio::spawn(run_engine_listener(addr, registry));
+    let state = HubState::new(registry.clone());
+
+    let engine_task = tokio::spawn(run_engine_listener(engine_addr, registry));
+    let mcp_task = tokio::spawn(run_mcp_server(mcp_addr, state));
 
     tokio::select! {
-        r = listener => {
-            if let Ok(Err(e)) = r {
-                eprintln!("aether-hub: listener error: {e}");
-                return Err(e);
-            }
-        }
+        r = engine_task => log_exit("engine listener", r),
+        r = mcp_task => log_exit("mcp listener", r),
         _ = tokio::signal::ctrl_c() => {
             eprintln!("aether-hub: shutting down");
         }
     }
     Ok(())
+}
+
+fn env_port(name: &str) -> Option<u16> {
+    std::env::var(name).ok().and_then(|s| s.parse().ok())
+}
+
+fn log_exit(label: &str, result: Result<std::io::Result<()>, tokio::task::JoinError>) {
+    match result {
+        Ok(Ok(())) => eprintln!("aether-hub: {label} exited"),
+        Ok(Err(e)) => eprintln!("aether-hub: {label} error: {e}"),
+        Err(e) => eprintln!("aether-hub: {label} join error: {e}"),
+    }
 }
