@@ -16,6 +16,18 @@ Early-stage Rust project (edition 2024). Vision: a game engine where Claude sits
 - **Merging**: `main` is protected (PR required, all CI checks required, linear history, no force-push). Claude does not push to `main`, does not force-push reviewed branches, does not self-merge, and asks before destructive operations.
 - **PRs** should be small and focused — one concept per PR.
 
+## MCP harness
+
+Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision. Starting `cargo run -p aether-hub` and `AETHER_HUB_URL=127.0.0.1:8889 cargo run -p aether-substrate` exposes three tools to a Claude Code session pointed at the project-scoped `.mcp.json`:
+
+- `mcp__aether-hub__list_engines` — connected engines (UUID + name/pid/version).
+- `mcp__aether-hub__describe_kinds(engine_id)` — the kind vocabulary the engine declared at handshake, with enough structural detail to build params.
+- `mcp__aether-hub__send_mail(mails)` — batched, best-effort. Each item takes either `params` (hub encodes via the kind's descriptor) or `payload_bytes` (raw escape hatch for `Opaque` kinds). Response is a per-item status array; one failure doesn't abort siblings.
+
+Prefer `params` over `payload_bytes` when the kind is describable — the hub does the `#[repr(C)]` byte packing so agents don't. When verifying substrate behavior end-to-end, reach for this before running a new test binary.
+
+Design detail lives in ADR-0006 (wire + topology) and ADR-0007 (schema-driven encoding).
+
 ## Commands
 
 - Build: `cargo build` (release: `cargo build --release`)
