@@ -228,6 +228,11 @@ pub struct ReceivedMail {
     /// `true` if this mail was addressed to every attached session;
     /// `false` if it was a reply targeted at this session specifically.
     pub broadcast: bool,
+    /// Substrate-attested name of the emitting mailbox (ADR-0011).
+    /// Distinguishes components that share a kind. `None` for mail
+    /// pushed by substrate core (e.g. the frame loop's `FrameStats`),
+    /// which has no sending mailbox.
+    pub origin: Option<String>,
 }
 
 #[tool_router]
@@ -276,7 +281,7 @@ impl Hub {
     }
 
     #[tool(
-        description = "Drain observation mail addressed to this MCP session. Returns everything currently queued (up to `max`, if provided). Each item reports the originating engine_id, the kind name, the raw payload bytes, and a `broadcast` flag indicating whether this mail also went to every other attached session (true) or was targeted specifically at this one (false). Non-blocking: returns an empty array if nothing is queued."
+        description = "Drain observation mail addressed to this MCP session. Returns everything currently queued (up to `max`, if provided). Each item reports the originating engine_id, the kind name, the raw payload bytes, a `broadcast` flag indicating whether this mail also went to every other attached session (true) or was targeted specifically at this one (false), and an optional `origin` — the substrate-local mailbox name of the emitting component (absent for substrate-core pushes with no sending mailbox). Non-blocking: returns an empty array if nothing is queued."
     )]
     async fn receive_mail(
         &self,
@@ -292,6 +297,7 @@ impl Hub {
                     kind_name: m.kind_name,
                     payload_bytes: m.payload,
                     broadcast: m.broadcast,
+                    origin: m.origin,
                 }),
                 Err(_) => break,
             }
@@ -877,6 +883,7 @@ mod tests {
             kind_name: kind.into(),
             payload,
             broadcast,
+            origin: None,
         }
     }
 
@@ -921,11 +928,28 @@ mod tests {
         assert_eq!(got[0].payload_bytes, vec![1, 2]);
         assert!(!got[0].broadcast);
         assert_eq!(got[0].engine_id, Uuid::from_u128(7).to_string());
+        assert!(got[0].origin.is_none());
         assert!(got[1].broadcast);
+        assert!(got[1].origin.is_none());
 
         // Queue is now empty.
         let got = drain(&hub, None).await;
         assert!(got.is_empty());
+    }
+
+    #[tokio::test]
+    async fn receive_mail_surfaces_origin() {
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let token = hub.session.token;
+
+        let mut with_origin = queued(3, "aether.observation.frame_stats", vec![], true);
+        with_origin.origin = Some("render".into());
+        push_queued(&state.sessions, token, with_origin).await;
+
+        let got = drain(&hub, None).await;
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].origin.as_deref(), Some("render"));
     }
 
     #[tokio::test]

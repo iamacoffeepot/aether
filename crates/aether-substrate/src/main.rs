@@ -213,10 +213,12 @@ fn main() -> wasmtime::Result<()> {
     let tris_for_sink = Arc::clone(&triangles_rendered);
     let sink_mbox = registry.register_sink(
         "render",
-        Arc::new(move |_kind: &str, _sender, bytes: &[u8], count: u32| {
-            verts_for_sink.lock().unwrap().extend_from_slice(bytes);
-            tris_for_sink.fetch_add(u64::from(count), Ordering::Relaxed);
-        }),
+        Arc::new(
+            move |_kind: &str, _origin: Option<&str>, _sender, bytes: &[u8], count: u32| {
+                verts_for_sink.lock().unwrap().extend_from_slice(bytes);
+                tris_for_sink.fetch_add(u64::from(count), Ordering::Relaxed);
+            },
+        ),
     );
 
     // Reserved well-known sink: mail sent here is forwarded to every
@@ -228,19 +230,26 @@ fn main() -> wasmtime::Result<()> {
         let outbound = Arc::clone(&outbound);
         registry.register_sink(
             HUB_CLAUDE_BROADCAST,
-            Arc::new(move |kind_name: &str, _sender, bytes: &[u8], _count: u32| {
-                if kind_name.is_empty() {
-                    eprintln!(
-                        "aether-substrate: {HUB_CLAUDE_BROADCAST} received mail with unregistered kind — dropping"
-                    );
-                    return;
-                }
-                outbound.send(EngineToHub::Mail(EngineMailFrame {
-                    address: ClaudeAddress::Broadcast,
-                    kind_name: kind_name.to_owned(),
-                    payload: bytes.to_vec(),
-                }));
-            }),
+            Arc::new(
+                move |kind_name: &str,
+                      origin: Option<&str>,
+                      _sender,
+                      bytes: &[u8],
+                      _count: u32| {
+                    if kind_name.is_empty() {
+                        eprintln!(
+                            "aether-substrate: {HUB_CLAUDE_BROADCAST} received mail with unregistered kind — dropping"
+                        );
+                        return;
+                    }
+                    outbound.send(EngineToHub::Mail(EngineMailFrame {
+                        address: ClaudeAddress::Broadcast,
+                        kind_name: kind_name.to_owned(),
+                        payload: bytes.to_vec(),
+                        origin: origin.map(str::to_owned),
+                    }));
+                },
+            ),
         )
     };
 

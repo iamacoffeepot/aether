@@ -14,11 +14,14 @@ use crate::mail::MailboxId;
 /// Handler invoked when mail is delivered to a substrate-owned sink.
 /// Called on a scheduler worker thread; must be `Send + Sync`.
 /// Arguments: kind name (resolved by the dispatcher so sinks don't
-/// need a reverse lookup), the originating Claude session token for
-/// hub-inbound mail (or `SessionToken::NIL` for substrate-local mail)
-/// per ADR-0008's reply-to-sender primitive, payload bytes, and the
-/// kind-implied count.
-pub type SinkHandler = Arc<dyn Fn(&str, SessionToken, &[u8], u32) + Send + Sync + 'static>;
+/// need a reverse lookup), the sending mailbox's registered name if
+/// the mail came from a component (`None` for substrate-core pushes
+/// with no sending mailbox, per ADR-0011), the originating Claude
+/// session token for hub-inbound mail (or `SessionToken::NIL` for
+/// substrate-local mail) per ADR-0008's reply-to-sender primitive,
+/// payload bytes, and the kind-implied count.
+pub type SinkHandler =
+    Arc<dyn Fn(&str, Option<&str>, SessionToken, &[u8], u32) + Send + Sync + 'static>;
 
 /// What a given mailbox actually is. The registry records this so the
 /// scheduler can dispatch appropriately without a per-mail type check.
@@ -32,6 +35,10 @@ pub enum MailboxEntry {
 pub struct Registry {
     by_name: HashMap<String, MailboxId>,
     entries: Vec<MailboxEntry>,
+    /// Parallel index: `mailbox_names[id]` is the name the mailbox was
+    /// registered with. Enables the `MailboxId` → name reverse lookup
+    /// used to stamp `origin` on observation mail (ADR-0011).
+    mailbox_names: Vec<String>,
     kind_by_name: HashMap<String, u32>,
     /// Parallel index: `kind_names[id]` is the canonical name the kind
     /// was first registered with. Kept in sync with `kind_by_name` so
@@ -45,6 +52,7 @@ impl Registry {
         Self {
             by_name: HashMap::new(),
             entries: Vec::new(),
+            mailbox_names: Vec::new(),
             kind_by_name: HashMap::new(),
             kind_names: Vec::new(),
         }
@@ -57,6 +65,7 @@ impl Registry {
         }
         let id = MailboxId(self.entries.len() as u32);
         self.entries.push(entry);
+        self.mailbox_names.push(name.clone());
         self.by_name.insert(name, id);
         id
     }
@@ -80,6 +89,13 @@ impl Registry {
 
     pub fn entry(&self, id: MailboxId) -> Option<&MailboxEntry> {
         self.entries.get(id.0 as usize)
+    }
+
+    /// Reverse of `lookup`: name for a given mailbox id, or `None` if
+    /// the id is out of range. Used by the sink dispatch path to stamp
+    /// `origin` on observation mail (ADR-0011).
+    pub fn mailbox_name(&self, id: MailboxId) -> Option<&str> {
+        self.mailbox_names.get(id.0 as usize).map(|s| s.as_str())
     }
 
     /// Register a mail kind by name. Idempotent — re-registering a name
@@ -144,15 +160,15 @@ mod tests {
         let c2 = Arc::clone(&counter);
         let id = r.register_sink(
             "heartbeat",
-            Arc::new(move |_kind, _sender, _bytes, count| {
+            Arc::new(move |_kind, _origin, _sender, _bytes, count| {
                 c2.fetch_add(count, Ordering::SeqCst);
             }),
         );
         let Some(MailboxEntry::Sink(h)) = r.entry(id) else {
             panic!("expected sink")
         };
-        h("aether.tick", SessionToken::NIL, &[], 7);
-        h("aether.tick", SessionToken::NIL, &[], 3);
+        h("aether.tick", None, SessionToken::NIL, &[], 7);
+        h("aether.tick", Some("physics"), SessionToken::NIL, &[], 3);
         assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
 
@@ -160,7 +176,7 @@ mod tests {
     fn mailbox_ids_are_dense_and_sequential() {
         let mut r = Registry::new();
         let a = r.register_component("a");
-        let b = r.register_sink("b", Arc::new(|_, _, _, _| {}));
+        let b = r.register_sink("b", Arc::new(|_, _, _, _, _| {}));
         let c = r.register_component("c");
         assert_eq!(a, MailboxId(0));
         assert_eq!(b, MailboxId(1));
@@ -209,6 +225,16 @@ mod tests {
         let id = r.register_kind("aether.tick");
         assert_eq!(r.kind_id("aether.tick"), Some(id));
         assert!(r.kind_id("absent").is_none());
+    }
+
+    #[test]
+    fn mailbox_name_reverse_lookup() {
+        let mut r = Registry::new();
+        let a = r.register_component("physics");
+        let b = r.register_sink("hub.claude.broadcast", Arc::new(|_, _, _, _, _| {}));
+        assert_eq!(r.mailbox_name(a), Some("physics"));
+        assert_eq!(r.mailbox_name(b), Some("hub.claude.broadcast"));
+        assert!(r.mailbox_name(MailboxId(999)).is_none());
     }
 
     #[test]
