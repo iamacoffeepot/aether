@@ -21,7 +21,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_hub_protocol::{
-    EngineId, EngineToHub, Hello, HubToEngine, MailFrame, read_frame, write_frame,
+    EngineId, EngineToHub, Hello, HubToEngine, KindDescriptor, MailFrame, read_frame, write_frame,
 };
 
 use crate::mail::Mail;
@@ -50,6 +50,7 @@ impl HubClient {
         addr: A,
         name: impl Into<String>,
         version: impl Into<String>,
+        kinds: Vec<KindDescriptor>,
         registry: Arc<Registry>,
         queue: Arc<MailQueue>,
     ) -> io::Result<Self> {
@@ -59,9 +60,7 @@ impl HubClient {
             pid: process::id(),
             started_unix: unix_now(),
             version: version.into(),
-            // PR 2 of the ADR-0007 arc replaces this with descriptors
-            // collected from aether-substrate-mail.
-            kinds: vec![],
+            kinds,
         });
         write_frame(&mut stream, &hello).map_err(io::Error::other)?;
 

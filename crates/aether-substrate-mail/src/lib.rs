@@ -10,6 +10,12 @@
 
 #![no_std]
 
+#[cfg(feature = "descriptors")]
+extern crate alloc;
+
+#[cfg(feature = "descriptors")]
+pub mod descriptors;
+
 use aether_mail::Kind;
 use bytemuck::{Pod, Zeroable};
 
