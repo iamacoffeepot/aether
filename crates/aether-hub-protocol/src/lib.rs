@@ -215,11 +215,13 @@ mod tests {
 
     #[test]
     fn mail_frame_roundtrip() {
+        let sender = SessionToken(Uuid::from_u128(0xa_b_c_d));
         let msg = HubToEngine::Mail(MailFrame {
             recipient_name: "hello".into(),
             kind_name: "aether.tick".into(),
             payload: vec![],
             count: 1,
+            sender,
         });
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
@@ -229,7 +231,45 @@ mod tests {
                 assert_eq!(m.recipient_name, "hello");
                 assert_eq!(m.kind_name, "aether.tick");
                 assert_eq!(m.count, 1);
+                assert_eq!(m.sender, sender);
             }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn engine_mail_frame_session_roundtrip() {
+        let token = SessionToken(Uuid::from_u128(0x1));
+        let msg = EngineToHub::Mail(EngineMailFrame {
+            address: ClaudeAddress::Session(token),
+            kind_name: "aether.observation.ping".into(),
+            payload: vec![1, 2, 3],
+        });
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
+        match back {
+            EngineToHub::Mail(m) => {
+                assert_eq!(m.address, ClaudeAddress::Session(token));
+                assert_eq!(m.kind_name, "aether.observation.ping");
+                assert_eq!(m.payload, vec![1, 2, 3]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn engine_mail_frame_broadcast_roundtrip() {
+        let msg = EngineToHub::Mail(EngineMailFrame {
+            address: ClaudeAddress::Broadcast,
+            kind_name: "aether.observation.world".into(),
+            payload: vec![],
+        });
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
+        match back {
+            EngineToHub::Mail(m) => assert_eq!(m.address, ClaudeAddress::Broadcast),
             _ => panic!("wrong variant"),
         }
     }

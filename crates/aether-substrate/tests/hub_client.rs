@@ -11,7 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_hub_protocol::{
-    EngineId, EngineToHub, Goodbye, HubToEngine, MailFrame, Uuid, Welcome, read_frame, write_frame,
+    EngineId, EngineToHub, Goodbye, HubToEngine, MailFrame, SessionToken, Uuid, Welcome,
+    read_frame, write_frame,
 };
 use aether_substrate::{HubClient, MailQueue, Registry, Scheduler};
 
@@ -124,18 +125,21 @@ fn inbound_mail_lands_in_queue_after_resolution() {
             kind_name: "aether.tick".into(),
             payload: vec![1, 2, 3],
             count: 7,
+            sender: SessionToken::NIL,
         },
         MailFrame {
             recipient_name: "hello".into(),
             kind_name: "not.registered".into(),
             payload: vec![],
             count: 1,
+            sender: SessionToken::NIL,
         },
         MailFrame {
             recipient_name: "hello".into(),
             kind_name: "aether.tick".into(),
             payload: vec![9],
             count: 1,
+            sender: SessionToken::NIL,
         },
     ] {
         write_frame(&mut stream, &HubToEngine::Mail(frame)).unwrap();
