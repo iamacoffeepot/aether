@@ -79,6 +79,21 @@ impl Kind for DrawTriangle {
     const NAME: &'static str = "aether.draw_triangle";
 }
 
+/// Periodic observation emitted by the substrate's frame loop when a
+/// hub is attached (ADR-0008). The substrate pushes one of these at
+/// `LOG_EVERY_FRAMES` cadence to the `hub.claude.broadcast` sink, so
+/// every attached Claude session learns how the engine is running
+/// without having to poll the engine directly.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct FrameStats {
+    pub frame: u64,
+    pub triangles: u64,
+}
+impl Kind for FrameStats {
+    const NAME: &'static str = "aether.observation.frame_stats";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +143,18 @@ mod tests {
         assert_eq!(MouseButton::NAME, "aether.mouse_button");
         assert_eq!(MouseMove::NAME, "aether.mouse_move");
         assert_eq!(DrawTriangle::NAME, "aether.draw_triangle");
+        assert_eq!(FrameStats::NAME, "aether.observation.frame_stats");
+    }
+
+    #[test]
+    fn frame_stats_roundtrip() {
+        let s = FrameStats {
+            frame: 120,
+            triangles: 240,
+        };
+        let bytes = encode(&s);
+        assert_eq!(bytes.len(), 16);
+        let back: FrameStats = decode(&bytes).unwrap();
+        assert_eq!(back, s);
     }
 }

@@ -24,7 +24,7 @@ use aether_substrate::{
     SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
 };
-use aether_substrate_mail::{DrawTriangle, Key, MouseButton, MouseMove, Tick};
+use aether_substrate_mail::{DrawTriangle, FrameStats, Key, MouseButton, MouseMove, Tick};
 use render::Gpu;
 use wasmtime::{Engine, Linker, Module};
 use winit::application::ApplicationHandler;
@@ -41,10 +41,12 @@ const LOG_EVERY_FRAMES: u64 = 120;
 struct App {
     queue: Arc<MailQueue>,
     component_mbox: MailboxId,
+    broadcast_mbox: MailboxId,
     kind_tick: u32,
     kind_key: u32,
     kind_mouse_button: u32,
     kind_mouse_move: u32,
+    kind_frame_stats: u32,
     frame_vertices: Arc<Mutex<Vec<u8>>>,
     triangles_rendered: Arc<AtomicU64>,
     window: Option<Arc<Window>>,
@@ -94,11 +96,22 @@ impl ApplicationHandler for App {
                 }
                 self.frame += 1;
                 if self.frame.is_multiple_of(LOG_EVERY_FRAMES) {
+                    let triangles = self.triangles_rendered.load(Ordering::Relaxed);
                     eprintln!(
                         "  frame {:>5}  triangles_rendered={}",
-                        self.frame,
-                        self.triangles_rendered.load(Ordering::Relaxed),
+                        self.frame, triangles,
                     );
+                    // Emit an observation to every attached Claude
+                    // session. No-op when no hub is connected.
+                    self.queue.push(Mail::new(
+                        self.broadcast_mbox,
+                        self.kind_frame_stats,
+                        encode(&FrameStats {
+                            frame: self.frame,
+                            triangles,
+                        }),
+                        1,
+                    ));
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -164,6 +177,7 @@ fn main() -> wasmtime::Result<()> {
     let kind_mouse_button = registry.register_kind(MouseButton::NAME);
     let kind_mouse_move = registry.register_kind(MouseMove::NAME);
     registry.register_kind(DrawTriangle::NAME);
+    let kind_frame_stats = registry.register_kind(FrameStats::NAME);
 
     let frame_vertices = Arc::new(Mutex::new(Vec::<u8>::with_capacity(4096)));
     let triangles_rendered = Arc::new(AtomicU64::new(0));
@@ -183,7 +197,7 @@ fn main() -> wasmtime::Result<()> {
     // outbound handle is disconnected and the sink silently drops —
     // the component doesn't have to care either way.
     let outbound = HubOutbound::disconnected();
-    {
+    let broadcast_mbox = {
         let outbound = Arc::clone(&outbound);
         registry.register_sink(
             HUB_CLAUDE_BROADCAST,
@@ -200,8 +214,8 @@ fn main() -> wasmtime::Result<()> {
                     payload: bytes.to_vec(),
                 }));
             }),
-        );
-    }
+        )
+    };
 
     // Mailbox contract: component=0, render sink=1. The component
     // hardcodes 1 as its send_mail recipient; assert here so a mismatch
@@ -264,10 +278,12 @@ fn main() -> wasmtime::Result<()> {
     let mut app = App {
         queue,
         component_mbox,
+        broadcast_mbox,
         kind_tick,
         kind_key,
         kind_mouse_button,
         kind_mouse_move,
+        kind_frame_stats,
         frame_vertices,
         triangles_rendered: Arc::clone(&triangles_rendered),
         window: None,

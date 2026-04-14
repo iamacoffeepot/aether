@@ -18,15 +18,18 @@ Early-stage Rust project (edition 2024). Vision: a game engine where Claude sits
 
 ## MCP harness
 
-Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision. Starting `cargo run -p aether-hub` and `AETHER_HUB_URL=127.0.0.1:8889 cargo run -p aether-substrate` exposes three tools to a Claude Code session pointed at the project-scoped `.mcp.json`:
+Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision. Starting `cargo run -p aether-hub` and `AETHER_HUB_URL=127.0.0.1:8889 cargo run -p aether-substrate` exposes four tools to a Claude Code session pointed at the project-scoped `.mcp.json`:
 
 - `mcp__aether-hub__list_engines` — connected engines (UUID + name/pid/version).
 - `mcp__aether-hub__describe_kinds(engine_id)` — the kind vocabulary the engine declared at handshake, with enough structural detail to build params.
 - `mcp__aether-hub__send_mail(mails)` — batched, best-effort. Each item takes either `params` (hub encodes via the kind's descriptor) or `payload_bytes` (raw escape hatch for `Opaque` kinds). Response is a per-item status array; one failure doesn't abort siblings.
+- `mcp__aether-hub__receive_mail(max?)` — non-blocking drain of observation mail the engine pushed to this session. Each item carries `engine_id`, `kind_name`, `payload_bytes`, and a `broadcast` flag (`true` means fan-out to every attached session, `false` means targeted reply-to-sender).
 
 Prefer `params` over `payload_bytes` when the kind is describable — the hub does the `#[repr(C)]` byte packing so agents don't. When verifying substrate behavior end-to-end, reach for this before running a new test binary.
 
-Design detail lives in ADR-0006 (wire + topology) and ADR-0007 (schema-driven encoding).
+The observation path (ADR-0008) goes the other way: engines emit to the well-known sink `"hub.claude.broadcast"` and the hub fans out to every attached session. The live substrate binary pushes `aether.observation.frame_stats` there every 120 frames — a good smoke test for `receive_mail`. Reply-to-sender from a WASM component is plumbed at the wire level but not yet exposed as a host fn.
+
+Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encoding), and ADR-0008 (observation path).
 
 ## Commands
 
