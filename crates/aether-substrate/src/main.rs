@@ -53,9 +53,27 @@ struct App {
     gpu: Option<Gpu>,
     started: Option<Instant>,
     frame: u64,
+    occluded: bool,
     // Scheduler is owned so its workers are joined on Drop when the event
     // loop exits — we never reference it otherwise.
     _scheduler: Scheduler,
+}
+
+impl App {
+    fn set_occluded(&mut self, occluded: bool, event_loop: &ActiveEventLoop) {
+        if self.occluded == occluded {
+            return;
+        }
+        self.occluded = occluded;
+        if occluded {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        } else {
+            event_loop.set_control_flow(ControlFlow::Poll);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -81,8 +99,17 @@ impl ApplicationHandler for App {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size);
                 }
+                // Windows reports minimize as a zero-dimension resize;
+                // macOS uses Occluded. Treat both as "pause the loop".
+                self.set_occluded(size.width == 0 || size.height == 0, event_loop);
+            }
+            WindowEvent::Occluded(occluded) => {
+                self.set_occluded(occluded, event_loop);
             }
             WindowEvent::RedrawRequested => {
+                if self.occluded {
+                    return;
+                }
                 self.queue.push(Mail::new(
                     self.component_mbox,
                     self.kind_tick,
@@ -290,6 +317,7 @@ fn main() -> wasmtime::Result<()> {
         gpu: None,
         started: None,
         frame: 0,
+        occluded: false,
         _scheduler: scheduler,
     };
 
