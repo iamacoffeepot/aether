@@ -4,12 +4,13 @@
 // `--decode <kind> <bytes>`.
 //
 // Usage:
-//   encode_load                         # encode LoadComponentPayload
-//   encode_load drop <id>               # encode DropComponentPayload
-//   encode_load replace <id> [name]     # encode ReplaceComponentPayload
-//   encode_load --decode load  <bytes>  # decode LoadResultPayload
-//   encode_load --decode drop  <bytes>  # decode DropResultPayload
-//   encode_load --decode repl  <bytes>  # decode ReplaceResultPayload
+//   encode_load                                    # encode a tiny WAT stub
+//   encode_load --wasm-file <path> [--name <n>]    # encode real WASM bytes
+//   encode_load drop <id>                          # encode DropComponentPayload
+//   encode_load replace <id>                       # encode ReplaceComponentPayload
+//   encode_load --decode load  <bytes>             # decode LoadResultPayload
+//   encode_load --decode drop  <bytes>             # decode DropResultPayload
+//   encode_load --decode repl  <bytes>             # decode ReplaceResultPayload
 //
 // `<bytes>` is a comma-separated decimal byte list (what MCP
 // `receive_mail` emits).
@@ -81,16 +82,45 @@ fn main() {
         }
     }
 
-    // Default: encode LoadComponentPayload.
-    let wasm = wat::parse_str(WAT).expect("compile WAT");
-    let payload = LoadComponentPayload {
-        wasm,
-        kinds: vec![KindDescriptor {
+    // Default: encode LoadComponentPayload. A `--wasm-file <path>`
+    // flag swaps the built-in WAT stub for an external module
+    // (e.g. the hello-component release build); `--name <n>` sets
+    // the mailbox name the substrate will register.
+    let mut wasm_path: Option<String> = None;
+    let mut name: Option<String> = Some("smoke".into());
+    let mut use_smoke_kind = true;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--wasm-file" => {
+                wasm_path = Some(args[i + 1].clone());
+                use_smoke_kind = false;
+                i += 2;
+            }
+            "--name" => {
+                name = Some(args[i + 1].clone());
+                i += 2;
+            }
+            other => panic!("unknown arg {other:?}"),
+        }
+    }
+    let wasm = match wasm_path {
+        Some(p) => std::fs::read(&p).unwrap_or_else(|e| panic!("read {p:?}: {e}")),
+        None => wat::parse_str(WAT).expect("compile WAT"),
+    };
+    let kinds = if use_smoke_kind {
+        vec![KindDescriptor {
             name: "smoke.ping".into(),
             encoding: KindEncoding::Signal,
-        }],
-        name: Some("smoke".into()),
+        }]
+    } else {
+        // Real components (like aether-hello-component) resolve the
+        // kinds they need by name via the `resolve_kind` host fn —
+        // substrate boot already registers Tick, Key, MouseButton,
+        // MouseMove, and DrawTriangle. No extra descriptors needed.
+        vec![]
     };
+    let payload = LoadComponentPayload { wasm, kinds, name };
     let bytes = postcard::to_allocvec(&payload).expect("encode");
     print_bytes(&bytes);
 }
