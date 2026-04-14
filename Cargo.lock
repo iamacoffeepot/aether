@@ -28,10 +28,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-hello-component"
+name = "aether-component"
 version = "0.1.0"
 dependencies = [
  "aether-mail",
+ "bytemuck",
+]
+
+[[package]]
+name = "aether-hello-component"
+version = "0.1.0"
+dependencies = [
+ "aether-component",
  "aether-substrate-mail",
 ]
 
