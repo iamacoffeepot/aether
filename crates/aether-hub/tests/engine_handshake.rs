@@ -47,6 +47,7 @@ fn hello(name: &str) -> EngineToHub {
         pid: 1,
         started_unix: 0,
         version: "test".into(),
+        kinds: vec![],
     })
 }
 
