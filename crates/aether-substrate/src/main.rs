@@ -189,7 +189,7 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> wasmtime::Result<()> {
-    let engine = Engine::default();
+    let engine = Arc::new(Engine::default());
     let module = Module::new(&engine, HELLO_WASM)?;
 
     let registry = Arc::new(Registry::new());
@@ -275,6 +275,7 @@ fn main() -> wasmtime::Result<()> {
 
     let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
     host_fns::register(&mut linker)?;
+    let linker = Arc::new(linker);
 
     let ctx = SubstrateCtx {
         sender: component_mbox,
@@ -291,6 +292,26 @@ fn main() -> wasmtime::Result<()> {
         components,
         WORKERS,
     );
+
+    // Wire the ADR-0010 control plane. Registered after the scheduler
+    // exists so the handler can capture the runtime component table
+    // directly rather than an `Arc<Scheduler>` (which would cycle back
+    // through the registry via this sink).
+    {
+        let control_plane = aether_substrate::ControlPlane {
+            engine: Arc::clone(&engine),
+            linker: Arc::clone(&linker),
+            registry: Arc::clone(&registry),
+            queue: Arc::clone(&queue),
+            outbound: Arc::clone(&outbound),
+            components: scheduler.components().clone(),
+            default_name_counter: Arc::new(AtomicU64::new(0)),
+        };
+        registry.register_sink(
+            aether_substrate::AETHER_CONTROL,
+            control_plane.into_sink_handler(),
+        );
+    }
 
     // Optional hub connection. If `AETHER_HUB_URL` is set, dial it and
     // keep the `HubClient` alive for the lifetime of the process so the

@@ -8,6 +8,7 @@
 // wires these into a real frame-loop binary with a first component.
 
 pub mod component;
+pub mod control;
 pub mod ctx;
 pub mod host_fns;
 pub mod hub_client;
@@ -17,6 +18,7 @@ pub mod registry;
 pub mod scheduler;
 
 pub use component::Component;
+pub use control::{AETHER_CONTROL, ControlPlane, LoadComponentPayload, LoadResultPayload};
 pub use ctx::SubstrateCtx;
 pub use hub_client::{HubClient, HubOutbound};
 pub use mail::{Mail, MailKind, MailboxId};

@@ -89,6 +89,24 @@ impl fmt::Display for KindConflict {
 
 impl std::error::Error for KindConflict {}
 
+/// A runtime mailbox registration lost to name collision. Returned
+/// from `try_register_component` (ADR-0010) so the load handler can
+/// reply with an error instead of panicking. The init path that
+/// registers hard-coded mailbox names still uses `register_component`
+/// and panics — collisions there are bugs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameConflict {
+    pub name: String,
+}
+
+impl fmt::Display for NameConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "mailbox name {:?} already registered", self.name)
+    }
+}
+
+impl std::error::Error for NameConflict {}
+
 impl Registry {
     pub fn new() -> Self {
         Self {
@@ -111,8 +129,31 @@ impl Registry {
 
     /// Register a WASM component under `name`. The returned `MailboxId`
     /// is handed to the scheduler alongside the component's `Actor`.
+    /// Panics on a name collision — callers that cannot assume unique
+    /// names (e.g. ADR-0010's load handler, which accepts names from
+    /// an agent) should use `try_register_component` instead.
     pub fn register_component(&self, name: impl Into<String>) -> MailboxId {
         self.insert(name, MailboxEntry::Component)
+    }
+
+    /// Non-panicking variant of `register_component` for runtime
+    /// registrations. Returns `NameConflict` if the name is already in
+    /// use, leaving the registry untouched; otherwise allocates a
+    /// fresh `MailboxId` and records the component entry.
+    pub fn try_register_component(
+        &self,
+        name: impl Into<String>,
+    ) -> Result<MailboxId, NameConflict> {
+        let name = name.into();
+        let mut inner = self.inner.write().unwrap();
+        if inner.by_name.contains_key(&name) {
+            return Err(NameConflict { name });
+        }
+        let id = MailboxId(inner.entries.len() as u32);
+        inner.entries.push(MailboxEntry::Component);
+        inner.mailbox_names.push(name.clone());
+        inner.by_name.insert(name, id);
+        Ok(id)
     }
 
     /// Register a substrate-owned sink. Mail to this mailbox is handled
@@ -440,6 +481,19 @@ mod tests {
         let _ = r.register_kind("aether.foo");
         let stored = r.kind_descriptor(0).expect("descriptor present");
         assert!(matches!(stored.encoding, KindEncoding::Pod { .. }));
+    }
+
+    #[test]
+    fn try_register_component_is_non_panicking_on_collision() {
+        let r = Registry::new();
+        let first = r.try_register_component("loaded").expect("fresh name");
+        let err = r
+            .try_register_component("loaded")
+            .expect_err("collision must not panic");
+        assert_eq!(err.name, "loaded");
+        assert_eq!(r.lookup("loaded"), Some(first));
+        // Entries count unchanged after the failed second attempt.
+        assert_eq!(r.len(), 1);
     }
 
     #[test]
