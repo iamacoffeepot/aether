@@ -1,41 +1,36 @@
-// First real aether component. On each tick the component emits a
-// triangle as a draw-triangle mail to the substrate's render sink.
-// Positions are clip-space; the component has no camera/transform
-// story yet.
+// First real aether component, now built on the ADR-0012 SDK.
+// On each tick it emits a triangle as draw-triangle mail to the
+// substrate's render sink. Positions are clip-space; the component
+// has no camera/transform story yet.
 //
-// Per ADR-0005, kind ids are resolved by name at component init — the
-// substrate assigns them; the guest caches them in statics. Payload
-// types are imported from `aether-substrate-mail` so wire layout stays
-// in one place. The render sink's mailbox id is resolved the same way
-// via `resolve_mailbox`; this matters under ADR-0010's empty boot,
-// where the substrate's mailbox allocation order is no longer fixed
-// and hardcoded ids would target the wrong sink.
+// What the SDK (aether-component) replaces compared to the pre-SDK
+// shape:
+//   - raw `extern "C"` block → `aether_component::raw` owns it.
+//   - three `static mut u32` sentinel slots → two typed `Option`s
+//     holding `KindId<Tick>` and `Sink<DrawTriangle>`.
+//   - `ptr as u32`, `size_of::<T>() as u32`, `count` math at the
+//     send site → `Sink::send(&payload)`.
+//   - `#[cfg(target_arch = "wasm32")]` guards per item → none;
+//     the SDK's raw module has host-target stubs so this whole file
+//     compiles for `cargo test --workspace` on any target.
 //
-// `#[cfg(target_arch = "wasm32")]` guards bodies so the crate still
-// compiles for the host target in `cargo test --workspace` (where the
-// `aether` imports aren't linkable and `ptr as u32` would truncate a
-// 64-bit host pointer).
+// The `#[unsafe(no_mangle)] extern "C" fn init/receive` exports and
+// the `static mut` backing store remain hand-written — ADR-0014's
+// `Component` trait + `export!` macro will absorb those next.
 
-#[cfg(target_arch = "wasm32")]
-use aether_mail::Kind;
-#[cfg(target_arch = "wasm32")]
+use aether_component::{KindId, Sink, resolve, resolve_sink};
 use aether_substrate_mail::{DrawTriangle, Tick, Vertex};
 
-// `u32::MAX` sentinel matches the host's KIND_NOT_FOUND /
-// MAILBOX_NOT_FOUND — if `init` didn't run or a name is missing, the
-// dispatch below simply no-ops instead of sending to mailbox 0 or a
-// wrong kind id.
-#[cfg(target_arch = "wasm32")]
-static mut KIND_TICK: u32 = u32::MAX;
-#[cfg(target_arch = "wasm32")]
-static mut KIND_DRAW_TRIANGLE: u32 = u32::MAX;
-#[cfg(target_arch = "wasm32")]
-static mut RENDER_SINK: u32 = u32::MAX;
+// Resolved at init; read on every receive. `Option` carries the
+// "not yet resolved" state without a sentinel u32 — the SDK's
+// `resolve` panics on failure, so a `Some` here is always a valid
+// id.
+static mut TICK: Option<KindId<Tick>> = None;
+static mut RENDER: Option<Sink<DrawTriangle>> = None;
 
 // A fixed clip-space triangle with per-vertex color. Typed as
-// DrawTriangle so the vertex layout matches the substrate's decode
-// type; bytemuck handles the &T-to-bytes cast at send time.
-#[cfg(target_arch = "wasm32")]
+// DrawTriangle so `Sink::send` can byte-cast it without the caller
+// doing pointer math.
 static TRIANGLE: DrawTriangle = DrawTriangle {
     verts: [
         Vertex {
@@ -62,40 +57,20 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
     ],
 };
 
-#[cfg(target_arch = "wasm32")]
-#[link(wasm_import_module = "aether")]
-unsafe extern "C" {
-    fn send_mail(recipient: u32, kind: u32, ptr: u32, len: u32, count: u32) -> u32;
-    fn resolve_kind(name_ptr: u32, name_len: u32) -> u32;
-    fn resolve_mailbox(name_ptr: u32, name_len: u32) -> u32;
-}
-
-#[cfg(target_arch = "wasm32")]
-unsafe fn resolve_k(name: &str) -> u32 {
-    unsafe { resolve_kind(name.as_ptr() as u32, name.len() as u32) }
-}
-
-#[cfg(target_arch = "wasm32")]
-unsafe fn resolve_m(name: &str) -> u32 {
-    unsafe { resolve_mailbox(name.as_ptr() as u32, name.len() as u32) }
-}
-
-/// Runs once before the first `receive`. Resolves each kind name and
-/// the render-sink mailbox name this component cares about and caches
-/// the assigned ids. Return value is currently informational.
+/// Runs once before the first `receive`. Resolves the kinds and the
+/// render sink this component cares about and caches them in typed
+/// statics.
 ///
 /// # Safety
-/// Called by the substrate exactly once, before any `receive` call, on
-/// a thread that owns this component's linear memory. The body mutates
-/// the resolution statics — safe because there is no concurrent reader
-/// until `init` returns.
+/// Called by the substrate exactly once, before any `receive` call,
+/// on a thread that owns this component's linear memory. The body
+/// writes to the resolution statics — safe because there is no
+/// concurrent reader until `init` returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn init() -> u32 {
-    #[cfg(target_arch = "wasm32")]
     unsafe {
-        KIND_TICK = resolve_k(Tick::NAME);
-        KIND_DRAW_TRIANGLE = resolve_k(DrawTriangle::NAME);
-        RENDER_SINK = resolve_m("render");
+        TICK = Some(resolve::<Tick>());
+        RENDER = Some(resolve_sink::<DrawTriangle>("render"));
     }
     0
 }
@@ -106,16 +81,12 @@ pub unsafe extern "C" fn init() -> u32 {
 /// inbound payload; the tick's empty body is unused.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn receive(kind: u32, _ptr: u32, _count: u32) -> u32 {
-    #[cfg(target_arch = "wasm32")]
     unsafe {
-        if kind == KIND_TICK && RENDER_SINK != u32::MAX {
-            let ptr = &TRIANGLE as *const DrawTriangle as u32;
-            let len = core::mem::size_of::<DrawTriangle>() as u32;
-            // count = number of triangles in this payload (one).
-            send_mail(RENDER_SINK, KIND_DRAW_TRIANGLE, ptr, len, 1);
+        if let (Some(tick), Some(render)) = (TICK, RENDER)
+            && tick.matches(kind)
+        {
+            render.send(&TRIANGLE);
         }
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    let _ = kind;
     0
 }
