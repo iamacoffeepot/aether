@@ -192,7 +192,7 @@ fn main() -> wasmtime::Result<()> {
     let engine = Engine::default();
     let module = Module::new(&engine, HELLO_WASM)?;
 
-    let mut registry = Registry::new();
+    let registry = Arc::new(Registry::new());
     let component_mbox = registry.register_component("hello");
 
     // Pre-register every substrate-owned kind by name so the component
@@ -259,7 +259,6 @@ fn main() -> wasmtime::Result<()> {
     assert_eq!(component_mbox, MailboxId(0));
     assert_eq!(sink_mbox, MailboxId(1));
 
-    let registry = Arc::new(registry);
     let queue = Arc::new(MailQueue::new());
 
     let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);

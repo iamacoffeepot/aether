@@ -43,7 +43,7 @@ fn tick_roundtrip_component_to_sink() {
     let engine = Engine::default();
     let module = Module::new(&engine, WAT).expect("compile wat");
 
-    let mut registry = Registry::new();
+    let registry = Arc::new(Registry::new());
     let component_mbox = registry.register_component("hello");
 
     let counter = Arc::new(AtomicU32::new(0));
@@ -56,8 +56,6 @@ fn tick_roundtrip_component_to_sink() {
     );
     assert_eq!(component_mbox, MailboxId(0));
     assert_eq!(sink_mbox, MailboxId(1));
-
-    let registry = Arc::new(registry);
     let queue = Arc::new(MailQueue::new());
 
     let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
