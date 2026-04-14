@@ -19,7 +19,9 @@ pub use engine::HEARTBEAT_INTERVAL;
 pub use engine::READ_TIMEOUT;
 pub use mcp::{DEFAULT_MCP_PORT, HubState, run_mcp_server};
 pub use registry::{EngineRecord, EngineRegistry};
-pub use session::{SESSION_CHANNEL_CAPACITY, SessionHandle, SessionRecord, SessionRegistry};
+pub use session::{
+    QueuedMail, SESSION_CHANNEL_CAPACITY, SessionHandle, SessionRecord, SessionRegistry,
+};
 
 /// Default port the hub binds for engine TCP clients. ADR-0006 V0 fixes
 /// this; `AETHER_ENGINE_PORT` overrides.
