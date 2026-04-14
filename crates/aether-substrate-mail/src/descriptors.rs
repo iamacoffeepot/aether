@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use aether_hub_protocol::{KindDescriptor, KindEncoding, PodField, PodFieldType, PodPrimitive};
 use aether_mail::Kind;
 
-use crate::{DrawTriangle, Key, MouseButton, MouseMove, Tick};
+use crate::{DrawTriangle, FrameStats, Key, MouseButton, MouseMove, Tick};
 
 /// Every kind the substrate exposes, in the order the `Registry` will
 /// register them. Caller ignores the order — names are the contract.
@@ -35,6 +35,13 @@ pub fn all() -> Vec<KindDescriptor> {
         // structs, so this kind stays opaque and clients use the raw
         // payload_bytes path.
         opaque(DrawTriangle::NAME),
+        pod(
+            FrameStats::NAME,
+            vec![
+                scalar("frame", PodPrimitive::U64),
+                scalar("triangles", PodPrimitive::U64),
+            ],
+        ),
     ]
 }
 
@@ -114,5 +121,21 @@ mod tests {
         let descs = all();
         let dt = descs.iter().find(|d| d.name == DrawTriangle::NAME).unwrap();
         assert_eq!(dt.encoding, KindEncoding::Opaque);
+    }
+
+    #[test]
+    fn frame_stats_fields_match_struct_layout() {
+        let descs = all();
+        let fs = descs.iter().find(|d| d.name == FrameStats::NAME).unwrap();
+        let KindEncoding::Pod { fields } = &fs.encoding else {
+            panic!("expected Pod")
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "frame");
+        assert_eq!(fields[1].name, "triangles");
+        assert!(matches!(
+            fields[0].ty,
+            PodFieldType::Scalar(PodPrimitive::U64)
+        ));
     }
 }
