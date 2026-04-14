@@ -47,6 +47,12 @@ impl SubstrateCtx {
             Some(MailboxEntry::Component) => {
                 self.queue.push(Mail::new(recipient, kind, payload, count));
             }
+            Some(MailboxEntry::Dropped) => {
+                eprintln!(
+                    "substrate: component {:?} sent mail to dropped mailbox {:?} — discarded",
+                    self.sender, recipient
+                );
+            }
             None => {
                 eprintln!(
                     "substrate: dropped mail from {:?} to unknown mailbox {:?}",

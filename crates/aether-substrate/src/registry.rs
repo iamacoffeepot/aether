@@ -37,6 +37,12 @@ pub enum MailboxEntry {
     Component,
     /// Mail is handled inline by a substrate-native closure.
     Sink(SinkHandler),
+    /// Mailbox has been explicitly dropped (ADR-0010). The slot stays
+    /// in place so the numeric id isn't reused, but any mail addressed
+    /// to it is discarded by the scheduler / ctx dispatch. The name is
+    /// released from the lookup table so a subsequent load can reuse
+    /// it.
+    Dropped,
 }
 
 pub struct Registry {
@@ -107,6 +113,29 @@ impl fmt::Display for NameConflict {
 
 impl std::error::Error for NameConflict {}
 
+/// Reasons `Registry::drop_mailbox` can refuse. Distinct from the
+/// post-drop dispatch log, which the scheduler handles independently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DropError {
+    UnknownId(MailboxId),
+    NotComponent { id: MailboxId, kind: &'static str },
+    AlreadyDropped(MailboxId),
+}
+
+impl fmt::Display for DropError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DropError::UnknownId(id) => write!(f, "unknown mailbox id {:?}", id),
+            DropError::NotComponent { id, kind } => {
+                write!(f, "mailbox {:?} is a {kind}, not a component", id)
+            }
+            DropError::AlreadyDropped(id) => write!(f, "mailbox {:?} already dropped", id),
+        }
+    }
+}
+
+impl std::error::Error for DropError {}
+
 impl Registry {
     pub fn new() -> Self {
         Self {
@@ -154,6 +183,33 @@ impl Registry {
         inner.mailbox_names.push(name.clone());
         inner.by_name.insert(name, id);
         Ok(id)
+    }
+
+    /// Invalidate a component mailbox (ADR-0010). Releases the name
+    /// from the lookup table so a subsequent `load_component` may
+    /// reuse it, and marks the entry as `Dropped` so dispatch-path
+    /// readers can distinguish an intentional drop from an unknown
+    /// id. Returns the released name on success; callers that need
+    /// to tear down the underlying `Component` do so via the
+    /// scheduler's `remove_component`. Refuses to drop `Sink` entries
+    /// — those are substrate-owned and outlive the control plane.
+    pub fn drop_mailbox(&self, id: MailboxId) -> Result<String, DropError> {
+        let mut inner = self.inner.write().unwrap();
+        let idx = id.0 as usize;
+        let Some(entry) = inner.entries.get(idx) else {
+            return Err(DropError::UnknownId(id));
+        };
+        match entry {
+            MailboxEntry::Component => {}
+            MailboxEntry::Sink(_) => {
+                return Err(DropError::NotComponent { id, kind: "sink" });
+            }
+            MailboxEntry::Dropped => return Err(DropError::AlreadyDropped(id)),
+        }
+        let name = std::mem::take(&mut inner.mailbox_names[idx]);
+        inner.by_name.remove(&name);
+        inner.entries[idx] = MailboxEntry::Dropped;
+        Ok(name)
     }
 
     /// Register a substrate-owned sink. Mail to this mailbox is handled
@@ -494,6 +550,43 @@ mod tests {
         assert_eq!(r.lookup("loaded"), Some(first));
         // Entries count unchanged after the failed second attempt.
         assert_eq!(r.len(), 1);
+    }
+
+    #[test]
+    fn drop_mailbox_frees_name_and_marks_entry_dropped() {
+        let r = Registry::new();
+        let id = r.try_register_component("loaded").unwrap();
+        let name = r.drop_mailbox(id).expect("drop");
+        assert_eq!(name, "loaded");
+        assert!(r.lookup("loaded").is_none(), "name should be reusable");
+        assert!(
+            matches!(r.entry(id), Some(MailboxEntry::Dropped)),
+            "entry must mark id as dropped"
+        );
+        // Reload the same name — allocates a fresh id after the dropped slot.
+        let reloaded = r.try_register_component("loaded").unwrap();
+        assert_ne!(reloaded, id);
+        assert_eq!(r.lookup("loaded"), Some(reloaded));
+    }
+
+    #[test]
+    fn drop_mailbox_rejects_sink_and_unknown_and_repeat() {
+        let r = Registry::new();
+        let sink = r.register_sink("heartbeat", Arc::new(|_, _, _, _, _| {}));
+        assert!(matches!(
+            r.drop_mailbox(sink),
+            Err(DropError::NotComponent { .. })
+        ));
+        assert!(matches!(
+            r.drop_mailbox(MailboxId(999)),
+            Err(DropError::UnknownId(_))
+        ));
+        let c = r.try_register_component("x").unwrap();
+        r.drop_mailbox(c).unwrap();
+        assert!(matches!(
+            r.drop_mailbox(c),
+            Err(DropError::AlreadyDropped(_))
+        ));
     }
 
     #[test]

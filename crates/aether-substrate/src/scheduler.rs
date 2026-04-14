@@ -124,6 +124,22 @@ impl Scheduler {
             .remove(&id)
             .map(|m| m.into_inner().expect("component mutex poisoned"))
     }
+
+    /// Atomically rebind `id` to a freshly instantiated component
+    /// (ADR-0010). Returns the old component so the caller can drop
+    /// it after the swap; wasmtime resources (linear memory, Store)
+    /// are reclaimed when the returned value falls out of scope.
+    /// The entry is replaced under the write lock so no worker can
+    /// observe a gap between old and new — any mail that gets popped
+    /// after the swap is delivered to the new instance.
+    pub fn replace_component(&self, id: MailboxId, new_component: Component) -> Option<Component> {
+        let mut table = self.ctx.components.write().unwrap();
+        let old = table
+            .remove(&id)
+            .map(|m| m.into_inner().expect("component mutex poisoned"));
+        table.insert(id, Mutex::new(new_component));
+        old
+    }
 }
 
 impl Drop for Scheduler {
@@ -163,6 +179,12 @@ fn worker_loop(ctx: Arc<WorkerContext>) {
                         );
                     }
                 }
+            }
+            Some(MailboxEntry::Dropped) => {
+                eprintln!(
+                    "substrate: mail to dropped mailbox {:?} — discarded",
+                    recipient
+                );
             }
             None => {
                 eprintln!(

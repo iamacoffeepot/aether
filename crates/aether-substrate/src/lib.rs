@@ -18,7 +18,10 @@ pub mod registry;
 pub mod scheduler;
 
 pub use component::Component;
-pub use control::{AETHER_CONTROL, ControlPlane, LoadComponentPayload, LoadResultPayload};
+pub use control::{
+    AETHER_CONTROL, ControlPlane, DropComponentPayload, DropResultPayload, LoadComponentPayload,
+    LoadResultPayload, ReplaceComponentPayload, ReplaceResultPayload,
+};
 pub use ctx::SubstrateCtx;
 pub use hub_client::{HubClient, HubOutbound};
 pub use mail::{Mail, MailKind, MailboxId};

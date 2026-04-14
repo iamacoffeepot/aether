@@ -136,6 +136,23 @@ impl Kind for LoadResult {
     const NAME: &'static str = "aether.control.load_result";
 }
 
+/// `aether.control.drop_result` — reply-to-sender for `drop_component`.
+/// Carries `Ok` on success or an error describing why the drop failed
+/// (unknown mailbox, mailbox wasn't a component, already dropped).
+pub struct DropResult;
+impl Kind for DropResult {
+    const NAME: &'static str = "aether.control.drop_result";
+}
+
+/// `aether.control.replace_result` — reply-to-sender for
+/// `replace_component`. Carries `Ok` on success or an error if the
+/// target mailbox was invalid, the new module failed to compile, or
+/// instantiation failed.
+pub struct ReplaceResult;
+impl Kind for ReplaceResult {
+    const NAME: &'static str = "aether.control.replace_result";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +207,8 @@ mod tests {
         assert_eq!(ReplaceComponent::NAME, "aether.control.replace_component");
         assert_eq!(DropComponent::NAME, "aether.control.drop_component");
         assert_eq!(LoadResult::NAME, "aether.control.load_result");
+        assert_eq!(DropResult::NAME, "aether.control.drop_result");
+        assert_eq!(ReplaceResult::NAME, "aether.control.replace_result");
     }
 
     #[test]
