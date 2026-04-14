@@ -19,7 +19,12 @@ async fn main() -> std::io::Result<()> {
     let registry = EngineRegistry::new();
     let sessions = SessionRegistry::new();
     let pending = PendingSpawns::new();
-    let state = HubState::new(registry.clone(), sessions.clone());
+    let state = HubState::new(
+        registry.clone(),
+        sessions.clone(),
+        pending.clone(),
+        engine_addr,
+    );
 
     let engine_task = tokio::spawn(run_engine_listener(
         engine_addr,

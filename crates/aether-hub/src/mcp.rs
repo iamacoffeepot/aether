@@ -1,15 +1,17 @@
-// Claude-facing MCP tool surface. ADR-0006 V0 + ADR-0007: three tools
-// — `send_mail` (plural, schema-driven), `list_engines`, and
-// `describe_kinds` (read-only introspection over the per-engine kind
-// vocabulary shipped at handshake).
+// Claude-facing MCP tool surface. ADR-0006 V0 + ADR-0007 +
+// ADR-0008 + ADR-0009: send_mail / list_engines / describe_kinds /
+// receive_mail / spawn_substrate.
 //
 // The rmcp `Service` factory is invoked per session, so `Hub` is cheap
 // to clone and shares a single `HubState` via `Arc`. Per-tool output is
 // returned as a JSON-encoded `String`; rmcp wraps it into a
 // `Content::text` automatically via `IntoContents`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use aether_hub_protocol::{
     EngineId, HubToEngine, KindDescriptor, KindEncoding, MailFrame, SessionToken, Uuid,
@@ -30,6 +32,7 @@ use tokio::sync::{Mutex, mpsc};
 use crate::encoder::encode_pod;
 use crate::registry::{EngineRecord, EngineRegistry};
 use crate::session::{QueuedMail, SessionHandle, SessionRegistry};
+use crate::spawn::{DEFAULT_HANDSHAKE_TIMEOUT, PendingSpawns, SpawnOpts};
 
 /// Default port the hub binds for MCP clients. Overridable via
 /// `AETHER_MCP_PORT`.
@@ -40,11 +43,26 @@ pub const DEFAULT_MCP_PORT: u16 = 8888;
 pub struct HubState {
     engines: EngineRegistry,
     sessions: SessionRegistry,
+    pending_spawns: PendingSpawns,
+    /// Address of the hub's engine TCP listener. Injected as
+    /// `AETHER_HUB_URL` into spawned substrates so they dial back to
+    /// this hub instance.
+    hub_engine_addr: SocketAddr,
 }
 
 impl HubState {
-    pub fn new(engines: EngineRegistry, sessions: SessionRegistry) -> Arc<Self> {
-        Arc::new(Self { engines, sessions })
+    pub fn new(
+        engines: EngineRegistry,
+        sessions: SessionRegistry,
+        pending_spawns: PendingSpawns,
+        hub_engine_addr: SocketAddr,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            engines,
+            sessions,
+            pending_spawns,
+            hub_engine_addr,
+        })
     }
 }
 
@@ -140,6 +158,35 @@ pub struct EngineInfo {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SpawnSubstrateArgs {
+    /// Absolute path to the substrate binary the hub should launch.
+    /// The hub does not build, resolve, or locate binaries — the caller
+    /// passes a path that exists.
+    pub binary_path: String,
+    /// Additional command-line arguments to pass to the substrate.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables for the child. `AETHER_HUB_URL` is
+    /// injected automatically to point at this hub; if the caller
+    /// includes it here, the caller's value wins.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Handshake timeout in milliseconds. Defaults to 5 seconds if
+    /// omitted — override for slow CI machines or debug builds.
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SpawnResult {
+    /// UUID assigned by the hub once the substrate completed its
+    /// `Hello` handshake.
+    pub engine_id: String,
+    /// Operating-system PID of the spawned substrate.
+    pub pid: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReceiveMailArgs {
     /// Maximum number of items to return in this call. `None` drains
     /// everything currently queued. Defaults to unlimited.
@@ -228,6 +275,45 @@ impl Hub {
             }
         }
         serde_json::to_string(&out).map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    #[tool(
+        description = "Launch a substrate binary as a child process of the hub. The hub injects `AETHER_HUB_URL` so the child dials back to this hub instance. Blocks until the substrate completes its `Hello` handshake (or the handshake timeout fires — default 5 seconds, overridable via `timeout_ms`). Returns the assigned `engine_id` and the child `pid`. The hub owns the child for its lifetime; dropping the engine from the registry (socket disconnect or `terminate_substrate`) reaps the process."
+    )]
+    async fn spawn_substrate(
+        &self,
+        Parameters(args): Parameters<SpawnSubstrateArgs>,
+    ) -> Result<String, McpError> {
+        let handshake_timeout = args
+            .timeout_ms
+            .map(|ms| Duration::from_millis(ms as u64))
+            .unwrap_or(DEFAULT_HANDSHAKE_TIMEOUT);
+        let opts = SpawnOpts {
+            binary_path: PathBuf::from(args.binary_path),
+            args: args.args,
+            env: args.env,
+            handshake_timeout,
+        };
+        let engine_id = crate::spawn::spawn_substrate(
+            opts,
+            self.state.hub_engine_addr,
+            &self.state.pending_spawns,
+            &self.state.engines,
+        )
+        .await
+        .map_err(|e| McpError::internal_error(format!("spawn failed: {e}"), None))?;
+
+        let pid = self
+            .state
+            .engines
+            .get(&engine_id)
+            .map(|r| r.pid)
+            .unwrap_or(0);
+        let result = SpawnResult {
+            engine_id: engine_id.0.to_string(),
+            pid,
+        };
+        serde_json::to_string(&result).map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 
     #[tool(
@@ -371,6 +457,19 @@ mod tests {
     use aether_hub_protocol::EngineId;
     use tokio::sync::mpsc;
 
+    /// Build a `HubState` with spawn fields stubbed for tests that don't
+    /// exercise the spawn path. Real spawn tests construct the state
+    /// with `HubState::new` directly so they can inject a listener
+    /// address.
+    fn test_state(engines: EngineRegistry, sessions: SessionRegistry) -> Arc<HubState> {
+        HubState::new(
+            engines,
+            sessions,
+            PendingSpawns::new(),
+            "127.0.0.1:0".parse().unwrap(),
+        )
+    }
+
     fn record(id_u128: u128) -> (EngineRecord, mpsc::Receiver<HubToEngine>) {
         record_with_kinds(id_u128, vec![])
     }
@@ -399,7 +498,7 @@ mod tests {
         let (b, _rx_b) = record(2);
         engines.insert(a);
         engines.insert(b);
-        let state = HubState::new(engines, SessionRegistry::new());
+        let state = test_state(engines, SessionRegistry::new());
         let hub = Hub::new(state);
 
         let json = hub.list_engines().await.unwrap();
@@ -438,7 +537,7 @@ mod tests {
         let (rec, mut rx) = record(100);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines, sessions));
+        let hub = Hub::new(test_state(engines, sessions));
         let expected = hub.session.token;
 
         let statuses = run(
@@ -457,7 +556,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_hubs_mint_distinct_session_tokens() {
-        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
         let a = Hub::new(Arc::clone(&state));
         let b = Hub::new(Arc::clone(&state));
         assert_ne!(a.session.token, b.session.token);
@@ -467,7 +566,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_hub_deregisters_session() {
-        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
         let hub = Hub::new(Arc::clone(&state));
         let token = hub.session.token;
         assert!(state.sessions.get(&token).is_some());
@@ -481,7 +580,7 @@ mod tests {
         let (rec, mut rx) = record(7);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
+        let hub = Hub::new(test_state(engines, SessionRegistry::new()));
 
         let statuses = run(
             &hub,
@@ -528,7 +627,7 @@ mod tests {
         let (rec, mut rx) = record_with_kinds(3, kinds);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
+        let hub = Hub::new(test_state(engines, SessionRegistry::new()));
 
         let statuses = run(
             &hub,
@@ -563,7 +662,7 @@ mod tests {
         let (rec, mut rx) = record_with_kinds(4, kinds);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
+        let hub = Hub::new(test_state(engines, SessionRegistry::new()));
 
         let statuses = run(
             &hub,
@@ -584,7 +683,7 @@ mod tests {
         let (rec, mut rx) = record(5);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
+        let hub = Hub::new(test_state(engines, SessionRegistry::new()));
 
         let good = spec(id.0.to_string(), "aether.tick", None, Some(vec![]));
         let bad = spec(
@@ -613,7 +712,7 @@ mod tests {
         let (rec, _rx) = record(6);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
+        let hub = Hub::new(test_state(engines, SessionRegistry::new()));
 
         let both = MailSpec {
             engine_id: id.0.to_string(),
@@ -639,7 +738,7 @@ mod tests {
         let (rec, _rx) = record_with_kinds(9, kinds);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
+        let hub = Hub::new(test_state(engines, SessionRegistry::new()));
 
         let statuses = run(
             &hub,
@@ -672,7 +771,7 @@ mod tests {
         let (rec, _rx) = record_with_kinds(11, kinds.clone());
         let id = rec.id;
         engines.insert(rec);
-        let state = HubState::new(engines, SessionRegistry::new());
+        let state = test_state(engines, SessionRegistry::new());
         let hub = Hub::new(state);
 
         let args = DescribeKindsArgs {
@@ -685,7 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn describe_kinds_unknown_engine_errors() {
-        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
         let hub = Hub::new(state);
         let args = DescribeKindsArgs {
             engine_id: Uuid::from_u128(1).to_string(),
@@ -723,7 +822,7 @@ mod tests {
 
     #[tokio::test]
     async fn receive_mail_empty_queue_returns_empty_array() {
-        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
         let hub = Hub::new(state);
         let got = drain(&hub, None).await;
         assert!(got.is_empty());
@@ -731,7 +830,7 @@ mod tests {
 
     #[tokio::test]
     async fn receive_mail_drains_everything_by_default() {
-        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
         let hub = Hub::new(Arc::clone(&state));
         let token = hub.session.token;
 
@@ -763,7 +862,7 @@ mod tests {
 
     #[tokio::test]
     async fn receive_mail_respects_max() {
-        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
         let hub = Hub::new(Arc::clone(&state));
         let token = hub.session.token;
         for i in 0..5u8 {
@@ -786,7 +885,7 @@ mod tests {
     #[tokio::test]
     async fn receive_mail_scoped_to_own_session() {
         // Push into session A's queue; session B's drain should see nothing.
-        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
         let hub_a = Hub::new(Arc::clone(&state));
         let hub_b = Hub::new(Arc::clone(&state));
 
@@ -803,5 +902,55 @@ mod tests {
         let got_a = drain(&hub_a, None).await;
         assert_eq!(got_a.len(), 1);
         assert_eq!(got_a[0].payload_bytes, vec![42]);
+    }
+
+    #[tokio::test]
+    async fn spawn_substrate_tool_surfaces_bad_path() {
+        let state = HubState::new(
+            EngineRegistry::new(),
+            SessionRegistry::new(),
+            PendingSpawns::new(),
+            "127.0.0.1:1".parse().unwrap(),
+        );
+        let hub = Hub::new(state);
+
+        let err = hub
+            .spawn_substrate(Parameters(SpawnSubstrateArgs {
+                binary_path: "/this/path/definitely/does/not/exist".into(),
+                args: vec![],
+                env: HashMap::new(),
+                timeout_ms: None,
+            }))
+            .await
+            .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("spawn failed"), "unexpected error: {msg}");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn spawn_substrate_tool_surfaces_timeout() {
+        // /bin/sh + sleep will never handshake; configured timeout
+        // fires and the tool turns the SpawnError into an MCP error.
+        let state = HubState::new(
+            EngineRegistry::new(),
+            SessionRegistry::new(),
+            PendingSpawns::new(),
+            "127.0.0.1:1".parse().unwrap(),
+        );
+        let hub = Hub::new(state);
+
+        let err = hub
+            .spawn_substrate(Parameters(SpawnSubstrateArgs {
+                binary_path: "/bin/sh".into(),
+                args: vec!["-c".into(), "sleep 60".into()],
+                env: HashMap::new(),
+                timeout_ms: Some(150),
+            }))
+            .await
+            .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("spawn failed"), "unexpected error: {msg}");
+        assert!(msg.contains("handshake"), "expected timeout wording: {msg}");
     }
 }
