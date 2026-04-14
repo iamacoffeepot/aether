@@ -8,10 +8,12 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
 mod engine;
+mod mcp;
 mod registry;
 
 pub use engine::HEARTBEAT_INTERVAL;
 pub use engine::READ_TIMEOUT;
+pub use mcp::{DEFAULT_MCP_PORT, HubState, run_mcp_server};
 pub use registry::{EngineRecord, EngineRegistry};
 
 /// Default port the hub binds for engine TCP clients. ADR-0006 V0 fixes
