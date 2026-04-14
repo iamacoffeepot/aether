@@ -131,6 +131,16 @@ async fn read_loop(reader: &mut tokio::net::tcp::OwnedReadHalf) -> Result<(), Fr
                 )));
             }
             EngineToHub::Heartbeat => {}
+            EngineToHub::Mail(m) => {
+                // PR 2 wires this into session routing; for now
+                // acknowledge on the wire but drop the payload.
+                eprintln!(
+                    "aether-hub: engine mail (addr={:?}, kind={:?}, {} bytes) — routing not wired yet",
+                    m.address,
+                    m.kind_name,
+                    m.payload.len()
+                );
+            }
             EngineToHub::Goodbye(_) => return Ok(()),
         }
     }

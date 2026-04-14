@@ -11,7 +11,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use aether_hub_protocol::{EngineId, HubToEngine, KindDescriptor, KindEncoding, MailFrame, Uuid};
+use aether_hub_protocol::{
+    EngineId, HubToEngine, KindDescriptor, KindEncoding, MailFrame, SessionToken, Uuid,
+};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -218,6 +220,7 @@ async fn deliver_one(spec: MailSpec, engines: &EngineRegistry) -> Result<(), Str
         kind_name: spec.kind_name,
         payload,
         count: spec.count,
+        sender: SessionToken::NIL,
     });
     record
         .mail_tx

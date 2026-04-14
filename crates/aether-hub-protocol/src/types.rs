@@ -11,6 +11,20 @@ use uuid::Uuid;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EngineId(pub Uuid);
 
+/// Hub-minted routing handle for a Claude MCP session. The engine
+/// treats it as opaque bytes: it only echoes tokens the hub handed it
+/// on inbound mail back as the address on a reply. The hub validates
+/// on receipt; unknown/expired tokens produce an undeliverable status
+/// (per ADR-0008).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionToken(pub Uuid);
+
+impl SessionToken {
+    /// Placeholder used before session tracking lands at the hub.
+    /// Always treated as expired by the hub's validator.
+    pub const NIL: SessionToken = SessionToken(Uuid::nil());
+}
+
 /// First frame the engine sends after the TCP connection is open.
 /// The hub replies with a `Welcome` carrying the assigned `EngineId`.
 ///
@@ -96,13 +110,38 @@ pub struct Welcome {
 
 /// A piece of mail routed by the hub to an engine. Kind and recipient
 /// are carried by name; the engine resolves them against its local
-/// registry (per ADR-0005's kind registry).
+/// registry (per ADR-0005's kind registry). `sender` is the hub's
+/// routing handle for the originating Claude session — components
+/// that want to reply-to-sender echo it back on an outbound
+/// `EngineMailFrame` (ADR-0008).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailFrame {
     pub recipient_name: String,
     pub kind_name: String,
     pub payload: Vec<u8>,
     pub count: u32,
+    pub sender: SessionToken,
+}
+
+/// A piece of mail the engine is sending to one or more Claude
+/// sessions through the hub. The hub owns session routing, so the
+/// engine addresses by `ClaudeAddress` rather than by session id or
+/// recipient name (ADR-0008).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineMailFrame {
+    pub address: ClaudeAddress,
+    pub kind_name: String,
+    pub payload: Vec<u8>,
+}
+
+/// How an engine-originated mail is addressed at the hub. `Session`
+/// targets the specific MCP session whose token the engine is echoing
+/// from an earlier inbound mail; `Broadcast` fan-outs to every
+/// currently attached session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClaudeAddress {
+    Session(SessionToken),
+    Broadcast,
 }
 
 /// Optional clean-shutdown marker. Either side may send it; receipt is
@@ -113,12 +152,14 @@ pub struct Goodbye {
     pub reason: String,
 }
 
-/// Frames an engine sends to the hub. V0 omits engine-originated mail
-/// and replies — those land when pub-sub lands.
+/// Frames an engine sends to the hub. `Mail` is the observation path
+/// (ADR-0008): engine-originated mail addressed to a Claude session
+/// or broadcast to all sessions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineToHub {
     Hello(Hello),
     Heartbeat,
+    Mail(EngineMailFrame),
     Goodbye(Goodbye),
 }
 
