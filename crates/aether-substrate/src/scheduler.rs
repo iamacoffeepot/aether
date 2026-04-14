@@ -90,7 +90,8 @@ fn worker_loop(ctx: Arc<WorkerContext>) {
         let recipient = mail.recipient;
         match ctx.registry.entry(recipient) {
             Some(MailboxEntry::Sink(handler)) => {
-                handler(&mail.payload, mail.count);
+                let kind_name = ctx.registry.kind_name(mail.kind).unwrap_or("");
+                handler(kind_name, mail.sender, &mail.payload, mail.count);
             }
             Some(MailboxEntry::Component) => match ctx.components.get(&recipient) {
                 Some(lock) => {
