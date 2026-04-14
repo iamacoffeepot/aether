@@ -1,6 +1,7 @@
-// Claude-facing MCP tool surface. ADR-0006 V0: two tools —
-// `send_mail` forwards to a specific engine, `list_engines` is
-// read-only introspection.
+// Claude-facing MCP tool surface. ADR-0006 V0 + ADR-0007: three tools
+// — `send_mail` (plural, schema-driven), `list_engines`, and
+// `describe_kinds` (read-only introspection over the per-engine kind
+// vocabulary shipped at handshake).
 //
 // The rmcp `Service` factory is invoked per session, so `Hub` is cheap
 // to clone and shares a single `HubState` via `Arc`. Per-tool output is
@@ -10,7 +11,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use aether_hub_protocol::{EngineId, HubToEngine, MailFrame, Uuid};
+use aether_hub_protocol::{EngineId, HubToEngine, KindDescriptor, KindEncoding, MailFrame, Uuid};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -23,7 +24,8 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::registry::EngineRegistry;
+use crate::encoder::encode_pod;
+use crate::registry::{EngineRecord, EngineRegistry};
 
 /// Default port the hub binds for MCP clients. Overridable via
 /// `AETHER_MCP_PORT`.
@@ -66,19 +68,45 @@ pub struct DescribeKindsArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMailArgs {
+    /// One or more mail items to deliver. Each item is processed
+    /// independently — a single failure doesn't abort the batch. The
+    /// response carries a per-item status so the caller decides retry
+    /// vs abort policy.
+    pub mails: Vec<MailSpec>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MailSpec {
     /// Hub-assigned engine UUID as a string (from `list_engines`).
     pub engine_id: String,
     /// Mailbox name as registered by the engine.
     pub recipient_name: String,
     /// Kind name (e.g. `"aether.tick"`) the engine's registry knows.
     pub kind_name: String,
-    /// Payload bytes. Encoding is per-kind and agreed between sender
-    /// and the engine — V0 has no server-side schema validation.
+    /// Structured params for schema-driven encoding. The hub looks up
+    /// this kind's descriptor (from `describe_kinds`) and writes bytes
+    /// matching the engine's `#[repr(C)]` layout. Mutually exclusive
+    /// with `payload_bytes`.
     #[serde(default)]
-    pub payload: Vec<u8>,
-    /// Number of items the payload encodes. Typically 1.
+    pub params: Option<serde_json::Value>,
+    /// Raw payload bytes. Escape hatch for `Opaque` kinds or anything
+    /// the hub doesn't know how to encode. Mutually exclusive with
+    /// `params`.
+    #[serde(default)]
+    pub payload_bytes: Option<Vec<u8>>,
+    /// Count carried on the mail frame. For single-struct payloads
+    /// this is 1 (the default); for encoded slices it's the number
+    /// of elements the bytes represent.
     #[serde(default = "one")]
     pub count: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct MailStatus {
+    /// Index into the `mails` array the caller supplied.
+    pub index: u32,
+    /// `"delivered"` on success, or `"error: <reason>"` on failure.
+    pub status: String,
 }
 
 fn one() -> u32 {
@@ -96,34 +124,25 @@ pub struct EngineInfo {
 #[tool_router]
 impl Hub {
     #[tool(
-        description = "Send mail to a mailbox on a specific engine. Returns 'delivered' when the hub queued the frame to the engine's socket (not when the engine processes it)."
+        description = "Send one or more mail items. Each item takes either `params` (structured, encoded via the engine's kind descriptor) or `payload_bytes` (raw escape hatch for Opaque kinds). The batch is best-effort: per-item status is returned and failures don't abort siblings. 'delivered' means the hub queued the frame to the engine's socket — not that the engine processed it."
     )]
     async fn send_mail(
         &self,
         Parameters(args): Parameters<SendMailArgs>,
     ) -> Result<String, McpError> {
-        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
-            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
-        })?;
-        let id = EngineId(uuid);
-        let Some(record) = self.state.engines.get(&id) else {
-            return Err(McpError::invalid_params(
-                format!("unknown engine_id {}", args.engine_id),
-                None,
-            ));
-        };
-        let frame = HubToEngine::Mail(MailFrame {
-            recipient_name: args.recipient_name,
-            kind_name: args.kind_name,
-            payload: args.payload,
-            count: args.count,
-        });
-        record
-            .mail_tx
-            .send(frame)
-            .await
-            .map_err(|_| McpError::internal_error("engine disconnected", None))?;
-        Ok("delivered".into())
+        let mut statuses = Vec::with_capacity(args.mails.len());
+        for (i, spec) in args.mails.into_iter().enumerate() {
+            let result = deliver_one(spec, &self.state.engines).await;
+            let status = match result {
+                Ok(()) => "delivered".into(),
+                Err(e) => format!("error: {e}"),
+            };
+            statuses.push(MailStatus {
+                index: i as u32,
+                status,
+            });
+        }
+        serde_json::to_string(&statuses).map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 
     #[tool(
@@ -178,6 +197,82 @@ impl ServerHandler for Hub {
             ..Default::default()
         }
     }
+}
+
+/// Resolve one `MailSpec` against the registry, encode its payload,
+/// and push to the engine's mail channel. Returns a human-readable
+/// error string rather than `Err` so the batch driver can emit it as
+/// a per-mail status without losing sibling success.
+async fn deliver_one(spec: MailSpec, engines: &EngineRegistry) -> Result<(), String> {
+    let uuid = Uuid::parse_str(&spec.engine_id)
+        .map_err(|e| format!("engine_id is not a valid UUID: {e}"))?;
+    let id = EngineId(uuid);
+    let record = engines
+        .get(&id)
+        .ok_or_else(|| format!("unknown engine_id {}", spec.engine_id))?;
+
+    let payload = resolve_payload(&spec, &record)?;
+
+    let frame = HubToEngine::Mail(MailFrame {
+        recipient_name: spec.recipient_name,
+        kind_name: spec.kind_name,
+        payload,
+        count: spec.count,
+    });
+    record
+        .mail_tx
+        .send(frame)
+        .await
+        .map_err(|_| "engine disconnected".to_owned())
+}
+
+/// Decide which encoding path a mail goes through based on
+/// `params`/`payload_bytes` presence and the kind's descriptor.
+fn resolve_payload(spec: &MailSpec, record: &EngineRecord) -> Result<Vec<u8>, String> {
+    match (&spec.params, &spec.payload_bytes) {
+        (Some(_), Some(_)) => Err("params and payload_bytes are mutually exclusive".to_owned()),
+        (None, Some(bytes)) => Ok(bytes.clone()),
+        (Some(p), None) => {
+            let desc = find_kind(record, &spec.kind_name).ok_or_else(|| {
+                format!(
+                    "kind {:?} has no descriptor on this engine; provide payload_bytes instead",
+                    spec.kind_name
+                )
+            })?;
+            match &desc.encoding {
+                KindEncoding::Signal => {
+                    if !is_empty_params(p) {
+                        return Err(format!(
+                            "kind {:?} is Signal; params must be absent or empty",
+                            spec.kind_name
+                        ));
+                    }
+                    Ok(Vec::new())
+                }
+                KindEncoding::Pod { fields } => encode_pod(p, fields).map_err(|e| e.to_string()),
+                KindEncoding::Opaque => Err(format!(
+                    "kind {:?} is Opaque; use payload_bytes",
+                    spec.kind_name
+                )),
+            }
+        }
+        (None, None) => {
+            // Neither given: permissible only if the descriptor says
+            // Signal. Anything else is ambiguous — fail loudly.
+            match find_kind(record, &spec.kind_name) {
+                Some(desc) if matches!(desc.encoding, KindEncoding::Signal) => Ok(Vec::new()),
+                _ => Err("missing params or payload_bytes".to_owned()),
+            }
+        }
+    }
+}
+
+fn find_kind<'a>(record: &'a EngineRecord, name: &str) -> Option<&'a KindDescriptor> {
+    record.kinds.iter().find(|k| k.name == name)
+}
+
+fn is_empty_params(v: &serde_json::Value) -> bool {
+    v.is_null() || v.as_object().is_some_and(|o| o.is_empty())
 }
 
 /// Bind an axum server on `addr` exposing the MCP tool surface at
@@ -239,51 +334,207 @@ mod tests {
         assert_eq!(list.len(), 2);
     }
 
+    fn spec(
+        engine_id: String,
+        kind: &str,
+        params: Option<serde_json::Value>,
+        payload_bytes: Option<Vec<u8>>,
+    ) -> MailSpec {
+        MailSpec {
+            engine_id,
+            recipient_name: "hello".into(),
+            kind_name: kind.into(),
+            params,
+            payload_bytes,
+            count: 1,
+        }
+    }
+
+    async fn run(hub: &Hub, mails: Vec<MailSpec>) -> Vec<MailStatus> {
+        let json = hub
+            .send_mail(Parameters(SendMailArgs { mails }))
+            .await
+            .unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
     #[tokio::test]
-    async fn send_mail_forwards_to_engine_channel() {
+    async fn send_mail_payload_bytes_passthrough() {
         let engines = EngineRegistry::new();
         let (rec, mut rx) = record(7);
         let id = rec.id;
         engines.insert(rec);
-        let state = HubState::new(engines);
-        let hub = Hub::new(state);
+        let hub = Hub::new(HubState::new(engines));
 
-        let args = SendMailArgs {
-            engine_id: id.0.to_string(),
-            recipient_name: "hello".into(),
-            kind_name: "aether.tick".into(),
-            payload: vec![9, 9],
-            count: 3,
+        let statuses = run(
+            &hub,
+            vec![spec(
+                id.0.to_string(),
+                "aether.tick",
+                None,
+                Some(vec![9, 9]),
+            )],
+        )
+        .await;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].status, "delivered");
+
+        let frame = rx.try_recv().expect("frame");
+        let HubToEngine::Mail(m) = frame else {
+            panic!("wrong variant")
         };
-        let ack = hub.send_mail(Parameters(args)).await.unwrap();
-        assert_eq!(ack, "delivered");
-
-        let frame = rx.try_recv().expect("expected a frame");
-        match frame {
-            HubToEngine::Mail(m) => {
-                assert_eq!(m.recipient_name, "hello");
-                assert_eq!(m.kind_name, "aether.tick");
-                assert_eq!(m.payload, vec![9, 9]);
-                assert_eq!(m.count, 3);
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
+        assert_eq!(m.payload, vec![9, 9]);
     }
 
     #[tokio::test]
-    async fn send_mail_unknown_engine_errors() {
-        let state = HubState::new(EngineRegistry::new());
-        let hub = Hub::new(state);
+    async fn send_mail_params_encodes_via_descriptor() {
+        use aether_hub_protocol::{
+            KindDescriptor, KindEncoding, PodField, PodFieldType, PodPrimitive,
+        };
 
-        let args = SendMailArgs {
-            engine_id: Uuid::from_u128(99).to_string(),
-            recipient_name: "x".into(),
-            kind_name: "y".into(),
-            payload: vec![],
+        let engines = EngineRegistry::new();
+        let kinds = vec![KindDescriptor {
+            name: "aether.mouse_move".into(),
+            encoding: KindEncoding::Pod {
+                fields: vec![
+                    PodField {
+                        name: "x".into(),
+                        ty: PodFieldType::Scalar(PodPrimitive::F32),
+                    },
+                    PodField {
+                        name: "y".into(),
+                        ty: PodFieldType::Scalar(PodPrimitive::F32),
+                    },
+                ],
+            },
+        }];
+        let (rec, mut rx) = record_with_kinds(3, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let hub = Hub::new(HubState::new(engines));
+
+        let statuses = run(
+            &hub,
+            vec![spec(
+                id.0.to_string(),
+                "aether.mouse_move",
+                Some(serde_json::json!({"x": 10.5, "y": 20.0})),
+                None,
+            )],
+        )
+        .await;
+        assert_eq!(statuses[0].status, "delivered");
+
+        let HubToEngine::Mail(m) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&10.5f32.to_le_bytes());
+        expected.extend_from_slice(&20.0f32.to_le_bytes());
+        assert_eq!(m.payload, expected);
+    }
+
+    #[tokio::test]
+    async fn send_mail_signal_no_params() {
+        use aether_hub_protocol::{KindDescriptor, KindEncoding};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![KindDescriptor {
+            name: "aether.tick".into(),
+            encoding: KindEncoding::Signal,
+        }];
+        let (rec, mut rx) = record_with_kinds(4, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let hub = Hub::new(HubState::new(engines));
+
+        let statuses = run(
+            &hub,
+            vec![spec(id.0.to_string(), "aether.tick", None, None)],
+        )
+        .await;
+        assert_eq!(statuses[0].status, "delivered");
+
+        let HubToEngine::Mail(m) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        assert!(m.payload.is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_mail_batch_reports_per_item_status() {
+        let engines = EngineRegistry::new();
+        let (rec, mut rx) = record(5);
+        let id = rec.id;
+        engines.insert(rec);
+        let hub = Hub::new(HubState::new(engines));
+
+        let good = spec(id.0.to_string(), "aether.tick", None, Some(vec![]));
+        let bad = spec(
+            Uuid::from_u128(0xdead).to_string(),
+            "aether.tick",
+            None,
+            Some(vec![]),
+        );
+        let good2 = spec(id.0.to_string(), "aether.tick", None, Some(vec![1]));
+
+        let statuses = run(&hub, vec![good, bad, good2]).await;
+        assert_eq!(statuses.len(), 3);
+        assert_eq!(statuses[0].status, "delivered");
+        assert!(statuses[1].status.starts_with("error: unknown engine_id"));
+        assert_eq!(statuses[2].status, "delivered");
+
+        // Two frames actually went through.
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn send_mail_params_and_bytes_are_mutually_exclusive() {
+        let engines = EngineRegistry::new();
+        let (rec, _rx) = record(6);
+        let id = rec.id;
+        engines.insert(rec);
+        let hub = Hub::new(HubState::new(engines));
+
+        let both = MailSpec {
+            engine_id: id.0.to_string(),
+            recipient_name: "hello".into(),
+            kind_name: "aether.tick".into(),
+            params: Some(serde_json::json!({})),
+            payload_bytes: Some(vec![]),
             count: 1,
         };
-        let err = hub.send_mail(Parameters(args)).await.unwrap_err();
-        assert!(format!("{err:?}").contains("unknown engine_id"));
+        let statuses = run(&hub, vec![both]).await;
+        assert!(statuses[0].status.contains("mutually exclusive"));
+    }
+
+    #[tokio::test]
+    async fn send_mail_opaque_kind_rejects_params() {
+        use aether_hub_protocol::{KindDescriptor, KindEncoding};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![KindDescriptor {
+            name: "hello.opaque".into(),
+            encoding: KindEncoding::Opaque,
+        }];
+        let (rec, _rx) = record_with_kinds(9, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let hub = Hub::new(HubState::new(engines));
+
+        let statuses = run(
+            &hub,
+            vec![spec(
+                id.0.to_string(),
+                "hello.opaque",
+                Some(serde_json::json!({})),
+                None,
+            )],
+        )
+        .await;
+        assert!(statuses[0].status.contains("Opaque"));
     }
 
     #[tokio::test]
