@@ -96,7 +96,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     let seen = Arc::new((Mutex::new(Seen::default()), Condvar::new()));
     let seen_for_sink = Arc::clone(&seen);
 
-    let mut registry = Registry::new();
+    let registry = Arc::new(Registry::new());
     let recipient = registry.register_sink(
         "hello",
         Arc::new(
@@ -115,7 +115,6 @@ fn inbound_mail_lands_in_queue_after_resolution() {
         ),
     );
     registry.register_kind("aether.tick");
-    let registry = Arc::new(registry);
     let queue = Arc::new(MailQueue::new());
 
     let _sched = Scheduler::new(Arc::clone(&registry), Arc::clone(&queue), HashMap::new(), 1);

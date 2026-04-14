@@ -1,11 +1,14 @@
 // Name registries. Two parallel tables: mailboxes (name → MailboxId,
 // tagged component-vs-sink) and kinds (name → u32 kind id, per
-// ADR-0005). Both are populated at substrate boot and frozen when the
-// registry is wrapped in Arc — readers see a stable snapshot and
-// contend on nothing. Post-boot dynamic registration is deferred.
+// ADR-0005). The registry uses interior mutability (`RwLock`) so
+// mailboxes and kinds can be added at runtime — ADR-0010's runtime
+// component loading mutates both tables after an `Arc<Registry>` has
+// already been shared with the scheduler and hub client. Reads take
+// a shared lock and are cheap; writes are rare (boot + load/replace
+// /drop).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use aether_hub_protocol::SessionToken;
 
@@ -25,6 +28,9 @@ pub type SinkHandler =
 
 /// What a given mailbox actually is. The registry records this so the
 /// scheduler can dispatch appropriately without a per-mail type check.
+/// `Clone` so readers can pull the entry out from under the `RwLock`
+/// guard without holding it for the duration of the handler call.
+#[derive(Clone)]
 pub enum MailboxEntry {
     /// Mail goes to a WASM component's `receive` function on a worker.
     Component,
@@ -33,6 +39,11 @@ pub enum MailboxEntry {
 }
 
 pub struct Registry {
+    inner: RwLock<Inner>,
+}
+
+#[derive(Default)]
+struct Inner {
     by_name: HashMap<String, MailboxId>,
     entries: Vec<MailboxEntry>,
     /// Parallel index: `mailbox_names[id]` is the name the mailbox was
@@ -50,85 +61,101 @@ pub struct Registry {
 impl Registry {
     pub fn new() -> Self {
         Self {
-            by_name: HashMap::new(),
-            entries: Vec::new(),
-            mailbox_names: Vec::new(),
-            kind_by_name: HashMap::new(),
-            kind_names: Vec::new(),
+            inner: RwLock::new(Inner::default()),
         }
     }
 
-    fn insert(&mut self, name: impl Into<String>, entry: MailboxEntry) -> MailboxId {
+    fn insert(&self, name: impl Into<String>, entry: MailboxEntry) -> MailboxId {
         let name = name.into();
-        if self.by_name.contains_key(&name) {
+        let mut inner = self.inner.write().unwrap();
+        if inner.by_name.contains_key(&name) {
             panic!("mailbox name already registered: {name}");
         }
-        let id = MailboxId(self.entries.len() as u32);
-        self.entries.push(entry);
-        self.mailbox_names.push(name.clone());
-        self.by_name.insert(name, id);
+        let id = MailboxId(inner.entries.len() as u32);
+        inner.entries.push(entry);
+        inner.mailbox_names.push(name.clone());
+        inner.by_name.insert(name, id);
         id
     }
 
     /// Register a WASM component under `name`. The returned `MailboxId`
     /// is handed to the scheduler alongside the component's `Actor`.
-    pub fn register_component(&mut self, name: impl Into<String>) -> MailboxId {
+    pub fn register_component(&self, name: impl Into<String>) -> MailboxId {
         self.insert(name, MailboxEntry::Component)
     }
 
     /// Register a substrate-owned sink. Mail to this mailbox is handled
     /// inline on the thread that delivered it (or on the host-function
     /// caller thread if a component sent it).
-    pub fn register_sink(&mut self, name: impl Into<String>, handler: SinkHandler) -> MailboxId {
+    pub fn register_sink(&self, name: impl Into<String>, handler: SinkHandler) -> MailboxId {
         self.insert(name, MailboxEntry::Sink(handler))
     }
 
     pub fn lookup(&self, name: &str) -> Option<MailboxId> {
-        self.by_name.get(name).copied()
+        self.inner.read().unwrap().by_name.get(name).copied()
     }
 
-    pub fn entry(&self, id: MailboxId) -> Option<&MailboxEntry> {
-        self.entries.get(id.0 as usize)
+    /// Fetch the entry for a mailbox id. Returns an owned clone so the
+    /// caller can drop the internal lock before invoking a sink handler
+    /// (avoids holding the registry lock across arbitrary user code).
+    pub fn entry(&self, id: MailboxId) -> Option<MailboxEntry> {
+        self.inner
+            .read()
+            .unwrap()
+            .entries
+            .get(id.0 as usize)
+            .cloned()
     }
 
     /// Reverse of `lookup`: name for a given mailbox id, or `None` if
     /// the id is out of range. Used by the sink dispatch path to stamp
     /// `origin` on observation mail (ADR-0011).
-    pub fn mailbox_name(&self, id: MailboxId) -> Option<&str> {
-        self.mailbox_names.get(id.0 as usize).map(|s| s.as_str())
+    pub fn mailbox_name(&self, id: MailboxId) -> Option<String> {
+        self.inner
+            .read()
+            .unwrap()
+            .mailbox_names
+            .get(id.0 as usize)
+            .cloned()
     }
 
     /// Register a mail kind by name. Idempotent — re-registering a name
     /// returns the id it was first assigned. Ids are dense and assigned
     /// in insertion order, per ADR-0005's kind-name registry.
-    pub fn register_kind(&mut self, name: impl Into<String>) -> u32 {
+    pub fn register_kind(&self, name: impl Into<String>) -> u32 {
         let name = name.into();
-        if let Some(&id) = self.kind_by_name.get(&name) {
+        let mut inner = self.inner.write().unwrap();
+        if let Some(&id) = inner.kind_by_name.get(&name) {
             return id;
         }
-        let id = self.kind_names.len() as u32;
-        self.kind_names.push(name.clone());
-        self.kind_by_name.insert(name, id);
+        let id = inner.kind_names.len() as u32;
+        inner.kind_names.push(name.clone());
+        inner.kind_by_name.insert(name, id);
         id
     }
 
     pub fn kind_id(&self, name: &str) -> Option<u32> {
-        self.kind_by_name.get(name).copied()
+        self.inner.read().unwrap().kind_by_name.get(name).copied()
     }
 
     /// Reverse of `kind_id`: name for a given id, or `None` if the id
     /// is out of range. Used by the scheduler to hand sink handlers a
     /// kind name without them keeping their own map.
-    pub fn kind_name(&self, id: u32) -> Option<&str> {
-        self.kind_names.get(id as usize).map(|s| s.as_str())
+    pub fn kind_name(&self, id: u32) -> Option<String> {
+        self.inner
+            .read()
+            .unwrap()
+            .kind_names
+            .get(id as usize)
+            .cloned()
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.inner.read().unwrap().entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.inner.read().unwrap().entries.is_empty()
     }
 }
 
@@ -146,7 +173,7 @@ mod tests {
 
     #[test]
     fn register_and_lookup_component() {
-        let mut r = Registry::new();
+        let r = Registry::new();
         let id = r.register_component("physics");
         assert_eq!(id, MailboxId(0));
         assert_eq!(r.lookup("physics"), Some(id));
@@ -155,7 +182,7 @@ mod tests {
 
     #[test]
     fn sink_handler_runs_on_call() {
-        let mut r = Registry::new();
+        let r = Registry::new();
         let counter = Arc::new(AtomicU32::new(0));
         let c2 = Arc::clone(&counter);
         let id = r.register_sink(
@@ -174,7 +201,7 @@ mod tests {
 
     #[test]
     fn mailbox_ids_are_dense_and_sequential() {
-        let mut r = Registry::new();
+        let r = Registry::new();
         let a = r.register_component("a");
         let b = r.register_sink("b", Arc::new(|_, _, _, _, _| {}));
         let c = r.register_component("c");
@@ -187,7 +214,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "mailbox name already registered")]
     fn duplicate_name_panics() {
-        let mut r = Registry::new();
+        let r = Registry::new();
         r.register_component("x");
         r.register_component("x");
     }
@@ -200,8 +227,18 @@ mod tests {
     }
 
     #[test]
+    fn mailbox_name_reverse_lookup() {
+        let r = Registry::new();
+        let a = r.register_component("physics");
+        let b = r.register_sink("hub.claude.broadcast", Arc::new(|_, _, _, _, _| {}));
+        assert_eq!(r.mailbox_name(a).as_deref(), Some("physics"));
+        assert_eq!(r.mailbox_name(b).as_deref(), Some("hub.claude.broadcast"));
+        assert!(r.mailbox_name(MailboxId(999)).is_none());
+    }
+
+    #[test]
     fn kind_ids_are_dense_and_sequential() {
-        let mut r = Registry::new();
+        let r = Registry::new();
         let a = r.register_kind("aether.tick");
         let b = r.register_kind("aether.key");
         let c = r.register_kind("hello.npc_health");
@@ -212,7 +249,7 @@ mod tests {
 
     #[test]
     fn kind_registration_is_idempotent() {
-        let mut r = Registry::new();
+        let r = Registry::new();
         let first = r.register_kind("aether.tick");
         let second = r.register_kind("aether.tick");
         assert_eq!(first, second);
@@ -221,29 +258,32 @@ mod tests {
 
     #[test]
     fn kind_id_lookup() {
-        let mut r = Registry::new();
+        let r = Registry::new();
         let id = r.register_kind("aether.tick");
         assert_eq!(r.kind_id("aether.tick"), Some(id));
         assert!(r.kind_id("absent").is_none());
     }
 
     #[test]
-    fn mailbox_name_reverse_lookup() {
-        let mut r = Registry::new();
-        let a = r.register_component("physics");
-        let b = r.register_sink("hub.claude.broadcast", Arc::new(|_, _, _, _, _| {}));
-        assert_eq!(r.mailbox_name(a), Some("physics"));
-        assert_eq!(r.mailbox_name(b), Some("hub.claude.broadcast"));
-        assert!(r.mailbox_name(MailboxId(999)).is_none());
+    fn kind_name_reverse_lookup() {
+        let r = Registry::new();
+        let a = r.register_kind("aether.tick");
+        let b = r.register_kind("aether.key");
+        assert_eq!(r.kind_name(a).as_deref(), Some("aether.tick"));
+        assert_eq!(r.kind_name(b).as_deref(), Some("aether.key"));
+        assert!(r.kind_name(999).is_none());
     }
 
     #[test]
-    fn kind_name_reverse_lookup() {
-        let mut r = Registry::new();
-        let a = r.register_kind("aether.tick");
-        let b = r.register_kind("aether.key");
-        assert_eq!(r.kind_name(a), Some("aether.tick"));
-        assert_eq!(r.kind_name(b), Some("aether.key"));
-        assert!(r.kind_name(999).is_none());
+    fn registration_through_shared_arc() {
+        // Interior mutability means Arc<Registry> can register after
+        // it's already been shared — the dispatch path today never
+        // exercises this, but PR 2+ will when `load_component` adds
+        // mailboxes and kinds from a handler that holds an Arc.
+        let r = Arc::new(Registry::new());
+        let r2 = Arc::clone(&r);
+        let id = r2.register_component("late");
+        assert_eq!(r.lookup("late"), Some(id));
+        assert_eq!(r.register_kind("aether.late"), 0);
     }
 }
