@@ -31,8 +31,12 @@ impl SubstrateCtx {
         match self.registry.entry(recipient) {
             Some(MailboxEntry::Sink(handler)) => {
                 let kind_name = self.registry.kind_name(kind).unwrap_or("");
-                // Component-originated mail has no Claude-side sender.
-                handler(kind_name, SessionToken::NIL, &payload, count);
+                // Component-originated mail: the sender is this ctx's
+                // mailbox, so its registry name is the `origin` any
+                // sink cares about (ADR-0011). Claude-side session is
+                // `NIL` — component sends never have a reply-to target.
+                let origin = self.registry.mailbox_name(self.sender);
+                handler(kind_name, origin, SessionToken::NIL, &payload, count);
             }
             Some(MailboxEntry::Component) => {
                 self.queue.push(Mail::new(recipient, kind, payload, count));

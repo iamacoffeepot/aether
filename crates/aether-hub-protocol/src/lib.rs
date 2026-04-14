@@ -244,6 +244,7 @@ mod tests {
             address: ClaudeAddress::Session(token),
             kind_name: "aether.observation.ping".into(),
             payload: vec![1, 2, 3],
+            origin: Some("physics".into()),
         });
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
@@ -253,6 +254,7 @@ mod tests {
                 assert_eq!(m.address, ClaudeAddress::Session(token));
                 assert_eq!(m.kind_name, "aether.observation.ping");
                 assert_eq!(m.payload, vec![1, 2, 3]);
+                assert_eq!(m.origin.as_deref(), Some("physics"));
             }
             _ => panic!("wrong variant"),
         }
@@ -264,12 +266,16 @@ mod tests {
             address: ClaudeAddress::Broadcast,
             kind_name: "aether.observation.world".into(),
             payload: vec![],
+            origin: None,
         });
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
         let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
         match back {
-            EngineToHub::Mail(m) => assert_eq!(m.address, ClaudeAddress::Broadcast),
+            EngineToHub::Mail(m) => {
+                assert_eq!(m.address, ClaudeAddress::Broadcast);
+                assert!(m.origin.is_none());
+            }
             _ => panic!("wrong variant"),
         }
     }

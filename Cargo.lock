@@ -42,6 +42,7 @@ dependencies = [
  "aether-hub-protocol",
  "axum",
  "bytemuck",
+ "libc",
  "postcard",
  "rmcp",
  "schemars",

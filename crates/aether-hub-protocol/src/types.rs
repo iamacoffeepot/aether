@@ -126,12 +126,16 @@ pub struct MailFrame {
 /// A piece of mail the engine is sending to one or more Claude
 /// sessions through the hub. The hub owns session routing, so the
 /// engine addresses by `ClaudeAddress` rather than by session id or
-/// recipient name (ADR-0008).
+/// recipient name (ADR-0008). `origin` is the substrate-local mailbox
+/// name of the emitting component (ADR-0011); `None` for substrate
+/// core pushes that have no sending mailbox. The hub forwards it
+/// verbatim and does not validate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineMailFrame {
     pub address: ClaudeAddress,
     pub kind_name: String,
     pub payload: Vec<u8>,
+    pub origin: Option<String>,
 }
 
 /// How an engine-originated mail is addressed at the hub. `Session`

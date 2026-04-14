@@ -100,7 +100,11 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     let recipient = registry.register_sink(
         "hello",
         Arc::new(
-            move |_kind: &str, sender: SessionToken, bytes: &[u8], count: u32| {
+            move |_kind: &str,
+                  _origin: Option<&str>,
+                  sender: SessionToken,
+                  bytes: &[u8],
+                  count: u32| {
                 let (lock, cv) = &*seen_for_sink;
                 let mut s = lock.lock().unwrap();
                 s.count_sum += count;
@@ -339,6 +343,7 @@ fn outbound_sends_reach_the_hub_wire() {
         address: ClaudeAddress::Broadcast,
         kind_name: "aether.observation.ping".into(),
         payload: vec![1, 2, 3],
+        origin: Some("physics".into()),
     })));
 
     // Read it back on the server side. Heartbeats may arrive too —
@@ -354,6 +359,7 @@ fn outbound_sends_reach_the_hub_wire() {
     assert_eq!(observed.address, ClaudeAddress::Broadcast);
     assert_eq!(observed.kind_name, "aether.observation.ping");
     assert_eq!(observed.payload, vec![1, 2, 3]);
+    assert_eq!(observed.origin.as_deref(), Some("physics"));
 
     drop(stream);
 }
@@ -367,6 +373,7 @@ fn outbound_send_without_attach_is_noop() {
         address: ClaudeAddress::Broadcast,
         kind_name: "aether.tick".into(),
         payload: vec![],
+        origin: None,
     }));
     assert!(!ok);
 }

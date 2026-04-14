@@ -29,6 +29,11 @@ pub struct QueuedMail {
     pub kind_name: String,
     pub payload: Vec<u8>,
     pub broadcast: bool,
+    /// Substrate-attested origin — the mailbox name of the emitting
+    /// component, forwarded verbatim from `EngineMailFrame::origin`
+    /// (ADR-0011). `None` for substrate-core pushes with no sending
+    /// mailbox.
+    pub origin: Option<String>,
 }
 
 /// One entry in the hub's session table. `mail_tx` is how the engine

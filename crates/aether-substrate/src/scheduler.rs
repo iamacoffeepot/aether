@@ -91,7 +91,12 @@ fn worker_loop(ctx: Arc<WorkerContext>) {
         match ctx.registry.entry(recipient) {
             Some(MailboxEntry::Sink(handler)) => {
                 let kind_name = ctx.registry.kind_name(mail.kind).unwrap_or("");
-                handler(kind_name, mail.sender, &mail.payload, mail.count);
+                // Mail reaching a sink through the scheduler queue
+                // came from substrate core (e.g. the frame loop's
+                // FrameStats push) and has no sending mailbox; per
+                // ADR-0011 origin is `None`. Components reach sinks
+                // inline via `SubstrateCtx::send`, not this path.
+                handler(kind_name, None, mail.sender, &mail.payload, mail.count);
             }
             Some(MailboxEntry::Component) => match ctx.components.get(&recipient) {
                 Some(lock) => {

@@ -162,6 +162,7 @@ async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail
         address,
         kind_name,
         payload,
+        origin,
     } = mail;
     match address {
         ClaudeAddress::Session(token) => match sessions.get(&token) {
@@ -171,6 +172,7 @@ async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail
                     kind_name,
                     payload,
                     broadcast: false,
+                    origin,
                 };
                 if record.mail_tx.send(queued).await.is_err() {
                     eprintln!(
@@ -197,6 +199,7 @@ async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail
                     kind_name: kind_name.clone(),
                     payload: payload.clone(),
                     broadcast: true,
+                    origin: origin.clone(),
                 };
                 if record.mail_tx.send(queued).await.is_err() {
                     eprintln!(
@@ -255,6 +258,16 @@ mod tests {
             address,
             kind_name: "aether.observation.ping".into(),
             payload,
+            origin: None,
+        }
+    }
+
+    fn mail_with_origin(address: ClaudeAddress, payload: Vec<u8>, origin: &str) -> EngineMailFrame {
+        EngineMailFrame {
+            address,
+            kind_name: "aether.observation.ping".into(),
+            payload,
+            origin: Some(origin.into()),
         }
     }
 
@@ -267,7 +280,7 @@ mod tests {
         route_engine_mail(
             &sessions,
             engine_id(1),
-            mail(ClaudeAddress::Session(a.token), vec![1, 2, 3]),
+            mail_with_origin(ClaudeAddress::Session(a.token), vec![1, 2, 3], "physics"),
         )
         .await;
 
@@ -275,6 +288,7 @@ mod tests {
         assert_eq!(got.payload, vec![1, 2, 3]);
         assert_eq!(got.engine_id, engine_id(1));
         assert!(!got.broadcast, "session address should not set broadcast");
+        assert_eq!(got.origin.as_deref(), Some("physics"));
         assert!(rx_b.try_recv().is_err(), "b should not have received");
     }
 
@@ -304,7 +318,7 @@ mod tests {
         route_engine_mail(
             &sessions,
             engine_id(1),
-            mail(ClaudeAddress::Broadcast, vec![42]),
+            mail_with_origin(ClaudeAddress::Broadcast, vec![42], "render"),
         )
         .await;
 
@@ -313,6 +327,7 @@ mod tests {
             assert_eq!(got.payload, vec![42]);
             assert!(got.broadcast, "{name}: broadcast flag should be set");
             assert_eq!(got.engine_id, engine_id(1));
+            assert_eq!(got.origin.as_deref(), Some("render"), "{name}: origin");
         }
     }
 
