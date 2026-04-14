@@ -94,6 +94,48 @@ impl Kind for FrameStats {
     const NAME: &'static str = "aether.observation.frame_stats";
 }
 
+// Reserved control-plane vocabulary (ADR-0010). The substrate handles
+// these kinds inline rather than dispatching to a component — the
+// namespace itself is the routing discriminator. Payloads are not Pod,
+// so each is `Opaque`: the substrate-side handler decodes via postcard
+// against substrate-internal types. Keeping them here (alongside the
+// engine-facing kinds) means the hub's `describe_kinds` surfaces them
+// uniformly and the init path registers them exactly once at boot.
+
+/// `aether.control.load_component` — request the substrate load a WASM
+/// component into a freshly allocated mailbox. Payload carries the WASM
+/// bytes, any new kinds the component intends to use, and an optional
+/// human-readable name. The substrate replies with `load_result`.
+pub struct LoadComponent;
+impl Kind for LoadComponent {
+    const NAME: &'static str = "aether.control.load_component";
+}
+
+/// `aether.control.replace_component` — atomically rebind a target
+/// mailbox id to a freshly instantiated component. Any mail queued on
+/// the old instance at the moment of swap is dropped (V0 policy; drain
+/// is an additive follow-up).
+pub struct ReplaceComponent;
+impl Kind for ReplaceComponent {
+    const NAME: &'static str = "aether.control.replace_component";
+}
+
+/// `aether.control.drop_component` — remove a component from the
+/// substrate and invalidate its mailbox id.
+pub struct DropComponent;
+impl Kind for DropComponent {
+    const NAME: &'static str = "aether.control.drop_component";
+}
+
+/// `aether.control.load_result` — reply-to-sender emitted by the
+/// substrate after handling `load_component`. Carries the assigned
+/// mailbox id on success or an error describing why the load failed
+/// (kind-descriptor conflict, invalid WASM, etc.).
+pub struct LoadResult;
+impl Kind for LoadResult {
+    const NAME: &'static str = "aether.control.load_result";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +186,10 @@ mod tests {
         assert_eq!(MouseMove::NAME, "aether.mouse_move");
         assert_eq!(DrawTriangle::NAME, "aether.draw_triangle");
         assert_eq!(FrameStats::NAME, "aether.observation.frame_stats");
+        assert_eq!(LoadComponent::NAME, "aether.control.load_component");
+        assert_eq!(ReplaceComponent::NAME, "aether.control.replace_component");
+        assert_eq!(DropComponent::NAME, "aether.control.drop_component");
+        assert_eq!(LoadResult::NAME, "aether.control.load_result");
     }
 
     #[test]

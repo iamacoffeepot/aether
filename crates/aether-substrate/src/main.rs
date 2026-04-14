@@ -24,7 +24,7 @@ use aether_substrate::{
     SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
 };
-use aether_substrate_mail::{DrawTriangle, FrameStats, Key, MouseButton, MouseMove, Tick};
+use aether_substrate_mail::{FrameStats, Key, MouseButton, MouseMove, Tick};
 use render::Gpu;
 use wasmtime::{Engine, Linker, Module};
 use winit::application::ApplicationHandler;
@@ -195,16 +195,28 @@ fn main() -> wasmtime::Result<()> {
     let registry = Arc::new(Registry::new());
     let component_mbox = registry.register_component("hello");
 
-    // Pre-register every substrate-owned kind by name so the component
-    // can resolve them during `init` via the `resolve_kind` host fn.
+    // Pre-register every substrate-owned kind with its descriptor so
+    // the Registry agrees with what the hub receives at `Hello` and
+    // ADR-0010's load-time conflict check has the right reference.
     // Ids are dense and assigned in the order below; not otherwise
     // meaningful — consumers always resolve by name.
-    let kind_tick = registry.register_kind(Tick::NAME);
-    let kind_key = registry.register_kind(Key::NAME);
-    let kind_mouse_button = registry.register_kind(MouseButton::NAME);
-    let kind_mouse_move = registry.register_kind(MouseMove::NAME);
-    registry.register_kind(DrawTriangle::NAME);
-    let kind_frame_stats = registry.register_kind(FrameStats::NAME);
+    let boot_descriptors = aether_substrate_mail::descriptors::all();
+    for d in &boot_descriptors {
+        registry
+            .register_kind_with_descriptor(d.clone())
+            .expect("duplicate kind in substrate init");
+    }
+    let kind_tick = registry.kind_id(Tick::NAME).expect("Tick registered");
+    let kind_key = registry.kind_id(Key::NAME).expect("Key registered");
+    let kind_mouse_button = registry
+        .kind_id(MouseButton::NAME)
+        .expect("MouseButton registered");
+    let kind_mouse_move = registry
+        .kind_id(MouseMove::NAME)
+        .expect("MouseMove registered");
+    let kind_frame_stats = registry
+        .kind_id(FrameStats::NAME)
+        .expect("FrameStats registered");
 
     let frame_vertices = Arc::new(Mutex::new(Vec::<u8>::with_capacity(4096)));
     let triangles_rendered = Arc::new(AtomicU64::new(0));
@@ -289,7 +301,7 @@ fn main() -> wasmtime::Result<()> {
             url.as_str(),
             "hello-triangle",
             env!("CARGO_PKG_VERSION"),
-            aether_substrate_mail::descriptors::all(),
+            boot_descriptors.clone(),
             Arc::clone(&registry),
             Arc::clone(&queue),
             Arc::clone(&outbound),
