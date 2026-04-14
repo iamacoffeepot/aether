@@ -12,7 +12,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use aether_hub_protocol::{
-    EngineId, HubToEngine, KindDescriptor, KindEncoding, MailFrame, SessionToken, Uuid,
+    EngineId, EngineMailFrame, HubToEngine, KindDescriptor, KindEncoding, MailFrame, SessionToken,
+    Uuid,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -25,9 +26,11 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex, mpsc};
 
 use crate::encoder::encode_pod;
 use crate::registry::{EngineRecord, EngineRegistry};
+use crate::session::{SessionHandle, SessionRegistry};
 
 /// Default port the hub binds for MCP clients. Overridable via
 /// `AETHER_MCP_PORT`.
@@ -37,27 +40,39 @@ pub const DEFAULT_MCP_PORT: u16 = 8888;
 /// each per-session `Hub` instance.
 pub struct HubState {
     engines: EngineRegistry,
+    sessions: SessionRegistry,
 }
 
 impl HubState {
-    pub fn new(engines: EngineRegistry) -> Arc<Self> {
-        Arc::new(Self { engines })
+    pub fn new(engines: EngineRegistry, sessions: SessionRegistry) -> Arc<Self> {
+        Arc::new(Self { engines, sessions })
     }
 }
 
-/// Per-session rmcp service. `ToolRouter<Self>` is built once in
-/// `new`; state is shared via `Arc<HubState>`.
+/// Per-session rmcp service. rmcp calls the factory once per MCP
+/// session and may clone the result for concurrent tool dispatch;
+/// `session` is an `Arc<SessionHandle>` so the registry entry only
+/// goes away when the last clone drops.
 #[derive(Clone)]
 pub struct Hub {
     state: Arc<HubState>,
     tool_router: ToolRouter<Self>,
+    session: Arc<SessionHandle>,
+    /// Drain for this session's inbound observation mail. PR 3 wires
+    /// the `receive_mail` tool to it; wrapping in an `Arc<Mutex<_>>`
+    /// lets clones share the same receiver.
+    #[allow(dead_code)]
+    inbound: Arc<Mutex<mpsc::Receiver<EngineMailFrame>>>,
 }
 
 impl Hub {
     pub fn new(state: Arc<HubState>) -> Self {
+        let (session, rx) = SessionHandle::mint(&state.sessions);
         Self {
             state,
             tool_router: Self::tool_router(),
+            session: Arc::new(session),
+            inbound: Arc::new(Mutex::new(rx)),
         }
     }
 }
@@ -134,7 +149,7 @@ impl Hub {
     ) -> Result<String, McpError> {
         let mut statuses = Vec::with_capacity(args.mails.len());
         for (i, spec) in args.mails.into_iter().enumerate() {
-            let result = deliver_one(spec, &self.state.engines).await;
+            let result = deliver_one(spec, &self.state.engines, self.session.token).await;
             let status = match result {
                 Ok(()) => "delivered".into(),
                 Err(e) => format!("error: {e}"),
@@ -205,7 +220,11 @@ impl ServerHandler for Hub {
 /// and push to the engine's mail channel. Returns a human-readable
 /// error string rather than `Err` so the batch driver can emit it as
 /// a per-mail status without losing sibling success.
-async fn deliver_one(spec: MailSpec, engines: &EngineRegistry) -> Result<(), String> {
+async fn deliver_one(
+    spec: MailSpec,
+    engines: &EngineRegistry,
+    sender: SessionToken,
+) -> Result<(), String> {
     let uuid = Uuid::parse_str(&spec.engine_id)
         .map_err(|e| format!("engine_id is not a valid UUID: {e}"))?;
     let id = EngineId(uuid);
@@ -220,7 +239,7 @@ async fn deliver_one(spec: MailSpec, engines: &EngineRegistry) -> Result<(), Str
         kind_name: spec.kind_name,
         payload,
         count: spec.count,
-        sender: SessionToken::NIL,
+        sender,
     });
     record
         .mail_tx
@@ -329,7 +348,7 @@ mod tests {
         let (b, _rx_b) = record(2);
         engines.insert(a);
         engines.insert(b);
-        let state = HubState::new(engines);
+        let state = HubState::new(engines, SessionRegistry::new());
         let hub = Hub::new(state);
 
         let json = hub.list_engines().await.unwrap();
@@ -362,12 +381,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_mail_stamps_sender_with_session_token() {
+        let engines = EngineRegistry::new();
+        let sessions = SessionRegistry::new();
+        let (rec, mut rx) = record(100);
+        let id = rec.id;
+        engines.insert(rec);
+        let hub = Hub::new(HubState::new(engines, sessions));
+        let expected = hub.session.token;
+
+        let statuses = run(
+            &hub,
+            vec![spec(id.0.to_string(), "aether.tick", None, Some(vec![]))],
+        )
+        .await;
+        assert_eq!(statuses[0].status, "delivered");
+
+        let HubToEngine::Mail(m) = rx.try_recv().unwrap() else {
+            panic!()
+        };
+        assert_eq!(m.sender, expected);
+        assert_ne!(m.sender, SessionToken::NIL);
+    }
+
+    #[tokio::test]
+    async fn two_hubs_mint_distinct_session_tokens() {
+        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let a = Hub::new(Arc::clone(&state));
+        let b = Hub::new(Arc::clone(&state));
+        assert_ne!(a.session.token, b.session.token);
+        // Both live in the registry.
+        assert_eq!(state.sessions.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn dropping_hub_deregisters_session() {
+        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let token = hub.session.token;
+        assert!(state.sessions.get(&token).is_some());
+        drop(hub);
+        assert!(state.sessions.get(&token).is_none());
+    }
+
+    #[tokio::test]
     async fn send_mail_payload_bytes_passthrough() {
         let engines = EngineRegistry::new();
         let (rec, mut rx) = record(7);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines));
+        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
 
         let statuses = run(
             &hub,
@@ -414,7 +477,7 @@ mod tests {
         let (rec, mut rx) = record_with_kinds(3, kinds);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines));
+        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
 
         let statuses = run(
             &hub,
@@ -449,7 +512,7 @@ mod tests {
         let (rec, mut rx) = record_with_kinds(4, kinds);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines));
+        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
 
         let statuses = run(
             &hub,
@@ -470,7 +533,7 @@ mod tests {
         let (rec, mut rx) = record(5);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines));
+        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
 
         let good = spec(id.0.to_string(), "aether.tick", None, Some(vec![]));
         let bad = spec(
@@ -499,7 +562,7 @@ mod tests {
         let (rec, _rx) = record(6);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines));
+        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
 
         let both = MailSpec {
             engine_id: id.0.to_string(),
@@ -525,7 +588,7 @@ mod tests {
         let (rec, _rx) = record_with_kinds(9, kinds);
         let id = rec.id;
         engines.insert(rec);
-        let hub = Hub::new(HubState::new(engines));
+        let hub = Hub::new(HubState::new(engines, SessionRegistry::new()));
 
         let statuses = run(
             &hub,
@@ -558,7 +621,7 @@ mod tests {
         let (rec, _rx) = record_with_kinds(11, kinds.clone());
         let id = rec.id;
         engines.insert(rec);
-        let state = HubState::new(engines);
+        let state = HubState::new(engines, SessionRegistry::new());
         let hub = Hub::new(state);
 
         let args = DescribeKindsArgs {
@@ -571,7 +634,7 @@ mod tests {
 
     #[tokio::test]
     async fn describe_kinds_unknown_engine_errors() {
-        let state = HubState::new(EngineRegistry::new());
+        let state = HubState::new(EngineRegistry::new(), SessionRegistry::new());
         let hub = Hub::new(state);
         let args = DescribeKindsArgs {
             engine_id: Uuid::from_u128(1).to_string(),

@@ -4,23 +4,27 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use aether_hub::{EngineRegistry, run_engine_listener};
+use aether_hub::{EngineRegistry, SessionRegistry, run_engine_listener};
 use aether_hub_protocol::{EngineToHub, Goodbye, Hello, HubToEngine, encode_frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-async fn spawn_hub() -> (SocketAddr, EngineRegistry) {
+async fn spawn_hub() -> (SocketAddr, EngineRegistry, SessionRegistry) {
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
     let registry = EngineRegistry::new();
-    let reg_clone = registry.clone();
-    tokio::spawn(run_engine_listener(addr, reg_clone));
+    let sessions = SessionRegistry::new();
+    tokio::spawn(run_engine_listener(
+        addr,
+        registry.clone(),
+        sessions.clone(),
+    ));
     // Give the listener a beat to bind.
     tokio::time::sleep(Duration::from_millis(50)).await;
-    (addr, registry)
+    (addr, registry, sessions)
 }
 
 async fn connect(addr: SocketAddr) -> TcpStream {
@@ -53,7 +57,7 @@ fn hello(name: &str) -> EngineToHub {
 
 #[tokio::test]
 async fn handshake_assigns_engine_id_and_registers() {
-    let (addr, registry) = spawn_hub().await;
+    let (addr, registry, _sessions) = spawn_hub().await;
     let mut stream = connect(addr).await;
 
     write_frame_async(&mut stream, &hello("test")).await;
@@ -73,7 +77,7 @@ async fn handshake_assigns_engine_id_and_registers() {
 
 #[tokio::test]
 async fn goodbye_deregisters() {
-    let (addr, registry) = spawn_hub().await;
+    let (addr, registry, _sessions) = spawn_hub().await;
     let mut stream = connect(addr).await;
 
     write_frame_async(&mut stream, &hello("bye")).await;
@@ -100,7 +104,7 @@ async fn goodbye_deregisters() {
 
 #[tokio::test]
 async fn non_hello_first_frame_is_rejected() {
-    let (addr, registry) = spawn_hub().await;
+    let (addr, registry, _sessions) = spawn_hub().await;
     let mut stream = connect(addr).await;
 
     write_frame_async(&mut stream, &EngineToHub::Heartbeat).await;
@@ -116,7 +120,7 @@ async fn non_hello_first_frame_is_rejected() {
 async fn hub_sends_periodic_heartbeats() {
     // This test relies on HEARTBEAT_INTERVAL being short enough that a
     // heartbeat arrives within a few seconds.
-    let (addr, _registry) = spawn_hub().await;
+    let (addr, _registry, _sessions) = spawn_hub().await;
     let mut stream = connect(addr).await;
     write_frame_async(&mut stream, &hello("hb")).await;
     let _: HubToEngine = read_frame_async(&mut stream).await;
@@ -139,7 +143,7 @@ async fn hub_sends_periodic_heartbeats() {
 
 #[tokio::test]
 async fn silent_engine_is_reaped() {
-    let (addr, registry) = spawn_hub().await;
+    let (addr, registry, _sessions) = spawn_hub().await;
     let mut stream = connect(addr).await;
     write_frame_async(&mut stream, &hello("silent")).await;
     let _: HubToEngine = read_frame_async(&mut stream).await;
