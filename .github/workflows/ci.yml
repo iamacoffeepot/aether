@@ -9,6 +9,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/**'
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -21,6 +39,8 @@ jobs:
 
   clippy:
     name: Clippy
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +53,8 @@ jobs:
 
   test:
     name: Test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -44,5 +66,23 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --all-targets
       - run: cargo test --workspace --all-targets
+
+  ci-pass:
+    name: CI pass
+    if: always()
+    needs: [changes, fmt, clippy, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        run: |
+          echo "changes: ${{ needs.changes.result }}"
+          echo "fmt:     ${{ needs.fmt.result }}"
+          echo "clippy:  ${{ needs.clippy.result }}"
+          echo "test:    ${{ needs.test.result }}"
+          fail=0
+          [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
+          [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
+          [[ "${{ needs.clippy.result }}"  == "success" || "${{ needs.clippy.result }}" == "skipped" ]] || fail=1
+          [[ "${{ needs.test.result }}"    == "success" || "${{ needs.test.result }}" == "skipped" ]] || fail=1
+          exit $fail
