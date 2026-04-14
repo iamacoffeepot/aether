@@ -15,7 +15,10 @@ use alloc::vec::Vec;
 use aether_hub_protocol::{KindDescriptor, KindEncoding, PodField, PodFieldType, PodPrimitive};
 use aether_mail::Kind;
 
-use crate::{DrawTriangle, FrameStats, Key, MouseButton, MouseMove, Tick};
+use crate::{
+    DrawTriangle, DropComponent, FrameStats, Key, LoadComponent, LoadResult, MouseButton,
+    MouseMove, ReplaceComponent, Tick,
+};
 
 /// Every kind the substrate exposes, in the order the `Registry` will
 /// register them. Caller ignores the order — names are the contract.
@@ -42,6 +45,14 @@ pub fn all() -> Vec<KindDescriptor> {
                 scalar("triangles", PodPrimitive::U64),
             ],
         ),
+        // ADR-0010 control-plane kinds. Variable-length payloads that
+        // don't fit the Pod model — the substrate handler decodes via
+        // postcard against its own wire types. Agents that use the MCP
+        // `send_mail` tool supply these as raw `payload_bytes`.
+        opaque(LoadComponent::NAME),
+        opaque(ReplaceComponent::NAME),
+        opaque(DropComponent::NAME),
+        opaque(LoadResult::NAME),
     ]
 }
 
@@ -86,6 +97,24 @@ mod tests {
         assert!(names.contains(&MouseButton::NAME));
         assert!(names.contains(&MouseMove::NAME));
         assert!(names.contains(&DrawTriangle::NAME));
+        assert!(names.contains(&LoadComponent::NAME));
+        assert!(names.contains(&ReplaceComponent::NAME));
+        assert!(names.contains(&DropComponent::NAME));
+        assert!(names.contains(&LoadResult::NAME));
+    }
+
+    #[test]
+    fn control_kinds_are_opaque() {
+        let descs = all();
+        for name in [
+            LoadComponent::NAME,
+            ReplaceComponent::NAME,
+            DropComponent::NAME,
+            LoadResult::NAME,
+        ] {
+            let d = descs.iter().find(|d| d.name == name).unwrap();
+            assert_eq!(d.encoding, KindEncoding::Opaque, "{name}");
+        }
     }
 
     #[test]
