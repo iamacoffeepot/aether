@@ -2,7 +2,6 @@
 name = "aether-substrate"
 version.workspace = true
 edition.workspace = true
-build = "build.rs"
 
 [dependencies]
 aether-hub-protocol = { path = "../aether-hub-protocol" }
