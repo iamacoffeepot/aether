@@ -10,10 +10,20 @@
 //     and `Ctx` with init-vs-receive capability fencing, `Mail<'_>` for
 //     inbound with typed `decode` / `decode_slice`, and the `export!`
 //     macro that owns the `#[no_mangle]` init/receive shims.
+//   - ADR-0015: Additive lifecycle hooks on the `Component` trait
+//     (`on_replace`, `on_drop`, `on_rehydrate`, all defaulted), plus
+//     the narrowed `DropCtx<'_>` capability type. `export!` emits the
+//     matching `#[no_mangle]` shims; the substrate-side wiring that
+//     actually invokes them lands in a follow-up. Components that
+//     don't override stay green; components that do can be written
+//     against the hooks today, behavior activates the moment substrate
+//     catches up.
 //
 // Still deferred:
-//   - Lifecycle hooks beyond init/receive (ADR-0015).
-//   - Persistent state across hot reload (ADR-0016).
+//   - Persistent state across hot reload (ADR-0016). `PriorState<'_>`
+//     is part of the `on_rehydrate` signature this ADR commits to, but
+//     the substrate-owned state bundle, the `save_state` host fn, and
+//     the call sites that actually populate it are ADR-0016's problem.
 //   - Reply-to-sender (ADR-0013). `Mail::sender()` is present as
 //     `Option<&Sender>` and always returns `None` today; once 0013
 //     lands on the substrate side, the `export!` macro will flip to
@@ -200,6 +210,36 @@ pub trait Component: Sized + 'static {
     /// calling `mail.decode::<K>(kind_id)` directly — the `Option`
     /// return doubles as the match.
     fn receive(&mut self, ctx: &mut Ctx<'_>, mail: Mail<'_>);
+
+    /// Called once on the old instance, immediately before a
+    /// `replace_component` swap (ADR-0015 §3). Default is no-op;
+    /// override to emit state that the new instance can consume via
+    /// `on_rehydrate`. The state-bundle serialization contract is
+    /// ADR-0016's problem — this hook exists here so state can flow
+    /// through it once that lands.
+    fn on_replace(&mut self, ctx: &mut DropCtx<'_>) {
+        let _ = ctx;
+    }
+
+    /// Called once on the instance being dropped — both for
+    /// `drop_component` and for the old instance of
+    /// `replace_component` — immediately before the substrate tears
+    /// down linear memory. Default is no-op; override for cleanup
+    /// (sending "goodbye" mail, flushing work to a sibling component,
+    /// logging).
+    fn on_drop(&mut self, ctx: &mut DropCtx<'_>) {
+        let _ = ctx;
+    }
+
+    /// Called after `init` on a freshly-instantiated component that
+    /// is replacing an older instance, if and only if the substrate
+    /// has state from the old instance for us. Default ignores the
+    /// prior state; components that persist across replace override
+    /// to rehydrate. ADR-0016 fills in the state-bundle shape.
+    fn on_rehydrate(&mut self, ctx: &mut Ctx<'_>, prior: PriorState<'_>) {
+        let _ = ctx;
+        let _ = prior;
+    }
 }
 
 /// Init-only capability handle. The type split between `InitCtx` and
@@ -268,6 +308,86 @@ impl Ctx<'_> {
 /// `Option<&Sender>` from day one.
 pub struct Sender {
     _priv: (),
+}
+
+/// Narrowed capability handle for shutdown hooks (`on_replace`,
+/// `on_drop`). Like `Ctx`, but deliberately smaller:
+///
+/// - `send` / `send_many` still work — outbound mail during shutdown
+///   is a valid and useful pattern ("I'm going away, here's the last
+///   thing I observed").
+/// - No `reply` — sender handles invalidate on teardown; a reply
+///   attempt during `on_drop` cannot be honored.
+/// - No `resolve` — resolution belongs at init. There is no use case
+///   for resolving at teardown.
+/// - Exposes `save_state` once ADR-0016 lands — state serialization
+///   is the defining reason `on_replace` has its own context.
+pub struct DropCtx<'a> {
+    _borrow: PhantomData<&'a ()>,
+}
+
+impl DropCtx<'_> {
+    /// Not part of the public API; called only by `export!`.
+    #[doc(hidden)]
+    pub fn __new() -> Self {
+        DropCtx {
+            _borrow: PhantomData,
+        }
+    }
+
+    /// Send a single payload during a shutdown hook.
+    pub fn send<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payload: &K) {
+        sink.send(payload);
+    }
+
+    /// Send a slice of payloads during a shutdown hook.
+    pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payloads: &[K]) {
+        sink.send_many(payloads);
+    }
+}
+
+/// Opaque view of a prior state bundle handed to `on_rehydrate` by
+/// the substrate. Today the substrate never produces one, so
+/// `on_rehydrate` is never called — the type exists on the surface
+/// so ADR-0016 can populate it without changing the trait shape.
+///
+/// The lifetime `'a` ties `bytes()` back to the call; holding a
+/// reference past return is a compile error.
+pub struct PriorState<'a> {
+    version: u32,
+    ptr: usize,
+    len: usize,
+    _borrow: PhantomData<&'a [u8]>,
+}
+
+impl<'a> PriorState<'a> {
+    /// Not part of the public API; called only by `export!`. The FFI
+    /// delivers the buffer as wasm32 `(u32, u32)`; this widens.
+    #[doc(hidden)]
+    pub unsafe fn __from_raw(version: u32, ptr: u32, len: u32) -> Self {
+        PriorState {
+            version,
+            ptr: ptr as usize,
+            len: len as usize,
+            _borrow: PhantomData,
+        }
+    }
+
+    /// Component-defined schema version. The substrate does not
+    /// interpret it — see ADR-0016.
+    pub fn schema_version(&self) -> u32 {
+        self.version
+    }
+
+    /// Bytes the previous instance saved via `DropCtx::save_state`.
+    /// Empty today; non-empty once ADR-0016 is wired end-to-end.
+    pub fn bytes(&self) -> &'a [u8] {
+        if self.len == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len) }
+        }
+    }
 }
 
 /// Inbound mail, as received by `Component::receive`. Wraps the raw
@@ -467,6 +587,49 @@ macro_rules! export {
             <$component as $crate::Component>::receive(instance, &mut ctx, mail);
             0
         }
+
+        /// # Safety
+        /// Called by the substrate exactly once, on the old instance,
+        /// immediately before a `replace_component` swap.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn on_replace() -> u32 {
+            let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
+                return 1;
+            };
+            let mut ctx = $crate::DropCtx::__new();
+            <$component as $crate::Component>::on_replace(instance, &mut ctx);
+            0
+        }
+
+        /// # Safety
+        /// Called by the substrate exactly once on the instance being
+        /// dropped, immediately before linear memory is torn down.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn on_drop() -> u32 {
+            let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
+                return 1;
+            };
+            let mut ctx = $crate::DropCtx::__new();
+            <$component as $crate::Component>::on_drop(instance, &mut ctx);
+            0
+        }
+
+        /// # Safety
+        /// Called by the substrate after `init` on a freshly
+        /// instantiated replacement, with `(version, ptr, len)`
+        /// describing the prior-state bundle the old instance
+        /// produced via `DropCtx::save_state` (ADR-0016 wires this
+        /// end-to-end; today the substrate never calls it).
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn on_rehydrate(version: u32, ptr: u32, len: u32) -> u32 {
+            let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
+                return 1;
+            };
+            let mut ctx = $crate::Ctx::__new();
+            let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
+            <$component as $crate::Component>::on_rehydrate(instance, &mut ctx, prior);
+            0
+        }
     };
 }
 
@@ -598,5 +761,39 @@ mod tests {
     fn mail_sender_is_always_none_today() {
         let mail = unsafe { Mail::__from_ptr_test(0, 0, 0) };
         assert!(mail.sender().is_none());
+    }
+
+    #[test]
+    fn prior_state_empty_bytes_does_not_deref() {
+        // With len=0, `bytes()` must not materialise a pointer — a
+        // raw 0 ptr with len>0 would be UB if anyone called
+        // `from_raw_parts` on it. The `if self.len == 0` branch in
+        // `bytes()` is what guarantees this.
+        let prior = unsafe { PriorState::__from_raw(7, 0, 0) };
+        assert_eq!(prior.schema_version(), 7);
+        assert_eq!(prior.bytes(), &[] as &[u8]);
+    }
+
+    #[test]
+    fn prior_state_nonempty_bytes_roundtrip() {
+        let buf: [u8; 4] = [1, 2, 3, 4];
+        let prior = PriorState {
+            version: 3,
+            ptr: buf.as_ptr().addr(),
+            len: buf.len(),
+            _borrow: PhantomData,
+        };
+        assert_eq!(prior.schema_version(), 3);
+        assert_eq!(prior.bytes(), &buf);
+    }
+
+    /// `DropCtx::__new()` must be callable without special setup so
+    /// the `export!` macro can build one inside a `#[no_mangle]` shim.
+    /// The accessor covered here just verifies the constructor type
+    /// is well-formed; send/send_many require a real FFI and are not
+    /// unit-testable on host.
+    #[test]
+    fn drop_ctx_constructor_well_formed() {
+        let _ctx: DropCtx<'_> = DropCtx::__new();
     }
 }
