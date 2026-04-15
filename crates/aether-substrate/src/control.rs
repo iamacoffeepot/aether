@@ -253,12 +253,15 @@ impl ControlPlane {
                 error: e.to_string(),
             };
         }
-        // Pull the Component out of the scheduler table and drop it
-        // here to reclaim wasmtime resources. If the table has no
-        // entry (shouldn't happen if the registry said Component but
-        // worth tolerating), we've already marked the mailbox Dropped
-        // so subsequent mail is discarded regardless.
-        let _ = self.remove_component(id);
+        // Pull the Component out of the scheduler table, fire the
+        // ADR-0015 `on_drop` hook on it, then let it drop at end of
+        // scope so wasmtime reclaims linear memory. The mailbox was
+        // already marked `Dropped` above, so any mail racing in
+        // parallel will be discarded regardless of when the hook
+        // runs.
+        if let Some(mut component) = self.remove_component(id) {
+            component.on_drop();
+        }
         DropResultPayload::Ok
     }
 
@@ -323,6 +326,19 @@ impl ControlPlane {
             }
         };
 
+        // ADR-0015 §3: hooks run on the old instance under the write
+        // lock before instantiation. Take the lock now, invoke hooks,
+        // then keep the lock while we instantiate + swap so no mail
+        // races in. Wart named in ADR-0015: if instantiation below
+        // fails, `on_drop` will have already fired on the old
+        // instance even though it stays live.
+        let mut table = self.components.write().unwrap();
+        if let Some(cell) = table.get(&id) {
+            let mut old = cell.lock().unwrap();
+            old.on_replace();
+            old.on_drop();
+        }
+
         let ctx = SubstrateCtx {
             sender: id,
             registry: Arc::clone(&self.registry),
@@ -332,16 +348,23 @@ impl ControlPlane {
             Ok(c) => c,
             Err(e) => {
                 // Registry is left as-is; any newly registered
-                // kinds stay. The old component is still bound.
+                // kinds stay. The old component is still bound (hooks
+                // already fired — see wart above).
                 return ReplaceResultPayload::Err {
                     error: format!("wasm instantiation failed: {e}"),
                 };
             }
         };
 
-        // Atomic swap in the scheduler table. The returned old
-        // Component is dropped at end of scope — wasmtime reclaims.
-        let _old = self.swap_component(id, new_component);
+        // Atomic swap in-place under the already-held write lock.
+        // The returned old Component drops at end of scope; wasmtime
+        // reclaims linear memory + Store.
+        let _old = table
+            .remove(&id)
+            .map(|m| m.into_inner().expect("component mutex poisoned"));
+        table.insert(id, std::sync::Mutex::new(new_component));
+        drop(table);
+
         self.announce_kinds();
         ReplaceResultPayload::Ok
     }
@@ -359,15 +382,6 @@ impl ControlPlane {
             .unwrap()
             .remove(&id)
             .map(|m| m.into_inner().expect("component mutex poisoned"))
-    }
-
-    fn swap_component(&self, id: MailboxId, new_component: Component) -> Option<Component> {
-        let mut table = self.components.write().unwrap();
-        let old = table
-            .remove(&id)
-            .map(|m| m.into_inner().expect("component mutex poisoned"));
-        table.insert(id, std::sync::Mutex::new(new_component));
-        old
     }
 
     /// Ship the complete current kind vocabulary to the hub so its
@@ -452,6 +466,38 @@ mod tests {
             (memory (export "memory") 1)
             (func (export "receive") (param i32 i32 i32) (result i32)
                 i32.const 0))
+    "#;
+
+    /// WAT with lifecycle hooks. Each hook writes a marker to a
+    /// distinct offset in linear memory so tests can observe which
+    /// hook fired. `on_replace` writes 0x11 at offset 200;
+    /// `on_drop` writes 0x22 at offset 204.
+    const WAT_HOOKS: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "receive") (param i32 i32 i32) (result i32)
+                i32.const 0)
+            (func (export "on_replace") (result i32)
+                i32.const 200
+                i32.const 0x11
+                i32.store
+                i32.const 0)
+            (func (export "on_drop") (result i32)
+                i32.const 204
+                i32.const 0x22
+                i32.store
+                i32.const 0))
+    "#;
+
+    /// WAT where `on_drop` traps via `unreachable`. Used to verify
+    /// that a panicking hook does not stall teardown.
+    const WAT_TRAPS_ON_DROP: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "receive") (param i32 i32 i32) (result i32)
+                i32.const 0)
+            (func (export "on_drop") (result i32)
+                unreachable))
     "#;
 
     fn make_plane() -> ControlPlane {
@@ -751,6 +797,84 @@ mod tests {
             .unwrap(),
         );
         assert!(matches!(result, ReplaceResultPayload::Err { .. }));
+    }
+
+    #[test]
+    fn drop_component_with_hooks_completes_ok() {
+        // WAT_HOOKS exports on_drop. handle_drop should fire it and
+        // complete without error; the marker write is exercised in
+        // component::tests::on_drop_invokes_export_and_writes_marker.
+        let plane = make_plane();
+        let wasm = wat::parse_str(WAT_HOOKS).unwrap();
+        let LoadResultPayload::Ok { mailbox_id, .. } = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponentPayload {
+                wasm,
+                kinds: vec![],
+                name: Some("hooked".into()),
+            })
+            .unwrap(),
+        ) else {
+            panic!("load should succeed");
+        };
+        let dropped = plane
+            .handle_drop(&postcard::to_allocvec(&DropComponentPayload { mailbox_id }).unwrap());
+        assert!(matches!(dropped, DropResultPayload::Ok));
+    }
+
+    #[test]
+    fn drop_component_with_trapping_on_drop_still_ok() {
+        // ADR-0015 trap containment: a panicking hook must not stall
+        // teardown. The handler logs and returns Ok regardless.
+        let plane = make_plane();
+        let wasm = wat::parse_str(WAT_TRAPS_ON_DROP).unwrap();
+        let LoadResultPayload::Ok { mailbox_id, .. } = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponentPayload {
+                wasm,
+                kinds: vec![],
+                name: Some("crasher".into()),
+            })
+            .unwrap(),
+        ) else {
+            panic!("load should succeed");
+        };
+        let dropped = plane
+            .handle_drop(&postcard::to_allocvec(&DropComponentPayload { mailbox_id }).unwrap());
+        assert!(matches!(dropped, DropResultPayload::Ok));
+        // Mailbox still marked Dropped; component still removed.
+        assert!(matches!(
+            plane.registry.entry(MailboxId(mailbox_id)),
+            Some(crate::registry::MailboxEntry::Dropped),
+        ));
+    }
+
+    #[test]
+    fn replace_component_fires_hooks_on_old_instance() {
+        // handle_replace takes the write lock, fires on_replace +
+        // on_drop on the old component, instantiates the new one,
+        // and swaps under the same lock. Success means both hooks
+        // completed without stalling the replace.
+        let plane = make_plane();
+        let wasm_old = wat::parse_str(WAT_HOOKS).unwrap();
+        let LoadResultPayload::Ok { mailbox_id, .. } = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponentPayload {
+                wasm: wasm_old,
+                kinds: vec![],
+                name: Some("swap_me".into()),
+            })
+            .unwrap(),
+        ) else {
+            panic!("load should succeed");
+        };
+        let wasm_new = wat::parse_str(WAT).unwrap();
+        let result = plane.handle_replace(
+            &postcard::to_allocvec(&ReplaceComponentPayload {
+                mailbox_id,
+                wasm: wasm_new,
+                kinds: vec![],
+            })
+            .unwrap(),
+        );
+        assert!(matches!(result, ReplaceResultPayload::Ok));
     }
 
     #[test]
