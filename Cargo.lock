@@ -40,7 +40,9 @@ name = "aether-hello-component"
 version = "0.1.0"
 dependencies = [
  "aether-component",
+ "aether-mail",
  "aether-substrate-mail",
+ "bytemuck",
 ]
 
 [[package]]

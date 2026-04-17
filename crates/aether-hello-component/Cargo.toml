@@ -9,3 +9,19 @@ crate-type = ["cdylib"]
 [dependencies]
 aether-component = { path = "../aether-component" }
 aether-substrate-mail = { path = "../aether-substrate-mail" }
+
+# Examples for the ADR-0017 (component-to-component reply) smoke
+# test. Each is a standalone wasm cdylib loaded via the substrate's
+# `load_component` control plane — paired so caller sends
+# `demo.request` to "echoer" and observes the reply.
+[dev-dependencies]
+aether-mail = { path = "../aether-mail" }
+bytemuck = { version = "1", features = ["derive"] }
+
+[[example]]
+name = "echoer"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "caller"
+crate-type = ["cdylib"]
