@@ -78,6 +78,20 @@ impl HubOutbound {
     pub fn is_connected(&self) -> bool {
         self.tx.get().is_some()
     }
+
+    /// Test helper: build an attached outbound paired with the
+    /// receiver end so tests can assert on the frames components
+    /// emit. Mirrors the channel `HubClient::connect` would attach
+    /// but skips the TCP machinery.
+    #[cfg(test)]
+    pub fn test_channel() -> (Arc<Self>, std::sync::mpsc::Receiver<EngineToHub>) {
+        let (tx, rx) = mpsc::channel::<EngineToHub>();
+        let outbound = Arc::new(Self {
+            tx: OnceLock::new(),
+        });
+        outbound.attach(tx);
+        (outbound, rx)
+    }
 }
 
 /// Live hub connection. Threads are retained so their join handles

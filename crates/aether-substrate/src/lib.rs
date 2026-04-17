@@ -16,6 +16,7 @@ pub mod mail;
 pub mod queue;
 pub mod registry;
 pub mod scheduler;
+pub mod sender_table;
 
 pub use component::Component;
 pub use control::{

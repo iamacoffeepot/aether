@@ -4,6 +4,7 @@
 // surface. Growth of this surface should be reviewed as deliberately
 // as any other architectural change.
 
+use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use wasmtime::{Caller, Linker};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
@@ -14,6 +15,19 @@ use crate::mail::MailboxId;
 /// sentinel.
 pub const KIND_NOT_FOUND: u32 = u32::MAX;
 pub const MAILBOX_NOT_FOUND: u32 = u32::MAX;
+
+/// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
+/// `0` is success; non-zero values distinguish call-site errors
+/// (unknown handle, OOB guest memory, unregistered kind) from each
+/// other so the SDK can surface a useful message. "Session gone" is
+/// a named status but not yet populated — V0 cannot synchronously
+/// detect that the hub has dropped a session; the outbound frame is
+/// queued and if the session is gone the hub discards it silently.
+pub const REPLY_OK: u32 = 0;
+pub const REPLY_UNKNOWN_HANDLE: u32 = 1;
+pub const REPLY_SESSION_GONE: u32 = 2;
+pub const REPLY_OOB: u32 = 3;
+pub const REPLY_KIND_NOT_FOUND: u32 = 4;
 
 /// ADR-0016 §2: maximum size of a single state bundle. A `save_state`
 /// call with `len > MAX_STATE_BUNDLE_BYTES` is rejected (status 3) and
@@ -134,6 +148,52 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
             let ctx = caller.data_mut();
             ctx.saved_state = Some(StateBundle { version, bytes });
             SAVE_STATE_OK
+        },
+    )?;
+
+    // ADR-0013 §3: `reply_mail` addresses a specific Claude session
+    // using a per-instance handle the guest received as the 4th param
+    // on its `receive` shim. Two routes diverge here versus `send_mail`:
+    // the recipient is a `SessionToken` rather than a `MailboxId`, and
+    // the frame goes straight out over `HubOutbound` rather than
+    // through the registry's sink handlers.
+    linker.func_wrap(
+        "aether",
+        "reply_mail",
+        |mut caller: Caller<'_, SubstrateCtx>,
+         sender: u32,
+         kind: u32,
+         ptr: u32,
+         len: u32,
+         _count: u32|
+         -> u32 {
+            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return REPLY_OOB,
+            };
+            let data = memory.data(&caller);
+            let start = ptr as usize;
+            let end = match start.checked_add(len as usize) {
+                Some(e) if e <= data.len() => e,
+                _ => return REPLY_OOB,
+            };
+            let payload = data[start..end].to_vec();
+
+            let ctx = caller.data();
+            let Some(token) = ctx.sender_table.resolve(sender) else {
+                return REPLY_UNKNOWN_HANDLE;
+            };
+            let Some(kind_name) = ctx.registry.kind_name(kind) else {
+                return REPLY_KIND_NOT_FOUND;
+            };
+            let origin = ctx.registry.mailbox_name(ctx.sender);
+            ctx.outbound.send(EngineToHub::Mail(EngineMailFrame {
+                address: ClaudeAddress::Session(token),
+                kind_name,
+                payload,
+                origin,
+            }));
+            REPLY_OK
         },
     )?;
 

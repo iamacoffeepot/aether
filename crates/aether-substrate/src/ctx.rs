@@ -13,9 +13,11 @@ use std::sync::Arc;
 
 use aether_hub_protocol::SessionToken;
 
+use crate::hub_client::HubOutbound;
 use crate::mail::{Mail, MailKind, MailboxId};
 use crate::queue::MailQueue;
 use crate::registry::{MailboxEntry, Registry};
+use crate::sender_table::SenderTable;
 
 /// ADR-0016 §3: opt-in state migration payload. The substrate owns the
 /// buffer from the moment `save_state` is called on the old instance
@@ -32,6 +34,18 @@ pub struct SubstrateCtx {
     pub sender: MailboxId,
     pub registry: Arc<Registry>,
     pub queue: Arc<MailQueue>,
+    /// ADR-0013: direct outbound handle so the `reply_mail` host fn
+    /// can address a specific Claude session without routing through
+    /// a well-known sink. Broadcast still goes through
+    /// `hub.claude.broadcast`; reply is the session-targeted twin.
+    /// `HubOutbound::disconnected` when no hub is attached — sends
+    /// silently drop, matching the broadcast semantics.
+    pub outbound: Arc<HubOutbound>,
+    /// ADR-0013: handle→token map populated by `Component::deliver`
+    /// whenever an inbound Claude-originated mail is dispatched. The
+    /// guest receives the `u32` handle as the 4th param on its
+    /// `receive` shim and can pass it back to `reply_mail`.
+    pub sender_table: SenderTable,
     /// Set by the `save_state` host fn during `on_replace`. The
     /// substrate extracts it after hooks return via
     /// `Component::take_saved_state`. Never read by the guest —
@@ -46,15 +60,23 @@ pub struct SubstrateCtx {
 }
 
 impl SubstrateCtx {
-    /// Build a fresh ctx with empty state-migration slots. Using this
-    /// over the struct literal keeps the `saved_state` /
-    /// `save_state_error` fields private to the migration wiring —
-    /// callers should never set them directly.
-    pub fn new(sender: MailboxId, registry: Arc<Registry>, queue: Arc<MailQueue>) -> Self {
+    /// Build a fresh ctx with empty state-migration slots and an
+    /// empty sender table. Using this over the struct literal keeps
+    /// the private fields (sender_table, saved_state,
+    /// save_state_error) internal to the wiring — callers should
+    /// never set them directly.
+    pub fn new(
+        sender: MailboxId,
+        registry: Arc<Registry>,
+        queue: Arc<MailQueue>,
+        outbound: Arc<HubOutbound>,
+    ) -> Self {
         SubstrateCtx {
             sender,
             registry,
             queue,
+            outbound,
+            sender_table: SenderTable::new(),
             saved_state: None,
             save_state_error: None,
         }
