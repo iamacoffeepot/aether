@@ -1,21 +1,11 @@
-// First real aether component, now written against the ADR-0014
-// `Component` trait. On each tick it emits a fixed clip-space
-// triangle to the substrate's render sink.
-//
-// What the Component trait + export! macro replace compared to the
-// ADR-0012 shape this file used to carry:
-//   - hand-written `#[unsafe(no_mangle)] pub unsafe extern "C" fn
-//     init/receive` → `export!(Hello)` emits the shims.
-//   - `static mut Option<KindId<Tick>>` / `static mut Option<Sink<...>>`
-//     → fields on `Hello`, populated during `init`.
-//   - `unsafe` blocks around every access to the statics → none;
-//     `&mut self` in `receive` is ordinary safe Rust.
-//
-// Behavioral parity: resolves Tick and the "render" sink at init,
-// sends the triangle whenever a tick arrives. Nothing else.
+// First real aether component. On each tick it emits a fixed
+// clip-space triangle to the substrate's render sink. It also
+// answers ADR-0013 `aether.ping` mail with a matching `aether.pong`
+// back to the originating Claude session — a minimal round-trip
+// smoke test proving reply-to-sender works end-to-end over the hub.
 
 use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
-use aether_substrate_mail::{DrawTriangle, Tick, Vertex};
+use aether_substrate_mail::{DrawTriangle, Ping, Pong, Tick, Vertex};
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
     verts: [
@@ -45,6 +35,8 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
 
 pub struct Hello {
     tick: KindId<Tick>,
+    ping: KindId<Ping>,
+    pong: KindId<Pong>,
     render: Sink<DrawTriangle>,
 }
 
@@ -52,6 +44,8 @@ impl Component for Hello {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Hello {
             tick: ctx.resolve::<Tick>(),
+            ping: ctx.resolve::<Ping>(),
+            pong: ctx.resolve::<Pong>(),
             render: ctx.resolve_sink::<DrawTriangle>("render"),
         }
     }
@@ -59,6 +53,14 @@ impl Component for Hello {
     fn receive(&mut self, ctx: &mut Ctx<'_>, mail: Mail<'_>) {
         if self.tick.matches(mail.kind()) {
             ctx.send(&self.render, &TRIANGLE);
+        } else if let Some(ping) = mail.decode(self.ping)
+            && let Some(sender) = mail.sender()
+        {
+            // Echo the sequence number so the caller can pair request
+            // and reply when multiple pings are in flight. No sender
+            // (component-origin or broadcast) silently drops the ping
+            // — there's nothing to reply to.
+            ctx.reply(sender, self.pong, &Pong { seq: ping.seq });
         }
     }
 }

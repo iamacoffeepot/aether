@@ -79,6 +79,31 @@ impl Kind for DrawTriangle {
     const NAME: &'static str = "aether.draw_triangle";
 }
 
+/// Request addressed to a component that supports the ADR-0013
+/// reply-to-sender smoke path. The component answers with `Pong`
+/// carrying the same `seq`; the round trip proves that a Claude
+/// session → component → session reply actually works end-to-end.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct Ping {
+    pub seq: u32,
+}
+impl Kind for Ping {
+    const NAME: &'static str = "aether.ping";
+}
+
+/// Reply-to-sender counterpart to `Ping`. The `seq` is the incoming
+/// `Ping.seq` echoed back so the caller can match requests against
+/// replies when multiple are in flight.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+pub struct Pong {
+    pub seq: u32,
+}
+impl Kind for Pong {
+    const NAME: &'static str = "aether.pong";
+}
+
 /// Periodic observation emitted by the substrate's frame loop when a
 /// hub is attached (ADR-0008). The substrate pushes one of these at
 /// `LOG_EVERY_FRAMES` cadence to the `hub.claude.broadcast` sink, so
@@ -203,6 +228,8 @@ mod tests {
         assert_eq!(MouseMove::NAME, "aether.mouse_move");
         assert_eq!(DrawTriangle::NAME, "aether.draw_triangle");
         assert_eq!(FrameStats::NAME, "aether.observation.frame_stats");
+        assert_eq!(Ping::NAME, "aether.ping");
+        assert_eq!(Pong::NAME, "aether.pong");
         assert_eq!(LoadComponent::NAME, "aether.control.load_component");
         assert_eq!(ReplaceComponent::NAME, "aether.control.replace_component");
         assert_eq!(DropComponent::NAME, "aether.control.drop_component");
