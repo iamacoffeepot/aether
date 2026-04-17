@@ -5,17 +5,19 @@
 // force every consumer through the proc-macro toolchain even when they
 // just want the runtime traits.
 //
-// `Kind` always emits the `aether_mail::Kind` impl plus a
-// `CastEligible` impl that propagates each field's eligibility — this
-// is the compile-time machinery the `Schema` derive uses to decide
-// whether a struct can use the `#[repr(C)]`-shaped wire format. Enums
-// always get `CastEligible::ELIGIBLE = false`.
+// `Kind` emits only the `aether_mail::Kind` impl — a `const NAME` and
+// nothing else. Wasm guests that just want to address a kind by name
+// derive only this and stay free of hub-protocol entirely.
 //
-// `Schema` is opt-in. It emits an `aether_mail::Schema` impl that
-// returns the `aether_hub_protocol::SchemaType` describing the type's
-// payload. Components that never need to introspect their own kinds
-// (every wasm guest today) skip `Schema` and stay free of the
-// hub-protocol dep.
+// `Schema` is opt-in (typically gated on a `descriptors` feature so
+// it expands only in std consumers). It emits *both* the
+// `aether_mail::Schema` impl returning a `SchemaType` AND a
+// `CastEligible` impl whose `ELIGIBLE` const propagates each field's
+// eligibility against `#[repr(C)]` presence. Pairing them here means
+// types used as schema fields (helper structs like `Vertex`) get
+// `CastEligible` for free without needing a separate derive — the
+// Schema derive is the only place that needs eligibility, so it owns
+// the impl.
 //
 // Field-type handling is the trickiest part. For most field types we
 // delegate to `<FieldT as Schema>::schema()` and let the blanket impls
@@ -54,33 +56,15 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
 fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let kind_name = parse_kind_name(&input.attrs)?;
-
-    let cast_eligible_expr = match &input.data {
-        Data::Struct(_) => {
-            let fields = struct_fields(input)?;
-            let has_repr_c = struct_has_repr_c(&input.attrs);
-            cast_eligible_expr_for_struct(has_repr_c, &fields)
-        }
-        // Enums and unions are never cast-eligible — they need a tag
-        // discriminant + variable layout that `bytemuck::cast` can't
-        // express. The derive emits `false` and the schema lands as a
-        // postcard-encoded sum.
-        Data::Enum(_) => quote! { false },
-        Data::Union(u) => {
-            return Err(syn::Error::new_spanned(
-                u.union_token,
-                "Kind derive does not support unions",
-            ));
-        }
-    };
-
+    if let Data::Union(u) = &input.data {
+        return Err(syn::Error::new_spanned(
+            u.union_token,
+            "Kind derive does not support unions",
+        ));
+    }
     Ok(quote! {
         impl ::aether_mail::Kind for #name {
             const NAME: &'static str = #kind_name;
-        }
-
-        impl ::aether_mail::CastEligible for #name {
-            const ELIGIBLE: bool = #cast_eligible_expr;
         }
     })
 }
@@ -101,9 +85,16 @@ fn cast_eligible_expr_for_struct(has_repr_c: bool, fields: &[FieldInfo]) -> Toke
 
 fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
-    let body = match &input.data {
-        Data::Struct(_) => expand_schema_struct(input)?,
-        Data::Enum(e) => expand_schema_enum(e)?,
+    let (body, cast_eligible_expr) = match &input.data {
+        Data::Struct(_) => {
+            let fields = struct_fields(input)?;
+            let has_repr_c = struct_has_repr_c(&input.attrs);
+            (
+                expand_schema_struct(&fields)?,
+                cast_eligible_expr_for_struct(has_repr_c, &fields),
+            )
+        }
+        Data::Enum(e) => (expand_schema_enum(e)?, quote! { false }),
         Data::Union(u) => {
             return Err(syn::Error::new_spanned(
                 u.union_token,
@@ -117,12 +108,14 @@ fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 #body
             }
         }
+
+        impl ::aether_mail::CastEligible for #name {
+            const ELIGIBLE: bool = #cast_eligible_expr;
+        }
     })
 }
 
-fn expand_schema_struct(input: &DeriveInput) -> syn::Result<TokenStream2> {
-    let fields = struct_fields(input)?;
-
+fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
     if fields.is_empty() {
         return Ok(quote! { ::aether_hub_protocol::SchemaType::Unit });
     }

@@ -7,9 +7,13 @@ edition.workspace = true
 # Emit wire-compatible descriptors for the ADR-0007 schema-driven hub
 # boundary. Off by default so WASM guests don't drag in hub-protocol.
 # Native binaries (aether-substrate) enable it.
-descriptors = ["dep:aether-hub-protocol"]
+descriptors = [
+    "dep:aether-hub-protocol",
+    "aether-mail/descriptors",
+    "aether-mail/derive",
+]
 
 [dependencies]
-aether-mail = { path = "../aether-mail" }
+aether-mail = { path = "../aether-mail", features = ["derive"] }
 aether-hub-protocol = { path = "../aether-hub-protocol", optional = true }
 bytemuck = { version = "1.19", features = ["derive"] }
