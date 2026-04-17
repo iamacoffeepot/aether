@@ -60,6 +60,15 @@ impl MailQueue {
         }
     }
 
+    /// Test-only: non-blocking pop. Returns `None` immediately if the
+    /// queue is empty rather than parking on `pending_cv`. Used by
+    /// substrate tests that need to assert on queue state without
+    /// running a worker.
+    #[cfg(test)]
+    pub(crate) fn try_pop(&self) -> Option<Mail> {
+        self.pending.lock().unwrap().pop_front()
+    }
+
     pub(crate) fn pop_blocking(&self) -> Option<Mail> {
         let mut q = self.pending.lock().unwrap();
         loop {

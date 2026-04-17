@@ -41,10 +41,14 @@ pub struct SubstrateCtx {
     /// `HubOutbound::disconnected` when no hub is attached — sends
     /// silently drop, matching the broadcast semantics.
     pub outbound: Arc<HubOutbound>,
-    /// ADR-0013: handle→token map populated by `Component::deliver`
-    /// whenever an inbound Claude-originated mail is dispatched. The
-    /// guest receives the `u32` handle as the 4th param on its
-    /// `receive` shim and can pass it back to `reply_mail`.
+    /// ADR-0013 + ADR-0017: handle→entry map populated by
+    /// `Component::deliver` whenever an inbound mail has a meaningful
+    /// reply target — a Claude session (`SenderEntry::Session`) or
+    /// another component (`SenderEntry::Component`). The guest
+    /// receives an opaque `u32` handle as the 4th param on its
+    /// `receive` shim and passes it back to `reply_mail`; the
+    /// substrate routes either over `HubOutbound` or back through
+    /// `MailQueue` based on the variant.
     pub sender_table: SenderTable,
     /// Set by the `save_state` host fn during `on_replace`. The
     /// substrate extracts it after hooks return via
@@ -103,7 +107,13 @@ impl SubstrateCtx {
                 );
             }
             Some(MailboxEntry::Component) => {
-                self.queue.push(Mail::new(recipient, kind, payload, count));
+                // ADR-0017: component-to-component mail carries the
+                // sender's mailbox id so `Component::deliver` can
+                // allocate a Component-variant `SenderEntry`. The
+                // receiving guest gets a reply-capable handle that
+                // routes back through the local queue.
+                self.queue
+                    .push(Mail::new(recipient, kind, payload, count).with_origin(self.sender));
             }
             Some(MailboxEntry::Dropped) => {
                 eprintln!(
