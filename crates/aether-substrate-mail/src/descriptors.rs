@@ -17,7 +17,7 @@ use aether_mail::Kind;
 
 use crate::{
     DrawTriangle, DropComponent, DropResult, FrameStats, Key, LoadComponent, LoadResult,
-    MouseButton, MouseMove, ReplaceComponent, ReplaceResult, Tick,
+    MouseButton, MouseMove, Ping, Pong, ReplaceComponent, ReplaceResult, Tick,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -45,6 +45,11 @@ pub fn all() -> Vec<KindDescriptor> {
                 scalar("triangles", PodPrimitive::U64),
             ],
         ),
+        // ADR-0013 smoke-test vocabulary. Both Pod so the MCP
+        // `send_mail` tool can encode ping from params; Pong comes
+        // back as bytes on the reply path.
+        pod(Ping::NAME, vec![scalar("seq", PodPrimitive::U32)]),
+        pod(Pong::NAME, vec![scalar("seq", PodPrimitive::U32)]),
         // ADR-0010 control-plane kinds. Variable-length payloads that
         // don't fit the Pod model — the substrate handler decodes via
         // postcard against its own wire types. Agents that use the MCP
@@ -99,6 +104,8 @@ mod tests {
         assert!(names.contains(&MouseButton::NAME));
         assert!(names.contains(&MouseMove::NAME));
         assert!(names.contains(&DrawTriangle::NAME));
+        assert!(names.contains(&Ping::NAME));
+        assert!(names.contains(&Pong::NAME));
         assert!(names.contains(&LoadComponent::NAME));
         assert!(names.contains(&ReplaceComponent::NAME));
         assert!(names.contains(&DropComponent::NAME));
