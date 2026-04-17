@@ -368,4 +368,203 @@ mod tests {
         let err = read_frame::<_, EngineToHub>(&mut Cursor::new(buf)).unwrap_err();
         assert!(matches!(err, FrameError::Postcard(_)));
     }
+
+    // ADR-0019 — schema descriptor roundtrips. The new `KindEncoding::Schema`
+    // arm and its `SchemaType` vocabulary need to survive postcard encode/
+    // decode end-to-end, including nested types and every enum variant shape.
+    // These tests pin the wire format so consumers (hub encoder, substrate
+    // decoder, derive macro) can rely on it across the migration PRs.
+
+    #[test]
+    fn schema_unit_and_scalar_roundtrip() {
+        let desc = KindDescriptor {
+            name: "demo.tick".into(),
+            encoding: KindEncoding::Schema(SchemaType::Unit),
+        };
+        let bytes = postcard::to_allocvec(&desc).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
+            desc
+        );
+
+        let desc = KindDescriptor {
+            name: "demo.seq".into(),
+            encoding: KindEncoding::Schema(SchemaType::Scalar(Primitive::U32)),
+        };
+        let bytes = postcard::to_allocvec(&desc).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
+            desc
+        );
+    }
+
+    #[test]
+    fn schema_cast_eligible_struct_roundtrip() {
+        // `Struct { repr_c: true }` — vertex-shaped: scalars + fixed array
+        // of a nested cast-eligible struct.
+        let vertex = SchemaType::Struct {
+            repr_c: true,
+            fields: vec![
+                NamedField {
+                    name: "x".into(),
+                    ty: SchemaType::Scalar(Primitive::F32),
+                },
+                NamedField {
+                    name: "y".into(),
+                    ty: SchemaType::Scalar(Primitive::F32),
+                },
+            ],
+        };
+        let triangle = SchemaType::Struct {
+            repr_c: true,
+            fields: vec![NamedField {
+                name: "verts".into(),
+                ty: SchemaType::Array {
+                    element: Box::new(vertex),
+                    len: 3,
+                },
+            }],
+        };
+        let desc = KindDescriptor {
+            name: "demo.draw_triangle".into(),
+            encoding: KindEncoding::Schema(triangle),
+        };
+        let bytes = postcard::to_allocvec(&desc).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
+            desc
+        );
+    }
+
+    #[test]
+    fn schema_postcard_struct_with_rich_fields_roundtrip() {
+        // `Struct { repr_c: false }` — control-plane-shaped: string,
+        // bytes, optional, nested vec.
+        let load = SchemaType::Struct {
+            repr_c: false,
+            fields: vec![
+                NamedField {
+                    name: "wasm".into(),
+                    ty: SchemaType::Bytes,
+                },
+                NamedField {
+                    name: "name".into(),
+                    ty: SchemaType::Option(Box::new(SchemaType::String)),
+                },
+                NamedField {
+                    name: "tags".into(),
+                    ty: SchemaType::Vec(Box::new(SchemaType::String)),
+                },
+            ],
+        };
+        let desc = KindDescriptor {
+            name: "demo.load_component".into(),
+            encoding: KindEncoding::Schema(load),
+        };
+        let bytes = postcard::to_allocvec(&desc).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
+            desc
+        );
+    }
+
+    #[test]
+    fn schema_enum_with_all_variant_shapes_roundtrip() {
+        // Cover every `EnumVariant` arm in one descriptor: result-shaped
+        // sum (`Ok(payload) | Err { reason }`) plus a unit variant.
+        let result = SchemaType::Enum {
+            variants: vec![
+                EnumVariant::Unit {
+                    name: "Pending".into(),
+                    discriminant: 0,
+                },
+                EnumVariant::Tuple {
+                    name: "Ok".into(),
+                    discriminant: 1,
+                    fields: vec![SchemaType::Scalar(Primitive::U64)],
+                },
+                EnumVariant::Struct {
+                    name: "Err".into(),
+                    discriminant: 2,
+                    fields: vec![NamedField {
+                        name: "reason".into(),
+                        ty: SchemaType::String,
+                    }],
+                },
+            ],
+        };
+        let desc = KindDescriptor {
+            name: "demo.load_result".into(),
+            encoding: KindEncoding::Schema(result),
+        };
+        let bytes = postcard::to_allocvec(&desc).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
+            desc
+        );
+    }
+
+    #[test]
+    fn schema_descriptor_survives_full_frame_roundtrip() {
+        // The schema arm has to survive a real `Hello` frame, not just a
+        // bare `KindDescriptor`. This catches enum-tag drift inside the
+        // outer `EngineToHub` envelope.
+        let hello = EngineToHub::Hello(Hello {
+            name: "schema-demo".into(),
+            pid: 1,
+            started_unix: 0,
+            version: "0".into(),
+            kinds: vec![KindDescriptor {
+                name: "demo.note".into(),
+                encoding: KindEncoding::Schema(SchemaType::Struct {
+                    repr_c: false,
+                    fields: vec![NamedField {
+                        name: "body".into(),
+                        ty: SchemaType::String,
+                    }],
+                }),
+            }],
+        });
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &hello).unwrap();
+        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
+        let EngineToHub::Hello(h) = back else {
+            panic!("wrong variant")
+        };
+        assert_eq!(h.kinds.len(), 1);
+        let KindEncoding::Schema(SchemaType::Struct { repr_c, fields }) = &h.kinds[0].encoding
+        else {
+            panic!("expected Schema(Struct)")
+        };
+        assert!(!*repr_c);
+        assert_eq!(fields[0].name, "body");
+        assert_eq!(fields[0].ty, SchemaType::String);
+    }
+
+    #[test]
+    fn legacy_pod_arms_still_roundtrip() {
+        // The migration plan keeps Signal/Pod/Opaque alive during the
+        // intermediate PRs. A regression here means existing consumers
+        // would break before the cleanup PR can land.
+        for encoding in [
+            KindEncoding::Signal,
+            KindEncoding::Opaque,
+            KindEncoding::Pod {
+                fields: vec![PodField {
+                    name: "code".into(),
+                    ty: PodFieldType::Scalar(PodPrimitive::U32),
+                }],
+            },
+        ] {
+            let desc = KindDescriptor {
+                name: "demo.legacy".into(),
+                encoding: encoding.clone(),
+            };
+            let bytes = postcard::to_allocvec(&desc).unwrap();
+            assert_eq!(
+                postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
+                desc
+            );
+        }
+    }
 }

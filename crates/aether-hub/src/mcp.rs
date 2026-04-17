@@ -486,6 +486,13 @@ fn resolve_payload(spec: &MailSpec, record: &EngineRecord) -> Result<Vec<u8>, St
                     "kind {:?} is Opaque; use payload_bytes",
                     spec.kind_name
                 )),
+                // ADR-0019 PR 1: type plumbed, encoder lands in PR 5.
+                // Until then, agents that hit a Schema kind get a clear
+                // error rather than silent corruption.
+                KindEncoding::Schema(_) => Err(format!(
+                    "kind {:?} uses Schema encoding; hub encoder not yet implemented (ADR-0019)",
+                    spec.kind_name
+                )),
             }
         }
         (None, None) => {

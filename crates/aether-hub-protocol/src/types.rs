@@ -58,11 +58,21 @@ pub struct KindDescriptor {
 ///   scalars and fixed-size scalar arrays matching Rust's layout.
 /// - `Opaque`: the hub can't encode this from params. Clients must
 ///   supply raw bytes. V0 structural (postcard) kinds land here.
+/// - `Schema`: ADR-0019 unified vocabulary covering scalars, strings,
+///   vecs, options, enums, and nested structs. The `repr_c` flag on
+///   `SchemaType::Struct` opts a struct into the cast-shaped wire
+///   format (today's `Pod` bytes); everything else is postcard.
+///
+/// `Signal`/`Pod`/`Opaque` are kept here through the migration so
+/// `aether-hub`, `aether-substrate`, and the smoke binaries can move
+/// over one PR at a time. The cleanup PR deletes them along with
+/// `PodField`/`PodFieldType`/`PodPrimitive`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KindEncoding {
     Signal,
     Pod { fields: Vec<PodField> },
     Opaque,
+    Schema(SchemaType),
 }
 
 /// One field in a POD kind. Field order matches the Rust struct's
@@ -89,6 +99,88 @@ pub enum PodFieldType {
 /// spelling so tooling can parse them without a lookup.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PodPrimitive {
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+}
+
+/// ADR-0019 schema type vocabulary. Describes the structure of a mail
+/// kind's payload in enough detail for the hub to encode it from
+/// agent-supplied params and the substrate to decode it into a typed
+/// value. `Struct.repr_c = true` selects the cast-shaped wire format
+/// (raw `#[repr(C)]` bytes); everything else is postcard.
+///
+/// Restrictions on `repr_c = true` (enforced by the SDK derive, not
+/// the wire format): only legal when every field is itself
+/// cast-eligible — `Scalar`, `Array` of cast-eligible elements, or a
+/// nested `Struct { repr_c: true, .. }`. `String`, `Bytes`, `Vec`,
+/// `Option`, and `Enum` fields disqualify a struct from `repr_c`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SchemaType {
+    Unit,
+    Bool,
+    Scalar(Primitive),
+    String,
+    Bytes,
+    Option(Box<SchemaType>),
+    Vec(Box<SchemaType>),
+    Array {
+        element: Box<SchemaType>,
+        len: u32,
+    },
+    Struct {
+        fields: Vec<NamedField>,
+        repr_c: bool,
+    },
+    Enum {
+        variants: Vec<EnumVariant>,
+    },
+}
+
+/// One field inside a `SchemaType::Struct` or struct-shaped enum
+/// variant. Field order matches the Rust source order; for cast-shaped
+/// structs (`repr_c: true`) it also matches `#[repr(C)]` layout.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedField {
+    pub name: String,
+    pub ty: SchemaType,
+}
+
+/// One variant of a `SchemaType::Enum`. Discriminants are explicit
+/// `u32`s so the wire encoding doesn't depend on declaration order —
+/// adding a variant later (without renumbering existing ones) is
+/// forward-compatible at the postcard level.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EnumVariant {
+    Unit {
+        name: String,
+        discriminant: u32,
+    },
+    Tuple {
+        name: String,
+        discriminant: u32,
+        fields: Vec<SchemaType>,
+    },
+    Struct {
+        name: String,
+        discriminant: u32,
+        fields: Vec<NamedField>,
+    },
+}
+
+/// Scalar primitives addressable by `SchemaType::Scalar`. Same set as
+/// `PodPrimitive` (which is parallel for the legacy `Pod` arm during
+/// migration); kept as its own type so `Schema` can outlive `Pod` once
+/// the cleanup PR removes the legacy arm.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Primitive {
     U8,
     U16,
     U32,
