@@ -1,0 +1,18 @@
+[package]
+name = "aether-mail-derive"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+# Tests need both the runtime traits and the macro re-exports, plus
+# the `descriptors` feature so `Schema` resolves.
+aether-mail = { path = "../aether-mail", features = ["derive", "descriptors"] }
+aether-hub-protocol = { path = "../aether-hub-protocol" }

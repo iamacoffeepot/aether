@@ -76,9 +76,22 @@ dependencies = [
 name = "aether-mail"
 version = "0.1.0"
 dependencies = [
+ "aether-hub-protocol",
+ "aether-mail-derive",
  "bytemuck",
  "postcard",
  "serde",
+]
+
+[[package]]
+name = "aether-mail-derive"
+version = "0.1.0"
+dependencies = [
+ "aether-hub-protocol",
+ "aether-mail",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

@@ -29,6 +29,165 @@ pub trait Kind {
     const NAME: &'static str;
 }
 
+/// Compile-time predicate: can this type's payload travel across the
+/// wire as raw `#[repr(C)]` bytes (and decode by `bytemuck::cast`)?
+///
+/// Used by `#[derive(Kind)]` to compute `SchemaType::Struct.repr_c`
+/// at the consumer's compile time without losing recursion: a struct
+/// whose fields are all `CastEligible` is itself eligible *iff* it
+/// also carries `#[repr(C)]`. Anything containing a `String`, `Vec`,
+/// `Option`, enum, or non-`#[repr(C)]` substruct short-circuits to
+/// `false`, which forces the postcard wire path on the descriptor.
+pub trait CastEligible {
+    const ELIGIBLE: bool;
+}
+
+macro_rules! cast_eligible_primitive {
+    ($($t:ty),* $(,)?) => {
+        $( impl CastEligible for $t { const ELIGIBLE: bool = true; } )*
+    };
+}
+
+cast_eligible_primitive!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, bool);
+
+impl<T: CastEligible, const N: usize> CastEligible for [T; N] {
+    const ELIGIBLE: bool = T::ELIGIBLE;
+}
+
+// Variable-length and sum-shaped stdlib types are explicitly cast
+// *in*-eligible. The derive's emitted `ELIGIBLE` const ANDs every
+// field's value, so without these impls a `#[repr(C)]` struct
+// containing a `String` would fail to compile — the trait bound
+// on `<String as CastEligible>::ELIGIBLE` would be unsatisfied.
+// Listing them here is the price of not having stable Rust
+// specialization; new "definitely not eligible" types can be added
+// as the kind vocabulary reaches for them.
+impl CastEligible for alloc::string::String {
+    const ELIGIBLE: bool = false;
+}
+impl<T> CastEligible for alloc::vec::Vec<T> {
+    const ELIGIBLE: bool = false;
+}
+impl<T> CastEligible for Option<T> {
+    const ELIGIBLE: bool = false;
+}
+
+/// Re-exported derive macros from `aether-mail-derive`. Behind the
+/// `derive` feature so `cargo build` on a guest that hand-writes
+/// `impl Kind` doesn't pay the proc-macro compile cost.
+#[cfg(feature = "derive")]
+pub use aether_mail_derive::{Kind, Schema};
+
+/// ADR-0019 schema producer. The substrate (and tooling that builds
+/// hub descriptors) calls `T::schema()` to learn how a kind's payload
+/// is laid out. Wasm guests typically don't need this — they send and
+/// receive bytes — so the trait sits behind the `descriptors` feature.
+///
+/// Blanket impls cover the leaf types in the schema vocabulary
+/// (primitives, `String`, `[u8]`-shaped `Vec`s, fixed arrays,
+/// `Option`, generic `Vec`). User structs reach the trait via
+/// `#[derive(Schema)]`.
+#[cfg(feature = "descriptors")]
+pub use schema::Schema;
+
+/// Internal helpers the `#[derive(Schema)]` macro uses to construct
+/// `String` and `Vec` values without forcing every consumer crate to
+/// `extern crate alloc;`. Not part of the public API; the macro is the
+/// only intended caller.
+#[cfg(feature = "descriptors")]
+#[doc(hidden)]
+pub mod __derive_runtime {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    pub fn string_from(s: &str) -> String {
+        String::from(s)
+    }
+
+    pub fn vec_from<T, const N: usize>(arr: [T; N]) -> Vec<T> {
+        Vec::from(arr)
+    }
+}
+
+#[cfg(feature = "descriptors")]
+mod schema {
+    use alloc::boxed::Box;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use aether_hub_protocol::{Primitive, SchemaType};
+
+    /// Produces the `SchemaType` describing how this type lays out as
+    /// a mail payload. Implemented by `#[derive(Schema)]` on user
+    /// structs, and by blanket impl on the schema-vocabulary leaves.
+    pub trait Schema {
+        fn schema() -> SchemaType;
+    }
+
+    macro_rules! scalar {
+        ($t:ty, $p:ident) => {
+            impl Schema for $t {
+                fn schema() -> SchemaType {
+                    SchemaType::Scalar(Primitive::$p)
+                }
+            }
+        };
+    }
+
+    scalar!(u8, U8);
+    scalar!(u16, U16);
+    scalar!(u32, U32);
+    scalar!(u64, U64);
+    scalar!(i8, I8);
+    scalar!(i16, I16);
+    scalar!(i32, I32);
+    scalar!(i64, I64);
+    scalar!(f32, F32);
+    scalar!(f64, F64);
+
+    impl Schema for bool {
+        fn schema() -> SchemaType {
+            SchemaType::Bool
+        }
+    }
+
+    impl Schema for String {
+        fn schema() -> SchemaType {
+            SchemaType::String
+        }
+    }
+
+    // Generic `Vec<T>`. `Vec<u8>` is the canonical byte-buffer shape
+    // and the wire vocabulary has a `Bytes` arm to render it as
+    // base64/JSON-array params at the hub. We can't add a specialized
+    // `impl Schema for Vec<u8>` here because Rust's overlap rules
+    // forbid it without nightly specialization — so the derive macro
+    // pattern-matches `Vec<u8>` on field types and emits
+    // `SchemaType::Bytes` directly, bypassing this blanket. Standalone
+    // `Vec<u8>` outside a derived struct still routes through this
+    // impl and lands as `Vec(Scalar(U8))`.
+    impl<T: Schema> Schema for Vec<T> {
+        fn schema() -> SchemaType {
+            SchemaType::Vec(Box::new(T::schema()))
+        }
+    }
+
+    impl<T: Schema> Schema for Option<T> {
+        fn schema() -> SchemaType {
+            SchemaType::Option(Box::new(T::schema()))
+        }
+    }
+
+    impl<T: Schema, const N: usize> Schema for [T; N] {
+        fn schema() -> SchemaType {
+            SchemaType::Array {
+                element: Box::new(T::schema()),
+                len: N as u32,
+            }
+        }
+    }
+}
+
 /// Reason a decode failed. Encoding is infallible for the tiers we
 /// support, so there is no corresponding `EncodeError`.
 #[derive(Debug, Clone, PartialEq, Eq)]

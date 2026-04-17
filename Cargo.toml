@@ -8,6 +8,7 @@ members = [
     "crates/aether-hub",
     "crates/aether-hub-protocol",
     "crates/aether-mail",
+    "crates/aether-mail-derive",
     "crates/aether-mail-spike-host",
     "crates/aether-mail-spike-guest",
 ]
