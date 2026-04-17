@@ -1,7 +1,8 @@
 # ADR-0012: Guest-side component SDK
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-14
+- **Accepted:** 2026-04-14
 
 ## Context
 
