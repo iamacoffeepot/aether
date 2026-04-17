@@ -78,8 +78,12 @@ The existing `SubstrateCtx::send` path already handles "mailbox is Dropped" — 
 
 ### 4. Handle lifetime
 
-- **Session handles**: same as ADR-0013. Valid for the life of the session; stale on session-gone (V0 doesn't detect this synchronously — the hub discards the frame).
-- **Component handles**: valid for the life of the *receiving* component instance. Drop/replace on the receiver clears the table along with the `Store`. The *referenced* component being dropped after handle allocation resolves at `reply_mail` time — it routes to a Dropped mailbox entry and the substrate discards, consistent with today's component-to-dropped-mailbox semantics.
+Mail in this system is best-effort end-to-end. The broadcast sink silently drops when no hub is attached; sends to dropped mailboxes log and discard; in-flight mail across `replace_component` is dropped (ADR-0010 §5). Reply inherits that contract — a component that needs delivery assurance builds timeouts, acks, or retries on top, same as it would for any other send.
+
+With that framing, handle expiry collapses to "the send might fail":
+
+- **Session handles**: same as ADR-0013. Valid for the life of the session; stale on session-gone (V0 doesn't detect this synchronously — the hub discards the frame on receipt).
+- **Component handles**: valid for the life of the *receiving* component instance (cleared along with the `Store` on drop/replace of the receiver). The *referenced* component being dropped between handle allocation and reply resolves at `reply_mail` time — it routes through `SubstrateCtx::send` which already handles Dropped entries with a log-and-discard. This is the same semantic as any component-to-dropped-mailbox send today, not a new failure mode.
 
 Crucially, **handles do not cross instance boundaries**. A handle allocated for component B, stashed by B, then carried through a `replace_component` on B is invalidated along with the rest of B's state (ADR-0010). If B wants to survive the reply across replace, the payload needs to carry something the new instance can re-resolve — the handle isn't that thing.
 
@@ -115,12 +119,13 @@ Works identically whether the caller was a Claude session or another component. 
 - **Runtime-discovered peer replies become ergonomic.** No more "embed your own name in the payload" workaround; no more per-message `resolve_mailbox` calls.
 - **Cheap implementation.** Extends the existing `SenderTable` — roughly one enum, one `Mail` field, and a match in `reply_mail`. No new host fn, no new guest type.
 - **Composes with typed sinks.** Components that know their callee at init still use `Sink<K>`; components that answer discovered callers use `Sender`. Both work.
+- **Preserves the best-effort mail contract.** Reply failure modes (session-gone, component-dropped, handle-unknown) are all just "send didn't arrive" from the guest's perspective — the same semantic as any other mail send. Components that need delivery assurance build it on top.
 
 ### Negative
 
-- **Two handle lifetimes under one type.** Session handles and component handles expire under different rules. The opaque-u32 surface hides this from the guest, but substrate code has to reason about both cases. A component dropped between receive and reply is a new failure mode from today's perspective (though the same mail-to-dropped-mailbox semantics apply).
 - **Forgery surface is slightly wider.** A compromised component that guesses a handle value could reply to an arbitrary session or component. Same concern as ADR-0013, just scoped wider — still bounded by the guest having to invent valid `u32`s, which is astronomical against monotonic allocation.
 - **Encourages reply-over-send.** For peer-to-peer patterns that *could* use `Sink<K>` cleanly, developers might default to reply because the API is uniform. That's mostly fine but skips the compile-time kind fencing sinks provide.
+- **Two handle variants share one table.** The `SenderEntry` enum means every `reply_mail` call pays for a match arm to pick the route. Negligible, but it's a branch that didn't exist before.
 
 ### Neutral
 
