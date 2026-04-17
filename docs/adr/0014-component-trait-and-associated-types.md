@@ -1,7 +1,8 @@
 # ADR-0014: Component trait and associated types
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-14
+- **Accepted:** 2026-04-15
 
 ## Context
 
