@@ -13,6 +13,7 @@
 #[link(wasm_import_module = "aether")]
 unsafe extern "C" {
     pub fn send_mail(recipient: u32, kind: u32, ptr: u32, len: u32, count: u32) -> u32;
+    pub fn reply_mail(sender: u32, kind: u32, ptr: u32, len: u32, count: u32) -> u32;
     pub fn resolve_kind(name_ptr: u32, name_len: u32) -> u32;
     pub fn resolve_mailbox(name_ptr: u32, name_len: u32) -> u32;
     pub fn save_state(version: u32, ptr: u32, len: u32) -> u32;
@@ -24,6 +25,14 @@ unsafe extern "C" {
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn send_mail(_recipient: u32, _kind: u32, _ptr: u32, _len: u32, _count: u32) -> u32 {
     panic!("aether-component: send_mail called on non-wasm target");
+}
+
+/// # Safety
+/// Host-target stub for the wasm `aether::reply_mail` import. Always
+/// panics — callers on non-wasm targets are misusing the SDK.
+#[cfg(not(target_arch = "wasm32"))]
+pub unsafe fn reply_mail(_sender: u32, _kind: u32, _ptr: u32, _len: u32, _count: u32) -> u32 {
+    panic!("aether-component: reply_mail called on non-wasm target");
 }
 
 /// # Safety

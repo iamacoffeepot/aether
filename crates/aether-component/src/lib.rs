@@ -22,14 +22,11 @@
 //     substrate hands it to the new instance via `on_rehydrate` with
 //     a populated `PriorState<'_>`. Opt-in — components that don't
 //     override either hook migrate nothing.
-//
-// Still deferred:
-//   - Reply-to-sender (ADR-0013). `Mail::sender()` is present as
-//     `Option<&Sender>` and always returns `None` today; once 0013
-//     lands on the substrate side, the `export!` macro will flip to
-//     the 4-param receive ABI and the field will start carrying a
-//     handle. Component authors won't see the ABI change — it lands
-//     inside the macro.
+//   - ADR-0013: Reply-to-sender. `Mail::sender()` returns `Some(Sender)`
+//     for mail that came from a Claude session; `Ctx::reply` takes a
+//     `Sender` and a typed `KindId<K>` to answer the originating
+//     session. The 4-param `receive(kind, ptr, count, sender)` ABI is
+//     absorbed by the `export!` macro so component authors don't see it.
 
 #![no_std]
 
@@ -299,15 +296,63 @@ impl Ctx<'_> {
     pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payloads: &[K]) {
         sink.send_many(payloads);
     }
+
+    /// Reply to the Claude session that originated the inbound mail
+    /// (ADR-0013). `sender` came from `mail.sender()` on the current
+    /// receive — pass it back as the routing handle. The kind is
+    /// supplied as a typed `KindId<K>` so the same compile-time
+    /// matching the rest of the SDK uses applies here too.
+    ///
+    /// Status of the underlying host call is dropped; reply is
+    /// fire-and-forget on the guest side. If the session is gone the
+    /// hub silently discards the frame.
+    pub fn reply<K: Kind + bytemuck::NoUninit>(
+        &self,
+        sender: Sender,
+        kind: KindId<K>,
+        payload: &K,
+    ) {
+        let bytes = bytemuck::bytes_of(payload);
+        unsafe {
+            raw::reply_mail(
+                sender.raw,
+                kind.raw,
+                bytes.as_ptr().addr() as u32,
+                bytes.len() as u32,
+                1,
+            );
+        }
+    }
 }
 
-/// Reply-to-sender handle. Placeholder until ADR-0013 lands — today
-/// nothing on the substrate side produces a non-`None` sender, so
-/// `Mail::sender()` always returns `None`. Kept on the surface so
-/// consumers structure their receive bodies around
-/// `Option<&Sender>` from day one.
+/// Sentinel the substrate passes as the `sender` parameter on the
+/// `receive` shim when there is no meaningful reply target — for
+/// component-originated mail (no Claude session involved) and for
+/// broadcast-origin mail. `Mail::sender()` returns `None` in this
+/// case; `Sender` is only constructable via the `Mail` accessor.
+pub const SENDER_NONE: u32 = u32::MAX;
+
+/// Opaque per-instance handle identifying the originating Claude
+/// session of an inbound mail. Hand it back to `Ctx::reply` to send
+/// a session-targeted response.
+///
+/// `Copy` because the handle is a `u32` underneath; cloning is free.
+/// Cloning is also fine for stashing across receives — the substrate
+/// guarantees the handle stays valid until the originating session
+/// disconnects (in which case the eventual reply silently drops on
+/// the hub side; ADR-0013 §1's session-gone status is not yet
+/// detected synchronously).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Sender {
-    _priv: (),
+    raw: u32,
+}
+
+impl Sender {
+    /// Raw handle value. Exposed for components that need to call a
+    /// host fn the SDK doesn't yet wrap.
+    pub fn raw(self) -> u32 {
+        self.raw
+    }
 }
 
 /// Narrowed capability handle for shutdown hooks (`on_replace`,
@@ -417,7 +462,7 @@ impl<'a> PriorState<'a> {
 }
 
 /// Inbound mail, as received by `Component::receive`. Wraps the raw
-/// `(kind, ptr, count)` FFI parameters with typed decode helpers.
+/// `(kind, ptr, count, sender)` FFI parameters with typed decode helpers.
 ///
 /// The lifetime `'a` ties the returned references back to the receive
 /// call; holding a decoded `&K` past the return of `receive` is a
@@ -432,6 +477,7 @@ pub struct Mail<'a> {
     // no-op; on 64-bit hosts it lets us unit-test with real pointers.
     ptr: usize,
     count: u32,
+    sender: u32,
     _borrow: PhantomData<&'a [u8]>,
 }
 
@@ -439,11 +485,12 @@ impl<'a> Mail<'a> {
     /// Not part of the public API; called only by `export!`. The FFI
     /// delivers `ptr` as a wasm32 offset (`u32`); this widens it.
     #[doc(hidden)]
-    pub unsafe fn __from_raw(kind: u32, ptr: u32, count: u32) -> Self {
+    pub unsafe fn __from_raw(kind: u32, ptr: u32, count: u32, sender: u32) -> Self {
         Mail {
             kind,
             ptr: ptr as usize,
             count,
+            sender,
             _borrow: PhantomData,
         }
     }
@@ -452,11 +499,12 @@ impl<'a> Mail<'a> {
     /// from a host pointer go through here so 64-bit addresses survive.
     #[doc(hidden)]
     #[cfg(test)]
-    unsafe fn __from_ptr_test(kind: u32, ptr: usize, count: u32) -> Self {
+    unsafe fn __from_ptr_test(kind: u32, ptr: usize, count: u32, sender: u32) -> Self {
         Mail {
             kind,
             ptr,
             count,
+            sender,
             _borrow: PhantomData,
         }
     }
@@ -474,10 +522,16 @@ impl<'a> Mail<'a> {
         self.count
     }
 
-    /// Reply handle for the session that originated this mail.
-    /// Always `None` today; ADR-0013 will start returning `Some`.
-    pub fn sender(&self) -> Option<&Sender> {
-        None
+    /// Reply handle for the session that originated this mail. `None`
+    /// for component-to-component mail and broadcast-origin mail;
+    /// `Some(Sender)` when the inbound came from a Claude session and
+    /// can be answered via `Ctx::reply`.
+    pub fn sender(&self) -> Option<Sender> {
+        if self.sender == SENDER_NONE {
+            None
+        } else {
+            Some(Sender { raw: self.sender })
+        }
     }
 
     /// Decode as a single owned `K`. Returns `None` if the kind does
@@ -601,15 +655,18 @@ macro_rules! export {
         }
 
         /// # Safety
-        /// Called by the substrate with `(kind, ptr, count)` matching
-        /// the FFI contract in `aether-substrate/src/host_fns.rs`.
+        /// Called by the substrate with `(kind, ptr, count, sender)`
+        /// matching the FFI contract in
+        /// `aether-substrate/src/host_fns.rs`. `sender` is the per-
+        /// instance reply-to handle (ADR-0013) or `SENDER_NONE` for
+        /// mail with no meaningful reply target.
         #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn receive(kind: u32, ptr: u32, count: u32) -> u32 {
+        pub unsafe extern "C" fn receive(kind: u32, ptr: u32, count: u32, sender: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
             let mut ctx = $crate::Ctx::__new();
-            let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, count) };
+            let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, count, sender) };
             <$component as $crate::Component>::receive(instance, &mut ctx, mail);
             0
         }
@@ -735,7 +792,7 @@ mod tests {
         // has to arrange for that address to point at valid bytes.
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&value as *const FakePod).addr();
-        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, 1) };
+        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, 1, SENDER_NONE) };
         let kind: KindId<FakePod> = KindId {
             raw: 7,
             _k: PhantomData,
@@ -748,7 +805,7 @@ mod tests {
     fn mail_decode_wrong_kind_returns_none() {
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&value as *const FakePod).addr();
-        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, 1) };
+        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, 1, SENDER_NONE) };
         let wrong: KindId<FakePod> = KindId {
             raw: 8,
             _k: PhantomData,
@@ -760,7 +817,7 @@ mod tests {
     fn mail_decode_wrong_count_returns_none() {
         let values = [FakePod { a: 5, b: 9 }, FakePod { a: 1, b: 1 }];
         let ptr_raw = values.as_ptr().addr();
-        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, 2) };
+        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, 2, SENDER_NONE) };
         let kind: KindId<FakePod> = KindId {
             raw: 7,
             _k: PhantomData,
@@ -773,7 +830,7 @@ mod tests {
     fn mail_decode_slice_roundtrip() {
         let values = [FakePod { a: 1, b: 2 }, FakePod { a: 3, b: 4 }];
         let ptr_raw = values.as_ptr().addr();
-        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, 2) };
+        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, 2, SENDER_NONE) };
         let kind: KindId<FakePod> = KindId {
             raw: 7,
             _k: PhantomData,
@@ -783,9 +840,16 @@ mod tests {
     }
 
     #[test]
-    fn mail_sender_is_always_none_today() {
-        let mail = unsafe { Mail::__from_ptr_test(0, 0, 0) };
+    fn mail_sender_none_for_sentinel_handle() {
+        let mail = unsafe { Mail::__from_ptr_test(0, 0, 0, SENDER_NONE) };
         assert!(mail.sender().is_none());
+    }
+
+    #[test]
+    fn mail_sender_some_for_real_handle() {
+        let mail = unsafe { Mail::__from_ptr_test(0, 0, 0, 42) };
+        let s = mail.sender().expect("non-sentinel handle yields Some");
+        assert_eq!(s.raw(), 42);
     }
 
     #[test]

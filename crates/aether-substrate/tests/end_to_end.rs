@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use aether_substrate::{
-    Component, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
+    Component, HubOutbound, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
 };
 use wasmtime::{Engine, Linker, Module};
@@ -27,7 +27,9 @@ const WAT: &str = r#"
   (import "aether" "send_mail"
     (func $send_mail (param i32 i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
-  (func (export "receive") (param $kind i32) (param $ptr i32) (param $count i32) (result i32)
+  (func (export "receive")
+    (param $kind i32) (param $ptr i32) (param $count i32) (param $sender i32)
+    (result i32)
     ;; Forward a send_mail call to mailbox 1 (the sink in this test).
     ;; recipient=1, kind=99, ptr=0, len=0, count=<same as incoming count>.
     i32.const 1
@@ -61,7 +63,12 @@ fn tick_roundtrip_component_to_sink() {
     let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
     host_fns::register(&mut linker).expect("register host fns");
 
-    let ctx = SubstrateCtx::new(component_mbox, Arc::clone(&registry), Arc::clone(&queue));
+    let ctx = SubstrateCtx::new(
+        component_mbox,
+        Arc::clone(&registry),
+        Arc::clone(&queue),
+        HubOutbound::disconnected(),
+    );
     let component = Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
 
     let mut components = std::collections::HashMap::new();

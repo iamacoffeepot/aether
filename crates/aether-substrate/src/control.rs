@@ -210,7 +210,12 @@ impl ControlPlane {
             }
         };
 
-        let ctx = SubstrateCtx::new(mailbox, Arc::clone(&self.registry), Arc::clone(&self.queue));
+        let ctx = SubstrateCtx::new(
+            mailbox,
+            Arc::clone(&self.registry),
+            Arc::clone(&self.queue),
+            Arc::clone(&self.outbound),
+        );
         let component = match Component::instantiate(&self.engine, &self.linker, &module, ctx) {
             Ok(c) => c,
             Err(e) => {
@@ -344,7 +349,12 @@ impl ControlPlane {
             old.on_drop();
         }
 
-        let ctx = SubstrateCtx::new(id, Arc::clone(&self.registry), Arc::clone(&self.queue));
+        let ctx = SubstrateCtx::new(
+            id,
+            Arc::clone(&self.registry),
+            Arc::clone(&self.queue),
+            Arc::clone(&self.outbound),
+        );
         let mut new_component =
             match Component::instantiate(&self.engine, &self.linker, &module, ctx) {
                 Ok(c) => c,
@@ -475,12 +485,12 @@ mod tests {
     }
 
     /// Minimal WAT module satisfying the substrate's component
-    /// contract: exports `memory`, a `receive(i32,i32,i32) -> i32`
+    /// contract: exports `memory`, a `receive(i32,i32,i32,i32) -> i32`
     /// that returns 0, and no `init`.
     const WAT: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0))
     "#;
 
@@ -491,7 +501,7 @@ mod tests {
     const WAT_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 i32.const 200
@@ -510,7 +520,7 @@ mod tests {
     const WAT_TRAPS_ON_DROP: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_drop") (result i32)
                 unreachable))
@@ -524,7 +534,7 @@ mod tests {
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 300) "\de\ad\be\ef")
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -542,7 +552,7 @@ mod tests {
             (import "aether" "save_state"
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -558,7 +568,7 @@ mod tests {
     const WAT_REHYDRATES: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_rehydrate") (param i32 i32 i32) (result i32)
                 i32.const 396

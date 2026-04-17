@@ -3,10 +3,12 @@
 // static-offset convention (mail payload written at `MAIL_OFFSET`) to
 // match the spike; a guest-side allocator is future work per issue #18.
 
+use aether_hub_protocol::SessionToken;
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
 use crate::mail::Mail;
+use crate::sender_table::SENDER_NONE;
 
 const MAIL_OFFSET: u32 = 1024;
 
@@ -18,16 +20,20 @@ const MAIL_OFFSET: u32 = 1024;
 /// offset split keeps out-of-bounds checks obvious.
 const STATE_OFFSET: u32 = 8192;
 
-/// Contract with the guest: it exports a `receive(kind, ptr, count) -> u32`
-/// entrypoint and a `memory` named `memory`. ADR-0015 adds optional
-/// `on_replace`, `on_drop`, and `on_rehydrate` exports; the substrate
-/// calls them at the right lifecycle moments when present and silently
-/// skips when absent (no-op trait defaults compile down to no symbol
-/// under LTO, so components that don't override stay backwards-compat).
+/// Contract with the guest: it exports a
+/// `receive(kind, ptr, count, sender) -> u32` entrypoint and a `memory`
+/// named `memory`. ADR-0013 widened the receive ABI with a fourth
+/// `sender: u32` parameter — a per-instance handle the guest can pass
+/// back to `reply_mail`, or `SENDER_NONE` for component-originated
+/// mail. ADR-0015 adds optional `on_replace`, `on_drop`, and
+/// `on_rehydrate` exports; the substrate calls them at the right
+/// lifecycle moments when present and silently skips when absent
+/// (no-op trait defaults compile down to no symbol under LTO, so
+/// components that don't override stay backwards-compat).
 pub struct Component {
     store: Store<SubstrateCtx>,
     memory: Memory,
-    receive: TypedFunc<(u32, u32, u32), u32>,
+    receive: TypedFunc<(u32, u32, u32, u32), u32>,
     on_replace: Option<TypedFunc<(), u32>>,
     on_drop: Option<TypedFunc<(), u32>>,
     on_rehydrate: Option<TypedFunc<(u32, u32, u32), u32>>,
@@ -48,7 +54,8 @@ impl Component {
         let memory = instance
             .get_memory(&mut store, "memory")
             .ok_or_else(|| wasmtime::Error::msg("guest exports no `memory`"))?;
-        let receive = instance.get_typed_func::<(u32, u32, u32), u32>(&mut store, "receive")?;
+        let receive =
+            instance.get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "receive")?;
 
         // Optional `init() -> u32` export: called once before the first
         // `receive`, used for one-shot bootstrap like resolving kind
@@ -90,11 +97,24 @@ impl Component {
     /// `receive`. Returns the guest's return value (contract is
     /// currently informational; host-visible errors propagate as
     /// `wasmtime::Error`).
+    ///
+    /// ADR-0013: when the mail carries a non-NIL `SessionToken`
+    /// (hub-originated mail), a fresh sender handle is allocated from
+    /// the per-instance `SenderTable`. Component-originated mail and
+    /// broadcast-origin mail pass `SENDER_NONE` so the guest cannot
+    /// `reply_mail` against a meaningless target.
     pub fn deliver(&mut self, mail: &Mail) -> wasmtime::Result<u32> {
+        let handle = if mail.sender == SessionToken::NIL {
+            SENDER_NONE
+        } else {
+            self.store.data_mut().sender_table.allocate(mail.sender)
+        };
         self.memory
             .write(&mut self.store, MAIL_OFFSET as usize, &mail.payload)?;
-        self.receive
-            .call(&mut self.store, (mail.kind, MAIL_OFFSET, mail.count))
+        self.receive.call(
+            &mut self.store,
+            (mail.kind, MAIL_OFFSET, mail.count, handle),
+        )
     }
 
     /// Invoke the guest's `on_replace` hook if it exports one.
@@ -193,6 +213,7 @@ mod tests {
     use wasmtime::{Engine, Linker};
 
     use super::*;
+    use crate::hub_client::HubOutbound;
     use crate::mail::MailboxId;
     use crate::queue::MailQueue;
     use crate::registry::Registry;
@@ -202,6 +223,7 @@ mod tests {
             MailboxId(0),
             Arc::new(Registry::new()),
             Arc::new(MailQueue::new()),
+            HubOutbound::disconnected(),
         )
     }
 
@@ -220,7 +242,7 @@ mod tests {
     const WAT_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 i32.const 200
@@ -237,14 +259,14 @@ mod tests {
     const WAT_NO_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0))
     "#;
 
     const WAT_TRAP_ON_DROP: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_drop") (result i32)
                 unreachable))
@@ -258,7 +280,7 @@ mod tests {
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 300) "\de\ad\be\ef")
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -276,7 +298,7 @@ mod tests {
             (import "aether" "save_state"
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -293,7 +315,7 @@ mod tests {
     const WAT_REHYDRATES: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32) (result i32)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_rehydrate") (param i32 i32 i32) (result i32)
                 ;; *(u32*)396 = version
@@ -305,6 +327,36 @@ mod tests {
                 local.get 1
                 local.get 2
                 memory.copy
+                i32.const 0))
+    "#;
+
+    /// ADR-0013: `receive` stores the sender handle at offset 500 so
+    /// the test can observe what the substrate passed through.
+    const WAT_STORES_SENDER: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+                i32.const 500
+                local.get 3
+                i32.store
+                i32.const 0))
+    "#;
+
+    /// ADR-0013: `receive` echoes a reply back to the sender under
+    /// whatever kind id the caller registered. Payload is empty —
+    /// the round-trip is the observable behavior.
+    const WAT_REPLIES: &str = r#"
+        (module
+            (import "aether" "reply_mail"
+                (func $reply_mail (param i32 i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+                (drop (call $reply_mail
+                    (local.get 3) ;; sender handle from receive param
+                    (i32.const 0) ;; kind id 0 — registered in the test
+                    (i32.const 0) ;; ptr
+                    (i32.const 0) ;; len
+                    (i32.const 1))) ;; count
                 i32.const 0))
     "#;
 
@@ -396,5 +448,102 @@ mod tests {
         };
         // Silently discards the bundle per ADR-0016 §3.
         component.call_on_rehydrate(&bundle).expect("noop ok");
+    }
+
+    #[test]
+    fn deliver_with_nil_sender_passes_sender_none() {
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+        use crate::sender_table::SENDER_NONE;
+
+        let mut component = instantiate(WAT_STORES_SENDER);
+        // Mail::new defaults sender to SessionToken::NIL.
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1);
+        component.deliver(&mail).expect("deliver");
+        assert_eq!(component.read_u32(500), SENDER_NONE);
+    }
+
+    #[test]
+    fn deliver_with_real_token_allocates_handle() {
+        use aether_hub_protocol::{SessionToken, Uuid};
+
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+        use crate::sender_table::SENDER_NONE;
+
+        let mut component = instantiate(WAT_STORES_SENDER);
+        let token = SessionToken(Uuid::from_u128(0xaaaa));
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_sender(token);
+        component.deliver(&mail).expect("deliver");
+        let observed = component.read_u32(500);
+        assert_ne!(observed, SENDER_NONE);
+        assert_eq!(
+            component.store.data().sender_table.resolve(observed),
+            Some(token),
+        );
+    }
+
+    fn plane_ctx_for_reply() -> (
+        SubstrateCtx,
+        std::sync::mpsc::Receiver<aether_hub_protocol::EngineToHub>,
+    ) {
+        use aether_hub_protocol::{KindDescriptor, KindEncoding};
+
+        use crate::hub_client::HubOutbound;
+        use crate::mail::MailboxId as M;
+
+        let (outbound, rx) = HubOutbound::test_channel();
+        let registry = Arc::new(Registry::new());
+        // Kind id 0 is what `WAT_REPLIES` passes to reply_mail.
+        registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: "test.pong".into(),
+                encoding: KindEncoding::Signal,
+            })
+            .expect("register kind");
+        let ctx = SubstrateCtx::new(M(0), registry, Arc::new(MailQueue::new()), outbound);
+        (ctx, rx)
+    }
+
+    fn instantiate_with_ctx(wat: &str, ctx: SubstrateCtx) -> Component {
+        let engine = Engine::default();
+        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        crate::host_fns::register(&mut linker).expect("register host fns");
+        let wasm = wat::parse_str(wat).unwrap();
+        let module = Module::new(&engine, &wasm).unwrap();
+        Component::instantiate(&engine, &linker, &module, ctx).unwrap()
+    }
+
+    #[test]
+    fn reply_mail_emits_session_addressed_frame() {
+        use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
+
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+
+        let (ctx, rx) = plane_ctx_for_reply();
+        let mut component = instantiate_with_ctx(WAT_REPLIES, ctx);
+
+        let token = SessionToken(Uuid::from_u128(0xbeef));
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_sender(token);
+        component.deliver(&mail).expect("deliver");
+
+        let frame = rx.try_recv().expect("outbound frame queued");
+        let EngineToHub::Mail(mail_frame) = frame else {
+            panic!("expected EngineToHub::Mail, got {frame:?}");
+        };
+        assert_eq!(mail_frame.address, ClaudeAddress::Session(token));
+        assert_eq!(mail_frame.kind_name, "test.pong");
+    }
+
+    #[test]
+    fn reply_mail_with_unknown_handle_sends_no_frame() {
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+
+        let (ctx, rx) = plane_ctx_for_reply();
+        let mut component = instantiate_with_ctx(WAT_REPLIES, ctx);
+
+        // NIL sender → SENDER_NONE reaches the guest → reply_mail
+        // returns REPLY_UNKNOWN_HANDLE and outbound stays quiet.
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1);
+        component.deliver(&mail).expect("deliver");
+        assert!(rx.try_recv().is_err(), "no frame should have been sent");
     }
 }
