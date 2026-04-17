@@ -17,13 +17,49 @@ use crate::mail::{Mail, MailKind, MailboxId};
 use crate::queue::MailQueue;
 use crate::registry::{MailboxEntry, Registry};
 
+/// ADR-0016 §3: opt-in state migration payload. The substrate owns the
+/// buffer from the moment `save_state` is called on the old instance
+/// until the bundle is handed to the new instance via `on_rehydrate`
+/// (or discarded if no successor consumes it). Both fields are opaque
+/// to the substrate — the component owns versioning and the byte layout.
+#[derive(Debug, Clone)]
+pub struct StateBundle {
+    pub version: u32,
+    pub bytes: Vec<u8>,
+}
+
 pub struct SubstrateCtx {
     pub sender: MailboxId,
     pub registry: Arc<Registry>,
     pub queue: Arc<MailQueue>,
+    /// Set by the `save_state` host fn during `on_replace`. The
+    /// substrate extracts it after hooks return via
+    /// `Component::take_saved_state`. Never read by the guest —
+    /// rehydration reads from a scratch offset written by the
+    /// substrate, not from here.
+    pub saved_state: Option<StateBundle>,
+    /// Set by the `save_state` host fn when it rejects a call (1 MiB
+    /// cap exceeded, OOB pointer). ADR-0016 §4: a failing save aborts
+    /// the replace; the substrate checks this after `on_replace` and
+    /// surfaces the message back up the control plane.
+    pub save_state_error: Option<String>,
 }
 
 impl SubstrateCtx {
+    /// Build a fresh ctx with empty state-migration slots. Using this
+    /// over the struct literal keeps the `saved_state` /
+    /// `save_state_error` fields private to the migration wiring —
+    /// callers should never set them directly.
+    pub fn new(sender: MailboxId, registry: Arc<Registry>, queue: Arc<MailQueue>) -> Self {
+        SubstrateCtx {
+            sender,
+            registry,
+            queue,
+            saved_state: None,
+            save_state_error: None,
+        }
+    }
+
     /// Dispatch mail. If the recipient is a sink, the handler runs inline
     /// on the caller's thread. If it's a component, the mail is enqueued
     /// for a worker to deliver. Unknown recipients are dropped.

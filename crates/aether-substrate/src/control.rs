@@ -210,11 +210,7 @@ impl ControlPlane {
             }
         };
 
-        let ctx = SubstrateCtx {
-            sender: mailbox,
-            registry: Arc::clone(&self.registry),
-            queue: Arc::clone(&self.queue),
-        };
+        let ctx = SubstrateCtx::new(mailbox, Arc::clone(&self.registry), Arc::clone(&self.queue));
         let component = match Component::instantiate(&self.engine, &self.linker, &module, ctx) {
             Ok(c) => c,
             Err(e) => {
@@ -326,35 +322,55 @@ impl ControlPlane {
             }
         };
 
-        // ADR-0015 §3: hooks run on the old instance under the write
-        // lock before instantiation. Take the lock now, invoke hooks,
-        // then keep the lock while we instantiate + swap so no mail
+        // ADR-0015 §3 + ADR-0016 §4: hooks run on the old instance
+        // under the write lock before instantiation. Take the lock
+        // now, invoke hooks, extract any saved state, then keep the
+        // lock while we instantiate + rehydrate + swap so no mail
         // races in. Wart named in ADR-0015: if instantiation below
         // fails, `on_drop` will have already fired on the old
         // instance even though it stays live.
         let mut table = self.components.write().unwrap();
+        let mut saved = None;
         if let Some(cell) = table.get(&id) {
             let mut old = cell.lock().unwrap();
             old.on_replace();
+            // ADR-0016 §4 step 2: save failures abort the replace
+            // before `on_drop` fires, so the old instance is still
+            // fully alive. Check the error slot before continuing.
+            if let Some(err) = old.take_save_error() {
+                return ReplaceResultPayload::Err { error: err };
+            }
+            saved = old.take_saved_state();
             old.on_drop();
         }
 
-        let ctx = SubstrateCtx {
-            sender: id,
-            registry: Arc::clone(&self.registry),
-            queue: Arc::clone(&self.queue),
-        };
-        let new_component = match Component::instantiate(&self.engine, &self.linker, &module, ctx) {
-            Ok(c) => c,
-            Err(e) => {
-                // Registry is left as-is; any newly registered
-                // kinds stay. The old component is still bound (hooks
-                // already fired — see wart above).
-                return ReplaceResultPayload::Err {
-                    error: format!("wasm instantiation failed: {e}"),
-                };
-            }
-        };
+        let ctx = SubstrateCtx::new(id, Arc::clone(&self.registry), Arc::clone(&self.queue));
+        let mut new_component =
+            match Component::instantiate(&self.engine, &self.linker, &module, ctx) {
+                Ok(c) => c,
+                Err(e) => {
+                    // Registry is left as-is; any newly registered
+                    // kinds stay. The old component is still bound
+                    // (on_replace + on_drop already fired — see wart
+                    // above); the bundle is discarded.
+                    return ReplaceResultPayload::Err {
+                        error: format!("wasm instantiation failed: {e}"),
+                    };
+                }
+            };
+
+        // ADR-0016 §4 step 5: rehydrate the new instance if the old
+        // one produced a bundle. A trap or memory-write failure here
+        // aborts the replace: drop the new instance, keep the old
+        // in the table. `on_drop` on the old already fired — that's
+        // the documented ordering wart.
+        if let Some(bundle) = saved
+            && let Err(e) = new_component.call_on_rehydrate(&bundle)
+        {
+            return ReplaceResultPayload::Err {
+                error: format!("on_rehydrate failed: {e}"),
+            };
+        }
 
         // Atomic swap in-place under the already-held write lock.
         // The returned old Component drops at end of scope; wasmtime
@@ -498,6 +514,61 @@ mod tests {
                 i32.const 0)
             (func (export "on_drop") (result i32)
                 unreachable))
+    "#;
+
+    /// ADR-0016 save side: `on_replace` saves 4 bytes of 0xDEADBEEF
+    /// with schema version 7.
+    const WAT_SAVES_STATE: &str = r#"
+        (module
+            (import "aether" "save_state"
+                (func $save_state (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 300) "\de\ad\be\ef")
+            (func (export "receive") (param i32 i32 i32) (result i32)
+                i32.const 0)
+            (func (export "on_replace") (result i32)
+                (drop (call $save_state
+                    (i32.const 7)
+                    (i32.const 300)
+                    (i32.const 4)))
+                i32.const 0))
+    "#;
+
+    /// ADR-0016 save side: attempts a 2 MiB save, which the substrate
+    /// rejects over the 1 MiB cap. `save_state` returns status 3 and
+    /// the ctx error slot is populated.
+    const WAT_SAVES_TOO_LARGE: &str = r#"
+        (module
+            (import "aether" "save_state"
+                (func $save_state (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "receive") (param i32 i32 i32) (result i32)
+                i32.const 0)
+            (func (export "on_replace") (result i32)
+                (drop (call $save_state
+                    (i32.const 1)
+                    (i32.const 0)
+                    (i32.const 0x00200000)))
+                i32.const 0))
+    "#;
+
+    /// ADR-0016 load side: `on_rehydrate` copies the bundle bytes to
+    /// offset 400 and stores the version at offset 396. Used to prove
+    /// migration end-to-end when paired with `WAT_SAVES_STATE`.
+    const WAT_REHYDRATES: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "receive") (param i32 i32 i32) (result i32)
+                i32.const 0)
+            (func (export "on_rehydrate") (param i32 i32 i32) (result i32)
+                i32.const 396
+                local.get 0
+                i32.store
+                i32.const 400
+                local.get 1
+                local.get 2
+                memory.copy
+                i32.const 0))
     "#;
 
     fn make_plane() -> ControlPlane {
@@ -883,5 +954,142 @@ mod tests {
         // No panic; no outbound reply. Unknown kind arriving at the
         // control mailbox just logs and moves on.
         plane.dispatch("aether.control.does_not_exist", SessionToken::NIL, &[]);
+    }
+
+    #[test]
+    fn replace_migrates_state_from_old_to_new() {
+        // The full ADR-0016 path: load an old instance that saves on
+        // replace, replace with a new instance that rehydrates, and
+        // observe that the new instance's memory received the bundle.
+        let plane = make_plane();
+        let LoadResultPayload::Ok { mailbox_id, .. } = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponentPayload {
+                wasm: wat::parse_str(WAT_SAVES_STATE).unwrap(),
+                kinds: vec![],
+                name: Some("stateful".into()),
+            })
+            .unwrap(),
+        ) else {
+            panic!("load should succeed");
+        };
+
+        let result = plane.handle_replace(
+            &postcard::to_allocvec(&ReplaceComponentPayload {
+                mailbox_id,
+                wasm: wat::parse_str(WAT_REHYDRATES).unwrap(),
+                kinds: vec![],
+            })
+            .unwrap(),
+        );
+        assert!(matches!(result, ReplaceResultPayload::Ok), "got {result:?}");
+
+        // Peek into the new component's memory — rehydrate should
+        // have written version 7 at offset 396 and 0xDEADBEEF at
+        // offset 400.
+        let table = plane.components.read().unwrap();
+        let cell = table.get(&MailboxId(mailbox_id)).expect("present");
+        let mut new = cell.lock().unwrap();
+        assert_eq!(new.read_u32(396), 7);
+        assert_eq!(new.read_bytes(400, 4), vec![0xDE, 0xAD, 0xBE, 0xEF],);
+    }
+
+    #[test]
+    fn replace_aborts_when_save_state_over_cap() {
+        // Old instance requests a save larger than 1 MiB; substrate
+        // rejects, `handle_replace` surfaces the error, old stays live.
+        let plane = make_plane();
+        let LoadResultPayload::Ok { mailbox_id, .. } = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponentPayload {
+                wasm: wat::parse_str(WAT_SAVES_TOO_LARGE).unwrap(),
+                kinds: vec![],
+                name: Some("greedy".into()),
+            })
+            .unwrap(),
+        ) else {
+            panic!("load should succeed");
+        };
+
+        let result = plane.handle_replace(
+            &postcard::to_allocvec(&ReplaceComponentPayload {
+                mailbox_id,
+                wasm: wat::parse_str(WAT).unwrap(),
+                kinds: vec![],
+            })
+            .unwrap(),
+        );
+        let ReplaceResultPayload::Err { error } = result else {
+            panic!("expected replace to fail, got {result:?}");
+        };
+        assert!(error.contains("exceeds"), "got: {error}");
+        // Old instance is still bound; name still resolves to its id.
+        assert_eq!(plane.registry.lookup("greedy"), Some(MailboxId(mailbox_id)));
+        assert!(
+            plane
+                .components
+                .read()
+                .unwrap()
+                .contains_key(&MailboxId(mailbox_id))
+        );
+    }
+
+    #[test]
+    fn replace_without_rehydrate_hook_discards_bundle() {
+        // Old saves, new doesn't implement on_rehydrate — the bundle
+        // is silently discarded (ADR-0016 §3). Replace succeeds.
+        let plane = make_plane();
+        let LoadResultPayload::Ok { mailbox_id, .. } = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponentPayload {
+                wasm: wat::parse_str(WAT_SAVES_STATE).unwrap(),
+                kinds: vec![],
+                name: Some("orphan_save".into()),
+            })
+            .unwrap(),
+        ) else {
+            panic!("load should succeed");
+        };
+
+        let result = plane.handle_replace(
+            &postcard::to_allocvec(&ReplaceComponentPayload {
+                mailbox_id,
+                wasm: wat::parse_str(WAT).unwrap(),
+                kinds: vec![],
+            })
+            .unwrap(),
+        );
+        assert!(matches!(result, ReplaceResultPayload::Ok), "got {result:?}");
+    }
+
+    #[test]
+    fn replace_with_no_save_does_not_invoke_rehydrate() {
+        // Old doesn't save; new has on_rehydrate but it must not
+        // fire — ADR-0016 §3 says rehydrate only runs if a bundle
+        // exists. The new instance's rehydrate marker offsets should
+        // stay zero.
+        let plane = make_plane();
+        let LoadResultPayload::Ok { mailbox_id, .. } = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponentPayload {
+                wasm: wat::parse_str(WAT).unwrap(),
+                kinds: vec![],
+                name: Some("stateless_old".into()),
+            })
+            .unwrap(),
+        ) else {
+            panic!("load should succeed");
+        };
+
+        let result = plane.handle_replace(
+            &postcard::to_allocvec(&ReplaceComponentPayload {
+                mailbox_id,
+                wasm: wat::parse_str(WAT_REHYDRATES).unwrap(),
+                kinds: vec![],
+            })
+            .unwrap(),
+        );
+        assert!(matches!(result, ReplaceResultPayload::Ok));
+        let table = plane.components.read().unwrap();
+        let cell = table.get(&MailboxId(mailbox_id)).expect("present");
+        let mut new = cell.lock().unwrap();
+        assert_eq!(new.read_u32(396), 0);
+        assert_eq!(new.read_u32(400), 0);
     }
 }

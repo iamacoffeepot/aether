@@ -61,11 +61,7 @@ fn tick_roundtrip_component_to_sink() {
     let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
     host_fns::register(&mut linker).expect("register host fns");
 
-    let ctx = SubstrateCtx {
-        sender: component_mbox,
-        registry: Arc::clone(&registry),
-        queue: Arc::clone(&queue),
-    };
+    let ctx = SubstrateCtx::new(component_mbox, Arc::clone(&registry), Arc::clone(&queue));
     let component = Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
 
     let mut components = std::collections::HashMap::new();
