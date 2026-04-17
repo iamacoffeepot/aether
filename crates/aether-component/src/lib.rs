@@ -13,17 +13,17 @@
 //   - ADR-0015: Additive lifecycle hooks on the `Component` trait
 //     (`on_replace`, `on_drop`, `on_rehydrate`, all defaulted), plus
 //     the narrowed `DropCtx<'_>` capability type. `export!` emits the
-//     matching `#[no_mangle]` shims; the substrate-side wiring that
-//     actually invokes them lands in a follow-up. Components that
-//     don't override stay green; components that do can be written
-//     against the hooks today, behavior activates the moment substrate
-//     catches up.
+//     matching `#[no_mangle]` shims and the substrate invokes them at
+//     `drop_component` and `replace_component` call sites. Components
+//     that don't override stay green; hook traps are contained so a
+//     panicking hook doesn't stall teardown.
+//   - ADR-0016: Persistent state across hot reload. `DropCtx::save_state`
+//     lets `on_replace` deposit a version-tagged byte bundle; the
+//     substrate hands it to the new instance via `on_rehydrate` with
+//     a populated `PriorState<'_>`. Opt-in — components that don't
+//     override either hook migrate nothing.
 //
 // Still deferred:
-//   - Persistent state across hot reload (ADR-0016). `PriorState<'_>`
-//     is part of the `on_rehydrate` signature this ADR commits to, but
-//     the substrate-owned state bundle, the `save_state` host fn, and
-//     the call sites that actually populate it are ADR-0016's problem.
 //   - Reply-to-sender (ADR-0013). `Mail::sender()` is present as
 //     `Option<&Sender>` and always returns `None` today; once 0013
 //     lands on the substrate side, the `export!` macro will flip to
@@ -213,10 +213,9 @@ pub trait Component: Sized + 'static {
 
     /// Called once on the old instance, immediately before a
     /// `replace_component` swap (ADR-0015 §3). Default is no-op;
-    /// override to emit state that the new instance can consume via
-    /// `on_rehydrate`. The state-bundle serialization contract is
-    /// ADR-0016's problem — this hook exists here so state can flow
-    /// through it once that lands.
+    /// override to serialize state (via `DropCtx::save_state`) that
+    /// the new instance can consume through `on_rehydrate`, or to
+    /// emit farewell mail. ADR-0016 §2 governs the save-bundle shape.
     fn on_replace(&mut self, ctx: &mut DropCtx<'_>) {
         let _ = ctx;
     }
@@ -232,10 +231,11 @@ pub trait Component: Sized + 'static {
     }
 
     /// Called after `init` on a freshly-instantiated component that
-    /// is replacing an older instance, if and only if the substrate
-    /// has state from the old instance for us. Default ignores the
-    /// prior state; components that persist across replace override
-    /// to rehydrate. ADR-0016 fills in the state-bundle shape.
+    /// is replacing an older instance, if and only if the predecessor
+    /// produced a state bundle via `DropCtx::save_state` (ADR-0016 §3).
+    /// Default ignores the prior state; components that persist
+    /// across replace override to rehydrate and typically branch on
+    /// `prior.schema_version()`.
     fn on_rehydrate(&mut self, ctx: &mut Ctx<'_>, prior: PriorState<'_>) {
         let _ = ctx;
         let _ = prior;
@@ -316,12 +316,15 @@ pub struct Sender {
 /// - `send` / `send_many` still work — outbound mail during shutdown
 ///   is a valid and useful pattern ("I'm going away, here's the last
 ///   thing I observed").
+/// - `save_state` is only meaningful in `on_replace` — it deposits a
+///   version-tagged byte bundle the substrate hands to the new
+///   instance via `on_rehydrate`. Calling it from `on_drop` is
+///   technically accepted by the host fn, but the bytes are then
+///   discarded (ADR-0016 §5 — plain drops have no successor).
 /// - No `reply` — sender handles invalidate on teardown; a reply
 ///   attempt during `on_drop` cannot be honored.
 /// - No `resolve` — resolution belongs at init. There is no use case
 ///   for resolving at teardown.
-/// - Exposes `save_state` once ADR-0016 lands — state serialization
-///   is the defining reason `on_replace` has its own context.
 pub struct DropCtx<'a> {
     _borrow: PhantomData<&'a ()>,
 }
@@ -344,12 +347,36 @@ impl DropCtx<'_> {
     pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payloads: &[K]) {
         sink.send_many(payloads);
     }
+
+    /// Deposit a migration bundle for the substrate to hand to the
+    /// replacement instance via `on_rehydrate`. `version` is
+    /// component-defined (the substrate doesn't interpret it); bytes
+    /// are copied into a substrate-owned buffer immediately, so the
+    /// caller is free to drop the slice on return.
+    ///
+    /// Panics if the substrate rejects the call — today that's only
+    /// the 1 MiB cap being exceeded or an internal OOB, both of
+    /// which are component bugs. ADR-0015's trap containment ensures
+    /// the panic doesn't stall teardown on the substrate side.
+    ///
+    /// May be called zero or one times per `on_replace`; a second
+    /// call overwrites. Calling from `on_drop` is legal but the
+    /// bundle is discarded on plain drops — `drop_component` has no
+    /// successor to hand it to (ADR-0016 §5).
+    pub fn save_state(&mut self, version: u32, bytes: &[u8]) {
+        let status =
+            unsafe { raw::save_state(version, bytes.as_ptr().addr() as u32, bytes.len() as u32) };
+        if status != 0 {
+            panic!("aether-component: save_state failed (status {status})");
+        }
+    }
 }
 
 /// Opaque view of a prior state bundle handed to `on_rehydrate` by
-/// the substrate. Today the substrate never produces one, so
-/// `on_rehydrate` is never called — the type exists on the surface
-/// so ADR-0016 can populate it without changing the trait shape.
+/// the substrate. Populated when the predecessor called
+/// `DropCtx::save_state` during its own `on_replace`; empty otherwise
+/// (and in that case `on_rehydrate` is not called at all — ADR-0016
+/// §3).
 ///
 /// The lifetime `'a` ties `bytes()` back to the call; holding a
 /// reference past return is a compile error.
@@ -380,7 +407,6 @@ impl<'a> PriorState<'a> {
     }
 
     /// Bytes the previous instance saved via `DropCtx::save_state`.
-    /// Empty today; non-empty once ADR-0016 is wired end-to-end.
     pub fn bytes(&self) -> &'a [u8] {
         if self.len == 0 {
             &[]
@@ -618,8 +644,7 @@ macro_rules! export {
         /// Called by the substrate after `init` on a freshly
         /// instantiated replacement, with `(version, ptr, len)`
         /// describing the prior-state bundle the old instance
-        /// produced via `DropCtx::save_state` (ADR-0016 wires this
-        /// end-to-end; today the substrate never calls it).
+        /// produced via `DropCtx::save_state`.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn on_rehydrate(version: u32, ptr: u32, len: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {

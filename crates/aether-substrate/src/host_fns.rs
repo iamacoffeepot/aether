@@ -6,7 +6,7 @@
 
 use wasmtime::{Caller, Linker};
 
-use crate::ctx::SubstrateCtx;
+use crate::ctx::{StateBundle, SubstrateCtx};
 use crate::mail::MailboxId;
 
 /// Returned by `resolve_kind` / `resolve_mailbox` when the requested
@@ -14,6 +14,21 @@ use crate::mail::MailboxId;
 /// sentinel.
 pub const KIND_NOT_FOUND: u32 = u32::MAX;
 pub const MAILBOX_NOT_FOUND: u32 = u32::MAX;
+
+/// ADR-0016 §2: maximum size of a single state bundle. A `save_state`
+/// call with `len > MAX_STATE_BUNDLE_BYTES` is rejected (status 3) and
+/// the failure is recorded on the ctx so the substrate can abort the
+/// replace. 1 MiB is conservative and matches ADR-0006's `MAX_FRAME_SIZE`
+/// — revisitable once a real component actually hits the cap.
+pub const MAX_STATE_BUNDLE_BYTES: usize = 1 << 20;
+
+/// Status codes returned by the `save_state` host fn. 0 is success —
+/// non-zero values let the SDK distinguish component bugs (OOB, no
+/// memory) from policy rejection (over the size cap).
+pub const SAVE_STATE_OK: u32 = 0;
+pub const SAVE_STATE_NO_MEMORY: u32 = 1;
+pub const SAVE_STATE_OOB: u32 = 2;
+pub const SAVE_STATE_TOO_LARGE: u32 = 3;
 
 /// Register the substrate host functions on `linker`. Components that
 /// want these capabilities must be instantiated via a linker that this
@@ -82,6 +97,46 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     // `hub.claude.broadcast`, `aether.control`) without hardcoding
     // numeric ids — ADR-0010's empty boot removed the fixed boot
     // order that such hardcoding used to depend on.
+    // ADR-0016 §2: save_state buffers the component's migration payload
+    // into a substrate-owned slot on the store ctx. The guest passes a
+    // `version` (opaque to the substrate) and a `(ptr, len)` pair
+    // pointing at its own linear memory. Bytes are copied out so the
+    // old instance can drop its memory normally; the substrate later
+    // hands them to the new instance via `on_rehydrate`.
+    //
+    // Size cap is enforced before the guest memory is read — an
+    // oversized request records an error and aborts without touching
+    // memory. A subsequent `save_state` in the same `on_replace` call
+    // overwrites; this matches ADR-0016 §2's "zero or one times" clause
+    // for the success path and doesn't change behavior on error.
+    linker.func_wrap(
+        "aether",
+        "save_state",
+        |mut caller: Caller<'_, SubstrateCtx>, version: u32, ptr: u32, len: u32| -> u32 {
+            if len as usize > MAX_STATE_BUNDLE_BYTES {
+                caller.data_mut().save_state_error = Some(format!(
+                    "save_state: bundle size {} exceeds {} byte cap",
+                    len, MAX_STATE_BUNDLE_BYTES,
+                ));
+                return SAVE_STATE_TOO_LARGE;
+            }
+            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return SAVE_STATE_NO_MEMORY,
+            };
+            let data = memory.data(&caller);
+            let start = ptr as usize;
+            let end = match start.checked_add(len as usize) {
+                Some(e) if e <= data.len() => e,
+                _ => return SAVE_STATE_OOB,
+            };
+            let bytes = data[start..end].to_vec();
+            let ctx = caller.data_mut();
+            ctx.saved_state = Some(StateBundle { version, bytes });
+            SAVE_STATE_OK
+        },
+    )?;
+
     linker.func_wrap(
         "aether",
         "resolve_mailbox",

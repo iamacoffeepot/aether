@@ -1,7 +1,8 @@
 # ADR-0016: Persistent component state across hot reload
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-14
+- **Accepted:** 2026-04-17
 
 ## Context
 
