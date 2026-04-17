@@ -1,7 +1,20 @@
 # ADR-0018: Constrain `Sender` to the receive call
 
-- **Status:** Proposed
+- **Status:** Rejected
 - **Date:** 2026-04-17
+- **Rejected:** 2026-04-17
+
+## Rejection note
+
+Rejected during review. The argument against: mail is explicitly best-effort — sends to dropped mailboxes log and discard, broadcasts silently drop when no hub is attached, in-flight mail on `replace_component` is dropped. Stale handles are just another instance of the same "might not arrive" semantic. The right place to handle delivery assurance is *on top* (acks, timeouts, retries in the application), not at the type system.
+
+The async-reply-to-session gap surfaced during review sharpened this: forbidding persistence would close off async replies to Claude sessions entirely until a parallel "deferred sender" mechanism shipped. Adding compile-time rigidity now — and then immediately needing a second mechanism to restore functionality — is exactly the kind of speculative complexity `feedback_defer_architecture_until_forced` was about.
+
+The original proposal text is preserved below for record. Future contributors considering a similar constraint should first check: has the best-effort contract become insufficient in practice? If not, persistable senders stay.
+
+---
+
+## Original proposal (not accepted)
 
 ## Context
 
