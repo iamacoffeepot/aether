@@ -8,7 +8,7 @@ use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
 use crate::mail::Mail;
-use crate::sender_table::SENDER_NONE;
+use crate::sender_table::{SENDER_NONE, SenderEntry};
 
 const MAIL_OFFSET: u32 = 1024;
 
@@ -98,16 +98,22 @@ impl Component {
     /// currently informational; host-visible errors propagate as
     /// `wasmtime::Error`).
     ///
-    /// ADR-0013: when the mail carries a non-NIL `SessionToken`
-    /// (hub-originated mail), a fresh sender handle is allocated from
-    /// the per-instance `SenderTable`. Component-originated mail and
-    /// broadcast-origin mail pass `SENDER_NONE` so the guest cannot
-    /// `reply_mail` against a meaningless target.
+    /// ADR-0013 + ADR-0017: a fresh sender handle is allocated from
+    /// the per-instance `SenderTable` for every inbound that has a
+    /// meaningful reply target — a Claude session (non-NIL
+    /// `SessionToken`) or another component (`from_component`
+    /// populated by `SubstrateCtx::send`). Broadcast-origin and
+    /// system-generated mail pass `SENDER_NONE` so the guest's
+    /// `mail.sender()` accessor returns `None`.
     pub fn deliver(&mut self, mail: &Mail) -> wasmtime::Result<u32> {
-        let handle = if mail.sender == SessionToken::NIL {
-            SENDER_NONE
+        let entry = if mail.sender != SessionToken::NIL {
+            Some(SenderEntry::Session(mail.sender))
         } else {
-            self.store.data_mut().sender_table.allocate(mail.sender)
+            mail.from_component.map(SenderEntry::Component)
+        };
+        let handle = match entry {
+            Some(e) => self.store.data_mut().sender_table.allocate(e),
+            None => SENDER_NONE,
         };
         self.memory
             .write(&mut self.store, MAIL_OFFSET as usize, &mail.payload)?;
@@ -463,11 +469,11 @@ mod tests {
     }
 
     #[test]
-    fn deliver_with_real_token_allocates_handle() {
+    fn deliver_with_real_token_allocates_session_handle() {
         use aether_hub_protocol::{SessionToken, Uuid};
 
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
-        use crate::sender_table::SENDER_NONE;
+        use crate::sender_table::{SENDER_NONE, SenderEntry};
 
         let mut component = instantiate(WAT_STORES_SENDER);
         let token = SessionToken(Uuid::from_u128(0xaaaa));
@@ -477,8 +483,50 @@ mod tests {
         assert_ne!(observed, SENDER_NONE);
         assert_eq!(
             component.store.data().sender_table.resolve(observed),
-            Some(token),
+            Some(SenderEntry::Session(token)),
         );
+    }
+
+    #[test]
+    fn deliver_with_from_component_allocates_component_handle() {
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+        use crate::sender_table::{SENDER_NONE, SenderEntry};
+
+        let mut component = instantiate(WAT_STORES_SENDER);
+        // ADR-0017: component-origin mail (no session token, but a
+        // populated `from_component`) gets a Component-variant handle.
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_origin(M(7));
+        component.deliver(&mail).expect("deliver");
+        let observed = component.read_u32(500);
+        assert_ne!(observed, SENDER_NONE);
+        assert_eq!(
+            component.store.data().sender_table.resolve(observed),
+            Some(SenderEntry::Component(M(7))),
+        );
+    }
+
+    #[test]
+    fn deliver_session_takes_priority_over_component_origin() {
+        // If both a session token and a from_component are set (which
+        // can happen if hub-originated mail somehow gets re-routed
+        // through SubstrateCtx::send), the Session variant wins. The
+        // session is the more specific reply target.
+        use aether_hub_protocol::{SessionToken, Uuid};
+
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+        use crate::sender_table::SenderEntry;
+
+        let mut component = instantiate(WAT_STORES_SENDER);
+        let token = SessionToken(Uuid::from_u128(0xbbbb));
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1)
+            .with_sender(token)
+            .with_origin(M(99));
+        component.deliver(&mail).expect("deliver");
+        let observed = component.read_u32(500);
+        match component.store.data().sender_table.resolve(observed) {
+            Some(SenderEntry::Session(t)) => assert_eq!(t, token),
+            other => panic!("expected Session, got {other:?}"),
+        }
     }
 
     fn plane_ctx_for_reply() -> (
@@ -545,5 +593,83 @@ mod tests {
         let mail = SubstrateMail::new(M(0), 0, vec![], 1);
         component.deliver(&mail).expect("deliver");
         assert!(rx.try_recv().is_err(), "no frame should have been sent");
+    }
+
+    /// ADR-0017 component-reply path. Builds a ctx whose registry
+    /// has both a fake originating-component mailbox (id 1, name
+    /// "caller") and a "test.pong" kind. When `WAT_REPLIES` calls
+    /// `reply_mail` with the Component-variant handle the substrate
+    /// allocated, the reply lands on the local `MailQueue` —
+    /// outbound stays empty.
+    fn plane_ctx_with_caller_mailbox() -> (
+        SubstrateCtx,
+        std::sync::mpsc::Receiver<aether_hub_protocol::EngineToHub>,
+        Arc<MailQueue>,
+        crate::mail::MailboxId,
+    ) {
+        use aether_hub_protocol::{KindDescriptor, KindEncoding};
+
+        use crate::hub_client::HubOutbound;
+        use crate::mail::MailboxId as M;
+
+        let (outbound, rx) = HubOutbound::test_channel();
+        let registry = Arc::new(Registry::new());
+        let caller = registry.register_component("caller");
+        registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: "test.pong".into(),
+                encoding: KindEncoding::Signal,
+            })
+            .expect("register kind");
+        let queue = Arc::new(MailQueue::new());
+        let ctx = SubstrateCtx::new(M(0), registry, Arc::clone(&queue), outbound);
+        (ctx, rx, queue, caller)
+    }
+
+    #[test]
+    fn reply_mail_to_component_enqueues_on_mailqueue() {
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+
+        let (ctx, rx_outbound, queue, caller) = plane_ctx_with_caller_mailbox();
+        let mut component = instantiate_with_ctx(WAT_REPLIES, ctx);
+
+        // Inbound mail from "caller" — substrate allocates a
+        // Component-variant handle. The guest's reply_mail call
+        // routes through SubstrateCtx::send to the local queue.
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_origin(caller);
+        component.deliver(&mail).expect("deliver");
+
+        // Outbound stayed quiet — no hub frame for component replies.
+        assert!(
+            rx_outbound.try_recv().is_err(),
+            "component reply must not hit HubOutbound"
+        );
+        // The local queue picked up the reply addressed to caller.
+        let queued = queue.try_pop().expect("reply enqueued");
+        assert_eq!(queued.recipient, caller);
+        assert_eq!(queued.kind, 0);
+    }
+
+    #[test]
+    fn reply_mail_to_dropped_component_silently_discards() {
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+
+        let (ctx, rx_outbound, queue, caller) = plane_ctx_with_caller_mailbox();
+        // Drop the caller before the reply lands. SubstrateCtx::send
+        // logs and discards rather than panicking — the inbound flow
+        // still completes successfully from the receiving guest's
+        // perspective.
+        ctx.registry.drop_mailbox(caller).expect("drop caller");
+        let mut component = instantiate_with_ctx(WAT_REPLIES, ctx);
+
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_origin(caller);
+        component.deliver(&mail).expect("deliver");
+
+        assert!(rx_outbound.try_recv().is_err());
+        // Queue stays empty — dropped mailbox path discards.
+        assert!(
+            queue.try_pop().is_none(),
+            "reply to dropped mailbox must not enqueue"
+        );
     }
 }

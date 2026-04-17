@@ -1,7 +1,8 @@
 # ADR-0017: Extend `Sender` handles to component-origin mail
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-17
+- **Accepted:** 2026-04-17
 
 ## Context
 

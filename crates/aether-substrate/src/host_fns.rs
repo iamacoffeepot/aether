@@ -9,6 +9,7 @@ use wasmtime::{Caller, Linker};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
 use crate::mail::MailboxId;
+use crate::sender_table::SenderEntry;
 
 /// Returned by `resolve_kind` / `resolve_mailbox` when the requested
 /// name has not been registered. Guests use this as a "lookup failed"
@@ -151,12 +152,16 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // ADR-0013 §3: `reply_mail` addresses a specific Claude session
-    // using a per-instance handle the guest received as the 4th param
-    // on its `receive` shim. Two routes diverge here versus `send_mail`:
-    // the recipient is a `SessionToken` rather than a `MailboxId`, and
-    // the frame goes straight out over `HubOutbound` rather than
-    // through the registry's sink handlers.
+    // ADR-0013 + ADR-0017: `reply_mail` addresses the originator of
+    // the inbound mail whose sender handle the guest received.
+    // Branches on the `SenderEntry` variant:
+    //   - Session: ship as a `ClaudeAddress::Session` frame through
+    //     `HubOutbound` (same route as ADR-0013's original design).
+    //   - Component: enqueue on the local `MailQueue` via
+    //     `SubstrateCtx::send`. Dropped-mailbox discard is handled
+    //     there already, so a component that vanished between the
+    //     request and the reply silently drops — the same contract
+    //     as any other send to a dropped mailbox.
     linker.func_wrap(
         "aether",
         "reply_mail",
@@ -165,7 +170,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
          kind: u32,
          ptr: u32,
          len: u32,
-         _count: u32|
+         count: u32|
          -> u32 {
             let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
@@ -180,19 +185,33 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
             let payload = data[start..end].to_vec();
 
             let ctx = caller.data();
-            let Some(token) = ctx.sender_table.resolve(sender) else {
+            let Some(entry) = ctx.sender_table.resolve(sender) else {
                 return REPLY_UNKNOWN_HANDLE;
             };
-            let Some(kind_name) = ctx.registry.kind_name(kind) else {
-                return REPLY_KIND_NOT_FOUND;
-            };
-            let origin = ctx.registry.mailbox_name(ctx.sender);
-            ctx.outbound.send(EngineToHub::Mail(EngineMailFrame {
-                address: ClaudeAddress::Session(token),
-                kind_name,
-                payload,
-                origin,
-            }));
+            match entry {
+                SenderEntry::Session(token) => {
+                    let Some(kind_name) = ctx.registry.kind_name(kind) else {
+                        return REPLY_KIND_NOT_FOUND;
+                    };
+                    let origin = ctx.registry.mailbox_name(ctx.sender);
+                    ctx.outbound.send(EngineToHub::Mail(EngineMailFrame {
+                        address: ClaudeAddress::Session(token),
+                        kind_name,
+                        payload,
+                        origin,
+                    }));
+                }
+                SenderEntry::Component(mbox) => {
+                    // Validate the kind id cheaply — the guest might
+                    // have passed a bogus one and we'd rather return
+                    // a meaningful status than silently enqueue mail
+                    // that the receiver can't decode.
+                    if ctx.registry.kind_name(kind).is_none() {
+                        return REPLY_KIND_NOT_FOUND;
+                    }
+                    ctx.send(mbox, kind, payload, count);
+                }
+            }
             REPLY_OK
         },
     )?;
