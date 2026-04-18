@@ -6,7 +6,7 @@ use aether_hub_protocol::SessionToken;
 /// Addressing token for any mailbox — component or substrate-owned sink.
 /// Opaque `u32` newtype so it can't be accidentally mixed with wasmtime
 /// indices or raw integers.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MailboxId(pub u32);
 
 /// Host/guest contract tag for the payload layout. The substrate and the

@@ -5,13 +5,12 @@
 // screen; until a component is loaded and explicitly mailed, the
 // window clears to its default and no triangles are drawn.
 //
-// Keyboard/mouse/tick events from winit target the substrate's
-// optional `default_component` mailbox. It's `None` at boot and stays
-// `None` until something (a future CLI flag, an `aether.control.*`
-// message, or a load handler extension) wires one up. For the current
-// "test component in isolation" workflow, agents drive components via
-// direct mail to the id returned by `load_component`, not via the
-// window's input stream.
+// Keyboard/mouse/tick events from winit are published per-stream
+// (ADR-0021): the substrate consults an `InputSubscribers` table —
+// shared with the control-plane handler — and enqueues one copy of
+// the event per currently-subscribed mailbox. Empty subscriber sets
+// drop the event at the source. Subscriptions are managed via
+// `aether.control.subscribe_input` / `aether.control.unsubscribe_input`.
 
 mod render;
 
@@ -25,11 +24,12 @@ use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
-    HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, MailQueue, Registry, Scheduler, SubstrateCtx,
-    host_fns,
+    HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, MailQueue, Registry, Scheduler,
+    SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
+    subscribers_for,
 };
-use aether_substrate_mail::{FrameStats, Key, MouseButton, MouseMove, Tick};
+use aether_substrate_mail::{FrameStats, InputStream, Key, MouseButton, MouseMove, Tick};
 use render::Gpu;
 use wasmtime::{Engine, Linker};
 use winit::application::ApplicationHandler;
@@ -43,10 +43,11 @@ const LOG_EVERY_FRAMES: u64 = 120;
 
 struct App {
     queue: Arc<MailQueue>,
-    /// Mailbox that receives `aether.tick`, `aether.key`, and mouse
-    /// events while the window has focus. `None` means "substrate
-    /// boots componentless"; input events are dropped silently.
-    default_component: Option<MailboxId>,
+    /// ADR-0021 per-stream subscribers. Shared with the control plane
+    /// so subscribe / unsubscribe / drop write through the same table
+    /// the platform thread reads on each event. Empty sets — the
+    /// boot state — mean the event is dropped at the source.
+    input_subscribers: InputSubscribers,
     broadcast_mbox: MailboxId,
     kind_tick: u32,
     kind_key: u32,
@@ -116,7 +117,8 @@ impl ApplicationHandler for App {
                 if self.occluded {
                     return;
                 }
-                if let Some(mbox) = self.default_component {
+                let tick_subs = subscribers_for(&self.input_subscribers, InputStream::Tick);
+                for mbox in tick_subs {
                     self.queue
                         .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
                 }
@@ -151,23 +153,30 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput {
                 event: key_event, ..
             } => {
-                if let Some(mbox) = self.default_component
-                    && key_event.state == ElementState::Pressed
-                    && !key_event.repeat
-                {
-                    let code: u32 = match key_event.physical_key {
-                        PhysicalKey::Code(k) => k as u32,
-                        PhysicalKey::Unidentified(_) => 0,
-                    };
-                    self.queue
-                        .push(Mail::new(mbox, self.kind_key, encode(&Key { code }), 1));
+                if key_event.state == ElementState::Pressed && !key_event.repeat {
+                    let subs = subscribers_for(&self.input_subscribers, InputStream::Key);
+                    if !subs.is_empty() {
+                        let code: u32 = match key_event.physical_key {
+                            PhysicalKey::Code(k) => k as u32,
+                            PhysicalKey::Unidentified(_) => 0,
+                        };
+                        for mbox in subs {
+                            self.queue.push(Mail::new(
+                                mbox,
+                                self.kind_key,
+                                encode(&Key { code }),
+                                1,
+                            ));
+                        }
+                    }
                 }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 ..
             } => {
-                if let Some(mbox) = self.default_component {
+                let subs = subscribers_for(&self.input_subscribers, InputStream::MouseButton);
+                for mbox in subs {
                     self.queue.push(Mail::new(
                         mbox,
                         self.kind_mouse_button,
@@ -177,13 +186,16 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if let Some(mbox) = self.default_component {
+                let subs = subscribers_for(&self.input_subscribers, InputStream::MouseMove);
+                if !subs.is_empty() {
                     let payload = encode(&MouseMove {
                         x: position.x as f32,
                         y: position.y as f32,
                     });
-                    self.queue
-                        .push(Mail::new(mbox, self.kind_mouse_move, payload, 1));
+                    for mbox in subs {
+                        self.queue
+                            .push(Mail::new(mbox, self.kind_mouse_move, payload.clone(), 1));
+                    }
                 }
             }
             _ => {}
@@ -282,6 +294,11 @@ fn main() -> wasmtime::Result<()> {
         WORKERS,
     );
 
+    // ADR-0021 subscriber table, shared with the control plane so
+    // subscribe / unsubscribe / drop write through the same `Arc`
+    // the platform thread reads when publishing events.
+    let input_subscribers = aether_substrate::new_subscribers();
+
     // Wire the ADR-0010 control plane. Registered after the scheduler
     // exists so the handler can capture the runtime component table
     // directly rather than an `Arc<Scheduler>` (which would cycle back
@@ -294,6 +311,7 @@ fn main() -> wasmtime::Result<()> {
             queue: Arc::clone(&queue),
             outbound: Arc::clone(&outbound),
             components: scheduler.components().clone(),
+            input_subscribers: Arc::clone(&input_subscribers),
             default_name_counter: Arc::new(AtomicU64::new(0)),
         };
         registry.register_sink(
@@ -335,7 +353,7 @@ fn main() -> wasmtime::Result<()> {
 
     let mut app = App {
         queue,
-        default_component: None,
+        input_subscribers,
         broadcast_mbox,
         kind_tick,
         kind_key,

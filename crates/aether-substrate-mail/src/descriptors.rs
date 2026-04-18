@@ -19,7 +19,8 @@ use aether_mail::{Kind, Schema};
 
 use crate::{
     DrawTriangle, DropComponent, DropResult, FrameStats, Key, LoadComponent, LoadResult,
-    MouseButton, MouseMove, Ping, Pong, ReplaceComponent, ReplaceResult, Tick,
+    MouseButton, MouseMove, Ping, Pong, ReplaceComponent, ReplaceResult, SubscribeInput,
+    SubscribeInputResult, Tick, UnsubscribeInput,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -48,6 +49,10 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<LoadResult>(),
         schema::<DropResult>(),
         schema::<ReplaceResult>(),
+        // ADR-0021 publish/subscribe routing for input streams.
+        schema::<SubscribeInput>(),
+        schema::<UnsubscribeInput>(),
+        schema::<SubscribeInputResult>(),
     ]
 }
 
@@ -80,6 +85,9 @@ mod tests {
         assert!(names.contains(&LoadResult::NAME));
         assert!(names.contains(&DropResult::NAME));
         assert!(names.contains(&ReplaceResult::NAME));
+        assert!(names.contains(&SubscribeInput::NAME));
+        assert!(names.contains(&UnsubscribeInput::NAME));
+        assert!(names.contains(&SubscribeInputResult::NAME));
     }
 
     #[test]

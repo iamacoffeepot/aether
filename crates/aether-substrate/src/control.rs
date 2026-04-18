@@ -32,7 +32,8 @@ use aether_hub_protocol::{
 use aether_mail::Kind;
 use aether_substrate_mail::{
     DropComponent, DropResult, LoadComponent, LoadKind, LoadKindEncoding, LoadKindPrimitive,
-    LoadResult, ReplaceComponent, ReplaceResult,
+    LoadResult, ReplaceComponent, ReplaceResult, SubscribeInput, SubscribeInputResult,
+    UnsubscribeInput,
 };
 use serde::Serialize;
 use wasmtime::{Engine, Linker, Module};
@@ -40,6 +41,7 @@ use wasmtime::{Engine, Linker, Module};
 use crate::component::Component;
 use crate::ctx::SubstrateCtx;
 use crate::hub_client::HubOutbound;
+use crate::input::{self, InputSubscribers};
 use crate::mail::MailboxId;
 use crate::queue::MailQueue;
 use crate::registry::{Registry, SinkHandler};
@@ -91,6 +93,24 @@ fn lift_load_field_type(primitive: LoadKindPrimitive, array_len: Option<u32>) ->
     }
 }
 
+/// Shared validation for `subscribe_input` / `unsubscribe_input`: the
+/// mailbox id must name a live component. Sinks are rejected because
+/// they handle mail inline and have no business receiving fan-out
+/// input events; dropped mailboxes are rejected so callers don't
+/// unsubscribe with a stale id and think the op succeeded.
+fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
+    match registry.entry(id) {
+        Some(crate::registry::MailboxEntry::Component) => Ok(()),
+        Some(crate::registry::MailboxEntry::Sink(_)) => {
+            Err(format!("mailbox {:?} is a sink, not a component", id))
+        }
+        Some(crate::registry::MailboxEntry::Dropped) => {
+            Err(format!("mailbox {:?} already dropped", id))
+        }
+        None => Err(format!("unknown mailbox id {:?}", id)),
+    }
+}
+
 fn lift_primitive(p: LoadKindPrimitive) -> Primitive {
     match p {
         LoadKindPrimitive::U8 => Primitive::U8,
@@ -117,6 +137,11 @@ pub struct ControlPlane {
     pub queue: Arc<MailQueue>,
     pub outbound: Arc<HubOutbound>,
     pub components: ComponentTable,
+    /// ADR-0021 per-stream subscriber sets, shared with the platform
+    /// thread. The control plane mutates this table on subscribe /
+    /// unsubscribe / drop; the platform thread reads it to fan out
+    /// each published event.
+    pub input_subscribers: InputSubscribers,
     /// Monotonic counter for default component names. Only consulted
     /// when the load payload omits `name`.
     pub default_name_counter: Arc<AtomicU64>,
@@ -149,6 +174,12 @@ impl ControlPlane {
         } else if kind_name == ReplaceComponent::NAME {
             let result = self.handle_replace(bytes);
             self.reply(sender, ReplaceResult::NAME, &result);
+        } else if kind_name == SubscribeInput::NAME {
+            let result = self.handle_subscribe(bytes);
+            self.reply(sender, SubscribeInputResult::NAME, &result);
+        } else if kind_name == UnsubscribeInput::NAME {
+            let result = self.handle_unsubscribe(bytes);
+            self.reply(sender, SubscribeInputResult::NAME, &result);
         } else {
             eprintln!(
                 "aether-substrate: {AETHER_CONTROL} received unrecognised kind {kind_name:?} — dropping"
@@ -262,6 +293,15 @@ impl ControlPlane {
                 error: e.to_string(),
             };
         }
+        // ADR-0021 §4: clear this mailbox from every input subscriber
+        // set. Done after the registry marks the mailbox `Dropped` so
+        // the invariant "every subscriber id references a live mailbox"
+        // holds across the short window before `remove_component`
+        // finishes — any mail the platform thread publishes in that
+        // window is already discarded by the scheduler's `Dropped`
+        // arm, so fan-out to a soon-to-be-empty subscriber set is
+        // harmless.
+        input::remove_from_all(&self.input_subscribers, id);
         // Pull the Component out of the scheduler table, fire the
         // ADR-0015 `on_drop` hook on it, then let it drop at end of
         // scope so wasmtime reclaims linear memory. The mailbox was
@@ -272,6 +312,59 @@ impl ControlPlane {
             component.on_drop();
         }
         DropResult::Ok
+    }
+
+    fn handle_subscribe(&self, bytes: &[u8]) -> SubscribeInputResult {
+        let payload: SubscribeInput = match postcard::from_bytes(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                return SubscribeInputResult::Err {
+                    error: format!("postcard decode failed: {e}"),
+                };
+            }
+        };
+        let id = MailboxId(payload.mailbox);
+        if let Err(e) = validate_subscriber_mailbox(&self.registry, id) {
+            return SubscribeInputResult::Err { error: e };
+        }
+        self.input_subscribers
+            .write()
+            .unwrap()
+            .entry(payload.stream)
+            .or_default()
+            .insert(id);
+        SubscribeInputResult::Ok
+    }
+
+    fn handle_unsubscribe(&self, bytes: &[u8]) -> SubscribeInputResult {
+        let payload: UnsubscribeInput = match postcard::from_bytes(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                return SubscribeInputResult::Err {
+                    error: format!("postcard decode failed: {e}"),
+                };
+            }
+        };
+        let id = MailboxId(payload.mailbox);
+        // Unsubscribe is idempotent on "not currently subscribed" but
+        // still validates the mailbox: an unknown or sink id is a
+        // clear programming error, not something to swallow. A dropped
+        // mailbox has already had its subscriptions cleared by
+        // handle_drop, but accepting one here would mask a caller bug
+        // where they unsubscribe using a stale id. Err is the right
+        // answer in both cases.
+        if let Err(e) = validate_subscriber_mailbox(&self.registry, id) {
+            return SubscribeInputResult::Err { error: e };
+        }
+        if let Some(set) = self
+            .input_subscribers
+            .write()
+            .unwrap()
+            .get_mut(&payload.stream)
+        {
+            set.remove(&id);
+        }
+        SubscribeInputResult::Ok
     }
 
     fn handle_replace(&self, bytes: &[u8]) -> ReplaceResult {
@@ -606,6 +699,7 @@ mod tests {
             queue,
             outbound,
             components,
+            input_subscribers: input::new_subscribers(),
             default_name_counter: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -1115,5 +1209,243 @@ mod tests {
         let mut new = cell.lock().unwrap();
         assert_eq!(new.read_u32(396), 0);
         assert_eq!(new.read_u32(400), 0);
+    }
+
+    // ADR-0021: per-stream subscribe / unsubscribe, drop cleanup,
+    // replace-preserves-subscriptions. `make_plane` already threads an
+    // empty `InputSubscribers` into the handler, so these tests only
+    // need to load a component and exercise the subscribe surface.
+
+    use aether_substrate_mail::{
+        InputStream, SubscribeInput, SubscribeInputResult, UnsubscribeInput,
+    };
+
+    fn subs(plane: &ControlPlane, stream: InputStream) -> std::collections::BTreeSet<MailboxId> {
+        plane
+            .input_subscribers
+            .read()
+            .unwrap()
+            .get(&stream)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn load_blank(plane: &ControlPlane, name: &str) -> u32 {
+        let wasm = wat::parse_str(WAT).unwrap();
+        let result = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponent {
+                wasm,
+                kinds: vec![],
+                name: Some(name.into()),
+            })
+            .unwrap(),
+        );
+        let LoadResult::Ok { mailbox_id, .. } = result else {
+            panic!("load should succeed: {result:?}");
+        };
+        mailbox_id
+    }
+
+    fn do_subscribe(
+        plane: &ControlPlane,
+        mailbox: u32,
+        stream: InputStream,
+    ) -> SubscribeInputResult {
+        plane.handle_subscribe(&postcard::to_allocvec(&SubscribeInput { stream, mailbox }).unwrap())
+    }
+
+    fn do_unsubscribe(
+        plane: &ControlPlane,
+        mailbox: u32,
+        stream: InputStream,
+    ) -> SubscribeInputResult {
+        plane.handle_unsubscribe(
+            &postcard::to_allocvec(&UnsubscribeInput { stream, mailbox }).unwrap(),
+        )
+    }
+
+    #[test]
+    fn subscribe_adds_mailbox_to_stream_set() {
+        let plane = make_plane();
+        let id = load_blank(&plane, "listener");
+        assert!(matches!(
+            do_subscribe(&plane, id, InputStream::Tick),
+            SubscribeInputResult::Ok
+        ));
+        let set = subs(&plane, InputStream::Tick);
+        assert!(set.contains(&MailboxId(id)));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn subscribe_is_idempotent() {
+        let plane = make_plane();
+        let id = load_blank(&plane, "listener");
+        for _ in 0..3 {
+            assert!(matches!(
+                do_subscribe(&plane, id, InputStream::Key),
+                SubscribeInputResult::Ok
+            ));
+        }
+        assert_eq!(subs(&plane, InputStream::Key).len(), 1);
+    }
+
+    #[test]
+    fn subscribe_two_components_fan_out_to_both() {
+        let plane = make_plane();
+        let a = load_blank(&plane, "a");
+        let b = load_blank(&plane, "b");
+        assert!(matches!(
+            do_subscribe(&plane, a, InputStream::Tick),
+            SubscribeInputResult::Ok
+        ));
+        assert!(matches!(
+            do_subscribe(&plane, b, InputStream::Tick),
+            SubscribeInputResult::Ok
+        ));
+        let set = subs(&plane, InputStream::Tick);
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&MailboxId(a)));
+        assert!(set.contains(&MailboxId(b)));
+    }
+
+    #[test]
+    fn unsubscribe_removes_from_set() {
+        let plane = make_plane();
+        let id = load_blank(&plane, "listener");
+        do_subscribe(&plane, id, InputStream::MouseMove);
+        assert!(matches!(
+            do_unsubscribe(&plane, id, InputStream::MouseMove),
+            SubscribeInputResult::Ok
+        ));
+        assert!(subs(&plane, InputStream::MouseMove).is_empty());
+    }
+
+    #[test]
+    fn unsubscribe_not_subscribed_is_ok() {
+        // ADR-0021 §2: unsubscribe of a non-subscriber is `Ok`, not
+        // `Err`. The mailbox must still be a live component though.
+        let plane = make_plane();
+        let id = load_blank(&plane, "listener");
+        assert!(matches!(
+            do_unsubscribe(&plane, id, InputStream::Tick),
+            SubscribeInputResult::Ok
+        ));
+    }
+
+    #[test]
+    fn subscribe_unknown_mailbox_is_err() {
+        let plane = make_plane();
+        assert!(matches!(
+            do_subscribe(&plane, 9999, InputStream::Tick),
+            SubscribeInputResult::Err { .. }
+        ));
+    }
+
+    #[test]
+    fn subscribe_sink_mailbox_is_err() {
+        // Sinks are substrate-owned and don't make sense as input
+        // subscribers; the handler rejects.
+        let plane = make_plane();
+        let sink = plane
+            .registry
+            .register_sink("some.sink", Arc::new(|_, _, _, _, _| {}));
+        assert!(matches!(
+            do_subscribe(&plane, sink.0, InputStream::Tick),
+            SubscribeInputResult::Err { .. }
+        ));
+    }
+
+    #[test]
+    fn subscribe_dropped_mailbox_is_err() {
+        let plane = make_plane();
+        let id = load_blank(&plane, "victim");
+        plane.handle_drop(&postcard::to_allocvec(&DropComponent { mailbox_id: id }).unwrap());
+        assert!(matches!(
+            do_subscribe(&plane, id, InputStream::Tick),
+            SubscribeInputResult::Err { .. }
+        ));
+    }
+
+    #[test]
+    fn drop_component_removes_from_every_subscriber_set() {
+        // ADR-0021 §4: dropping a component clears its id from every
+        // stream's subscriber set, not just the ones currently held.
+        let plane = make_plane();
+        let id = load_blank(&plane, "listener");
+        do_subscribe(&plane, id, InputStream::Tick);
+        do_subscribe(&plane, id, InputStream::Key);
+        do_subscribe(&plane, id, InputStream::MouseButton);
+        let dropped =
+            plane.handle_drop(&postcard::to_allocvec(&DropComponent { mailbox_id: id }).unwrap());
+        assert!(matches!(dropped, DropResult::Ok));
+        for s in [
+            InputStream::Tick,
+            InputStream::Key,
+            InputStream::MouseMove,
+            InputStream::MouseButton,
+        ] {
+            assert!(
+                !subs(&plane, s).contains(&MailboxId(id)),
+                "stream {s:?} still contains dropped id"
+            );
+        }
+    }
+
+    #[test]
+    fn replace_component_preserves_subscriptions() {
+        // ADR-0021 §4: replace keeps the mailbox id, and subscriptions
+        // are keyed by mailbox, so the new instance inherits them.
+        let plane = make_plane();
+        let id = load_blank(&plane, "listener");
+        do_subscribe(&plane, id, InputStream::Tick);
+        do_subscribe(&plane, id, InputStream::Key);
+        let result = plane.handle_replace(
+            &postcard::to_allocvec(&ReplaceComponent {
+                mailbox_id: id,
+                wasm: wat::parse_str(WAT).unwrap(),
+                kinds: vec![],
+            })
+            .unwrap(),
+        );
+        assert!(matches!(result, ReplaceResult::Ok));
+        assert!(subs(&plane, InputStream::Tick).contains(&MailboxId(id)));
+        assert!(subs(&plane, InputStream::Key).contains(&MailboxId(id)));
+    }
+
+    #[test]
+    fn subscribe_malformed_payload_is_err() {
+        let plane = make_plane();
+        let result = plane.handle_subscribe(&[0xFF; 4]);
+        assert!(matches!(result, SubscribeInputResult::Err { .. }));
+    }
+
+    #[test]
+    fn subscribe_dispatch_replies_with_result_kind() {
+        // Dispatch goes through `dispatch()` so a SubscribeInputResult
+        // is sent via reply-to-sender. We can't easily observe the
+        // outbound here without a richer fake, but at least confirm
+        // the dispatch path doesn't panic on the two kinds.
+        let plane = make_plane();
+        let id = load_blank(&plane, "listener");
+        plane.dispatch(
+            SubscribeInput::NAME,
+            SessionToken::NIL,
+            &postcard::to_allocvec(&SubscribeInput {
+                stream: InputStream::Tick,
+                mailbox: id,
+            })
+            .unwrap(),
+        );
+        plane.dispatch(
+            UnsubscribeInput::NAME,
+            SessionToken::NIL,
+            &postcard::to_allocvec(&UnsubscribeInput {
+                stream: InputStream::Tick,
+                mailbox: id,
+            })
+            .unwrap(),
+        );
+        assert!(!subs(&plane, InputStream::Tick).contains(&MailboxId(id)));
     }
 }
