@@ -1,6 +1,6 @@
 # ADR-0020: Symmetric receive_mail decode
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-17
 
 ## Context

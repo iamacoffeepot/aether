@@ -23,7 +23,7 @@ Claude drives a running engine through MCP — the concrete form of the "Claude-
 - `mcp__aether-hub__list_engines` — connected engines (UUID + name/pid/version + `spawned` flag: `true` if the hub launched the process, `false` if it connected externally).
 - `mcp__aether-hub__describe_kinds(engine_id)` — the kind vocabulary the engine declared at handshake, with enough structural detail to build params.
 - `mcp__aether-hub__send_mail(mails)` — batched, best-effort. Each item takes either `params` (hub encodes via the kind's descriptor) or `payload_bytes` (raw escape hatch for `Opaque` kinds). Response is a per-item status array; one failure doesn't abort siblings.
-- `mcp__aether-hub__receive_mail(max?)` — non-blocking drain of observation mail the engine pushed to this session. Each item carries `engine_id`, `kind_name`, `payload_bytes`, and a `broadcast` flag (`true` means fan-out to every attached session, `false` means targeted reply-to-sender).
+- `mcp__aether-hub__receive_mail(max?)` — non-blocking drain of observation mail the engine pushed to this session. Each item carries `engine_id`, `kind_name`, structured `params` (decoded against the engine's kind descriptor — symmetric to `send_mail`, ADR-0020), `payload_bytes` (always populated; primarily a fallback when `params` is null), an optional `decode_error` populated when decode failed, and a `broadcast` flag (`true` means fan-out to every attached session, `false` means targeted reply-to-sender). Read `params` first; fall back to `payload_bytes` only if it's null.
 - `mcp__aether-hub__spawn_substrate(binary_path, args?, env?, timeout_ms?)` — launches a substrate binary as a child of the hub with `AETHER_HUB_URL` injected. Blocks until `Hello` handshake; returns `engine_id` + `pid`. The hub owns the child for its lifetime.
 - `mcp__aether-hub__terminate_substrate(engine_id, grace_ms?)` — SIGTERM → grace (default 2s) → SIGKILL. Errors on externally connected engines (the hub only terminates children it owns).
 
@@ -33,7 +33,7 @@ The observation path (ADR-0008) goes the other way: engines emit to the well-kno
 
 Input streams (tick, key, mouse_move, mouse_button) are publish/subscribe (ADR-0021): the substrate boots with empty subscriber sets and drops every input event until something subscribes. To wire a freshly-loaded component into the platform's event stream, mail `aether.control.subscribe_input` with `{ "stream": "Tick" | "Key" | "MouseMove" | "MouseButton", "mailbox": <id from load_result> }`. Multiple components may subscribe to the same stream; the substrate fans out to every subscriber. `aether.control.unsubscribe_input` removes one. Both reply via `aether.control.subscribe_input_result`. Subscriptions are auto-cleared when a component is dropped and preserved across `replace_component` (the mailbox id is stable).
 
-Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encoding), ADR-0008 (observation path), ADR-0009 (hub-supervised substrate spawn), and ADR-0021 (input stream subscriptions).
+Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encoding), ADR-0008 (observation path), ADR-0009 (hub-supervised substrate spawn), ADR-0020 (symmetric receive_mail decode), and ADR-0021 (input stream subscriptions).
 
 ## Commands
 

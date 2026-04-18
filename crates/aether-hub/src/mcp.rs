@@ -29,6 +29,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 
+use crate::decoder::decode_schema;
 use crate::encoder::encode_schema;
 use crate::registry::{EngineRecord, EngineRegistry};
 use crate::session::{QueuedMail, SessionHandle, SessionRegistry};
@@ -222,8 +223,21 @@ pub struct ReceivedMail {
     pub engine_id: String,
     /// Kind name the engine declared at handshake.
     pub kind_name: String,
-    /// Raw payload bytes. Decode against the engine's kind descriptor
-    /// (via `describe_kinds`) if you need structured fields.
+    /// Structured value decoded against the engine's kind descriptor —
+    /// the symmetric counterpart to `send_mail`'s `params` field
+    /// (ADR-0020). `null` if the hub couldn't decode (no descriptor for
+    /// this kind, or decode failed), in which case `decode_error` is
+    /// populated and the agent falls back to `payload_bytes`.
+    pub params: Option<serde_json::Value>,
+    /// Decode failure reason. Populated only when `params` is `null`
+    /// because the hub's decoder rejected the payload (e.g. schema
+    /// drift, truncation, unknown kind). Always paired with intact
+    /// `payload_bytes` for an escape-hatch decode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_error: Option<String>,
+    /// Raw payload bytes. Always populated. Prefer `params`; reach for
+    /// `payload_bytes` only when `params` is `null` (decode failed) or
+    /// when the agent genuinely needs the wire bytes.
     pub payload_bytes: Vec<u8>,
     /// `true` if this mail was addressed to every attached session;
     /// `false` if it was a reply targeted at this session specifically.
@@ -281,7 +295,7 @@ impl Hub {
     }
 
     #[tool(
-        description = "Drain observation mail addressed to this MCP session. Returns everything currently queued (up to `max`, if provided). Each item reports the originating engine_id, the kind name, the raw payload bytes, a `broadcast` flag indicating whether this mail also went to every other attached session (true) or was targeted specifically at this one (false), and an optional `origin` — the substrate-local mailbox name of the emitting component (absent for substrate-core pushes with no sending mailbox). Non-blocking: returns an empty array if nothing is queued."
+        description = "Drain observation mail addressed to this MCP session. Returns everything currently queued (up to `max`, if provided). Each item reports the originating engine_id, the kind name, structured `params` decoded against the engine's kind descriptor (ADR-0020 — symmetric to `send_mail`), the raw `payload_bytes` (always populated; primarily a fallback when `params` is null), an optional `decode_error` explaining why decode failed when `params` is null, a `broadcast` flag indicating whether this mail also went to every other attached session (true) or was targeted specifically at this one (false), and an optional `origin` — the substrate-local mailbox name of the emitting component (absent for substrate-core pushes with no sending mailbox). Non-blocking: returns an empty array if nothing is queued."
     )]
     async fn receive_mail(
         &self,
@@ -292,13 +306,19 @@ impl Hub {
         let mut out = Vec::new();
         while out.len() < cap {
             match rx.try_recv() {
-                Ok(m) => out.push(ReceivedMail {
-                    engine_id: m.engine_id.0.to_string(),
-                    kind_name: m.kind_name,
-                    payload_bytes: m.payload,
-                    broadcast: m.broadcast,
-                    origin: m.origin,
-                }),
+                Ok(m) => {
+                    let (params, decode_error) =
+                        decode_inbound(&m.engine_id, &m.kind_name, &m.payload, &self.state.engines);
+                    out.push(ReceivedMail {
+                        engine_id: m.engine_id.0.to_string(),
+                        kind_name: m.kind_name,
+                        params,
+                        decode_error,
+                        payload_bytes: m.payload,
+                        broadcast: m.broadcast,
+                        origin: m.origin,
+                    });
+                }
                 Err(_) => break,
             }
         }
@@ -477,6 +497,42 @@ fn resolve_payload(spec: &MailSpec, record: &EngineRecord) -> Result<Vec<u8>, St
 
 fn find_kind<'a>(record: &'a EngineRecord, name: &str) -> Option<&'a KindDescriptor> {
     record.kinds.iter().find(|k| k.name == name)
+}
+
+/// Decode an inbound observation payload against the originating
+/// engine's kind descriptor (ADR-0020). Returns the structured `params`
+/// on success; on any failure (engine no longer in the registry, kind
+/// not declared, decode error) returns `(None, Some(reason))` so the
+/// agent sees both the bytes and a human-readable explanation. Lookup
+/// failures are treated as decode failures rather than tool errors —
+/// the rest of the batch should still drain.
+fn decode_inbound(
+    engine_id: &EngineId,
+    kind_name: &str,
+    payload: &[u8],
+    engines: &EngineRegistry,
+) -> (Option<serde_json::Value>, Option<String>) {
+    let Some(record) = engines.get(engine_id) else {
+        return (
+            None,
+            Some(format!(
+                "engine {} no longer connected; cannot resolve schema",
+                engine_id.0
+            )),
+        );
+    };
+    let Some(desc) = find_kind(&record, kind_name) else {
+        return (
+            None,
+            Some(format!(
+                "kind {kind_name:?} has no descriptor on this engine"
+            )),
+        );
+    };
+    match decode_schema(payload, &desc.schema) {
+        Ok(v) => (Some(v), None),
+        Err(e) => (None, Some(e.to_string())),
+    }
 }
 
 /// Bind an axum server on `addr` exposing the MCP tool surface at
@@ -899,6 +955,193 @@ mod tests {
         assert_eq!(second.len(), 2);
         let rest = drain(&hub, None).await;
         assert_eq!(rest.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn receive_mail_decodes_params_against_descriptor() {
+        // FrameStats-shaped: cast struct with two u64 fields. The
+        // engine ships raw cast bytes; the hub looks up the descriptor
+        // and lifts them into structured `params`.
+        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaType};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![KindDescriptor {
+            name: "aether.observation.frame_stats".into(),
+            schema: SchemaType::Struct {
+                repr_c: true,
+                fields: vec![
+                    NamedField {
+                        name: "frame".into(),
+                        ty: SchemaType::Scalar(Primitive::U64),
+                    },
+                    NamedField {
+                        name: "triangles".into(),
+                        ty: SchemaType::Scalar(Primitive::U64),
+                    },
+                ],
+            },
+        }];
+        let (rec, _rx) = record_with_kinds(33, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let token = hub.session.token;
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&120u64.to_le_bytes());
+        payload.extend_from_slice(&7u64.to_le_bytes());
+        push_queued(
+            &state.sessions,
+            token,
+            QueuedMail {
+                engine_id: id,
+                kind_name: "aether.observation.frame_stats".into(),
+                payload,
+                broadcast: true,
+                origin: None,
+            },
+        )
+        .await;
+
+        let got = drain(&hub, None).await;
+        assert_eq!(got.len(), 1);
+        let item = &got[0];
+        assert_eq!(
+            item.params,
+            Some(serde_json::json!({"frame": 120u64, "triangles": 7u64}))
+        );
+        assert!(item.decode_error.is_none());
+        // payload_bytes still populated alongside params (escape hatch).
+        assert_eq!(item.payload_bytes.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn receive_mail_decode_failure_populates_error() {
+        // Descriptor declares 8-byte u64; hub gets only 2 bytes.
+        // Decoder must surface a Truncated error in `decode_error` and
+        // leave `params` null without dropping the item.
+        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaType};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![KindDescriptor {
+            name: "demo.short".into(),
+            schema: SchemaType::Struct {
+                repr_c: true,
+                fields: vec![NamedField {
+                    name: "n".into(),
+                    ty: SchemaType::Scalar(Primitive::U64),
+                }],
+            },
+        }];
+        let (rec, _rx) = record_with_kinds(34, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let token = hub.session.token;
+
+        push_queued(
+            &state.sessions,
+            token,
+            QueuedMail {
+                engine_id: id,
+                kind_name: "demo.short".into(),
+                payload: vec![1, 2],
+                broadcast: false,
+                origin: None,
+            },
+        )
+        .await;
+
+        let got = drain(&hub, None).await;
+        assert_eq!(got.len(), 1);
+        let item = &got[0];
+        assert!(item.params.is_none());
+        let err = item
+            .decode_error
+            .as_deref()
+            .expect("decode error populated");
+        assert!(err.contains("truncated"), "got: {err}");
+        assert_eq!(item.payload_bytes, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn receive_mail_unknown_kind_falls_back_to_bytes() {
+        // Engine sent a kind it never declared at handshake (or the
+        // descriptor was lost). Decode reports the missing descriptor;
+        // bytes survive for the agent to inspect.
+        let engines = EngineRegistry::new();
+        let (rec, _rx) = record_with_kinds(35, vec![]);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let token = hub.session.token;
+
+        push_queued(
+            &state.sessions,
+            token,
+            QueuedMail {
+                engine_id: id,
+                kind_name: "demo.unknown".into(),
+                payload: vec![9, 9, 9],
+                broadcast: false,
+                origin: None,
+            },
+        )
+        .await;
+
+        let got = drain(&hub, None).await;
+        assert_eq!(got.len(), 1);
+        assert!(got[0].params.is_none());
+        let err = got[0].decode_error.as_deref().unwrap();
+        assert!(err.contains("no descriptor"), "got: {err}");
+        assert_eq!(got[0].payload_bytes, vec![9, 9, 9]);
+    }
+
+    #[tokio::test]
+    async fn receive_mail_unit_kind_decodes_to_null_params() {
+        use aether_hub_protocol::{KindDescriptor, SchemaType};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![KindDescriptor {
+            name: "aether.observation.ping".into(),
+            schema: SchemaType::Unit,
+        }];
+        let (rec, _rx) = record_with_kinds(36, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let token = hub.session.token;
+
+        push_queued(
+            &state.sessions,
+            token,
+            QueuedMail {
+                engine_id: id,
+                kind_name: "aether.observation.ping".into(),
+                payload: vec![],
+                broadcast: false,
+                origin: None,
+            },
+        )
+        .await;
+
+        // Read raw JSON rather than going through `drain` — `Option<Value>`
+        // collapses `Some(Null)` and `None` over deserialization, so the
+        // distinction between "decoded to null" and "no value" is only
+        // observable in the wire form. The MCP client sees the wire form.
+        let json = hub
+            .receive_mail(Parameters(ReceiveMailArgs { max: None }))
+            .await
+            .unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let item = &raw.as_array().unwrap()[0];
+        assert_eq!(item.get("params"), Some(&serde_json::Value::Null));
+        // decode_error skipped on success thanks to `skip_serializing_if`.
+        assert!(item.get("decode_error").is_none());
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 
 use tokio::net::TcpListener;
 
+mod decoder;
 mod encoder;
 mod engine;
 mod mcp;
@@ -14,6 +15,7 @@ mod registry;
 mod session;
 mod spawn;
 
+pub use decoder::{DecodeError, decode_schema};
 pub use encoder::{EncodeError, encode_schema};
 
 pub use engine::HEARTBEAT_INTERVAL;
