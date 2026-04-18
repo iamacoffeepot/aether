@@ -19,10 +19,11 @@ pub mod scheduler;
 pub mod sender_table;
 
 pub use component::Component;
-pub use control::{
-    AETHER_CONTROL, ControlPlane, DropComponentPayload, DropResultPayload, LoadComponentPayload,
-    LoadResultPayload, ReplaceComponentPayload, ReplaceResultPayload,
-};
+pub use control::{AETHER_CONTROL, ControlPlane};
+// ADR-0019 PR 5: control-plane payload types now live as schema kinds
+// in `aether-substrate-mail` (LoadComponent, LoadResult, etc.).
+// Re-exports of the old `*Payload` structs are gone — consumers
+// import from `aether-substrate-mail` directly.
 pub use ctx::SubstrateCtx;
 pub use hub_client::{HubClient, HubOutbound};
 pub use mail::{Mail, MailKind, MailboxId};

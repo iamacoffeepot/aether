@@ -2,17 +2,13 @@
 // substrate binary and shipped to the hub at `Hello` per ADR-0007 so
 // the hub can encode agent-supplied params for each kind.
 //
-// ADR-0019 PR 4: cast-shaped kinds are now emitted as
-// `KindEncoding::Schema(T::schema())` — the bytes the hub produces are
-// identical to what the legacy `Pod`/`Signal` arms produced, but the
-// descriptor walks the type definition instead of restating its layout
-// here. Adding or renaming a field on a kind is a one-place change
-// (the struct itself); the schema is whatever the derive emits.
-//
-// Control-plane kinds (LoadComponent, ReplaceComponent, DropComponent,
-// LoadResult, DropResult, ReplaceResult) stay `Opaque` here. They
-// migrate in PR 5 along with the postcard encoder + `payload_bytes`
-// removal.
+// ADR-0019 PR 5: every substrate kind, including the control-plane
+// vocabulary, ships as `KindEncoding::Schema(T::schema())`. There are
+// no `Opaque` kinds left in the substrate's descriptor list — every
+// kind is hub-encodable from agent params, and the `payload_bytes`
+// escape hatch has been removed from the MCP `send_mail` tool.
+// Adding or renaming a field on a kind is a one-place change (the
+// struct itself); the schema is whatever the derive emits.
 
 use alloc::string::ToString;
 use alloc::vec;
@@ -42,14 +38,16 @@ pub fn all() -> Vec<KindDescriptor> {
         // ADR-0013 smoke-test vocabulary.
         schema::<Ping>(),
         schema::<Pong>(),
-        // ADR-0010 control-plane kinds — still Opaque; PR 5 turns
-        // them into real schemas alongside dropping `payload_bytes`.
-        opaque(LoadComponent::NAME),
-        opaque(ReplaceComponent::NAME),
-        opaque(DropComponent::NAME),
-        opaque(LoadResult::NAME),
-        opaque(DropResult::NAME),
-        opaque(ReplaceResult::NAME),
+        // ADR-0010 control-plane vocabulary — now real schemas. The
+        // hub encodes LoadComponent / ReplaceComponent / etc. from
+        // agent params; the substrate decodes via postcard. No more
+        // `payload_bytes` workaround.
+        schema::<LoadComponent>(),
+        schema::<ReplaceComponent>(),
+        schema::<DropComponent>(),
+        schema::<LoadResult>(),
+        schema::<DropResult>(),
+        schema::<ReplaceResult>(),
     ]
 }
 
@@ -57,13 +55,6 @@ fn schema<K: Kind + Schema>() -> KindDescriptor {
     KindDescriptor {
         name: K::NAME.to_string(),
         encoding: KindEncoding::Schema(K::schema()),
-    }
-}
-
-fn opaque(name: &str) -> KindDescriptor {
-    KindDescriptor {
-        name: name.to_string(),
-        encoding: KindEncoding::Opaque,
     }
 }
 
@@ -92,20 +83,47 @@ mod tests {
     }
 
     #[test]
-    fn control_kinds_are_opaque() {
-        // PR 5 turns these into Schema kinds. Until then, agents must
-        // supply `payload_bytes` for the control plane.
+    fn control_kinds_are_postcard_schemas() {
+        // ADR-0019 PR 5: control-plane kinds are no longer `Opaque`.
+        // Each ships as `Schema(Struct{repr_c:false,..})` (LoadComponent,
+        // DropComponent, ReplaceComponent) or `Schema(Enum{..})` (the
+        // *Result variants). The hub builds them from agent params via
+        // the postcard encoder.
         let descs = all();
         for name in [
             LoadComponent::NAME,
             ReplaceComponent::NAME,
             DropComponent::NAME,
-            LoadResult::NAME,
-            DropResult::NAME,
-            ReplaceResult::NAME,
         ] {
             let d = descs.iter().find(|d| d.name == name).unwrap();
-            assert_eq!(d.encoding, KindEncoding::Opaque, "{name}");
+            let KindEncoding::Schema(SchemaType::Struct { repr_c, .. }) = &d.encoding else {
+                panic!("{name} should be Schema(Struct), got {:?}", d.encoding);
+            };
+            assert!(!*repr_c, "{name} contains String/Vec, must be postcard");
+        }
+        for name in [LoadResult::NAME, DropResult::NAME, ReplaceResult::NAME] {
+            let d = descs.iter().find(|d| d.name == name).unwrap();
+            assert!(
+                matches!(d.encoding, KindEncoding::Schema(SchemaType::Enum { .. })),
+                "{name} should be Schema(Enum), got {:?}",
+                d.encoding
+            );
+        }
+    }
+
+    #[test]
+    fn no_kinds_are_opaque() {
+        // The whole point of PR 5: every kind in the substrate's
+        // descriptor list is hub-encodable. A regression here means
+        // an agent would lose the ability to send some kind via
+        // `send_mail`.
+        let descs = all();
+        for d in &descs {
+            assert!(
+                !matches!(d.encoding, KindEncoding::Opaque),
+                "kind {:?} is still Opaque",
+                d.name
+            );
         }
     }
 

@@ -17,3 +17,4 @@ descriptors = [
 aether-mail = { path = "../aether-mail", features = ["derive"] }
 aether-hub-protocol = { path = "../aether-hub-protocol", optional = true }
 bytemuck = { version = "1.19", features = ["derive"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
