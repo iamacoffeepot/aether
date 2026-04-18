@@ -1,7 +1,8 @@
 # ADR-0019: Unified schema encoding for mail kinds
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-17
+- **Accepted:** 2026-04-17
 
 ## Context
 
