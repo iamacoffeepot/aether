@@ -19,46 +19,57 @@ pub mod descriptors;
 use aether_mail::Kind;
 use bytemuck::{Pod, Zeroable};
 
+// ADR-0019 PR 3: every cast-shaped kind below moves to
+// `#[derive(Kind)]` (always) plus `#[derive(Schema)]` (gated on the
+// `descriptors` feature so wasm guests stay free of hub-protocol).
+// Wire format is unchanged in this PR — descriptors.rs still emits the
+// legacy `Pod`/`Signal`/`Opaque` arms. The `Schema` impls land here so
+// the substrate's dispatch path (PR 4) and the hub encoder (PR 5) have
+// something to call into without another round of boilerplate.
+
 /// Per-frame signal from the substrate's frame loop. Empty payload for
 /// now; milestone 4 will add an elapsed-seconds field.
+#[derive(aether_mail::Kind)]
+#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[kind(name = "aether.tick")]
 pub struct Tick;
-impl Kind for Tick {
-    const NAME: &'static str = "aether.tick";
-}
 
 /// A single keyboard keypress, identified by `winit::keyboard::KeyCode
 /// as u32`. Dispatched on press only (not release, not repeat).
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_mail::Kind)]
+#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[kind(name = "aether.key")]
 pub struct Key {
     pub code: u32,
 }
-impl Kind for Key {
-    const NAME: &'static str = "aether.key";
-}
 
 /// A mouse-button press. No payload today — which button isn't tracked.
+#[derive(aether_mail::Kind)]
+#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[kind(name = "aether.mouse_button")]
 pub struct MouseButton;
-impl Kind for MouseButton {
-    const NAME: &'static str = "aether.mouse_button";
-}
 
 /// Cursor position in window coordinates, as logical pixels cast to f32.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind)]
+#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[kind(name = "aether.mouse_move")]
 pub struct MouseMove {
     pub x: f32,
     pub y: f32,
 }
-impl Kind for MouseMove {
-    const NAME: &'static str = "aether.mouse_move";
-}
 
 /// A single clip-space vertex with per-vertex color. Matches the
 /// substrate's `VertexBufferLayout`: `(pos: vec2<f32>, color: vec3<f32>)`,
-/// 20 bytes on the wire.
+/// 20 bytes on the wire. Not a kind on its own — only addressable as
+/// the element type inside `DrawTriangle.verts`. The `Schema` derive
+/// is conditional so DrawTriangle's emitted schema can recurse into
+/// it under `descriptors`; without the feature, neither type emits
+/// schema or eligibility info.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable)]
+#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
 pub struct Vertex {
     pub x: f32,
     pub y: f32,
@@ -71,12 +82,11 @@ pub struct Vertex {
 /// `count` field is the number of triangles in the payload when
 /// sent as a slice.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind)]
+#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[kind(name = "aether.draw_triangle")]
 pub struct DrawTriangle {
     pub verts: [Vertex; 3],
-}
-impl Kind for DrawTriangle {
-    const NAME: &'static str = "aether.draw_triangle";
 }
 
 /// Request addressed to a component that supports the ADR-0013
@@ -84,24 +94,22 @@ impl Kind for DrawTriangle {
 /// carrying the same `seq`; the round trip proves that a Claude
 /// session → component → session reply actually works end-to-end.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_mail::Kind)]
+#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[kind(name = "aether.ping")]
 pub struct Ping {
     pub seq: u32,
-}
-impl Kind for Ping {
-    const NAME: &'static str = "aether.ping";
 }
 
 /// Reply-to-sender counterpart to `Ping`. The `seq` is the incoming
 /// `Ping.seq` echoed back so the caller can match requests against
 /// replies when multiple are in flight.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_mail::Kind)]
+#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[kind(name = "aether.pong")]
 pub struct Pong {
     pub seq: u32,
-}
-impl Kind for Pong {
-    const NAME: &'static str = "aether.pong";
 }
 
 /// Periodic observation emitted by the substrate's frame loop when a
@@ -110,13 +118,12 @@ impl Kind for Pong {
 /// every attached Claude session learns how the engine is running
 /// without having to poll the engine directly.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_mail::Kind)]
+#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[kind(name = "aether.observation.frame_stats")]
 pub struct FrameStats {
     pub frame: u64,
     pub triangles: u64,
-}
-impl Kind for FrameStats {
-    const NAME: &'static str = "aether.observation.frame_stats";
 }
 
 // Reserved control-plane vocabulary (ADR-0010). The substrate handles
@@ -248,5 +255,86 @@ mod tests {
         assert_eq!(bytes.len(), 16);
         let back: FrameStats = decode(&bytes).unwrap();
         assert_eq!(back, s);
+    }
+
+    // ADR-0019 PR 3 — every kind below now has a derived `Schema` impl
+    // (gated on `descriptors`). These tests pin the derive output so
+    // PR 5's switch-over of `descriptors.rs` from legacy `Pod`/`Signal`
+    // arms to `Schema(...)` doesn't drift on wire bytes for cast-shaped
+    // kinds.
+    #[cfg(feature = "descriptors")]
+    mod schema {
+        use super::*;
+        use aether_hub_protocol::{Primitive, SchemaType};
+        use aether_mail::{CastEligible, Schema};
+
+        #[test]
+        fn unit_kinds_emit_schema_unit() {
+            assert!(matches!(<Tick as Schema>::schema(), SchemaType::Unit));
+            assert!(matches!(
+                <MouseButton as Schema>::schema(),
+                SchemaType::Unit
+            ));
+        }
+
+        #[test]
+        fn cast_kinds_pick_repr_c_true() {
+            const { assert!(<Key as CastEligible>::ELIGIBLE) };
+            const { assert!(<MouseMove as CastEligible>::ELIGIBLE) };
+            const { assert!(<Vertex as CastEligible>::ELIGIBLE) };
+            const { assert!(<DrawTriangle as CastEligible>::ELIGIBLE) };
+            const { assert!(<Ping as CastEligible>::ELIGIBLE) };
+            const { assert!(<Pong as CastEligible>::ELIGIBLE) };
+            const { assert!(<FrameStats as CastEligible>::ELIGIBLE) };
+        }
+
+        #[test]
+        fn key_schema_is_one_u32_field() {
+            let SchemaType::Struct { repr_c, fields } = <Key as Schema>::schema() else {
+                panic!("expected Struct");
+            };
+            assert!(repr_c);
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "code");
+            assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
+        }
+
+        #[test]
+        fn draw_triangle_schema_recurses_into_vertex() {
+            let SchemaType::Struct { repr_c, fields } = <DrawTriangle as Schema>::schema() else {
+                panic!("expected Struct");
+            };
+            assert!(repr_c);
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "verts");
+            let SchemaType::Array { element, len } = &fields[0].ty else {
+                panic!("expected Array");
+            };
+            assert_eq!(*len, 3);
+            let SchemaType::Struct {
+                repr_c: nested_repr,
+                fields: nested_fields,
+            } = element.as_ref()
+            else {
+                panic!("expected nested Struct");
+            };
+            assert!(*nested_repr);
+            assert_eq!(nested_fields.len(), 5);
+            assert_eq!(nested_fields[0].name, "x");
+            assert_eq!(nested_fields[4].name, "b");
+        }
+
+        #[test]
+        fn frame_stats_schema_is_two_u64_fields() {
+            let SchemaType::Struct { repr_c, fields } = <FrameStats as Schema>::schema() else {
+                panic!("expected Struct");
+            };
+            assert!(repr_c);
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name, "frame");
+            assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U64));
+            assert_eq!(fields[1].name, "triangles");
+            assert_eq!(fields[1].ty, SchemaType::Scalar(Primitive::U64));
+        }
     }
 }
