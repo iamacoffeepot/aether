@@ -25,3 +25,10 @@ crate-type = ["cdylib"]
 [[example]]
 name = "caller"
 crate-type = ["cdylib"]
+
+# ADR-0021 input subscriptions smoke. Resolves all four substrate
+# input kinds and broadcasts a `demo.input_observed` per event so
+# `receive_mail` shows the dispatch landing.
+[[example]]
+name = "input_logger"
+crate-type = ["cdylib"]
