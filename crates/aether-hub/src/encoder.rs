@@ -1,35 +1,29 @@
-// POD encoder: serde_json params + KindDescriptor field list → bytes
-// matching the Rust `#[repr(C)]` layout the engine expects.
+// `encode_schema`: serde_json params + `SchemaType` descriptor → wire
+// bytes the substrate's decode path is happy with. Pure function; no
+// hub state, no async.
 //
-// Pure function; no hub state, no async.
+// Two wire shapes, picked per descriptor:
 //
-// Layout rules implemented:
-//   - Scalar fields emit LE bytes at an offset padded up to the
-//     primitive's natural alignment (1/2/4/8).
-//   - Array fields emit elements contiguously; the start is padded to
-//     the element's alignment, elements don't re-pad between each
-//     other (matches `[T; N]` layout).
-//   - After all fields, trailing zeros bring total size up to a
-//     multiple of the largest field alignment (Rust `#[repr(C)]`
-//     struct size rule).
+// 1. Cast-shaped (`Struct { repr_c: true }` and the recursive tree
+//    under it): `#[repr(C)]` byte layout. Scalars and fixed arrays
+//    laid out at the alignment they'd occupy in a Rust struct;
+//    trailing padding rounds total size to the largest field
+//    alignment. Substrate decode is `bytemuck::cast`.
 //
-// ADR-0019 PR 4 added `encode_schema`, the `SchemaType`-driven sibling
-// of `encode_pod` for `KindEncoding::Schema(...)` kinds. PR 5 wired
-// the postcard path through it for postcard-shaped schemas (`String`,
-// `Bytes`, `Vec`, `Option`, `Enum`, `Struct { repr_c: false }`).
+// 2. Postcard (everything else): postcard 1.x wire format, written
+//    directly:
+//      - bool: 1 byte (0 or 1)
+//      - u8/i8: 1 byte
+//      - u16..u64: LEB128 varint
+//      - i16..i64: zigzag-then-LEB128
+//      - f32/f64: little-endian
+//      - String / &[u8] (Bytes): varint length + bytes
+//      - Vec<T>: varint length + concatenated encoded elements
+//      - [T; N]: concatenated encoded elements (no length prefix)
+//      - Option<T>: 1-byte tag (0 or 1), then T if Some
+//      - enum: varint discriminant, then variant body
+//      - struct: concatenated field bytes in declaration order
 //
-// Wire format for the postcard path follows postcard 1.x exactly:
-//   - bool: 1 byte (0 or 1)
-//   - u8/i8: 1 byte
-//   - u16..u64: LEB128 varint
-//   - i16..i64: zigzag-then-LEB128
-//   - f32/f64: little-endian
-//   - String / &[u8] (Bytes): varint length + bytes
-//   - Vec<T>: varint length + concatenated encoded elements
-//   - [T; N]: concatenated encoded elements (no length prefix)
-//   - Option<T>: 1-byte tag (0 or 1), then T if Some
-//   - enum: varint discriminant, then variant body in declaration order
-//   - struct: concatenated field bytes in declaration order
 // We write the bytes directly rather than going through a serde
 // serializer because the JSON-driven encoding is structural — matching
 // postcard's wire format byte-for-byte is the contract, not "calling
@@ -37,9 +31,7 @@
 
 use std::fmt;
 
-use aether_hub_protocol::{
-    EnumVariant, NamedField, PodField, PodFieldType, PodPrimitive, Primitive, SchemaType,
-};
+use aether_hub_protocol::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::Value;
 
 #[derive(Debug)]
@@ -97,75 +89,21 @@ impl fmt::Display for EncodeError {
 
 impl std::error::Error for EncodeError {}
 
-/// Encode `params` into the byte layout implied by `fields`. Params
-/// is expected to be a JSON object; keys not present in the
-/// descriptor are rejected so typos don't silently drop data.
-pub fn encode_pod(params: &Value, fields: &[PodField]) -> Result<Vec<u8>, EncodeError> {
-    let obj = params.as_object().ok_or(EncodeError::NotAnObject)?;
-
-    for key in obj.keys() {
-        if !fields.iter().any(|f| &f.name == key) {
-            return Err(EncodeError::UnexpectedField(key.clone()));
-        }
-    }
-
-    let mut out = Vec::new();
-    let mut max_align = 1usize;
-
-    for field in fields {
-        let value = obj
-            .get(&field.name)
-            .ok_or_else(|| EncodeError::MissingField(field.name.clone()))?;
-        match &field.ty {
-            PodFieldType::Scalar(p) => {
-                let a = align_of(*p);
-                pad_to(&mut out, a);
-                write_primitive(&mut out, *p, value, &field.name)?;
-                max_align = max_align.max(a);
-            }
-            PodFieldType::Array { element, len } => {
-                let a = align_of(*element);
-                pad_to(&mut out, a);
-                let arr = value.as_array().ok_or_else(|| EncodeError::TypeMismatch {
-                    field: field.name.clone(),
-                    expected: "array",
-                })?;
-                if arr.len() != *len as usize {
-                    return Err(EncodeError::ArrayLengthMismatch {
-                        field: field.name.clone(),
-                        expected: *len,
-                        got: arr.len(),
-                    });
-                }
-                for (i, v) in arr.iter().enumerate() {
-                    let elem_name = format!("{}[{}]", field.name, i);
-                    write_primitive(&mut out, *element, v, &elem_name)?;
-                }
-                max_align = max_align.max(a);
-            }
-        }
-    }
-
-    pad_to(&mut out, max_align);
-    Ok(out)
-}
-
 /// ADR-0019: encode `params` against a `SchemaType` descriptor.
 /// Dispatches on the schema's wire shape:
 ///
 /// - `Unit` → empty payload.
 /// - `Struct { repr_c: true }` (and the recursive cast-shaped tree
 ///   under it) → `#[repr(C)]` byte layout, decodable by
-///   `bytemuck::cast` on the substrate side. Same wire bytes as
-///   `encode_pod` for the same logical shape.
+///   `bytemuck::cast` on the substrate side.
 /// - Everything else → postcard wire format, written directly per the
 ///   format described at the top of this file.
 pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, EncodeError> {
     match schema {
         SchemaType::Unit => {
-            // Empty payload. Match `encode_pod`'s behavior of accepting
-            // an empty object or null; reject explicit non-empty input
-            // so a typo doesn't get silently swallowed.
+            // Empty payload. Accept an empty object or null; reject
+            // explicit non-empty input so a typo doesn't get silently
+            // swallowed.
             if let Some(obj) = params.as_object()
                 && !obj.is_empty()
             {
@@ -637,9 +575,8 @@ fn align_of_primitive(p: Primitive) -> usize {
     }
 }
 
-/// `Primitive`-flavored sibling of `write_primitive`. Same wire bytes
-/// — both enums describe the same set of types — but the duplication
-/// stays here until `PodPrimitive` goes away in the cleanup PR.
+/// Write one `Primitive` scalar into `out` at the cast-shaped wire
+/// layout (LE bytes, no padding — the caller pre-pads to alignment).
 fn write_primitive_schema(
     out: &mut Vec<u8>,
     p: Primitive,
@@ -709,78 +646,6 @@ fn pad_to(out: &mut Vec<u8>, align: usize) {
     }
 }
 
-fn align_of(p: PodPrimitive) -> usize {
-    match p {
-        PodPrimitive::U8 | PodPrimitive::I8 => 1,
-        PodPrimitive::U16 | PodPrimitive::I16 => 2,
-        PodPrimitive::U32 | PodPrimitive::I32 | PodPrimitive::F32 => 4,
-        PodPrimitive::U64 | PodPrimitive::I64 | PodPrimitive::F64 => 8,
-    }
-}
-
-fn write_primitive(
-    out: &mut Vec<u8>,
-    p: PodPrimitive,
-    v: &Value,
-    name: &str,
-) -> Result<(), EncodeError> {
-    match p {
-        PodPrimitive::U8 => {
-            let n = as_unsigned(v, name, "u8")?;
-            let n: u8 = n.try_into().map_err(|_| oor(name, "u8"))?;
-            out.push(n);
-        }
-        PodPrimitive::U16 => {
-            let n = as_unsigned(v, name, "u16")?;
-            let n: u16 = n.try_into().map_err(|_| oor(name, "u16"))?;
-            out.extend_from_slice(&n.to_le_bytes());
-        }
-        PodPrimitive::U32 => {
-            let n = as_unsigned(v, name, "u32")?;
-            let n: u32 = n.try_into().map_err(|_| oor(name, "u32"))?;
-            out.extend_from_slice(&n.to_le_bytes());
-        }
-        PodPrimitive::U64 => {
-            let n = as_unsigned(v, name, "u64")?;
-            out.extend_from_slice(&n.to_le_bytes());
-        }
-        PodPrimitive::I8 => {
-            let n = as_signed(v, name, "i8")?;
-            let n: i8 = n.try_into().map_err(|_| oor(name, "i8"))?;
-            out.extend_from_slice(&n.to_le_bytes());
-        }
-        PodPrimitive::I16 => {
-            let n = as_signed(v, name, "i16")?;
-            let n: i16 = n.try_into().map_err(|_| oor(name, "i16"))?;
-            out.extend_from_slice(&n.to_le_bytes());
-        }
-        PodPrimitive::I32 => {
-            let n = as_signed(v, name, "i32")?;
-            let n: i32 = n.try_into().map_err(|_| oor(name, "i32"))?;
-            out.extend_from_slice(&n.to_le_bytes());
-        }
-        PodPrimitive::I64 => {
-            let n = as_signed(v, name, "i64")?;
-            out.extend_from_slice(&n.to_le_bytes());
-        }
-        PodPrimitive::F32 => {
-            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch {
-                field: name.to_owned(),
-                expected: "f32",
-            })?;
-            out.extend_from_slice(&(n as f32).to_le_bytes());
-        }
-        PodPrimitive::F64 => {
-            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch {
-                field: name.to_owned(),
-                expected: "f64",
-            })?;
-            out.extend_from_slice(&n.to_le_bytes());
-        }
-    }
-    Ok(())
-}
-
 fn as_unsigned(v: &Value, name: &str, expected: &'static str) -> Result<u64, EncodeError> {
     v.as_u64().ok_or_else(|| EncodeError::TypeMismatch {
         field: name.to_owned(),
@@ -807,34 +672,48 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn scalar(name: &str, ty: PodPrimitive) -> PodField {
-        PodField {
+    fn scalar(name: &str, ty: Primitive) -> NamedField {
+        NamedField {
             name: name.into(),
-            ty: PodFieldType::Scalar(ty),
+            ty: SchemaType::Scalar(ty),
         }
     }
 
-    fn array(name: &str, element: PodPrimitive, len: u32) -> PodField {
-        PodField {
-            name: name.into(),
-            ty: PodFieldType::Array { element, len },
+    fn cast_struct(fields: Vec<NamedField>) -> SchemaType {
+        SchemaType::Struct {
+            fields,
+            repr_c: true,
         }
     }
 
     #[test]
-    fn key_u32_field() {
-        let fields = &[scalar("code", PodPrimitive::U32)];
-        let bytes = encode_pod(&json!({"code": 42}), fields).unwrap();
+    fn unit_encodes_empty_payload() {
+        let bytes = encode_schema(&json!({}), &SchemaType::Unit).unwrap();
+        assert!(bytes.is_empty());
+        let bytes = encode_schema(&json!(null), &SchemaType::Unit).unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn unit_rejects_non_empty_object() {
+        let err = encode_schema(&json!({"x": 1}), &SchemaType::Unit).unwrap_err();
+        assert!(matches!(err, EncodeError::UnexpectedField(_)));
+    }
+
+    #[test]
+    fn cast_struct_single_u32_field() {
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let bytes = encode_schema(&json!({"code": 42}), &schema).unwrap();
         assert_eq!(bytes, vec![42, 0, 0, 0]);
     }
 
     #[test]
-    fn mouse_move_two_f32() {
-        let fields = &[
-            scalar("x", PodPrimitive::F32),
-            scalar("y", PodPrimitive::F32),
-        ];
-        let bytes = encode_pod(&json!({"x": 1.5, "y": -3.25}), fields).unwrap();
+    fn cast_struct_two_f32_fields() {
+        let schema = cast_struct(vec![
+            scalar("x", Primitive::F32),
+            scalar("y", Primitive::F32),
+        ]);
+        let bytes = encode_schema(&json!({"x": 1.5, "y": -3.25}), &schema).unwrap();
         let mut expected = Vec::new();
         expected.extend_from_slice(&1.5f32.to_le_bytes());
         expected.extend_from_slice(&(-3.25f32).to_le_bytes());
@@ -842,58 +721,26 @@ mod tests {
     }
 
     #[test]
-    fn bytemuck_roundtrip_for_key_shape() {
-        // Re-decoding our bytes via bytemuck::cast (as the engine
-        // would) is the load-bearing proof of layout correctness.
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
-        struct Key {
-            code: u32,
-        }
-        let fields = &[scalar("code", PodPrimitive::U32)];
-        let bytes = encode_pod(&json!({"code": 0xdead_beefu32}), fields).unwrap();
-        let back: Key = bytemuck::cast_slice(&bytes)[0];
-        assert_eq!(back, Key { code: 0xdead_beef });
-    }
-
-    #[test]
-    fn bytemuck_roundtrip_for_mousemove_shape() {
-        #[repr(C)]
-        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
-        struct MouseMove {
-            x: f32,
-            y: f32,
-        }
-        let fields = &[
-            scalar("x", PodPrimitive::F32),
-            scalar("y", PodPrimitive::F32),
-        ];
-        let bytes = encode_pod(&json!({"x": 10.5, "y": 20.0}), fields).unwrap();
-        let back: MouseMove = bytemuck::cast_slice(&bytes)[0];
-        assert_eq!(back, MouseMove { x: 10.5, y: 20.0 });
-    }
-
-    #[test]
-    fn pads_between_u8_and_u32() {
+    fn cast_struct_pads_between_u8_and_u32() {
         // #[repr(C)] { a: u8, b: u32 } is 8 bytes: a at 0, 3 bytes of
         // padding, b at 4.
-        let fields = &[
-            scalar("a", PodPrimitive::U8),
-            scalar("b", PodPrimitive::U32),
-        ];
-        let bytes = encode_pod(&json!({"a": 7, "b": 0x0102_0304u32}), fields).unwrap();
+        let schema = cast_struct(vec![
+            scalar("a", Primitive::U8),
+            scalar("b", Primitive::U32),
+        ]);
+        let bytes = encode_schema(&json!({"a": 7, "b": 0x0102_0304u32}), &schema).unwrap();
         assert_eq!(bytes, vec![7, 0, 0, 0, 4, 3, 2, 1]);
     }
 
     #[test]
-    fn trailing_padding_for_u64_then_u8() {
+    fn cast_struct_trailing_padding_for_u64_then_u8() {
         // { a: u64, b: u8 } — 9 bytes of content, rounded to 16 by
         // trailing padding for align-8.
-        let fields = &[
-            scalar("a", PodPrimitive::U64),
-            scalar("b", PodPrimitive::U8),
-        ];
-        let bytes = encode_pod(&json!({"a": 1u64, "b": 2}), fields).unwrap();
+        let schema = cast_struct(vec![
+            scalar("a", Primitive::U64),
+            scalar("b", Primitive::U8),
+        ]);
+        let bytes = encode_schema(&json!({"a": 1u64, "b": 2}), &schema).unwrap();
         assert_eq!(bytes.len(), 16);
         assert_eq!(&bytes[0..8], &1u64.to_le_bytes());
         assert_eq!(bytes[8], 2);
@@ -901,44 +748,79 @@ mod tests {
     }
 
     #[test]
-    fn fixed_array_field() {
-        let fields = &[array("xs", PodPrimitive::U8, 4)];
-        let bytes = encode_pod(&json!({"xs": [1, 2, 3, 4]}), fields).unwrap();
+    fn cast_struct_fixed_array_field() {
+        let schema = cast_struct(vec![NamedField {
+            name: "xs".into(),
+            ty: SchemaType::Array {
+                element: Box::new(SchemaType::Scalar(Primitive::U8)),
+                len: 4,
+            },
+        }]);
+        let bytes = encode_schema(&json!({"xs": [1, 2, 3, 4]}), &schema).unwrap();
         assert_eq!(bytes, vec![1, 2, 3, 4]);
     }
 
     #[test]
-    fn missing_field_errors() {
-        let fields = &[scalar("code", PodPrimitive::U32)];
-        let err = encode_pod(&json!({}), fields).unwrap_err();
+    fn cast_struct_signed_negative_roundtrip() {
+        // i32 in cast layout = LE bytes; -1 = 0xffffffff.
+        let schema = cast_struct(vec![scalar("n", Primitive::I32)]);
+        let bytes = encode_schema(&json!({"n": -1}), &schema).unwrap();
+        assert_eq!(bytes, vec![0xff, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn cast_struct_bytemuck_roundtrip_for_key_shape() {
+        // Re-decoding our bytes via bytemuck::cast (as the engine
+        // would) is the load-bearing proof of layout correctness.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
+        struct Key {
+            code: u32,
+        }
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let bytes = encode_schema(&json!({"code": 0xdead_beefu32}), &schema).unwrap();
+        let back: Key = bytemuck::cast_slice(&bytes)[0];
+        assert_eq!(back, Key { code: 0xdead_beef });
+    }
+
+    #[test]
+    fn cast_struct_missing_field_errors() {
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let err = encode_schema(&json!({}), &schema).unwrap_err();
         assert!(matches!(err, EncodeError::MissingField(n) if n == "code"));
     }
 
     #[test]
-    fn unexpected_field_errors() {
-        let fields = &[scalar("code", PodPrimitive::U32)];
-        let err = encode_pod(&json!({"code": 1, "extra": 2}), fields).unwrap_err();
+    fn cast_struct_unexpected_field_errors() {
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let err = encode_schema(&json!({"code": 1, "extra": 2}), &schema).unwrap_err();
         assert!(matches!(err, EncodeError::UnexpectedField(n) if n == "extra"));
     }
 
     #[test]
-    fn type_mismatch_errors() {
-        let fields = &[scalar("code", PodPrimitive::U32)];
-        let err = encode_pod(&json!({"code": "not-a-number"}), fields).unwrap_err();
+    fn cast_struct_type_mismatch_errors() {
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let err = encode_schema(&json!({"code": "not-a-number"}), &schema).unwrap_err();
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
     #[test]
-    fn out_of_range_errors() {
-        let fields = &[scalar("b", PodPrimitive::U8)];
-        let err = encode_pod(&json!({"b": 300}), fields).unwrap_err();
+    fn cast_struct_out_of_range_errors() {
+        let schema = cast_struct(vec![scalar("b", Primitive::U8)]);
+        let err = encode_schema(&json!({"b": 300}), &schema).unwrap_err();
         assert!(matches!(err, EncodeError::OutOfRange { .. }));
     }
 
     #[test]
-    fn array_length_mismatch_errors() {
-        let fields = &[array("xs", PodPrimitive::U8, 4)];
-        let err = encode_pod(&json!({"xs": [1, 2, 3]}), fields).unwrap_err();
+    fn cast_struct_array_length_mismatch_errors() {
+        let schema = cast_struct(vec![NamedField {
+            name: "xs".into(),
+            ty: SchemaType::Array {
+                element: Box::new(SchemaType::Scalar(Primitive::U8)),
+                len: 4,
+            },
+        }]);
+        let err = encode_schema(&json!({"xs": [1, 2, 3]}), &schema).unwrap_err();
         assert!(matches!(
             err,
             EncodeError::ArrayLengthMismatch {
@@ -950,132 +832,27 @@ mod tests {
     }
 
     #[test]
-    fn non_object_params_errors() {
-        let fields = &[scalar("code", PodPrimitive::U32)];
-        let err = encode_pod(&json!([1, 2, 3]), fields).unwrap_err();
+    fn cast_struct_non_object_params_errors() {
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let err = encode_schema(&json!([1, 2, 3]), &schema).unwrap_err();
         assert!(matches!(err, EncodeError::NotAnObject));
     }
 
     #[test]
-    fn signed_negative_roundtrip() {
-        let fields = &[scalar("n", PodPrimitive::I32)];
-        let bytes = encode_pod(&json!({"n": -1}), fields).unwrap();
-        assert_eq!(bytes, vec![0xff, 0xff, 0xff, 0xff]);
-    }
-
-    // ADR-0019 PR 4 — `encode_schema` must produce byte-identical
-    // output to `encode_pod` for cast-shaped kinds. PR 5 will retire
-    // `encode_pod` once consumers migrate; until then both encoders
-    // coexist and a regression in either path is caught here.
-
-    fn schema_scalar(name: &str, ty: Primitive) -> NamedField {
-        NamedField {
-            name: name.into(),
-            ty: SchemaType::Scalar(ty),
-        }
-    }
-
-    fn schema_struct(fields: Vec<NamedField>) -> SchemaType {
-        SchemaType::Struct {
-            fields,
-            repr_c: true,
-        }
-    }
-
-    #[test]
-    fn schema_unit_encodes_empty_payload() {
-        let bytes = encode_schema(&json!({}), &SchemaType::Unit).unwrap();
-        assert!(bytes.is_empty());
-        let bytes = encode_schema(&json!(null), &SchemaType::Unit).unwrap();
-        assert!(bytes.is_empty());
-    }
-
-    #[test]
-    fn schema_unit_rejects_non_empty_object() {
-        let err = encode_schema(&json!({"x": 1}), &SchemaType::Unit).unwrap_err();
-        assert!(matches!(err, EncodeError::UnexpectedField(_)));
-    }
-
-    #[test]
-    fn schema_struct_matches_encode_pod_for_key() {
-        // Single u32 — the simplest cast struct.
-        let pod_bytes = encode_pod(
-            &json!({"code": 0xdead_beefu32}),
-            &[scalar("code", PodPrimitive::U32)],
-        )
-        .unwrap();
-        let schema_bytes = encode_schema(
-            &json!({"code": 0xdead_beefu32}),
-            &schema_struct(vec![schema_scalar("code", Primitive::U32)]),
-        )
-        .unwrap();
-        assert_eq!(pod_bytes, schema_bytes);
-    }
-
-    #[test]
-    fn schema_struct_matches_encode_pod_for_mousemove() {
-        // Two f32 — the same shape Pod encoder tests use.
-        let pod_bytes = encode_pod(
-            &json!({"x": 10.5, "y": 20.0}),
-            &[
-                scalar("x", PodPrimitive::F32),
-                scalar("y", PodPrimitive::F32),
-            ],
-        )
-        .unwrap();
-        let schema_bytes = encode_schema(
-            &json!({"x": 10.5, "y": 20.0}),
-            &schema_struct(vec![
-                schema_scalar("x", Primitive::F32),
-                schema_scalar("y", Primitive::F32),
-            ]),
-        )
-        .unwrap();
-        assert_eq!(pod_bytes, schema_bytes);
-    }
-
-    #[test]
-    fn schema_struct_pads_between_u8_and_u32_like_pod() {
-        // The padding-rule test from `encode_pod` ported to schema —
-        // alignment behavior must match for binary compatibility.
-        let pod_bytes = encode_pod(
-            &json!({"a": 7, "b": 0x0102_0304u32}),
-            &[
-                scalar("a", PodPrimitive::U8),
-                scalar("b", PodPrimitive::U32),
-            ],
-        )
-        .unwrap();
-        let schema_bytes = encode_schema(
-            &json!({"a": 7, "b": 0x0102_0304u32}),
-            &schema_struct(vec![
-                schema_scalar("a", Primitive::U8),
-                schema_scalar("b", Primitive::U32),
-            ]),
-        )
-        .unwrap();
-        assert_eq!(pod_bytes, schema_bytes);
-        assert_eq!(schema_bytes, vec![7, 0, 0, 0, 4, 3, 2, 1]);
-    }
-
-    #[test]
-    fn schema_nested_struct_matches_drawtriangle_layout() {
+    fn cast_nested_struct_drawtriangle_layout() {
         // DrawTriangle's shape: { verts: [Vertex; 3] } where Vertex is
         // 5 f32s. Cast wire format = 60 bytes, no internal padding.
-        // Pod descriptors couldn't model nested structs so this had to
-        // be Opaque before — proving the schema path matches the cast
-        // layout end-to-end is the key property of PR 4.
         let vertex = SchemaType::Struct {
             repr_c: true,
             fields: vec![
-                schema_scalar("x", Primitive::F32),
-                schema_scalar("y", Primitive::F32),
-                schema_scalar("r", Primitive::F32),
-                schema_scalar("g", Primitive::F32),
-                schema_scalar("b", Primitive::F32),
+                scalar("x", Primitive::F32),
+                scalar("y", Primitive::F32),
+                scalar("r", Primitive::F32),
+                scalar("g", Primitive::F32),
+                scalar("b", Primitive::F32),
             ],
         };
-        let triangle = schema_struct(vec![NamedField {
+        let triangle = cast_struct(vec![NamedField {
             name: "verts".into(),
             ty: SchemaType::Array {
                 element: Box::new(vertex),
@@ -1087,7 +864,6 @@ mod tests {
         let bytes = encode_schema(&params, &triangle).unwrap();
         assert_eq!(bytes.len(), 60);
 
-        // Roundtrip via bytemuck — same proof shape as the Pod tests.
         #[repr(C)]
         #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
         struct Vertex {
@@ -1118,25 +894,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn schema_struct_rejects_unexpected_field() {
-        let schema = schema_struct(vec![schema_scalar("code", Primitive::U32)]);
-        let err = encode_schema(&json!({"code": 1, "extra": 2}), &schema).unwrap_err();
-        assert!(matches!(err, EncodeError::UnexpectedField(n) if n == "extra"));
-    }
-
-    #[test]
-    fn schema_struct_rejects_missing_field() {
-        let schema = schema_struct(vec![schema_scalar("code", Primitive::U32)]);
-        let err = encode_schema(&json!({}), &schema).unwrap_err();
-        assert!(matches!(err, EncodeError::MissingField(n) if n == "code"));
-    }
-
-    // ADR-0019 PR 5 — postcard path. Each test asserts that
-    // `encode_schema` produces byte-identical output to
-    // `postcard::to_allocvec` on an equivalent typed value. That's the
-    // load-bearing property: if these match, the substrate decode
-    // (via `postcard::from_bytes`) sees the same value the agent sent.
+    // Postcard path. Each test asserts byte-identity with
+    // `postcard::to_allocvec` on an equivalent typed value — if these
+    // match, the substrate decode (via `postcard::from_bytes`) sees
+    // the same value the agent sent.
 
     use serde::{Deserialize, Serialize};
 

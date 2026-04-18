@@ -27,8 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use aether_hub_protocol::{
-    ClaudeAddress, EngineMailFrame, EngineToHub, KindDescriptor, KindEncoding, NamedField,
-    Primitive, SchemaType,
+    ClaudeAddress, EngineMailFrame, EngineToHub, KindDescriptor, NamedField, Primitive, SchemaType,
 };
 use aether_mail::Kind;
 use aether_substrate_mail::{
@@ -59,8 +58,8 @@ pub const AETHER_CONTROL: &str = "aether.control";
 /// kinds, so a runtime-registered kind is indistinguishable from a
 /// boot-registered one on the wire.
 fn lift_load_kind(k: &LoadKind) -> KindDescriptor {
-    let encoding = match &k.encoding {
-        LoadKindEncoding::Signal => KindEncoding::Schema(SchemaType::Unit),
+    let schema = match &k.encoding {
+        LoadKindEncoding::Signal => SchemaType::Unit,
         LoadKindEncoding::Pod { fields } => {
             let named = fields
                 .iter()
@@ -69,15 +68,15 @@ fn lift_load_kind(k: &LoadKind) -> KindDescriptor {
                     ty: lift_load_field_type(f.primitive, f.array_len),
                 })
                 .collect();
-            KindEncoding::Schema(SchemaType::Struct {
+            SchemaType::Struct {
                 fields: named,
                 repr_c: true,
-            })
+            }
         }
     };
     KindDescriptor {
         name: k.name.clone(),
-        encoding,
+        schema,
     }
 }
 
@@ -175,7 +174,7 @@ impl ControlPlane {
         for kind in &descriptors {
             if let Some(id) = self.registry.kind_id(&kind.name)
                 && let Some(existing) = self.registry.kind_descriptor(id)
-                && existing.encoding != kind.encoding
+                && existing.schema != kind.schema
             {
                 return LoadResult::Err {
                     error: format!(
@@ -312,7 +311,7 @@ impl ControlPlane {
         for kind in &descriptors {
             if let Some(kid) = self.registry.kind_id(&kind.name)
                 && let Some(existing) = self.registry.kind_descriptor(kid)
-                && existing.encoding != kind.encoding
+                && existing.schema != kind.schema
             {
                 return ReplaceResult::Err {
                     error: format!(
@@ -459,7 +458,7 @@ impl ControlPlane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_hub_protocol::{KindEncoding, SessionToken};
+    use aether_hub_protocol::SessionToken;
 
     #[test]
     fn load_payload_roundtrip() {
@@ -669,13 +668,13 @@ mod tests {
             .registry
             .register_kind_with_descriptor(KindDescriptor {
                 name: "shared".into(),
-                encoding: KindEncoding::Schema(SchemaType::Struct {
+                schema: SchemaType::Struct {
                     fields: vec![NamedField {
                         name: "n".into(),
                         ty: SchemaType::Scalar(Primitive::U32),
                     }],
                     repr_c: true,
-                }),
+                },
             })
             .unwrap();
         let wasm = wat::parse_str(WAT).unwrap();

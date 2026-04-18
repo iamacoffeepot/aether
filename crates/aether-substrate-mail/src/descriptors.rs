@@ -14,7 +14,7 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use aether_hub_protocol::{KindDescriptor, KindEncoding};
+use aether_hub_protocol::KindDescriptor;
 use aether_mail::{Kind, Schema};
 
 use crate::{
@@ -54,7 +54,7 @@ pub fn all() -> Vec<KindDescriptor> {
 fn schema<K: Kind + Schema>() -> KindDescriptor {
     KindDescriptor {
         name: K::NAME.to_string(),
-        encoding: KindEncoding::Schema(K::schema()),
+        schema: K::schema(),
     }
 }
 
@@ -84,11 +84,10 @@ mod tests {
 
     #[test]
     fn control_kinds_are_postcard_schemas() {
-        // ADR-0019 PR 5: control-plane kinds are no longer `Opaque`.
-        // Each ships as `Schema(Struct{repr_c:false,..})` (LoadComponent,
-        // DropComponent, ReplaceComponent) or `Schema(Enum{..})` (the
-        // *Result variants). The hub builds them from agent params via
-        // the postcard encoder.
+        // ADR-0019: control-plane kinds ship as `Struct{repr_c:false,..}`
+        // (LoadComponent, DropComponent, ReplaceComponent) or `Enum{..}`
+        // (the *Result variants). Hub builds them from agent params
+        // via the postcard encoder.
         let descs = all();
         for name in [
             LoadComponent::NAME,
@@ -96,39 +95,23 @@ mod tests {
             DropComponent::NAME,
         ] {
             let d = descs.iter().find(|d| d.name == name).unwrap();
-            let KindEncoding::Schema(SchemaType::Struct { repr_c, .. }) = &d.encoding else {
-                panic!("{name} should be Schema(Struct), got {:?}", d.encoding);
+            let SchemaType::Struct { repr_c, .. } = &d.schema else {
+                panic!("{name} should be Struct, got {:?}", d.schema);
             };
             assert!(!*repr_c, "{name} contains String/Vec, must be postcard");
         }
         for name in [LoadResult::NAME, DropResult::NAME, ReplaceResult::NAME] {
             let d = descs.iter().find(|d| d.name == name).unwrap();
             assert!(
-                matches!(d.encoding, KindEncoding::Schema(SchemaType::Enum { .. })),
-                "{name} should be Schema(Enum), got {:?}",
-                d.encoding
+                matches!(d.schema, SchemaType::Enum { .. }),
+                "{name} should be Enum, got {:?}",
+                d.schema
             );
         }
     }
 
     #[test]
-    fn no_kinds_are_opaque() {
-        // The whole point of PR 5: every kind in the substrate's
-        // descriptor list is hub-encodable. A regression here means
-        // an agent would lose the ability to send some kind via
-        // `send_mail`.
-        let descs = all();
-        for d in &descs {
-            assert!(
-                !matches!(d.encoding, KindEncoding::Opaque),
-                "kind {:?} is still Opaque",
-                d.name
-            );
-        }
-    }
-
-    #[test]
-    fn cast_kinds_emit_schema_struct_with_repr_c() {
+    fn cast_kinds_emit_struct_with_repr_c() {
         let descs = all();
         for name in [
             Key::NAME,
@@ -139,23 +122,19 @@ mod tests {
             Pong::NAME,
         ] {
             let d = descs.iter().find(|d| d.name == name).unwrap();
-            let KindEncoding::Schema(SchemaType::Struct { repr_c, .. }) = &d.encoding else {
-                panic!("expected Schema(Struct) for {name}, got {:?}", d.encoding);
+            let SchemaType::Struct { repr_c, .. } = &d.schema else {
+                panic!("expected Struct for {name}, got {:?}", d.schema);
             };
             assert!(*repr_c, "{name} should be cast-shaped");
         }
     }
 
     #[test]
-    fn signal_kinds_emit_schema_unit() {
+    fn signal_kinds_emit_unit() {
         let descs = all();
         for name in [Tick::NAME, MouseButton::NAME] {
             let d = descs.iter().find(|d| d.name == name).unwrap();
-            assert_eq!(
-                d.encoding,
-                KindEncoding::Schema(SchemaType::Unit),
-                "{name} should be Schema(Unit)"
-            );
+            assert_eq!(d.schema, SchemaType::Unit, "{name} should be Unit");
         }
     }
 
@@ -163,8 +142,8 @@ mod tests {
     fn key_field_layout() {
         let descs = all();
         let key = descs.iter().find(|d| d.name == Key::NAME).unwrap();
-        let KindEncoding::Schema(SchemaType::Struct { fields, .. }) = &key.encoding else {
-            panic!("expected Schema(Struct)")
+        let SchemaType::Struct { fields, .. } = &key.schema else {
+            panic!("expected Struct")
         };
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name, "code");
@@ -175,8 +154,8 @@ mod tests {
     fn mouse_move_field_layout() {
         let descs = all();
         let mm = descs.iter().find(|d| d.name == MouseMove::NAME).unwrap();
-        let KindEncoding::Schema(SchemaType::Struct { fields, .. }) = &mm.encoding else {
-            panic!("expected Schema(Struct)")
+        let SchemaType::Struct { fields, .. } = &mm.schema else {
+            panic!("expected Struct")
         };
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "x");
@@ -187,12 +166,10 @@ mod tests {
 
     #[test]
     fn draw_triangle_recurses_into_vertex() {
-        // The cast wire format previously couldn't describe nested
-        // structs (DrawTriangle was Opaque). The Schema arm fixes that.
         let descs = all();
         let dt = descs.iter().find(|d| d.name == DrawTriangle::NAME).unwrap();
-        let KindEncoding::Schema(SchemaType::Struct { fields, repr_c }) = &dt.encoding else {
-            panic!("expected Schema(Struct)")
+        let SchemaType::Struct { fields, repr_c } = &dt.schema else {
+            panic!("expected Struct")
         };
         assert!(*repr_c);
         assert_eq!(fields.len(), 1);
@@ -216,8 +193,8 @@ mod tests {
     fn frame_stats_field_layout() {
         let descs = all();
         let fs = descs.iter().find(|d| d.name == FrameStats::NAME).unwrap();
-        let KindEncoding::Schema(SchemaType::Struct { fields, .. }) = &fs.encoding else {
-            panic!("expected Schema(Struct)")
+        let SchemaType::Struct { fields, .. } = &fs.schema else {
+            panic!("expected Struct")
         };
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "frame");

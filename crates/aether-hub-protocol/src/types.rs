@@ -42,73 +42,13 @@ pub struct Hello {
     pub kinds: Vec<KindDescriptor>,
 }
 
-/// One entry in `Hello.kinds`: a kind-name plus a wire-describable
-/// encoding. Per ADR-0007 the hub uses these to encode agent-supplied
-/// params into the exact bytes the engine expects.
+/// One entry in `Hello.kinds`: a kind-name plus its schema. The hub
+/// uses the schema to encode agent-supplied params into the exact
+/// bytes the engine expects (cast-shaped or postcard, ADR-0019).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KindDescriptor {
     pub name: String,
-    pub encoding: KindEncoding,
-}
-
-/// How the hub can materialize bytes for a given kind.
-///
-/// - `Signal`: empty payload. `params` must be absent or empty.
-/// - `Pod`: `#[repr(C)]` struct; hub encodes an ordered field list of
-///   scalars and fixed-size scalar arrays matching Rust's layout.
-/// - `Opaque`: the hub can't encode this from params. Clients must
-///   supply raw bytes. V0 structural (postcard) kinds land here.
-/// - `Schema`: ADR-0019 unified vocabulary covering scalars, strings,
-///   vecs, options, enums, and nested structs. The `repr_c` flag on
-///   `SchemaType::Struct` opts a struct into the cast-shaped wire
-///   format (today's `Pod` bytes); everything else is postcard.
-///
-/// `Signal`/`Pod`/`Opaque` are kept here through the migration so
-/// `aether-hub`, `aether-substrate`, and the smoke binaries can move
-/// over one PR at a time. The cleanup PR deletes them along with
-/// `PodField`/`PodFieldType`/`PodPrimitive`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum KindEncoding {
-    Signal,
-    Pod { fields: Vec<PodField> },
-    Opaque,
-    Schema(SchemaType),
-}
-
-/// One field in a POD kind. Field order matches the Rust struct's
-/// declaration order; the hub walks the list writing bytes with the
-/// same alignment/padding the `#[repr(C)]` layout implies.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PodField {
-    pub name: String,
-    pub ty: PodFieldType,
-}
-
-/// A POD field is either a scalar or a fixed-length array of one
-/// scalar primitive. Nested structs are deliberately out of scope for
-/// V0 (ADR-0007) — a kind with nested-struct fields uses
-/// `KindEncoding::Opaque` and the `payload_bytes` escape hatch.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PodFieldType {
-    Scalar(PodPrimitive),
-    Array { element: PodPrimitive, len: u32 },
-}
-
-/// POD primitive types the hub can encode. Matches the Rust primitive
-/// set that's trivially `bytemuck::Pod`. Names are the canonical Rust
-/// spelling so tooling can parse them without a lookup.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PodPrimitive {
-    U8,
-    U16,
-    U32,
-    U64,
-    I8,
-    I16,
-    I32,
-    I64,
-    F32,
-    F64,
+    pub schema: SchemaType,
 }
 
 /// ADR-0019 schema type vocabulary. Describes the structure of a mail
@@ -175,10 +115,10 @@ pub enum EnumVariant {
     },
 }
 
-/// Scalar primitives addressable by `SchemaType::Scalar`. Same set as
-/// `PodPrimitive` (which is parallel for the legacy `Pod` arm during
-/// migration); kept as its own type so `Schema` can outlive `Pod` once
-/// the cleanup PR removes the legacy arm.
+/// Scalar primitives addressable by `SchemaType::Scalar`. Matches the
+/// Rust primitive set that's trivially `bytemuck::Pod` so cast-shaped
+/// structs can express their leaf types; `bool` is `SchemaType::Bool`,
+/// not a `Primitive` (the cast path doesn't accept `bool` fields).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Primitive {
     U8,
