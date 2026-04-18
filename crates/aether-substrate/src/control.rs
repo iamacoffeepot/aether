@@ -130,6 +130,12 @@ fn lift_primitive(p: LoadKindPrimitive) -> Primitive {
 /// struct keeps the closure body short and makes the dependencies
 /// explicit — useful since the handler needs a broad slice of
 /// substrate state (wasmtime, registry, scheduler table, outbound).
+///
+/// `Clone` is cheap — every field is an `Arc` — and exists for tests
+/// that want to drive `dispatch` more than once (each call consumes
+/// the handler via `into_sink_handler`). Production has exactly one
+/// ControlPlane and never clones it.
+#[derive(Clone)]
 pub struct ControlPlane {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<SubstrateCtx>>,
