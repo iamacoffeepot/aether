@@ -29,7 +29,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::encoder::encode_pod;
+use crate::encoder::{encode_pod, encode_schema};
 use crate::registry::{EngineRecord, EngineRegistry};
 use crate::session::{QueuedMail, SessionHandle, SessionRegistry};
 use crate::spawn::{DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, PendingSpawns, SpawnOpts};
@@ -486,20 +486,27 @@ fn resolve_payload(spec: &MailSpec, record: &EngineRecord) -> Result<Vec<u8>, St
                     "kind {:?} is Opaque; use payload_bytes",
                     spec.kind_name
                 )),
-                // ADR-0019 PR 1: type plumbed, encoder lands in PR 5.
-                // Until then, agents that hit a Schema kind get a clear
-                // error rather than silent corruption.
-                KindEncoding::Schema(_) => Err(format!(
-                    "kind {:?} uses Schema encoding; hub encoder not yet implemented (ADR-0019)",
-                    spec.kind_name
-                )),
+                // ADR-0019 PR 4: cast-shaped Schema kinds encode through
+                // `encode_schema`; postcard-shaped ones still error
+                // until PR 5 wires the postcard path.
+                KindEncoding::Schema(schema) => encode_schema(p, schema).map_err(|e| e.to_string()),
             }
         }
         (None, None) => {
-            // Neither given: permissible only if the descriptor says
-            // Signal. Anything else is ambiguous — fail loudly.
+            // Neither given: permissible only if the descriptor implies
+            // an empty payload — `KindEncoding::Signal` (legacy) or
+            // ADR-0019's `KindEncoding::Schema(SchemaType::Unit)`.
+            // Anything else is ambiguous — fail loudly.
             match find_kind(record, &spec.kind_name) {
                 Some(desc) if matches!(desc.encoding, KindEncoding::Signal) => Ok(Vec::new()),
+                Some(desc)
+                    if matches!(
+                        desc.encoding,
+                        KindEncoding::Schema(aether_hub_protocol::SchemaType::Unit)
+                    ) =>
+                {
+                    Ok(Vec::new())
+                }
                 _ => Err("missing params or payload_bytes".to_owned()),
             }
         }
