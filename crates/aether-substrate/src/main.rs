@@ -152,22 +152,16 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput {
                 event: key_event, ..
-            } => {
-                if key_event.state == ElementState::Pressed && !key_event.repeat {
-                    let subs = subscribers_for(&self.input_subscribers, InputStream::Key);
-                    if !subs.is_empty() {
-                        let code: u32 = match key_event.physical_key {
-                            PhysicalKey::Code(k) => k as u32,
-                            PhysicalKey::Unidentified(_) => 0,
-                        };
-                        for mbox in subs {
-                            self.queue.push(Mail::new(
-                                mbox,
-                                self.kind_key,
-                                encode(&Key { code }),
-                                1,
-                            ));
-                        }
+            } if key_event.state == ElementState::Pressed && !key_event.repeat => {
+                let subs = subscribers_for(&self.input_subscribers, InputStream::Key);
+                if !subs.is_empty() {
+                    let code: u32 = match key_event.physical_key {
+                        PhysicalKey::Code(k) => k as u32,
+                        PhysicalKey::Unidentified(_) => 0,
+                    };
+                    for mbox in subs {
+                        self.queue
+                            .push(Mail::new(mbox, self.kind_key, encode(&Key { code }), 1));
                     }
                 }
             }
