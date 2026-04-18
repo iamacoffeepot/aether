@@ -128,8 +128,6 @@ fn decode_value(
     }
 }
 
-// ---- cast-shaped path ------------------------------------------------
-
 fn decode_cast_struct(
     cur: &mut Cursor<'_>,
     fields: &[NamedField],
@@ -240,8 +238,6 @@ fn align_of_primitive(p: Primitive) -> usize {
         Primitive::U64 | Primitive::I64 | Primitive::F64 => 8,
     }
 }
-
-// ---- postcard path ---------------------------------------------------
 
 fn decode_postcard(
     cur: &mut Cursor<'_>,
@@ -424,8 +420,6 @@ fn decode_enum_body(
     }
 }
 
-// ---- varint / zigzag -------------------------------------------------
-
 /// Postcard 1.x varint: 7 bits per byte, MSB set means continue. Cap at
 /// 10 bytes — anything longer is overflow for u64.
 fn read_varint_u64(cur: &mut Cursor<'_>, path: &str) -> Result<u64, DecodeError> {
@@ -445,8 +439,6 @@ fn read_varint_u64(cur: &mut Cursor<'_>, path: &str) -> Result<u64, DecodeError>
 fn unzigzag(n: u64) -> i64 {
     ((n >> 1) as i64) ^ -((n & 1) as i64)
 }
-
-// ---- helpers ---------------------------------------------------------
 
 /// JSON numbers can't represent NaN/infinity. The encoder accepts
 /// arbitrary `f64`s; on decode we coerce non-finite to `null` so the
