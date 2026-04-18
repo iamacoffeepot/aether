@@ -2,18 +2,24 @@
 // substrate binary and shipped to the hub at `Hello` per ADR-0007 so
 // the hub can encode agent-supplied params for each kind.
 //
-// Adding a kind to `lib.rs` means adding a matching entry here; the
-// coupling is deliberate — each descriptor re-states the `#[repr(C)]`
-// field order the encoder will walk on the hub side, so drift between
-// the struct layout and the descriptor is caught when we next look at
-// this file.
+// ADR-0019 PR 4: cast-shaped kinds are now emitted as
+// `KindEncoding::Schema(T::schema())` — the bytes the hub produces are
+// identical to what the legacy `Pod`/`Signal` arms produced, but the
+// descriptor walks the type definition instead of restating its layout
+// here. Adding or renaming a field on a kind is a one-place change
+// (the struct itself); the schema is whatever the derive emits.
+//
+// Control-plane kinds (LoadComponent, ReplaceComponent, DropComponent,
+// LoadResult, DropResult, ReplaceResult) stay `Opaque` here. They
+// migrate in PR 5 along with the postcard encoder + `payload_bytes`
+// removal.
 
 use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use aether_hub_protocol::{KindDescriptor, KindEncoding, PodField, PodFieldType, PodPrimitive};
-use aether_mail::Kind;
+use aether_hub_protocol::{KindDescriptor, KindEncoding};
+use aether_mail::{Kind, Schema};
 
 use crate::{
     DrawTriangle, DropComponent, DropResult, FrameStats, Key, LoadComponent, LoadResult,
@@ -24,36 +30,20 @@ use crate::{
 /// register them. Caller ignores the order — names are the contract.
 pub fn all() -> Vec<KindDescriptor> {
     vec![
-        signal(Tick::NAME),
-        pod(Key::NAME, vec![scalar("code", PodPrimitive::U32)]),
-        signal(MouseButton::NAME),
-        pod(
-            MouseMove::NAME,
-            vec![
-                scalar("x", PodPrimitive::F32),
-                scalar("y", PodPrimitive::F32),
-            ],
-        ),
-        // DrawTriangle nests Vertex; V0 descriptors don't model nested
-        // structs, so this kind stays opaque and clients use the raw
-        // payload_bytes path.
-        opaque(DrawTriangle::NAME),
-        pod(
-            FrameStats::NAME,
-            vec![
-                scalar("frame", PodPrimitive::U64),
-                scalar("triangles", PodPrimitive::U64),
-            ],
-        ),
-        // ADR-0013 smoke-test vocabulary. Both Pod so the MCP
-        // `send_mail` tool can encode ping from params; Pong comes
-        // back as bytes on the reply path.
-        pod(Ping::NAME, vec![scalar("seq", PodPrimitive::U32)]),
-        pod(Pong::NAME, vec![scalar("seq", PodPrimitive::U32)]),
-        // ADR-0010 control-plane kinds. Variable-length payloads that
-        // don't fit the Pod model — the substrate handler decodes via
-        // postcard against its own wire types. Agents that use the MCP
-        // `send_mail` tool supply these as raw `payload_bytes`.
+        schema::<Tick>(),
+        schema::<Key>(),
+        schema::<MouseButton>(),
+        schema::<MouseMove>(),
+        // DrawTriangle's schema recurses into Vertex; the cast wire
+        // format keeps today's bytes (the hub encoder treats the
+        // nested `Struct { repr_c: true }` exactly like a flat Pod).
+        schema::<DrawTriangle>(),
+        schema::<FrameStats>(),
+        // ADR-0013 smoke-test vocabulary.
+        schema::<Ping>(),
+        schema::<Pong>(),
+        // ADR-0010 control-plane kinds — still Opaque; PR 5 turns
+        // them into real schemas alongside dropping `payload_bytes`.
         opaque(LoadComponent::NAME),
         opaque(ReplaceComponent::NAME),
         opaque(DropComponent::NAME),
@@ -63,17 +53,10 @@ pub fn all() -> Vec<KindDescriptor> {
     ]
 }
 
-fn signal(name: &str) -> KindDescriptor {
+fn schema<K: Kind + Schema>() -> KindDescriptor {
     KindDescriptor {
-        name: name.to_string(),
-        encoding: KindEncoding::Signal,
-    }
-}
-
-fn pod(name: &str, fields: Vec<PodField>) -> KindDescriptor {
-    KindDescriptor {
-        name: name.to_string(),
-        encoding: KindEncoding::Pod { fields },
+        name: K::NAME.to_string(),
+        encoding: KindEncoding::Schema(K::schema()),
     }
 }
 
@@ -84,16 +67,10 @@ fn opaque(name: &str) -> KindDescriptor {
     }
 }
 
-fn scalar(name: &str, ty: PodPrimitive) -> PodField {
-    PodField {
-        name: name.to_string(),
-        ty: PodFieldType::Scalar(ty),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_hub_protocol::{Primitive, SchemaType};
 
     #[test]
     fn covers_every_substrate_kind() {
@@ -116,6 +93,8 @@ mod tests {
 
     #[test]
     fn control_kinds_are_opaque() {
+        // PR 5 turns these into Schema kinds. Until then, agents must
+        // supply `payload_bytes` for the control plane.
         let descs = all();
         for name in [
             LoadComponent::NAME,
@@ -131,53 +110,100 @@ mod tests {
     }
 
     #[test]
-    fn key_fields_match_struct_layout() {
+    fn cast_kinds_emit_schema_struct_with_repr_c() {
         let descs = all();
-        let key = descs.iter().find(|d| d.name == Key::NAME).unwrap();
-        let KindEncoding::Pod { fields } = &key.encoding else {
-            panic!("expected Pod")
-        };
-        assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0].name, "code");
-        assert_eq!(fields[0].ty, PodFieldType::Scalar(PodPrimitive::U32));
+        for name in [
+            Key::NAME,
+            MouseMove::NAME,
+            DrawTriangle::NAME,
+            FrameStats::NAME,
+            Ping::NAME,
+            Pong::NAME,
+        ] {
+            let d = descs.iter().find(|d| d.name == name).unwrap();
+            let KindEncoding::Schema(SchemaType::Struct { repr_c, .. }) = &d.encoding else {
+                panic!("expected Schema(Struct) for {name}, got {:?}", d.encoding);
+            };
+            assert!(*repr_c, "{name} should be cast-shaped");
+        }
     }
 
     #[test]
-    fn mouse_move_fields_match_struct_layout() {
+    fn signal_kinds_emit_schema_unit() {
+        let descs = all();
+        for name in [Tick::NAME, MouseButton::NAME] {
+            let d = descs.iter().find(|d| d.name == name).unwrap();
+            assert_eq!(
+                d.encoding,
+                KindEncoding::Schema(SchemaType::Unit),
+                "{name} should be Schema(Unit)"
+            );
+        }
+    }
+
+    #[test]
+    fn key_field_layout() {
+        let descs = all();
+        let key = descs.iter().find(|d| d.name == Key::NAME).unwrap();
+        let KindEncoding::Schema(SchemaType::Struct { fields, .. }) = &key.encoding else {
+            panic!("expected Schema(Struct)")
+        };
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "code");
+        assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
+    }
+
+    #[test]
+    fn mouse_move_field_layout() {
         let descs = all();
         let mm = descs.iter().find(|d| d.name == MouseMove::NAME).unwrap();
-        let KindEncoding::Pod { fields } = &mm.encoding else {
-            panic!("expected Pod")
+        let KindEncoding::Schema(SchemaType::Struct { fields, .. }) = &mm.encoding else {
+            panic!("expected Schema(Struct)")
         };
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "x");
         assert_eq!(fields[1].name, "y");
-        assert!(matches!(
-            fields[0].ty,
-            PodFieldType::Scalar(PodPrimitive::F32)
-        ));
+        assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::F32));
+        assert_eq!(fields[1].ty, SchemaType::Scalar(Primitive::F32));
     }
 
     #[test]
-    fn draw_triangle_is_opaque() {
+    fn draw_triangle_recurses_into_vertex() {
+        // The cast wire format previously couldn't describe nested
+        // structs (DrawTriangle was Opaque). The Schema arm fixes that.
         let descs = all();
         let dt = descs.iter().find(|d| d.name == DrawTriangle::NAME).unwrap();
-        assert_eq!(dt.encoding, KindEncoding::Opaque);
+        let KindEncoding::Schema(SchemaType::Struct { fields, repr_c }) = &dt.encoding else {
+            panic!("expected Schema(Struct)")
+        };
+        assert!(*repr_c);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "verts");
+        let SchemaType::Array { element, len } = &fields[0].ty else {
+            panic!("expected Array");
+        };
+        assert_eq!(*len, 3);
+        let SchemaType::Struct {
+            repr_c: nested_repr,
+            fields: nested_fields,
+        } = element.as_ref()
+        else {
+            panic!("expected nested Struct");
+        };
+        assert!(*nested_repr);
+        assert_eq!(nested_fields.len(), 5);
     }
 
     #[test]
-    fn frame_stats_fields_match_struct_layout() {
+    fn frame_stats_field_layout() {
         let descs = all();
         let fs = descs.iter().find(|d| d.name == FrameStats::NAME).unwrap();
-        let KindEncoding::Pod { fields } = &fs.encoding else {
-            panic!("expected Pod")
+        let KindEncoding::Schema(SchemaType::Struct { fields, .. }) = &fs.encoding else {
+            panic!("expected Schema(Struct)")
         };
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].name, "frame");
         assert_eq!(fields[1].name, "triangles");
-        assert!(matches!(
-            fields[0].ty,
-            PodFieldType::Scalar(PodPrimitive::U64)
-        ));
+        assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U64));
     }
 }
