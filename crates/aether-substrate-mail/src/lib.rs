@@ -16,7 +16,6 @@ extern crate alloc;
 #[cfg(feature = "descriptors")]
 pub mod descriptors;
 
-use aether_mail::Kind;
 use bytemuck::{Pod, Zeroable};
 
 // ADR-0019 PR 3: every cast-shaped kind below moves to
@@ -128,67 +127,148 @@ pub struct FrameStats {
 
 // Reserved control-plane vocabulary (ADR-0010). The substrate handles
 // these kinds inline rather than dispatching to a component — the
-// namespace itself is the routing discriminator. Payloads are not Pod,
-// so each is `Opaque`: the substrate-side handler decodes via postcard
-// against substrate-internal types. Keeping them here (alongside the
-// engine-facing kinds) means the hub's `describe_kinds` surfaces them
-// uniformly and the init path registers them exactly once at boot.
+// namespace itself is the routing discriminator. ADR-0019 PR 5 turned
+// these from Opaque markers into real schema-described types: their
+// fields are postcard-encoded on the wire, hub-encodable from agent
+// params (no more `payload_bytes` workaround), and the substrate
+// decodes them with `postcard::from_bytes` against the same types
+// that ship as the kind.
+//
+// Gated behind `descriptors` because the types use `String`/`Vec`/
+// `Option` — wasm guests that don't enable descriptors stay free of
+// the alloc-heavy payload types (and have no business loading
+// components anyway).
 
-/// `aether.control.load_component` — request the substrate load a WASM
-/// component into a freshly allocated mailbox. Payload carries the WASM
-/// bytes, any new kinds the component intends to use, and an optional
-/// human-readable name. The substrate replies with `load_result`.
-pub struct LoadComponent;
-impl Kind for LoadComponent {
-    const NAME: &'static str = "aether.control.load_component";
-}
+#[cfg(feature = "descriptors")]
+pub use control_plane::*;
 
-/// `aether.control.replace_component` — atomically rebind a target
-/// mailbox id to a freshly instantiated component. Any mail queued on
-/// the old instance at the moment of swap is dropped (V0 policy; drain
-/// is an additive follow-up).
-pub struct ReplaceComponent;
-impl Kind for ReplaceComponent {
-    const NAME: &'static str = "aether.control.replace_component";
-}
+#[cfg(feature = "descriptors")]
+mod control_plane {
+    use alloc::string::String;
+    use alloc::vec::Vec;
 
-/// `aether.control.drop_component` — remove a component from the
-/// substrate and invalidate its mailbox id.
-pub struct DropComponent;
-impl Kind for DropComponent {
-    const NAME: &'static str = "aether.control.drop_component";
-}
+    use serde::{Deserialize, Serialize};
 
-/// `aether.control.load_result` — reply-to-sender emitted by the
-/// substrate after handling `load_component`. Carries the assigned
-/// mailbox id on success or an error describing why the load failed
-/// (kind-descriptor conflict, invalid WASM, etc.).
-pub struct LoadResult;
-impl Kind for LoadResult {
-    const NAME: &'static str = "aether.control.load_result";
-}
+    /// `aether.control.load_component` — request the substrate load a
+    /// WASM component into a freshly allocated mailbox. Carries the
+    /// raw WASM bytes, any new kinds the component intends to use,
+    /// and an optional human-readable name. The substrate replies
+    /// with `LoadResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.load_component")]
+    pub struct LoadComponent {
+        pub wasm: Vec<u8>,
+        pub kinds: Vec<LoadKind>,
+        pub name: Option<String>,
+    }
 
-/// `aether.control.drop_result` — reply-to-sender for `drop_component`.
-/// Carries `Ok` on success or an error describing why the drop failed
-/// (unknown mailbox, mailbox wasn't a component, already dropped).
-pub struct DropResult;
-impl Kind for DropResult {
-    const NAME: &'static str = "aether.control.drop_result";
-}
+    /// Reply to `LoadComponent`. `Ok` carries the assigned mailbox id
+    /// and the resolved name (so callers that omitted `name` learn
+    /// the substrate-defaulted one). `Err` carries the failure reason
+    /// — kind-descriptor conflict, invalid WASM, name conflict, etc.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.load_result")]
+    pub enum LoadResult {
+        Ok { mailbox_id: u32, name: String },
+        Err { error: String },
+    }
 
-/// `aether.control.replace_result` — reply-to-sender for
-/// `replace_component`. Carries `Ok` on success or an error if the
-/// target mailbox was invalid, the new module failed to compile, or
-/// instantiation failed.
-pub struct ReplaceResult;
-impl Kind for ReplaceResult {
-    const NAME: &'static str = "aether.control.replace_result";
+    /// `aether.control.drop_component` — remove a component from the
+    /// substrate and invalidate its mailbox id. Reply: `DropResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.drop_component")]
+    pub struct DropComponent {
+        pub mailbox_id: u32,
+    }
+
+    /// Reply to `DropComponent`. `Ok` on success; `Err` if the
+    /// mailbox was unknown, wasn't a component, or already dropped.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.drop_result")]
+    pub enum DropResult {
+        Ok,
+        Err { error: String },
+    }
+
+    /// `aether.control.replace_component` — atomically rebind a target
+    /// mailbox id to a freshly instantiated component. In-flight mail
+    /// queued on the old instance at the moment of swap is dropped
+    /// (V0 policy; drain is an additive follow-up). Reply:
+    /// `ReplaceResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.replace_component")]
+    pub struct ReplaceComponent {
+        pub mailbox_id: u32,
+        pub wasm: Vec<u8>,
+        pub kinds: Vec<LoadKind>,
+    }
+
+    /// Reply to `ReplaceComponent`. Same shape as `DropResult` —
+    /// success or a free-form error string.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.replace_result")]
+    pub enum ReplaceResult {
+        Ok,
+        Err { error: String },
+    }
+
+    /// One kind a `LoadComponent` (or `ReplaceComponent`) wants the
+    /// substrate to register before the wasm boots.
+    ///
+    /// Deliberately *flatter* than `aether_hub_protocol::SchemaType`:
+    /// the full vocabulary is recursive (`Box<SchemaType>` arms) and
+    /// `#[derive(Schema)]` has no way to break that recursion at the
+    /// derive site. The flat shape covers what runtime-loaded
+    /// components actually reach for today (signal kinds and
+    /// cast-shaped scalar/array structs); richer kinds — strings,
+    /// nested structs, enums on a runtime-registered kind — would
+    /// need either schema-evolution support in the hub-protocol
+    /// types or a separate registration path. Both are parked.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct LoadKind {
+        pub name: String,
+        pub encoding: LoadKindEncoding,
+    }
+
+    /// Encoding shape for a runtime-registered kind. `Signal` → empty
+    /// payload (becomes `SchemaType::Unit`); `Pod` → cast-shaped
+    /// struct (becomes `SchemaType::Struct { repr_c: true, .. }`).
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub enum LoadKindEncoding {
+        Signal,
+        Pod { fields: Vec<LoadKindField> },
+    }
+
+    /// One field on a runtime-registered Pod kind.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct LoadKindField {
+        pub name: String,
+        pub primitive: LoadKindPrimitive,
+        pub array_len: Option<u32>,
+    }
+
+    /// Scalar primitives expressible by `LoadKindField`. Mirrors
+    /// `aether_hub_protocol::Primitive`; the substrate's load handler
+    /// converts on the way into the registry.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
+    pub enum LoadKindPrimitive {
+        U8,
+        U16,
+        U32,
+        U64,
+        I8,
+        I16,
+        I32,
+        I64,
+        F32,
+        F64,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_mail::{decode, decode_slice, encode, encode_slice};
+    use aether_mail::{Kind, decode, decode_slice, encode, encode_slice};
 
     #[test]
     fn key_roundtrip() {
