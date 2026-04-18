@@ -533,7 +533,7 @@ mod tests {
         SubstrateCtx,
         std::sync::mpsc::Receiver<aether_hub_protocol::EngineToHub>,
     ) {
-        use aether_hub_protocol::{KindDescriptor, KindEncoding};
+        use aether_hub_protocol::{KindDescriptor, SchemaType};
 
         use crate::hub_client::HubOutbound;
         use crate::mail::MailboxId as M;
@@ -544,7 +544,7 @@ mod tests {
         registry
             .register_kind_with_descriptor(KindDescriptor {
                 name: "test.pong".into(),
-                encoding: KindEncoding::Signal,
+                schema: SchemaType::Unit,
             })
             .expect("register kind");
         let ctx = SubstrateCtx::new(M(0), registry, Arc::new(MailQueue::new()), outbound);
@@ -607,7 +607,7 @@ mod tests {
         Arc<MailQueue>,
         crate::mail::MailboxId,
     ) {
-        use aether_hub_protocol::{KindDescriptor, KindEncoding};
+        use aether_hub_protocol::{KindDescriptor, SchemaType};
 
         use crate::hub_client::HubOutbound;
         use crate::mail::MailboxId as M;
@@ -618,7 +618,7 @@ mod tests {
         registry
             .register_kind_with_descriptor(KindDescriptor {
                 name: "test.pong".into(),
-                encoding: KindEncoding::Signal,
+                schema: SchemaType::Unit,
             })
             .expect("register kind");
         let queue = Arc::new(MailQueue::new());

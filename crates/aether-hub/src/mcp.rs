@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_hub_protocol::{
-    EngineId, HubToEngine, KindDescriptor, KindEncoding, MailFrame, SessionToken, Uuid,
+    EngineId, HubToEngine, KindDescriptor, MailFrame, SchemaType, SessionToken, Uuid,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -29,7 +29,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::encoder::{encode_pod, encode_schema};
+use crate::encoder::encode_schema;
 use crate::registry::{EngineRecord, EngineRegistry};
 use crate::session::{QueuedMail, SessionHandle, SessionRegistry};
 use crate::spawn::{DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, PendingSpawns, SpawnOpts};
@@ -458,48 +458,25 @@ async fn deliver_one(
         .map_err(|_| "engine disconnected".to_owned())
 }
 
-/// Decide which encoding path a mail goes through based on the
-/// kind's descriptor. ADR-0019 PR 5 removed the `payload_bytes`
-/// escape hatch — every mail must come through `params`, and the
-/// hub picks cast vs postcard from the schema.
+/// Decide the wire bytes for a mail by looking up the kind's
+/// descriptor and feeding `params` through `encode_schema`. ADR-0019:
+/// every kind has a schema; absent params is only legal when the
+/// schema is `Unit`.
 fn resolve_payload(spec: &MailSpec, record: &EngineRecord) -> Result<Vec<u8>, String> {
     let desc = find_kind(record, &spec.kind_name)
         .ok_or_else(|| format!("kind {:?} has no descriptor on this engine", spec.kind_name))?;
-    match (&spec.params, &desc.encoding) {
-        // Empty-payload shortcut: no params for a kind whose schema
-        // is empty (Signal or Schema(Unit)) — both legal.
-        (None, KindEncoding::Signal) => Ok(Vec::new()),
-        (None, KindEncoding::Schema(aether_hub_protocol::SchemaType::Unit)) => Ok(Vec::new()),
+    match (&spec.params, &desc.schema) {
+        (None, SchemaType::Unit) => Ok(Vec::new()),
         (None, _) => Err(format!(
-            "kind {:?} requires `params` (no `payload_bytes` escape hatch — ADR-0019)",
+            "kind {:?} requires `params` (only Unit kinds may omit them)",
             spec.kind_name
         )),
-        (Some(p), KindEncoding::Signal) => {
-            if !is_empty_params(p) {
-                return Err(format!(
-                    "kind {:?} is Signal; params must be absent or empty",
-                    spec.kind_name
-                ));
-            }
-            Ok(Vec::new())
-        }
-        (Some(p), KindEncoding::Pod { fields }) => encode_pod(p, fields).map_err(|e| e.to_string()),
-        (Some(_), KindEncoding::Opaque) => Err(format!(
-            "kind {:?} is Opaque — no encoder available, and `payload_bytes` was removed in ADR-0019 PR 5. Engine must publish a real Schema for this kind.",
-            spec.kind_name
-        )),
-        (Some(p), KindEncoding::Schema(schema)) => {
-            encode_schema(p, schema).map_err(|e| e.to_string())
-        }
+        (Some(p), schema) => encode_schema(p, schema).map_err(|e| e.to_string()),
     }
 }
 
 fn find_kind<'a>(record: &'a EngineRecord, name: &str) -> Option<&'a KindDescriptor> {
     record.kinds.iter().find(|k| k.name == name)
-}
-
-fn is_empty_params(v: &serde_json::Value) -> bool {
-    v.is_null() || v.as_object().is_some_and(|o| o.is_empty())
 }
 
 /// Bind an axum server on `addr` exposing the MCP tool surface at
@@ -547,9 +524,7 @@ mod tests {
         // unreachable from `send_mail`.
         let tick = aether_hub_protocol::KindDescriptor {
             name: "aether.tick".into(),
-            encoding: aether_hub_protocol::KindEncoding::Schema(
-                aether_hub_protocol::SchemaType::Unit,
-            ),
+            schema: aether_hub_protocol::SchemaType::Unit,
         };
         record_with_kinds(id_u128, vec![tick])
     }
@@ -646,22 +621,21 @@ mod tests {
 
     #[tokio::test]
     async fn send_mail_params_encodes_via_descriptor() {
-        use aether_hub_protocol::{
-            KindDescriptor, KindEncoding, PodField, PodFieldType, PodPrimitive,
-        };
+        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaType};
 
         let engines = EngineRegistry::new();
         let kinds = vec![KindDescriptor {
             name: "aether.mouse_move".into(),
-            encoding: KindEncoding::Pod {
+            schema: SchemaType::Struct {
+                repr_c: true,
                 fields: vec![
-                    PodField {
+                    NamedField {
                         name: "x".into(),
-                        ty: PodFieldType::Scalar(PodPrimitive::F32),
+                        ty: SchemaType::Scalar(Primitive::F32),
                     },
-                    PodField {
+                    NamedField {
                         name: "y".into(),
-                        ty: PodFieldType::Scalar(PodPrimitive::F32),
+                        ty: SchemaType::Scalar(Primitive::F32),
                     },
                 ],
             },
@@ -692,13 +666,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_mail_signal_no_params() {
-        use aether_hub_protocol::{KindDescriptor, KindEncoding};
+    async fn send_mail_unit_kind_no_params() {
+        use aether_hub_protocol::{KindDescriptor, SchemaType};
 
         let engines = EngineRegistry::new();
         let kinds = vec![KindDescriptor {
             name: "aether.tick".into(),
-            encoding: KindEncoding::Signal,
+            schema: SchemaType::Unit,
         }];
         let (rec, mut rx) = record_with_kinds(4, kinds);
         let id = rec.id;
@@ -739,18 +713,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_mail_opaque_kind_rejects_with_helpful_error() {
-        // ADR-0019 PR 5: `payload_bytes` is gone. If a kind is still
-        // Opaque (foreign engine, V0 holdover), agents have no way to
-        // send it — the error message should make the cause explicit.
-        use aether_hub_protocol::{KindDescriptor, KindEncoding};
-
+    async fn send_mail_unknown_kind_errors() {
+        // ADR-0019 cleanup: there's no fallback path for kinds without
+        // a descriptor — an agent gets a clear "no descriptor" error.
         let engines = EngineRegistry::new();
-        let kinds = vec![KindDescriptor {
-            name: "hello.opaque".into(),
-            encoding: KindEncoding::Opaque,
-        }];
-        let (rec, _rx) = record_with_kinds(9, kinds);
+        let (rec, _rx) = record_with_kinds(9, vec![]);
         let id = rec.id;
         engines.insert(rec);
         let hub = Hub::new(test_state(engines, SessionRegistry::new()));
@@ -759,13 +726,13 @@ mod tests {
             &hub,
             vec![spec(
                 id.0.to_string(),
-                "hello.opaque",
+                "hello.unknown",
                 Some(serde_json::json!({})),
             )],
         )
         .await;
         assert!(
-            statuses[0].status.contains("Opaque"),
+            statuses[0].status.contains("no descriptor"),
             "got: {}",
             statuses[0].status
         );
@@ -773,16 +740,32 @@ mod tests {
 
     #[tokio::test]
     async fn describe_kinds_returns_descriptors() {
-        use aether_hub_protocol::{KindDescriptor, KindEncoding};
+        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaType};
 
         let kinds = vec![
             KindDescriptor {
                 name: "aether.tick".into(),
-                encoding: KindEncoding::Signal,
+                schema: SchemaType::Unit,
             },
             KindDescriptor {
-                name: "hello.custom".into(),
-                encoding: KindEncoding::Opaque,
+                name: "hello.note".into(),
+                schema: SchemaType::Struct {
+                    repr_c: false,
+                    fields: vec![NamedField {
+                        name: "body".into(),
+                        ty: SchemaType::String,
+                    }],
+                },
+            },
+            KindDescriptor {
+                name: "hello.cast".into(),
+                schema: SchemaType::Struct {
+                    repr_c: true,
+                    fields: vec![NamedField {
+                        name: "n".into(),
+                        ty: SchemaType::Scalar(Primitive::U32),
+                    }],
+                },
             },
         ];
         let engines = EngineRegistry::new();

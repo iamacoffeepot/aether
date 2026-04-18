@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-use aether_hub_protocol::{KindDescriptor, KindEncoding, SessionToken};
+use aether_hub_protocol::{KindDescriptor, SchemaType, SessionToken};
 
 use crate::mail::MailboxId;
 
@@ -79,8 +79,8 @@ struct Inner {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KindConflict {
     pub name: String,
-    pub existing: KindEncoding,
-    pub requested: KindEncoding,
+    pub existing: SchemaType,
+    pub requested: SchemaType,
 }
 
 impl fmt::Display for KindConflict {
@@ -247,25 +247,25 @@ impl Registry {
             .cloned()
     }
 
-    /// Register a mail kind by name, defaulting to an `Opaque`
-    /// descriptor. Idempotent — re-registering a name returns the id
-    /// it was first assigned, regardless of whether the first call
-    /// supplied a descriptor. Kept as a convenience for tests and
-    /// substrate-internal registrations that don't need the hub to
-    /// encode params; production init should prefer
-    /// `register_kind_with_descriptor` so the descriptor stored here
-    /// matches the one shipped to the hub at `Hello`.
+    /// Register a mail kind by name, defaulting the schema to `Bytes`
+    /// (raw byte payload, no agent-encodable structure). Idempotent —
+    /// re-registering a name returns the id it was first assigned,
+    /// regardless of whether the first call supplied a descriptor.
+    /// Kept as a convenience for tests and substrate-internal
+    /// registrations that don't need the hub to encode params;
+    /// production init should prefer `register_kind_with_descriptor`
+    /// so the descriptor stored here matches the type definition.
     pub fn register_kind(&self, name: impl Into<String>) -> u32 {
         let name = name.into();
         let descriptor = KindDescriptor {
             name: name.clone(),
-            encoding: KindEncoding::Opaque,
+            schema: SchemaType::Bytes,
         };
         // Name-only registration never conflicts: if the name is new
-        // we store Opaque; if it exists we return the existing id and
-        // leave its descriptor untouched.
+        // we store the default schema; if it exists we return the
+        // existing id and leave the stored descriptor untouched.
         self.register_kind_internal(name, descriptor, /*reject_conflict=*/ false)
-            .expect("Opaque default cannot produce a conflict")
+            .expect("Bytes default cannot produce a conflict")
     }
 
     /// Register a mail kind along with the descriptor the hub will
@@ -295,11 +295,11 @@ impl Registry {
         let mut inner = self.inner.write().unwrap();
         if let Some(&id) = inner.kind_by_name.get(&name) {
             let existing = &inner.kind_descriptors[id as usize];
-            if reject_conflict && existing.encoding != descriptor.encoding {
+            if reject_conflict && existing.schema != descriptor.schema {
                 return Err(KindConflict {
                     name,
-                    existing: existing.encoding.clone(),
-                    requested: descriptor.encoding,
+                    existing: existing.schema.clone(),
+                    requested: descriptor.schema,
                 });
             }
             return Ok(id);
@@ -470,80 +470,82 @@ mod tests {
         assert!(r.kind_name(999).is_none());
     }
 
-    fn opaque_desc(name: &str) -> KindDescriptor {
+    fn unit_desc(name: &str) -> KindDescriptor {
         KindDescriptor {
             name: name.to_string(),
-            encoding: KindEncoding::Opaque,
+            schema: SchemaType::Unit,
         }
     }
 
-    fn pod_desc(name: &str) -> KindDescriptor {
-        use aether_hub_protocol::{PodField, PodFieldType, PodPrimitive};
+    fn cast_struct_desc(name: &str) -> KindDescriptor {
+        use aether_hub_protocol::{NamedField, Primitive};
         KindDescriptor {
             name: name.to_string(),
-            encoding: KindEncoding::Pod {
-                fields: vec![PodField {
+            schema: SchemaType::Struct {
+                repr_c: true,
+                fields: vec![NamedField {
                     name: "x".to_string(),
-                    ty: PodFieldType::Scalar(PodPrimitive::U32),
+                    ty: SchemaType::Scalar(Primitive::U32),
                 }],
             },
         }
     }
 
     #[test]
-    fn register_kind_with_descriptor_stores_encoding() {
+    fn register_kind_with_descriptor_stores_schema() {
         let r = Registry::new();
         let id = r
-            .register_kind_with_descriptor(pod_desc("aether.foo"))
+            .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
             .expect("fresh name");
         let stored = r.kind_descriptor(id).expect("descriptor present");
-        assert_eq!(stored.encoding, pod_desc("aether.foo").encoding);
+        assert_eq!(stored.schema, cast_struct_desc("aether.foo").schema);
     }
 
     #[test]
     fn register_kind_with_descriptor_is_idempotent_on_match() {
         let r = Registry::new();
         let first = r
-            .register_kind_with_descriptor(pod_desc("aether.foo"))
+            .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
             .expect("first");
         let second = r
-            .register_kind_with_descriptor(pod_desc("aether.foo"))
-            .expect("same encoding should succeed");
+            .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
+            .expect("same schema should succeed");
         assert_eq!(first, second);
     }
 
     #[test]
     fn register_kind_with_descriptor_rejects_conflict() {
         let r = Registry::new();
-        r.register_kind_with_descriptor(opaque_desc("aether.foo"))
+        r.register_kind_with_descriptor(unit_desc("aether.foo"))
             .expect("first");
         let err = r
-            .register_kind_with_descriptor(pod_desc("aether.foo"))
-            .expect_err("different encoding should conflict");
+            .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
+            .expect_err("different schema should conflict");
         assert_eq!(err.name, "aether.foo");
-        assert_eq!(err.existing, KindEncoding::Opaque);
-        assert!(matches!(err.requested, KindEncoding::Pod { .. }));
+        assert_eq!(err.existing, SchemaType::Unit);
+        assert!(matches!(err.requested, SchemaType::Struct { .. }));
     }
 
     #[test]
-    fn register_kind_defaults_to_opaque() {
+    fn register_kind_defaults_to_bytes() {
         let r = Registry::new();
         let id = r.register_kind("aether.bar");
         let stored = r.kind_descriptor(id).expect("descriptor present");
-        assert_eq!(stored.encoding, KindEncoding::Opaque);
+        assert_eq!(stored.schema, SchemaType::Bytes);
     }
 
     #[test]
-    fn name_only_register_after_with_descriptor_preserves_stored_encoding() {
-        // The legacy name-only path must not clobber a real descriptor
-        // that was recorded first — tests frequently call `register_kind`
-        // after main.rs has already registered via `register_kind_with_descriptor`.
+    fn name_only_register_after_with_descriptor_preserves_stored_schema() {
+        // The name-only path must not clobber a real descriptor that
+        // was recorded first — tests frequently call `register_kind`
+        // after main.rs has already registered via
+        // `register_kind_with_descriptor`.
         let r = Registry::new();
-        r.register_kind_with_descriptor(pod_desc("aether.foo"))
+        r.register_kind_with_descriptor(cast_struct_desc("aether.foo"))
             .expect("first");
         let _ = r.register_kind("aether.foo");
         let stored = r.kind_descriptor(0).expect("descriptor present");
-        assert!(matches!(stored.encoding, KindEncoding::Pod { .. }));
+        assert!(matches!(stored.schema, SchemaType::Struct { .. }));
     }
 
     #[test]

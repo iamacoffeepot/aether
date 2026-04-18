@@ -136,20 +136,17 @@ mod tests {
             kinds: vec![
                 KindDescriptor {
                     name: "aether.tick".into(),
-                    encoding: KindEncoding::Signal,
+                    schema: SchemaType::Unit,
                 },
                 KindDescriptor {
                     name: "aether.key".into(),
-                    encoding: KindEncoding::Pod {
-                        fields: vec![PodField {
+                    schema: SchemaType::Struct {
+                        repr_c: true,
+                        fields: vec![NamedField {
                             name: "code".into(),
-                            ty: PodFieldType::Scalar(PodPrimitive::U32),
+                            ty: SchemaType::Scalar(Primitive::U32),
                         }],
                     },
-                },
-                KindDescriptor {
-                    name: "aether.draw_triangle".into(),
-                    encoding: KindEncoding::Opaque,
                 },
             ],
         });
@@ -160,43 +157,13 @@ mod tests {
         let EngineToHub::Hello(h) = back else {
             panic!("wrong variant")
         };
-        assert_eq!(h.kinds.len(), 3);
-        assert_eq!(h.kinds[0].encoding, KindEncoding::Signal);
-        let KindEncoding::Pod { fields } = &h.kinds[1].encoding else {
-            panic!("expected Pod")
+        assert_eq!(h.kinds.len(), 2);
+        assert_eq!(h.kinds[0].schema, SchemaType::Unit);
+        let SchemaType::Struct { fields, .. } = &h.kinds[1].schema else {
+            panic!("expected Struct")
         };
         assert_eq!(fields[0].name, "code");
-        assert_eq!(fields[0].ty, PodFieldType::Scalar(PodPrimitive::U32));
-        assert_eq!(h.kinds[2].encoding, KindEncoding::Opaque);
-    }
-
-    #[test]
-    fn pod_field_array_roundtrip() {
-        let desc = KindDescriptor {
-            name: "aether.mouse_move".into(),
-            encoding: KindEncoding::Pod {
-                fields: vec![
-                    PodField {
-                        name: "x".into(),
-                        ty: PodFieldType::Scalar(PodPrimitive::F32),
-                    },
-                    PodField {
-                        name: "y".into(),
-                        ty: PodFieldType::Scalar(PodPrimitive::F32),
-                    },
-                    PodField {
-                        name: "pad".into(),
-                        ty: PodFieldType::Array {
-                            element: PodPrimitive::U8,
-                            len: 4,
-                        },
-                    },
-                ],
-            },
-        };
-        let bytes = postcard::to_allocvec(&desc).unwrap();
-        let back: KindDescriptor = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(back, desc);
+        assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
     }
 
     #[test]
@@ -285,11 +252,11 @@ mod tests {
         let msg = EngineToHub::KindsChanged(vec![
             KindDescriptor {
                 name: "aether.tick".into(),
-                encoding: KindEncoding::Signal,
+                schema: SchemaType::Unit,
             },
             KindDescriptor {
                 name: "physics.contact".into(),
-                encoding: KindEncoding::Opaque,
+                schema: SchemaType::Bytes,
             },
         ]);
         let mut buf = Vec::new();
@@ -369,17 +336,16 @@ mod tests {
         assert!(matches!(err, FrameError::Postcard(_)));
     }
 
-    // ADR-0019 — schema descriptor roundtrips. The new `KindEncoding::Schema`
-    // arm and its `SchemaType` vocabulary need to survive postcard encode/
-    // decode end-to-end, including nested types and every enum variant shape.
-    // These tests pin the wire format so consumers (hub encoder, substrate
-    // decoder, derive macro) can rely on it across the migration PRs.
+    // ADR-0019 — schema descriptor roundtrips. The `SchemaType` vocabulary
+    // must survive postcard encode/decode end-to-end including nested types
+    // and every enum variant shape. These tests pin the wire format so
+    // consumers (hub encoder, substrate decoder, derive macro) can rely on it.
 
     #[test]
     fn schema_unit_and_scalar_roundtrip() {
         let desc = KindDescriptor {
             name: "demo.tick".into(),
-            encoding: KindEncoding::Schema(SchemaType::Unit),
+            schema: SchemaType::Unit,
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(
@@ -389,7 +355,7 @@ mod tests {
 
         let desc = KindDescriptor {
             name: "demo.seq".into(),
-            encoding: KindEncoding::Schema(SchemaType::Scalar(Primitive::U32)),
+            schema: SchemaType::Scalar(Primitive::U32),
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(
@@ -427,7 +393,7 @@ mod tests {
         };
         let desc = KindDescriptor {
             name: "demo.draw_triangle".into(),
-            encoding: KindEncoding::Schema(triangle),
+            schema: triangle,
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(
@@ -459,7 +425,7 @@ mod tests {
         };
         let desc = KindDescriptor {
             name: "demo.load_component".into(),
-            encoding: KindEncoding::Schema(load),
+            schema: load,
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(
@@ -495,7 +461,7 @@ mod tests {
         };
         let desc = KindDescriptor {
             name: "demo.load_result".into(),
-            encoding: KindEncoding::Schema(result),
+            schema: result,
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(
@@ -516,13 +482,13 @@ mod tests {
             version: "0".into(),
             kinds: vec![KindDescriptor {
                 name: "demo.note".into(),
-                encoding: KindEncoding::Schema(SchemaType::Struct {
+                schema: SchemaType::Struct {
                     repr_c: false,
                     fields: vec![NamedField {
                         name: "body".into(),
                         ty: SchemaType::String,
                     }],
-                }),
+                },
             }],
         });
         let mut buf = Vec::new();
@@ -532,39 +498,11 @@ mod tests {
             panic!("wrong variant")
         };
         assert_eq!(h.kinds.len(), 1);
-        let KindEncoding::Schema(SchemaType::Struct { repr_c, fields }) = &h.kinds[0].encoding
-        else {
-            panic!("expected Schema(Struct)")
+        let SchemaType::Struct { repr_c, fields } = &h.kinds[0].schema else {
+            panic!("expected Struct")
         };
         assert!(!*repr_c);
         assert_eq!(fields[0].name, "body");
         assert_eq!(fields[0].ty, SchemaType::String);
-    }
-
-    #[test]
-    fn legacy_pod_arms_still_roundtrip() {
-        // The migration plan keeps Signal/Pod/Opaque alive during the
-        // intermediate PRs. A regression here means existing consumers
-        // would break before the cleanup PR can land.
-        for encoding in [
-            KindEncoding::Signal,
-            KindEncoding::Opaque,
-            KindEncoding::Pod {
-                fields: vec![PodField {
-                    name: "code".into(),
-                    ty: PodFieldType::Scalar(PodPrimitive::U32),
-                }],
-            },
-        ] {
-            let desc = KindDescriptor {
-                name: "demo.legacy".into(),
-                encoding: encoding.clone(),
-            };
-            let bytes = postcard::to_allocvec(&desc).unwrap();
-            assert_eq!(
-                postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
-                desc
-            );
-        }
     }
 }

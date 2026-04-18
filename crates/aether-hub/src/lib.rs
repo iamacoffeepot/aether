@@ -14,7 +14,7 @@ mod registry;
 mod session;
 mod spawn;
 
-pub use encoder::{EncodeError, encode_pod};
+pub use encoder::{EncodeError, encode_schema};
 
 pub use engine::HEARTBEAT_INTERVAL;
 pub use engine::READ_TIMEOUT;

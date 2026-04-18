@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn update_kinds_replaces_cached_descriptors() {
-        use aether_hub_protocol::{KindDescriptor, KindEncoding};
+        use aether_hub_protocol::{KindDescriptor, SchemaType};
         let reg = EngineRegistry::new();
         let r = record(3);
         let id = r.id;
@@ -186,7 +186,7 @@ mod tests {
 
         let new_kinds = vec![KindDescriptor {
             name: "physics.contact".into(),
-            encoding: KindEncoding::Opaque,
+            schema: SchemaType::Bytes,
         }];
         reg.update_kinds(&id, new_kinds.clone());
         assert_eq!(reg.get(&id).unwrap().kinds, new_kinds);
