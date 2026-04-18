@@ -263,6 +263,69 @@ mod control_plane {
         F32,
         F64,
     }
+
+    // ADR-0021 publish/subscribe routing for substrate input streams.
+    // Closed enum over streams the platform layer publishes; a
+    // SubscribeInput names one and a mailbox to receive it. Reserved
+    // kind names `aether.control.subscribe_input` /
+    // `aether.control.unsubscribe_input` / `aether.control.subscribe_input_result`
+    // match the namespace used for load/drop/replace; the substrate
+    // handles them inline and replies via reply-to-sender.
+
+    /// A substrate-published input stream (ADR-0021). Closed set —
+    /// adding a platform event (e.g. `Resize`) is an additive variant
+    /// plus a publisher change on the substrate side.
+    #[derive(
+        aether_mail::Schema,
+        Serialize,
+        Deserialize,
+        Debug,
+        Clone,
+        Copy,
+        PartialEq,
+        Eq,
+        Hash,
+        PartialOrd,
+        Ord,
+    )]
+    pub enum InputStream {
+        Tick,
+        Key,
+        MouseMove,
+        MouseButton,
+    }
+
+    /// `aether.control.subscribe_input` — add `mailbox` to the
+    /// subscriber set for `stream`. Idempotent: subscribing a mailbox
+    /// already in the set is still `Ok` (subscriptions are a set, not
+    /// a counter). Reply: `SubscribeInputResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.subscribe_input")]
+    pub struct SubscribeInput {
+        pub stream: InputStream,
+        pub mailbox: u32,
+    }
+
+    /// `aether.control.unsubscribe_input` — remove `mailbox` from the
+    /// subscriber set for `stream`. Idempotent: unsubscribing a mailbox
+    /// that isn't subscribed is still `Ok`. Reply:
+    /// `SubscribeInputResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.unsubscribe_input")]
+    pub struct UnsubscribeInput {
+        pub stream: InputStream,
+        pub mailbox: u32,
+    }
+
+    /// Reply to both subscribe and unsubscribe (ADR-0021 §2). Only
+    /// failure mode: the target mailbox id doesn't name a live
+    /// component (unknown, a sink, or already dropped).
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.subscribe_input_result")]
+    pub enum SubscribeInputResult {
+        Ok,
+        Err { error: String },
+    }
 }
 
 #[cfg(test)]
@@ -323,6 +386,12 @@ mod tests {
         assert_eq!(LoadResult::NAME, "aether.control.load_result");
         assert_eq!(DropResult::NAME, "aether.control.drop_result");
         assert_eq!(ReplaceResult::NAME, "aether.control.replace_result");
+        assert_eq!(SubscribeInput::NAME, "aether.control.subscribe_input");
+        assert_eq!(UnsubscribeInput::NAME, "aether.control.unsubscribe_input");
+        assert_eq!(
+            SubscribeInputResult::NAME,
+            "aether.control.subscribe_input_result"
+        );
     }
 
     #[test]
