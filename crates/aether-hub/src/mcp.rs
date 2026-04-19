@@ -308,6 +308,13 @@ pub struct CaptureFrameArgs {
     /// current state."
     #[serde(default)]
     pub mails: Vec<MailSpec>,
+    /// Optional bundle of cleanup mails dispatched *after* the frame
+    /// is captured. Useful for "set a flag, capture, unset the flag"
+    /// patterns in one atomic tool call. Resolved against the same
+    /// abort-on-first-failure policy as `mails` — a bad envelope in
+    /// either bundle aborts the whole request before any mail moves.
+    #[serde(default)]
+    pub after_mails: Vec<MailSpec>,
     /// Maximum time to wait for the substrate's reply, in
     /// milliseconds. Defaults to 5000 (5 s). Clamped to 30000 (30 s).
     #[serde(default)]
@@ -577,7 +584,7 @@ impl Hub {
     }
 
     #[tool(
-        description = "Capture the current swapchain contents of the given engine as a PNG and return it inline as MCP image content. Optionally dispatches a bundle of state-changing mail atomically *before* the capture: the substrate resolves every envelope first (abort-on-first-failure), pushes them to the mail queue, then requests the capture. The render loop's `queue.wait_idle()` ensures the bundle has been fully processed before the frame is read back, so the captured image reliably reflects the bundle's effects. An empty `mails` list just captures the current state. Rejects if another capture is already in flight on this session, or if the wait exceeds `timeout_ms` (default 5000, clamped to 30000). Use this to verify substrate rendering end-to-end without needing the user to look at the window, and to bundle \"do X then show me\" into one atomic tool call."
+        description = "Capture the current frame contents of the given engine as a PNG and return it inline as MCP image content. The substrate renders to an offscreen target so the capture works regardless of window visibility (important on macOS where occluded windows would otherwise block). Optionally carries two mail bundles dispatched atomically around the capture: `mails` fires *before* the frame is read back (state-changing mail whose effects should appear in the image), and `after_mails` fires *after* readback (cleanup such as restoring a flag the caller flipped for the capture). The substrate resolves every envelope in both bundles first (abort-on-first-failure); any failure means no mail moves. The render loop's `queue.wait_idle()` ensures the pre-capture bundle has been fully processed before the frame is read back. Empty bundles mean \"just capture\" / \"no cleanup\". Rejects if another capture is already in flight on this session, or if the wait exceeds `timeout_ms` (default 5000, clamped to 30000). Use this to verify substrate rendering end-to-end and to bundle \"set X, show me, restore X\" into one atomic tool call."
     )]
     async fn capture_frame(
         &self,
@@ -591,15 +598,19 @@ impl Hub {
             McpError::invalid_params(format!("unknown engine_id {}", args.engine_id), None)
         })?;
 
-        // Encode each envelope in the bundle against its kind's
+        // Encode each envelope in both bundles against its kind's
         // descriptor. Done before we register the reply-waiter or
         // send anything, so a bad bundle produces a clean invalid-
         // params error and never touches the engine wire.
         let envelopes = encode_capture_bundle(&args.mails, &record).map_err(|e| {
             McpError::invalid_params(format!("capture_frame mails bundle: {e}"), None)
         })?;
+        let after_envelopes = encode_capture_bundle(&args.after_mails, &record).map_err(|e| {
+            McpError::invalid_params(format!("capture_frame after_mails bundle: {e}"), None)
+        })?;
         let bundle_params = serde_json::json!({
             "mails": envelopes,
+            "after_mails": after_envelopes,
         });
 
         // Register the reply-waiter BEFORE sending the request, so the
@@ -1470,9 +1481,10 @@ mod tests {
     }
 
     /// Descriptor for `aether.control.capture_frame` that matches
-    /// the real substrate's schema: a postcard struct with a single
-    /// `mails: Vec<MailEnvelope>` field. Used across capture_frame
-    /// tests so they all exercise the same wire shape.
+    /// the real substrate's schema: a postcard struct with `mails`
+    /// and `after_mails` fields, both `Vec<MailEnvelope>`. Used
+    /// across capture_frame tests so they all exercise the same
+    /// wire shape.
     fn capture_frame_kind_descriptor() -> aether_hub_protocol::KindDescriptor {
         use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaType};
         let envelope = SchemaType::Struct {
@@ -1500,10 +1512,16 @@ mod tests {
             name: "aether.control.capture_frame".into(),
             schema: SchemaType::Struct {
                 repr_c: false,
-                fields: vec![NamedField {
-                    name: "mails".into(),
-                    ty: SchemaType::Vec(Box::new(envelope)),
-                }],
+                fields: vec![
+                    NamedField {
+                        name: "mails".into(),
+                        ty: SchemaType::Vec(Box::new(envelope.clone())),
+                    },
+                    NamedField {
+                        name: "after_mails".into(),
+                        ty: SchemaType::Vec(Box::new(envelope)),
+                    },
+                ],
             },
         }
     }
@@ -1573,6 +1591,7 @@ mod tests {
             .capture_frame(Parameters(CaptureFrameArgs {
                 engine_id: id.0.to_string(),
                 mails: vec![],
+                after_mails: vec![],
                 timeout_ms: Some(2_000),
             }))
             .await
@@ -1638,6 +1657,7 @@ mod tests {
             .capture_frame(Parameters(CaptureFrameArgs {
                 engine_id: id.0.to_string(),
                 mails: vec![],
+                after_mails: vec![],
                 timeout_ms: Some(2_000),
             }))
             .await
@@ -1672,6 +1692,7 @@ mod tests {
             .capture_frame(Parameters(CaptureFrameArgs {
                 engine_id: id.0.to_string(),
                 mails: vec![],
+                after_mails: vec![],
                 timeout_ms: Some(100),
             }))
             .await
@@ -1703,6 +1724,7 @@ mod tests {
             .capture_frame(Parameters(CaptureFrameArgs {
                 engine_id: id.0.to_string(),
                 mails: vec![],
+                after_mails: vec![],
                 timeout_ms: Some(50),
             }))
             .await
@@ -1754,6 +1776,7 @@ mod tests {
             #[derive(serde::Deserialize, Debug)]
             struct CaptureFrameMirror {
                 mails: Vec<EnvelopeMirror>,
+                after_mails: Vec<EnvelopeMirror>,
             }
             let HubToEngine::Mail(frame) = req else {
                 panic!("expected Mail");
@@ -1766,6 +1789,8 @@ mod tests {
             assert_eq!(decoded.mails[0].count, 1);
             // `demo.tick` is Unit — payload is zero bytes.
             assert!(decoded.mails[0].payload.is_empty());
+            // Test passes `after_mails: vec![]` — empty bundle.
+            assert!(decoded.after_mails.is_empty());
 
             // Reply with a fake PNG so the tool completes.
             #[derive(serde::Serialize)]
@@ -1801,6 +1826,7 @@ mod tests {
                     params: None,
                     count: 1,
                 }],
+                after_mails: vec![],
                 timeout_ms: Some(2_000),
             }))
             .await
@@ -1834,6 +1860,7 @@ mod tests {
                     params: None,
                     count: 1,
                 }],
+                after_mails: vec![],
                 timeout_ms: Some(1_000),
             }))
             .await
