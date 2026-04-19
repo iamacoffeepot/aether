@@ -5,7 +5,7 @@
 // smoke test proving reply-to-sender works end-to-end over the hub.
 
 use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
-use aether_substrate_mail::{DrawTriangle, Ping, Pong, Tick, Vertex};
+use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
     verts: [

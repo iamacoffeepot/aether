@@ -24,8 +24,8 @@
 // MouseButton).
 
 use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
+use aether_kinds::{Key, MouseButton, MouseMove, Tick};
 use aether_mail::Kind;
-use aether_substrate_mail::{Key, MouseButton, MouseMove, Tick};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]

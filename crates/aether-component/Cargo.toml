@@ -11,7 +11,7 @@ bytemuck = { version = "1", default-features = false }
 # `load_component` control plane. Their dev-deps don't propagate to
 # downstream guests that depend on `aether-component` for the SDK.
 [dev-dependencies]
-aether-substrate-mail = { path = "../aether-substrate-mail" }
+aether-kinds = { path = "../aether-kinds" }
 bytemuck = { version = "1", features = ["derive"] }
 
 # ADR-0017 (component-to-component reply) smoke pair: caller sends
