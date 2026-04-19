@@ -12,15 +12,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use aether_hub_protocol::SessionToken;
+use aether_kinds::{
+    DropComponent, InputStream, LoadComponent, SubscribeInput, Tick, UnsubscribeInput,
+};
 use aether_mail::Kind;
 use aether_substrate::{
     AETHER_CONTROL, ControlPlane, HubOutbound, InputSubscribers, MailQueue, Registry, Scheduler,
     SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
     new_subscribers, subscribers_for,
-};
-use aether_substrate_mail::{
-    DropComponent, InputStream, LoadComponent, SubscribeInput, Tick, UnsubscribeInput,
 };
 use wasmtime::{Engine, Linker};
 
@@ -58,7 +58,7 @@ fn make_harness() -> Harness {
     let linker = Arc::new(linker);
 
     let registry = Arc::new(Registry::new());
-    for d in aether_substrate_mail::descriptors::all() {
+    for d in aether_kinds::descriptors::all() {
         registry
             .register_kind_with_descriptor(d)
             .expect("descriptor unique");

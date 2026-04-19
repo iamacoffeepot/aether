@@ -24,9 +24,9 @@ pub use component::Component;
 pub use control::{AETHER_CONTROL, ControlPlane};
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
 // ADR-0019 PR 5: control-plane payload types now live as schema kinds
-// in `aether-substrate-mail` (LoadComponent, LoadResult, etc.).
+// in `aether-kinds` (LoadComponent, LoadResult, etc.).
 // Re-exports of the old `*Payload` structs are gone — consumers
-// import from `aether-substrate-mail` directly.
+// import from `aether-kinds` directly.
 pub use ctx::SubstrateCtx;
 pub use hub_client::{HubClient, HubOutbound};
 pub use mail::{Mail, MailKind, MailboxId};

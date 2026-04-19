@@ -1,6 +1,6 @@
 // aether-mail: shared machinery for the mail typing system described in
 // ADR-0005. No concrete kinds live here — each actor owns its kinds in
-// its own crate (substrate in `aether-substrate-mail`, components in
+// its own crate (substrate in `aether-kinds`, components in
 // `{component}-mail` crates as they define their own).
 //
 // Two payload tiers:

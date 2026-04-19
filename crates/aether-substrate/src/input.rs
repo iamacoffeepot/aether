@@ -13,7 +13,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 
-use aether_substrate_mail::InputStream;
+use aether_kinds::InputStream;
 
 use crate::mail::MailboxId;
 

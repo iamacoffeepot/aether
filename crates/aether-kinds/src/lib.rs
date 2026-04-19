@@ -1,4 +1,4 @@
-// aether-substrate-mail: the substrate's own mail vocabulary. Imported
+// aether-kinds: the substrate's own mail vocabulary. Imported
 // by any actor that wants to send mail to the substrate, receive mail
 // the substrate dispatches (tick, input), or consume the substrate's
 // sink kinds (draw_triangle). See ADR-0005.

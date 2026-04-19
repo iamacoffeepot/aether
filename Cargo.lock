@@ -31,8 +31,8 @@ dependencies = [
 name = "aether-component"
 version = "0.1.0"
 dependencies = [
+ "aether-kinds",
  "aether-mail",
- "aether-substrate-mail",
  "bytemuck",
 ]
 
@@ -41,7 +41,7 @@ name = "aether-hello-component"
 version = "0.1.0"
 dependencies = [
  "aether-component",
- "aether-substrate-mail",
+ "aether-kinds",
 ]
 
 [[package]]
@@ -69,6 +69,16 @@ dependencies = [
  "postcard",
  "serde",
  "uuid",
+]
+
+[[package]]
+name = "aether-kinds"
+version = "0.1.0"
+dependencies = [
+ "aether-hub-protocol",
+ "aether-mail",
+ "bytemuck",
+ "serde",
 ]
 
 [[package]]
@@ -109,8 +119,8 @@ name = "aether-substrate"
 version = "0.1.0"
 dependencies = [
  "aether-hub-protocol",
+ "aether-kinds",
  "aether-mail",
- "aether-substrate-mail",
  "bytemuck",
  "pollster",
  "postcard",
@@ -121,16 +131,6 @@ dependencies = [
  "wat",
  "wgpu",
  "winit",
-]
-
-[[package]]
-name = "aether-substrate-mail"
-version = "0.1.0"
-dependencies = [
- "aether-hub-protocol",
- "aether-mail",
- "bytemuck",
- "serde",
 ]
 
 [[package]]

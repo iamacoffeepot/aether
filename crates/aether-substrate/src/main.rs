@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
+use aether_kinds::{FrameStats, InputStream, Key, MouseButton, MouseMove, Tick};
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
@@ -29,7 +30,6 @@ use aether_substrate::{
     mail::{Mail, MailboxId},
     subscribers_for,
 };
-use aether_substrate_mail::{FrameStats, InputStream, Key, MouseButton, MouseMove, Tick};
 use render::Gpu;
 use wasmtime::{Engine, Linker};
 use winit::application::ApplicationHandler;
@@ -220,7 +220,7 @@ fn main() -> wasmtime::Result<()> {
     // ADR-0010's load-time conflict check has the right reference.
     // Ids are dense and assigned in the order below; not otherwise
     // meaningful — consumers always resolve by name.
-    let boot_descriptors = aether_substrate_mail::descriptors::all();
+    let boot_descriptors = aether_kinds::descriptors::all();
     for d in &boot_descriptors {
         registry
             .register_kind_with_descriptor(d.clone())

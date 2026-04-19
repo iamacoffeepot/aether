@@ -7,8 +7,8 @@
 // trip is visible to the driving Claude session.
 
 use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
+use aether_kinds::Tick;
 use aether_mail::Kind;
-use aether_substrate_mail::Tick;
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]

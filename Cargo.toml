@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
     "crates/aether-substrate",
-    "crates/aether-substrate-mail",
+    "crates/aether-kinds",
     "crates/aether-component",
     "crates/aether-hello-component",
     "crates/aether-hub",

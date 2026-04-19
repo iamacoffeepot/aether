@@ -10,7 +10,7 @@
 // without threading a correlation token through the payload.
 //
 // ADR-0019 PR 5: the on-wire payload types live in
-// `aether-substrate-mail` as schema-described kinds (LoadComponent,
+// `aether-kinds` as schema-described kinds (LoadComponent,
 // LoadResult, etc.) — no more separate `*Payload` structs in this
 // crate. The substrate decodes incoming mail as the kind type
 // directly via postcard, converts the runtime-loaded kind list
@@ -31,12 +31,12 @@ use std::time::{Duration, Instant};
 use aether_hub_protocol::{
     ClaudeAddress, EngineMailFrame, EngineToHub, KindDescriptor, NamedField, Primitive, SchemaType,
 };
-use aether_mail::Kind;
-use aether_substrate_mail::{
+use aether_kinds::{
     DropComponent, DropResult, LoadComponent, LoadKind, LoadKindEncoding, LoadKindPrimitive,
     LoadResult, ReplaceComponent, ReplaceResult, SubscribeInput, SubscribeInputResult,
     UnsubscribeInput,
 };
+use aether_mail::Kind;
 use serde::Serialize;
 use wasmtime::{Engine, Linker, Module};
 
@@ -1335,9 +1335,7 @@ mod tests {
     // empty `InputSubscribers` into the handler, so these tests only
     // need to load a component and exercise the subscribe surface.
 
-    use aether_substrate_mail::{
-        InputStream, SubscribeInput, SubscribeInputResult, UnsubscribeInput,
-    };
+    use aether_kinds::{InputStream, SubscribeInput, SubscribeInputResult, UnsubscribeInput};
 
     fn subs(plane: &ControlPlane, stream: InputStream) -> std::collections::BTreeSet<MailboxId> {
         plane
