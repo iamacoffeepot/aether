@@ -531,9 +531,12 @@ mod control_plane {
         pub monitor_index: Option<u32>,
     }
 
-    /// The three window presentation modes PR B will let agents
-    /// switch between. Included in the read-only snapshot now so the
-    /// shape is stable across both PRs.
+    /// The three window presentation modes. `Windowed` has no fields —
+    /// the current size lives on `WindowInfo` / `SetWindowModeResult`.
+    /// `FullscreenExclusive` carries the specific video mode; the
+    /// substrate matches against the active monitor's supported modes
+    /// and fails the request if none matches (loud rather than
+    /// silently falling back).
     #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub enum WindowMode {
         Windowed,
@@ -542,6 +545,42 @@ mod control_plane {
             width: u32,
             height: u32,
             refresh_mhz: u32,
+        },
+    }
+
+    /// `aether.control.set_window_mode` — switch the substrate's
+    /// window presentation mode. `width` / `height` apply only when
+    /// `mode == Windowed`; fullscreen modes size themselves from the
+    /// monitor / requested video mode. Reply carries the new state
+    /// so callers don't have to follow up with a `platform_info`
+    /// query.
+    ///
+    /// Fullscreen-exclusive requests fail with `Err` if no
+    /// `VideoMode` on the current monitor matches the `(width,
+    /// height, refresh_mhz)` triple exactly. Use `platform_info`
+    /// first to enumerate supported modes.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.set_window_mode")]
+    pub struct SetWindowMode {
+        pub mode: WindowMode,
+        pub width: Option<u32>,
+        pub height: Option<u32>,
+    }
+
+    /// Reply to `SetWindowMode`. `Ok` carries the resolved state
+    /// after the mode change applied; `Err` carries the reason the
+    /// request was rejected (unknown video mode, window not ready,
+    /// etc.) with no state change.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.set_window_mode_result")]
+    pub enum SetWindowModeResult {
+        Ok {
+            mode: WindowMode,
+            width: u32,
+            height: u32,
+        },
+        Err {
+            error: String,
         },
     }
 }
@@ -619,6 +658,11 @@ mod tests {
         assert_eq!(
             PlatformInfoResult::NAME,
             "aether.control.platform_info_result"
+        );
+        assert_eq!(SetWindowMode::NAME, "aether.control.set_window_mode");
+        assert_eq!(
+            SetWindowModeResult::NAME,
+            "aether.control.set_window_mode_result"
         );
     }
 

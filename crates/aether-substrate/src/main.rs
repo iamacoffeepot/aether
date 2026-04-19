@@ -23,8 +23,8 @@ use std::time::Instant;
 use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub, SessionToken};
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, InputStream,
-    Key, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult, Tick, VideoMode,
-    WindowInfo, WindowMode,
+    Key, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult, SetWindowModeResult,
+    Tick, VideoMode, WindowInfo, WindowMode,
 };
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
@@ -34,7 +34,7 @@ use aether_substrate::{
     capture::CaptureWaker,
     host_fns,
     mail::{Mail, MailboxId},
-    platform_info::PlatformInfoNotifier,
+    platform_info::{PlatformInfoNotifier, WindowModeNotifier},
     subscribers_for,
 };
 use render::Gpu;
@@ -43,24 +43,34 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::PhysicalKey;
-use winit::window::{Window, WindowId};
+use winit::monitor::{MonitorHandle, VideoModeHandle};
+use winit::window::{Fullscreen, Window, WindowId};
 
 /// Events the event loop can receive from outside the winit thread.
 /// Each variant corresponds to a control-plane request that needs to
 /// run on the event-loop thread — either because winit APIs require
 /// it (monitor enumeration, window state) or because the work has to
 /// be ordered with frame rendering (captures).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum UserEvent {
     /// A capture is pending on `CaptureQueue`; wake the loop so its
     /// `RedrawRequested` handler pulls and fulfils it, even if the
     /// window is occluded (and `ControlFlow::Wait` would otherwise
     /// keep the loop asleep).
-    CaptureRequested,
+    Capture,
     /// An MCP session asked for a `platform_info` snapshot. The
     /// handler is fire-and-forget — the sender rides inline, the
     /// event loop snapshots on receipt and replies via `outbound`.
-    PlatformInfoRequested { sender: SessionToken },
+    PlatformInfo { sender: SessionToken },
+    /// An MCP session asked to switch the window mode. The event
+    /// loop resolves fullscreen modes against the current monitor,
+    /// applies the change, and replies with the new state.
+    SetWindowMode {
+        sender: SessionToken,
+        mode: WindowMode,
+        width: Option<u32>,
+        height: Option<u32>,
+    },
 }
 
 /// Adapter that bridges `CaptureQueue::request` to the winit event
@@ -75,7 +85,7 @@ impl CaptureWaker for CaptureRequestWaker {
     fn wake(&self) {
         // `send_event` only fails if the event loop has shut down; in
         // that case nothing listens for captures anyway.
-        let _ = self.proxy.send_event(UserEvent::CaptureRequested);
+        let _ = self.proxy.send_event(UserEvent::Capture);
     }
 }
 
@@ -89,9 +99,31 @@ struct PlatformInfoProxy {
 
 impl PlatformInfoNotifier for PlatformInfoProxy {
     fn notify(&self, sender: SessionToken) {
-        let _ = self
-            .proxy
-            .send_event(UserEvent::PlatformInfoRequested { sender });
+        let _ = self.proxy.send_event(UserEvent::PlatformInfo { sender });
+    }
+}
+
+/// Companion to `PlatformInfoProxy` for window-mode writes. Wires
+/// the control-plane handler's `WindowModeNotifier` call into a
+/// `SetWindowModeRequested` user event on the event loop.
+struct SetWindowModeProxy {
+    proxy: EventLoopProxy<UserEvent>,
+}
+
+impl WindowModeNotifier for SetWindowModeProxy {
+    fn request(
+        &self,
+        sender: SessionToken,
+        mode: WindowMode,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) {
+        let _ = self.proxy.send_event(UserEvent::SetWindowMode {
+            sender,
+            mode,
+            width,
+            height,
+        });
     }
 }
 
@@ -130,6 +162,18 @@ struct App {
     started: Option<Instant>,
     frame: u64,
     occluded: bool,
+    /// Initial window mode, parsed from `AETHER_WINDOW_MODE` at boot
+    /// and applied when `resumed` creates the window. Kept so the
+    /// window attributes can reference it even when `resumed` fires
+    /// lazily (and for logging).
+    boot_mode: WindowMode,
+    /// Optional initial windowed size from `AETHER_WINDOW_MODE`.
+    /// Only consulted when `boot_mode == Windowed`.
+    boot_size: Option<(u32, u32)>,
+    /// Currently-applied window mode. Updated by `set_window_mode`
+    /// and read by `platform_info`'s window-state field. Starts as
+    /// `boot_mode`.
+    current_mode: WindowMode,
     // Scheduler is owned so its workers are joined on Drop when the event
     // loop exits — we never reference it otherwise.
     _scheduler: Scheduler,
@@ -230,6 +274,129 @@ fn map_backend(b: wgpu::Backend) -> GpuBackend {
     }
 }
 
+/// Encode + send a `SetWindowModeResult` reply to the originating
+/// session. Mirrors the other `send_*_reply` helpers.
+fn send_set_window_mode_reply(
+    outbound: &HubOutbound,
+    sender: aether_hub_protocol::SessionToken,
+    result: SetWindowModeResult,
+) {
+    let payload = match postcard::to_allocvec(&result) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(
+                target: "aether_substrate::window_mode",
+                error = %e,
+                "set_window_mode result encode failed",
+            );
+            return;
+        }
+    };
+    outbound.send(EngineToHub::Mail(EngineMailFrame {
+        address: ClaudeAddress::Session(sender),
+        kind_name: SetWindowModeResult::NAME.to_owned(),
+        payload,
+        origin: None,
+    }));
+}
+
+/// Parse `AETHER_WINDOW_MODE`. Grammar:
+///   `windowed`              — default size
+///   `windowed:WxH`          — windowed, WxH physical pixels
+///   `fullscreen-borderless` — borderless on current monitor
+///   `exclusive:WxH@HZ`      — exclusive, matched against monitor modes
+/// Refresh is integer Hz (converted to mhz by *1000); non-integer
+/// refresh isn't expressible from the env var today — runtime
+/// `set_window_mode` accepts full-precision mhz directly.
+fn parse_window_mode_env(s: &str) -> Result<(WindowMode, Option<(u32, u32)>), String> {
+    let s = s.trim();
+    if s == "windowed" {
+        return Ok((WindowMode::Windowed, None));
+    }
+    if let Some(rest) = s.strip_prefix("windowed:") {
+        let (w, h) = parse_wxh(rest)?;
+        return Ok((WindowMode::Windowed, Some((w, h))));
+    }
+    if s == "fullscreen-borderless" {
+        return Ok((WindowMode::FullscreenBorderless, None));
+    }
+    if let Some(rest) = s.strip_prefix("exclusive:") {
+        let (dim, hz) = rest
+            .split_once('@')
+            .ok_or_else(|| format!("exclusive mode missing @HZ in {s:?}"))?;
+        let (width, height) = parse_wxh(dim)?;
+        let hz: u32 = hz.parse().map_err(|e| format!("invalid Hz {hz:?}: {e}"))?;
+        return Ok((
+            WindowMode::FullscreenExclusive {
+                width,
+                height,
+                refresh_mhz: hz.saturating_mul(1000),
+            },
+            None,
+        ));
+    }
+    Err(format!("unrecognised AETHER_WINDOW_MODE value {s:?}"))
+}
+
+fn parse_wxh(s: &str) -> Result<(u32, u32), String> {
+    let (w, h) = s
+        .split_once('x')
+        .ok_or_else(|| format!("expected WxH, got {s:?}"))?;
+    let w: u32 = w.parse().map_err(|e| format!("invalid width {w:?}: {e}"))?;
+    let h: u32 = h
+        .parse()
+        .map_err(|e| format!("invalid height {h:?}: {e}"))?;
+    Ok((w, h))
+}
+
+/// Find a `VideoModeHandle` on `monitor` matching the given size +
+/// refresh exactly. Returns `None` if no match — the caller surfaces
+/// this as `SetWindowModeResult::Err` rather than falling back
+/// silently to something close.
+fn find_exclusive_mode(
+    monitor: &MonitorHandle,
+    width: u32,
+    height: u32,
+    refresh_mhz: u32,
+) -> Option<VideoModeHandle> {
+    monitor.video_modes().find(|m| {
+        m.size().width == width
+            && m.size().height == height
+            && m.refresh_rate_millihertz() == refresh_mhz
+    })
+}
+
+/// Build winit's `Option<Fullscreen>` for the requested mode.
+/// `monitor_for_exclusive` is the monitor to match video modes
+/// against — the window's current monitor at runtime, the primary at
+/// boot.
+fn resolve_fullscreen(
+    mode: &WindowMode,
+    monitor_for_exclusive: Option<&MonitorHandle>,
+) -> Result<Option<Fullscreen>, String> {
+    match mode {
+        WindowMode::Windowed => Ok(None),
+        WindowMode::FullscreenBorderless => Ok(Some(Fullscreen::Borderless(None))),
+        WindowMode::FullscreenExclusive {
+            width,
+            height,
+            refresh_mhz,
+        } => {
+            let monitor = monitor_for_exclusive.ok_or_else(|| {
+                "fullscreen-exclusive requested but no monitor available".to_owned()
+            })?;
+            let handle =
+                find_exclusive_mode(monitor, *width, *height, *refresh_mhz).ok_or_else(|| {
+                    format!(
+                        "no video mode matches {width}x{height}@{refresh_mhz}mhz on monitor {:?}",
+                        monitor.name()
+                    )
+                })?;
+            Ok(Some(Fullscreen::Exclusive(handle)))
+        }
+    }
+}
+
 impl App {
     /// Build a `PlatformInfoResult::Ok` from whatever the event loop
     /// knows right now: OS via `std::env::consts` + `os_info`, engine
@@ -315,9 +482,7 @@ impl App {
                 .and_then(|m| event_loop.available_monitors().position(|other| other == m))
                 .map(|idx| idx as u32);
             WindowInfo {
-                // PR B will track the active mode as actual state;
-                // today the substrate only boots windowed.
-                mode: WindowMode::Windowed,
+                mode: self.current_mode.clone(),
                 width: size.width,
                 height: size.height,
                 scale_factor: w.scale_factor(),
@@ -331,6 +496,48 @@ impl App {
             gpu: gpu_info,
             monitors,
             window,
+        }
+    }
+
+    /// Apply a `SetWindowMode` request against the current window.
+    /// Resolves fullscreen modes against the current monitor (so
+    /// exclusive modes match the display the window is actually on),
+    /// sets fullscreen + optional windowed size, and reads the new
+    /// `inner_size()` back for the reply. A missing window (before
+    /// `resumed`) replies `Err` rather than hanging.
+    fn apply_window_mode(
+        &mut self,
+        mode: WindowMode,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> SetWindowModeResult {
+        let Some(window) = self.window.as_ref().cloned() else {
+            return SetWindowModeResult::Err {
+                error: "window not ready; set_window_mode arrived before resumed".to_owned(),
+            };
+        };
+        let monitor = window.current_monitor();
+        let fullscreen = match resolve_fullscreen(&mode, monitor.as_ref()) {
+            Ok(fs) => fs,
+            Err(e) => return SetWindowModeResult::Err { error: e },
+        };
+        window.set_fullscreen(fullscreen);
+        // `set_inner_size` returns `Option<PhysicalSize>` — the
+        // platform may honour the request asynchronously or not at
+        // all. We keep the request as the caller's intent; the reply
+        // size is whatever winit reports *after* applying.
+        if matches!(mode, WindowMode::Windowed)
+            && let (Some(w), Some(h)) = (width, height)
+        {
+            let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+        }
+
+        self.current_mode = mode.clone();
+        let size = window.inner_size();
+        SetWindowModeResult::Ok {
+            mode,
+            width: size.width,
+            height: size.height,
         }
     }
 
@@ -353,7 +560,7 @@ impl App {
 impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::CaptureRequested => {
+            UserEvent::Capture => {
                 // When occluded, `ControlFlow::Wait` stops the normal
                 // redraw cadence — request one explicitly so the
                 // capture handler in `RedrawRequested` runs.
@@ -361,9 +568,18 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
-            UserEvent::PlatformInfoRequested { sender } => {
+            UserEvent::PlatformInfo { sender } => {
                 let result = self.snapshot_platform_info(event_loop);
                 send_platform_info_reply(&self.outbound, sender, result);
+            }
+            UserEvent::SetWindowMode {
+                sender,
+                mode,
+                width,
+                height,
+            } => {
+                let result = self.apply_window_mode(mode, width, height);
+                send_set_window_mode_reply(&self.outbound, sender, result);
             }
         }
     }
@@ -372,11 +588,26 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let window = Arc::new(
-            event_loop
-                .create_window(Window::default_attributes().with_title("aether hello-triangle"))
-                .expect("create_window"),
-        );
+        // Apply `AETHER_WINDOW_MODE` at window creation. Resolving
+        // exclusive at boot uses the primary monitor since there's
+        // no window yet to ask "which monitor am I on?".
+        let mut attrs = Window::default_attributes().with_title("aether hello-triangle");
+        if let Some((w, h)) = self.boot_size {
+            attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h));
+        }
+        match resolve_fullscreen(&self.boot_mode, event_loop.primary_monitor().as_ref()) {
+            Ok(fs) => attrs = attrs.with_fullscreen(fs),
+            Err(e) => {
+                tracing::warn!(
+                    target: "aether_substrate::boot",
+                    error = %e,
+                    "AETHER_WINDOW_MODE boot request rejected — falling back to Windowed",
+                );
+                self.boot_mode = WindowMode::Windowed;
+                self.current_mode = WindowMode::Windowed;
+            }
+        }
+        let window = Arc::new(event_loop.create_window(attrs).expect("create_window"));
         self.gpu = Some(Gpu::new(Arc::clone(&window)));
         window.request_redraw();
         self.window = Some(window);
@@ -651,6 +882,9 @@ fn main() -> wasmtime::Result<()> {
     let platform_info_notifier = Arc::new(PlatformInfoProxy {
         proxy: event_loop.create_proxy(),
     });
+    let window_mode_notifier = Arc::new(SetWindowModeProxy {
+        proxy: event_loop.create_proxy(),
+    });
 
     // Wire the ADR-0010 control plane. Registered after the scheduler
     // exists so the handler can capture the runtime component table
@@ -668,6 +902,7 @@ fn main() -> wasmtime::Result<()> {
             default_name_counter: Arc::new(AtomicU64::new(0)),
             capture_queue: capture_queue.clone(),
             platform_info_notifier: platform_info_notifier.clone(),
+            window_mode_notifier: window_mode_notifier.clone(),
         };
         registry.register_sink(
             aether_substrate::AETHER_CONTROL,
@@ -710,6 +945,24 @@ fn main() -> wasmtime::Result<()> {
     );
 
     let boot_kinds_count = boot_descriptors.len() as u32;
+    // Parse `AETHER_WINDOW_MODE` at boot. Unset → Windowed (default
+    // size); bad value → log + fall back to Windowed rather than
+    // refusing to boot.
+    let (boot_mode, boot_size) = match std::env::var("AETHER_WINDOW_MODE") {
+        Ok(s) => match parse_window_mode_env(&s) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::warn!(
+                    target: "aether_substrate::boot",
+                    value = %s,
+                    error = %e,
+                    "AETHER_WINDOW_MODE unparseable — falling back to Windowed",
+                );
+                (WindowMode::Windowed, None)
+            }
+        },
+        Err(_) => (WindowMode::Windowed, None),
+    };
     let mut app = App {
         queue,
         input_subscribers,
@@ -729,6 +982,9 @@ fn main() -> wasmtime::Result<()> {
         started: None,
         frame: 0,
         occluded: false,
+        boot_mode: boot_mode.clone(),
+        boot_size,
+        current_mode: boot_mode,
         _scheduler: scheduler,
     };
 
@@ -745,4 +1001,58 @@ fn main() -> wasmtime::Result<()> {
         "frame loop exited",
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_windowed_defaults() {
+        let (m, s) = parse_window_mode_env("windowed").unwrap();
+        assert!(matches!(m, WindowMode::Windowed));
+        assert_eq!(s, None);
+    }
+
+    #[test]
+    fn parse_windowed_with_size() {
+        let (m, s) = parse_window_mode_env("windowed:1280x720").unwrap();
+        assert!(matches!(m, WindowMode::Windowed));
+        assert_eq!(s, Some((1280, 720)));
+    }
+
+    #[test]
+    fn parse_fullscreen_borderless() {
+        let (m, s) = parse_window_mode_env("fullscreen-borderless").unwrap();
+        assert!(matches!(m, WindowMode::FullscreenBorderless));
+        assert_eq!(s, None);
+    }
+
+    #[test]
+    fn parse_exclusive_converts_hz_to_mhz() {
+        let (m, s) = parse_window_mode_env("exclusive:1920x1080@60").unwrap();
+        let WindowMode::FullscreenExclusive {
+            width,
+            height,
+            refresh_mhz,
+        } = m
+        else {
+            panic!("expected exclusive");
+        };
+        assert_eq!((width, height, refresh_mhz), (1920, 1080, 60_000));
+        assert_eq!(s, None);
+    }
+
+    #[test]
+    fn parse_rejects_unknown_variant() {
+        assert!(parse_window_mode_env("garbage").is_err());
+        assert!(parse_window_mode_env("exclusive:1920x1080").is_err()); // missing @hz
+        assert!(parse_window_mode_env("windowed:notxwide").is_err());
+    }
+
+    #[test]
+    fn parse_ignores_whitespace() {
+        let (m, _) = parse_window_mode_env("  windowed  ").unwrap();
+        assert!(matches!(m, WindowMode::Windowed));
+    }
 }

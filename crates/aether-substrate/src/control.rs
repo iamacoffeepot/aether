@@ -34,7 +34,8 @@ use aether_hub_protocol::{
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, DropComponent, DropResult, LoadComponent, LoadKind,
     LoadKindEncoding, LoadKindPrimitive, LoadResult, MailEnvelope, PlatformInfo, ReplaceComponent,
-    ReplaceResult, SubscribeInput, SubscribeInputResult, UnsubscribeInput,
+    ReplaceResult, SetWindowMode, SetWindowModeResult, SubscribeInput, SubscribeInputResult,
+    UnsubscribeInput,
 };
 use aether_mail::Kind;
 use serde::Serialize;
@@ -46,7 +47,7 @@ use crate::ctx::SubstrateCtx;
 use crate::hub_client::HubOutbound;
 use crate::input::{self, InputSubscribers};
 use crate::mail::{Mail, MailboxId};
-use crate::platform_info::PlatformInfoNotifier;
+use crate::platform_info::{PlatformInfoNotifier, WindowModeNotifier};
 use crate::queue::MailQueue;
 use crate::registry::{Registry, SinkHandler};
 use crate::scheduler::ComponentTable;
@@ -230,6 +231,11 @@ pub struct ControlPlane {
     /// The handler just hands the sender over; the event-loop thread
     /// snapshots + replies. Tests use `NoopPlatformInfoNotifier`.
     pub platform_info_notifier: Arc<dyn PlatformInfoNotifier>,
+    /// Fire-and-forget notifier for `aether.control.set_window_mode`.
+    /// Carries the requested mode + optional Windowed size; the
+    /// event-loop thread resolves fullscreen modes, applies the
+    /// change, and replies with the resulting state.
+    pub window_mode_notifier: Arc<dyn WindowModeNotifier>,
     /// ADR-0021 per-stream subscriber sets, shared with the platform
     /// thread. The control plane mutates this table on subscribe /
     /// unsubscribe / drop; the platform thread reads it to fan out
@@ -280,6 +286,8 @@ impl ControlPlane {
             // loop and let it snapshot + reply on its own thread
             // (winit monitor / scale-factor APIs require it).
             self.platform_info_notifier.notify(sender);
+        } else if kind_name == SetWindowMode::NAME {
+            self.handle_set_window_mode(sender, bytes);
         } else {
             tracing::warn!(
                 target: "aether_substrate::control",
@@ -552,6 +560,26 @@ impl ControlPlane {
             self.reply(sender, CaptureFrameResult::NAME, &result);
         }
         // Else: render thread will reply on its next redraw.
+    }
+
+    /// Handler for `aether.control.set_window_mode`. Decodes the
+    /// request, then hands it to the event-loop thread via
+    /// `window_mode_notifier` — the event loop resolves video modes,
+    /// applies the change, and replies on its own. Decode failures
+    /// reply inline so the caller doesn't hang on a malformed body.
+    fn handle_set_window_mode(&self, sender: aether_hub_protocol::SessionToken, bytes: &[u8]) {
+        let payload: SetWindowMode = match postcard::from_bytes(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                let result = SetWindowModeResult::Err {
+                    error: format!("postcard decode failed: {e}"),
+                };
+                self.reply(sender, SetWindowModeResult::NAME, &result);
+                return;
+            }
+        };
+        self.window_mode_notifier
+            .request(sender, payload.mode, payload.width, payload.height);
     }
 
     fn handle_replace(&self, bytes: &[u8]) -> ReplaceResult {
@@ -940,6 +968,7 @@ mod tests {
             default_name_counter: Arc::new(AtomicU64::new(0)),
             capture_queue: CaptureQueue::new(),
             platform_info_notifier: Arc::new(crate::platform_info::NoopPlatformInfoNotifier),
+            window_mode_notifier: Arc::new(crate::platform_info::NoopWindowModeNotifier),
         }
     }
 
