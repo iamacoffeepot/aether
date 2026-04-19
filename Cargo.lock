@@ -104,17 +104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-mail-spike-guest"
-version = "0.1.0"
-
-[[package]]
-name = "aether-mail-spike-host"
-version = "0.1.0"
-dependencies = [
- "wasmtime",
-]
-
-[[package]]
 name = "aether-substrate"
 version = "0.1.0"
 dependencies = [

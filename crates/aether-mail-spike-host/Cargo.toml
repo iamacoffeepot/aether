@@ -1,8 +1,0 @@
-[package]
-name = "aether-mail-spike-host"
-version.workspace = true
-edition.workspace = true
-build = "build.rs"
-
-[dependencies]
-wasmtime = "30"
