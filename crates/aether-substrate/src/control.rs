@@ -24,7 +24,9 @@
 // that the agent cannot have caused — e.g. a poisoned lock.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use aether_hub_protocol::{
     ClaudeAddress, EngineMailFrame, EngineToHub, KindDescriptor, NamedField, Primitive, SchemaType,
@@ -52,6 +54,56 @@ use crate::scheduler::ComponentTable;
 /// a component. Kept as a constant so substrate init, tests, and any
 /// future tooling share one spelling.
 pub const AETHER_CONTROL: &str = "aether.control";
+
+/// ADR-0022 default ceiling on the freeze-drain phase of
+/// `replace_component`. Per-replace overridable via
+/// `ReplaceComponent::drain_timeout_ms`.
+pub const DEFAULT_DRAIN_TIMEOUT_MS: u32 = 5_000;
+
+/// Spin-sleep cadence for `drain_pending`. Short enough that the
+/// usual sub-millisecond drain returns within a single sleep, long
+/// enough that the polling thread doesn't burn a core when a
+/// component has a slow `deliver`.
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_micros(200);
+
+/// Block until the entry's `pending` count reaches zero or `timeout`
+/// elapses. Returns `true` if the drain completed, `false` on
+/// timeout. Polled rather than condvar-driven to keep
+/// `ComponentEntry` lock-free on the hot dispatch path.
+fn drain_pending(entry: &crate::scheduler::ComponentEntry, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if entry.pending.load(Ordering::Acquire) == 0 {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return entry.pending.load(Ordering::Acquire) == 0;
+        }
+        std::thread::sleep(DRAIN_POLL_INTERVAL);
+    }
+}
+
+/// Deliver every parked mail through `target`. The caller must hold
+/// the components-table write lock so workers can't dispatch
+/// concurrently to either `entry.component` or `target` — that's
+/// what makes the per-component serialization invariant hold across
+/// the flush. Parked mail was already counted off the shared
+/// queue's outstanding tally when it was parked (see
+/// `worker_loop`), so we don't touch it here.
+fn flush_parked_to(
+    entry: &crate::scheduler::ComponentEntry,
+    target: &Mutex<Component>,
+    _queue: &MailQueue,
+) {
+    let mut parked = entry.parked.lock().unwrap();
+    if parked.is_empty() {
+        return;
+    }
+    let mut comp = target.lock().unwrap();
+    while let Some(mail) = parked.pop_front() {
+        comp.deliver(&mail).expect("component.deliver failed");
+    }
+}
 
 /// Translate a `LoadKind` (the flat, agent-shippable descriptor) into
 /// the recursive `KindDescriptor` the registry stores. `Signal`
@@ -383,6 +435,9 @@ impl ControlPlane {
             }
         };
         let id = MailboxId(payload.mailbox_id);
+        let drain_timeout = Duration::from_millis(
+            payload.drain_timeout_ms.unwrap_or(DEFAULT_DRAIN_TIMEOUT_MS) as u64,
+        );
 
         // Target must be a live Component. Reject unknown ids, sinks,
         // and already-dropped mailboxes before touching wasmtime.
@@ -435,6 +490,41 @@ impl ControlPlane {
             }
         };
 
+        // ADR-0022 freeze-drain: clone the Arc out of the table under
+        // a brief read lock so we can flip `frozen` and poll `pending`
+        // without holding any table-level lock. New mail that arrives
+        // during the freeze parks on this entry's `parked` deque;
+        // workers finishing in-flight `deliver` calls drive `pending`
+        // to zero.
+        let old_entry = match self.components.read().unwrap().get(&id).map(Arc::clone) {
+            Some(e) => e,
+            None => {
+                // Registered as a Component above but no entry bound
+                // — happens if instantiation lost the race with a
+                // concurrent drop. Treat as a stale id.
+                return ReplaceResult::Err {
+                    error: format!("mailbox {:?} has no bound component", id),
+                };
+            }
+        };
+        old_entry.frozen.store(true, Ordering::Release);
+        if !drain_pending(&old_entry, drain_timeout) {
+            // Drain timeout: old instance stays bound. Unfreeze and
+            // flush parked through the old component so accumulated
+            // mail isn't dropped on the floor. Holding the write lock
+            // here keeps workers from racing on the parked flush.
+            let table = self.components.write().unwrap();
+            flush_parked_to(&old_entry, &old_entry.component, &self.queue);
+            old_entry.frozen.store(false, Ordering::Release);
+            drop(table);
+            return ReplaceResult::Err {
+                error: format!(
+                    "drain timeout after {}ms; old instance still bound",
+                    drain_timeout.as_millis()
+                ),
+            };
+        }
+
         // ADR-0015 §3 + ADR-0016 §4: hooks run on the old instance
         // under the write lock before instantiation. Take the lock
         // now, invoke hooks, extract any saved state, then keep the
@@ -443,19 +533,21 @@ impl ControlPlane {
         // fails, `on_drop` will have already fired on the old
         // instance even though it stays live.
         let mut table = self.components.write().unwrap();
-        let mut saved = None;
-        if let Some(cell) = table.get(&id) {
-            let mut old = cell.lock().unwrap();
-            old.on_replace();
-            // ADR-0016 §4 step 2: save failures abort the replace
-            // before `on_drop` fires, so the old instance is still
-            // fully alive. Check the error slot before continuing.
-            if let Some(err) = old.take_save_error() {
-                return ReplaceResult::Err { error: err };
-            }
-            saved = old.take_saved_state();
-            old.on_drop();
+        let mut old_component = old_entry.component.lock().unwrap();
+        old_component.on_replace();
+        // ADR-0016 §4 step 2: save failures abort the replace
+        // before `on_drop` fires, so the old instance is still
+        // fully alive. Check the error slot before continuing.
+        if let Some(err) = old_component.take_save_error() {
+            drop(old_component);
+            flush_parked_to(&old_entry, &old_entry.component, &self.queue);
+            old_entry.frozen.store(false, Ordering::Release);
+            drop(table);
+            return ReplaceResult::Err { error: err };
         }
+        let saved = old_component.take_saved_state();
+        old_component.on_drop();
+        drop(old_component);
 
         let ctx = SubstrateCtx::new(
             id,
@@ -470,7 +562,11 @@ impl ControlPlane {
                     // Registry is left as-is; any newly registered
                     // kinds stay. The old component is still bound
                     // (on_replace + on_drop already fired — see wart
-                    // above); the bundle is discarded.
+                    // above); the bundle is discarded. Parked mail
+                    // flushes through the still-bound old instance.
+                    flush_parked_to(&old_entry, &old_entry.component, &self.queue);
+                    old_entry.frozen.store(false, Ordering::Release);
+                    drop(table);
                     return ReplaceResult::Err {
                         error: format!("wasm instantiation failed: {e}"),
                     };
@@ -485,37 +581,41 @@ impl ControlPlane {
         if let Some(bundle) = saved
             && let Err(e) = new_component.call_on_rehydrate(&bundle)
         {
+            flush_parked_to(&old_entry, &old_entry.component, &self.queue);
+            old_entry.frozen.store(false, Ordering::Release);
+            drop(table);
             return ReplaceResult::Err {
                 error: format!("on_rehydrate failed: {e}"),
             };
         }
 
-        // Atomic swap in-place under the already-held write lock.
-        // The returned old Component drops at end of scope; wasmtime
-        // reclaims linear memory + Store.
-        let _old = table
-            .remove(&id)
-            .map(|m| m.into_inner().expect("component mutex poisoned"));
-        table.insert(id, std::sync::Mutex::new(new_component));
+        // Build the new entry. Frozen defaults to false so workers
+        // dispatch normally as soon as the table swap is visible.
+        let new_entry = Arc::new(crate::scheduler::ComponentEntry::new(new_component));
+        // ADR-0022 §3: parked mail collected during the freeze flushes
+        // to the new instance before the table flips, so it's
+        // delivered before any post-swap mail and the agent's
+        // happens-before edge holds.
+        flush_parked_to(&old_entry, &new_entry.component, &self.queue);
+        table.insert(id, Arc::clone(&new_entry));
         drop(table);
+        // The old `Arc<ComponentEntry>` (and its wasmtime instance)
+        // drops when `old_entry` falls out of scope at function exit.
 
         self.announce_kinds();
         ReplaceResult::Ok
     }
 
     fn insert_component(&self, id: MailboxId, component: Component) {
-        self.components
-            .write()
-            .unwrap()
-            .insert(id, std::sync::Mutex::new(component));
+        self.components.write().unwrap().insert(
+            id,
+            Arc::new(crate::scheduler::ComponentEntry::new(component)),
+        );
     }
 
     fn remove_component(&self, id: MailboxId) -> Option<Component> {
-        self.components
-            .write()
-            .unwrap()
-            .remove(&id)
-            .map(|m| m.into_inner().expect("component mutex poisoned"))
+        let entry = self.components.write().unwrap().remove(&id)?;
+        Some(crate::scheduler::extract_component(entry))
     }
 
     /// Ship the complete current kind vocabulary to the hub so its
@@ -557,7 +657,9 @@ impl ControlPlane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mail::Mail;
     use aether_hub_protocol::SessionToken;
+    use std::sync::atomic::AtomicU32;
 
     #[test]
     fn load_payload_roundtrip() {
@@ -910,6 +1012,7 @@ mod tests {
                 mailbox_id,
                 wasm,
                 kinds: vec![],
+                drain_timeout_ms: None,
             })
             .unwrap(),
         );
@@ -937,6 +1040,7 @@ mod tests {
                 mailbox_id: 99,
                 wasm,
                 kinds: vec![],
+                drain_timeout_ms: None,
             })
             .unwrap(),
         );
@@ -963,6 +1067,7 @@ mod tests {
                 mailbox_id,
                 wasm,
                 kinds: vec![],
+                drain_timeout_ms: None,
             })
             .unwrap(),
         );
@@ -988,6 +1093,7 @@ mod tests {
                 mailbox_id,
                 wasm: vec![0, 1, 2, 3],
                 kinds: vec![],
+                drain_timeout_ms: None,
             })
             .unwrap(),
         );
@@ -1066,6 +1172,7 @@ mod tests {
                 mailbox_id,
                 wasm: wasm_new,
                 kinds: vec![],
+                drain_timeout_ms: None,
             })
             .unwrap(),
         );
@@ -1102,6 +1209,7 @@ mod tests {
                 mailbox_id,
                 wasm: wat::parse_str(WAT_REHYDRATES).unwrap(),
                 kinds: vec![],
+                drain_timeout_ms: None,
             })
             .unwrap(),
         );
@@ -1112,7 +1220,7 @@ mod tests {
         // offset 400.
         let table = plane.components.read().unwrap();
         let cell = table.get(&MailboxId(mailbox_id)).expect("present");
-        let mut new = cell.lock().unwrap();
+        let mut new = cell.component.lock().unwrap();
         assert_eq!(new.read_u32(396), 7);
         assert_eq!(new.read_bytes(400, 4), vec![0xDE, 0xAD, 0xBE, 0xEF],);
     }
@@ -1138,6 +1246,7 @@ mod tests {
                 mailbox_id,
                 wasm: wat::parse_str(WAT).unwrap(),
                 kinds: vec![],
+                drain_timeout_ms: None,
             })
             .unwrap(),
         );
@@ -1177,6 +1286,7 @@ mod tests {
                 mailbox_id,
                 wasm: wat::parse_str(WAT).unwrap(),
                 kinds: vec![],
+                drain_timeout_ms: None,
             })
             .unwrap(),
         );
@@ -1206,13 +1316,14 @@ mod tests {
                 mailbox_id,
                 wasm: wat::parse_str(WAT_REHYDRATES).unwrap(),
                 kinds: vec![],
+                drain_timeout_ms: None,
             })
             .unwrap(),
         );
         assert!(matches!(result, ReplaceResult::Ok));
         let table = plane.components.read().unwrap();
         let cell = table.get(&MailboxId(mailbox_id)).expect("present");
-        let mut new = cell.lock().unwrap();
+        let mut new = cell.component.lock().unwrap();
         assert_eq!(new.read_u32(396), 0);
         assert_eq!(new.read_u32(400), 0);
     }
@@ -1411,6 +1522,7 @@ mod tests {
                 mailbox_id: id,
                 wasm: wat::parse_str(WAT).unwrap(),
                 kinds: vec![],
+                drain_timeout_ms: None,
             })
             .unwrap(),
         );
@@ -1454,4 +1566,262 @@ mod tests {
         );
         assert!(!subs(&plane, InputStream::Tick).contains(&MailboxId(id)));
     }
+
+    // ADR-0022 freeze-drain-swap. The first three tests poke
+    // `pending` / `parked` directly to exercise the drain and flush
+    // paths without spinning up a worker pool — the drain logic is
+    // expressed against the entry's atomics, so the entry is the
+    // right level to test it at.
+
+    #[test]
+    fn drain_pending_returns_true_when_count_drops_in_time() {
+        let plane = make_plane();
+        let id = load_blank(&plane, "drainable");
+        let entry = plane
+            .components
+            .read()
+            .unwrap()
+            .get(&MailboxId(id))
+            .unwrap()
+            .clone();
+        entry.pending.store(2, Ordering::SeqCst);
+        let entry_for_drainer = Arc::clone(&entry);
+        let drainer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            entry_for_drainer.pending.store(0, Ordering::SeqCst);
+        });
+        assert!(super::drain_pending(&entry, Duration::from_millis(500)));
+        drainer.join().unwrap();
+    }
+
+    #[test]
+    fn replace_drain_timeout_keeps_old_bound() {
+        let plane = make_plane();
+        let id = load_blank(&plane, "victim");
+        let entry_before = plane
+            .components
+            .read()
+            .unwrap()
+            .get(&MailboxId(id))
+            .unwrap()
+            .clone();
+        // Pin pending above zero so drain never completes within the
+        // tight per-replace timeout.
+        entry_before.pending.store(1, Ordering::SeqCst);
+
+        let result = plane.handle_replace(
+            &postcard::to_allocvec(&ReplaceComponent {
+                mailbox_id: id,
+                wasm: wat::parse_str(WAT).unwrap(),
+                kinds: vec![],
+                drain_timeout_ms: Some(20),
+            })
+            .unwrap(),
+        );
+        let ReplaceResult::Err { error } = result else {
+            panic!("expected timeout, got {result:?}");
+        };
+        assert!(
+            error.contains("drain timeout"),
+            "unexpected error message: {error}"
+        );
+
+        // Same Arc still bound — no swap happened.
+        let entry_after = plane
+            .components
+            .read()
+            .unwrap()
+            .get(&MailboxId(id))
+            .unwrap()
+            .clone();
+        assert!(Arc::ptr_eq(&entry_before, &entry_after));
+        // Frozen flag cleared so future mail flows through again.
+        assert!(!entry_after.frozen.load(Ordering::SeqCst));
+
+        // Reset pending so the entry drops cleanly when the table
+        // releases it (no real worker to decrement on our behalf).
+        entry_after.pending.store(0, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn replace_flushes_parked_mail_to_new_instance() {
+        // Old + new components both forward `receive` to a counter
+        // sink. After parking N mails on the entry and triggering a
+        // successful replace, the counter records exactly the parked
+        // ticks — proving the new instance is the one that handled
+        // them post-swap.
+        let plane = make_plane();
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_for_sink = Arc::clone(&counter);
+        let sink_id = plane.registry.register_sink(
+            "drain-flush-sink",
+            Arc::new(move |_kind, _origin, _sender, _bytes, count| {
+                counter_for_sink.fetch_add(count, Ordering::SeqCst);
+            }),
+        );
+
+        let LoadResult::Ok { mailbox_id: id, .. } = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponent {
+                wasm: wat::parse_str(WAT_FORWARDS_TO_SINK).unwrap(),
+                kinds: vec![],
+                name: Some("flusher".into()),
+            })
+            .unwrap(),
+        ) else {
+            panic!("load failed");
+        };
+
+        let entry = plane
+            .components
+            .read()
+            .unwrap()
+            .get(&MailboxId(id))
+            .unwrap()
+            .clone();
+        // Park three mails directly on the entry. Real workers would
+        // do this when frozen=true; here we simulate the post-park
+        // state without standing up a worker pool. We do NOT touch
+        // queue.outstanding — these mails are off-queue from the
+        // pool's perspective.
+        entry.frozen.store(true, Ordering::SeqCst);
+        let kind_id = 0; // sink_id payload is unused; kind is irrelevant.
+        let _ = kind_id;
+        for n in 1..=3u32 {
+            entry.parked.lock().unwrap().push_back(Mail {
+                recipient: MailboxId(id),
+                kind: 0,
+                payload: vec![sink_id.0 as u8],
+                count: n,
+                sender: SessionToken::NIL,
+                from_component: None,
+            });
+        }
+
+        let result = plane.handle_replace(
+            &postcard::to_allocvec(&ReplaceComponent {
+                mailbox_id: id,
+                wasm: wat::parse_str(WAT_FORWARDS_TO_SINK).unwrap(),
+                kinds: vec![],
+                drain_timeout_ms: Some(500),
+            })
+            .unwrap(),
+        );
+        assert!(matches!(result, ReplaceResult::Ok), "got {result:?}");
+
+        // Three parked ticks (counts 1, 2, 3) flushed to the new
+        // instance, which forwarded each to the sink.
+        assert_eq!(counter.load(Ordering::SeqCst), 1 + 2 + 3);
+
+        // New entry is bound now, parked is empty, frozen cleared.
+        let entry_after = plane
+            .components
+            .read()
+            .unwrap()
+            .get(&MailboxId(id))
+            .unwrap()
+            .clone();
+        assert!(!Arc::ptr_eq(&entry, &entry_after));
+        assert!(entry_after.parked.lock().unwrap().is_empty());
+        assert!(!entry_after.frozen.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn replace_drain_timeout_flushes_parked_to_old() {
+        // Pending stays >0 (a forever in-flight deliver), so the
+        // replace times out. Parked mail must still be delivered —
+        // through the old instance, since the swap didn't happen.
+        let plane = make_plane();
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_for_sink = Arc::clone(&counter);
+        let sink_id = plane.registry.register_sink(
+            "drain-timeout-sink",
+            Arc::new(move |_kind, _origin, _sender, _bytes, count| {
+                counter_for_sink.fetch_add(count, Ordering::SeqCst);
+            }),
+        );
+
+        let LoadResult::Ok { mailbox_id: id, .. } = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponent {
+                wasm: wat::parse_str(WAT_FORWARDS_TO_SINK).unwrap(),
+                kinds: vec![],
+                name: Some("survivor".into()),
+            })
+            .unwrap(),
+        ) else {
+            panic!("load failed");
+        };
+
+        let entry = plane
+            .components
+            .read()
+            .unwrap()
+            .get(&MailboxId(id))
+            .unwrap()
+            .clone();
+        entry.pending.store(1, Ordering::SeqCst);
+        entry.frozen.store(true, Ordering::SeqCst);
+        for n in 1..=2u32 {
+            entry.parked.lock().unwrap().push_back(Mail {
+                recipient: MailboxId(id),
+                kind: 0,
+                payload: vec![sink_id.0 as u8],
+                count: n,
+                sender: SessionToken::NIL,
+                from_component: None,
+            });
+        }
+
+        let result = plane.handle_replace(
+            &postcard::to_allocvec(&ReplaceComponent {
+                mailbox_id: id,
+                wasm: wat::parse_str(WAT_FORWARDS_TO_SINK).unwrap(),
+                kinds: vec![],
+                drain_timeout_ms: Some(20),
+            })
+            .unwrap(),
+        );
+        let ReplaceResult::Err { error } = result else {
+            panic!("expected timeout, got {result:?}");
+        };
+        assert!(error.contains("drain timeout"), "{error}");
+
+        // Old instance handled the parked counts (1 + 2 = 3).
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+
+        // Same entry still bound; parked empty, frozen cleared.
+        let entry_after = plane
+            .components
+            .read()
+            .unwrap()
+            .get(&MailboxId(id))
+            .unwrap()
+            .clone();
+        assert!(Arc::ptr_eq(&entry, &entry_after));
+        assert!(entry_after.parked.lock().unwrap().is_empty());
+        assert!(!entry_after.frozen.load(Ordering::SeqCst));
+
+        // Reset for clean drop.
+        entry_after.pending.store(0, Ordering::SeqCst);
+    }
+
+    /// Component that, on each `receive`, forwards a `send_mail` to
+    /// the sink mailbox encoded in the first payload byte. Used by
+    /// the drain-flush tests so we can observe whether the new (or
+    /// old) instance handled each parked mail.
+    const WAT_FORWARDS_TO_SINK: &str = r#"
+        (module
+            (import "aether" "send_mail"
+                (func $send_mail (param i32 i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "receive")
+                (param $kind i32) (param $ptr i32) (param $count i32) (param $sender i32)
+                (result i32)
+                (drop (call $send_mail
+                    (i32.load8_u (local.get $ptr))
+                    (i32.const 0)
+                    (i32.const 0)
+                    (i32.const 0)
+                    (local.get $count)))
+                i32.const 0))
+    "#;
 }
