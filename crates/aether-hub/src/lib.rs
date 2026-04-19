@@ -10,6 +10,7 @@ use tokio::net::TcpListener;
 mod decoder;
 mod encoder;
 mod engine;
+mod log_store;
 mod mcp;
 mod registry;
 mod session;
@@ -20,6 +21,7 @@ pub use encoder::{EncodeError, encode_schema};
 
 pub use engine::HEARTBEAT_INTERVAL;
 pub use engine::READ_TIMEOUT;
+pub use log_store::{LogStore, ReadResult as LogReadResult};
 pub use mcp::{DEFAULT_MCP_PORT, HubState, run_mcp_server};
 pub use registry::{EngineRecord, EngineRegistry};
 pub use session::{
@@ -42,6 +44,7 @@ pub async fn run_engine_listener(
     registry: EngineRegistry,
     sessions: SessionRegistry,
     pending: PendingSpawns,
+    logs: LogStore,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -52,8 +55,11 @@ pub async fn run_engine_listener(
         let registry = registry.clone();
         let sessions = sessions.clone();
         let pending = pending.clone();
+        let logs = logs.clone();
         tokio::spawn(async move {
-            if let Err(e) = engine::handle_connection(stream, registry, sessions, pending).await {
+            if let Err(e) =
+                engine::handle_connection(stream, registry, sessions, pending, logs).await
+            {
                 eprintln!("aether-hub: engine {peer} dropped: {e}");
             }
         });

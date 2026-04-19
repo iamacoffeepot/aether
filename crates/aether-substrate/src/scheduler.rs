@@ -224,24 +224,26 @@ fn worker_loop(ctx: Arc<WorkerContext>) {
                         entry.pending.fetch_sub(1, Ordering::AcqRel);
                     }
                     None => {
-                        eprintln!(
-                            "substrate: mail to registered-component mailbox {:?} \
-                             but no component bound to it — dropped",
-                            recipient
+                        tracing::warn!(
+                            target: "aether_substrate::scheduler",
+                            mailbox = ?recipient,
+                            "mail to registered-component mailbox but no component bound — dropped",
                         );
                     }
                 }
             }
             Some(MailboxEntry::Dropped) => {
-                eprintln!(
-                    "substrate: mail to dropped mailbox {:?} — discarded",
-                    recipient
+                tracing::warn!(
+                    target: "aether_substrate::scheduler",
+                    mailbox = ?recipient,
+                    "mail to dropped mailbox — discarded",
                 );
             }
             None => {
-                eprintln!(
-                    "substrate: mail to unknown mailbox {:?} — dropped",
-                    recipient
+                tracing::warn!(
+                    target: "aether_substrate::scheduler",
+                    mailbox = ?recipient,
+                    "mail to unknown mailbox — dropped",
                 );
             }
         }

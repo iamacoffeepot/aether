@@ -188,6 +188,34 @@ pub struct Goodbye {
     pub reason: String,
 }
 
+/// One captured log entry forwarded from an engine to the hub
+/// (ADR-0023). Sequence is monotonic per substrate boot starting at 0
+/// — agents poll `engine_logs` with `since: <last>` to consume
+/// incrementally without re-receiving entries. `message` is the
+/// already-formatted event text (tracing's structured fields are
+/// flattened into it); per-line cap is enforced at capture time
+/// (>16 KiB truncated with a `...[truncated]` marker).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub timestamp_unix_ms: u64,
+    pub level: LogLevel,
+    pub target: String,
+    pub message: String,
+    pub sequence: u64,
+}
+
+/// Severity for `LogEntry`. Mirrors `tracing::Level`. Ordered
+/// most-verbose to least-verbose so a min-level filter can be
+/// expressed as `entry.level >= min`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
 /// Frames an engine sends to the hub. `Mail` is the observation path
 /// (ADR-0008): engine-originated mail addressed to a Claude session
 /// or broadcast to all sessions. `KindsChanged` (ADR-0010 §4) tells
@@ -195,12 +223,16 @@ pub struct Goodbye {
 /// needed after `aether.control.load_component` /
 /// `aether.control.replace_component` registers a new kind, which the
 /// hub would otherwise miss since its cache is pinned at `Hello`.
+/// `LogBatch` (ADR-0023) carries captured log entries from the
+/// substrate's tracing layer; the hub appends them to a per-engine
+/// ring buffer served via the `engine_logs` MCP tool.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineToHub {
     Hello(Hello),
     Heartbeat,
     Mail(EngineMailFrame),
     KindsChanged(Vec<KindDescriptor>),
+    LogBatch(Vec<LogEntry>),
     Goodbye(Goodbye),
 }
 

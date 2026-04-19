@@ -60,7 +60,7 @@ impl HubOutbound {
 
     fn attach(&self, tx: Sender<EngineToHub>) {
         if self.tx.set(tx).is_err() {
-            eprintln!("aether-substrate: HubOutbound attached twice — ignoring second attach");
+            tracing::warn!(target: "aether_substrate::hub_client", "HubOutbound attached twice — ignoring second attach");
         }
     }
 
@@ -141,7 +141,7 @@ impl HubClient {
                 ));
             }
         };
-        eprintln!("aether-substrate: hub registered as engine {}", engine_id.0);
+        tracing::info!(target: "aether_substrate::hub_client", engine_id = %engine_id.0, "hub registered engine");
 
         let (tx, rx) = mpsc::channel::<EngineToHub>();
         let reader_stream = stream.try_clone()?;
@@ -167,14 +167,14 @@ fn run_reader(mut stream: TcpStream, registry: Arc<Registry>, queue: Arc<MailQue
             Ok(HubToEngine::Mail(frame)) => dispatch_mail(frame, &registry, &queue),
             Ok(HubToEngine::Heartbeat) => {}
             Ok(HubToEngine::Welcome(_)) => {
-                eprintln!("aether-substrate: unexpected post-handshake Welcome, ignoring");
+                tracing::warn!(target: "aether_substrate::hub_client", "unexpected post-handshake Welcome, ignoring");
             }
             Ok(HubToEngine::Goodbye(g)) => {
-                eprintln!("aether-substrate: hub Goodbye: {}", g.reason);
+                tracing::info!(target: "aether_substrate::hub_client", reason = %g.reason, "hub Goodbye");
                 return;
             }
             Err(e) => {
-                eprintln!("aether-substrate: hub read error: {e}");
+                tracing::error!(target: "aether_substrate::hub_client", error = %e, "hub read error");
                 return;
             }
         }
@@ -184,7 +184,7 @@ fn run_reader(mut stream: TcpStream, registry: Arc<Registry>, queue: Arc<MailQue
 fn run_writer(mut stream: TcpStream, rx: mpsc::Receiver<EngineToHub>) {
     while let Ok(frame) = rx.recv() {
         if let Err(e) = write_frame(&mut stream, &frame) {
-            eprintln!("aether-substrate: hub write error: {e}");
+            tracing::error!(target: "aether_substrate::hub_client", error = %e, "hub write error");
             return;
         }
     }
@@ -201,16 +201,18 @@ fn run_heartbeat(tx: Sender<EngineToHub>) {
 
 fn dispatch_mail(frame: MailFrame, registry: &Registry, queue: &MailQueue) {
     let Some(recipient) = registry.lookup(&frame.recipient_name) else {
-        eprintln!(
-            "aether-substrate: dropping hub mail to unknown mailbox {:?}",
-            frame.recipient_name
+        tracing::warn!(
+            target: "aether_substrate::hub_client",
+            mailbox = %frame.recipient_name,
+            "dropping hub mail to unknown mailbox",
         );
         return;
     };
     let Some(kind) = registry.kind_id(&frame.kind_name) else {
-        eprintln!(
-            "aether-substrate: dropping hub mail of unknown kind {:?}",
-            frame.kind_name
+        tracing::warn!(
+            target: "aether_substrate::hub_client",
+            kind = %frame.kind_name,
+            "dropping hub mail of unknown kind",
         );
         return;
     };

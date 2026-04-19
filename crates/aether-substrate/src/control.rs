@@ -239,8 +239,10 @@ impl ControlPlane {
             let result = self.handle_unsubscribe(bytes);
             self.reply(sender, SubscribeInputResult::NAME, &result);
         } else {
-            eprintln!(
-                "aether-substrate: {AETHER_CONTROL} received unrecognised kind {kind_name:?} — dropping"
+            tracing::warn!(
+                target: "aether_substrate::control",
+                kind = %kind_name,
+                "{AETHER_CONTROL} received unrecognised kind — dropping",
             );
         }
     }
@@ -641,7 +643,7 @@ impl ControlPlane {
         let payload = match postcard::to_allocvec(result) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("aether-substrate: {kind_name} encode failed: {e}");
+                tracing::error!(target: "aether_substrate::control", kind = %kind_name, error = %e, "result encode failed");
                 return;
             }
         };

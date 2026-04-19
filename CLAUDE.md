@@ -18,7 +18,7 @@ Early-stage Rust project (edition 2024). Vision: a game engine where Claude sits
 
 ## MCP harness
 
-Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision. Starting `cargo run -p aether-hub` (and either letting the hub spawn substrates via `spawn_substrate`, or running `AETHER_HUB_URL=127.0.0.1:8889 cargo run -p aether-substrate` by hand) exposes six tools to a Claude Code session pointed at the project-scoped `.mcp.json`:
+Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision. Starting `cargo run -p aether-hub` (and either letting the hub spawn substrates via `spawn_substrate`, or running `AETHER_HUB_URL=127.0.0.1:8889 cargo run -p aether-substrate` by hand) exposes seven tools to a Claude Code session pointed at the project-scoped `.mcp.json`:
 
 - `mcp__aether-hub__list_engines` — connected engines (UUID + name/pid/version + `spawned` flag: `true` if the hub launched the process, `false` if it connected externally).
 - `mcp__aether-hub__describe_kinds(engine_id)` — the kind vocabulary the engine declared at handshake, with enough structural detail to build params.
@@ -26,6 +26,7 @@ Claude drives a running engine through MCP — the concrete form of the "Claude-
 - `mcp__aether-hub__receive_mail(max?)` — non-blocking drain of observation mail the engine pushed to this session. Each item carries `engine_id`, `kind_name`, structured `params` (decoded against the engine's kind descriptor — symmetric to `send_mail`, ADR-0020), `payload_bytes` (always populated; primarily a fallback when `params` is null), an optional `decode_error` populated when decode failed, and a `broadcast` flag (`true` means fan-out to every attached session, `false` means targeted reply-to-sender). Read `params` first; fall back to `payload_bytes` only if it's null.
 - `mcp__aether-hub__spawn_substrate(binary_path, args?, env?, timeout_ms?)` — launches a substrate binary as a child of the hub with `AETHER_HUB_URL` injected. Blocks until `Hello` handshake; returns `engine_id` + `pid`. The hub owns the child for its lifetime.
 - `mcp__aether-hub__terminate_substrate(engine_id, grace_ms?)` — SIGTERM → grace (default 2s) → SIGKILL. Errors on externally connected engines (the hub only terminates children it owns).
+- `mcp__aether-hub__engine_logs(engine_id, max?, level?, since?)` — drain captured substrate `tracing` events for an engine (ADR-0023). Cursor-based polling: pass back the previous response's `next_since` to receive only new entries. `level` filters server-side (`"trace"|"debug"|"info"|"warn"|"error"`, default `"trace"`); `max` defaults to 100 / clamped to 1000. `truncated_before` flags hub-side ring eviction so a slow poller knows it missed a window. The buffer survives engine exit, so post-mortem polls work after a substrate crash. Substrate-side filter: `AETHER_LOG_FILTER` (standard `EnvFilter` syntax, e.g. `AETHER_LOG_FILTER=aether_substrate=debug,wgpu=warn`) overrides the INFO+ default.
 
 Prefer `params` over `payload_bytes` when the kind is describable — the hub does the `#[repr(C)]` byte packing so agents don't. When verifying substrate behavior end-to-end, reach for this before running a new test binary.
 
@@ -35,7 +36,7 @@ Input streams (tick, key, mouse_move, mouse_button) are publish/subscribe (ADR-0
 
 `aether.control.replace_component` is freeze-drain-swap (ADR-0022): the substrate freezes the target mailbox, waits for in-flight `deliver` calls on the old instance to complete, then swaps. If the drain exceeds `drain_timeout_ms` (default 5000, per-replace overridable) the reply is `Err { error: "drain timeout ..." }` and the old instance stays bound — a loud failure rather than silent dropped mail. Mail that arrives during the freeze is parked and flushed through whichever instance ends up bound (new on success, old on timeout).
 
-Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encoding), ADR-0008 (observation path), ADR-0009 (hub-supervised substrate spawn), ADR-0020 (symmetric receive_mail decode), ADR-0021 (input stream subscriptions), and ADR-0022 (drain-on-swap for replace_component).
+Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encoding), ADR-0008 (observation path), ADR-0009 (hub-supervised substrate spawn), ADR-0020 (symmetric receive_mail decode), ADR-0021 (input stream subscriptions), ADR-0022 (drain-on-swap for replace_component), and ADR-0023 (substrate log capture + engine_logs).
 
 ## Commands
 
