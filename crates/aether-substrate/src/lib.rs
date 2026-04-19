@@ -7,6 +7,7 @@
 // scheduler, and the `send_mail` host function. Milestone 1 PR B
 // wires these into a real frame-loop binary with a first component.
 
+pub mod capture;
 pub mod component;
 pub mod control;
 pub mod ctx;
@@ -20,6 +21,7 @@ pub mod registry;
 pub mod scheduler;
 pub mod sender_table;
 
+pub use capture::{CaptureQueue, PendingCapture};
 pub use component::Component;
 pub use control::{AETHER_CONTROL, ControlPlane};
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};

@@ -18,9 +18,9 @@ use aether_hub_protocol::KindDescriptor;
 use aether_mail::{Kind, Schema};
 
 use crate::{
-    DrawTriangle, DropComponent, DropResult, FrameStats, Key, LoadComponent, LoadResult,
-    MouseButton, MouseMove, Ping, Pong, ReplaceComponent, ReplaceResult, SubscribeInput,
-    SubscribeInputResult, Tick, UnsubscribeInput,
+    CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats, Key,
+    LoadComponent, LoadResult, MouseButton, MouseMove, Ping, Pong, ReplaceComponent, ReplaceResult,
+    SubscribeInput, SubscribeInputResult, Tick, UnsubscribeInput,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -53,6 +53,11 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<SubscribeInput>(),
         schema::<UnsubscribeInput>(),
         schema::<SubscribeInputResult>(),
+        // Substrate capture path — on-demand PNG readback of the
+        // current swapchain, replied-to-sender so an MCP session can
+        // see what the engine is rendering.
+        schema::<CaptureFrame>(),
+        schema::<CaptureFrameResult>(),
     ]
 }
 

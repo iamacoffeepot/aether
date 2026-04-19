@@ -7,12 +7,20 @@
 // instance rmcp builds per session holds an `Arc<SessionHandle>`, so
 // when the session ends (last Hub clone drops) the registry entry is
 // removed automatically.
+//
+// Await-reply routing: a tool call that issues a synchronous
+// request — one whose reply arrives as observation mail of a known
+// kind — can register a waiter via `SessionHandle::await_reply`. The
+// next inbound mail of that kind bypasses the general inbound queue
+// and resolves the waiter's oneshot. Guard-on-drop deregisters on
+// timeout, cancel, or session drop. Unmatched inbound mail still
+// falls through to `receive_mail` unchanged.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use aether_hub_protocol::{EngineId, SessionToken, Uuid};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Bound on the per-session inbound observation queue. Back-pressure
 /// shape: if a Claude session isn't draining fast enough, engine mail
@@ -40,10 +48,90 @@ pub struct QueuedMail {
 /// connection handlers push observation mail at a specific session
 /// (via `ClaudeAddress::Session(token)`) or at all sessions (via
 /// `ClaudeAddress::Broadcast`, which iterates the registry).
+/// `replies` is the kind-keyed registry of pending synchronous-reply
+/// waiters — see `PendingReplies`.
 #[derive(Clone, Debug)]
 pub struct SessionRecord {
     pub token: SessionToken,
     pub mail_tx: mpsc::Sender<QueuedMail>,
+    pub replies: Arc<PendingReplies>,
+}
+
+/// Per-session map of pending reply-waiters, keyed by mail kind name.
+/// A tool call that expects a specific reply kind registers one
+/// entry; the engine reader consults the map on every inbound mail
+/// addressed to this session and diverts a matching mail to the
+/// waiter's oneshot channel instead of the general inbound queue.
+///
+/// Only one waiter per kind at a time. A concurrent registration
+/// attempt for the same kind returns `None`, letting the caller
+/// decide whether to reject or retry.
+#[derive(Debug, Default)]
+pub struct PendingReplies {
+    inner: Mutex<HashMap<String, oneshot::Sender<QueuedMail>>>,
+}
+
+impl PendingReplies {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Register interest in the next mail of `kind`. Returns a
+    /// receiver paired with a guard that auto-deregisters on drop, or
+    /// `None` if another waiter is already registered for this kind.
+    pub fn register(
+        self: &Arc<Self>,
+        kind: String,
+    ) -> Option<(PendingReplyGuard, oneshot::Receiver<QueuedMail>)> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.contains_key(&kind) {
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        inner.insert(kind.clone(), tx);
+        Some((
+            PendingReplyGuard {
+                kind,
+                replies: Arc::clone(self),
+            },
+            rx,
+        ))
+    }
+
+    /// Try to deliver an inbound mail to a registered waiter. Returns
+    /// `None` if a waiter was found (mail was either delivered or
+    /// dropped along with a dead receiver — either way, it's handled);
+    /// `Some(mail)` if no waiter was registered, letting the caller
+    /// fall through to the general inbound queue.
+    pub fn try_deliver(&self, kind: &str, mail: QueuedMail) -> Option<QueuedMail> {
+        let mut inner = self.inner.lock().unwrap();
+        match inner.remove(kind) {
+            Some(tx) => {
+                // Ignore send error: receiver was dropped (caller
+                // timed out or cancelled). Mail is consumed either
+                // way; it does not fall through.
+                let _ = tx.send(mail);
+                None
+            }
+            None => Some(mail),
+        }
+    }
+}
+
+/// RAII guard tying a registered waiter to the caller's scope. On
+/// drop — whether from normal completion, timeout, cancel, or
+/// session-wide teardown — the registry entry for this kind is
+/// removed. If an inbound mail has already matched and resolved the
+/// oneshot, the remove-on-drop is a no-op.
+pub struct PendingReplyGuard {
+    kind: String,
+    replies: Arc<PendingReplies>,
+}
+
+impl Drop for PendingReplyGuard {
+    fn drop(&mut self) {
+        self.replies.inner.lock().unwrap().remove(&self.kind);
+    }
 }
 
 /// Thread-safe map of live MCP sessions. Cheap to clone; all clones
@@ -88,6 +176,7 @@ impl SessionRegistry {
 /// dropped by rmcp at end-of-session) removes the entry.
 pub struct SessionHandle {
     pub token: SessionToken,
+    pub replies: Arc<PendingReplies>,
     sessions: SessionRegistry,
 }
 
@@ -99,10 +188,16 @@ impl SessionHandle {
     pub fn mint(sessions: &SessionRegistry) -> (Self, mpsc::Receiver<QueuedMail>) {
         let token = SessionToken(Uuid::new_v4());
         let (tx, rx) = mpsc::channel(SESSION_CHANNEL_CAPACITY);
-        sessions.insert(SessionRecord { token, mail_tx: tx });
+        let replies = PendingReplies::new();
+        sessions.insert(SessionRecord {
+            token,
+            mail_tx: tx,
+            replies: Arc::clone(&replies),
+        });
         (
             Self {
                 token,
+                replies,
                 sessions: sessions.clone(),
             },
             rx,
