@@ -6,3 +6,27 @@ edition.workspace = true
 [dependencies]
 aether-mail = { path = "../aether-mail" }
 bytemuck = { version = "1", default-features = false }
+
+# Examples are standalone wasm cdylibs loaded via the substrate's
+# `load_component` control plane. Their dev-deps don't propagate to
+# downstream guests that depend on `aether-component` for the SDK.
+[dev-dependencies]
+aether-substrate-mail = { path = "../aether-substrate-mail" }
+bytemuck = { version = "1", features = ["derive"] }
+
+# ADR-0017 (component-to-component reply) smoke pair: caller sends
+# `demo.request` to "echoer" and observes the reply.
+[[example]]
+name = "echoer"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "caller"
+crate-type = ["cdylib"]
+
+# ADR-0021 input subscriptions smoke. Resolves all four substrate input
+# kinds and broadcasts a `demo.input_observed` per event so
+# `receive_mail` shows the dispatch landing.
+[[example]]
+name = "input_logger"
+crate-type = ["cdylib"]
