@@ -18,13 +18,10 @@ pub mod descriptors;
 
 use bytemuck::{Pod, Zeroable};
 
-// ADR-0019 PR 3: every cast-shaped kind below moves to
-// `#[derive(Kind)]` (always) plus `#[derive(Schema)]` (gated on the
-// `descriptors` feature so wasm guests stay free of hub-protocol).
-// Wire format is unchanged in this PR — descriptors.rs still emits the
-// legacy `Pod`/`Signal`/`Opaque` arms. The `Schema` impls land here so
-// the substrate's dispatch path (PR 4) and the hub encoder (PR 5) have
-// something to call into without another round of boilerplate.
+// Every kind below derives `Kind` (always) plus `Schema` (gated on the
+// `descriptors` feature so wasm guests stay free of hub-protocol). The
+// `Schema` impls feed `descriptors.rs`, which `Hello`-ships the kind
+// vocabulary to the hub for agent-side encoding (ADR-0019).
 
 /// Per-frame signal from the substrate's frame loop. Empty payload for
 /// now; milestone 4 will add an elapsed-seconds field.
