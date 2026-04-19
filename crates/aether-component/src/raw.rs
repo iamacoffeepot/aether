@@ -2,20 +2,31 @@
 // guest component tree that should write `extern "C"` decls or host-stub
 // panics; everything else goes through the typed wrappers in `lib.rs`.
 //
-// On wasm32 the three fns are imports from the `aether` module the
-// substrate exposes (see `aether-substrate/src/host_fns.rs`). On any
-// other target they're stubs that panic if called, which keeps the
-// crate (and every component that depends on it) compilable for
-// `cargo test --workspace` on the host — components can still be
-// unit-tested for pure logic there, they just can't cross the FFI.
+// On wasm32 the fns are imports from the `aether` module the substrate
+// exposes (see `aether-substrate/src/host_fns.rs`). On any other target
+// they're stubs that panic if called, which keeps the crate (and every
+// component that depends on it) compilable for `cargo test --workspace`
+// on the host — components can still be unit-tested for pure logic
+// there, they just can't cross the FFI.
+//
+// ADR-0024 Phase 1: the wasm-visible import names carry a `_p32`
+// suffix in anticipation of a future `_p64` sibling for wasm64
+// components. The Rust-side identifiers stay un-suffixed (`send_mail`,
+// not `send_mail_p32`) so callers in `lib.rs` don't have to thread the
+// suffix through every callsite — `#[link_name]` does the remap.
 
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "aether")]
 unsafe extern "C" {
+    #[link_name = "send_mail_p32"]
     pub fn send_mail(recipient: u32, kind: u32, ptr: u32, len: u32, count: u32) -> u32;
+    #[link_name = "reply_mail_p32"]
     pub fn reply_mail(sender: u32, kind: u32, ptr: u32, len: u32, count: u32) -> u32;
+    #[link_name = "resolve_kind_p32"]
     pub fn resolve_kind(name_ptr: u32, name_len: u32) -> u32;
+    #[link_name = "resolve_mailbox_p32"]
     pub fn resolve_mailbox(name_ptr: u32, name_len: u32) -> u32;
+    #[link_name = "save_state_p32"]
     pub fn save_state(version: u32, ptr: u32, len: u32) -> u32;
 }
 

@@ -702,7 +702,7 @@ mod tests {
     const WAT: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0))
     "#;
 
@@ -713,7 +713,7 @@ mod tests {
     const WAT_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 i32.const 200
@@ -732,7 +732,7 @@ mod tests {
     const WAT_TRAPS_ON_DROP: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_drop") (result i32)
                 unreachable))
@@ -742,11 +742,11 @@ mod tests {
     /// with schema version 7.
     const WAT_SAVES_STATE: &str = r#"
         (module
-            (import "aether" "save_state"
+            (import "aether" "save_state_p32"
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 300) "\de\ad\be\ef")
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -761,10 +761,10 @@ mod tests {
     /// the ctx error slot is populated.
     const WAT_SAVES_TOO_LARGE: &str = r#"
         (module
-            (import "aether" "save_state"
+            (import "aether" "save_state_p32"
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -780,9 +780,9 @@ mod tests {
     const WAT_REHYDRATES: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
-            (func (export "on_rehydrate") (param i32 i32 i32) (result i32)
+            (func (export "on_rehydrate_p32") (param i32 i32 i32) (result i32)
                 i32.const 396
                 local.get 0
                 i32.store
@@ -1812,10 +1812,10 @@ mod tests {
     /// old) instance handled each parked mail.
     const WAT_FORWARDS_TO_SINK: &str = r#"
         (module
-            (import "aether" "send_mail"
+            (import "aether" "send_mail_p32"
                 (func $send_mail (param i32 i32 i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive")
+            (func (export "receive_p32")
                 (param $kind i32) (param $ptr i32) (param $count i32) (param $sender i32)
                 (result i32)
                 (drop (call $send_mail

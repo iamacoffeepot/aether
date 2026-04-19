@@ -659,8 +659,9 @@ macro_rules! export {
         /// matching the FFI contract in
         /// `aether-substrate/src/host_fns.rs`. `sender` is the per-
         /// instance reply-to handle (ADR-0013) or `SENDER_NONE` for
-        /// mail with no meaningful reply target.
-        #[unsafe(no_mangle)]
+        /// mail with no meaningful reply target. Exported under the
+        /// `_p32` suffix per ADR-0024 Phase 1.
+        #[unsafe(export_name = "receive_p32")]
         pub unsafe extern "C" fn receive(kind: u32, ptr: u32, count: u32, sender: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
@@ -701,8 +702,9 @@ macro_rules! export {
         /// Called by the substrate after `init` on a freshly
         /// instantiated replacement, with `(version, ptr, len)`
         /// describing the prior-state bundle the old instance
-        /// produced via `DropCtx::save_state`.
-        #[unsafe(no_mangle)]
+        /// produced via `DropCtx::save_state`. Exported under the
+        /// `_p32` suffix per ADR-0024 Phase 1.
+        #[unsafe(export_name = "on_rehydrate_p32")]
         pub unsafe extern "C" fn on_rehydrate(version: u32, ptr: u32, len: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;

@@ -36,7 +36,9 @@ Input streams (tick, key, mouse_move, mouse_button) are publish/subscribe (ADR-0
 
 `aether.control.replace_component` is freeze-drain-swap (ADR-0022): the substrate freezes the target mailbox, waits for in-flight `deliver` calls on the old instance to complete, then swaps. If the drain exceeds `drain_timeout_ms` (default 5000, per-replace overridable) the reply is `Err { error: "drain timeout ..." }` and the old instance stays bound — a loud failure rather than silent dropped mail. Mail that arrives during the freeze is parked and flushed through whichever instance ends up bound (new on success, old on timeout).
 
-Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encoding), ADR-0008 (observation path), ADR-0009 (hub-supervised substrate spawn), ADR-0020 (symmetric receive_mail decode), ADR-0021 (input stream subscriptions), ADR-0022 (drain-on-swap for replace_component), and ADR-0023 (substrate log capture + engine_logs).
+Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encoding), ADR-0008 (observation path), ADR-0009 (hub-supervised substrate spawn), ADR-0020 (symmetric receive_mail decode), ADR-0021 (input stream subscriptions), ADR-0022 (drain-on-swap for replace_component), ADR-0023 (substrate log capture + engine_logs), and ADR-0024 (`_p32`-suffixed FFI in anticipation of wasm64).
+
+The component FFI surface uses a `_p32` suffix on every pointer-typed import (`aether::send_mail_p32`, `reply_mail_p32`, `resolve_kind_p32`, `resolve_mailbox_p32`, `save_state_p32`) and on the `receive_p32` / `on_rehydrate_p32` exports. Non-pointer exports (`init`, `on_replace`, `on_drop`) are unsuffixed. The suffix locks the wasm32/wasm64 naming convention without committing to dual registration today — see ADR-0024 for the deferred Phase 2.
 
 ## Commands
 

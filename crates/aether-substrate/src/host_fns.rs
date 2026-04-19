@@ -51,7 +51,7 @@ pub const SAVE_STATE_TOO_LARGE: u32 = 3;
 pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     linker.func_wrap(
         "aether",
-        "send_mail",
+        "send_mail_p32",
         |mut caller: Caller<'_, SubstrateCtx>,
          recipient: u32,
          kind: u32,
@@ -82,7 +82,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
 
     linker.func_wrap(
         "aether",
-        "resolve_kind",
+        "resolve_kind_p32",
         |mut caller: Caller<'_, SubstrateCtx>, name_ptr: u32, name_len: u32| -> u32 {
             let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
@@ -126,7 +126,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     // for the success path and doesn't change behavior on error.
     linker.func_wrap(
         "aether",
-        "save_state",
+        "save_state_p32",
         |mut caller: Caller<'_, SubstrateCtx>, version: u32, ptr: u32, len: u32| -> u32 {
             if len as usize > MAX_STATE_BUNDLE_BYTES {
                 caller.data_mut().save_state_error = Some(format!(
@@ -164,7 +164,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     //     as any other send to a dropped mailbox.
     linker.func_wrap(
         "aether",
-        "reply_mail",
+        "reply_mail_p32",
         |mut caller: Caller<'_, SubstrateCtx>,
          sender: u32,
          kind: u32,
@@ -218,7 +218,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
 
     linker.func_wrap(
         "aether",
-        "resolve_mailbox",
+        "resolve_mailbox_p32",
         |mut caller: Caller<'_, SubstrateCtx>, name_ptr: u32, name_len: u32| -> u32 {
             let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
