@@ -1,7 +1,8 @@
 # ADR-0027: Component-declared kind dependencies via associated typelist
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-19
+- **Accepted:** 2026-04-19
 
 ## Context
 
@@ -101,12 +102,14 @@ Two new methods on `Mail<'_>`, both type-driven:
 ```rust
 impl<'a> Mail<'a> {
     /// True if the inbound kind matches `K`. For signal-shaped kinds.
-    pub fn is<K: Kind>(&self) -> bool { /* lookup table → matches */ }
+    pub fn is<K: Kind + 'static>(&self) -> bool { /* lookup table → matches */ }
 
-    /// Some(&K) if the inbound is a `K`, else None. For POD kinds.
-    pub fn decode<K: Kind + bytemuck::Pod>(&self) -> Option<&K> { ... }
+    /// Some(K) if the inbound is a `K`, else None. For POD kinds.
+    pub fn decode_typed<K: Kind + bytemuck::AnyBitPattern + 'static>(&self) -> Option<K> { ... }
 }
 ```
+
+(Implementation note: the original sketch named the type-driven decode `decode` to mirror the existing `decode(kind_id)`. Rust does not allow two inherent methods with the same name on the same type, so the shipped name is `decode_typed`. `_typed` signals "type-driven via the kind table" rather than "via the explicit `KindId<K>` arg". A symmetric `decode_slice_typed` covers the batched path. The shipped methods return owned `K` (matching `decode`'s `pod_read_unaligned` semantics) rather than borrowed `&K` to keep alignment requirements off the receive body.)
 
 The receive body becomes:
 
@@ -114,8 +117,8 @@ The receive body becomes:
 fn receive(&mut self, ctx: &mut Ctx<'_>, mail: Mail<'_>) {
     if mail.is::<Tick>() { ... }
     else if mail.is::<MouseButton>() { ... }
-    else if let Some(k) = mail.decode::<Key>() { ... }
-    else if let Some(m) = mail.decode::<MouseMove>() { ... }
+    else if let Some(k) = mail.decode_typed::<Key>() { ... }
+    else if let Some(m) = mail.decode_typed::<MouseMove>() { ... }
 }
 ```
 
@@ -135,9 +138,9 @@ Sized at `MAX_KINDS = 32` to match the tuple impl ceiling. Cons-list components 
 
 ### 5. Migration & coexistence
 
-The new shape is strictly additive. Existing components written against the current API (with explicit `KindId<K>` fields and `ctx.resolve::<K>()` calls in init) continue to compile and run unchanged — `Component::Kinds` defaults to `()` for components that don't override it, and `mail.decode(kind_id_field)` / `KindId::matches` stay on the API surface. Authors choose between the two styles per component.
+The new shape is mostly additive. Existing components written against the current API (with explicit `KindId<K>` fields and `ctx.resolve::<K>()` calls in init) continue to compile and run unchanged at the **call** sites — `mail.decode(kind_id_field)` / `KindId::matches` stay on the API surface. Authors choose between the two styles per component.
 
-Over time, the in-repo example components (echoer, caller, input_logger) migrate to the new shape as part of the same PR that ships this ADR.
+The one non-additive nudge: every `Component` impl must explicitly declare `type Kinds = (...)` (or `type Kinds = ();` if the receive body uses only the older `KindId<K>` field pattern). Default associated types are still nightly-only, so the trait can't ship `type Kinds = () = ...`. The cost is a one-line addition per component; the in-repo examples (echoer, caller, input_logger, hello-component) get migrated to the new shape as part of this ADR's implementation PR.
 
 ### 6. Compile-time membership gate (deferred to follow-up)
 

@@ -4,6 +4,12 @@
 // back to the originating Claude session — a minimal round-trip
 // smoke test proving reply-to-sender works end-to-end over the hub.
 
+// ADR-0027 shape: receive-side kinds (`Tick`, `Ping`) live in
+// `type Kinds`; dispatch reads the per-component `KindTable` via
+// `mail.is::<Tick>()` and `mail.decode_typed::<Ping>()`. Reply kind
+// `Pong` keeps an explicit `KindId<Pong>` because `Ctx::reply` takes
+// one (sender-side, type-driven reply is a follow-up).
+
 use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
 
@@ -34,26 +40,24 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
 };
 
 pub struct Hello {
-    tick: KindId<Tick>,
-    ping: KindId<Ping>,
     pong: KindId<Pong>,
     render: Sink<DrawTriangle>,
 }
 
 impl Component for Hello {
+    type Kinds = (Tick, Ping);
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Hello {
-            tick: ctx.resolve::<Tick>(),
-            ping: ctx.resolve::<Ping>(),
             pong: ctx.resolve::<Pong>(),
             render: ctx.resolve_sink::<DrawTriangle>("render"),
         }
     }
 
     fn receive(&mut self, ctx: &mut Ctx<'_>, mail: Mail<'_>) {
-        if self.tick.matches(mail.kind()) {
+        if mail.is::<Tick>() {
             ctx.send(&self.render, &TRIANGLE);
-        } else if let Some(ping) = mail.decode(self.ping)
+        } else if let Some(ping) = mail.decode_typed::<Ping>()
             && let Some(sender) = mail.sender()
         {
             // Echo the sequence number so the caller can pair request

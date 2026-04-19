@@ -5,8 +5,13 @@
 // sender handle the substrate allocated — broadcasts
 // `demo.observation { seq }` to `hub.claude.broadcast` so the round
 // trip is visible to the driving Claude session.
+//
+// ADR-0027 shape: receive-side kinds (`Tick`, `Response`) live in
+// `type Kinds` and dispatch via `mail.is::<Tick>()` /
+// `mail.decode_typed::<Response>()`; send-side `Sink<K>` keeps its
+// explicit field because mailbox names are data, not type.
 
-use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
+use aether_component::{Component, Ctx, InitCtx, Mail, Sink};
 use aether_kinds::Tick;
 use aether_mail::Kind;
 use bytemuck::{Pod, Zeroable};
@@ -39,18 +44,16 @@ impl Kind for Observation {
 }
 
 pub struct Caller {
-    tick: KindId<Tick>,
-    response: KindId<Response>,
     request: Sink<Request>,
     observe: Sink<Observation>,
     next_seq: u32,
 }
 
 impl Component for Caller {
+    type Kinds = (Tick, Response);
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Caller {
-            tick: ctx.resolve::<Tick>(),
-            response: ctx.resolve::<Response>(),
             request: ctx.resolve_sink::<Request>("echoer"),
             observe: ctx.resolve_sink::<Observation>("hub.claude.broadcast"),
             next_seq: 0,
@@ -58,11 +61,11 @@ impl Component for Caller {
     }
 
     fn receive(&mut self, ctx: &mut Ctx<'_>, mail: Mail<'_>) {
-        if self.tick.matches(mail.kind()) {
+        if mail.is::<Tick>() {
             let seq = self.next_seq;
             self.next_seq = self.next_seq.wrapping_add(1);
             ctx.send(&self.request, &Request { seq });
-        } else if let Some(resp) = mail.decode(self.response) {
+        } else if let Some(resp) = mail.decode_typed::<Response>() {
             ctx.send(&self.observe, &Observation { seq: resp.seq });
         }
     }
