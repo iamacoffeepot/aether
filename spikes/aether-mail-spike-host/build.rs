@@ -16,9 +16,10 @@ use std::process::Command;
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
-    let guest_dir = workspace_root
-        .join("crates")
+    // spikes/aether-mail-spike-host → spikes/aether-mail-spike-guest
+    let guest_dir = manifest_dir
+        .parent()
+        .unwrap()
         .join("aether-mail-spike-guest");
 
     println!("cargo:rerun-if-changed={}", guest_dir.join("src").display());

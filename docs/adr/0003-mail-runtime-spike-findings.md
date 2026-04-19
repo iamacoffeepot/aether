@@ -64,7 +64,7 @@ These are limits on how far the numbers should be read, not failures of the resu
 - **The substrate-and-mail architecture moves forward as ADR-0002 describes.** No re-architecture; no deferred-lever PRs in the immediate roadmap.
 - **The deferred-levers section of ADR-0002 stays deferred.** Hierarchical shared memory, substrate-hosted fast paths, read-only caches, and mail compaction are not pre-emptively built. They get pulled when a specific concrete workload demands one of them.
 - **Real-workload characterization is identified as future work.** When real subsystem code starts existing — physics integrators, scene traversal, asset streaming — the spike's measurement harness should be re-pointed at workloads that exercise memory access, branches, and cache. That's a separate effort, not an immediate blocker.
-- **The spike crates (`aether-mail-spike-host`, `aether-mail-spike-guest`) become reference artefacts.** They live in the workspace as throwaway/educational code. When the real substrate begins, it can borrow shape from them but should not depend on them.
+- **The spike crates (`aether-mail-spike-host`, `aether-mail-spike-guest`) become reference artefacts.** They live in the repo as throwaway/educational code under `spikes/` (since 2026-04, moved out of the main workspace so they don't pull into routine builds; build standalone via `cargo build` from inside their crate directory). When the real substrate begins, it can borrow shape from them but should not depend on them.
 - **Boundary cost (~75ns/mail) is the operating baseline** that future engine-design discussions can reason against.
 
 ## Alternatives considered

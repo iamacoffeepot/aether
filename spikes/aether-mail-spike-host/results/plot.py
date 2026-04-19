@@ -281,8 +281,8 @@ def main() -> int:
 
     if not any_done:
         print(
-            "no CSVs found — run `cargo run --release -p aether-mail-spike-host` and/or\n"
-            "`cargo run --release -p aether-mail-spike-host --bin concurrent` first"
+            "no CSVs found — from inside `spikes/aether-mail-spike-host/`, run\n"
+            "`cargo run --release` and/or `cargo run --release --bin concurrent` first"
         )
         return 1
     return 0

@@ -1,7 +1,7 @@
 // Worker-pool scheduler. Shape borrowed from
-// `aether-mail-spike-host/src/scheduler.rs` per ADR-0004: shared queue,
-// per-component `Mutex`, frame-barrier counter, all under `std`
-// primitives only. The spike crate is not a dependency.
+// `spikes/aether-mail-spike-host/src/scheduler.rs` per ADR-0004:
+// shared queue, per-component `Mutex`, frame-barrier counter, all
+// under `std` primitives only. The spike crate is not a dependency.
 //
 // Design notes carried from ADR-0004:
 //   - Single `Mutex<VecDeque<Mail>>` + `Condvar` as the shared queue.

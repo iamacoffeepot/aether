@@ -1,0 +1,13 @@
+# Reference artefact under spikes/ — standalone Cargo workspace so the
+# parent aether workspace doesn't absorb it (see ADR-0003 §Consequences).
+[workspace]
+
+[package]
+name = "aether-mail-spike-guest"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]

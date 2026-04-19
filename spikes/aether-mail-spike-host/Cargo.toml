@@ -1,0 +1,12 @@
+# Reference artefact under spikes/ — standalone Cargo workspace so the
+# parent aether workspace doesn't absorb it (see ADR-0003 §Consequences).
+[workspace]
+
+[package]
+name = "aether-mail-spike-host"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+wasmtime = "30"

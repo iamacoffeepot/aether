@@ -1,6 +1,6 @@
 # Mail-spike benchmark results
 
-CSV output from running `cargo run --release -p aether-mail-spike-host` lands here. Files are gitignored — they vary per machine and across runs, and we don't want to commit benchmark output.
+CSV output from running `cargo run --release` (from inside `spikes/aether-mail-spike-host/`) lands here. Files are gitignored — they vary per machine and across runs, and we don't want to commit benchmark output.
 
 Always use `--release`. Both the host binary and the wasm guest pick up the host's profile (release host → release guest, debug host → debug guest), so a debug run gives you debug-host numbers measuring debug-guest work — meaningless for benchmarking.
 
@@ -29,15 +29,15 @@ Per-workload dimensions:
 | `parallel_mixed` | `n_actors` | `k_workers` | Two barriered phases per frame (heavy tick + light neighbor) |
 | `churn` | `n_actors` | `k_workers` | Tiny work per tick — isolates scheduler dispatch floor |
 
-Sequential CSVs come from `cargo run --release -p aether-mail-spike-host`.
-Concurrent CSVs come from `cargo run --release -p aether-mail-spike-host --bin concurrent`.
+Sequential CSVs come from `cargo run --release` (run from inside `spikes/aether-mail-spike-host/`).
+Concurrent CSVs come from `cargo run --release --bin concurrent` (same working directory).
 
 ## How to plot
 
 `plot.py` reads the four CSVs and writes corresponding PNGs alongside (also gitignored). It's a uv script with PEP 723 inline dependencies (matplotlib, numpy), so:
 
 ```sh
-cd crates/aether-mail-spike-host/results
+cd spikes/aether-mail-spike-host/results
 uv run plot.py
 ```
 

@@ -1,1 +1,4 @@
 /target
+# Spike crates under spikes/ are standalone Cargo workspaces with
+# their own target dirs (per ADR-0003 §Consequences).
+spikes/*/target/

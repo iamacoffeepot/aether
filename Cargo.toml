@@ -9,9 +9,11 @@ members = [
     "crates/aether-hub-protocol",
     "crates/aether-mail",
     "crates/aether-mail-derive",
-    "crates/aether-mail-spike-host",
-    "crates/aether-mail-spike-guest",
 ]
+# Reference artefacts under spikes/ are standalone Cargo workspaces
+# (see ADR-0003 §Consequences) and must be excluded so they aren't
+# auto-absorbed into this workspace via the parent-walk.
+exclude = ["spikes/*"]
 
 [workspace.package]
 version = "0.1.0"
