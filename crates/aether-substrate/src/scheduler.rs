@@ -19,21 +19,55 @@
 // take the shared lock (one per dispatch); writes are rare and held
 // briefly (insert/remove). The per-component `Mutex` serialises
 // deliver calls for a single component as before.
+//
+// ADR-0022 layers freeze-drain semantics on top of the table:
+// `replace_component` flips a per-entry `frozen` flag so workers park
+// new mail on the entry instead of dispatching, then waits for the
+// per-entry `pending` count of in-flight `deliver` calls to reach
+// zero before swapping. The swap step (and the parked-mail flush) is
+// driven by `ControlPlane::handle_replace`; this module just owns
+// the per-entry state and the worker dispatch path that respects it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 
 use crate::component::Component;
-use crate::mail::MailboxId;
+use crate::mail::{Mail, MailboxId};
 use crate::queue::MailQueue;
 use crate::registry::{MailboxEntry, Registry};
 
+/// Per-mailbox scheduler state. Beyond the wasmtime instance itself we
+/// track ADR-0022's freeze-drain bookkeeping: `pending` counts mail
+/// currently being delivered to this component, `frozen` halts dispatch
+/// for replace's quiescence window, and `parked` holds mail popped
+/// while frozen so it can be replayed against whichever component is
+/// bound after the swap (new instance on success, old on timeout).
+pub struct ComponentEntry {
+    pub component: Mutex<Component>,
+    pub pending: AtomicU32,
+    pub frozen: AtomicBool,
+    pub parked: Mutex<VecDeque<Mail>>,
+}
+
+impl ComponentEntry {
+    pub fn new(component: Component) -> Self {
+        Self {
+            component: Mutex::new(component),
+            pending: AtomicU32::new(0),
+            frozen: AtomicBool::new(false),
+            parked: Mutex::new(VecDeque::new()),
+        }
+    }
+}
+
 /// Shared, runtime-mutable table of bound components. Cloned into the
 /// scheduler's workers and into the ADR-0010 load handler so both read
-/// and write through the same `RwLock`. The inner `Mutex<Component>`
-/// still serialises deliver calls per-component.
-pub type ComponentTable = Arc<RwLock<HashMap<MailboxId, Mutex<Component>>>>;
+/// and write through the same `RwLock`. Values are `Arc`-shared so the
+/// freeze-drain path in `replace_component` can hold a long-lived
+/// reference to one entry without keeping the table read lock open.
+pub type ComponentTable = Arc<RwLock<HashMap<MailboxId, Arc<ComponentEntry>>>>;
 
 /// Owned by the scheduler, shared with every worker. Separate from the
 /// public `Scheduler` handle so workers can keep running even while the
@@ -64,7 +98,7 @@ impl Scheduler {
         let components: ComponentTable = Arc::new(RwLock::new(
             components
                 .into_iter()
-                .map(|(id, c)| (id, Mutex::new(c)))
+                .map(|(id, c)| (id, Arc::new(ComponentEntry::new(c))))
                 .collect(),
         ));
         let ctx = Arc::new(WorkerContext {
@@ -102,13 +136,13 @@ impl Scheduler {
     /// the load handler once instantiation succeeds and the mailbox
     /// id has been assigned. Silently replaces any existing component
     /// at `id` — replacement is an ADR-0010 primitive in its own
-    /// right, wired in a later PR.
+    /// right, handled by `ControlPlane::handle_replace` (ADR-0022).
     pub fn add_component(&self, id: MailboxId, component: Component) {
         self.ctx
             .components
             .write()
             .unwrap()
-            .insert(id, Mutex::new(component));
+            .insert(id, Arc::new(ComponentEntry::new(component)));
     }
 
     /// Remove and return the component bound to `id`, if any. The
@@ -122,24 +156,23 @@ impl Scheduler {
             .write()
             .unwrap()
             .remove(&id)
-            .map(|m| m.into_inner().expect("component mutex poisoned"))
+            .map(extract_component)
     }
+}
 
-    /// Atomically rebind `id` to a freshly instantiated component
-    /// (ADR-0010). Returns the old component so the caller can drop
-    /// it after the swap; wasmtime resources (linear memory, Store)
-    /// are reclaimed when the returned value falls out of scope.
-    /// The entry is replaced under the write lock so no worker can
-    /// observe a gap between old and new — any mail that gets popped
-    /// after the swap is delivered to the new instance.
-    pub fn replace_component(&self, id: MailboxId, new_component: Component) -> Option<Component> {
-        let mut table = self.ctx.components.write().unwrap();
-        let old = table
-            .remove(&id)
-            .map(|m| m.into_inner().expect("component mutex poisoned"));
-        table.insert(id, Mutex::new(new_component));
-        old
-    }
+/// Pull the wasmtime instance out of a removed entry. Panics if any
+/// other `Arc` clone is still live (e.g. a worker holding a reference
+/// across a deliver that's about to return). The control plane only
+/// removes entries after either (a) `drop_component` marked the
+/// mailbox `Dropped` so workers refuse new dispatches, or (b) the
+/// freeze-drain path of `handle_replace` confirmed `pending == 0`,
+/// so no worker should be holding a clone in either case.
+pub(crate) fn extract_component(entry: Arc<ComponentEntry>) -> Component {
+    Arc::into_inner(entry)
+        .expect("component entry still referenced by a worker")
+        .component
+        .into_inner()
+        .expect("component mutex poisoned")
 }
 
 impl Drop for Scheduler {
@@ -165,11 +198,30 @@ fn worker_loop(ctx: Arc<WorkerContext>) {
                 handler(&kind_name, None, mail.sender, &mail.payload, mail.count);
             }
             Some(MailboxEntry::Component) => {
-                let components = ctx.components.read().unwrap();
-                match components.get(&recipient) {
-                    Some(lock) => {
-                        let mut c = lock.lock().unwrap();
-                        c.deliver(&mail).expect("component.deliver failed");
+                let entry = ctx
+                    .components
+                    .read()
+                    .unwrap()
+                    .get(&recipient)
+                    .map(Arc::clone);
+                match entry {
+                    Some(entry) => {
+                        // ADR-0022 freeze-drain: while frozen, mail is
+                        // parked on the entry without entering the
+                        // pending count. handle_replace flushes the
+                        // parked queue under the write lock once the
+                        // swap (or timeout) resolves.
+                        if entry.frozen.load(Ordering::Acquire) {
+                            entry.parked.lock().unwrap().push_back(mail);
+                            ctx.queue.mark_completed();
+                            continue;
+                        }
+                        entry.pending.fetch_add(1, Ordering::AcqRel);
+                        {
+                            let mut c = entry.component.lock().unwrap();
+                            c.deliver(&mail).expect("component.deliver failed");
+                        }
+                        entry.pending.fetch_sub(1, Ordering::AcqRel);
                     }
                     None => {
                         eprintln!(

@@ -33,7 +33,9 @@ The observation path (ADR-0008) goes the other way: engines emit to the well-kno
 
 Input streams (tick, key, mouse_move, mouse_button) are publish/subscribe (ADR-0021): the substrate boots with empty subscriber sets and drops every input event until something subscribes. To wire a freshly-loaded component into the platform's event stream, mail `aether.control.subscribe_input` with `{ "stream": "Tick" | "Key" | "MouseMove" | "MouseButton", "mailbox": <id from load_result> }`. Multiple components may subscribe to the same stream; the substrate fans out to every subscriber. `aether.control.unsubscribe_input` removes one. Both reply via `aether.control.subscribe_input_result`. Subscriptions are auto-cleared when a component is dropped and preserved across `replace_component` (the mailbox id is stable).
 
-Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encoding), ADR-0008 (observation path), ADR-0009 (hub-supervised substrate spawn), ADR-0020 (symmetric receive_mail decode), and ADR-0021 (input stream subscriptions).
+`aether.control.replace_component` is freeze-drain-swap (ADR-0022): the substrate freezes the target mailbox, waits for in-flight `deliver` calls on the old instance to complete, then swaps. If the drain exceeds `drain_timeout_ms` (default 5000, per-replace overridable) the reply is `Err { error: "drain timeout ..." }` and the old instance stays bound — a loud failure rather than silent dropped mail. Mail that arrives during the freeze is parked and flushed through whichever instance ends up bound (new on success, old on timeout).
+
+Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encoding), ADR-0008 (observation path), ADR-0009 (hub-supervised substrate spawn), ADR-0020 (symmetric receive_mail decode), ADR-0021 (input stream subscriptions), and ADR-0022 (drain-on-swap for replace_component).
 
 ## Commands
 

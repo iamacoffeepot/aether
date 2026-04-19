@@ -92,6 +92,8 @@ For `replace_component(target, new_bytes)`:
 
 This ordering is the subject of follow-up bikeshed: `on_replace` + `on_drop` firing back-to-back is redundant if the state migration already captured everything. Keeping both firing is the honest answer — `on_drop` is for universal cleanup; `on_replace` is the migration-specific moment. Overrides don't have to implement both.
 
+> **Updated by ADR-0022.** Steps 1–6 above describe what happens *during* the swap; ADR-0022 prepends two phases — freeze (flip a per-entry flag so workers park new mail instead of dispatching) and drain (wait for in-flight `deliver` calls on the old instance to complete) — before step 1 takes the write lock. Mail parked during the freeze flushes through whichever instance ends up bound (new on success, old on timeout) before the write lock releases. The ordering of hooks 2–5 is unchanged.
+
 ### 4. What stays parked
 
 - **`on_tick` as a first-class hook.** Continues to come in via `receive` as `aether.tick` mail. Revisit when the pattern-matching cost is visible.

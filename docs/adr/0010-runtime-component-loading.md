@@ -67,6 +67,8 @@ External senders see no addressing change. Mail in flight on the wire that hasn'
 
 In-flight mail policy is **drop**, not drain. Drain is more semantically clean but adds protocol — quiesce signal, flush ack, then swap. V0 picks drop; if a real workload needs drain, it's an additive `drain: bool` flag on the replace mail.
 
+> **Superseded by ADR-0022.** The drop policy was loose-but-harmless while components were stateless renderers; ADR-0016 (state migration) and ADR-0013 (reply-to-sender) made it actively wrong. ADR-0022 replaces step 3 with a freeze-drain-swap: the substrate quiesces the recipient, waits for in-flight `deliver` calls to complete, then swaps. See ADR-0022 for the actual semantics in shipping code.
+
 ### 6. State migration is out of scope
 
 The new component starts fresh. WASM linear memory from the old instance is not transferred. If a component needs persistent state across swaps, it's the component's responsibility to externalize it (e.g., write to a sidecar mailbox another component owns, or to a future persistence service). When state migration becomes a concrete need, it gets its own ADR.

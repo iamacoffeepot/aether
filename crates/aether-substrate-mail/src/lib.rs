@@ -191,9 +191,11 @@ mod control_plane {
     }
 
     /// `aether.control.replace_component` — atomically rebind a target
-    /// mailbox id to a freshly instantiated component. In-flight mail
-    /// queued on the old instance at the moment of swap is dropped
-    /// (V0 policy; drain is an additive follow-up). Reply:
+    /// mailbox id to a freshly instantiated component. ADR-0022: the
+    /// substrate freezes the target, drains in-flight mail through
+    /// the old instance, then swaps. If the drain exceeds
+    /// `drain_timeout_ms` (default 5000) the replace fails with
+    /// `ReplaceResult::Err` and the old instance stays bound. Reply:
     /// `ReplaceResult`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.replace_component")]
@@ -201,6 +203,7 @@ mod control_plane {
         pub mailbox_id: u32,
         pub wasm: Vec<u8>,
         pub kinds: Vec<LoadKind>,
+        pub drain_timeout_ms: Option<u32>,
     }
 
     /// Reply to `ReplaceComponent`. Same shape as `DropResult` —

@@ -1,6 +1,6 @@
 # ADR-0022: Drain in-flight mail before component swap
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-17
 
 ## Context
