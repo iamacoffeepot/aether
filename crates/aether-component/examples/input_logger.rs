@@ -22,8 +22,13 @@
 // `code` carries the keycode for Key, the rounded cursor `x` for
 // MouseMove, and `0` for the empty-payload kinds (Tick and
 // MouseButton).
+//
+// ADR-0027 shape: the four input kinds live in `type Kinds`;
+// dispatch reads from the per-component `KindTable` via
+// `mail.is::<K>()` for signal kinds and `mail.decode_typed::<K>()`
+// for payload-bearing ones.
 
-use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
+use aether_component::{Component, Ctx, InitCtx, Mail, Sink};
 use aether_kinds::{Key, MouseButton, MouseMove, Tick};
 use aether_mail::Kind;
 use bytemuck::{Pod, Zeroable};
@@ -39,36 +44,30 @@ impl Kind for InputObserved {
 }
 
 pub struct InputLogger {
-    tick: KindId<Tick>,
-    key: KindId<Key>,
-    mouse_button: KindId<MouseButton>,
-    mouse_move: KindId<MouseMove>,
     observe: Sink<InputObserved>,
 }
 
 impl Component for InputLogger {
+    type Kinds = (Tick, Key, MouseButton, MouseMove);
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         InputLogger {
-            tick: ctx.resolve::<Tick>(),
-            key: ctx.resolve::<Key>(),
-            mouse_button: ctx.resolve::<MouseButton>(),
-            mouse_move: ctx.resolve::<MouseMove>(),
             observe: ctx.resolve_sink::<InputObserved>("hub.claude.broadcast"),
         }
     }
 
     fn receive(&mut self, ctx: &mut Ctx<'_>, mail: Mail<'_>) {
-        let observation = if self.tick.matches(mail.kind()) {
+        let observation = if mail.is::<Tick>() {
             Some(InputObserved { stream: 0, code: 0 })
-        } else if self.mouse_button.matches(mail.kind()) {
+        } else if mail.is::<MouseButton>() {
             Some(InputObserved { stream: 2, code: 0 })
-        } else if let Some(k) = mail.decode(self.key) {
+        } else if let Some(k) = mail.decode_typed::<Key>() {
             Some(InputObserved {
                 stream: 1,
                 code: k.code,
             })
         } else {
-            mail.decode(self.mouse_move).map(|m| InputObserved {
+            mail.decode_typed::<MouseMove>().map(|m| InputObserved {
                 stream: 3,
                 code: m.x as u32,
             })

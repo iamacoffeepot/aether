@@ -40,6 +40,8 @@ Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encod
 
 The component FFI surface uses a `_p32` suffix on every pointer-typed import (`aether::send_mail_p32`, `reply_mail_p32`, `resolve_kind_p32`, `resolve_mailbox_p32`, `save_state_p32`) and on the `receive_p32` / `on_rehydrate_p32` exports. Non-pointer exports (`init`, `on_replace`, `on_drop`) are unsuffixed. The suffix locks the wasm32/wasm64 naming convention without committing to dual registration today — see ADR-0024 for the deferred Phase 2.
 
+Components declare their receive-side kind dependencies as a typelist on the `Component` trait (ADR-0027): `type Kinds = (Tick, Key, MouseMove);` for tuples up to 32, or `Cons<H, T>` / `Nil` for the unbounded escape hatch. The SDK walks the list at init, calls `resolve_kind` for each, and stashes the result in a per-component `KindTable`; receive-time helpers `mail.is::<K>()` and `mail.decode_typed::<K>()` consult the table by `TypeId` so the user doesn't carry a `KindId<K>` field per kind. `Sink<K>` keeps its explicit field — mailbox names are data, not types — and the older ADR-0014 `KindId<K>` + `mail.decode(kind_id)` pattern still compiles for components that need it (declare `type Kinds = ();`).
+
 ## Commands
 
 - Build: `cargo build` (release: `cargo build --release`)
