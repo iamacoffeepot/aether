@@ -20,8 +20,8 @@ use aether_mail::{Kind, Schema};
 use crate::{
     CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats, Key,
     LoadComponent, LoadResult, MouseButton, MouseMove, Ping, PlatformInfo, PlatformInfoResult,
-    Pong, ReplaceComponent, ReplaceResult, SubscribeInput, SubscribeInputResult, Tick,
-    UnsubscribeInput,
+    Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult, SubscribeInput,
+    SubscribeInputResult, Tick, UnsubscribeInput,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -63,6 +63,11 @@ pub fn all() -> Vec<KindDescriptor> {
         // Empty request, fat reply — see `PlatformInfoResult`.
         schema::<PlatformInfo>(),
         schema::<PlatformInfoResult>(),
+        // Window-mode switch: agents flip between windowed /
+        // fullscreen-borderless / fullscreen-exclusive, reply carries
+        // the resolved state.
+        schema::<SetWindowMode>(),
+        schema::<SetWindowModeResult>(),
     ]
 }
 

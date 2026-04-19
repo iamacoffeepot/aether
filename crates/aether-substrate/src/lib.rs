@@ -26,7 +26,9 @@ pub use capture::{CaptureQueue, PendingCapture};
 pub use component::Component;
 pub use control::{AETHER_CONTROL, ControlPlane};
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
-pub use platform_info::{NoopPlatformInfoNotifier, PlatformInfoNotifier};
+pub use platform_info::{
+    NoopPlatformInfoNotifier, NoopWindowModeNotifier, PlatformInfoNotifier, WindowModeNotifier,
+};
 // ADR-0019 PR 5: control-plane payload types now live as schema kinds
 // in `aether-kinds` (LoadComponent, LoadResult, etc.).
 // Re-exports of the old `*Payload` structs are gone — consumers
