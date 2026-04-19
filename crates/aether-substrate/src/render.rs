@@ -172,16 +172,22 @@ impl Gpu {
                 return;
             }
             other => {
-                eprintln!("surface.get_current_texture: {other:?}");
+                tracing::warn!(
+                    target: "aether_substrate::render",
+                    status = ?other,
+                    "surface.get_current_texture returned unexpected status",
+                );
                 return;
             }
         };
 
         let vertex_bytes = vertices.len() as u64;
         if vertex_bytes > VERTEX_BUFFER_BYTES {
-            eprintln!(
-                "dropping frame: {} vertex bytes exceeds fixed buffer of {}",
-                vertex_bytes, VERTEX_BUFFER_BYTES
+            tracing::warn!(
+                target: "aether_substrate::render",
+                vertex_bytes,
+                cap = VERTEX_BUFFER_BYTES,
+                "dropping frame: vertex bytes exceed fixed buffer",
             );
             return;
         }

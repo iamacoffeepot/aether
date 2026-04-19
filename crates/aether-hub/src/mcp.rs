@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_hub_protocol::{
-    EngineId, HubToEngine, KindDescriptor, MailFrame, SchemaType, SessionToken, Uuid,
+    EngineId, HubToEngine, KindDescriptor, LogLevel, MailFrame, SchemaType, SessionToken, Uuid,
 };
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -31,6 +31,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::decoder::decode_schema;
 use crate::encoder::encode_schema;
+use crate::log_store::{LogStore, TOOL_DEFAULT_ENTRIES, TOOL_MAX_ENTRIES};
 use crate::registry::{EngineRecord, EngineRegistry};
 use crate::session::{QueuedMail, SessionHandle, SessionRegistry};
 use crate::spawn::{DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, PendingSpawns, SpawnOpts};
@@ -45,6 +46,9 @@ pub struct HubState {
     engines: EngineRegistry,
     sessions: SessionRegistry,
     pending_spawns: PendingSpawns,
+    /// ADR-0023 per-engine log buffers. Outlives engine records so
+    /// post-mortem `engine_logs` polls succeed after a substrate exit.
+    logs: LogStore,
     /// Address of the hub's engine TCP listener. Injected as
     /// `AETHER_HUB_URL` into spawned substrates so they dial back to
     /// this hub instance.
@@ -56,12 +60,14 @@ impl HubState {
         engines: EngineRegistry,
         sessions: SessionRegistry,
         pending_spawns: PendingSpawns,
+        logs: LogStore,
         hub_engine_addr: SocketAddr,
     ) -> Arc<Self> {
         Arc::new(Self {
             engines,
             sessions,
             pending_spawns,
+            logs,
             hub_engine_addr,
         })
     }
@@ -147,6 +153,16 @@ fn one() -> u32 {
     1
 }
 
+fn log_level_to_str(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Trace => "trace",
+        LogLevel::Debug => "debug",
+        LogLevel::Info => "info",
+        LogLevel::Warn => "warn",
+        LogLevel::Error => "error",
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct EngineInfo {
     pub engine_id: String,
@@ -207,6 +223,54 @@ pub struct TerminateResult {
     /// Exit code if the child exited normally; `null` if it was killed
     /// by a signal (the common case when `sigkilled` is true).
     pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EngineLogsArgs {
+    /// Hub-assigned engine UUID as a string (from `list_engines`).
+    pub engine_id: String,
+    /// Maximum entries to return. Defaults to 100; clamped to 1000.
+    #[serde(default)]
+    pub max: Option<u32>,
+    /// Minimum log level (`"trace"|"debug"|"info"|"warn"|"error"`).
+    /// Defaults to `"trace"` (every captured entry).
+    #[serde(default)]
+    pub level: Option<String>,
+    /// Cursor: only entries with `sequence > since` are returned.
+    /// Pass back the previous response's `next_since` to poll
+    /// incrementally without re-receiving.
+    #[serde(default)]
+    pub since: Option<u64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct EngineLogsResponse {
+    pub engine_id: String,
+    pub entries: Vec<EngineLogEntry>,
+    /// Highest `sequence` returned in `entries`, or the request's
+    /// `since` value if the response is empty. Use as the next
+    /// `since` for incremental polling.
+    pub next_since: u64,
+    /// Set when the hub-side ring evicted entries the caller hadn't
+    /// seen — `Some(seq)` means the gap above the request's `since`
+    /// extends up to (but not including) `seq`. Treat as a signal to
+    /// poll more often or accept the loss.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated_before: Option<u64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct EngineLogEntry {
+    pub timestamp_unix_ms: u64,
+    /// Lowercase level: `"trace"|"debug"|"info"|"warn"|"error"`.
+    pub level: String,
+    /// Module path the event was emitted from
+    /// (e.g. `"aether_substrate::scheduler"`).
+    pub target: String,
+    /// Already-formatted event text. Tracing's structured fields are
+    /// flattened into this string by the substrate's capture layer.
+    pub message: String,
+    pub sequence: u64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -411,6 +475,56 @@ impl Hub {
     }
 
     #[tool(
+        description = "Drain captured substrate log entries for an engine (ADR-0023). Cursor-based polling: pass back `next_since` from the previous response to receive only new entries. `level` (default `\"trace\"`) filters server-side. `max` defaults to 100, clamped to 1000. `truncated_before` is set when the hub-side ring evicted entries the caller hadn't seen — treat it as a signal to poll more often or accept the gap. Buffer survives engine exit until hub shutdown, so post-mortem polls work after the substrate has crashed."
+    )]
+    async fn engine_logs(
+        &self,
+        Parameters(args): Parameters<EngineLogsArgs>,
+    ) -> Result<String, McpError> {
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+        let min_level = match args.level.as_deref() {
+            None | Some("trace") => LogLevel::Trace,
+            Some("debug") => LogLevel::Debug,
+            Some("info") => LogLevel::Info,
+            Some("warn") => LogLevel::Warn,
+            Some("error") => LogLevel::Error,
+            Some(other) => {
+                return Err(McpError::invalid_params(
+                    format!("level {other:?} is not one of trace|debug|info|warn|error",),
+                    None,
+                ));
+            }
+        };
+        let max = args
+            .max
+            .map(|n| n as usize)
+            .unwrap_or(TOOL_DEFAULT_ENTRIES)
+            .min(TOOL_MAX_ENTRIES);
+        let since = args.since.unwrap_or(0);
+        let result = self.state.logs.read(id, max, min_level, since);
+        let response = EngineLogsResponse {
+            engine_id: args.engine_id,
+            entries: result
+                .entries
+                .into_iter()
+                .map(|e| EngineLogEntry {
+                    timestamp_unix_ms: e.timestamp_unix_ms,
+                    level: log_level_to_str(e.level).to_owned(),
+                    target: e.target,
+                    message: e.message,
+                    sequence: e.sequence,
+                })
+                .collect(),
+            next_since: result.next_since,
+            truncated_before: result.truncated_before,
+        };
+        serde_json::to_string(&response).map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    #[tool(
         description = "List all engines currently connected to the hub. Each item reports the hub-assigned engine_id, the engine's self-declared name/pid/version, and a `spawned` flag: `true` if the hub launched this engine as a child process (ADR-0009), `false` if it connected externally."
     )]
     async fn list_engines(&self) -> Result<String, McpError> {
@@ -568,6 +682,7 @@ mod tests {
             engines,
             sessions,
             PendingSpawns::new(),
+            LogStore::new(),
             "127.0.0.1:0".parse().unwrap(),
         )
     }
@@ -1172,6 +1287,7 @@ mod tests {
             EngineRegistry::new(),
             SessionRegistry::new(),
             PendingSpawns::new(),
+            LogStore::new(),
             "127.0.0.1:1".parse().unwrap(),
         );
         let hub = Hub::new(state);
@@ -1195,6 +1311,7 @@ mod tests {
             EngineRegistry::new(),
             SessionRegistry::new(),
             PendingSpawns::new(),
+            LogStore::new(),
             "127.0.0.1:1".parse().unwrap(),
         );
         let hub = Hub::new(state);
@@ -1219,6 +1336,7 @@ mod tests {
             engines,
             SessionRegistry::new(),
             PendingSpawns::new(),
+            LogStore::new(),
             "127.0.0.1:1".parse().unwrap(),
         );
         let hub = Hub::new(state);
@@ -1258,6 +1376,7 @@ mod tests {
             engines.clone(),
             SessionRegistry::new(),
             PendingSpawns::new(),
+            LogStore::new(),
             "127.0.0.1:1".parse().unwrap(),
         );
         let hub = Hub::new(state);
@@ -1286,6 +1405,7 @@ mod tests {
             EngineRegistry::new(),
             SessionRegistry::new(),
             PendingSpawns::new(),
+            LogStore::new(),
             "127.0.0.1:1".parse().unwrap(),
         );
         let hub = Hub::new(state);

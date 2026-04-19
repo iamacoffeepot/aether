@@ -131,7 +131,7 @@ impl Component {
         if let Some(f) = self.on_replace.clone()
             && let Err(e) = f.call(&mut self.store, ())
         {
-            eprintln!("substrate: on_replace hook trapped: {e}");
+            tracing::error!(target: "aether_substrate::component", error = %e, "on_replace hook trapped");
         }
     }
 
@@ -141,7 +141,7 @@ impl Component {
         if let Some(f) = self.on_drop.clone()
             && let Err(e) = f.call(&mut self.store, ())
         {
-            eprintln!("substrate: on_drop hook trapped: {e}");
+            tracing::error!(target: "aether_substrate::component", error = %e, "on_drop hook trapped");
         }
     }
 

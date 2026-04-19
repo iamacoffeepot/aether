@@ -1,7 +1,8 @@
 # ADR-0023: Substrate log capture and the `engine_logs` MCP tool
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-17
+- **Accepted:** 2026-04-18
 
 ## Context
 

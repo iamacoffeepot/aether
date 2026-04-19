@@ -130,9 +130,11 @@ impl ApplicationHandler for App {
                 self.frame += 1;
                 if self.frame.is_multiple_of(LOG_EVERY_FRAMES) {
                     let triangles = self.triangles_rendered.load(Ordering::Relaxed);
-                    eprintln!(
-                        "  frame {:>5}  triangles_rendered={}",
-                        self.frame, triangles,
+                    tracing::info!(
+                        target: "aether_substrate::frame_loop",
+                        frame = self.frame,
+                        triangles,
+                        "frame stats",
                     );
                     // Emit an observation to every attached Claude
                     // session. No-op when no hub is connected.
@@ -198,6 +200,17 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> wasmtime::Result<()> {
+    // Reserved well-known sink: mail sent here is forwarded to every
+    // attached Claude session via the hub. The handle is created up
+    // front (before the hub is dialed) so the log capture layer can
+    // share it; the hub client populates it later if `AETHER_HUB_URL`
+    // is set, otherwise sends are silently dropped.
+    let outbound = HubOutbound::disconnected();
+
+    // ADR-0023: install the tracing subscriber + log capture early so
+    // bring-up errors (renderer init, hub handshake) are captured.
+    aether_substrate::log_capture::init(Arc::clone(&outbound));
+
     let engine = Arc::new(Engine::default());
 
     let registry = Arc::new(Registry::new());
@@ -243,8 +256,8 @@ fn main() -> wasmtime::Result<()> {
     // Reserved well-known sink: mail sent here is forwarded to every
     // attached Claude session via the hub. If no hub is connected, the
     // outbound handle is disconnected and the sink silently drops —
-    // the component doesn't have to care either way.
-    let outbound = HubOutbound::disconnected();
+    // the component doesn't have to care either way. (Handle created
+    // earlier so the log capture layer could share it.)
     let broadcast_mbox = {
         let outbound = Arc::clone(&outbound);
         registry.register_sink(
@@ -256,8 +269,9 @@ fn main() -> wasmtime::Result<()> {
                       bytes: &[u8],
                       _count: u32| {
                     if kind_name.is_empty() {
-                        eprintln!(
-                            "aether-substrate: {HUB_CLAUDE_BROADCAST} received mail with unregistered kind — dropping"
+                        tracing::warn!(
+                            target: "aether_substrate::broadcast",
+                            "{HUB_CLAUDE_BROADCAST} received mail with unregistered kind — dropping",
                         );
                         return;
                     }
@@ -330,16 +344,22 @@ fn main() -> wasmtime::Result<()> {
         ) {
             Ok(c) => Some(c),
             Err(e) => {
-                eprintln!("aether-substrate: hub connect to {url} failed: {e}");
+                tracing::error!(
+                    target: "aether_substrate::boot",
+                    url = %url,
+                    error = %e,
+                    "hub connect failed",
+                );
                 None
             }
         },
         Err(_) => None,
     };
 
-    eprintln!(
-        "aether-substrate: componentless boot — {WORKERS} workers, close window to exit. \
-         Load a component via `aether.control.load_component`."
+    tracing::info!(
+        target: "aether_substrate::boot",
+        workers = WORKERS,
+        "componentless boot — close window to exit; load a component via aether.control.load_component",
     );
 
     let event_loop = EventLoop::new()?;
@@ -368,12 +388,13 @@ fn main() -> wasmtime::Result<()> {
 
     let total = triangles_rendered.load(Ordering::Relaxed);
     let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();
-    eprintln!(
-        "\nran {} frames in {:.2}ms ({:.1} fps) — triangles rendered = {}",
-        app.frame,
-        elapsed.as_secs_f64() * 1000.0,
-        app.frame as f64 / elapsed.as_secs_f64().max(0.001),
-        total,
+    tracing::info!(
+        target: "aether_substrate::shutdown",
+        frames = app.frame,
+        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+        fps = app.frame as f64 / elapsed.as_secs_f64().max(0.001),
+        triangles = total,
+        "frame loop exited",
     );
     Ok(())
 }

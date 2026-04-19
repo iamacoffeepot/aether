@@ -273,6 +273,46 @@ mod tests {
     }
 
     #[test]
+    fn log_batch_roundtrip() {
+        let msg = EngineToHub::LogBatch(vec![
+            LogEntry {
+                timestamp_unix_ms: 1_713_379_200_123,
+                level: LogLevel::Error,
+                target: "aether_substrate::component".into(),
+                message: "trap in deliver: unreachable".into(),
+                sequence: 47,
+            },
+            LogEntry {
+                timestamp_unix_ms: 1_713_379_200_456,
+                level: LogLevel::Info,
+                target: "aether_substrate::scheduler".into(),
+                message: "boot complete".into(),
+                sequence: 48,
+            },
+        ]);
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
+        match back {
+            EngineToHub::LogBatch(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].sequence, 47);
+                assert_eq!(entries[0].level, LogLevel::Error);
+                assert_eq!(entries[1].target, "aether_substrate::scheduler");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn log_level_ordering() {
+        assert!(LogLevel::Error > LogLevel::Warn);
+        assert!(LogLevel::Warn > LogLevel::Info);
+        assert!(LogLevel::Info > LogLevel::Debug);
+        assert!(LogLevel::Debug > LogLevel::Trace);
+    }
+
+    #[test]
     fn heartbeat_both_directions() {
         for buf in [
             encode_frame(&EngineToHub::Heartbeat),

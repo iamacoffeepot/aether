@@ -13,6 +13,7 @@ pub mod ctx;
 pub mod host_fns;
 pub mod hub_client;
 pub mod input;
+pub mod log_capture;
 pub mod mail;
 pub mod queue;
 pub mod registry;

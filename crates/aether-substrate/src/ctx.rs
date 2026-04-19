@@ -116,15 +116,19 @@ impl SubstrateCtx {
                     .push(Mail::new(recipient, kind, payload, count).with_origin(self.sender));
             }
             Some(MailboxEntry::Dropped) => {
-                eprintln!(
-                    "substrate: component {:?} sent mail to dropped mailbox {:?} — discarded",
-                    self.sender, recipient
+                tracing::warn!(
+                    target: "aether_substrate::ctx",
+                    sender = ?self.sender,
+                    mailbox = ?recipient,
+                    "component sent mail to dropped mailbox — discarded",
                 );
             }
             None => {
-                eprintln!(
-                    "substrate: dropped mail from {:?} to unknown mailbox {:?}",
-                    self.sender, recipient
+                tracing::warn!(
+                    target: "aether_substrate::ctx",
+                    sender = ?self.sender,
+                    mailbox = ?recipient,
+                    "component sent mail to unknown mailbox — dropped",
                 );
             }
         }
