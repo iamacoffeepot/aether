@@ -33,14 +33,14 @@ use aether_hub_protocol::{
 };
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, DropComponent, DropResult, LoadComponent, LoadKind,
-    LoadKindEncoding, LoadKindPrimitive, LoadResult, ReplaceComponent, ReplaceResult,
+    LoadKindEncoding, LoadKindPrimitive, LoadResult, MailEnvelope, ReplaceComponent, ReplaceResult,
     SubscribeInput, SubscribeInputResult, UnsubscribeInput,
 };
 use aether_mail::Kind;
 use serde::Serialize;
 use wasmtime::{Engine, Linker, Module};
 
-use crate::capture::CaptureQueue;
+use crate::capture::{CaptureQueue, PendingCapture};
 use crate::component::Component;
 use crate::ctx::SubstrateCtx;
 use crate::hub_client::HubOutbound;
@@ -177,6 +177,31 @@ fn lift_primitive(p: LoadKindPrimitive) -> Primitive {
         LoadKindPrimitive::F32 => Primitive::F32,
         LoadKindPrimitive::F64 => Primitive::F64,
     }
+}
+
+/// Resolve every envelope in `bundle` against the registry, returning
+/// fully-typed `Mail`s. On any resolve failure, return a formatted
+/// error string tagged with `label` (e.g. `"capture bundle"`); the
+/// caller surfaces it as a `CaptureFrameResult::Err`.
+fn resolve_bundle(
+    registry: &Registry,
+    bundle: &[MailEnvelope],
+    label: &str,
+) -> Result<Vec<Mail>, String> {
+    let mut out = Vec::with_capacity(bundle.len());
+    for env in bundle {
+        let mailbox = registry.lookup(&env.recipient_name).ok_or_else(|| {
+            format!(
+                "unknown recipient mailbox {:?} in {label}",
+                env.recipient_name
+            )
+        })?;
+        let kind_id = registry
+            .kind_id(&env.kind_name)
+            .ok_or_else(|| format!("unknown kind {:?} in {label}", env.kind_name))?;
+        out.push(Mail::new(mailbox, kind_id, env.payload.clone(), env.count));
+    }
+    Ok(out)
 }
 
 /// State the control-plane sink handler captures. Grouping it in a
@@ -436,14 +461,18 @@ impl ControlPlane {
 
     /// Handler for `aether.control.capture_frame`. Two phases:
     ///
-    /// 1. Resolve every envelope in the request's `mails` bundle
-    ///    against the registry (kind + recipient mailbox). If *any*
-    ///    envelope fails to resolve, abort: no mail is pushed, no
-    ///    capture is requested, reply is `Err`. Atomicity guarantee.
-    /// 2. Push every resolved mail onto the queue, then request the
-    ///    capture. The render thread's existing
+    /// 1. Resolve every envelope in *both* the `mails` (pre-capture)
+    ///    and `after_mails` (post-capture cleanup) bundles against
+    ///    the registry. If *any* envelope fails, abort the whole
+    ///    request: no mail is pushed, no capture is requested, reply
+    ///    is `Err`. Atomicity guarantee covers both bundles.
+    /// 2. Push every resolved pre-capture mail onto the queue, then
+    ///    request the capture with the resolved `after_mails` stashed
+    ///    on the `PendingCapture`. The render thread's existing
     ///    `queue.wait_idle()` → `take capture` ordering ensures the
-    ///    captured frame reflects the bundle's effects.
+    ///    captured frame reflects the pre-capture bundle's effects;
+    ///    after readback, the render thread pushes `after_mails`
+    ///    before replying.
     ///
     /// The capture itself happens on the render thread (where the
     /// wgpu device lives), so this handler returns without replying
@@ -462,46 +491,49 @@ impl ControlPlane {
             }
         };
 
-        // Phase 1: resolve every envelope against the registry before
-        // pushing anything. Any failure aborts the whole bundle so a
-        // partial dispatch can't leak into the next frame.
-        let mut resolved = Vec::with_capacity(payload.mails.len());
-        for env in &payload.mails {
-            let mailbox = match self.registry.lookup(&env.recipient_name) {
-                Some(id) => id,
-                None => {
-                    let result = CaptureFrameResult::Err {
-                        error: format!(
-                            "unknown recipient mailbox {:?} in capture bundle",
-                            env.recipient_name
-                        ),
-                    };
-                    self.reply(sender, CaptureFrameResult::NAME, &result);
+        // Phase 1: resolve every envelope in both bundles before
+        // pushing anything or requesting a capture. Any failure
+        // aborts the whole request so a partial dispatch can't leak
+        // into the next frame — and so a bad `after_mails` bundle
+        // can't slip through after the pre-capture mail has already
+        // been queued.
+        let pre = match resolve_bundle(&self.registry, &payload.mails, "capture bundle") {
+            Ok(v) => v,
+            Err(e) => {
+                self.reply(
+                    sender,
+                    CaptureFrameResult::NAME,
+                    &CaptureFrameResult::Err { error: e },
+                );
+                return;
+            }
+        };
+        let after =
+            match resolve_bundle(&self.registry, &payload.after_mails, "capture after bundle") {
+                Ok(v) => v,
+                Err(e) => {
+                    self.reply(
+                        sender,
+                        CaptureFrameResult::NAME,
+                        &CaptureFrameResult::Err { error: e },
+                    );
                     return;
                 }
             };
-            let kind_id = match self.registry.kind_id(&env.kind_name) {
-                Some(id) => id,
-                None => {
-                    let result = CaptureFrameResult::Err {
-                        error: format!("unknown kind {:?} in capture bundle", env.kind_name),
-                    };
-                    self.reply(sender, CaptureFrameResult::NAME, &result);
-                    return;
-                }
-            };
-            resolved.push(Mail::new(mailbox, kind_id, env.payload.clone(), env.count));
-        }
 
-        // Phase 2: push every resolved mail, then request capture.
-        // Order matters on the wire but workers dispatch concurrently;
-        // `queue.wait_idle()` on the render thread is what enforces
-        // "capture after all mail processed".
-        for mail in resolved {
+        // Phase 2: push every resolved pre-capture mail, then request
+        // the capture. Order matters on the wire but workers dispatch
+        // concurrently; `queue.wait_idle()` on the render thread is
+        // what enforces "capture after all mail processed".
+        for mail in pre {
             self.queue.push(mail);
         }
 
-        if !self.capture_queue.request(sender) {
+        let pending = PendingCapture {
+            sender,
+            after_mails: after,
+        };
+        if !self.capture_queue.request(pending) {
             let result = CaptureFrameResult::Err {
                 error: "capture already pending; try again once the in-flight \
                     request completes"

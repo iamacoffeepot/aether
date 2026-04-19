@@ -28,7 +28,9 @@ use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
     CaptureQueue, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, MailQueue,
-    Registry, Scheduler, SubstrateCtx, host_fns,
+    Registry, Scheduler, SubstrateCtx,
+    capture::CaptureWaker,
+    host_fns,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -36,9 +38,34 @@ use render::Gpu;
 use wasmtime::{Engine, Linker};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
+
+/// Events the event loop can receive from outside the winit thread.
+/// The one variant exists so `CaptureRequestWaker` can nudge the loop
+/// when a capture lands while the window is occluded — without it the
+/// loop would sleep in `ControlFlow::Wait` and the capture would hang.
+#[derive(Debug, Clone, Copy)]
+enum UserEvent {
+    CaptureRequested,
+}
+
+/// Adapter that bridges `CaptureQueue::request` to the winit event
+/// loop. `request()` pokes `wake()`, which sends a `CaptureRequested`
+/// user event; `App::user_event` then runs a render pass even if the
+/// window is occluded so the capture resolves.
+struct CaptureRequestWaker {
+    proxy: EventLoopProxy<UserEvent>,
+}
+
+impl CaptureWaker for CaptureRequestWaker {
+    fn wake(&self) {
+        // `send_event` only fails if the event loop has shut down; in
+        // that case nothing listens for captures anyway.
+        let _ = self.proxy.send_event(UserEvent::CaptureRequested);
+    }
+}
 
 const WORKERS: usize = 2;
 const LOG_EVERY_FRAMES: u64 = 120;
@@ -120,7 +147,20 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<UserEvent> for App {
+    fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::CaptureRequested => {
+                // When occluded, `ControlFlow::Wait` stops the normal
+                // redraw cadence — request one explicitly so the
+                // capture handler in `RedrawRequested` runs.
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -151,7 +191,12 @@ impl ApplicationHandler for App {
                 self.set_occluded(occluded, event_loop);
             }
             WindowEvent::RedrawRequested => {
-                if self.occluded {
+                let pending_capture = self.capture_queue.take();
+                // Occluded + nothing to capture: skip the frame
+                // entirely. Captures still land via `user_event`
+                // (which calls `request_redraw`), so even a hidden
+                // window can produce frames for the agent.
+                if self.occluded && pending_capture.is_none() {
                     return;
                 }
                 let tick_subs = subscribers_for(&self.input_subscribers, InputStream::Tick);
@@ -161,7 +206,6 @@ impl ApplicationHandler for App {
                 }
                 self.queue.wait_idle();
                 let verts = std::mem::take(&mut *self.frame_vertices.lock().unwrap());
-                let pending_capture = self.capture_queue.take();
                 if let Some(gpu) = self.gpu.as_mut() {
                     match pending_capture {
                         Some(req) => {
@@ -169,6 +213,14 @@ impl ApplicationHandler for App {
                                 Ok(png) => CaptureFrameResult::Ok { png },
                                 Err(error) => CaptureFrameResult::Err { error },
                             };
+                            // Post-capture cleanup: push every
+                            // `after_mails` entry the control plane
+                            // pre-resolved. Done before the reply so
+                            // the cleanup mail is at least queued
+                            // when the caller sees the PNG.
+                            for mail in req.after_mails {
+                                self.queue.push(mail);
+                            }
                             send_capture_reply(&self.outbound, req.sender, result);
                         }
                         None => {
@@ -178,7 +230,9 @@ impl ApplicationHandler for App {
                 } else if let Some(req) = pending_capture {
                     // No GPU yet — capture was requested before `resumed`.
                     // Reply with a diagnosable error rather than leaving the
-                    // caller hanging on an await-reply slot.
+                    // caller hanging on an await-reply slot. `after_mails`
+                    // is dropped — the pre-capture bundle wasn't processed
+                    // either, so there's nothing to clean up.
                     send_capture_reply(
                         &self.outbound,
                         req.sender,
@@ -208,7 +262,13 @@ impl ApplicationHandler for App {
                         1,
                     ));
                 }
-                if let Some(w) = &self.window {
+                // Only self-schedule the next redraw when the window
+                // is visible — otherwise we'd spin under `Poll`. When
+                // occluded, the next wake comes from `user_event`
+                // (capture requested) or a window event.
+                if !self.occluded
+                    && let Some(w) = &self.window
+                {
                     w.request_redraw();
                 }
             }
@@ -367,9 +427,17 @@ fn main() -> wasmtime::Result<()> {
     // the platform thread reads when publishing events.
     let input_subscribers = aether_substrate::new_subscribers();
 
+    // Build the event loop up front so we can hand its proxy to
+    // `CaptureQueue` as a waker — the capture handler pokes the
+    // proxy, which wakes the loop even when the window is occluded.
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+
     // Shared capture-request slot between the control plane (where
     // the request arrives) and the render thread (which fulfils it).
-    let capture_queue = CaptureQueue::new();
+    let capture_queue = CaptureQueue::with_waker(Arc::new(CaptureRequestWaker {
+        proxy: event_loop.create_proxy(),
+    }));
 
     // Wire the ADR-0010 control plane. Registered after the scheduler
     // exists so the handler can capture the runtime component table
@@ -426,9 +494,6 @@ fn main() -> wasmtime::Result<()> {
         workers = WORKERS,
         "componentless boot — close window to exit; load a component via aether.control.load_component",
     );
-
-    let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
 
     let mut app = App {
         queue,

@@ -328,24 +328,29 @@ mod control_plane {
     }
 
     /// `aether.control.capture_frame` — request the substrate grab the
-    /// current swapchain contents and reply-to-sender with an encoded
-    /// PNG. Optionally carries a bundle of mails the substrate should
-    /// dispatch *before* capturing, so the caller can issue
-    /// state-changing mail and the resulting frame in one atomic
-    /// tool call. The render thread's existing `queue.wait_idle()`
-    /// before the capture ensures every bundled mail has been fully
-    /// processed by the time the frame is read back. An empty
-    /// `mails` vec means "just capture the current state."
+    /// current frame contents and reply-to-sender with an encoded
+    /// PNG. Carries two optional bundles: `mails` dispatched *before*
+    /// capturing (state-changing mail whose effects should appear in
+    /// the frame) and `after_mails` dispatched *after* the readback
+    /// completes (cleanup, e.g. restoring a flag the caller flipped
+    /// for the capture). Both bundles plus the capture land in one
+    /// atomic tool call. The render thread's existing
+    /// `queue.wait_idle()` before the capture ensures every
+    /// `mails` entry has been fully processed by the time the frame
+    /// is read back. Empty vecs mean "just capture the current state"
+    /// / "no cleanup".
     ///
-    /// Abort-on-first-failure policy: if any envelope's kind or
-    /// recipient can't be resolved at the substrate, no mails are
-    /// dispatched and the reply is `CaptureFrameResult::Err`.
+    /// Abort-on-first-failure policy: if *any* envelope in *either*
+    /// bundle fails to resolve (unknown kind or recipient), no mail
+    /// is dispatched and the reply is `CaptureFrameResult::Err`. The
+    /// whole request aborts before touching the queue.
     ///
     /// Reply: `CaptureFrameResult`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.capture_frame")]
     pub struct CaptureFrame {
         pub mails: Vec<MailEnvelope>,
+        pub after_mails: Vec<MailEnvelope>,
     }
 
     /// One mail in a `CaptureFrame.mails` bundle. Structurally mirrors

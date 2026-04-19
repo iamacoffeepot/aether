@@ -1,8 +1,8 @@
 // Cross-thread handoff for `aether.control.capture_frame` requests.
 //
 // The control-plane handler runs on a scheduler worker; the actual
-// capture (swapchain → staging buffer → PNG) happens on the render
-// thread where the wgpu `Device` lives. `CaptureQueue` is the
+// capture (offscreen texture → staging buffer → PNG) happens on the
+// render thread where the wgpu `Device` lives. `CaptureQueue` is the
 // single-slot mailbox between them.
 //
 // One in-flight capture at a time is plenty for v1. If a second
@@ -10,16 +10,32 @@
 // it immediately with `CaptureFrameResult::Err` rather than queuing —
 // keeps the slot a scalar and avoids unbounded buildup if the render
 // thread stalls.
+//
+// The optional `CaptureWaker` pokes the event loop when a capture
+// lands, so even an occluded window (on macOS) still processes the
+// request rather than sleeping until the next window event.
 
 use std::sync::{Arc, Mutex};
 
 use aether_hub_protocol::SessionToken;
 
+use crate::Mail;
+
+/// Woken by `CaptureQueue::request` whenever a capture moves from
+/// empty → pending. The substrate binary plugs in an adapter over
+/// `winit::EventLoopProxy`; unit tests leave the waker unset.
+pub trait CaptureWaker: Send + Sync {
+    fn wake(&self);
+}
+
 /// One pending capture request. Carries the originating session's
-/// token so the render thread can reply-to-sender once it has bytes.
-#[derive(Copy, Clone, Debug)]
+/// token so the render thread can reply-to-sender once it has bytes,
+/// plus a resolved list of `after_mails` the control plane already
+/// validated; the render thread pushes them onto the queue after
+/// readback, before replying.
 pub struct PendingCapture {
     pub sender: SessionToken,
+    pub after_mails: Vec<Mail>,
 }
 
 /// Single-slot queue. Cheaply cloneable (wraps an `Arc`), shared
@@ -27,6 +43,7 @@ pub struct PendingCapture {
 #[derive(Clone, Default)]
 pub struct CaptureQueue {
     slot: Arc<Mutex<Option<PendingCapture>>>,
+    waker: Option<Arc<dyn CaptureWaker>>,
 }
 
 impl CaptureQueue {
@@ -34,15 +51,27 @@ impl CaptureQueue {
         Self::default()
     }
 
-    /// Try to install `sender` as the pending capture. Returns `true`
+    pub fn with_waker(waker: Arc<dyn CaptureWaker>) -> Self {
+        Self {
+            slot: Arc::default(),
+            waker: Some(waker),
+        }
+    }
+
+    /// Try to install `pending` as the pending capture. Returns `true`
     /// if the slot was empty and the request is now pending; `false`
-    /// if a capture is already in flight.
-    pub fn request(&self, sender: SessionToken) -> bool {
+    /// if a capture is already in flight. On success, pokes the waker
+    /// (if any) so a sleeping event loop can pick up the request.
+    pub fn request(&self, pending: PendingCapture) -> bool {
         let mut slot = self.slot.lock().unwrap();
         if slot.is_some() {
             return false;
         }
-        *slot = Some(PendingCapture { sender });
+        *slot = Some(pending);
+        drop(slot);
+        if let Some(w) = &self.waker {
+            w.wake();
+        }
         true
     }
 
@@ -58,33 +87,62 @@ impl CaptureQueue {
 mod tests {
     use super::*;
     use aether_hub_protocol::Uuid;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn token(u: u128) -> SessionToken {
         SessionToken(Uuid::from_u128(u))
     }
 
+    fn pending(u: u128) -> PendingCapture {
+        PendingCapture {
+            sender: token(u),
+            after_mails: Vec::new(),
+        }
+    }
+
     #[test]
     fn request_into_empty_slot_succeeds() {
         let q = CaptureQueue::new();
-        assert!(q.request(token(1)));
+        assert!(q.request(pending(1)));
     }
 
     #[test]
     fn second_request_rejected_while_pending() {
         let q = CaptureQueue::new();
-        assert!(q.request(token(1)));
-        assert!(!q.request(token(2)));
+        assert!(q.request(pending(1)));
+        assert!(!q.request(pending(2)));
     }
 
     #[test]
     fn take_clears_slot_for_next_request() {
         let q = CaptureQueue::new();
-        assert!(q.request(token(1)));
+        assert!(q.request(pending(1)));
         let got = q.take().expect("pending");
         assert_eq!(got.sender, token(1));
         // Slot is empty again.
         assert!(q.take().is_none());
         // Next request lands.
-        assert!(q.request(token(2)));
+        assert!(q.request(pending(2)));
+    }
+
+    #[test]
+    fn waker_fires_on_successful_request_only() {
+        struct Counter(AtomicU32);
+        impl CaptureWaker for Counter {
+            fn wake(&self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let w = Arc::new(Counter(AtomicU32::new(0)));
+        let q = CaptureQueue::with_waker(w.clone());
+        assert!(q.request(pending(1)));
+        assert_eq!(w.0.load(Ordering::SeqCst), 1);
+        // Second request fails (slot full) — waker must not fire again.
+        assert!(!q.request(pending(2)));
+        assert_eq!(w.0.load(Ordering::SeqCst), 1);
+        // Drain + re-request: waker fires again.
+        q.take();
+        assert!(q.request(pending(3)));
+        assert_eq!(w.0.load(Ordering::SeqCst), 2);
     }
 }

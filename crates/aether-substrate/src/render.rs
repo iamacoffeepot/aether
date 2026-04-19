@@ -8,12 +8,20 @@
 // `Arc<Window>`; the App owns the same Arc, so the window outlives
 // the surface by construction.
 //
-// Capture path: the surface is configured with COPY_SRC so the
-// swapchain texture can be copied into a readback buffer in the same
-// encoder as the frame. When a capture is requested, render() encodes
-// the copy alongside the normal pass, submits, maps the buffer, and
-// returns PNG bytes. Non-capture frames pay nothing beyond the one
-// extra usage bit on the surface.
+// Offscreen target: every frame renders into an intermediate texture
+// matching the surface's format and size (`OffscreenTarget`). The
+// swapchain is updated by copying that texture into the current
+// surface texture and presenting. If the surface is unavailable
+// (occluded, lost, etc.), we still render to the offscreen and the
+// capture path still works — we just skip the copy+present. This
+// decouples "can we capture a frame" from "is the window visible",
+// which matters for macOS where occluded windows stop delivering
+// swapchain textures.
+//
+// Capture path: `copy_texture_to_buffer` reads from the offscreen
+// texture (not the swapchain), so captures are independent of window
+// state. Non-capture frames pay nothing beyond the one extra texture
+// copy per frame.
 
 use std::sync::Arc;
 
@@ -34,10 +42,21 @@ pub struct Gpu {
     pub config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
+    /// Intermediate render target. Everything draws here; the swapchain
+    /// gets a `copy_texture_to_texture` blit + present. Sized to the
+    /// surface, reallocated on resize.
+    offscreen: OffscreenTarget,
     /// Lazily-allocated readback buffer for the capture path. Sized
     /// to `padded_row_bytes * height`; reallocated on resize or first
     /// capture after a size change.
     readback: Option<Readback>,
+}
+
+struct OffscreenTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
 }
 
 struct Readback {
@@ -79,11 +98,10 @@ impl Gpu {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
-            // COPY_SRC: swapchain texture is read by the capture path.
-            // Supported on every desktop wgpu backend; platforms that
-            // reject it will fail surface.configure and we'd fall back
-            // to an intermediate target — not needed today.
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            // COPY_DST: the swapchain receives a texture-to-texture
+            // copy from the offscreen each frame. No draw pass
+            // writes to it directly anymore.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -93,6 +111,8 @@ impl Gpu {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
+
+        let offscreen = create_offscreen(&device, format, config.width, config.height);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("hello-triangle shader"),
@@ -170,6 +190,7 @@ impl Gpu {
             config,
             pipeline,
             vertex_buffer,
+            offscreen,
             readback: None,
         }
     }
@@ -181,48 +202,38 @@ impl Gpu {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
+        self.offscreen = create_offscreen(
+            &self.device,
+            self.config.format,
+            self.config.width,
+            self.config.height,
+        );
         // Invalidate the readback buffer — it's sized to the old
         // surface; the next capture reallocates.
         self.readback = None;
     }
 
     pub fn render(&mut self, vertices: &[u8]) {
-        self.render_impl(vertices, false);
+        let _ = self.render_impl(vertices, false);
     }
 
-    /// Variant of `render` that also copies the swapchain texture into
+    /// Variant of `render` that also copies the offscreen texture into
     /// a readback buffer, maps it, and returns an encoded PNG. On any
     /// capture-path failure, returns `Err(reason)`; the frame itself
-    /// still renders and presents (capture is side-channel).
+    /// still renders and (if the surface is available) presents, since
+    /// capture is a side channel.
     pub fn render_and_capture(&mut self, vertices: &[u8]) -> Result<Vec<u8>, String> {
         self.render_impl(vertices, true)
-            .ok_or_else(|| "capture skipped — no surface texture this frame".to_owned())?
+            .ok_or_else(|| "capture did not produce a result".to_owned())?
     }
 
+    /// Draw `vertices` into the offscreen target, optionally encode a
+    /// capture copy, then best-effort blit to the swapchain and
+    /// present. Returns `Some(Ok(png))` / `Some(Err(reason))` when
+    /// `capture` is set; `None` when `capture` is false or the capture
+    /// path couldn't allocate. Surface unavailability does *not*
+    /// prevent capture — offscreen is the source of truth.
     fn render_impl(&mut self, vertices: &[u8], capture: bool) -> Option<Result<Vec<u8>, String>> {
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) => t,
-            wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
-                self.surface.configure(&self.device, &self.config);
-                t
-            }
-            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
-                return None;
-            }
-            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => {
-                return None;
-            }
-            other => {
-                tracing::warn!(
-                    target: "aether_substrate::render",
-                    status = ?other,
-                    "surface.get_current_texture returned unexpected status",
-                );
-                return None;
-            }
-        };
-
         let vertex_bytes = vertices.len() as u64;
         if vertex_bytes > VERTEX_BUFFER_BYTES {
             tracing::warn!(
@@ -238,9 +249,6 @@ impl Gpu {
         }
         let vertex_count = (vertex_bytes / VERTEX_STRIDE) as u32;
 
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -250,7 +258,7 @@ impl Gpu {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("triangle pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.offscreen.view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -275,33 +283,84 @@ impl Gpu {
             }
         }
 
-        // Capture path: issue a texture→buffer copy in the same
-        // encoder, submit everything, then present so the window
-        // update isn't delayed by the readback. The buffer map + PNG
-        // encode happens after present.
+        // Capture path: the copy runs against the offscreen texture,
+        // which is unaffected by whether a swapchain image is available
+        // this frame. That decouples capture from window visibility.
         let capture_meta = if capture {
-            Some(self.prepare_capture_copy(&output.texture, &mut encoder))
+            Some(self.prepare_capture_copy(&mut encoder))
         } else {
             None
         };
 
+        // Try to obtain a swapchain texture for presentation. If the
+        // surface is occluded/lost/outdated we just skip the blit +
+        // present step — the offscreen is already fresh and captures
+        // still resolve.
+        let surface_tex = self.acquire_surface_texture();
+        if let Some(tex) = surface_tex.as_ref() {
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.offscreen.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.offscreen.width,
+                    height: self.offscreen.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        if let Some(tex) = surface_tex {
+            tex.present();
+        }
 
         capture_meta.map(|meta| self.finish_capture(meta))
     }
 
-    /// Ensure a readback buffer exists sized to the current surface,
-    /// then encode a copy from the swapchain texture into it. Returns
-    /// the padded row stride + dims so `finish_capture` can map the
-    /// buffer and strip padding.
-    fn prepare_capture_copy(
-        &mut self,
-        texture: &wgpu::Texture,
-        encoder: &mut wgpu::CommandEncoder,
-    ) -> CaptureMeta {
-        let width = self.config.width;
-        let height = self.config.height;
+    /// Try to get the current swapchain texture. Reconfigures the
+    /// surface on `Suboptimal`/`Lost`/`Outdated` so the next frame
+    /// recovers; on anything else returns `None` and the caller skips
+    /// the present step for this frame.
+    fn acquire_surface_texture(&mut self) -> Option<wgpu::SurfaceTexture> {
+        match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => Some(t),
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
+                self.surface.configure(&self.device, &self.config);
+                Some(t)
+            }
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.device, &self.config);
+                None
+            }
+            wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => None,
+            other => {
+                tracing::warn!(
+                    target: "aether_substrate::render",
+                    status = ?other,
+                    "surface.get_current_texture returned unexpected status",
+                );
+                None
+            }
+        }
+    }
+
+    /// Ensure a readback buffer exists sized to the offscreen texture,
+    /// then encode a copy from the offscreen into it. Returns the
+    /// padded row stride + dims so `finish_capture` can map the buffer
+    /// and strip padding.
+    fn prepare_capture_copy(&mut self, encoder: &mut wgpu::CommandEncoder) -> CaptureMeta {
+        let width = self.offscreen.width;
+        let height = self.offscreen.height;
         let bytes_per_pixel = 4u32;
         let unpadded_row_bytes = width * bytes_per_pixel;
         let padded_row_bytes = align_up(unpadded_row_bytes, COPY_ROW_ALIGN);
@@ -329,7 +388,7 @@ impl Gpu {
 
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture,
+                texture: &self.offscreen.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -404,6 +463,38 @@ impl Gpu {
         readback.buffer.unmap();
 
         encode_png(&rgba, meta.width, meta.height)
+    }
+}
+
+fn create_offscreen(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> OffscreenTarget {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen color target"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        // RENDER_ATTACHMENT: the triangle pass writes here.
+        // COPY_SRC: both the swapchain blit and the readback copy
+        // read from this texture.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    OffscreenTarget {
+        texture,
+        view,
+        width,
+        height,
     }
 }
 
