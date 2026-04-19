@@ -55,7 +55,7 @@ impl Component {
             .get_memory(&mut store, "memory")
             .ok_or_else(|| wasmtime::Error::msg("guest exports no `memory`"))?;
         let receive =
-            instance.get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "receive")?;
+            instance.get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "receive_p32")?;
 
         // Optional `init() -> u32` export: called once before the first
         // `receive`, used for one-shot bootstrap like resolving kind
@@ -80,7 +80,7 @@ impl Component {
         // `STATE_OFFSET`, then calls the shim with `(version,
         // STATE_OFFSET, len)`.
         let on_rehydrate = instance
-            .get_typed_func::<(u32, u32, u32), u32>(&mut store, "on_rehydrate")
+            .get_typed_func::<(u32, u32, u32), u32>(&mut store, "on_rehydrate_p32")
             .ok();
 
         Ok(Self {
@@ -248,7 +248,7 @@ mod tests {
     const WAT_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 i32.const 200
@@ -265,14 +265,14 @@ mod tests {
     const WAT_NO_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0))
     "#;
 
     const WAT_TRAP_ON_DROP: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_drop") (result i32)
                 unreachable))
@@ -282,11 +282,11 @@ mod tests {
     /// version and 4 bytes at offset 300 (`0xDE 0xAD 0xBE 0xEF`).
     const WAT_SAVES_STATE: &str = r#"
         (module
-            (import "aether" "save_state"
+            (import "aether" "save_state_p32"
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 300) "\de\ad\be\ef")
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -301,10 +301,10 @@ mod tests {
     /// returns status 3 (too-large). The guest drops the return.
     const WAT_SAVES_TOO_LARGE: &str = r#"
         (module
-            (import "aether" "save_state"
+            (import "aether" "save_state_p32"
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -321,9 +321,9 @@ mod tests {
     const WAT_REHYDRATES: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 0)
-            (func (export "on_rehydrate") (param i32 i32 i32) (result i32)
+            (func (export "on_rehydrate_p32") (param i32 i32 i32) (result i32)
                 ;; *(u32*)396 = version
                 i32.const 396
                 local.get 0
@@ -341,7 +341,7 @@ mod tests {
     const WAT_STORES_SENDER: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 i32.const 500
                 local.get 3
                 i32.store
@@ -353,10 +353,10 @@ mod tests {
     /// the round-trip is the observable behavior.
     const WAT_REPLIES: &str = r#"
         (module
-            (import "aether" "reply_mail"
+            (import "aether" "reply_mail_p32"
                 (func $reply_mail (param i32 i32 i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
                 (drop (call $reply_mail
                     (local.get 3) ;; sender handle from receive param
                     (i32.const 0) ;; kind id 0 — registered in the test

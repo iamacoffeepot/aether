@@ -24,10 +24,10 @@ use wasmtime::{Engine, Linker, Module};
 
 const WAT: &str = r#"
 (module
-  (import "aether" "send_mail"
+  (import "aether" "send_mail_p32"
     (func $send_mail (param i32 i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
-  (func (export "receive")
+  (func (export "receive_p32")
     (param $kind i32) (param $ptr i32) (param $count i32) (param $sender i32)
     (result i32)
     ;; Forward a send_mail call to mailbox 1 (the sink in this test).
