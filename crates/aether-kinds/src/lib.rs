@@ -329,17 +329,45 @@ mod control_plane {
 
     /// `aether.control.capture_frame` — request the substrate grab the
     /// current swapchain contents and reply-to-sender with an encoded
-    /// PNG. No parameters today; structured as a postcard struct
-    /// (rather than Unit) so future options — resolution override,
-    /// format, region — can land as additive fields. Reply:
-    /// `CaptureFrameResult`.
+    /// PNG. Optionally carries a bundle of mails the substrate should
+    /// dispatch *before* capturing, so the caller can issue
+    /// state-changing mail and the resulting frame in one atomic
+    /// tool call. The render thread's existing `queue.wait_idle()`
+    /// before the capture ensures every bundled mail has been fully
+    /// processed by the time the frame is read back. An empty
+    /// `mails` vec means "just capture the current state."
+    ///
+    /// Abort-on-first-failure policy: if any envelope's kind or
+    /// recipient can't be resolved at the substrate, no mails are
+    /// dispatched and the reply is `CaptureFrameResult::Err`.
+    ///
+    /// Reply: `CaptureFrameResult`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.capture_frame")]
-    pub struct CaptureFrame {}
+    pub struct CaptureFrame {
+        pub mails: Vec<MailEnvelope>,
+    }
+
+    /// One mail in a `CaptureFrame.mails` bundle. Structurally mirrors
+    /// `aether_hub_protocol::MailFrame` — a pre-encoded payload plus
+    /// the name-level addressing the substrate uses to resolve it.
+    /// The hub encodes each envelope's `payload` via the kind's
+    /// descriptor before wrapping it into the bundle, so the
+    /// substrate side just pushes `Mail::new(mailbox, kind_id,
+    /// payload, count)` directly.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct MailEnvelope {
+        pub recipient_name: String,
+        pub kind_name: String,
+        pub payload: Vec<u8>,
+        pub count: u32,
+    }
 
     /// Reply to `CaptureFrame`. `Ok` carries the PNG bytes for the
-    /// captured frame; `Err` carries a free-form reason (capture not
-    /// supported on this surface, map failed, encode failed, etc.).
+    /// captured frame; `Err` carries a free-form reason — capture not
+    /// supported on this surface, map failed, encode failed, or a
+    /// bundle-resolution failure (unknown kind / mailbox) aborting
+    /// before any mail was dispatched.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.capture_frame_result")]
     pub enum CaptureFrameResult {

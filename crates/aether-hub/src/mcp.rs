@@ -298,6 +298,16 @@ pub struct EngineLogEntry {
 pub struct CaptureFrameArgs {
     /// Hub-assigned engine UUID as a string (from `list_engines`).
     pub engine_id: String,
+    /// Optional bundle of mails to dispatch on the substrate *before*
+    /// the capture fires. Each item has the same shape as a
+    /// `send_mail` entry — `recipient_name`, `kind_name`, structured
+    /// `params` encoded via the kind's descriptor, `count`. The
+    /// substrate resolves every envelope atomically: if any fails
+    /// (unknown kind, unknown recipient), no mail is dispatched and
+    /// the reply is an `Err`. An empty bundle means "just capture the
+    /// current state."
+    #[serde(default)]
+    pub mails: Vec<MailSpec>,
     /// Maximum time to wait for the substrate's reply, in
     /// milliseconds. Defaults to 5000 (5 s). Clamped to 30000 (30 s).
     #[serde(default)]
@@ -567,7 +577,7 @@ impl Hub {
     }
 
     #[tool(
-        description = "Capture the current swapchain contents of the given engine as a PNG and return it inline as MCP image content. Uses the existing mail path: sends `aether.control.capture_frame` to the substrate, which captures on its next frame and replies with `aether.control.capture_frame_result`. Rejects if another capture is already in flight on this substrate (rare), or if the wait exceeds `timeout_ms` (default 5000, clamped to 30000). Use this to verify substrate rendering end-to-end without needing the user to look at the window."
+        description = "Capture the current swapchain contents of the given engine as a PNG and return it inline as MCP image content. Optionally dispatches a bundle of state-changing mail atomically *before* the capture: the substrate resolves every envelope first (abort-on-first-failure), pushes them to the mail queue, then requests the capture. The render loop's `queue.wait_idle()` ensures the bundle has been fully processed before the frame is read back, so the captured image reliably reflects the bundle's effects. An empty `mails` list just captures the current state. Rejects if another capture is already in flight on this session, or if the wait exceeds `timeout_ms` (default 5000, clamped to 30000). Use this to verify substrate rendering end-to-end without needing the user to look at the window, and to bundle \"do X then show me\" into one atomic tool call."
     )]
     async fn capture_frame(
         &self,
@@ -580,6 +590,17 @@ impl Hub {
         let record = self.state.engines.get(&id).ok_or_else(|| {
             McpError::invalid_params(format!("unknown engine_id {}", args.engine_id), None)
         })?;
+
+        // Encode each envelope in the bundle against its kind's
+        // descriptor. Done before we register the reply-waiter or
+        // send anything, so a bad bundle produces a clean invalid-
+        // params error and never touches the engine wire.
+        let envelopes = encode_capture_bundle(&args.mails, &record).map_err(|e| {
+            McpError::invalid_params(format!("capture_frame mails bundle: {e}"), None)
+        })?;
+        let bundle_params = serde_json::json!({
+            "mails": envelopes,
+        });
 
         // Register the reply-waiter BEFORE sending the request, so the
         // engine reader can divert the reply to our oneshot the moment
@@ -598,17 +619,15 @@ impl Hub {
                 )
             })?;
 
-        // Encode + send the request mail. `Unit`-shaped descriptors
-        // encode to empty bytes; `aether.control.capture_frame` is a
-        // postcard-struct with zero fields so the payload is also
-        // empty. Either way the schema-driven path handles it.
+        // Send the capture_frame request carrying the pre-encoded
+        // bundle. The substrate's schema decoder reconstructs each
+        // envelope's `payload: Vec<u8>` from the JSON byte array the
+        // hub encoder wrote — postcard-equivalent round-trip.
         let spec = MailSpec {
             engine_id: args.engine_id.clone(),
             recipient_name: "aether.control".to_owned(),
             kind_name: KIND_CAPTURE_FRAME.to_owned(),
-            // Postcard-encoded empty struct is an empty object — the
-            // schema encoder accepts `json!({})` for a zero-field struct.
-            params: Some(serde_json::json!({})),
+            params: Some(bundle_params),
             count: 1,
         };
         deliver_one(spec, &self.state.engines, self.session.token)
@@ -749,6 +768,37 @@ fn resolve_payload(spec: &MailSpec, record: &EngineRecord) -> Result<Vec<u8>, St
 
 fn find_kind<'a>(record: &'a EngineRecord, name: &str) -> Option<&'a KindDescriptor> {
     record.kinds.iter().find(|k| k.name == name)
+}
+
+/// Encode each `MailSpec` in a `capture_frame` bundle against the
+/// engine's descriptors, producing the JSON shape the `CaptureFrame`
+/// kind's schema expects (`{mails: [{recipient_name, kind_name,
+/// payload, count}]}`'s `mails` array — returned here as a JSON
+/// array ready to be slotted under the outer `mails` key).
+///
+/// Abort-on-first-failure: a single bad envelope aborts the whole
+/// bundle, matching the substrate's atomic-dispatch guarantee. This
+/// also short-circuits the tool before it touches the engine wire.
+fn encode_capture_bundle(
+    specs: &[MailSpec],
+    record: &EngineRecord,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut out = Vec::with_capacity(specs.len());
+    for (i, spec) in specs.iter().enumerate() {
+        let payload = resolve_payload(spec, record)
+            .map_err(|e| format!("envelope[{i}] ({}): {e}", spec.kind_name))?;
+        let payload_bytes: Vec<serde_json::Value> = payload
+            .into_iter()
+            .map(|b| serde_json::Value::Number(b.into()))
+            .collect();
+        out.push(serde_json::json!({
+            "recipient_name": spec.recipient_name,
+            "kind_name": spec.kind_name,
+            "payload": payload_bytes,
+            "count": spec.count,
+        }));
+    }
+    Ok(out)
 }
 
 /// Decode an inbound observation payload against the originating
@@ -1419,6 +1469,45 @@ mod tests {
         assert_eq!(got_a[0].payload_bytes, vec![42]);
     }
 
+    /// Descriptor for `aether.control.capture_frame` that matches
+    /// the real substrate's schema: a postcard struct with a single
+    /// `mails: Vec<MailEnvelope>` field. Used across capture_frame
+    /// tests so they all exercise the same wire shape.
+    fn capture_frame_kind_descriptor() -> aether_hub_protocol::KindDescriptor {
+        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaType};
+        let envelope = SchemaType::Struct {
+            repr_c: false,
+            fields: vec![
+                NamedField {
+                    name: "recipient_name".into(),
+                    ty: SchemaType::String,
+                },
+                NamedField {
+                    name: "kind_name".into(),
+                    ty: SchemaType::String,
+                },
+                NamedField {
+                    name: "payload".into(),
+                    ty: SchemaType::Bytes,
+                },
+                NamedField {
+                    name: "count".into(),
+                    ty: SchemaType::Scalar(Primitive::U32),
+                },
+            ],
+        };
+        KindDescriptor {
+            name: "aether.control.capture_frame".into(),
+            schema: SchemaType::Struct {
+                repr_c: false,
+                fields: vec![NamedField {
+                    name: "mails".into(),
+                    ty: SchemaType::Vec(Box::new(envelope)),
+                }],
+            },
+        }
+    }
+
     #[tokio::test]
     async fn capture_frame_returns_image_on_substrate_reply() {
         // End-to-end of the MCP-side plumbing with a stubbed "substrate":
@@ -1427,19 +1516,9 @@ mod tests {
         // `Ok { png }` reply through the session's reply registry. The
         // tool should return a `CallToolResult` carrying the PNG as
         // image content.
-        use aether_hub_protocol::{KindDescriptor, SchemaType};
 
         let engines = EngineRegistry::new();
-        // Descriptor for the empty-struct request kind. An empty
-        // postcard struct is zero bytes on the wire; the encoder has
-        // no fields to emit so `params: json!({})` encodes cleanly.
-        let kinds = vec![KindDescriptor {
-            name: "aether.control.capture_frame".into(),
-            schema: SchemaType::Struct {
-                repr_c: false,
-                fields: vec![],
-            },
-        }];
+        let kinds = vec![capture_frame_kind_descriptor()];
         let (rec, mut rx) = record_with_kinds(777, kinds);
         let id = rec.id;
         engines.insert(rec);
@@ -1493,6 +1572,7 @@ mod tests {
         let result = hub
             .capture_frame(Parameters(CaptureFrameArgs {
                 engine_id: id.0.to_string(),
+                mails: vec![],
                 timeout_ms: Some(2_000),
             }))
             .await
@@ -1516,16 +1596,8 @@ mod tests {
 
     #[tokio::test]
     async fn capture_frame_surfaces_substrate_err_variant() {
-        use aether_hub_protocol::{KindDescriptor, SchemaType};
-
         let engines = EngineRegistry::new();
-        let kinds = vec![KindDescriptor {
-            name: "aether.control.capture_frame".into(),
-            schema: SchemaType::Struct {
-                repr_c: false,
-                fields: vec![],
-            },
-        }];
+        let kinds = vec![capture_frame_kind_descriptor()];
         let (rec, mut rx) = record_with_kinds(778, kinds);
         let id = rec.id;
         engines.insert(rec);
@@ -1565,6 +1637,7 @@ mod tests {
         let err = hub
             .capture_frame(Parameters(CaptureFrameArgs {
                 engine_id: id.0.to_string(),
+                mails: vec![],
                 timeout_ms: Some(2_000),
             }))
             .await
@@ -1578,16 +1651,8 @@ mod tests {
 
     #[tokio::test]
     async fn capture_frame_rejects_second_concurrent_call() {
-        use aether_hub_protocol::{KindDescriptor, SchemaType};
-
         let engines = EngineRegistry::new();
-        let kinds = vec![KindDescriptor {
-            name: "aether.control.capture_frame".into(),
-            schema: SchemaType::Struct {
-                repr_c: false,
-                fields: vec![],
-            },
-        }];
+        let kinds = vec![capture_frame_kind_descriptor()];
         let (rec, _rx) = record_with_kinds(779, kinds);
         let id = rec.id;
         engines.insert(rec);
@@ -1606,6 +1671,7 @@ mod tests {
         let err = hub
             .capture_frame(Parameters(CaptureFrameArgs {
                 engine_id: id.0.to_string(),
+                mails: vec![],
                 timeout_ms: Some(100),
             }))
             .await
@@ -1619,16 +1685,8 @@ mod tests {
 
     #[tokio::test]
     async fn capture_frame_times_out_when_no_reply() {
-        use aether_hub_protocol::{KindDescriptor, SchemaType};
-
         let engines = EngineRegistry::new();
-        let kinds = vec![KindDescriptor {
-            name: "aether.control.capture_frame".into(),
-            schema: SchemaType::Struct {
-                repr_c: false,
-                fields: vec![],
-            },
-        }];
+        let kinds = vec![capture_frame_kind_descriptor()];
         let (rec, mut rx) = record_with_kinds(780, kinds);
         let id = rec.id;
         engines.insert(rec);
@@ -1644,6 +1702,7 @@ mod tests {
         let err = hub
             .capture_frame(Parameters(CaptureFrameArgs {
                 engine_id: id.0.to_string(),
+                mails: vec![],
                 timeout_ms: Some(50),
             }))
             .await
@@ -1651,6 +1710,139 @@ mod tests {
         drain.await.ok();
         let msg = format!("{err:?}");
         assert!(msg.contains("timed out"), "expected timeout: {msg}");
+    }
+
+    #[tokio::test]
+    async fn capture_frame_encodes_bundle_into_request_payload() {
+        // Verify the bundle path: tool takes a `mails` array, resolves
+        // each MailSpec via its kind descriptor into bytes, wraps
+        // into a CaptureFrame, and the request-mail payload on the
+        // wire carries a valid postcard-encoded bundle the substrate
+        // could decode.
+        use aether_hub_protocol::{KindDescriptor, SchemaType};
+
+        let engines = EngineRegistry::new();
+        // Two kinds on this engine: capture_frame plus a `demo.tick`
+        // Unit kind we'll bundle into the capture request.
+        let kinds = vec![
+            capture_frame_kind_descriptor(),
+            KindDescriptor {
+                name: "demo.tick".into(),
+                schema: SchemaType::Unit,
+            },
+        ];
+        let (rec, mut rx) = record_with_kinds(781, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let session_token = hub.session.token;
+        let sessions_clone = state.sessions.clone();
+
+        let substrate_task = tokio::spawn(async move {
+            let req = rx.recv().await.expect("tool should send request");
+            // Decode the CaptureFrame the tool built — a postcard
+            // struct with a `Vec<MailEnvelope>` field. Using a local
+            // mirror keeps this test in the hub crate.
+            #[derive(serde::Deserialize, Debug)]
+            struct EnvelopeMirror {
+                recipient_name: String,
+                kind_name: String,
+                payload: Vec<u8>,
+                count: u32,
+            }
+            #[derive(serde::Deserialize, Debug)]
+            struct CaptureFrameMirror {
+                mails: Vec<EnvelopeMirror>,
+            }
+            let HubToEngine::Mail(frame) = req else {
+                panic!("expected Mail");
+            };
+            let decoded: CaptureFrameMirror =
+                postcard::from_bytes(&frame.payload).expect("decode CaptureFrame");
+            assert_eq!(decoded.mails.len(), 1);
+            assert_eq!(decoded.mails[0].recipient_name, "target.box");
+            assert_eq!(decoded.mails[0].kind_name, "demo.tick");
+            assert_eq!(decoded.mails[0].count, 1);
+            // `demo.tick` is Unit — payload is zero bytes.
+            assert!(decoded.mails[0].payload.is_empty());
+
+            // Reply with a fake PNG so the tool completes.
+            #[derive(serde::Serialize)]
+            enum ReplyMirror {
+                #[allow(dead_code)]
+                Ok { png: Vec<u8> },
+                #[allow(dead_code)]
+                Err { error: String },
+            }
+            let reply = postcard::to_allocvec(&ReplyMirror::Ok {
+                png: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 42],
+            })
+            .expect("encode");
+            let record = sessions_clone.get(&session_token).expect("session");
+            let kind: String = "aether.control.capture_frame_result".into();
+            let queued = QueuedMail {
+                engine_id: id,
+                kind_name: kind.clone(),
+                payload: reply,
+                broadcast: false,
+                origin: None,
+            };
+            record.replies.try_deliver(&kind, queued);
+        });
+
+        let result = hub
+            .capture_frame(Parameters(CaptureFrameArgs {
+                engine_id: id.0.to_string(),
+                mails: vec![MailSpec {
+                    engine_id: id.0.to_string(),
+                    recipient_name: "target.box".into(),
+                    kind_name: "demo.tick".into(),
+                    params: None,
+                    count: 1,
+                }],
+                timeout_ms: Some(2_000),
+            }))
+            .await
+            .expect("bundle tool should succeed");
+
+        substrate_task.await.expect("stub substrate");
+        assert!(result.content[0].as_image().is_some());
+    }
+
+    #[tokio::test]
+    async fn capture_frame_rejects_bundle_with_unknown_kind() {
+        // Bundle contains a kind the engine doesn't declare. The tool
+        // should abort before sending anything and surface a clear
+        // invalid-params error naming the offending envelope.
+        let engines = EngineRegistry::new();
+        // Only capture_frame is declared; `demo.mystery` is not.
+        let kinds = vec![capture_frame_kind_descriptor()];
+        let (rec, _rx) = record_with_kinds(782, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(state);
+
+        let err = hub
+            .capture_frame(Parameters(CaptureFrameArgs {
+                engine_id: id.0.to_string(),
+                mails: vec![MailSpec {
+                    engine_id: id.0.to_string(),
+                    recipient_name: "any".into(),
+                    kind_name: "demo.mystery".into(),
+                    params: None,
+                    count: 1,
+                }],
+                timeout_ms: Some(1_000),
+            }))
+            .await
+            .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("no descriptor") && msg.contains("demo.mystery"),
+            "expected abort with kind name: {msg}"
+        );
     }
 
     #[tokio::test]
