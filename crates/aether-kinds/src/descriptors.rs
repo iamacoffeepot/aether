@@ -19,8 +19,9 @@ use aether_mail::{Kind, Schema};
 
 use crate::{
     CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats, Key,
-    LoadComponent, LoadResult, MouseButton, MouseMove, Ping, Pong, ReplaceComponent, ReplaceResult,
-    SubscribeInput, SubscribeInputResult, Tick, UnsubscribeInput,
+    LoadComponent, LoadResult, MouseButton, MouseMove, Ping, PlatformInfo, PlatformInfoResult,
+    Pong, ReplaceComponent, ReplaceResult, SubscribeInput, SubscribeInputResult, Tick,
+    UnsubscribeInput,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -58,6 +59,10 @@ pub fn all() -> Vec<KindDescriptor> {
         // see what the engine is rendering.
         schema::<CaptureFrame>(),
         schema::<CaptureFrameResult>(),
+        // Read-only snapshot of OS / engine / GPU / monitors / window.
+        // Empty request, fat reply — see `PlatformInfoResult`.
+        schema::<PlatformInfo>(),
+        schema::<PlatformInfoResult>(),
     ]
 }
 

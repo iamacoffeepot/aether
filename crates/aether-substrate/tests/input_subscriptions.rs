@@ -106,6 +106,7 @@ fn make_harness() -> Harness {
         input_subscribers: Arc::clone(&input_subscribers),
         default_name_counter: Arc::new(AtomicU64::new(0)),
         capture_queue: aether_substrate::CaptureQueue::new(),
+        platform_info_notifier: Arc::new(aether_substrate::NoopPlatformInfoNotifier),
     };
 
     Harness {
