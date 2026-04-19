@@ -326,6 +326,26 @@ mod control_plane {
         Ok,
         Err { error: String },
     }
+
+    /// `aether.control.capture_frame` — request the substrate grab the
+    /// current swapchain contents and reply-to-sender with an encoded
+    /// PNG. No parameters today; structured as a postcard struct
+    /// (rather than Unit) so future options — resolution override,
+    /// format, region — can land as additive fields. Reply:
+    /// `CaptureFrameResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.capture_frame")]
+    pub struct CaptureFrame {}
+
+    /// Reply to `CaptureFrame`. `Ok` carries the PNG bytes for the
+    /// captured frame; `Err` carries a free-form reason (capture not
+    /// supported on this surface, map failed, encode failed, etc.).
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.capture_frame_result")]
+    pub enum CaptureFrameResult {
+        Ok { png: Vec<u8> },
+        Err { error: String },
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +411,11 @@ mod tests {
         assert_eq!(
             SubscribeInputResult::NAME,
             "aether.control.subscribe_input_result"
+        );
+        assert_eq!(CaptureFrame::NAME, "aether.control.capture_frame");
+        assert_eq!(
+            CaptureFrameResult::NAME,
+            "aether.control.capture_frame_result"
         );
     }
 

@@ -180,7 +180,16 @@ async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail
                     broadcast: false,
                     origin,
                 };
-                if record.mail_tx.send(queued).await.is_err() {
+                // Synchronous-reply diversion: if a tool call has
+                // registered a waiter for this exact kind on this
+                // session, the mail goes to the oneshot and skips the
+                // general inbound queue. Unmatched mail falls through
+                // unchanged.
+                let kind_name = queued.kind_name.clone();
+                let remainder = record.replies.try_deliver(&kind_name, queued);
+                if let Some(queued) = remainder
+                    && record.mail_tx.send(queued).await.is_err()
+                {
                     eprintln!(
                         "aether-hub: engine {} mail to session {} dropped: receiver closed",
                         engine_id.0, token.0

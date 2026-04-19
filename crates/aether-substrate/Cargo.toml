@@ -8,6 +8,7 @@ aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-mail = { path = "../aether-mail" }
 aether-kinds = { path = "../aether-kinds", features = ["descriptors"] }
 bytemuck = "1.19"
+png = "0.17"
 pollster = "0.4.0"
 postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }

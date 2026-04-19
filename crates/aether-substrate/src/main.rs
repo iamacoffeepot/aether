@@ -21,12 +21,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
-use aether_kinds::{FrameStats, InputStream, Key, MouseButton, MouseMove, Tick};
+use aether_kinds::{
+    CaptureFrameResult, FrameStats, InputStream, Key, MouseButton, MouseMove, Tick,
+};
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
-    HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, MailQueue, Registry, Scheduler,
-    SubstrateCtx, host_fns,
+    CaptureQueue, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, MailQueue,
+    Registry, Scheduler, SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -56,6 +58,13 @@ struct App {
     kind_frame_stats: u32,
     frame_vertices: Arc<Mutex<Vec<u8>>>,
     triangles_rendered: Arc<AtomicU64>,
+    /// Shared single-slot queue with the control plane. On each
+    /// redraw we `take()` any pending capture and, if present, use
+    /// `render_and_capture`, then reply-to-sender on `outbound`.
+    capture_queue: CaptureQueue,
+    /// Hub outbound — also shared with the log-capture layer and the
+    /// broadcast sink. The capture-reply path is the third consumer.
+    outbound: Arc<HubOutbound>,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     started: Option<Instant>,
@@ -64,6 +73,34 @@ struct App {
     // Scheduler is owned so its workers are joined on Drop when the event
     // loop exits — we never reference it otherwise.
     _scheduler: Scheduler,
+}
+
+/// Encode + send a `CaptureFrameResult` reply addressed to the
+/// originating session. Silent if the outbound is disconnected (no
+/// hub attached) — the result goes nowhere, which matches the
+/// broadcast sink's behavior for observations.
+fn send_capture_reply(
+    outbound: &HubOutbound,
+    sender: aether_hub_protocol::SessionToken,
+    result: CaptureFrameResult,
+) {
+    let payload = match postcard::to_allocvec(&result) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(
+                target: "aether_substrate::capture",
+                error = %e,
+                "capture result encode failed",
+            );
+            return;
+        }
+    };
+    outbound.send(EngineToHub::Mail(EngineMailFrame {
+        address: ClaudeAddress::Session(sender),
+        kind_name: CaptureFrameResult::NAME.to_owned(),
+        payload,
+        origin: None,
+    }));
 }
 
 impl App {
@@ -124,8 +161,31 @@ impl ApplicationHandler for App {
                 }
                 self.queue.wait_idle();
                 let verts = std::mem::take(&mut *self.frame_vertices.lock().unwrap());
+                let pending_capture = self.capture_queue.take();
                 if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.render(&verts);
+                    match pending_capture {
+                        Some(req) => {
+                            let result = match gpu.render_and_capture(&verts) {
+                                Ok(png) => CaptureFrameResult::Ok { png },
+                                Err(error) => CaptureFrameResult::Err { error },
+                            };
+                            send_capture_reply(&self.outbound, req.sender, result);
+                        }
+                        None => {
+                            gpu.render(&verts);
+                        }
+                    }
+                } else if let Some(req) = pending_capture {
+                    // No GPU yet — capture was requested before `resumed`.
+                    // Reply with a diagnosable error rather than leaving the
+                    // caller hanging on an await-reply slot.
+                    send_capture_reply(
+                        &self.outbound,
+                        req.sender,
+                        CaptureFrameResult::Err {
+                            error: "capture requested before GPU initialized".to_owned(),
+                        },
+                    );
                 }
                 self.frame += 1;
                 if self.frame.is_multiple_of(LOG_EVERY_FRAMES) {
@@ -307,6 +367,10 @@ fn main() -> wasmtime::Result<()> {
     // the platform thread reads when publishing events.
     let input_subscribers = aether_substrate::new_subscribers();
 
+    // Shared capture-request slot between the control plane (where
+    // the request arrives) and the render thread (which fulfils it).
+    let capture_queue = CaptureQueue::new();
+
     // Wire the ADR-0010 control plane. Registered after the scheduler
     // exists so the handler can capture the runtime component table
     // directly rather than an `Arc<Scheduler>` (which would cycle back
@@ -321,6 +385,7 @@ fn main() -> wasmtime::Result<()> {
             components: scheduler.components().clone(),
             input_subscribers: Arc::clone(&input_subscribers),
             default_name_counter: Arc::new(AtomicU64::new(0)),
+            capture_queue: capture_queue.clone(),
         };
         registry.register_sink(
             aether_substrate::AETHER_CONTROL,
@@ -376,6 +441,8 @@ fn main() -> wasmtime::Result<()> {
         kind_frame_stats,
         frame_vertices,
         triangles_rendered: Arc::clone(&triangles_rendered),
+        capture_queue,
+        outbound: Arc::clone(&outbound),
         window: None,
         gpu: None,
         started: None,

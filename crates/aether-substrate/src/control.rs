@@ -32,14 +32,15 @@ use aether_hub_protocol::{
     ClaudeAddress, EngineMailFrame, EngineToHub, KindDescriptor, NamedField, Primitive, SchemaType,
 };
 use aether_kinds::{
-    DropComponent, DropResult, LoadComponent, LoadKind, LoadKindEncoding, LoadKindPrimitive,
-    LoadResult, ReplaceComponent, ReplaceResult, SubscribeInput, SubscribeInputResult,
-    UnsubscribeInput,
+    CaptureFrame, CaptureFrameResult, DropComponent, DropResult, LoadComponent, LoadKind,
+    LoadKindEncoding, LoadKindPrimitive, LoadResult, ReplaceComponent, ReplaceResult,
+    SubscribeInput, SubscribeInputResult, UnsubscribeInput,
 };
 use aether_mail::Kind;
 use serde::Serialize;
 use wasmtime::{Engine, Linker, Module};
 
+use crate::capture::CaptureQueue;
 use crate::component::Component;
 use crate::ctx::SubstrateCtx;
 use crate::hub_client::HubOutbound;
@@ -195,6 +196,10 @@ pub struct ControlPlane {
     pub queue: Arc<MailQueue>,
     pub outbound: Arc<HubOutbound>,
     pub components: ComponentTable,
+    /// Handoff slot for `aether.control.capture_frame`. The handler
+    /// pushes a pending request here; the render thread pulls it on
+    /// the next frame and fulfils the reply.
+    pub capture_queue: CaptureQueue,
     /// ADR-0021 per-stream subscriber sets, shared with the platform
     /// thread. The control plane mutates this table on subscribe /
     /// unsubscribe / drop; the platform thread reads it to fan out
@@ -238,6 +243,8 @@ impl ControlPlane {
         } else if kind_name == UnsubscribeInput::NAME {
             let result = self.handle_unsubscribe(bytes);
             self.reply(sender, SubscribeInputResult::NAME, &result);
+        } else if kind_name == CaptureFrame::NAME {
+            self.handle_capture_frame(sender, bytes);
         } else {
             tracing::warn!(
                 target: "aether_substrate::control",
@@ -425,6 +432,35 @@ impl ControlPlane {
             set.remove(&id);
         }
         SubscribeInputResult::Ok
+    }
+
+    /// Handler for `aether.control.capture_frame`. The capture itself
+    /// happens on the render thread (where the wgpu device lives), so
+    /// this handler queues the request and returns without replying;
+    /// the render thread fulfils via `outbound`. If a capture is
+    /// already in flight, we reject immediately with an error so the
+    /// caller sees a clean failure rather than a hang.
+    fn handle_capture_frame(&self, sender: aether_hub_protocol::SessionToken, bytes: &[u8]) {
+        // Decode for validation; the payload is an empty struct today
+        // but decoding rejects garbage and leaves room for future
+        // options without a separate versioning mechanism.
+        if let Err(e) = postcard::from_bytes::<CaptureFrame>(bytes) {
+            let result = CaptureFrameResult::Err {
+                error: format!("postcard decode failed: {e}"),
+            };
+            self.reply(sender, CaptureFrameResult::NAME, &result);
+            return;
+        }
+
+        if !self.capture_queue.request(sender) {
+            let result = CaptureFrameResult::Err {
+                error: "capture already pending; try again once the in-flight \
+                    request completes"
+                    .to_owned(),
+            };
+            self.reply(sender, CaptureFrameResult::NAME, &result);
+        }
+        // Else: render thread will reply on its next redraw.
     }
 
     fn handle_replace(&self, bytes: &[u8]) -> ReplaceResult {
@@ -811,6 +847,7 @@ mod tests {
             components,
             input_subscribers: input::new_subscribers(),
             default_name_counter: Arc::new(AtomicU64::new(0)),
+            capture_queue: CaptureQueue::new(),
         }
     }
 

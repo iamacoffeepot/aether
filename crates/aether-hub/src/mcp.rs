@@ -16,10 +16,11 @@ use std::time::Duration;
 use aether_hub_protocol::{
     EngineId, HubToEngine, KindDescriptor, LogLevel, MailFrame, SchemaType, SessionToken, Uuid,
 };
+use base64::Engine as _;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{Implementation, ServerCapabilities, ServerInfo},
+    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -28,6 +29,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
+use tokio::time::timeout;
 
 use crate::decoder::decode_schema;
 use crate::encoder::encode_schema;
@@ -39,6 +41,25 @@ use crate::spawn::{DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, PendingSp
 /// Default port the hub binds for MCP clients. Overridable via
 /// `AETHER_MCP_PORT`.
 pub const DEFAULT_MCP_PORT: u16 = 8888;
+
+/// Substrate control-plane kind name for a capture request. String
+/// constants rather than an `aether-kinds` dependency to keep the hub
+/// agnostic of the substrate's typed kind vocabulary at crate level —
+/// the schema-driven descriptor path already provides wire-level
+/// compatibility.
+const KIND_CAPTURE_FRAME: &str = "aether.control.capture_frame";
+const KIND_CAPTURE_FRAME_RESULT: &str = "aether.control.capture_frame_result";
+
+/// Default cap on how long `capture_frame` waits for the substrate's
+/// reply before returning an error. Long enough to tolerate one
+/// stalled frame (monitor refresh + GPU readback + PNG encode); short
+/// enough that a stuck substrate doesn't hang the tool call.
+const DEFAULT_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Hard ceiling on `timeout_ms`. A request that needs more than 30s
+/// is probably a bug on the substrate side; surfacing it as a bound
+/// rather than letting it hang preserves the harness's responsiveness.
+const MAX_CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shared state across all rmcp sessions. Cheap to `Arc::clone` into
 /// each per-session `Hub` instance.
@@ -271,6 +292,27 @@ pub struct EngineLogEntry {
     /// flattened into this string by the substrate's capture layer.
     pub message: String,
     pub sequence: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CaptureFrameArgs {
+    /// Hub-assigned engine UUID as a string (from `list_engines`).
+    pub engine_id: String,
+    /// Maximum time to wait for the substrate's reply, in
+    /// milliseconds. Defaults to 5000 (5 s). Clamped to 30000 (30 s).
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+}
+
+/// Wire-format mirror of the substrate's `CaptureFrameResult` kind.
+/// Lives in the hub so we can postcard-decode the reply payload
+/// without pulling in the substrate's typed kind crate. Must stay in
+/// lockstep with `aether-kinds::CaptureFrameResult` — the comment on
+/// that type is the canonical spec.
+#[derive(Debug, Deserialize)]
+enum CaptureFrameResultWire {
+    Ok { png: Vec<u8> },
+    Err { error: String },
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -522,6 +564,102 @@ impl Hub {
             truncated_before: result.truncated_before,
         };
         serde_json::to_string(&response).map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    #[tool(
+        description = "Capture the current swapchain contents of the given engine as a PNG and return it inline as MCP image content. Uses the existing mail path: sends `aether.control.capture_frame` to the substrate, which captures on its next frame and replies with `aether.control.capture_frame_result`. Rejects if another capture is already in flight on this substrate (rare), or if the wait exceeds `timeout_ms` (default 5000, clamped to 30000). Use this to verify substrate rendering end-to-end without needing the user to look at the window."
+    )]
+    async fn capture_frame(
+        &self,
+        Parameters(args): Parameters<CaptureFrameArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+        let record = self.state.engines.get(&id).ok_or_else(|| {
+            McpError::invalid_params(format!("unknown engine_id {}", args.engine_id), None)
+        })?;
+
+        // Register the reply-waiter BEFORE sending the request, so the
+        // engine reader can divert the reply to our oneshot the moment
+        // it arrives. If another capture is already pending on this
+        // session, surface it as a clear error rather than silently
+        // waiting behind the first.
+        let (_guard, rx) = self
+            .session
+            .replies
+            .register(KIND_CAPTURE_FRAME_RESULT.to_owned())
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    "a capture is already in flight on this session; wait for it to complete"
+                        .to_owned(),
+                    None,
+                )
+            })?;
+
+        // Encode + send the request mail. `Unit`-shaped descriptors
+        // encode to empty bytes; `aether.control.capture_frame` is a
+        // postcard-struct with zero fields so the payload is also
+        // empty. Either way the schema-driven path handles it.
+        let spec = MailSpec {
+            engine_id: args.engine_id.clone(),
+            recipient_name: "aether.control".to_owned(),
+            kind_name: KIND_CAPTURE_FRAME.to_owned(),
+            // Postcard-encoded empty struct is an empty object — the
+            // schema encoder accepts `json!({})` for a zero-field struct.
+            params: Some(serde_json::json!({})),
+            count: 1,
+        };
+        deliver_one(spec, &self.state.engines, self.session.token)
+            .await
+            .map_err(|e| McpError::internal_error(format!("send failed: {e}"), None))?;
+
+        // Wait for the reply (or timeout). `_guard` drops when this
+        // future resolves — on any path — which removes the registry
+        // entry. The record lookup above already pinned `record` for
+        // the duration of the send; we don't need it past this point.
+        let _ = record;
+        let wait = args
+            .timeout_ms
+            .map(|ms| Duration::from_millis(ms as u64).min(MAX_CAPTURE_TIMEOUT))
+            .unwrap_or(DEFAULT_CAPTURE_TIMEOUT);
+        let queued = match timeout(wait, rx).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(_)) => {
+                return Err(McpError::internal_error(
+                    "capture reply channel closed before reply arrived".to_owned(),
+                    None,
+                ));
+            }
+            Err(_) => {
+                return Err(McpError::internal_error(
+                    format!(
+                        "timed out after {}ms waiting for capture_frame_result",
+                        wait.as_millis()
+                    ),
+                    None,
+                ));
+            }
+        };
+
+        // Decode the reply. The payload is a postcard-encoded
+        // `CaptureFrameResult` — either `Ok { png }` or `Err { error }`.
+        let result: CaptureFrameResultWire = postcard::from_bytes(&queued.payload)
+            .map_err(|e| McpError::internal_error(format!("decode reply: {e}"), None))?;
+        match result {
+            CaptureFrameResultWire::Err { error } => Err(McpError::internal_error(
+                format!("substrate capture failed: {error}"),
+                None,
+            )),
+            CaptureFrameResultWire::Ok { png } => {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+                Ok(CallToolResult::success(vec![Content::image(
+                    encoded,
+                    "image/png",
+                )]))
+            }
+        }
     }
 
     #[tool(
@@ -1279,6 +1417,240 @@ mod tests {
         let got_a = drain(&hub_a, None).await;
         assert_eq!(got_a.len(), 1);
         assert_eq!(got_a[0].payload_bytes, vec![42]);
+    }
+
+    #[tokio::test]
+    async fn capture_frame_returns_image_on_substrate_reply() {
+        // End-to-end of the MCP-side plumbing with a stubbed "substrate":
+        // the tool sends request mail (which we drain off the engine's
+        // mail_tx and ignore), then we inject a postcard-encoded
+        // `Ok { png }` reply through the session's reply registry. The
+        // tool should return a `CallToolResult` carrying the PNG as
+        // image content.
+        use aether_hub_protocol::{KindDescriptor, SchemaType};
+
+        let engines = EngineRegistry::new();
+        // Descriptor for the empty-struct request kind. An empty
+        // postcard struct is zero bytes on the wire; the encoder has
+        // no fields to emit so `params: json!({})` encodes cleanly.
+        let kinds = vec![KindDescriptor {
+            name: "aether.control.capture_frame".into(),
+            schema: SchemaType::Struct {
+                repr_c: false,
+                fields: vec![],
+            },
+        }];
+        let (rec, mut rx) = record_with_kinds(777, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let session_token = hub.session.token;
+
+        // Stub substrate: wait until the tool has sent its request
+        // (which means the reply registration is already installed),
+        // then push the reply through the session's mail tx path.
+        let sessions_clone = state.sessions.clone();
+        let substrate_task = tokio::spawn(async move {
+            // Drain the request the tool sent to the engine.
+            let _req = rx.recv().await.expect("tool should send request");
+            // Build the reply payload — postcard-encoded
+            // `CaptureFrameResult::Ok { png: vec![PNG...] }`. Use the
+            // local wire mirror so this test doesn't depend on
+            // aether-kinds being present.
+            #[derive(serde::Serialize)]
+            enum ReplyMirror {
+                #[allow(dead_code)]
+                Ok { png: Vec<u8> },
+                #[allow(dead_code)]
+                Err { error: String },
+            }
+            let fake_png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4];
+            let payload = postcard::to_allocvec(&ReplyMirror::Ok {
+                png: fake_png.clone(),
+            })
+            .expect("encode");
+            // Push as if it were a `ClaudeAddress::Session(token)`
+            // mail landing on this session. The await-reply diversion
+            // runs inside the engine_reader's `try_deliver`; in tests
+            // we short-circuit by driving the diversion directly.
+            let record = sessions_clone.get(&session_token).expect("session");
+            let kind: String = "aether.control.capture_frame_result".into();
+            let queued = QueuedMail {
+                engine_id: id,
+                kind_name: kind.clone(),
+                payload,
+                broadcast: false,
+                origin: None,
+            };
+            let remainder = record.replies.try_deliver(&kind, queued);
+            assert!(
+                remainder.is_none(),
+                "reply registry should have consumed the mail; tool wasn't awaiting"
+            );
+        });
+
+        let result = hub
+            .capture_frame(Parameters(CaptureFrameArgs {
+                engine_id: id.0.to_string(),
+                timeout_ms: Some(2_000),
+            }))
+            .await
+            .expect("tool should succeed");
+
+        substrate_task.await.expect("stub substrate task");
+
+        assert_eq!(result.content.len(), 1);
+        let image = result.content[0]
+            .as_image()
+            .expect("content should be image");
+        assert_eq!(image.mime_type, "image/png");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&image.data)
+            .expect("valid base64");
+        assert_eq!(
+            decoded,
+            vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_frame_surfaces_substrate_err_variant() {
+        use aether_hub_protocol::{KindDescriptor, SchemaType};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![KindDescriptor {
+            name: "aether.control.capture_frame".into(),
+            schema: SchemaType::Struct {
+                repr_c: false,
+                fields: vec![],
+            },
+        }];
+        let (rec, mut rx) = record_with_kinds(778, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let session_token = hub.session.token;
+        let sessions_clone = state.sessions.clone();
+
+        let substrate_task = tokio::spawn(async move {
+            let _req = rx.recv().await.expect("tool should send request");
+            #[derive(serde::Serialize)]
+            enum ReplyMirror {
+                #[allow(dead_code)]
+                Ok {
+                    png: Vec<u8>,
+                },
+                Err {
+                    error: String,
+                },
+            }
+            let payload = postcard::to_allocvec(&ReplyMirror::Err {
+                error: "gpu lost".into(),
+            })
+            .expect("encode");
+            let record = sessions_clone.get(&session_token).expect("session");
+            let kind: String = "aether.control.capture_frame_result".into();
+            let queued = QueuedMail {
+                engine_id: id,
+                kind_name: kind.clone(),
+                payload,
+                broadcast: false,
+                origin: None,
+            };
+            record.replies.try_deliver(&kind, queued);
+        });
+
+        let err = hub
+            .capture_frame(Parameters(CaptureFrameArgs {
+                engine_id: id.0.to_string(),
+                timeout_ms: Some(2_000),
+            }))
+            .await
+            .unwrap_err();
+
+        substrate_task.await.expect("stub substrate task");
+
+        let msg = format!("{err:?}");
+        assert!(msg.contains("gpu lost"), "unexpected error: {msg}");
+    }
+
+    #[tokio::test]
+    async fn capture_frame_rejects_second_concurrent_call() {
+        use aether_hub_protocol::{KindDescriptor, SchemaType};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![KindDescriptor {
+            name: "aether.control.capture_frame".into(),
+            schema: SchemaType::Struct {
+                repr_c: false,
+                fields: vec![],
+            },
+        }];
+        let (rec, _rx) = record_with_kinds(779, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+
+        // Pre-register a waiter for capture_frame_result via the same
+        // path the tool uses, so the second call sees a conflict
+        // without us actually racing two tool calls.
+        let (_guard, _rx) = hub
+            .session
+            .replies
+            .register("aether.control.capture_frame_result".into())
+            .expect("first registration");
+
+        let err = hub
+            .capture_frame(Parameters(CaptureFrameArgs {
+                engine_id: id.0.to_string(),
+                timeout_ms: Some(100),
+            }))
+            .await
+            .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("already in flight"),
+            "expected conflict: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_frame_times_out_when_no_reply() {
+        use aether_hub_protocol::{KindDescriptor, SchemaType};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![KindDescriptor {
+            name: "aether.control.capture_frame".into(),
+            schema: SchemaType::Struct {
+                repr_c: false,
+                fields: vec![],
+            },
+        }];
+        let (rec, mut rx) = record_with_kinds(780, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+
+        // Drain the request the tool will send so its mail_tx doesn't
+        // back-pressure, but never reply. The timeout fires.
+        let drain = tokio::spawn(async move {
+            let _ = rx.recv().await;
+        });
+
+        let err = hub
+            .capture_frame(Parameters(CaptureFrameArgs {
+                engine_id: id.0.to_string(),
+                timeout_ms: Some(50),
+            }))
+            .await
+            .unwrap_err();
+        drain.await.ok();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("timed out"), "expected timeout: {msg}");
     }
 
     #[tokio::test]
