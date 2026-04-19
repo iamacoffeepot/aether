@@ -45,7 +45,7 @@ use crate::component::Component;
 use crate::ctx::SubstrateCtx;
 use crate::hub_client::HubOutbound;
 use crate::input::{self, InputSubscribers};
-use crate::mail::MailboxId;
+use crate::mail::{Mail, MailboxId};
 use crate::queue::MailQueue;
 use crate::registry::{Registry, SinkHandler};
 use crate::scheduler::ComponentTable;
@@ -434,22 +434,71 @@ impl ControlPlane {
         SubscribeInputResult::Ok
     }
 
-    /// Handler for `aether.control.capture_frame`. The capture itself
-    /// happens on the render thread (where the wgpu device lives), so
-    /// this handler queues the request and returns without replying;
-    /// the render thread fulfils via `outbound`. If a capture is
-    /// already in flight, we reject immediately with an error so the
-    /// caller sees a clean failure rather than a hang.
+    /// Handler for `aether.control.capture_frame`. Two phases:
+    ///
+    /// 1. Resolve every envelope in the request's `mails` bundle
+    ///    against the registry (kind + recipient mailbox). If *any*
+    ///    envelope fails to resolve, abort: no mail is pushed, no
+    ///    capture is requested, reply is `Err`. Atomicity guarantee.
+    /// 2. Push every resolved mail onto the queue, then request the
+    ///    capture. The render thread's existing
+    ///    `queue.wait_idle()` → `take capture` ordering ensures the
+    ///    captured frame reflects the bundle's effects.
+    ///
+    /// The capture itself happens on the render thread (where the
+    /// wgpu device lives), so this handler returns without replying
+    /// on the happy path; the render thread fulfils via `outbound`.
+    /// `Err` replies (decode failure, envelope-resolve failure,
+    /// capture-already-pending) are sent inline.
     fn handle_capture_frame(&self, sender: aether_hub_protocol::SessionToken, bytes: &[u8]) {
-        // Decode for validation; the payload is an empty struct today
-        // but decoding rejects garbage and leaves room for future
-        // options without a separate versioning mechanism.
-        if let Err(e) = postcard::from_bytes::<CaptureFrame>(bytes) {
-            let result = CaptureFrameResult::Err {
-                error: format!("postcard decode failed: {e}"),
+        let payload: CaptureFrame = match postcard::from_bytes(bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                let result = CaptureFrameResult::Err {
+                    error: format!("postcard decode failed: {e}"),
+                };
+                self.reply(sender, CaptureFrameResult::NAME, &result);
+                return;
+            }
+        };
+
+        // Phase 1: resolve every envelope against the registry before
+        // pushing anything. Any failure aborts the whole bundle so a
+        // partial dispatch can't leak into the next frame.
+        let mut resolved = Vec::with_capacity(payload.mails.len());
+        for env in &payload.mails {
+            let mailbox = match self.registry.lookup(&env.recipient_name) {
+                Some(id) => id,
+                None => {
+                    let result = CaptureFrameResult::Err {
+                        error: format!(
+                            "unknown recipient mailbox {:?} in capture bundle",
+                            env.recipient_name
+                        ),
+                    };
+                    self.reply(sender, CaptureFrameResult::NAME, &result);
+                    return;
+                }
             };
-            self.reply(sender, CaptureFrameResult::NAME, &result);
-            return;
+            let kind_id = match self.registry.kind_id(&env.kind_name) {
+                Some(id) => id,
+                None => {
+                    let result = CaptureFrameResult::Err {
+                        error: format!("unknown kind {:?} in capture bundle", env.kind_name),
+                    };
+                    self.reply(sender, CaptureFrameResult::NAME, &result);
+                    return;
+                }
+            };
+            resolved.push(Mail::new(mailbox, kind_id, env.payload.clone(), env.count));
+        }
+
+        // Phase 2: push every resolved mail, then request capture.
+        // Order matters on the wire but workers dispatch concurrently;
+        // `queue.wait_idle()` on the render thread is what enforces
+        // "capture after all mail processed".
+        for mail in resolved {
+            self.queue.push(mail);
         }
 
         if !self.capture_queue.request(sender) {
