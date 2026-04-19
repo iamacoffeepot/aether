@@ -40,6 +40,13 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
+    /// Snapshot of the adapter chosen at `new()` — `AdapterInfo` plus
+    /// the resolved `Limits`. Retained so `platform_info` can report
+    /// what the substrate is running on without a second adapter
+    /// request (which would be expensive and is a one-time fact
+    /// anyway).
+    pub adapter_info: wgpu::AdapterInfo,
+    pub limits: wgpu::Limits,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     /// Intermediate render target. Everything draws here; the swapchain
@@ -78,10 +85,12 @@ impl Gpu {
             force_fallback_adapter: false,
         }))
         .expect("no compatible wgpu adapter");
+        let adapter_info = adapter.get_info();
+        let limits = wgpu::Limits::default();
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("aether-substrate device"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
+            required_limits: limits.clone(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::default(),
             trace: wgpu::Trace::default(),
@@ -188,6 +197,8 @@ impl Gpu {
             device,
             queue,
             config,
+            adapter_info,
+            limits,
             pipeline,
             vertex_buffer,
             offscreen,

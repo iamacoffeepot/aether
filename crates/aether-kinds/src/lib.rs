@@ -379,6 +379,171 @@ mod control_plane {
         Ok { png: Vec<u8> },
         Err { error: String },
     }
+
+    /// `aether.control.platform_info` — request a one-shot snapshot of
+    /// the host environment the substrate is running on: OS + engine
+    /// build + GPU adapter + monitors with video modes + current
+    /// window state. Empty payload; reply is `PlatformInfoResult`.
+    ///
+    /// Fat-query design: static environment (OS / GPU) and live state
+    /// (window mode / size) ride together in one snapshot. Callers
+    /// that mutate state (`set_window_mode`) get the new state in the
+    /// mutation's reply, so polling `platform_info` after every
+    /// change isn't necessary.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.platform_info")]
+    pub struct PlatformInfo;
+
+    /// Reply to `PlatformInfo`. `Err` is reserved for snapshot
+    /// failures that the substrate can articulate (e.g. monitor
+    /// enumeration failed) — today the happy path is essentially
+    /// infallible, but keeping the variant leaves room to surface
+    /// platform-specific issues without widening the kind later.
+    ///
+    /// `Ok` holds far more data than `Err`; the clippy lint is
+    /// accurate but the value is constructed once per request,
+    /// serialized, and dropped, so the in-memory enum-tag cost is
+    /// not a concern.
+    #[allow(clippy::large_enum_variant)]
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.platform_info_result")]
+    pub enum PlatformInfoResult {
+        Ok {
+            os: OsInfo,
+            engine: EngineInfo,
+            gpu: GpuInfo,
+            monitors: Vec<MonitorInfo>,
+            /// `None` before winit's `resumed` callback fires — there's
+            /// no window yet. After first resume this is populated for
+            /// the life of the process.
+            window: Option<WindowInfo>,
+        },
+        Err {
+            error: String,
+        },
+    }
+
+    /// Host OS identification. `name` / `arch` come from
+    /// `std::env::consts` (lowercase short names — `"macos"`,
+    /// `"linux"`, `"windows"`; `"aarch64"` / `"x86_64"`); `version`
+    /// is sourced from the `os_info` crate and is platform-formatted
+    /// (e.g. `"14.5"`, `"22.04"`).
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct OsInfo {
+        pub name: String,
+        pub version: String,
+        pub arch: String,
+    }
+
+    /// Engine-side build identification. `version` is the substrate
+    /// crate's `CARGO_PKG_VERSION`; `workers` is the scheduler's
+    /// configured worker count; `kinds_count` is the number of kinds
+    /// registered at boot (ADR-0010 load-time additions aren't
+    /// included — this is a static boot-time fingerprint).
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct EngineInfo {
+        pub version: String,
+        pub workers: u32,
+        pub kinds_count: u32,
+    }
+
+    /// wgpu adapter identification plus the limits most agents reach
+    /// for when planning work. Values are the ones wgpu reports; ids
+    /// are the raw `AdapterInfo::vendor` / `device` integers (PCI
+    /// ids on desktop GPUs, zero on software adapters).
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct GpuInfo {
+        pub name: String,
+        pub vendor_id: u32,
+        pub device_id: u32,
+        pub device_type: GpuDeviceType,
+        pub backend: GpuBackend,
+        pub driver: String,
+        pub driver_info: String,
+        pub max_texture_dim_2d: u32,
+        pub max_buffer_size: u64,
+        pub max_bind_groups: u32,
+    }
+
+    /// Mirror of `wgpu::DeviceType`. Kept as its own enum so the
+    /// kind's schema doesn't depend on wgpu version churn and so
+    /// agents see the same variant names on every platform.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum GpuDeviceType {
+        Other,
+        IntegratedGpu,
+        DiscreteGpu,
+        VirtualGpu,
+        Cpu,
+    }
+
+    /// Mirror of `wgpu::Backend`. Like `GpuDeviceType`, independent
+    /// of wgpu's enum so the wire shape is stable.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum GpuBackend {
+        Noop,
+        Vulkan,
+        Metal,
+        Dx12,
+        Gl,
+        BrowserWebGpu,
+    }
+
+    /// One monitor attached to the host. `position_x` / `position_y`
+    /// are the monitor's top-left in desktop coordinates; `width` /
+    /// `height` are the monitor's current resolution in physical
+    /// pixels. `current_mode` is `None` if winit couldn't determine
+    /// the active mode. `modes` is the full list winit reported —
+    /// callers pick one for `FullscreenExclusive`.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct MonitorInfo {
+        pub name: Option<String>,
+        pub is_primary: bool,
+        pub position_x: i32,
+        pub position_y: i32,
+        pub width: u32,
+        pub height: u32,
+        pub scale_factor: f64,
+        pub current_mode: Option<VideoMode>,
+        pub modes: Vec<VideoMode>,
+    }
+
+    /// A single video mode a monitor supports. `refresh_mhz` is
+    /// winit's millihertz unit (exact rational — divide by 1000 for
+    /// Hz). `bit_depth` is the per-channel count winit reports.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct VideoMode {
+        pub width: u32,
+        pub height: u32,
+        pub refresh_mhz: u32,
+        pub bit_depth: u16,
+    }
+
+    /// Current window state. `monitor_index` points into the
+    /// `monitors` vec on the same reply; `None` if winit couldn't
+    /// resolve a current monitor (rare).
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct WindowInfo {
+        pub mode: WindowMode,
+        pub width: u32,
+        pub height: u32,
+        pub scale_factor: f64,
+        pub monitor_index: Option<u32>,
+    }
+
+    /// The three window presentation modes PR B will let agents
+    /// switch between. Included in the read-only snapshot now so the
+    /// shape is stable across both PRs.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum WindowMode {
+        Windowed,
+        FullscreenBorderless,
+        FullscreenExclusive {
+            width: u32,
+            height: u32,
+            refresh_mhz: u32,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -449,6 +614,11 @@ mod tests {
         assert_eq!(
             CaptureFrameResult::NAME,
             "aether.control.capture_frame_result"
+        );
+        assert_eq!(PlatformInfo::NAME, "aether.control.platform_info");
+        assert_eq!(
+            PlatformInfoResult::NAME,
+            "aether.control.platform_info_result"
         );
     }
 

@@ -33,8 +33,8 @@ use aether_hub_protocol::{
 };
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, DropComponent, DropResult, LoadComponent, LoadKind,
-    LoadKindEncoding, LoadKindPrimitive, LoadResult, MailEnvelope, ReplaceComponent, ReplaceResult,
-    SubscribeInput, SubscribeInputResult, UnsubscribeInput,
+    LoadKindEncoding, LoadKindPrimitive, LoadResult, MailEnvelope, PlatformInfo, ReplaceComponent,
+    ReplaceResult, SubscribeInput, SubscribeInputResult, UnsubscribeInput,
 };
 use aether_mail::Kind;
 use serde::Serialize;
@@ -46,6 +46,7 @@ use crate::ctx::SubstrateCtx;
 use crate::hub_client::HubOutbound;
 use crate::input::{self, InputSubscribers};
 use crate::mail::{Mail, MailboxId};
+use crate::platform_info::PlatformInfoNotifier;
 use crate::queue::MailQueue;
 use crate::registry::{Registry, SinkHandler};
 use crate::scheduler::ComponentTable;
@@ -225,6 +226,10 @@ pub struct ControlPlane {
     /// pushes a pending request here; the render thread pulls it on
     /// the next frame and fulfils the reply.
     pub capture_queue: CaptureQueue,
+    /// Fire-and-forget notifier for `aether.control.platform_info`.
+    /// The handler just hands the sender over; the event-loop thread
+    /// snapshots + replies. Tests use `NoopPlatformInfoNotifier`.
+    pub platform_info_notifier: Arc<dyn PlatformInfoNotifier>,
     /// ADR-0021 per-stream subscriber sets, shared with the platform
     /// thread. The control plane mutates this table on subscribe /
     /// unsubscribe / drop; the platform thread reads it to fan out
@@ -270,6 +275,11 @@ impl ControlPlane {
             self.reply(sender, SubscribeInputResult::NAME, &result);
         } else if kind_name == CaptureFrame::NAME {
             self.handle_capture_frame(sender, bytes);
+        } else if kind_name == PlatformInfo::NAME {
+            // Empty payload; forward the sender straight to the event
+            // loop and let it snapshot + reply on its own thread
+            // (winit monitor / scale-factor APIs require it).
+            self.platform_info_notifier.notify(sender);
         } else {
             tracing::warn!(
                 target: "aether_substrate::control",
@@ -929,6 +939,7 @@ mod tests {
             input_subscribers: input::new_subscribers(),
             default_name_counter: Arc::new(AtomicU64::new(0)),
             capture_queue: CaptureQueue::new(),
+            platform_info_notifier: Arc::new(crate::platform_info::NoopPlatformInfoNotifier),
         }
     }
 

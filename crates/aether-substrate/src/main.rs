@@ -20,9 +20,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
+use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub, SessionToken};
 use aether_kinds::{
-    CaptureFrameResult, FrameStats, InputStream, Key, MouseButton, MouseMove, Tick,
+    CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, InputStream,
+    Key, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult, Tick, VideoMode,
+    WindowInfo, WindowMode,
 };
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
@@ -32,6 +34,7 @@ use aether_substrate::{
     capture::CaptureWaker,
     host_fns,
     mail::{Mail, MailboxId},
+    platform_info::PlatformInfoNotifier,
     subscribers_for,
 };
 use render::Gpu;
@@ -43,12 +46,21 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{Window, WindowId};
 
 /// Events the event loop can receive from outside the winit thread.
-/// The one variant exists so `CaptureRequestWaker` can nudge the loop
-/// when a capture lands while the window is occluded — without it the
-/// loop would sleep in `ControlFlow::Wait` and the capture would hang.
+/// Each variant corresponds to a control-plane request that needs to
+/// run on the event-loop thread — either because winit APIs require
+/// it (monitor enumeration, window state) or because the work has to
+/// be ordered with frame rendering (captures).
 #[derive(Debug, Clone, Copy)]
 enum UserEvent {
+    /// A capture is pending on `CaptureQueue`; wake the loop so its
+    /// `RedrawRequested` handler pulls and fulfils it, even if the
+    /// window is occluded (and `ControlFlow::Wait` would otherwise
+    /// keep the loop asleep).
     CaptureRequested,
+    /// An MCP session asked for a `platform_info` snapshot. The
+    /// handler is fire-and-forget — the sender rides inline, the
+    /// event loop snapshots on receipt and replies via `outbound`.
+    PlatformInfoRequested { sender: SessionToken },
 }
 
 /// Adapter that bridges `CaptureQueue::request` to the winit event
@@ -64,6 +76,22 @@ impl CaptureWaker for CaptureRequestWaker {
         // `send_event` only fails if the event loop has shut down; in
         // that case nothing listens for captures anyway.
         let _ = self.proxy.send_event(UserEvent::CaptureRequested);
+    }
+}
+
+/// Adapter that bridges `ControlPlane`'s `platform_info_notifier` to
+/// the winit event loop — same idea as `CaptureRequestWaker` but the
+/// per-request payload (the originating session token) rides inline
+/// on the event itself, so no shared queue is needed.
+struct PlatformInfoProxy {
+    proxy: EventLoopProxy<UserEvent>,
+}
+
+impl PlatformInfoNotifier for PlatformInfoProxy {
+    fn notify(&self, sender: SessionToken) {
+        let _ = self
+            .proxy
+            .send_event(UserEvent::PlatformInfoRequested { sender });
     }
 }
 
@@ -92,6 +120,11 @@ struct App {
     /// Hub outbound — also shared with the log-capture layer and the
     /// broadcast sink. The capture-reply path is the third consumer.
     outbound: Arc<HubOutbound>,
+    /// How many kinds the substrate registered at boot. Captured once
+    /// and cached so `platform_info` can report it without having to
+    /// consult the live registry (which also contains runtime-loaded
+    /// kinds — those aren't part of the build fingerprint).
+    boot_kinds_count: u32,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     started: Option<Instant>,
@@ -130,7 +163,177 @@ fn send_capture_reply(
     }));
 }
 
+/// Encode + send a `PlatformInfoResult` reply addressed at the
+/// originating session. Mirrors `send_capture_reply` in shape — silent
+/// on disconnected outbound since `PlatformInfoNotifier` fired without
+/// awaiting an ack anyway.
+fn send_platform_info_reply(
+    outbound: &HubOutbound,
+    sender: aether_hub_protocol::SessionToken,
+    result: PlatformInfoResult,
+) {
+    let payload = match postcard::to_allocvec(&result) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(
+                target: "aether_substrate::platform_info",
+                error = %e,
+                "platform_info result encode failed",
+            );
+            return;
+        }
+    };
+    outbound.send(EngineToHub::Mail(EngineMailFrame {
+        address: ClaudeAddress::Session(sender),
+        kind_name: PlatformInfoResult::NAME.to_owned(),
+        payload,
+        origin: None,
+    }));
+}
+
+/// Copy winit's `VideoModeHandle` fields into the wire-stable mirror
+/// in `aether-kinds`. Separate type so the kind's schema doesn't ride
+/// winit's layout.
+fn mirror_video_mode(m: winit::monitor::VideoModeHandle) -> VideoMode {
+    VideoMode {
+        width: m.size().width,
+        height: m.size().height,
+        refresh_mhz: m.refresh_rate_millihertz(),
+        bit_depth: m.bit_depth(),
+    }
+}
+
+/// Convert wgpu's `DeviceType` into the wire-stable mirror enum in
+/// `aether-kinds`. Separate enum so the schema doesn't drift with
+/// wgpu versions.
+fn map_device_type(t: wgpu::DeviceType) -> GpuDeviceType {
+    match t {
+        wgpu::DeviceType::Other => GpuDeviceType::Other,
+        wgpu::DeviceType::IntegratedGpu => GpuDeviceType::IntegratedGpu,
+        wgpu::DeviceType::DiscreteGpu => GpuDeviceType::DiscreteGpu,
+        wgpu::DeviceType::VirtualGpu => GpuDeviceType::VirtualGpu,
+        wgpu::DeviceType::Cpu => GpuDeviceType::Cpu,
+    }
+}
+
+/// Convert wgpu's `Backend` into the wire-stable mirror. `Empty` is
+/// coalesced into `Noop` — the substrate never uses the empty
+/// backend, but the match needs to be exhaustive.
+fn map_backend(b: wgpu::Backend) -> GpuBackend {
+    match b {
+        wgpu::Backend::Noop => GpuBackend::Noop,
+        wgpu::Backend::Vulkan => GpuBackend::Vulkan,
+        wgpu::Backend::Metal => GpuBackend::Metal,
+        wgpu::Backend::Dx12 => GpuBackend::Dx12,
+        wgpu::Backend::Gl => GpuBackend::Gl,
+        wgpu::Backend::BrowserWebGpu => GpuBackend::BrowserWebGpu,
+    }
+}
+
 impl App {
+    /// Build a `PlatformInfoResult::Ok` from whatever the event loop
+    /// knows right now: OS via `std::env::consts` + `os_info`, engine
+    /// via compile-time + boot-time facts, GPU via the cached
+    /// `AdapterInfo` on `Gpu`, monitors via winit. `window` is `None`
+    /// until `resumed` fires and `self.window` / `self.gpu` are set.
+    fn snapshot_platform_info(&self, event_loop: &ActiveEventLoop) -> PlatformInfoResult {
+        let os_info = os_info::get();
+        let os = OsInfo {
+            name: std::env::consts::OS.to_owned(),
+            version: os_info.version().to_string(),
+            arch: std::env::consts::ARCH.to_owned(),
+        };
+        let engine = EngineInfo {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            workers: WORKERS as u32,
+            kinds_count: self.boot_kinds_count,
+        };
+
+        // `Gpu` is absent until `resumed`; without an adapter we
+        // can't describe the GPU or the window. Surface that
+        // cleanly as `Err` so the caller sees why, rather than
+        // returning a half-populated snapshot.
+        let Some(gpu) = self.gpu.as_ref() else {
+            return PlatformInfoResult::Err {
+                error: "platform info requested before GPU / window came up".to_owned(),
+            };
+        };
+
+        let gpu_info = GpuInfo {
+            name: gpu.adapter_info.name.clone(),
+            vendor_id: gpu.adapter_info.vendor,
+            device_id: gpu.adapter_info.device,
+            device_type: map_device_type(gpu.adapter_info.device_type),
+            backend: map_backend(gpu.adapter_info.backend),
+            driver: gpu.adapter_info.driver.clone(),
+            driver_info: gpu.adapter_info.driver_info.clone(),
+            max_texture_dim_2d: gpu.limits.max_texture_dimension_2d,
+            max_buffer_size: gpu.limits.max_buffer_size,
+            max_bind_groups: gpu.limits.max_bind_groups,
+        };
+
+        // Monitor list + primary comparison. winit's `MonitorHandle`
+        // doesn't expose `is_primary` directly — compare against
+        // `primary_monitor()` by value (the handle is `PartialEq`).
+        let primary = event_loop.primary_monitor();
+        let monitors: Vec<MonitorInfo> = event_loop
+            .available_monitors()
+            .map(|m| {
+                let pos = m.position();
+                let size = m.size();
+                let current_refresh = m.refresh_rate_millihertz();
+                let modes: Vec<VideoMode> = m.video_modes().map(mirror_video_mode).collect();
+                // winit 0.30 exposes the monitor's current size +
+                // refresh but not a `current_video_mode` handle — we
+                // synthesize it by matching the listed modes against
+                // the live size/refresh, and settle for `None` if
+                // no entry matches (unusual but possible on virtual
+                // displays).
+                let current_mode = current_refresh.and_then(|mhz| {
+                    modes.iter().copied().find(|v| {
+                        v.width == size.width && v.height == size.height && v.refresh_mhz == mhz
+                    })
+                });
+                MonitorInfo {
+                    name: m.name(),
+                    is_primary: primary.as_ref() == Some(&m),
+                    position_x: pos.x,
+                    position_y: pos.y,
+                    width: size.width,
+                    height: size.height,
+                    scale_factor: m.scale_factor(),
+                    current_mode,
+                    modes,
+                }
+            })
+            .collect();
+
+        let window = self.window.as_ref().map(|w| {
+            let size = w.inner_size();
+            let monitor_index = w
+                .current_monitor()
+                .and_then(|m| event_loop.available_monitors().position(|other| other == m))
+                .map(|idx| idx as u32);
+            WindowInfo {
+                // PR B will track the active mode as actual state;
+                // today the substrate only boots windowed.
+                mode: WindowMode::Windowed,
+                width: size.width,
+                height: size.height,
+                scale_factor: w.scale_factor(),
+                monitor_index,
+            }
+        });
+
+        PlatformInfoResult::Ok {
+            os,
+            engine,
+            gpu: gpu_info,
+            monitors,
+            window,
+        }
+    }
+
     fn set_occluded(&mut self, occluded: bool, event_loop: &ActiveEventLoop) {
         if self.occluded == occluded {
             return;
@@ -148,7 +351,7 @@ impl App {
 }
 
 impl ApplicationHandler<UserEvent> for App {
-    fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::CaptureRequested => {
                 // When occluded, `ControlFlow::Wait` stops the normal
@@ -157,6 +360,10 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
+            }
+            UserEvent::PlatformInfoRequested { sender } => {
+                let result = self.snapshot_platform_info(event_loop);
+                send_platform_info_reply(&self.outbound, sender, result);
             }
         }
     }
@@ -439,6 +646,12 @@ fn main() -> wasmtime::Result<()> {
         proxy: event_loop.create_proxy(),
     }));
 
+    // Fire-and-forget notifier for `platform_info`. Carries the
+    // sender inline on each user event — no shared queue required.
+    let platform_info_notifier = Arc::new(PlatformInfoProxy {
+        proxy: event_loop.create_proxy(),
+    });
+
     // Wire the ADR-0010 control plane. Registered after the scheduler
     // exists so the handler can capture the runtime component table
     // directly rather than an `Arc<Scheduler>` (which would cycle back
@@ -454,6 +667,7 @@ fn main() -> wasmtime::Result<()> {
             input_subscribers: Arc::clone(&input_subscribers),
             default_name_counter: Arc::new(AtomicU64::new(0)),
             capture_queue: capture_queue.clone(),
+            platform_info_notifier: platform_info_notifier.clone(),
         };
         registry.register_sink(
             aether_substrate::AETHER_CONTROL,
@@ -495,6 +709,7 @@ fn main() -> wasmtime::Result<()> {
         "componentless boot — close window to exit; load a component via aether.control.load_component",
     );
 
+    let boot_kinds_count = boot_descriptors.len() as u32;
     let mut app = App {
         queue,
         input_subscribers,
@@ -508,6 +723,7 @@ fn main() -> wasmtime::Result<()> {
         triangles_rendered: Arc::clone(&triangles_rendered),
         capture_queue,
         outbound: Arc::clone(&outbound),
+        boot_kinds_count,
         window: None,
         gpu: None,
         started: None,
