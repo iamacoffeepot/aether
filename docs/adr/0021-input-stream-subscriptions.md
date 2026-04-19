@@ -1,7 +1,8 @@
 # ADR-0021: Publish/subscribe routing for substrate input streams
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-17
+- **Accepted:** 2026-04-19
 
 ## Context
 
