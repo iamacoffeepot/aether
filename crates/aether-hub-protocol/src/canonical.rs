@@ -783,6 +783,118 @@ const fn write_option_str(s: &Option<Cow<'static, str>>, out: &mut [u8], cursor:
     pos
 }
 
+// --- ADR-0033: const-fn encoders for `InputsRecord` ---
+//
+// The `#[handlers]` macro emits one postcard-compatible byte array per
+// handler/fallback/component-doc record, length-prefixed with the
+// section version tag and placed in the `aether.kinds.inputs` custom
+// section. Writing those bytes at const-eval time keeps everything in
+// `#[link_section]` statics without a runtime serializer on the guest.
+// The wire shape matches `postcard(InputsRecord)` byte-for-byte so the
+// substrate/hub reader can decode via `postcard::take_from_bytes`.
+
+/// Byte count of `val` in postcard's unsigned-varint encoding for u64.
+/// Extends `varint_u32_len` to the full u64 range needed by `Kind::ID`.
+pub const fn varint_u64_len(val: u64) -> usize {
+    let mut bytes = 1usize;
+    let mut v = val >> 7;
+    while v != 0 {
+        bytes += 1;
+        v >>= 7;
+    }
+    bytes
+}
+
+const fn write_varint_u64(mut val: u64, out: &mut [u8], cursor: usize) -> usize {
+    let mut pos = cursor;
+    while val >= 0x80 {
+        out[pos] = ((val & 0x7F) as u8) | 0x80;
+        val >>= 7;
+        pos += 1;
+    }
+    out[pos] = val as u8;
+    pos + 1
+}
+
+const fn option_borrowed_str_len(doc: Option<&str>) -> usize {
+    match doc {
+        None => 1, // discriminant byte only
+        Some(s) => 1 + str_len(s),
+    }
+}
+
+const fn write_option_borrowed_str(doc: Option<&str>, out: &mut [u8], cursor: usize) -> usize {
+    match doc {
+        None => {
+            out[cursor] = 0;
+            cursor + 1
+        }
+        Some(s) => {
+            out[cursor] = 1;
+            write_str(s, out, cursor + 1)
+        }
+    }
+}
+
+/// Byte length of a `Handler` record's postcard encoding. One-byte
+/// enum-variant tag (`0x00`) + `varint(id)` + `postcard(name)` +
+/// `option_str(doc)`.
+pub const fn inputs_handler_len(id: u64, name: &str, doc: Option<&str>) -> usize {
+    1 + varint_u64_len(id) + str_len(name) + option_borrowed_str_len(doc)
+}
+
+/// Serialize an `InputsRecord::Handler` into a fixed-size array sized
+/// by `inputs_handler_len`. Exact postcard wire shape for
+/// `InputsRecord::Handler { id, name, doc }`.
+pub const fn write_inputs_handler<const N: usize>(
+    id: u64,
+    name: &str,
+    doc: Option<&str>,
+) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut pos = 0usize;
+    out[pos] = 0; // variant tag: Handler
+    pos += 1;
+    pos = write_varint_u64(id, &mut out, pos);
+    pos = write_str(name, &mut out, pos);
+    pos = write_option_borrowed_str(doc, &mut out, pos);
+    // Silence "assigned but never read" warning on the final write.
+    let _ = pos;
+    out
+}
+
+/// Byte length of a `Fallback` record's postcard encoding.
+pub const fn inputs_fallback_len(doc: Option<&str>) -> usize {
+    1 + option_borrowed_str_len(doc)
+}
+
+/// Serialize an `InputsRecord::Fallback` into a fixed-size array.
+pub const fn write_inputs_fallback<const N: usize>(doc: Option<&str>) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut pos = 0usize;
+    out[pos] = 1; // variant tag: Fallback
+    pos += 1;
+    pos = write_option_borrowed_str(doc, &mut out, pos);
+    let _ = pos;
+    out
+}
+
+/// Byte length of a `Component` record's postcard encoding.
+pub const fn inputs_component_len(doc: &str) -> usize {
+    1 + str_len(doc)
+}
+
+/// Serialize an `InputsRecord::Component` into a fixed-size array.
+pub const fn write_inputs_component<const N: usize>(doc: &str) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut pos = 0usize;
+    out[pos] = 2; // variant tag: Component
+    pos += 1;
+    pos = write_str(doc, &mut out, pos);
+    let _ = pos;
+    out
+}
+
 #[cfg(test)]
 mod tests {
     //! The contract these tests pin: canonical bytes round-trip through
@@ -1040,5 +1152,84 @@ mod tests {
         const BYTES: [u8; N] = canonical_serialize_labels::<N>(&RESULT_LABELS);
         let decoded: KindLabels = postcard::from_bytes(&BYTES).expect("decode");
         assert_eq!(decoded, RESULT_LABELS);
+    }
+
+    // ADR-0033: handler/fallback/component record encoders. Round-trip
+    // through `postcard::from_bytes::<InputsRecord>` so the substrate
+    // reader sees exactly the enum shapes the macro emits.
+    use crate::types::InputsRecord;
+
+    #[test]
+    fn inputs_handler_const_round_trips() {
+        const ID: u64 = 0xdead_beef_cafe_f00d;
+        const NAME: &str = "aether.tick";
+        const DOC: Option<&str> = Some("Not useful to send manually.");
+        const N: usize = inputs_handler_len(ID, NAME, DOC);
+        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC);
+        let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
+        match decoded {
+            InputsRecord::Handler { id, name, doc } => {
+                assert_eq!(id, ID);
+                assert_eq!(name, NAME);
+                assert_eq!(doc.as_deref(), DOC);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inputs_handler_without_doc_const_round_trips() {
+        const ID: u64 = 1;
+        const NAME: &str = "test.ping";
+        const DOC: Option<&str> = None;
+        const N: usize = inputs_handler_len(ID, NAME, DOC);
+        const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC);
+        let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
+        assert_eq!(
+            decoded,
+            InputsRecord::Handler {
+                id: ID,
+                name: NAME.into(),
+                doc: None,
+            }
+        );
+    }
+
+    #[test]
+    fn inputs_fallback_const_round_trips() {
+        const DOC: Option<&str> = Some("Forwards anything unrecognized.");
+        const N: usize = inputs_fallback_len(DOC);
+        const BYTES: [u8; N] = write_inputs_fallback::<N>(DOC);
+        let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
+        assert_eq!(
+            decoded,
+            InputsRecord::Fallback {
+                doc: Some(DOC.unwrap().into()),
+            }
+        );
+    }
+
+    #[test]
+    fn inputs_component_const_round_trips() {
+        const DOC: &str = "Logs every input event to the broadcast sink.";
+        const N: usize = inputs_component_len(DOC);
+        const BYTES: [u8; N] = write_inputs_component::<N>(DOC);
+        let decoded: InputsRecord = postcard::from_bytes(&BYTES).expect("decode");
+        assert_eq!(decoded, InputsRecord::Component { doc: DOC.into() });
+    }
+
+    #[test]
+    fn varint_u64_matches_postcard_encoding() {
+        // Spot-check the new u64 varint against postcard's own encoder.
+        // `varint_u64_len` / `write_varint_u64` must agree on every
+        // boundary — the macro relies on it for handler ids that are
+        // full 64-bit FNV hashes.
+        for &v in &[0u64, 1, 0x7f, 0x80, 0xff, 0xffff_ffff, u64::MAX] {
+            let mut out = [0u8; 10];
+            let used = write_varint_u64(v, &mut out, 0);
+            let postcard_bytes = postcard::to_allocvec(&v).unwrap();
+            assert_eq!(&out[..used], &postcard_bytes[..], "mismatch for {v:#x}");
+            assert_eq!(used, varint_u64_len(v), "len mismatch for {v:#x}");
+        }
     }
 }

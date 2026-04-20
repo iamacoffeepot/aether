@@ -569,4 +569,96 @@ mod tests {
         assert_eq!(fields[0].name, "body");
         assert_eq!(fields[0].ty, SchemaType::String);
     }
+
+    // ADR-0033 — `InputsRecord` wire-format tests. The `#[handlers]`
+    // macro emits one `[INPUTS_SECTION_VERSION][postcard(InputsRecord)]`
+    // record per handler/fallback/component-doc, concatenated by the
+    // linker into the `aether.kinds.inputs` custom section. These tests
+    // pin the record shape both for the macro and for any downstream
+    // consumer that decodes the section.
+
+    #[test]
+    fn inputs_record_handler_roundtrip() {
+        let rec = InputsRecord::Handler {
+            id: 0xdead_beef_cafe_f00d,
+            name: "aether.tick".into(),
+            doc: Some("Not useful to send manually — the substrate drives this.".into()),
+        };
+        let bytes = postcard::to_allocvec(&rec).unwrap();
+        assert_eq!(postcard::from_bytes::<InputsRecord>(&bytes).unwrap(), rec);
+    }
+
+    #[test]
+    fn inputs_record_handler_without_doc_roundtrip() {
+        let rec = InputsRecord::Handler {
+            id: 1,
+            name: "aether.key".into(),
+            doc: None,
+        };
+        let bytes = postcard::to_allocvec(&rec).unwrap();
+        assert_eq!(postcard::from_bytes::<InputsRecord>(&bytes).unwrap(), rec);
+    }
+
+    #[test]
+    fn inputs_record_fallback_roundtrip() {
+        let rec = InputsRecord::Fallback {
+            doc: Some("Forwards anything unrecognized.".into()),
+        };
+        let bytes = postcard::to_allocvec(&rec).unwrap();
+        assert_eq!(postcard::from_bytes::<InputsRecord>(&bytes).unwrap(), rec);
+
+        let bare = InputsRecord::Fallback { doc: None };
+        let bytes = postcard::to_allocvec(&bare).unwrap();
+        assert_eq!(postcard::from_bytes::<InputsRecord>(&bytes).unwrap(), bare);
+    }
+
+    #[test]
+    fn inputs_record_component_roundtrip() {
+        let rec = InputsRecord::Component {
+            doc: "Logs every input event to the broadcast sink.".into(),
+        };
+        let bytes = postcard::to_allocvec(&rec).unwrap();
+        assert_eq!(postcard::from_bytes::<InputsRecord>(&bytes).unwrap(), rec);
+    }
+
+    #[test]
+    fn inputs_section_concatenated_records_streaming_decode() {
+        // Walk-the-section pattern the substrate reader will use:
+        // `[version][postcard(InputsRecord)]` back-to-back, consumed
+        // with `postcard::take_from_bytes` until the cursor empties.
+        let records = vec![
+            InputsRecord::Component {
+                doc: "A canary component.".into(),
+            },
+            InputsRecord::Handler {
+                id: 42,
+                name: "aether.tick".into(),
+                doc: Some("heartbeat".into()),
+            },
+            InputsRecord::Handler {
+                id: 0xff,
+                name: "test.ping".into(),
+                doc: None,
+            },
+            InputsRecord::Fallback {
+                doc: Some("catchall".into()),
+            },
+        ];
+
+        let mut section = Vec::new();
+        for rec in &records {
+            section.push(INPUTS_SECTION_VERSION);
+            section.extend(postcard::to_allocvec(rec).unwrap());
+        }
+
+        let mut cursor = &section[..];
+        let mut decoded = Vec::new();
+        while !cursor.is_empty() {
+            assert_eq!(cursor[0], INPUTS_SECTION_VERSION);
+            let (rec, rest) = postcard::take_from_bytes::<InputsRecord>(&cursor[1..]).unwrap();
+            decoded.push(rec);
+            cursor = rest;
+        }
+        assert_eq!(decoded, records);
+    }
 }

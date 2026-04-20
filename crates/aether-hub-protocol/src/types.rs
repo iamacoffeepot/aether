@@ -701,6 +701,39 @@ pub struct KindLabels {
     pub root: LabelNode,
 }
 
+/// One record in the `aether.kinds.inputs` section (ADR-0033). The
+/// enum tag discriminates handler vs fallback vs component-level doc
+/// so the reader can classify before decoding further. `id` on a
+/// `Handler` is the compile-time `K::ID` (ADR-0030); the hub reuses
+/// it rather than re-deriving from the name. `doc` values come from
+/// rustdoc `///` comments filtered through an optional `# Agent`
+/// section — `None` when the source had no comment at all, `Some` of
+/// the filtered body otherwise.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputsRecord {
+    /// A `#[handler]` method's advertised capability.
+    Handler {
+        id: u64,
+        name: Cow<'static, str>,
+        doc: Option<Cow<'static, str>>,
+    },
+    /// A `#[fallback]` method's presence and optional description.
+    Fallback { doc: Option<Cow<'static, str>> },
+    /// Component-wide rustdoc lifted from the `#[handlers]` impl block.
+    Component { doc: Cow<'static, str> },
+}
+
+/// Custom-section name for the inputs manifest (ADR-0033). Paired
+/// with `aether.kinds` and `aether.kinds.labels`; together they form
+/// the component's full declared surface — kinds introduced + kinds
+/// handled.
+pub const INPUTS_SECTION: &str = "aether.kinds.inputs";
+
+/// Version byte prefixing every record in the `aether.kinds.inputs`
+/// section. Follows ADR-0028's per-record versioning convention —
+/// unknown versions abort the read rather than silently skip.
+pub const INPUTS_SECTION_VERSION: u8 = 0x01;
+
 /// Hub's reply to `Hello`. Carries the `EngineId` the engine should
 /// treat as its identity for the rest of this connection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
