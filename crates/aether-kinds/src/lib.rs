@@ -27,7 +27,7 @@ use bytemuck::{Pod, Zeroable};
 /// elapsed-time is parked until a subscriber actually needs it.
 #[derive(aether_mail::Kind)]
 #[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
-#[kind(name = "aether.tick")]
+#[kind(name = "aether.tick", input)]
 pub struct Tick;
 
 /// A single keyboard keypress, identified by `winit::keyboard::KeyCode
@@ -35,7 +35,7 @@ pub struct Tick;
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_mail::Kind)]
 #[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
-#[kind(name = "aether.key")]
+#[kind(name = "aether.key", input)]
 pub struct Key {
     pub code: u32,
 }
@@ -43,14 +43,14 @@ pub struct Key {
 /// A mouse-button press. No payload today — which button isn't tracked.
 #[derive(aether_mail::Kind)]
 #[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
-#[kind(name = "aether.mouse_button")]
+#[kind(name = "aether.mouse_button", input)]
 pub struct MouseButton;
 
 /// Cursor position in window coordinates, as logical pixels cast to f32.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind)]
 #[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
-#[kind(name = "aether.mouse_move")]
+#[kind(name = "aether.mouse_move", input)]
 pub struct MouseMove {
     pub x: f32,
     pub y: f32,

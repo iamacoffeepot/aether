@@ -14,6 +14,7 @@ use std::sync::Arc;
 use aether_hub_protocol::SessionToken;
 
 use crate::hub_client::HubOutbound;
+use crate::input::InputSubscribers;
 use crate::mail::{Mail, MailKind, MailboxId};
 use crate::queue::MailQueue;
 use crate::registry::{MailboxEntry, Registry};
@@ -41,6 +42,12 @@ pub struct SubstrateCtx {
     /// `HubOutbound::disconnected` when no hub is attached — sends
     /// silently drop, matching the broadcast semantics.
     pub outbound: Arc<HubOutbound>,
+    /// ADR-0021 subscriber sets, shared with the platform-event
+    /// publisher in `main.rs`. `resolve_kind_p32` consults this when
+    /// the resolved kind is flagged `IS_INPUT`, auto-subscribing the
+    /// calling mailbox so components declaring `type Kinds = (Tick, ...)`
+    /// don't have to send `subscribe_input` themselves.
+    pub input_subscribers: InputSubscribers,
     /// ADR-0013 + ADR-0017: handle→entry map populated by
     /// `Component::deliver` whenever an inbound mail has a meaningful
     /// reply target — a Claude session (`SenderEntry::Session`) or
@@ -74,12 +81,14 @@ impl SubstrateCtx {
         registry: Arc<Registry>,
         queue: Arc<MailQueue>,
         outbound: Arc<HubOutbound>,
+        input_subscribers: InputSubscribers,
     ) -> Self {
         SubstrateCtx {
             sender,
             registry,
             queue,
             outbound,
+            input_subscribers,
             sender_table: SenderTable::new(),
             saved_state: None,
             save_state_error: None,

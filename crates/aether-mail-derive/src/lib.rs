@@ -55,16 +55,28 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
 
 fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
-    let kind_name = parse_kind_name(&input.attrs)?;
+    let KindAttr {
+        name: kind_name,
+        is_input,
+    } = parse_kind_attr(&input.attrs)?;
     if let Data::Union(u) = &input.data {
         return Err(syn::Error::new_spanned(
             u.union_token,
             "Kind derive does not support unions",
         ));
     }
+    // Only emit `IS_INPUT` when true — relying on the trait default
+    // for non-input kinds keeps the generated code minimal and makes
+    // grep-for-IS_INPUT-true a reliable audit of the input set.
+    let is_input_item = if is_input {
+        quote! { const IS_INPUT: bool = true; }
+    } else {
+        quote! {}
+    };
     Ok(quote! {
         impl ::aether_mail::Kind for #name {
             const NAME: &'static str = #kind_name;
+            #is_input_item
         }
     })
 }
@@ -228,28 +240,41 @@ fn is_vec_u8(ty: &Type) -> bool {
 
 // ----- attribute and shape helpers --------------------------------------
 
-fn parse_kind_name(attrs: &[Attribute]) -> syn::Result<String> {
+struct KindAttr {
+    name: String,
+    is_input: bool,
+}
+
+fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
     for attr in attrs {
         if !attr.path().is_ident("kind") {
             continue;
         }
-        let mut found: Option<String> = None;
+        let mut name: Option<String> = None;
+        let mut is_input = false;
         attr.parse_nested_meta(|meta| {
-            if !meta.path.is_ident("name") {
-                return Err(meta.error("expected `name = \"...\"`"));
+            if meta.path.is_ident("name") {
+                let value = meta.value()?;
+                let expr: Expr = value.parse()?;
+                if let Expr::Lit(lit) = &expr
+                    && let Lit::Str(s) = &lit.lit
+                {
+                    name = Some(s.value());
+                    return Ok(());
+                }
+                return Err(meta.error("`name` must be a string literal"));
             }
-            let value = meta.value()?;
-            let expr: Expr = value.parse()?;
-            if let Expr::Lit(lit) = &expr
-                && let Lit::Str(s) = &lit.lit
-            {
-                found = Some(s.value());
+            if meta.path.is_ident("input") {
+                // Flag-shaped — no `= value`. ADR-0021: marks this
+                // kind as a substrate-published input stream so the
+                // SDK's auto-subscribe walk catches it at init.
+                is_input = true;
                 return Ok(());
             }
-            Err(meta.error("`name` must be a string literal"))
+            Err(meta.error("expected `name = \"...\"` or `input`"))
         })?;
-        if let Some(name) = found {
-            return Ok(name);
+        if let Some(name) = name {
+            return Ok(KindAttr { name, is_input });
         }
     }
     Err(syn::Error::new(

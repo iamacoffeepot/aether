@@ -364,6 +364,7 @@ impl ControlPlane {
             Arc::clone(&self.registry),
             Arc::clone(&self.queue),
             Arc::clone(&self.outbound),
+            Arc::clone(&self.input_subscribers),
         );
         let component = match Component::instantiate(&self.engine, &self.linker, &module, ctx) {
             Ok(c) => c,
@@ -685,6 +686,7 @@ impl ControlPlane {
             Arc::clone(&self.registry),
             Arc::clone(&self.queue),
             Arc::clone(&self.outbound),
+            Arc::clone(&self.input_subscribers),
         );
         let mut new_component =
             match Component::instantiate(&self.engine, &self.linker, &module, ctx) {
