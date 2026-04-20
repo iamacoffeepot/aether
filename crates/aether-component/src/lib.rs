@@ -43,7 +43,7 @@
 use core::any::TypeId;
 use core::marker::PhantomData;
 
-use aether_mail::Kind;
+use aether_mail::{Kind, mailbox_id_from_name};
 
 pub mod kinds;
 pub mod raw;
@@ -53,10 +53,6 @@ pub use kinds::{Cons, KindList, KindTable, Nil};
 /// Sentinel returned by `raw::resolve_kind` when the substrate has not
 /// registered the requested kind name. Mirrors the host constant.
 pub const KIND_NOT_FOUND: u32 = u32::MAX;
-
-/// Sentinel returned by `raw::resolve_mailbox` when the substrate has
-/// not registered the requested mailbox name. Mirrors the host constant.
-pub const MAILBOX_NOT_FOUND: u64 = u64::MAX;
 
 /// Phantom-typed wrapper around a resolved kind id. A `KindId<Tick>`
 /// cannot be passed where a `KindId<DrawTriangle>` is expected — the
@@ -181,19 +177,15 @@ pub fn resolve<K: Kind>() -> KindId<K> {
     }
 }
 
-/// Resolve a mailbox by its registered name and bind it to kind `K`,
-/// producing a typed `Sink<K>`. Panics if either resolution fails —
-/// same "loud at init" discipline as `resolve`.
+/// Bind a mailbox name to kind `K`, producing a typed `Sink<K>`. The
+/// mailbox id is derived from the name client-side (ADR-0029 stable
+/// hash) — no host-fn round trip, no requirement that the target
+/// mailbox already exist on the substrate side at init time. Kind
+/// resolution (`resolve::<K>()`) still hits `resolve_kind` under the
+/// hood, so this panics if the kind isn't registered — same "loud at
+/// init" discipline as ADR-0012.
 pub fn resolve_sink<K: Kind>(mailbox_name: &str) -> Sink<K> {
-    let mailbox = unsafe {
-        raw::resolve_mailbox(
-            mailbox_name.as_ptr().addr() as u32,
-            mailbox_name.len() as u32,
-        )
-    };
-    if mailbox == MAILBOX_NOT_FOUND {
-        panic!("aether-component: resolve_mailbox failed");
-    }
+    let mailbox = mailbox_id_from_name(mailbox_name);
     let kind = resolve::<K>().raw();
     Sink {
         mailbox,

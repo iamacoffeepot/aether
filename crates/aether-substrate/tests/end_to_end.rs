@@ -22,7 +22,12 @@ use aether_substrate::{
 };
 use wasmtime::{Engine, Linker, Module};
 
-const WAT: &str = r#"
+fn forwards_to_sink_wat(sink_id: MailboxId) -> String {
+    // ADR-0029 made mailbox ids 64-bit name hashes, so the sink's id
+    // isn't a small constant — splice the actual hashed value into
+    // the WAT as an i64.const literal.
+    format!(
+        r#"
 (module
   (import "aether" "send_mail_p32"
     (func $send_mail (param i64 i32 i32 i32 i32) (result i32)))
@@ -30,20 +35,20 @@ const WAT: &str = r#"
   (func (export "receive_p32")
     (param $kind i32) (param $ptr i32) (param $count i32) (param $sender i32)
     (result i32)
-    ;; Forward a send_mail call to mailbox 1 (the sink in this test).
-    ;; recipient=1, kind=99, ptr=0, len=0, count=<same as incoming count>.
-    i64.const 1
+    i64.const {sink_id}
     i32.const 99
     i32.const 0
     i32.const 0
     local.get $count
     call $send_mail))
-"#;
+"#,
+        sink_id = sink_id.0,
+    )
+}
 
 #[test]
 fn tick_roundtrip_component_to_sink() {
     let engine = Engine::default();
-    let module = Module::new(&engine, WAT).expect("compile wat");
 
     let registry = Arc::new(Registry::new());
     let component_mbox = registry.register_component("hello");
@@ -56,8 +61,9 @@ fn tick_roundtrip_component_to_sink() {
             c2.fetch_add(count, Ordering::SeqCst);
         }),
     );
-    assert_eq!(component_mbox, MailboxId(0));
-    assert_eq!(sink_mbox, MailboxId(1));
+    let module = Module::new(&engine, forwards_to_sink_wat(sink_mbox)).expect("compile wat");
+    assert_eq!(component_mbox, MailboxId::from_name("hello"));
+    assert_eq!(sink_mbox, MailboxId::from_name("heartbeat"));
     let queue = Arc::new(MailQueue::new());
 
     let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);

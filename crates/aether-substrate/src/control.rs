@@ -1790,7 +1790,7 @@ mod tests {
             entry.parked.lock().unwrap().push_back(Mail {
                 recipient: MailboxId(id),
                 kind: 0,
-                payload: vec![sink_id.0 as u8],
+                payload: sink_id.0.to_le_bytes().to_vec(),
                 count: n,
                 sender: SessionToken::NIL,
                 from_component: None,
@@ -1862,7 +1862,7 @@ mod tests {
             entry.parked.lock().unwrap().push_back(Mail {
                 recipient: MailboxId(id),
                 kind: 0,
-                payload: vec![sink_id.0 as u8],
+                payload: sink_id.0.to_le_bytes().to_vec(),
                 count: n,
                 sender: SessionToken::NIL,
                 from_component: None,
@@ -1902,9 +1902,11 @@ mod tests {
     }
 
     /// Component that, on each `receive`, forwards a `send_mail` to
-    /// the sink mailbox encoded in the first payload byte. Used by
-    /// the drain-flush tests so we can observe whether the new (or
-    /// old) instance handled each parked mail.
+    /// the sink mailbox encoded in the payload's first 8 bytes (as
+    /// a little-endian u64 — ADR-0029 made mailbox ids 64-bit name
+    /// hashes, so 1-byte truncation no longer works). Used by the
+    /// drain-flush tests so we can observe whether the new (or old)
+    /// instance handled each parked mail.
     const WAT_FORWARDS_TO_SINK: &str = r#"
         (module
             (import "aether" "send_mail_p32"
@@ -1914,7 +1916,7 @@ mod tests {
                 (param $kind i32) (param $ptr i32) (param $count i32) (param $sender i32)
                 (result i32)
                 (drop (call $send_mail
-                    (i64.load8_u (local.get $ptr))
+                    (i64.load (local.get $ptr))
                     (i32.const 0)
                     (i32.const 0)
                     (i32.const 0)

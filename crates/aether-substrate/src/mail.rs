@@ -2,13 +2,30 @@
 // boundaries through the scheduler's queue.
 
 use aether_hub_protocol::SessionToken;
+use aether_mail::mailbox_id_from_name;
 
 /// Addressing token for any mailbox — component or substrate-owned sink.
 /// Opaque `u64` newtype so it can't be accidentally mixed with wasmtime
-/// indices or raw integers. Width is sized for the ADR-0029 move to
-/// name-derived ids; today the registry still allocates sequentially.
+/// indices or raw integers. The id is `aether_mail::mailbox_id_from_name`
+/// of the mailbox's registered name (ADR-0029) — deterministic across
+/// processes and sessions.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MailboxId(pub u64);
+
+impl MailboxId {
+    /// Reserved sentinel for "no sender". ADR-0011 / ADR-0017 treat
+    /// `MailboxId(0)` as the unassigned origin; registration rejects
+    /// any name whose hash collides with 0 (practical probability
+    /// ~2⁻⁶⁴, but the guard is cheap).
+    pub const NONE: MailboxId = MailboxId(0);
+
+    /// Compute the deterministic id for a mailbox name. Same algorithm
+    /// the guest SDK uses on the component side — ids round-trip
+    /// verbatim across the FFI.
+    pub fn from_name(name: &str) -> MailboxId {
+        MailboxId(mailbox_id_from_name(name))
+    }
+}
 
 /// Host/guest contract tag for the payload layout. The substrate and the
 /// components that talk to it agree on a specific layout per kind. The
