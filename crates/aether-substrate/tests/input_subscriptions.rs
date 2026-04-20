@@ -143,7 +143,6 @@ fn load_wat(plane: &ControlPlane, name: &str) -> u32 {
         LoadComponent::NAME,
         &LoadComponent {
             wasm: wat::parse_str(WAT).expect("compile WAT"),
-            kinds: vec![],
             name: Some(name.into()),
         },
     );

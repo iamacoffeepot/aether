@@ -10,10 +10,14 @@
 //! reset. Soft-lock detection is deliberately absent; seeing Claude
 //! recognise and recover from unwinnable states is part of the point.
 //!
-//! Grid is capped at 16×16 because `LoadKindEncoding::Pod` (the wire
-//! shape that runtime-registered kinds must conform to) supports only
-//! fixed-size scalar + array fields — no `Vec<u8>`. The cap is a
-//! harness constraint, not a gameplay one.
+//! Grid is capped at 16×16 as a carryover from the pre-ADR-0028
+//! `LoadKind` wire shape, which only supported fixed-size scalar
+//! and array fields. Now that the kind vocabulary rides in the
+//! wasm's `aether.kinds` custom section (ADR-0028), the full
+//! `SchemaType` vocabulary is available — including `Vec<u8>` —
+//! and this cap can be lifted whenever we want to extend the
+//! demo. Left as-is for now so this PR stays focused on the wire
+//! removal.
 
 use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
 use aether_kinds::{DrawTriangle, Tick, Vertex};
