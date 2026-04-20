@@ -19,7 +19,7 @@
 //! demo. Left as-is for now so this PR stays focused on the wire
 //! removal.
 
-use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
+use aether_component::{Component, Ctx, InitCtx, KindId, Sink, handlers};
 use aether_kinds::{DrawTriangle, Tick, Vertex};
 use aether_mail::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
@@ -53,7 +53,8 @@ pub struct SokobanMove {
 }
 
 /// Claude → component: reload the currently-active level. No payload.
-#[derive(Kind, Schema)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable, Kind, Schema)]
 #[kind(name = "demo.sokoban.reset")]
 pub struct SokobanReset;
 
@@ -137,9 +138,8 @@ pub struct Sokoban {
     render: Sink<DrawTriangle>,
 }
 
+#[handlers]
 impl Component for Sokoban {
-    type Kinds = (Tick, SokobanMove, SokobanReset, SokobanLoadLevel);
-
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         let mut me = Sokoban {
             state: SokobanState::default(),
@@ -150,25 +150,27 @@ impl Component for Sokoban {
         me
     }
 
-    fn receive(&mut self, ctx: &mut Ctx<'_>, mail: Mail<'_>) {
-        if mail.is::<Tick>() {
-            self.render_grid(ctx);
-            return;
-        }
-        if let Some(mv) = mail.decode_typed::<SokobanMove>() {
-            self.apply_move(mv.direction);
-            self.reply_state(ctx, &mail);
-            return;
-        }
-        if mail.is::<SokobanReset>() {
-            self.load_level(self.state.level_id);
-            self.reply_state(ctx, &mail);
-            return;
-        }
-        if let Some(load) = mail.decode_typed::<SokobanLoadLevel>() {
-            self.load_level(load.id);
-            self.reply_state(ctx, &mail);
-        }
+    #[handler]
+    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
+        self.render_grid(ctx);
+    }
+
+    #[handler]
+    fn on_move(&mut self, ctx: &mut Ctx<'_>, mv: SokobanMove) {
+        self.apply_move(mv.direction);
+        self.reply_state(ctx);
+    }
+
+    #[handler]
+    fn on_reset(&mut self, ctx: &mut Ctx<'_>, _rst: SokobanReset) {
+        self.load_level(self.state.level_id);
+        self.reply_state(ctx);
+    }
+
+    #[handler]
+    fn on_load_level(&mut self, ctx: &mut Ctx<'_>, load: SokobanLoadLevel) {
+        self.load_level(load.id);
+        self.reply_state(ctx);
     }
 }
 
@@ -298,8 +300,8 @@ impl Sokoban {
         self.state.player_y = ty;
     }
 
-    fn reply_state(&self, ctx: &mut Ctx<'_>, mail: &Mail<'_>) {
-        let Some(sender) = mail.sender() else {
+    fn reply_state(&self, ctx: &mut Ctx<'_>) {
+        let Some(sender) = ctx.sender() else {
             return;
         };
         ctx.reply(sender, self.state_kind, &self.state);

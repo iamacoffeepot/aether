@@ -1,17 +1,16 @@
-// Smoke-test component for ADR-0017 (component-origin sender
-// handles). On every `aether.tick`, sends `demo.request { seq }` to
-// the component registered as `"echoer"`. When the reply
-// `demo.response { seq }` arrives — via the Component-variant
-// sender handle the substrate allocated — broadcasts
-// `demo.observation { seq }` to `hub.claude.broadcast` so the round
-// trip is visible to the driving Claude session.
-//
-// ADR-0027 shape: receive-side kinds (`Tick`, `Response`) live in
-// `type Kinds` and dispatch via `mail.is::<Tick>()` /
-// `mail.decode_typed::<Response>()`; send-side `Sink<K>` keeps its
-// explicit field because mailbox names are data, not type.
+//! Smoke-test component for ADR-0017 (component-origin sender
+//! handles). On every tick, sends `demo.request { seq }` to the
+//! component registered as `"echoer"`. When the matching
+//! `demo.response { seq }` arrives via the Component-variant sender
+//! handle the substrate allocated, broadcasts
+//! `demo.observation { seq }` to `hub.claude.broadcast` so the round
+//! trip is visible to the driving Claude session.
+//!
+//! ADR-0033 phase 3: each kind gets its own `#[handler]` method on
+//! the `#[handlers]`-decorated impl; `Sink<K>` still carries the
+//! send-side mailbox name (data, not type).
 
-use aether_component::{Component, Ctx, InitCtx, Mail, Sink};
+use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
 use aether_kinds::Tick;
 use aether_mail::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
@@ -43,9 +42,8 @@ pub struct Caller {
     next_seq: u32,
 }
 
+#[handlers]
 impl Component for Caller {
-    type Kinds = (Tick, Response);
-
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Caller {
             request: ctx.resolve_sink::<Request>("echoer"),
@@ -54,14 +52,16 @@ impl Component for Caller {
         }
     }
 
-    fn receive(&mut self, ctx: &mut Ctx<'_>, mail: Mail<'_>) {
-        if mail.is::<Tick>() {
-            let seq = self.next_seq;
-            self.next_seq = self.next_seq.wrapping_add(1);
-            ctx.send(&self.request, &Request { seq });
-        } else if let Some(resp) = mail.decode_typed::<Response>() {
-            ctx.send(&self.observe, &Observation { seq: resp.seq });
-        }
+    #[handler]
+    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.wrapping_add(1);
+        ctx.send(&self.request, &Request { seq });
+    }
+
+    #[handler]
+    fn on_response(&mut self, ctx: &mut Ctx<'_>, resp: Response) {
+        ctx.send(&self.observe, &Observation { seq: resp.seq });
     }
 }
 
