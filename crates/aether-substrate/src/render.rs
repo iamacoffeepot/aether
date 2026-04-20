@@ -1,8 +1,8 @@
-// wgpu plumbing for milestone 3b: owns the device/queue/surface as in
-// 3a, plus a fixed vertex buffer, a shader module, and a render
-// pipeline matching the (pos vec2, color vec3) vertex layout. Each
-// frame the main thread hands in a byte blob drained from the render
-// sink; render() uploads it and issues one draw call.
+// wgpu plumbing: owns the device/queue/surface plus a fixed vertex
+// buffer, a shader module, and a render pipeline matching the
+// (pos vec2, color vec3) vertex layout. Each frame the main thread
+// hands in a byte blob drained from the render sink; render() uploads
+// it and issues one draw call.
 //
 // The surface holds a `'static` lifetime because it takes an owned
 // `Arc<Window>`; the App owns the same Arc, so the window outlives

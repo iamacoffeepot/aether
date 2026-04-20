@@ -10,8 +10,9 @@ use aether_hub_protocol::SessionToken;
 pub struct MailboxId(pub u32);
 
 /// Host/guest contract tag for the payload layout. The substrate and the
-/// components that talk to it agree on a specific layout per kind. Typed
-/// facade over this is deferred to a later milestone per issue #18.
+/// components that talk to it agree on a specific layout per kind. The
+/// typed facade over this is ADR-0005 (mail typing system) and ADR-0019
+/// (schema-described kinds).
 pub type MailKind = u32;
 
 /// The transport envelope. `payload` is the exact byte layout the kind

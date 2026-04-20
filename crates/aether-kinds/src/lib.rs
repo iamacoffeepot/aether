@@ -23,8 +23,8 @@ use bytemuck::{Pod, Zeroable};
 // `Schema` impls feed `descriptors.rs`, which `Hello`-ships the kind
 // vocabulary to the hub for agent-side encoding (ADR-0019).
 
-/// Per-frame signal from the substrate's frame loop. Empty payload for
-/// now; milestone 4 will add an elapsed-seconds field.
+/// Per-frame signal from the substrate's frame loop. Empty payload —
+/// elapsed-time is parked until a subscriber actually needs it.
 #[derive(aether_mail::Kind)]
 #[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
 #[kind(name = "aether.tick")]

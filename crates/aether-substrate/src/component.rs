@@ -1,7 +1,7 @@
 // A loaded WASM component: its wasmtime `Store<SubstrateCtx>`, instance,
-// and the cached handles needed to deliver mail. Milestone 1 uses a
-// static-offset convention (mail payload written at `MAIL_OFFSET`) to
-// match the spike; a guest-side allocator is future work per issue #18.
+// and the cached handles needed to deliver mail. Mail payloads are
+// written to the guest at a static `MAIL_OFFSET`; a guest-side
+// allocator is parked until an actual use case forces the question.
 
 use aether_hub_protocol::SessionToken;
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};

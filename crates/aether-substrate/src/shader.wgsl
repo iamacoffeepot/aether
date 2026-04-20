@@ -1,6 +1,6 @@
-// Milestone 3b: one vertex + fragment pair. Positions are already
-// clip-space (the component has no camera concept yet); colors pass
-// straight through to the fragment stage.
+// One vertex + fragment pair. Positions are already clip-space (the
+// component has no camera concept yet); colors pass straight through
+// to the fragment stage.
 
 struct VertexInput {
     @location(0) position: vec2<f32>,
