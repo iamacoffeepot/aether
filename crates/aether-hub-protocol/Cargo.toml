@@ -3,6 +3,16 @@ name = "aether-hub-protocol"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# `std` exposes the std::io/std::fmt-backed framing helpers
+# (`encode_frame`, `read_frame`, `write_frame`, `FrameError`) that the
+# hub + substrate use on the control channel. Default-on for host
+# builds; wasm guests opt out via `default-features = false` and get
+# the types (`SchemaType`, `LabelNode`, `KindShape`, …) and the
+# `canonical::*` const fns without pulling std in.
+default = ["std"]
+std = []
+
 [dependencies]
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }

@@ -8,17 +8,20 @@
 //! Framing: each frame on the TCP stream is a 4-byte little-endian
 //! length prefix followed by the postcard-encoded message. Two enum
 //! types (`EngineToHub`, `HubToEngine`) enforce direction at the type
-//! level.
+//! level. Framing helpers live behind the `std` feature so wasm guests
+//! that need only the schema vocabulary (`SchemaType`, `LabelNode`,
+//! `KindShape`, …) and `canonical::*` const fns don't pull std in.
 
-use std::fmt;
-use std::io::{self, Read, Write};
+#![cfg_attr(not(feature = "std"), no_std)]
 
-use serde::{Serialize, de::DeserializeOwned};
+extern crate alloc;
 
 pub use uuid::Uuid;
 
 mod types;
 pub use types::*;
+
+pub mod canonical;
 
 /// Maximum accepted frame body size. Bounded so a malformed length
 /// prefix cannot drive a reader into an OOM. 16 MiB is comfortably
@@ -26,77 +29,90 @@ pub use types::*;
 /// streams travel through the render sink, not the hub).
 pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
-/// Errors from the framing helpers. Wraps I/O and postcard decode
-/// errors; adds its own variant for an oversize length prefix.
-#[derive(Debug)]
-pub enum FrameError {
-    Io(io::Error),
-    Postcard(postcard::Error),
-    FrameTooLarge { size: usize, max: usize },
-}
+#[cfg(feature = "std")]
+mod framing {
+    use std::fmt;
+    use std::io::{self, Read, Write};
 
-impl fmt::Display for FrameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FrameError::Io(e) => write!(f, "hub protocol io: {e}"),
-            FrameError::Postcard(e) => write!(f, "hub protocol decode: {e}"),
-            FrameError::FrameTooLarge { size, max } => {
-                write!(f, "hub protocol frame too large: {size} > {max}")
+    use serde::{Serialize, de::DeserializeOwned};
+
+    use super::MAX_FRAME_SIZE;
+
+    /// Errors from the framing helpers. Wraps I/O and postcard decode
+    /// errors; adds its own variant for an oversize length prefix.
+    #[derive(Debug)]
+    pub enum FrameError {
+        Io(io::Error),
+        Postcard(postcard::Error),
+        FrameTooLarge { size: usize, max: usize },
+    }
+
+    impl fmt::Display for FrameError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                FrameError::Io(e) => write!(f, "hub protocol io: {e}"),
+                FrameError::Postcard(e) => write!(f, "hub protocol decode: {e}"),
+                FrameError::FrameTooLarge { size, max } => {
+                    write!(f, "hub protocol frame too large: {size} > {max}")
+                }
             }
         }
     }
-}
 
-impl std::error::Error for FrameError {}
+    impl std::error::Error for FrameError {}
 
-impl From<io::Error> for FrameError {
-    fn from(e: io::Error) -> Self {
-        FrameError::Io(e)
+    impl From<io::Error> for FrameError {
+        fn from(e: io::Error) -> Self {
+            FrameError::Io(e)
+        }
+    }
+
+    impl From<postcard::Error> for FrameError {
+        fn from(e: postcard::Error) -> Self {
+            FrameError::Postcard(e)
+        }
+    }
+
+    /// Encode a message into its framed wire representation (4-byte LE
+    /// length prefix + postcard body). Infallible — postcard encoding
+    /// of `alloc::Vec` is infallible for the types in this crate.
+    pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
+        let body = postcard::to_allocvec(msg).expect("postcard encode to Vec is infallible");
+        let mut out = Vec::with_capacity(4 + body.len());
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// Synchronous read of one framed message. Blocks until a complete
+    /// frame is consumed from `r`. Async callers should inline the
+    /// length+body reads on their own async stream rather than calling
+    /// this on a blocking wrapper.
+    pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, FrameError> {
+        let mut len_buf = [0u8; 4];
+        r.read_exact(&mut len_buf)?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > MAX_FRAME_SIZE {
+            return Err(FrameError::FrameTooLarge {
+                size: len,
+                max: MAX_FRAME_SIZE,
+            });
+        }
+        let mut buf = vec![0u8; len];
+        r.read_exact(&mut buf)?;
+        Ok(postcard::from_bytes(&buf)?)
+    }
+
+    /// Synchronous write of one framed message.
+    pub fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T) -> Result<(), FrameError> {
+        let bytes = encode_frame(msg);
+        w.write_all(&bytes)?;
+        Ok(())
     }
 }
 
-impl From<postcard::Error> for FrameError {
-    fn from(e: postcard::Error) -> Self {
-        FrameError::Postcard(e)
-    }
-}
-
-/// Encode a message into its framed wire representation (4-byte LE
-/// length prefix + postcard body). Infallible — postcard encoding of
-/// `alloc::Vec` is infallible for the types in this crate.
-pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
-    let body = postcard::to_allocvec(msg).expect("postcard encode to Vec is infallible");
-    let mut out = Vec::with_capacity(4 + body.len());
-    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    out.extend_from_slice(&body);
-    out
-}
-
-/// Synchronous read of one framed message. Blocks until a complete
-/// frame is consumed from `r`. Async callers should inline the
-/// length+body reads on their own async stream rather than calling
-/// this on a blocking wrapper.
-pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, FrameError> {
-    let mut len_buf = [0u8; 4];
-    r.read_exact(&mut len_buf)?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_FRAME_SIZE {
-        return Err(FrameError::FrameTooLarge {
-            size: len,
-            max: MAX_FRAME_SIZE,
-        });
-    }
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)?;
-    Ok(postcard::from_bytes(&buf)?)
-}
-
-/// Synchronous write of one framed message.
-pub fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T) -> Result<(), FrameError> {
-    let bytes = encode_frame(msg);
-    w.write_all(&bytes)?;
-    Ok(())
-}
+#[cfg(feature = "std")]
+pub use framing::*;
 
 #[cfg(test)]
 mod tests {

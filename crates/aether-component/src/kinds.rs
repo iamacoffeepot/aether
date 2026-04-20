@@ -273,10 +273,12 @@ mod tests {
     struct A;
     impl Kind for A {
         const NAME: &'static str = "test.a";
+        const ID: u64 = aether_mail::mailbox_id_from_name(Self::NAME);
     }
     struct B;
     impl Kind for B {
         const NAME: &'static str = "test.b";
+        const ID: u64 = aether_mail::mailbox_id_from_name(Self::NAME);
     }
 
     #[test]

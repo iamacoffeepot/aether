@@ -3,18 +3,13 @@ name = "aether-kinds"
 version.workspace = true
 edition.workspace = true
 
-[features]
-# Emit wire-compatible descriptors for the ADR-0007 schema-driven hub
-# boundary. Off by default so WASM guests don't drag in hub-protocol.
-# Native binaries (aether-substrate) enable it.
-descriptors = [
-    "dep:aether-hub-protocol",
-    "aether-mail/descriptors",
-    "aether-mail/derive",
-]
-
 [dependencies]
+# ADR-0032 unified the schema vocabulary under a no_std-capable
+# aether-hub-protocol, so the `descriptors` feature gate that used to
+# guard the Schema trait is gone — every consumer that pulls aether-kinds
+# gets schema-ready types. The hub-protocol dep stays no-default-features
+# here since aether-kinds is pulled by wasm guests too.
 aether-mail = { path = "../aether-mail", features = ["derive"] }
-aether-hub-protocol = { path = "../aether-hub-protocol", optional = true }
+aether-hub-protocol = { path = "../aether-hub-protocol", default-features = false }
 bytemuck = { version = "1.19", features = ["derive"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }

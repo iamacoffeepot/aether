@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-mail = { path = "../aether-mail" }
-aether-kinds = { path = "../aether-kinds", features = ["descriptors"] }
+aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"
 os_info = { version = "3", default-features = false }
 png = "0.17"

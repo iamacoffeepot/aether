@@ -115,7 +115,6 @@ version = "0.2.0-alpha"
 dependencies = [
  "aether-hub-protocol",
  "aether-mail",
- "postcard",
  "proc-macro2",
  "quote",
  "syn",
