@@ -26,7 +26,27 @@ use bytemuck::{Pod, Zeroable};
 
 /// Per-frame signal from the substrate's frame loop. Empty payload —
 /// elapsed-time is parked until a subscriber actually needs it.
-#[derive(aether_mail::Kind, aether_mail::Schema)]
+///
+/// ADR-0033 handler dispatch (`#[handlers]` synthesized `fn receive`)
+/// decodes every typed handler via `Mail::decode_typed::<K>()`, which
+/// requires `K: AnyBitPattern`. Zero-sized unit kinds like `Tick`
+/// trivially satisfy that through `Pod` + `Zeroable` — no padding,
+/// no uninitialized bits. Adding the derives preserves backward
+/// compatibility with the ADR-0027 `mail.is::<Tick>()` path (which
+/// only needed `Kind + 'static`) while unlocking typed dispatch.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_mail::Kind,
+    aether_mail::Schema,
+)]
 #[kind(name = "aether.tick", input)]
 pub struct Tick;
 
@@ -51,7 +71,21 @@ pub struct Key {
 }
 
 /// A mouse-button press. No payload today — which button isn't tracked.
-#[derive(aether_mail::Kind, aether_mail::Schema)]
+/// Zero-sized but derives `Pod` / `Zeroable` for the same reason as
+/// `Tick` — see the note on that type.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_mail::Kind,
+    aether_mail::Schema,
+)]
 #[kind(name = "aether.mouse_button", input)]
 pub struct MouseButton;
 
