@@ -115,6 +115,7 @@ version = "0.2.0-alpha"
 dependencies = [
  "aether-hub-protocol",
  "aether-mail",
+ "postcard",
  "proc-macro2",
  "quote",
  "syn",
@@ -135,6 +136,7 @@ dependencies = [
  "serde",
  "tracing",
  "tracing-subscriber",
+ "wasmparser 0.224.1",
  "wasmtime",
  "wat",
  "wgpu",

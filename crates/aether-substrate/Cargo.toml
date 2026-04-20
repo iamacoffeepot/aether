@@ -16,6 +16,11 @@ serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wasmtime = "30"
+# Wasmtime 30 doesn't expose `custom_sections` on `Module`; use
+# wasmparser directly to walk the raw wasm bytes for the ADR-0028
+# `aether.kinds` section. Pin to the version wasmtime re-exports
+# transitively so we stay on a single compiled copy.
+wasmparser = "0.224"
 wgpu = "29.0.1"
 winit = "0.30.13"
 
