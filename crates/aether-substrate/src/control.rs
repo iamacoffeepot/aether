@@ -287,6 +287,16 @@ impl ControlPlane {
             return LoadResult::Err { error };
         }
 
+        // ADR-0033: read the receive-side capability surface from the
+        // sibling `aether.kinds.inputs` section. Absence is not an
+        // error — components predating the `#[handlers]` macro ship
+        // an empty `ComponentCapabilities` and the hub treats them as
+        // opaque (no structured receive vocabulary to show MCP).
+        let capabilities = match kind_manifest::read_inputs_from_bytes(&payload.wasm) {
+            Ok(c) => c,
+            Err(error) => return LoadResult::Err { error },
+        };
+
         let module = match Module::new(&self.engine, &payload.wasm) {
             Ok(m) => m,
             Err(e) => {
@@ -337,6 +347,7 @@ impl ControlPlane {
         LoadResult::Ok {
             mailbox_id: mailbox.0,
             name,
+            capabilities,
         }
     }
 
@@ -553,6 +564,14 @@ impl ControlPlane {
             return ReplaceResult::Err { error };
         }
 
+        // ADR-0033: refresh capabilities from the new wasm's
+        // `aether.kinds.inputs` section so the hub's cached state
+        // tracks the swapped binary (not the pre-replace snapshot).
+        let capabilities = match kind_manifest::read_inputs_from_bytes(&payload.wasm) {
+            Ok(c) => c,
+            Err(error) => return ReplaceResult::Err { error },
+        };
+
         let module = match Module::new(&self.engine, &payload.wasm) {
             Ok(m) => m,
             Err(e) => {
@@ -676,7 +695,7 @@ impl ControlPlane {
         // drops when `old_entry` falls out of scope at function exit.
 
         self.announce_kinds();
-        ReplaceResult::Ok
+        ReplaceResult::Ok { capabilities }
     }
 
     fn insert_component(&self, id: MailboxId, component: Component) {
@@ -731,6 +750,7 @@ mod tests {
             LoadResult::Ok {
                 mailbox_id: 7,
                 name: "x".into(),
+                capabilities: aether_kinds::ComponentCapabilities::default(),
             },
             LoadResult::Err {
                 error: "nope".into(),
@@ -872,7 +892,11 @@ mod tests {
         };
         let result = plane.handle_load(&postcard::to_allocvec(&payload).unwrap());
         match result {
-            LoadResult::Ok { mailbox_id, name } => {
+            LoadResult::Ok {
+                mailbox_id,
+                name,
+                capabilities: _,
+            } => {
                 assert_eq!(name, "loaded");
                 assert_eq!(plane.registry.lookup("loaded"), Some(MailboxId(mailbox_id)));
                 assert!(
@@ -1142,13 +1166,18 @@ mod tests {
     fn replace_component_swaps_instance_and_preserves_id() {
         let plane = make_plane();
         let wasm = wat::parse_str(WAT).unwrap();
-        let LoadResult::Ok { mailbox_id, name } = plane.handle_load(
+        let LoadResult::Ok {
+            mailbox_id,
+            name,
+            capabilities: _,
+        } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm: wasm.clone(),
                 name: Some("swap_target".into()),
             })
             .unwrap(),
-        ) else {
+        )
+        else {
             panic!("load should succeed");
         };
         assert_eq!(name, "swap_target");
@@ -1161,7 +1190,7 @@ mod tests {
             })
             .unwrap(),
         );
-        assert!(matches!(result, ReplaceResult::Ok));
+        assert!(matches!(result, ReplaceResult::Ok { .. }));
         // Name still resolves to the same id; new Component bound.
         assert_eq!(
             plane.registry.lookup("swap_target"),
@@ -1312,7 +1341,7 @@ mod tests {
             })
             .unwrap(),
         );
-        assert!(matches!(result, ReplaceResult::Ok));
+        assert!(matches!(result, ReplaceResult::Ok { .. }));
     }
 
     #[test]
@@ -1347,7 +1376,7 @@ mod tests {
             })
             .unwrap(),
         );
-        assert!(matches!(result, ReplaceResult::Ok), "got {result:?}");
+        assert!(matches!(result, ReplaceResult::Ok { .. }), "got {result:?}");
 
         // Peek into the new component's memory — rehydrate should
         // have written version 7 at offset 396 and 0xDEADBEEF at
@@ -1420,7 +1449,7 @@ mod tests {
             })
             .unwrap(),
         );
-        assert!(matches!(result, ReplaceResult::Ok), "got {result:?}");
+        assert!(matches!(result, ReplaceResult::Ok { .. }), "got {result:?}");
     }
 
     #[test]
@@ -1448,7 +1477,7 @@ mod tests {
             })
             .unwrap(),
         );
-        assert!(matches!(result, ReplaceResult::Ok));
+        assert!(matches!(result, ReplaceResult::Ok { .. }));
         let table = plane.components.read().unwrap();
         let cell = table.get(&MailboxId(mailbox_id)).expect("present");
         let mut new = cell.component.lock().unwrap();
@@ -1650,7 +1679,7 @@ mod tests {
             })
             .unwrap(),
         );
-        assert!(matches!(result, ReplaceResult::Ok));
+        assert!(matches!(result, ReplaceResult::Ok { .. }));
         assert!(subs(&plane, InputStream::Tick).contains(&MailboxId(id)));
         assert!(subs(&plane, InputStream::Key).contains(&MailboxId(id)));
     }
@@ -1827,7 +1856,7 @@ mod tests {
             })
             .unwrap(),
         );
-        assert!(matches!(result, ReplaceResult::Ok), "got {result:?}");
+        assert!(matches!(result, ReplaceResult::Ok { .. }), "got {result:?}");
 
         // Three parked ticks (counts 1, 2, 3) flushed to the new
         // instance, which forwarded each to the sink.
