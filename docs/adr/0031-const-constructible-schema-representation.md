@@ -1,7 +1,8 @@
 # ADR-0031: Const-constructible schema representation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-20
+- **Accepted:** 2026-04-20
 
 ## Context
 

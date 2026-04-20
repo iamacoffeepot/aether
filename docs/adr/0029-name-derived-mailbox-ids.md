@@ -1,7 +1,8 @@
 # ADR-0029: Name-derived MailboxIds
 
-- **Status:** Proposed
+- **Status:** Accepted (phases 1–2 shipped)
 - **Date:** 2026-04-19
+- **Accepted:** 2026-04-20
 
 ## Context
 
