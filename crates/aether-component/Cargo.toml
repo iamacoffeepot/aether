@@ -5,7 +5,13 @@ edition.workspace = true
 
 [dependencies]
 aether-mail = { path = "../aether-mail" }
+# ADR-0030 Phase 2: the init walker auto-subscribes each `K::IS_INPUT`
+# kind by mailing `aether.control.subscribe_input` — the SDK needs the
+# concrete `InputStream` + `SubscribeInput` types from the substrate's
+# control vocabulary to build that mail.
+aether-kinds = { path = "../aether-kinds" }
 bytemuck = { version = "1", default-features = false }
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 
 # Examples are standalone wasm cdylibs loaded via the substrate's
 # `load_component` control plane. Their dev-deps don't propagate to

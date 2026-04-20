@@ -5,36 +5,11 @@
 // as any other architectural change.
 
 use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
-use aether_kinds::InputStream;
 use wasmtime::{Caller, Linker};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
 use crate::mail::MailboxId;
 use crate::sender_table::SenderEntry;
-
-/// Returned by `resolve_kind` when the requested name has not been
-/// registered. Guests use this as a "lookup failed" sentinel. Widened
-/// to `u64` alongside `MailKind` in ADR-0030 Phase 1.
-pub const KIND_NOT_FOUND: u64 = u64::MAX;
-
-/// Map a resolved kind name to the substrate input stream it belongs
-/// to. The four built-in input kinds (`aether.tick`, `aether.key`,
-/// `aether.mouse_button`, `aether.mouse_move`) are the only inputs
-/// today; a new input kind here would also need a publisher change
-/// in `main.rs`. Keeping the mapping in a small match — rather than a
-/// boot-time map on `Registry` — lets the guest's `resolve_kind`
-/// auto-subscribe without any new shared state: the Kind trait's
-/// `IS_INPUT` const on the kind definition is what the derive flags,
-/// and this mapping is the substrate-side counterpart.
-fn input_stream_for_name(name: &str) -> Option<InputStream> {
-    match name {
-        "aether.tick" => Some(InputStream::Tick),
-        "aether.key" => Some(InputStream::Key),
-        "aether.mouse_move" => Some(InputStream::MouseMove),
-        "aether.mouse_button" => Some(InputStream::MouseButton),
-        _ => None,
-    }
-}
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
 /// `0` is success; non-zero values distinguish call-site errors
@@ -99,45 +74,14 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    linker.func_wrap(
-        "aether",
-        "resolve_kind_p32",
-        |mut caller: Caller<'_, SubstrateCtx>, name_ptr: u32, name_len: u32| -> u64 {
-            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                Some(m) => m,
-                None => return KIND_NOT_FOUND,
-            };
-            let data = memory.data(&caller);
-            let start = name_ptr as usize;
-            let end = match start.checked_add(name_len as usize) {
-                Some(e) if e <= data.len() => e,
-                _ => return KIND_NOT_FOUND,
-            };
-            let name = match std::str::from_utf8(&data[start..end]) {
-                Ok(s) => s,
-                Err(_) => return KIND_NOT_FOUND,
-            };
-            let ctx = caller.data();
-            let id = ctx.registry.kind_id(name).unwrap_or(KIND_NOT_FOUND);
-            // ADR-0021 auto-subscribe: if the resolved kind is one of
-            // the substrate's input streams, fold the caller's mailbox
-            // into the subscriber set. A component declaring
-            // `type Kinds = (Tick, ...)` gets Tick delivery without
-            // ever sending `aether.control.subscribe_input`. Idempotent:
-            // repeated resolves (e.g. replace_component) stay correct.
-            if id != KIND_NOT_FOUND
-                && let Some(stream) = input_stream_for_name(name)
-            {
-                ctx.input_subscribers
-                    .write()
-                    .unwrap()
-                    .entry(stream)
-                    .or_default()
-                    .insert(ctx.sender);
-            }
-            id
-        },
-    )?;
+    // `resolve_kind_p32` was retired in ADR-0030 Phase 2: kind ids are
+    // the `fnv1a_64(canonical(name, schema))` hash, computed on the
+    // guest side via the `Kind` derive's `const ID`. The host fn and
+    // its `KIND_NOT_FOUND` sentinel are gone. Input-stream auto-
+    // subscribe (the side-effect that used to ride this host fn)
+    // moved to the guest SDK — `KindList::resolve_all` mails
+    // `aether.control.subscribe_input` for every `K::IS_INPUT` kind in
+    // the component's typelist.
 
     // ADR-0016 §2: save_state buffers the component's migration payload
     // into a substrate-owned slot on the store ctx. The guest passes a

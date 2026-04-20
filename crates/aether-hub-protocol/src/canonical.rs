@@ -299,6 +299,102 @@ pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &Schem
     out
 }
 
+/// Runtime sibling of `canonical_serialize_kind`. The derive folds the
+/// const-generic variant at compile time for the `aether.kinds` link
+/// section and `Kind::ID` emission; the substrate needs the same bytes
+/// for a `KindDescriptor` it got over the wire or from a loaded
+/// manifest, where the length isn't const and the `Cow` variants on
+/// the input are `Owned` (const-path helpers panic on those).
+///
+/// Implementation goes `SchemaType → SchemaShape → postcard`. The
+/// canonical bytes format is defined as `postcard(KindShape { name,
+/// schema: shape })`, and `SchemaShape` drops every nominal field the
+/// const serializer also drops, so the two paths produce
+/// byte-identical output. Pinned by the `canonical_kind_bytes_runtime_
+/// matches_const` test below.
+pub fn canonical_kind_bytes(name: &str, schema: &SchemaType) -> alloc::vec::Vec<u8> {
+    let shape = crate::types::KindShape {
+        name: alloc::borrow::Cow::Owned(name.into()),
+        schema: schema_to_shape(schema),
+    };
+    postcard::to_allocvec(&shape).expect("canonical KindShape serialization is infallible")
+}
+
+fn schema_to_shape(s: &SchemaType) -> crate::types::SchemaShape {
+    use crate::types::SchemaShape;
+    match s {
+        SchemaType::Unit => SchemaShape::Unit,
+        SchemaType::Bool => SchemaShape::Bool,
+        SchemaType::Scalar(p) => SchemaShape::Scalar(*p),
+        SchemaType::String => SchemaShape::String,
+        SchemaType::Bytes => SchemaShape::Bytes,
+        SchemaType::Option(cell) => {
+            SchemaShape::Option(alloc::boxed::Box::new(schema_to_shape(cell)))
+        }
+        SchemaType::Vec(cell) => SchemaShape::Vec(alloc::boxed::Box::new(schema_to_shape(cell))),
+        SchemaType::Array { element, len } => SchemaShape::Array {
+            element: alloc::boxed::Box::new(schema_to_shape(element)),
+            len: *len,
+        },
+        SchemaType::Struct { fields, repr_c } => SchemaShape::Struct {
+            fields: fields.iter().map(|f| schema_to_shape(&f.ty)).collect(),
+            repr_c: *repr_c,
+        },
+        SchemaType::Enum { variants } => SchemaShape::Enum {
+            variants: variants.iter().map(variant_to_shape).collect(),
+        },
+    }
+}
+
+fn variant_to_shape(v: &EnumVariant) -> crate::types::VariantShape {
+    use crate::types::VariantShape;
+    match v {
+        EnumVariant::Unit { discriminant, .. } => VariantShape::Unit {
+            discriminant: *discriminant,
+        },
+        EnumVariant::Tuple {
+            discriminant,
+            fields,
+            ..
+        } => VariantShape::Tuple {
+            discriminant: *discriminant,
+            fields: fields.iter().map(schema_to_shape).collect(),
+        },
+        EnumVariant::Struct {
+            discriminant,
+            fields,
+            ..
+        } => VariantShape::Struct {
+            discriminant: *discriminant,
+            fields: fields.iter().map(|f| schema_to_shape(&f.ty)).collect(),
+        },
+    }
+}
+
+/// Derive a `Kind::ID` from a `(name, schema)` pair at runtime. Matches
+/// `fnv1a_64_bytes(canonical_kind_bytes(name, schema))` byte-for-byte
+/// with the derive's compile-time emission, so a substrate computing
+/// `kind_id_from_parts(&desc.name, &desc.schema)` after a runtime
+/// `register_kind_with_descriptor` agrees with the id the component
+/// published as `<K as Kind>::ID` (ADR-0030 Phase 2).
+pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
+    fnv1a_64(&canonical_kind_bytes(name, schema))
+}
+
+/// FNV-1a 64 — duplicated from `aether_mail::fnv1a_64_bytes` because
+/// `aether-mail` depends on `aether-hub-protocol`, not the other way
+/// around. Same offset basis and prime; identical output.
+const fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+        i += 1;
+    }
+    hash
+}
+
 const fn write_schema(schema: &SchemaType, out: &mut [u8], cursor: usize) -> usize {
     let mut pos = cursor;
     match schema {
@@ -834,6 +930,24 @@ mod tests {
         };
         assert!(*repr_c);
         assert_eq!(fields.len(), 1);
+    }
+
+    #[test]
+    fn canonical_kind_bytes_runtime_matches_const() {
+        const NAME: &str = "test.triangle";
+        const N: usize = canonical_len_kind(NAME, &TRIANGLE);
+        const CONST_BYTES: [u8; N] = canonical_serialize_kind::<N>(NAME, &TRIANGLE);
+        let runtime_bytes = canonical_kind_bytes(NAME, &TRIANGLE);
+        assert_eq!(&CONST_BYTES[..], runtime_bytes.as_slice());
+    }
+
+    #[test]
+    fn kind_id_from_parts_matches_hash_of_const_bytes() {
+        const NAME: &str = "test.triangle";
+        const N: usize = canonical_len_kind(NAME, &TRIANGLE);
+        const BYTES: [u8; N] = canonical_serialize_kind::<N>(NAME, &TRIANGLE);
+        let expected = super::fnv1a_64(&BYTES);
+        assert_eq!(kind_id_from_parts(NAME, &TRIANGLE), expected);
     }
 
     #[test]

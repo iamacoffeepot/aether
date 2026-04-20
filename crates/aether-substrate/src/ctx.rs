@@ -43,10 +43,11 @@ pub struct SubstrateCtx {
     /// silently drop, matching the broadcast semantics.
     pub outbound: Arc<HubOutbound>,
     /// ADR-0021 subscriber sets, shared with the platform-event
-    /// publisher in `main.rs`. `resolve_kind_p32` consults this when
-    /// the resolved kind is flagged `IS_INPUT`, auto-subscribing the
-    /// calling mailbox so components declaring `type Kinds = (Tick, ...)`
-    /// don't have to send `subscribe_input` themselves.
+    /// publisher in `main.rs`. Components declaring
+    /// `type Kinds = (Tick, ...)` auto-subscribe from the guest SDK's
+    /// init walker by mailing `aether.control.subscribe_input`
+    /// (ADR-0030 Phase 2), which the control plane processes and
+    /// mutates this set.
     pub input_subscribers: InputSubscribers,
     /// ADR-0013 + ADR-0017: handle→entry map populated by
     /// `Component::deliver` whenever an inbound mail has a meaningful

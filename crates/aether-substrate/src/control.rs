@@ -112,40 +112,20 @@ fn flush_parked_to(
     }
 }
 
-/// Register every descriptor whose name is new; reject on a
-/// schema-mismatch against an existing registration. Used by both
-/// `handle_load` and `handle_replace` after they've merged the
-/// embedded manifest with the legacy `LoadKind` list. Aborts on
-/// the first conflict so the registry is all-or-nothing — no
-/// partial state leaks if a later descriptor disagrees with one
-/// already registered.
-///
-/// Duplicate names within `descriptors` itself that share a schema
-/// are harmless: the first call registers, the second becomes a
-/// no-op because the kind is now registered with the matching
-/// schema. A duplicate name with disagreeing schemas surfaces as
-/// the same conflict error.
+/// Register every descriptor from a component's embedded manifest.
+/// Under ADR-0030 Phase 2's hashed ids, `register_kind_with_descriptor`
+/// is idempotent on `(name, schema)` match and only fails on a genuine
+/// hash collision — which at 64 bits is vanishingly rare. A fresh
+/// (name, schema) lands in its own slot; a duplicate with identical
+/// schema is a no-op. Two registrations with the same name but
+/// different schemas get two distinct ids — producer and consumer
+/// will naturally disagree on `K::ID`, surfacing as "kind not found"
+/// on the first mail rather than silent data corruption.
 fn register_or_match_all(
     registry: &Registry,
     descriptors: &[KindDescriptor],
 ) -> Result<(), String> {
     for kind in descriptors {
-        if let Some(id) = registry.kind_id(&kind.name) {
-            if let Some(existing) = registry.kind_descriptor(id)
-                && existing.schema != kind.schema
-            {
-                return Err(format!(
-                    "kind `{}` already registered with a different encoding",
-                    kind.name
-                ));
-            }
-            // Already registered with the matching schema — nothing
-            // to do. This branch is what makes the merge of the
-            // embedded manifest and boot-registered kinds idempotent:
-            // `aether.tick` ships in every component binary via
-            // aether-kinds, re-registering it is a no-op.
-            continue;
-        }
         registry
             .register_kind_with_descriptor(kind.clone())
             .map_err(|e| format!("register `{}`: {e}", kind.name))?;
@@ -1018,10 +998,18 @@ mod tests {
     /// rather than silently clobbering — same contract as the
     /// legacy `LoadKind` conflict path.
     #[test]
-    fn load_component_rejects_embedded_manifest_conflict() {
+    fn load_component_with_same_name_different_schema_registers_distinct_kind() {
+        // ADR-0030 Phase 2: kind ids are `fnv1a(canonical(name, schema))`,
+        // so two schemas under the same name produce two distinct ids
+        // and coexist in the registry. The pre-Phase-2 behavior — load
+        // rejected with "already registered with a different encoding"
+        // — is gone; what used to be a conflict is now a clean new
+        // registration. Producer/consumer parity is defended instead
+        // by `K::ID` mismatch on the wire (a stale sender's mail lands
+        // on "kind not found" at decode time).
         let plane = make_plane();
 
-        plane
+        let existing_id = plane
             .registry
             .register_kind_with_descriptor(KindDescriptor {
                 name: "demo.conflict".into(),
@@ -1061,10 +1049,27 @@ mod tests {
             })
             .unwrap(),
         );
-        let LoadResult::Err { error } = result else {
-            panic!("expected load to fail on schema conflict");
-        };
-        assert!(error.contains("demo.conflict"), "error was: {error}");
+        assert!(
+            matches!(result, LoadResult::Ok { .. }),
+            "load should succeed under hashed ids, got {result:?}"
+        );
+
+        let new_id = aether_hub_protocol::canonical::kind_id_from_parts(
+            "demo.conflict",
+            &SchemaType::Scalar(Primitive::U64),
+        );
+        assert_ne!(
+            existing_id, new_id,
+            "u32 and u64 schemas under the same name must hash to distinct ids"
+        );
+        assert_eq!(
+            plane.registry.kind_descriptor(existing_id).unwrap().schema,
+            SchemaType::Scalar(Primitive::U32)
+        );
+        assert_eq!(
+            plane.registry.kind_descriptor(new_id).unwrap().schema,
+            SchemaType::Scalar(Primitive::U64)
+        );
     }
 
     #[test]

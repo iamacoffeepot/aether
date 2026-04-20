@@ -1,16 +1,21 @@
 // ADR-0027 typelist machinery. The user declares `type Kinds = (...)`
 // on their `Component` impl; the SDK walks that list at init time,
-// calls `resolve_kind` for each `K::NAME`, and stashes the resulting
-// `(TypeId, raw_id)` pairs in a per-component `KindTable`. Receive-time
-// helpers (`Mail::is::<K>()`, `Mail::decode_typed::<K>()`) consult the
-// table by `TypeId::of::<K>()` — no `KindId<K>` field on `Self` needed.
+// reads each `K::ID` (the const schema-hashed id per ADR-0030 Phase 2),
+// and stashes the resulting `(TypeId, K::ID)` pairs in a per-component
+// `KindTable`. Receive-time helpers (`Mail::is::<K>()`,
+// `Mail::decode_typed::<K>()`) consult the table by
+// `TypeId::of::<K>()` — no `KindId<K>` field on `Self` needed.
+//
+// The walker also emits an `aether.control.subscribe_input` mail for
+// each `K::IS_INPUT` kind, replacing the substrate-side auto-subscribe
+// side effect that pre-Phase-2 rode on the `resolve_kind` host fn.
 
 use core::any::TypeId;
 use core::cell::UnsafeCell;
 
 use aether_mail::Kind;
 
-use crate::{InitCtx, KindId};
+use crate::InitCtx;
 
 /// Maximum number of kinds a single component may declare. Sized to
 /// match the tuple impl ceiling (`KindList` for tuples is generated
@@ -33,15 +38,22 @@ pub struct Nil;
 /// same `KindTable`.
 pub struct Cons<H, T>(core::marker::PhantomData<(H, T)>);
 
-/// Walks a typelist of `Kind`s and resolves each into a per-component
+/// Walks a typelist of `Kind`s and populates a per-component
 /// `KindTable`. Implemented for tuples 1..=32 and for `Nil` / `Cons`.
 ///
 /// The trait is sealed via the `Kind: 'static` bound and the limited
 /// implementor set; downstream crates do not need to write their own.
 pub trait KindList {
-    /// Walk the list, calling `resolve_kind` for each `K::NAME`, and
-    /// insert `(TypeId::of::<K>(), raw_id)` into `table`. Called by
-    /// the `export!` macro's init shim before user `init`.
+    /// Insert `(TypeId::of::<K>(), K::ID)` into `table` for every `K`
+    /// in the list. ADR-0030 Phase 2: `K::ID` is a compile-time
+    /// function of `(name, schema)` — no host-fn call. Called by the
+    /// `export!` macro's init shim before user `init`.
+    ///
+    /// For each `K` where `K::IS_INPUT`, the walker additionally mails
+    /// `aether.control.subscribe_input` to add the component's own
+    /// mailbox to the stream's subscriber set. This replaces the
+    /// substrate-side side effect that pre-Phase-2 fired inside
+    /// `resolve_kind_p32` (ADR-0021).
     ///
     /// # Safety
     /// Must be called exactly once per `KindTable`, before any reads
@@ -60,9 +72,11 @@ where
     T: KindList,
 {
     unsafe fn resolve_all(ctx: &mut InitCtx<'_>, table: &KindTable) {
-        let id: KindId<H> = ctx.resolve::<H>();
         unsafe {
-            table.insert(TypeId::of::<H>(), id.raw());
+            table.insert(TypeId::of::<H>(), H::ID);
+            if H::IS_INPUT {
+                ctx.subscribe_input::<H>();
+            }
             <T as KindList>::resolve_all(ctx, table);
         }
     }
@@ -84,8 +98,10 @@ macro_rules! impl_kindlist_tuple {
         {
             unsafe fn resolve_all(ctx: &mut InitCtx<'_>, table: &KindTable) {
                 $(
-                    let id: KindId<$name> = ctx.resolve::<$name>();
-                    unsafe { table.insert(TypeId::of::<$name>(), id.raw()); }
+                    unsafe { table.insert(TypeId::of::<$name>(), $name::ID); }
+                    if $name::IS_INPUT {
+                        ctx.subscribe_input::<$name>();
+                    }
                 )+
             }
         }
@@ -172,9 +188,9 @@ impl_kindlist_tuple!(
     K22, K23, K24, K25, K26, K27, K28, K29, K30, K31, K32
 );
 
-/// Per-component cache mapping `TypeId::of::<K>()` to the `raw` kind id
-/// the substrate handed back at `resolve_kind(K::NAME)`. Sized at
-/// `MAX_KINDS` and uses linear scan — N is small and bounded, so a hash
+/// Per-component cache mapping `TypeId::of::<K>()` to the raw `K::ID`
+/// the derive emits on each `Kind` impl. Sized at `MAX_KINDS` and uses
+/// linear scan — N is small and bounded, so a hash
 /// map would cost more than it saves.
 ///
 /// Single-threaded write-once-read-many: the `export!` macro's init
