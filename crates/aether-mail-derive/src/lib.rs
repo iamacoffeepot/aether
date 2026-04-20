@@ -35,6 +35,8 @@ use syn::{
     PathArguments, Type, parse_macro_input, spanned::Spanned,
 };
 
+mod manifest;
+
 #[proc_macro_derive(Kind, attributes(kind))]
 pub fn derive_kind(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -73,12 +75,84 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     } else {
         quote! {}
     };
+    // ADR-0028: emit the kind's postcard-encoded descriptor into the
+    // `aether.kinds` wasm custom section when the type is syntactically
+    // resolvable (see `manifest::resolve`). Unresolvable types (nested
+    // cross-crate user types) quietly skip emission — the substrate
+    // reads what's in the section and falls back to other registration
+    // paths for anything it doesn't see there.
+    let manifest_static = build_manifest_static(name, &kind_name, &input.data, &input.attrs);
     Ok(quote! {
         impl ::aether_mail::Kind for #name {
             const NAME: &'static str = #kind_name;
             #is_input_item
         }
+        #manifest_static
     })
+}
+
+fn build_manifest_static(
+    type_ident: &syn::Ident,
+    kind_name: &str,
+    data: &Data,
+    attrs: &[Attribute],
+) -> TokenStream2 {
+    let descriptor = match data {
+        Data::Struct(DataStruct { fields, .. }) => {
+            let field_infos = collect_fields(fields);
+            manifest::struct_descriptor(kind_name, &field_infos, struct_has_repr_c(attrs))
+        }
+        Data::Enum(e) => manifest::enum_descriptor(kind_name, e),
+        Data::Union(_) => return quote! {},
+    };
+    let Some(descriptor) = descriptor else {
+        return quote! {};
+    };
+    let bytes = manifest::encode_record(&descriptor);
+    let len = bytes.len();
+    // A per-type static identifier keeps linker errors legible when
+    // two derives clash on section boundaries. `#[used]` blocks dead-
+    // code elimination from stripping the static before the linker
+    // writes it to the section. Wasm-target gating avoids placing
+    // these bytes in native test executables where the section is
+    // meaningless. Uppercase the type identifier so the generated
+    // const satisfies `non_upper_case_globals` — struct names come
+    // in as `CamelCase`, statics want `SCREAMING_SNAKE` by convention.
+    let upper = to_screaming_snake_case(&type_ident.to_string());
+    let static_ident = quote::format_ident!("__AETHER_KIND_MANIFEST_{}", upper);
+    // `#[link_section]` is an unsafe attribute under edition 2024
+    // — it places the static somewhere the compiler can't reason
+    // about. The bytes are inert data, so the practical risk is nil,
+    // but the `unsafe(...)` wrapper is still required for the
+    // attribute to parse.
+    quote! {
+        #[cfg(target_arch = "wasm32")]
+        #[used]
+        #[unsafe(link_section = "aether.kinds")]
+        static #static_ident: [u8; #len] = [ #( #bytes ),* ];
+    }
+}
+
+fn collect_fields(fields: &Fields) -> Vec<FieldInfo> {
+    match fields {
+        Fields::Named(named) => named
+            .named
+            .iter()
+            .map(|f| FieldInfo {
+                ident: f.ident.clone(),
+                ty: f.ty.clone(),
+            })
+            .collect(),
+        Fields::Unnamed(unnamed) => unnamed
+            .unnamed
+            .iter()
+            .map(|f| FieldInfo {
+                ident: None,
+                ty: f.ty.clone(),
+            })
+            .collect(),
+        Fields::Unit => Vec::new(),
+    }
 }
 
 fn cast_eligible_expr_for_struct(has_repr_c: bool, fields: &[FieldInfo]) -> TokenStream2 {
@@ -333,7 +407,18 @@ fn struct_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
     })
 }
 
-struct FieldInfo {
-    ident: Option<syn::Ident>,
-    ty: Type,
+pub(crate) struct FieldInfo {
+    pub(crate) ident: Option<syn::Ident>,
+    pub(crate) ty: Type,
+}
+
+fn to_screaming_snake_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, ch) in s.chars().enumerate() {
+        if ch.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(ch.to_ascii_uppercase());
+    }
+    out
 }

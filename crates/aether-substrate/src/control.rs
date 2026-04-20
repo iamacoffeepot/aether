@@ -43,6 +43,7 @@ use crate::component::Component;
 use crate::ctx::SubstrateCtx;
 use crate::hub_client::HubOutbound;
 use crate::input::{self, InputSubscribers};
+use crate::kind_manifest;
 use crate::mail::{Mail, MailboxId};
 use crate::platform_info::{PlatformInfoNotifier, WindowModeNotifier};
 use crate::queue::MailQueue;
@@ -110,6 +111,47 @@ fn flush_parked_to(
     while let Some(mail) = parked.pop_front() {
         comp.deliver(&mail).expect("component.deliver failed");
     }
+}
+
+/// Register every descriptor whose name is new; reject on a
+/// schema-mismatch against an existing registration. Used by both
+/// `handle_load` and `handle_replace` after they've merged the
+/// embedded manifest with the legacy `LoadKind` list. Aborts on
+/// the first conflict so the registry is all-or-nothing — no
+/// partial state leaks if a later descriptor disagrees with one
+/// already registered.
+///
+/// Duplicate names within `descriptors` itself that share a schema
+/// are harmless: the first call registers, the second becomes a
+/// no-op because the kind is now registered with the matching
+/// schema. A duplicate name with disagreeing schemas surfaces as
+/// the same conflict error.
+fn register_or_match_all(
+    registry: &Registry,
+    descriptors: &[KindDescriptor],
+) -> Result<(), String> {
+    for kind in descriptors {
+        if let Some(id) = registry.kind_id(&kind.name) {
+            if let Some(existing) = registry.kind_descriptor(id)
+                && existing.schema != kind.schema
+            {
+                return Err(format!(
+                    "kind `{}` already registered with a different encoding",
+                    kind.name
+                ));
+            }
+            // Already registered with the matching schema — nothing
+            // to do. This branch is what makes the merge of the
+            // embedded manifest and boot-registered kinds idempotent:
+            // `aether.tick` ships in every component binary via
+            // aether-kinds, re-registering it is a no-op.
+            continue;
+        }
+        registry
+            .register_kind_with_descriptor(kind.clone())
+            .map_err(|e| format!("register `{}`: {e}", kind.name))?;
+    }
+    Ok(())
 }
 
 /// Translate a `LoadKind` (the flat, agent-shippable descriptor) into
@@ -307,33 +349,27 @@ impl ControlPlane {
             Err(error) => return LoadResult::Err { error },
         };
 
-        // Kind descriptors first: convert the agent's flat `LoadKind`
-        // entries into full `KindDescriptor`s, then pre-check for
-        // conflicts. Aborting before allocating a mailbox or compiling
-        // WASM means a partial-registration of kinds can't leak.
-        let descriptors: Vec<KindDescriptor> = payload.kinds.iter().map(lift_load_kind).collect();
-        for kind in &descriptors {
-            if let Some(id) = self.registry.kind_id(&kind.name)
-                && let Some(existing) = self.registry.kind_descriptor(id)
-                && existing.schema != kind.schema
-            {
-                return LoadResult::Err {
-                    error: format!(
-                        "kind `{}` already registered with a different encoding",
-                        kind.name
-                    ),
-                };
-            }
-        }
-        for kind in descriptors {
-            // Pre-validated above; the only way this can still fail is
-            // a concurrent registration, which today doesn't exist (all
-            // descriptor-bearing registrations go through here or the
-            // single init path). Panic on violation of that invariant
-            // rather than surfacing an internal race as a user error.
-            self.registry
-                .register_kind_with_descriptor(kind)
-                .expect("pre-validated; no concurrent descriptor registrations");
+        // Merge the ADR-0028 embedded manifest (read from the
+        // raw wasm bytes) with any legacy `LoadKind` entries on
+        // the payload. The embedded path is the source of truth
+        // going forward; `payload.kinds` stays for backwards
+        // compatibility until ADR-0028 phase 2 removes the field.
+        // Duplicate names across both sources fall through the
+        // same schema-equality conflict check — identical
+        // descriptors dedupe, disagreements fail the load.
+        //
+        // Reading the section before `Module::new` lets a bad
+        // manifest fail before we spend cycles compiling the
+        // module, and keeps the "no partial registry state on
+        // failure" property the original code had.
+        let mut descriptors: Vec<KindDescriptor> =
+            match kind_manifest::read_from_bytes(&payload.wasm) {
+                Ok(d) => d,
+                Err(error) => return LoadResult::Err { error },
+            };
+        descriptors.extend(payload.kinds.iter().map(lift_load_kind));
+        if let Err(error) = register_or_match_all(&self.registry, &descriptors) {
+            return LoadResult::Err { error };
         }
 
         let module = match Module::new(&self.engine, &payload.wasm) {
@@ -592,25 +628,16 @@ impl ControlPlane {
             }
         }
 
-        // Kind descriptors: pre-validate like load_component.
-        let descriptors: Vec<KindDescriptor> = payload.kinds.iter().map(lift_load_kind).collect();
-        for kind in &descriptors {
-            if let Some(kid) = self.registry.kind_id(&kind.name)
-                && let Some(existing) = self.registry.kind_descriptor(kid)
-                && existing.schema != kind.schema
-            {
-                return ReplaceResult::Err {
-                    error: format!(
-                        "kind `{}` already registered with a different encoding",
-                        kind.name
-                    ),
-                };
-            }
-        }
-        for kind in descriptors {
-            self.registry
-                .register_kind_with_descriptor(kind)
-                .expect("pre-validated; no concurrent descriptor registrations");
+        // ADR-0028 embedded manifest + legacy `LoadKind` entries.
+        // See `handle_load` for the merge rationale.
+        let mut descriptors: Vec<KindDescriptor> =
+            match kind_manifest::read_from_bytes(&payload.wasm) {
+                Ok(d) => d,
+                Err(error) => return ReplaceResult::Err { error },
+            };
+        descriptors.extend(payload.kinds.iter().map(lift_load_kind));
+        if let Err(error) = register_or_match_all(&self.registry, &descriptors) {
+            return ReplaceResult::Err { error };
         }
 
         let module = match Module::new(&self.engine, &payload.wasm) {
@@ -1036,6 +1063,113 @@ mod tests {
         };
         let result = plane.handle_load(&postcard::to_allocvec(&payload).unwrap());
         assert!(matches!(result, LoadResult::Err { .. }));
+    }
+
+    /// ADR-0028 happy path: a component ships kind descriptors in
+    /// its `aether.kinds` custom section, with an empty legacy
+    /// `LoadKind` list on the payload. The substrate reads the
+    /// section and registers each kind before instantiation.
+    #[test]
+    fn load_component_registers_kinds_from_embedded_manifest() {
+        let plane = make_plane();
+
+        // Hand-roll a record the way the derive would emit it:
+        // `[0x01] [postcard(KindDescriptor { name, schema })]`.
+        // Placed into the WAT via `(@custom "aether.kinds" ...)`.
+        let desc = KindDescriptor {
+            name: "demo.embedded.kind".to_string(),
+            schema: SchemaType::Struct {
+                fields: vec![NamedField {
+                    name: "code".to_string(),
+                    ty: SchemaType::Scalar(Primitive::U32),
+                }],
+                repr_c: true,
+            },
+        };
+        let mut section = vec![0x01u8];
+        section.extend(postcard::to_allocvec(&desc).unwrap());
+        let escaped: String = section.iter().map(|b| format!("\\{b:02x}")).collect();
+        let wat = format!(
+            r#"(module
+                (@custom "aether.kinds" "{escaped}")
+                (memory (export "memory") 1)
+                (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
+                    i32.const 0))"#
+        );
+        let wasm = wat::parse_str(wat).unwrap();
+
+        // Empty `kinds` — the whole point is that the embedded
+        // manifest is the source of truth now.
+        let loaded = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponent {
+                wasm,
+                kinds: vec![],
+                name: Some("embedded_consumer".into()),
+            })
+            .unwrap(),
+        );
+        assert!(
+            matches!(loaded, LoadResult::Ok { .. }),
+            "load result was {loaded:?}",
+        );
+        let registered_id = plane
+            .registry
+            .kind_id("demo.embedded.kind")
+            .expect("manifest kind registered");
+        let back = plane
+            .registry
+            .kind_descriptor(registered_id)
+            .expect("descriptor recoverable");
+        assert_eq!(back.schema, desc.schema);
+    }
+
+    /// Same flow, but the embedded manifest conflicts with a kind
+    /// already registered with a different schema. The load aborts
+    /// rather than silently clobbering — same contract as the
+    /// legacy `LoadKind` conflict path.
+    #[test]
+    fn load_component_rejects_embedded_manifest_conflict() {
+        let plane = make_plane();
+
+        // Pre-register a kind with a specific schema.
+        plane
+            .registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: "demo.conflict".into(),
+                schema: SchemaType::Scalar(Primitive::U32),
+            })
+            .unwrap();
+
+        // Now embed a section declaring the same name with a
+        // different schema — must fail the load.
+        let desc = KindDescriptor {
+            name: "demo.conflict".into(),
+            schema: SchemaType::Scalar(Primitive::U64),
+        };
+        let mut section = vec![0x01u8];
+        section.extend(postcard::to_allocvec(&desc).unwrap());
+        let escaped: String = section.iter().map(|b| format!("\\{b:02x}")).collect();
+        let wat = format!(
+            r#"(module
+                (@custom "aether.kinds" "{escaped}")
+                (memory (export "memory") 1)
+                (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
+                    i32.const 0))"#
+        );
+        let wasm = wat::parse_str(wat).unwrap();
+
+        let result = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponent {
+                wasm,
+                kinds: vec![],
+                name: Some("conflict_consumer".into()),
+            })
+            .unwrap(),
+        );
+        let LoadResult::Err { error } = result else {
+            panic!("expected load to fail on schema conflict");
+        };
+        assert!(error.contains("demo.conflict"), "error was: {error}");
     }
 
     #[test]
