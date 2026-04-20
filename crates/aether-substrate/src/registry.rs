@@ -149,7 +149,7 @@ impl Registry {
         if inner.by_name.contains_key(&name) {
             panic!("mailbox name already registered: {name}");
         }
-        let id = MailboxId(inner.entries.len() as u32);
+        let id = MailboxId(inner.entries.len() as u64);
         inner.entries.push(entry);
         inner.mailbox_names.push(name.clone());
         inner.by_name.insert(name, id);
@@ -178,7 +178,7 @@ impl Registry {
         if inner.by_name.contains_key(&name) {
             return Err(NameConflict { name });
         }
-        let id = MailboxId(inner.entries.len() as u32);
+        let id = MailboxId(inner.entries.len() as u64);
         inner.entries.push(MailboxEntry::Component);
         inner.mailbox_names.push(name.clone());
         inner.by_name.insert(name, id);

@@ -4,10 +4,11 @@
 use aether_hub_protocol::SessionToken;
 
 /// Addressing token for any mailbox — component or substrate-owned sink.
-/// Opaque `u32` newtype so it can't be accidentally mixed with wasmtime
-/// indices or raw integers.
+/// Opaque `u64` newtype so it can't be accidentally mixed with wasmtime
+/// indices or raw integers. Width is sized for the ADR-0029 move to
+/// name-derived ids; today the registry still allocates sequentially.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct MailboxId(pub u32);
+pub struct MailboxId(pub u64);
 
 /// Host/guest contract tag for the payload layout. The substrate and the
 /// components that talk to it agree on a specific layout per kind. The
