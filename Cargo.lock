@@ -43,6 +43,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-demo-sokoban"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-component",
+ "aether-kinds",
+ "aether-mail",
+ "bytemuck",
+]
+
+[[package]]
 name = "aether-hello-component"
 version = "0.2.0-alpha"
 dependencies = [

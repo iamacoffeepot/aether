@@ -1,0 +1,13 @@
+[package]
+name = "aether-demo-sokoban"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-component = { path = "../../crates/aether-component" }
+aether-kinds = { path = "../../crates/aether-kinds" }
+aether-mail = { path = "../../crates/aether-mail", features = ["derive"] }
+bytemuck = { version = "1", default-features = false, features = ["derive"] }

@@ -9,6 +9,7 @@ members = [
     "crates/aether-hub-protocol",
     "crates/aether-mail",
     "crates/aether-mail-derive",
+    "demos/sokoban",
 ]
 # Reference artefacts under spikes/ are standalone Cargo workspaces
 # (see ADR-0003 §Consequences) and must be excluded so they aren't
