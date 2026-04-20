@@ -11,22 +11,16 @@
 // keeps the slot a scalar and avoids unbounded buildup if the render
 // thread stalls.
 //
-// The optional `CaptureWaker` pokes the event loop when a capture
-// lands, so even an occluded window (on macOS) still processes the
-// request rather than sleeping until the next window event.
+// The attached `Chassis` pokes its event loop (or no-ops) whenever a
+// capture lands so even an occluded window (on macOS) still processes
+// the request rather than sleeping until the next window event.
 
 use std::sync::{Arc, Mutex};
 
 use aether_hub_protocol::SessionToken;
 
 use crate::Mail;
-
-/// Woken by `CaptureQueue::request` whenever a capture moves from
-/// empty → pending. The substrate binary plugs in an adapter over
-/// `winit::EventLoopProxy`; unit tests leave the waker unset.
-pub trait CaptureWaker: Send + Sync {
-    fn wake(&self);
-}
+use crate::chassis::Chassis;
 
 /// One pending capture request. Carries the originating session's
 /// token so the render thread can reply-to-sender once it has bytes,
@@ -43,7 +37,7 @@ pub struct PendingCapture {
 #[derive(Clone, Default)]
 pub struct CaptureQueue {
     slot: Arc<Mutex<Option<PendingCapture>>>,
-    waker: Option<Arc<dyn CaptureWaker>>,
+    chassis: Option<Arc<dyn Chassis>>,
 }
 
 impl CaptureQueue {
@@ -51,17 +45,18 @@ impl CaptureQueue {
         Self::default()
     }
 
-    pub fn with_waker(waker: Arc<dyn CaptureWaker>) -> Self {
+    pub fn with_chassis(chassis: Arc<dyn Chassis>) -> Self {
         Self {
             slot: Arc::default(),
-            waker: Some(waker),
+            chassis: Some(chassis),
         }
     }
 
     /// Try to install `pending` as the pending capture. Returns `true`
     /// if the slot was empty and the request is now pending; `false`
-    /// if a capture is already in flight. On success, pokes the waker
-    /// (if any) so a sleeping event loop can pick up the request.
+    /// if a capture is already in flight. On success, pokes the
+    /// chassis (if any) so a sleeping event loop can pick up the
+    /// request.
     pub fn request(&self, pending: PendingCapture) -> bool {
         let mut slot = self.slot.lock().unwrap();
         if slot.is_some() {
@@ -69,8 +64,8 @@ impl CaptureQueue {
         }
         *slot = Some(pending);
         drop(slot);
-        if let Some(w) = &self.waker {
-            w.wake();
+        if let Some(chassis) = &self.chassis {
+            chassis.wake_for_capture();
         }
         true
     }
@@ -126,23 +121,33 @@ mod tests {
     }
 
     #[test]
-    fn waker_fires_on_successful_request_only() {
+    fn chassis_wakes_on_successful_request_only() {
+        use aether_kinds::WindowMode;
         struct Counter(AtomicU32);
-        impl CaptureWaker for Counter {
-            fn wake(&self) {
+        impl Chassis for Counter {
+            fn wake_for_capture(&self) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
+            fn request_platform_info(&self, _sender: SessionToken) {}
+            fn request_set_window_mode(
+                &self,
+                _sender: SessionToken,
+                _mode: WindowMode,
+                _width: Option<u32>,
+                _height: Option<u32>,
+            ) {
+            }
         }
-        let w = Arc::new(Counter(AtomicU32::new(0)));
-        let q = CaptureQueue::with_waker(w.clone());
+        let chassis = Arc::new(Counter(AtomicU32::new(0)));
+        let q = CaptureQueue::with_chassis(chassis.clone());
         assert!(q.request(pending(1)));
-        assert_eq!(w.0.load(Ordering::SeqCst), 1);
-        // Second request fails (slot full) — waker must not fire again.
+        assert_eq!(chassis.0.load(Ordering::SeqCst), 1);
+        // Second request fails (slot full) — chassis must not wake again.
         assert!(!q.request(pending(2)));
-        assert_eq!(w.0.load(Ordering::SeqCst), 1);
-        // Drain + re-request: waker fires again.
+        assert_eq!(chassis.0.load(Ordering::SeqCst), 1);
+        // Drain + re-request: chassis wakes again.
         q.take();
         assert!(q.request(pending(3)));
-        assert_eq!(w.0.load(Ordering::SeqCst), 2);
+        assert_eq!(chassis.0.load(Ordering::SeqCst), 2);
     }
 }

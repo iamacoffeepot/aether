@@ -38,13 +38,13 @@ use aether_mail::Kind;
 use wasmtime::{Engine, Linker, Module};
 
 use crate::capture::{CaptureQueue, PendingCapture};
+use crate::chassis::Chassis;
 use crate::component::Component;
 use crate::ctx::SubstrateCtx;
 use crate::hub_client::HubOutbound;
 use crate::input::{self, InputSubscribers};
 use crate::kind_manifest;
 use crate::mail::{Mail, MailboxId};
-use crate::platform_info::{PlatformInfoNotifier, WindowModeNotifier};
 use crate::queue::MailQueue;
 use crate::registry::{Registry, SinkHandler};
 use crate::scheduler::ComponentTable;
@@ -195,17 +195,15 @@ pub struct ControlPlane {
     pub components: ComponentTable,
     /// Handoff slot for `aether.control.capture_frame`. The handler
     /// pushes a pending request here; the render thread pulls it on
-    /// the next frame and fulfils the reply.
+    /// the next frame and fulfils the reply. The queue's chassis
+    /// handle (for wake-on-request) is the same `Arc<dyn Chassis>`
+    /// installed below.
     pub capture_queue: CaptureQueue,
-    /// Fire-and-forget notifier for `aether.control.platform_info`.
-    /// The handler just hands the sender over; the event-loop thread
-    /// snapshots + replies. Tests use `NoopPlatformInfoNotifier`.
-    pub platform_info_notifier: Arc<dyn PlatformInfoNotifier>,
-    /// Fire-and-forget notifier for `aether.control.set_window_mode`.
-    /// Carries the requested mode + optional Windowed size; the
-    /// event-loop thread resolves fullscreen modes, applies the
-    /// change, and replies with the resulting state.
-    pub window_mode_notifier: Arc<dyn WindowModeNotifier>,
+    /// ADR-0035 chassis handle. Core delegates peripheral operations
+    /// here: `platform_info` and `set_window_mode` requests hand the
+    /// sender off for the chassis to run on its own thread and reply
+    /// to. Tests use `NoopChassis`.
+    pub chassis: Arc<dyn Chassis>,
     /// ADR-0021 per-stream subscriber sets, shared with the platform
     /// thread. The control plane mutates this table on subscribe /
     /// unsubscribe / drop; the platform thread reads it to fan out
@@ -255,7 +253,7 @@ impl ControlPlane {
             // Empty payload; forward the sender straight to the event
             // loop and let it snapshot + reply on its own thread
             // (winit monitor / scale-factor APIs require it).
-            self.platform_info_notifier.notify(sender);
+            self.chassis.request_platform_info(sender);
         } else if kind_name == SetWindowMode::NAME {
             self.handle_set_window_mode(sender, bytes);
         } else {
@@ -506,10 +504,11 @@ impl ControlPlane {
     }
 
     /// Handler for `aether.control.set_window_mode`. Decodes the
-    /// request, then hands it to the event-loop thread via
-    /// `window_mode_notifier` — the event loop resolves video modes,
-    /// applies the change, and replies on its own. Decode failures
-    /// reply inline so the caller doesn't hang on a malformed body.
+    /// request, then hands it to the chassis via
+    /// `chassis.request_set_window_mode` — the chassis resolves video
+    /// modes, applies the change, and replies on its own thread.
+    /// Decode failures reply inline so the caller doesn't hang on a
+    /// malformed body.
     fn handle_set_window_mode(&self, sender: aether_hub_protocol::SessionToken, bytes: &[u8]) {
         let payload: SetWindowMode = match decode_payload(bytes) {
             Ok(p) => p,
@@ -519,8 +518,8 @@ impl ControlPlane {
                 return;
             }
         };
-        self.window_mode_notifier
-            .request(sender, payload.mode, payload.width, payload.height);
+        self.chassis
+            .request_set_window_mode(sender, payload.mode, payload.width, payload.height);
     }
 
     fn handle_replace(&self, bytes: &[u8]) -> ReplaceResult {
@@ -877,8 +876,7 @@ mod tests {
             input_subscribers: input::new_subscribers(),
             default_name_counter: Arc::new(AtomicU64::new(0)),
             capture_queue: CaptureQueue::new(),
-            platform_info_notifier: Arc::new(crate::platform_info::NoopPlatformInfoNotifier),
-            window_mode_notifier: Arc::new(crate::platform_info::NoopWindowModeNotifier),
+            chassis: crate::chassis::noop_chassis(),
         }
     }
 

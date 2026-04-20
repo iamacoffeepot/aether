@@ -29,12 +29,9 @@ use aether_kinds::{
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
-    CaptureQueue, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, MailQueue,
-    Registry, Scheduler, SubstrateCtx,
-    capture::CaptureWaker,
-    host_fns,
+    CaptureQueue, Chassis, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers,
+    MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
-    platform_info::{PlatformInfoNotifier, WindowModeNotifier},
     subscribers_for,
 };
 use render::Gpu;
@@ -73,45 +70,29 @@ enum UserEvent {
     },
 }
 
-/// Adapter that bridges `CaptureQueue::request` to the winit event
-/// loop. `request()` pokes `wake()`, which sends a `CaptureRequested`
-/// user event; `App::user_event` then runs a render pass even if the
-/// window is occluded so the capture resolves.
-struct CaptureRequestWaker {
+/// ADR-0035 desktop chassis: implements the `Chassis` trait by
+/// forwarding peripheral work to the winit event loop via
+/// `EventLoopProxy<UserEvent>`. Every method on the trait maps to a
+/// single `UserEvent` variant the event loop picks up on its own
+/// thread — the capture path goes through the shared `CaptureQueue`
+/// for backpressure, the window-mode and platform-info paths ride
+/// their payload inline on the event.
+struct DesktopChassis {
     proxy: EventLoopProxy<UserEvent>,
 }
 
-impl CaptureWaker for CaptureRequestWaker {
-    fn wake(&self) {
+impl Chassis for DesktopChassis {
+    fn wake_for_capture(&self) {
         // `send_event` only fails if the event loop has shut down; in
         // that case nothing listens for captures anyway.
         let _ = self.proxy.send_event(UserEvent::Capture);
     }
-}
 
-/// Adapter that bridges `ControlPlane`'s `platform_info_notifier` to
-/// the winit event loop — same idea as `CaptureRequestWaker` but the
-/// per-request payload (the originating session token) rides inline
-/// on the event itself, so no shared queue is needed.
-struct PlatformInfoProxy {
-    proxy: EventLoopProxy<UserEvent>,
-}
-
-impl PlatformInfoNotifier for PlatformInfoProxy {
-    fn notify(&self, sender: SessionToken) {
+    fn request_platform_info(&self, sender: SessionToken) {
         let _ = self.proxy.send_event(UserEvent::PlatformInfo { sender });
     }
-}
 
-/// Companion to `PlatformInfoProxy` for window-mode writes. Wires
-/// the control-plane handler's `WindowModeNotifier` call into a
-/// `SetWindowModeRequested` user event on the event loop.
-struct SetWindowModeProxy {
-    proxy: EventLoopProxy<UserEvent>,
-}
-
-impl WindowModeNotifier for SetWindowModeProxy {
-    fn request(
+    fn request_set_window_mode(
         &self,
         sender: SessionToken,
         mode: WindowMode,
@@ -788,20 +769,14 @@ fn main() -> wasmtime::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    // Shared capture-request slot between the control plane (where
-    // the request arrives) and the render thread (which fulfils it).
-    let capture_queue = CaptureQueue::with_waker(Arc::new(CaptureRequestWaker {
-        proxy: event_loop.create_proxy(),
-    }));
-
-    // Fire-and-forget notifier for `platform_info`. Carries the
-    // sender inline on each user event — no shared queue required.
-    let platform_info_notifier = Arc::new(PlatformInfoProxy {
+    // Single DesktopChassis handle feeds both the CaptureQueue (for
+    // wake-on-request) and the ControlPlane (for platform_info /
+    // set_window_mode delegation). Cloning the Arc is cheap — each
+    // consumer holds its own reference.
+    let chassis: Arc<dyn Chassis> = Arc::new(DesktopChassis {
         proxy: event_loop.create_proxy(),
     });
-    let window_mode_notifier = Arc::new(SetWindowModeProxy {
-        proxy: event_loop.create_proxy(),
-    });
+    let capture_queue = CaptureQueue::with_chassis(Arc::clone(&chassis));
 
     // Wire the ADR-0010 control plane. Registered after the scheduler
     // exists so the handler can capture the runtime component table
@@ -818,8 +793,7 @@ fn main() -> wasmtime::Result<()> {
             input_subscribers: Arc::clone(&input_subscribers),
             default_name_counter: Arc::new(AtomicU64::new(0)),
             capture_queue: capture_queue.clone(),
-            platform_info_notifier: platform_info_notifier.clone(),
-            window_mode_notifier: window_mode_notifier.clone(),
+            chassis: Arc::clone(&chassis),
         };
         registry.register_sink(
             aether_substrate::AETHER_CONTROL,
