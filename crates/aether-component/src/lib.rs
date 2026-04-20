@@ -296,17 +296,26 @@ impl InitCtx<'_> {
     /// mailbox as the subscriber for `K`'s stream. Called by
     /// `KindList::resolve_all` for every `K::IS_INPUT` kind — ADR-0030
     /// Phase 2 moved the subscribe side effect out of `resolve_kind`
-    /// and into the guest SDK. No-op if `K::NAME` isn't one of the
-    /// four known substrate input streams (input kinds defined
-    /// downstream of aether-kinds get to pick their own subscribe path).
-    pub fn subscribe_input<K: Kind>(&self) {
-        use aether_kinds::{InputStream, SubscribeInput};
-        let stream = match K::NAME {
-            "aether.tick" => InputStream::Tick,
-            "aether.key" => InputStream::Key,
-            "aether.mouse_move" => InputStream::MouseMove,
-            "aether.mouse_button" => InputStream::MouseButton,
-            _ => return,
+    /// and into the guest SDK. No-op if `K` isn't one of the four
+    /// known substrate input kind types (input kinds defined downstream
+    /// of aether-kinds get to pick their own subscribe path).
+    ///
+    /// Stream selection goes through `TypeId` rather than `K::NAME`
+    /// so a future rename on either side of the pairing surfaces as a
+    /// type error instead of silently skipping the subscribe.
+    pub fn subscribe_input<K: Kind + 'static>(&self) {
+        use aether_kinds::{InputStream, Key, MouseButton, MouseMove, SubscribeInput, Tick};
+        let tid = TypeId::of::<K>();
+        let stream = if tid == TypeId::of::<Tick>() {
+            InputStream::Tick
+        } else if tid == TypeId::of::<Key>() {
+            InputStream::Key
+        } else if tid == TypeId::of::<MouseMove>() {
+            InputStream::MouseMove
+        } else if tid == TypeId::of::<MouseButton>() {
+            InputStream::MouseButton
+        } else {
+            return;
         };
         let payload = SubscribeInput {
             stream,
