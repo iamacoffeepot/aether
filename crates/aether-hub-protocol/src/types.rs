@@ -115,6 +115,30 @@ pub enum EnumVariant {
     },
 }
 
+impl EnumVariant {
+    /// Variant's wire name — matches the `#[postcard(...)]` rename (if
+    /// any) or the bare Rust variant identifier. Used on both the
+    /// encode and decode sides for lookup and error reporting.
+    pub fn name(&self) -> &str {
+        match self {
+            EnumVariant::Unit { name, .. }
+            | EnumVariant::Tuple { name, .. }
+            | EnumVariant::Struct { name, .. } => name.as_str(),
+        }
+    }
+
+    /// Postcard discriminant — the varint written on the wire before
+    /// the variant body. Assigned by the derive at schema-build time
+    /// and stable for the life of the kind vocabulary.
+    pub fn discriminant(&self) -> u32 {
+        match self {
+            EnumVariant::Unit { discriminant, .. }
+            | EnumVariant::Tuple { discriminant, .. }
+            | EnumVariant::Struct { discriminant, .. } => *discriminant,
+        }
+    }
+}
+
 /// Scalar primitives addressable by `SchemaType::Scalar`. Matches the
 /// Rust primitive set that's trivially `bytemuck::Pod` so cast-shaped
 /// structs can express their leaf types; `bool` is `SchemaType::Bool`,

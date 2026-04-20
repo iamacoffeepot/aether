@@ -315,7 +315,7 @@ fn decode_postcard(
             let disc = read_varint_u64(cur, path)? as u32;
             let variant = variants
                 .iter()
-                .find(|v| variant_discriminant(v) == disc)
+                .find(|v| v.discriminant() == disc)
                 .ok_or_else(|| DecodeError::UnknownEnumDiscriminant {
                     path: path.into(),
                     discriminant: disc,
@@ -362,28 +362,12 @@ fn read_primitive_postcard(
     }
 }
 
-fn variant_discriminant(v: &EnumVariant) -> u32 {
-    match v {
-        EnumVariant::Unit { discriminant, .. }
-        | EnumVariant::Tuple { discriminant, .. }
-        | EnumVariant::Struct { discriminant, .. } => *discriminant,
-    }
-}
-
-fn variant_name(v: &EnumVariant) -> &str {
-    match v {
-        EnumVariant::Unit { name, .. }
-        | EnumVariant::Tuple { name, .. }
-        | EnumVariant::Struct { name, .. } => name.as_str(),
-    }
-}
-
 fn decode_enum_body(
     cur: &mut Cursor<'_>,
     variant: &EnumVariant,
     path: &str,
 ) -> Result<Value, DecodeError> {
-    let name = variant_name(variant).to_owned();
+    let name = variant.name().to_owned();
     match variant {
         EnumVariant::Unit { .. } => {
             // Unit variant: bare-string tag, no body. Symmetric to the

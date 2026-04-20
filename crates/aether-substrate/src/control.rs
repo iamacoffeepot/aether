@@ -66,6 +66,13 @@ pub const DEFAULT_DRAIN_TIMEOUT_MS: u32 = 5_000;
 /// component has a slow `deliver`.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_micros(200);
 
+/// Postcard-decode a control-plane payload with the one error-message
+/// shape every handler uses. Handlers wrap the `String` in their own
+/// `*Result::Err` variant — the shape is uniform, the enum differs.
+fn decode_payload<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    postcard::from_bytes(bytes).map_err(|e| format!("postcard decode failed: {e}"))
+}
+
 /// Block until the entry's `pending` count reaches zero or `timeout`
 /// elapses. Returns `true` if the drain completed, `false` on
 /// timeout. Polled rather than condvar-driven to keep
@@ -295,13 +302,9 @@ impl ControlPlane {
     }
 
     fn handle_load(&self, bytes: &[u8]) -> LoadResult {
-        let payload: LoadComponent = match postcard::from_bytes(bytes) {
+        let payload: LoadComponent = match decode_payload(bytes) {
             Ok(p) => p,
-            Err(e) => {
-                return LoadResult::Err {
-                    error: format!("postcard decode failed: {e}"),
-                };
-            }
+            Err(error) => return LoadResult::Err { error },
         };
 
         // Kind descriptors first: convert the agent's flat `LoadKind`
@@ -386,13 +389,9 @@ impl ControlPlane {
     }
 
     fn handle_drop(&self, bytes: &[u8]) -> DropResult {
-        let payload: DropComponent = match postcard::from_bytes(bytes) {
+        let payload: DropComponent = match decode_payload(bytes) {
             Ok(p) => p,
-            Err(e) => {
-                return DropResult::Err {
-                    error: format!("postcard decode failed: {e}"),
-                };
-            }
+            Err(error) => return DropResult::Err { error },
         };
         let id = MailboxId(payload.mailbox_id);
         if let Err(e) = self.registry.drop_mailbox(id) {
@@ -422,13 +421,9 @@ impl ControlPlane {
     }
 
     fn handle_subscribe(&self, bytes: &[u8]) -> SubscribeInputResult {
-        let payload: SubscribeInput = match postcard::from_bytes(bytes) {
+        let payload: SubscribeInput = match decode_payload(bytes) {
             Ok(p) => p,
-            Err(e) => {
-                return SubscribeInputResult::Err {
-                    error: format!("postcard decode failed: {e}"),
-                };
-            }
+            Err(error) => return SubscribeInputResult::Err { error },
         };
         let id = MailboxId(payload.mailbox);
         if let Err(e) = validate_subscriber_mailbox(&self.registry, id) {
@@ -444,13 +439,9 @@ impl ControlPlane {
     }
 
     fn handle_unsubscribe(&self, bytes: &[u8]) -> SubscribeInputResult {
-        let payload: UnsubscribeInput = match postcard::from_bytes(bytes) {
+        let payload: UnsubscribeInput = match decode_payload(bytes) {
             Ok(p) => p,
-            Err(e) => {
-                return SubscribeInputResult::Err {
-                    error: format!("postcard decode failed: {e}"),
-                };
-            }
+            Err(error) => return SubscribeInputResult::Err { error },
         };
         let id = MailboxId(payload.mailbox);
         // Unsubscribe is idempotent on "not currently subscribed" but
@@ -495,13 +486,11 @@ impl ControlPlane {
     /// `Err` replies (decode failure, envelope-resolve failure,
     /// capture-already-pending) are sent inline.
     fn handle_capture_frame(&self, sender: aether_hub_protocol::SessionToken, bytes: &[u8]) {
-        let payload: CaptureFrame = match postcard::from_bytes(bytes) {
+        let payload: CaptureFrame = match decode_payload(bytes) {
             Ok(p) => p,
-            Err(e) => {
-                let result = CaptureFrameResult::Err {
-                    error: format!("postcard decode failed: {e}"),
-                };
-                self.outbound.send_reply(sender, &result);
+            Err(error) => {
+                self.outbound
+                    .send_reply(sender, &CaptureFrameResult::Err { error });
                 return;
             }
         };
@@ -559,13 +548,11 @@ impl ControlPlane {
     /// applies the change, and replies on its own. Decode failures
     /// reply inline so the caller doesn't hang on a malformed body.
     fn handle_set_window_mode(&self, sender: aether_hub_protocol::SessionToken, bytes: &[u8]) {
-        let payload: SetWindowMode = match postcard::from_bytes(bytes) {
+        let payload: SetWindowMode = match decode_payload(bytes) {
             Ok(p) => p,
-            Err(e) => {
-                let result = SetWindowModeResult::Err {
-                    error: format!("postcard decode failed: {e}"),
-                };
-                self.outbound.send_reply(sender, &result);
+            Err(error) => {
+                self.outbound
+                    .send_reply(sender, &SetWindowModeResult::Err { error });
                 return;
             }
         };
@@ -574,13 +561,9 @@ impl ControlPlane {
     }
 
     fn handle_replace(&self, bytes: &[u8]) -> ReplaceResult {
-        let payload: ReplaceComponent = match postcard::from_bytes(bytes) {
+        let payload: ReplaceComponent = match decode_payload(bytes) {
             Ok(p) => p,
-            Err(e) => {
-                return ReplaceResult::Err {
-                    error: format!("postcard decode failed: {e}"),
-                };
-            }
+            Err(error) => return ReplaceResult::Err { error },
         };
         let id = MailboxId(payload.mailbox_id);
         let drain_timeout = Duration::from_millis(

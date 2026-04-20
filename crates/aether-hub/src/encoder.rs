@@ -249,13 +249,15 @@ fn encode_postcard(
             // tuple/struct variants, `"VariantName"` (string) for unit
             // variants. Same shape serde emits by default.
             let (tag, body) = decode_enum_tag(value, path)?;
-            let variant = variants.iter().find(|v| variant_name(v) == tag).ok_or(
-                EncodeError::TypeMismatch {
-                    field: path.to_owned(),
-                    expected: "enum variant matching schema",
-                },
-            )?;
-            write_varint_u64(out, variant_discriminant(variant) as u64);
+            let variant =
+                variants
+                    .iter()
+                    .find(|v| v.name() == tag)
+                    .ok_or(EncodeError::TypeMismatch {
+                        field: path.to_owned(),
+                        expected: "enum variant matching schema",
+                    })?;
+            write_varint_u64(out, variant.discriminant() as u64);
             encode_enum_body(body, variant, path, out)?;
             Ok(())
         }
@@ -359,22 +361,6 @@ fn decode_enum_tag<'a>(value: &'a Value, path: &str) -> Result<(&'a str, &'a Val
     }
     let (tag, body) = obj.iter().next().expect("len == 1");
     Ok((tag.as_str(), body))
-}
-
-fn variant_name(v: &EnumVariant) -> &str {
-    match v {
-        EnumVariant::Unit { name, .. }
-        | EnumVariant::Tuple { name, .. }
-        | EnumVariant::Struct { name, .. } => name.as_str(),
-    }
-}
-
-fn variant_discriminant(v: &EnumVariant) -> u32 {
-    match v {
-        EnumVariant::Unit { discriminant, .. }
-        | EnumVariant::Tuple { discriminant, .. }
-        | EnumVariant::Struct { discriminant, .. } => *discriminant,
-    }
 }
 
 fn encode_enum_body(
