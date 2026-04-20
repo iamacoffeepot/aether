@@ -16,6 +16,18 @@ use aether_hub_protocol::{EngineId, HubToEngine, KindDescriptor};
 use tokio::process::Child;
 use tokio::sync::mpsc;
 
+use crate::mcp::args::ComponentCapabilitiesWire;
+
+/// Per-loaded-component metadata tracked by the hub (ADR-0033). Seeded
+/// when `load_component` resolves, refreshed on `replace_component`,
+/// removed on `drop_component`. Surfaced verbatim by the
+/// `describe_component` MCP tool.
+#[derive(Clone, Debug)]
+pub struct ComponentRecord {
+    pub name: String,
+    pub capabilities: ComponentCapabilitiesWire,
+}
+
 /// One entry in the hub's engine table. `mail_tx` is how any other
 /// task (including MCP tool handlers) pushes frames at this engine —
 /// the per-connection writer task drains the receiver.
@@ -29,6 +41,11 @@ pub struct EngineRecord {
     /// tool surface for `describe_kinds` and for schema-driven encoding
     /// on `send_mail`.
     pub kinds: Vec<KindDescriptor>,
+    /// Per-mailbox component metadata (ADR-0033). Keyed on the
+    /// substrate-assigned `mailbox_id`. Clonable as a snapshot; the
+    /// authoritative write path goes through
+    /// `EngineRegistry::upsert_component`.
+    pub components: HashMap<u64, ComponentRecord>,
     pub mail_tx: mpsc::Sender<HubToEngine>,
     /// `true` if this engine was spawned by the hub (ADR-0009).
     /// `false` for externally connected substrates. Purely informational
@@ -104,6 +121,38 @@ impl EngineRegistry {
         }
     }
 
+    /// Insert or replace the component record for `(engine, mailbox)`.
+    /// Called after a successful `load_component` or
+    /// `replace_component` (ADR-0033). No-op if the engine is unknown.
+    pub fn upsert_component(&self, id: &EngineId, mailbox_id: u64, record: ComponentRecord) {
+        if let Some(engine) = self.inner.lock().unwrap().records.get_mut(id) {
+            engine.components.insert(mailbox_id, record);
+        }
+    }
+
+    /// Drop the component record for `(engine, mailbox)`. Called after
+    /// a successful `drop_component`. No-op if the engine or mailbox
+    /// is unknown.
+    pub fn drop_component(&self, id: &EngineId, mailbox_id: u64) {
+        if let Some(engine) = self.inner.lock().unwrap().records.get_mut(id) {
+            engine.components.remove(&mailbox_id);
+        }
+    }
+
+    /// Snapshot the component record for `(engine, mailbox)`. Used by
+    /// the `describe_component` MCP tool. Returns `None` for unknown
+    /// engine / mailbox pairs.
+    pub fn get_component(&self, id: &EngineId, mailbox_id: u64) -> Option<ComponentRecord> {
+        self.inner
+            .lock()
+            .unwrap()
+            .records
+            .get(id)?
+            .components
+            .get(&mailbox_id)
+            .cloned()
+    }
+
     pub fn list(&self) -> Vec<EngineRecord> {
         self.inner
             .lock()
@@ -148,6 +197,7 @@ mod tests {
             pid: 1,
             version: "0".into(),
             kinds: vec![],
+            components: HashMap::new(),
             mail_tx: tx,
             spawned: false,
         }

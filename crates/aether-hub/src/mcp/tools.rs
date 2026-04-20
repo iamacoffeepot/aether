@@ -26,14 +26,15 @@ use crate::session::SessionHandle;
 use crate::spawn::{DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, SpawnOpts};
 
 use super::args::{
-    CaptureFrameArgs, CaptureFrameResultWire, DescribeKindsArgs, EngineInfo, EngineLogEntry,
-    EngineLogsArgs, EngineLogsResponse, LoadComponentArgs, LoadComponentResponse, LoadResultWire,
-    MailSpec, MailStatus, ReceiveMailArgs, ReceivedMail, ReplaceComponentArgs, ReplaceResultWire,
-    SendMailArgs, SpawnResult, SpawnSubstrateArgs, TerminateResult, TerminateSubstrateArgs,
-    log_level_to_str,
+    CaptureFrameArgs, CaptureFrameResultWire, DescribeComponentArgs, DescribeComponentResponse,
+    DescribeKindsArgs, EngineInfo, EngineLogEntry, EngineLogsArgs, EngineLogsResponse,
+    LoadComponentArgs, LoadComponentResponse, LoadResultWire, MailSpec, MailStatus,
+    ReceiveMailArgs, ReceivedMail, ReplaceComponentArgs, ReplaceResultWire, SendMailArgs,
+    SpawnResult, SpawnSubstrateArgs, TerminateResult, TerminateSubstrateArgs, log_level_to_str,
 };
 use super::codecs::{decode_inbound, deliver_one, encode_capture_bundle};
 use super::{Hub, HubState};
+use crate::registry::ComponentRecord;
 
 /// Substrate control-plane kind name for a capture request. String
 /// constants rather than an `aether-kinds` dependency to keep the hub
@@ -485,8 +486,24 @@ impl Hub {
                 format!("substrate load failed: {error}"),
                 None,
             )),
-            LoadResultWire::Ok { mailbox_id, name } => {
-                let response = LoadComponentResponse { mailbox_id, name };
+            LoadResultWire::Ok {
+                mailbox_id,
+                name,
+                capabilities,
+            } => {
+                self.state.engines.upsert_component(
+                    &id,
+                    mailbox_id,
+                    ComponentRecord {
+                        name: name.clone(),
+                        capabilities: capabilities.clone(),
+                    },
+                );
+                let response = LoadComponentResponse {
+                    mailbox_id,
+                    name,
+                    capabilities,
+                };
                 serde_json::to_string(&response)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))
             }
@@ -577,8 +594,64 @@ impl Hub {
                 format!("substrate replace failed: {error}"),
                 None,
             )),
-            ReplaceResultWire::Ok => Ok("\"Ok\"".to_owned()),
+            ReplaceResultWire::Ok { capabilities } => {
+                // ADR-0033: the replaced component may advertise a
+                // different receive surface. Refresh the cached record
+                // so `describe_component` reflects what's actually
+                // bound now. Name is preserved — `replace_component`
+                // keeps the existing mailbox + name by design.
+                let existing = self.state.engines.get_component(&id, args.mailbox_id);
+                let name = existing
+                    .map(|r| r.name)
+                    .unwrap_or_else(|| format!("mailbox_{}", args.mailbox_id));
+                self.state.engines.upsert_component(
+                    &id,
+                    args.mailbox_id,
+                    ComponentRecord {
+                        name,
+                        capabilities: capabilities.clone(),
+                    },
+                );
+                serde_json::to_string(&capabilities)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))
+            }
         }
+    }
+
+    #[tool(
+        description = "Describe a loaded component's receive-side capabilities (ADR-0033). Returns the component's name, its top-level author-written documentation, the set of kinds it typed-handles (id, name, optional per-handler doc), and whether it has a `#[fallback]` catchall (with the fallback's own optional doc). The capability set is parsed from the component's `aether.kinds.inputs` wasm custom section at `load_component` / `replace_component` time. Strict receivers — components without a fallback — are distinguishable via `fallback: null` in the response. Components predating the `#[handlers]` macro ship with empty fields since they have no structured capability surface to advertise."
+    )]
+    pub(super) async fn describe_component(
+        &self,
+        Parameters(args): Parameters<DescribeComponentArgs>,
+    ) -> Result<String, McpError> {
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+        if self.state.engines.get(&id).is_none() {
+            return Err(McpError::invalid_params(
+                format!("unknown engine_id {}", args.engine_id),
+                None,
+            ));
+        }
+        let Some(component) = self.state.engines.get_component(&id, args.mailbox_id) else {
+            return Err(McpError::invalid_params(
+                format!(
+                    "no component at mailbox_id {} on engine {}",
+                    args.mailbox_id, args.engine_id
+                ),
+                None,
+            ));
+        };
+        let ComponentRecord { name, capabilities } = component;
+        let response = DescribeComponentResponse {
+            name,
+            doc: capabilities.doc,
+            receives: capabilities.handlers,
+            fallback: capabilities.fallback,
+        };
+        serde_json::to_string(&response).map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 
     #[tool(

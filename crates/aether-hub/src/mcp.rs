@@ -31,7 +31,7 @@ use crate::registry::EngineRegistry;
 use crate::session::{QueuedMail, SessionHandle, SessionRegistry};
 use crate::spawn::PendingSpawns;
 
-mod args;
+pub(crate) mod args;
 mod codecs;
 mod tools;
 
@@ -174,6 +174,7 @@ mod tests {
             pid: 42,
             version: "test".into(),
             kinds,
+            components: HashMap::new(),
             mail_tx: tx,
             spawned: false,
         };
@@ -428,6 +429,101 @@ mod tests {
             engine_id: Uuid::from_u128(1).to_string(),
         };
         let err = hub.describe_kinds(Parameters(args)).await.unwrap_err();
+        assert!(format!("{err:?}").contains("unknown engine_id"));
+    }
+
+    // ADR-0033: `describe_component` returns stored capabilities for
+    // `(engine, mailbox)`. `load_component` normally populates the
+    // record; tests seed it directly via `upsert_component` to isolate
+    // the lookup path from the full load flow.
+
+    fn stub_capabilities() -> args::ComponentCapabilitiesWire {
+        args::ComponentCapabilitiesWire {
+            handlers: vec![
+                args::HandlerCapabilityWire {
+                    id: 42,
+                    name: "aether.tick".into(),
+                    doc: Some("heartbeat".into()),
+                },
+                args::HandlerCapabilityWire {
+                    id: 0xff,
+                    name: "aether.ping".into(),
+                    doc: None,
+                },
+            ],
+            fallback: None,
+            doc: Some("A canary component.".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn describe_component_returns_stored_capabilities() {
+        use crate::registry::ComponentRecord;
+
+        let engines = EngineRegistry::new();
+        let (rec, _rx) = record(50);
+        let id = rec.id;
+        engines.insert(rec);
+        let capabilities = stub_capabilities();
+        engines.upsert_component(
+            &id,
+            7,
+            ComponentRecord {
+                name: "hello".into(),
+                capabilities: capabilities.clone(),
+            },
+        );
+        let hub = Hub::new(test_state(engines, SessionRegistry::new()));
+
+        let json = hub
+            .describe_component(Parameters(args::DescribeComponentArgs {
+                engine_id: id.0.to_string(),
+                mailbox_id: 7,
+            }))
+            .await
+            .unwrap();
+        let response: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(response["name"], "hello");
+        assert_eq!(response["doc"], "A canary component.");
+        let receives = response["receives"].as_array().unwrap();
+        assert_eq!(receives.len(), 2);
+        assert_eq!(receives[0]["name"], "aether.tick");
+        assert_eq!(receives[0]["doc"], "heartbeat");
+        assert_eq!(receives[1]["name"], "aether.ping");
+        assert!(receives[1]["doc"].is_null());
+        assert!(response["fallback"].is_null());
+    }
+
+    #[tokio::test]
+    async fn describe_component_unknown_mailbox_errors() {
+        let engines = EngineRegistry::new();
+        let (rec, _rx) = record(51);
+        let id = rec.id;
+        engines.insert(rec);
+        let hub = Hub::new(test_state(engines, SessionRegistry::new()));
+
+        let err = hub
+            .describe_component(Parameters(args::DescribeComponentArgs {
+                engine_id: id.0.to_string(),
+                mailbox_id: 999,
+            }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("no component at mailbox_id 999"));
+    }
+
+    #[tokio::test]
+    async fn describe_component_unknown_engine_errors() {
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
+        let hub = Hub::new(state);
+
+        let err = hub
+            .describe_component(Parameters(args::DescribeComponentArgs {
+                engine_id: Uuid::from_u128(0xdead).to_string(),
+                mailbox_id: 0,
+            }))
+            .await
+            .unwrap_err();
         assert!(format!("{err:?}").contains("unknown engine_id"));
     }
 
