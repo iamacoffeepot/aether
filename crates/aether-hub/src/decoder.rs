@@ -737,19 +737,19 @@ mod tests {
         SchemaType::Enum {
             variants: vec![
                 EnumVariant::Unit {
-                    name: "Pending".to_string().into(),
+                    name: "Pending".into(),
                     discriminant: 0,
                 },
                 EnumVariant::Tuple {
-                    name: "Ok".to_string().into(),
+                    name: "Ok".into(),
                     discriminant: 1,
                     fields: vec![SchemaType::Scalar(Primitive::U64)].into(),
                 },
                 EnumVariant::Struct {
-                    name: "Err".to_string().into(),
+                    name: "Err".into(),
                     discriminant: 2,
                     fields: vec![NamedField {
-                        name: "reason".to_string().into(),
+                        name: "reason".into(),
                         ty: SchemaType::String,
                     }]
                     .into(),

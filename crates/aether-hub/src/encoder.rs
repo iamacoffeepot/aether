@@ -941,7 +941,7 @@ mod tests {
 
     fn pc_string_schema() -> SchemaType {
         postcard_struct(vec![NamedField {
-            name: "body".to_string().into(),
+            name: "body".into(),
             ty: SchemaType::String,
         }])
     }
@@ -970,7 +970,7 @@ mod tests {
         };
         let expected = postcard::to_allocvec(&value).unwrap();
         let schema = postcard_struct(vec![NamedField {
-            name: "blob".to_string().into(),
+            name: "blob".into(),
             ty: SchemaType::Bytes,
         }]);
         let bytes = encode_schema(&json!({"blob": [1, 2, 3, 4, 5]}), &schema).unwrap();
@@ -980,7 +980,7 @@ mod tests {
     #[test]
     fn postcard_option_some_and_none() {
         let schema = postcard_struct(vec![NamedField {
-            name: "name".to_string().into(),
+            name: "name".into(),
             ty: SchemaType::Option(SchemaCell::owned(SchemaType::String)),
         }]);
         let some = PostcardOption {
@@ -1001,7 +1001,7 @@ mod tests {
         };
         let expected = postcard::to_allocvec(&value).unwrap();
         let schema = postcard_struct(vec![NamedField {
-            name: "tags".to_string().into(),
+            name: "tags".into(),
             ty: SchemaType::Vec(SchemaCell::owned(SchemaType::String)),
         }]);
         let bytes = encode_schema(&json!({"tags": ["alpha", "beta", "gamma"]}), &schema).unwrap();
@@ -1015,11 +1015,11 @@ mod tests {
         };
         let expected = postcard::to_allocvec(&value).unwrap();
         let inner_schema = postcard_struct(vec![NamedField {
-            name: "seq".to_string().into(),
+            name: "seq".into(),
             ty: SchemaType::Scalar(Primitive::U32),
         }]);
         let schema = postcard_struct(vec![NamedField {
-            name: "items".to_string().into(),
+            name: "items".into(),
             ty: SchemaType::Vec(SchemaCell::owned(inner_schema)),
         }]);
         let bytes = encode_schema(
@@ -1033,19 +1033,19 @@ mod tests {
     fn sum_schema() -> SchemaType {
         enum_schema(vec![
             EnumVariant::Unit {
-                name: "Pending".to_string().into(),
+                name: "Pending".into(),
                 discriminant: 0,
             },
             EnumVariant::Tuple {
-                name: "Ok".to_string().into(),
+                name: "Ok".into(),
                 discriminant: 1,
                 fields: vec![SchemaType::Scalar(Primitive::U64)].into(),
             },
             EnumVariant::Struct {
-                name: "Err".to_string().into(),
+                name: "Err".into(),
                 discriminant: 2,
                 fields: vec![NamedField {
-                    name: "reason".to_string().into(),
+                    name: "reason".into(),
                     ty: SchemaType::String,
                 }]
                 .into(),
