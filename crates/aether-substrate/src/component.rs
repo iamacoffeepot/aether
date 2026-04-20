@@ -12,6 +12,15 @@ use crate::sender_table::{SENDER_NONE, SenderEntry};
 
 const MAIL_OFFSET: u32 = 1024;
 
+/// Sentinel the ADR-0033 `#[handlers]` dispatcher returns from
+/// `receive_p32` when mail arrives with a kind id the component has
+/// no typed handler for and no fallback. Substrate-side, the
+/// scheduler turns this into a `tracing::warn!` so the unhandled
+/// kind surfaces in `engine_logs` without aborting the run. Strict-
+/// receiver enforcement at the substrate (pre-delivery rejection)
+/// is deferred to a later ADR; Phase 2 is warnings only.
+pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
+
 /// Offset the substrate writes prior-state bytes to before calling
 /// `on_rehydrate` (ADR-0016 §3). Deliberately separated from
 /// `MAIL_OFFSET` so the two scratch regions don't overlap in the
