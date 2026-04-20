@@ -14,7 +14,7 @@ use aether_hub_protocol::{
     ClaudeAddress, EngineId, EngineMailFrame, EngineToHub, Goodbye, HubToEngine, MailFrame,
     SessionToken, Uuid, Welcome, read_frame, write_frame,
 };
-use aether_substrate::{HubClient, HubOutbound, MailQueue, Registry, Scheduler};
+use aether_substrate::{HubClient, HubOutbound, MailQueue, Registry, Scheduler, mail::MailboxId};
 
 /// Start a mock hub on a random port. Returns the bound address and a
 /// `TcpStream` for the single connection it will accept.
@@ -193,7 +193,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     assert_eq!(s.count_sum, 8);
     assert_eq!(s.payload_lens, vec![3, 1]);
     assert_eq!(s.senders, vec![alice, SessionToken::NIL]);
-    assert_eq!(recipient.0, 0);
+    assert_eq!(recipient, MailboxId::from_name("hello"));
 
     drop(stream);
 }

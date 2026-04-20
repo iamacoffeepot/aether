@@ -81,6 +81,36 @@ impl<T> CastEligible for Option<T> {
     const ELIGIBLE: bool = false;
 }
 
+/// Deterministic 64-bit hash of a mailbox name (ADR-0029). Both the
+/// substrate registry and the guest SDK compute mailbox ids from names
+/// this way, which is how ids end up meaningful across processes and
+/// sessions without needing a host-fn resolve.
+///
+/// FNV-1a 64 is chosen for: (a) no dependencies — the algorithm is
+/// ~8 lines; (b) determinism across builds, platforms, and rust
+/// versions, without having to pin a third-party hasher; (c) the
+/// distribution is more than good enough at mailbox cardinality.
+/// At 64 bits the birthday bound is far past realistic mailbox
+/// counts — see ADR-0029 "Consequences" for the table.
+///
+/// The returned `u64` is the raw id wrapped into
+/// `aether_substrate::mail::MailboxId` on the substrate side; guests
+/// use it directly as the `recipient` on `send_mail`. `0` is reserved
+/// as the no-sender sentinel — callers should reject on the astronomical
+/// chance of a collision with it.
+pub const fn mailbox_id_from_name(name: &str) -> u64 {
+    // FNV-1a 64 offset basis / prime.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let bytes = name.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+        i += 1;
+    }
+    hash
+}
+
 /// Re-exported derive macros from `aether-mail-derive`. Behind the
 /// `derive` feature so `cargo build` on a guest that hand-writes
 /// `impl Kind` doesn't pay the proc-macro compile cost.
@@ -391,5 +421,17 @@ mod tests {
     fn empty_kind_encodes_to_zero_bytes() {
         assert!(encode_empty::<Signal>().is_empty());
         assert_eq!(Signal::NAME, "test.signal");
+    }
+
+    #[test]
+    fn mailbox_id_is_deterministic_and_name_specific() {
+        let a = mailbox_id_from_name("hub.claude.broadcast");
+        let b = mailbox_id_from_name("hub.claude.broadcast");
+        let c = mailbox_id_from_name("render");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        // Empty input gives the raw offset basis — useful as a quick
+        // sanity check that the algorithm matches FNV-1a 64.
+        assert_eq!(mailbox_id_from_name(""), 0xcbf29ce484222325);
     }
 }

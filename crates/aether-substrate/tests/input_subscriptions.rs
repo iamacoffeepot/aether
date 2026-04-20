@@ -17,19 +17,22 @@ use aether_kinds::{
 };
 use aether_mail::Kind;
 use aether_substrate::{
-    AETHER_CONTROL, ControlPlane, HubOutbound, InputSubscribers, MailQueue, Registry, Scheduler,
-    SubstrateCtx, host_fns,
+    ControlPlane, HubOutbound, InputSubscribers, MailQueue, Registry, Scheduler, SubstrateCtx,
+    host_fns,
     mail::{Mail, MailboxId},
     new_subscribers, subscribers_for,
 };
 use wasmtime::{Engine, Linker};
 
-/// Minimal guest: forwards every `receive` to mailbox `1` (the
-/// counting sink the harness registers) with a fixed kind id and a
-/// count of 1. Byte-identical for Tick / Key / any other input kind
-/// — the test doesn't care about the payload shape, only that the
-/// dispatch arrived.
-const WAT: &str = r#"
+/// Minimal guest: forwards every `receive` to the `"tally"` sink the
+/// harness registers, with a fixed kind id and a count of 1.
+/// Byte-identical for Tick / Key / any other input kind — the test
+/// doesn't care about the payload shape, only that the dispatch
+/// arrived. The recipient id is spliced in at harness-build time
+/// because ADR-0029 made mailbox ids 64-bit name hashes.
+fn tally_forwarding_wat(tally_id: u64) -> String {
+    format!(
+        r#"
 (module
   (import "aether" "send_mail_p32"
     (func $send_mail (param i64 i32 i32 i32 i32) (result i32)))
@@ -38,9 +41,11 @@ const WAT: &str = r#"
     (param $kind i32) (param $ptr i32) (param $count i32) (param $sender i32)
     (result i32)
     (drop (call $send_mail
-        (i64.const 1) (i32.const 99) (i32.const 0) (i32.const 0) (i32.const 1)))
+        (i64.const {tally_id}) (i32.const 99) (i32.const 0) (i32.const 0) (i32.const 1)))
     i32.const 0))
-"#;
+"#,
+    )
+}
 
 struct Harness {
     plane: ControlPlane,
@@ -48,6 +53,7 @@ struct Harness {
     input_subscribers: InputSubscribers,
     counter: Arc<AtomicU32>,
     kind_tick: u32,
+    wat: String,
     _scheduler: Scheduler,
 }
 
@@ -65,18 +71,6 @@ fn make_harness() -> Harness {
     }
     let kind_tick = registry.kind_id(Tick::NAME).expect("Tick registered");
 
-    // Mailbox id 0 is the counting sink — the WAT hard-codes `1` as
-    // the forwarding target, so we register the sink first at id 0,
-    // then correct the expectation below. Actually `register_sink`
-    // allocates ids in order; the first registration gets id 0, so
-    // we need the tally sink to land at id 1. Reserve id 0 with a
-    // placeholder control sink first.
-    let placeholder = registry.register_sink(
-        AETHER_CONTROL,
-        Arc::new(|_, _, _, _, _| { /* replaced below once plane exists */ }),
-    );
-    assert_eq!(placeholder.0, 0);
-
     let counter = Arc::new(AtomicU32::new(0));
     let c2 = Arc::clone(&counter);
     let sink_mbox = registry.register_sink(
@@ -85,7 +79,7 @@ fn make_harness() -> Harness {
             c2.fetch_add(count, Ordering::SeqCst);
         }),
     );
-    assert_eq!(sink_mbox.0, 1, "WAT hardcodes mailbox 1 as the sink");
+    let wat = tally_forwarding_wat(sink_mbox.0);
 
     let queue = Arc::new(MailQueue::new());
     let scheduler = Scheduler::new(
@@ -116,6 +110,7 @@ fn make_harness() -> Harness {
         input_subscribers,
         counter,
         kind_tick,
+        wat,
         _scheduler: scheduler,
     }
 }
@@ -130,7 +125,7 @@ fn dispatch<K: serde::Serialize>(plane: &ControlPlane, kind_name: &str, payload:
     handler(kind_name, None, SessionToken::NIL, &bytes, 0);
 }
 
-fn load_wat(plane: &ControlPlane, name: &str) -> u64 {
+fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> u64 {
     let before: std::collections::HashSet<u64> = plane
         .components
         .read()
@@ -142,7 +137,7 @@ fn load_wat(plane: &ControlPlane, name: &str) -> u64 {
         plane,
         LoadComponent::NAME,
         &LoadComponent {
-            wasm: wat::parse_str(WAT).expect("compile WAT"),
+            wasm: wat::parse_str(wat).expect("compile WAT"),
             name: Some(name.into()),
         },
     );
@@ -201,7 +196,7 @@ fn empty_subscribers_means_no_delivery() {
 #[test]
 fn subscribed_component_receives_published_ticks() {
     let h = make_harness();
-    let id = load_wat(&h.plane, "listener");
+    let id = load_wat(&h.plane, &h.wat, "listener");
     subscribe(&h.plane, InputStream::Tick, id);
     assert_eq!(
         subscribers_for(&h.input_subscribers, InputStream::Tick),
@@ -216,8 +211,8 @@ fn subscribed_component_receives_published_ticks() {
 #[test]
 fn two_subscribers_each_receive_every_tick() {
     let h = make_harness();
-    let a = load_wat(&h.plane, "a");
-    let b = load_wat(&h.plane, "b");
+    let a = load_wat(&h.plane, &h.wat, "a");
+    let b = load_wat(&h.plane, &h.wat, "b");
     subscribe(&h.plane, InputStream::Tick, a);
     subscribe(&h.plane, InputStream::Tick, b);
     publish_tick(&h);
@@ -229,7 +224,7 @@ fn two_subscribers_each_receive_every_tick() {
 #[test]
 fn unsubscribe_stops_delivery() {
     let h = make_harness();
-    let id = load_wat(&h.plane, "listener");
+    let id = load_wat(&h.plane, &h.wat, "listener");
     subscribe(&h.plane, InputStream::Tick, id);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);
@@ -243,7 +238,7 @@ fn unsubscribe_stops_delivery() {
 #[test]
 fn drop_clears_subscriptions() {
     let h = make_harness();
-    let id = load_wat(&h.plane, "victim");
+    let id = load_wat(&h.plane, &h.wat, "victim");
     subscribe(&h.plane, InputStream::Tick, id);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);

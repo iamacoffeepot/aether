@@ -1,11 +1,11 @@
-// Name registries. Two parallel tables: mailboxes (name → MailboxId,
-// tagged component-vs-sink) and kinds (name → u32 kind id, per
-// ADR-0005). The registry uses interior mutability (`RwLock`) so
-// mailboxes and kinds can be added at runtime — ADR-0010's runtime
-// component loading mutates both tables after an `Arc<Registry>` has
-// already been shared with the scheduler and hub client. Reads take
-// a shared lock and are cheap; writes are rare (boot + load/replace
-// /drop).
+// Name registries. Two tables: mailboxes (MailboxId → name + entry,
+// ids derived from name via ADR-0029's stable hash) and kinds (name →
+// u32 kind id, per ADR-0005 — still sequentially assigned). The
+// registry uses interior mutability (`RwLock`) so mailboxes and kinds
+// can be added at runtime — ADR-0010's runtime component loading
+// mutates both tables after an `Arc<Registry>` has already been shared
+// with the scheduler and hub client. Reads take a shared lock and are
+// cheap; writes are rare (boot + load/replace/drop).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -37,11 +37,11 @@ pub enum MailboxEntry {
     Component,
     /// Mail is handled inline by a substrate-native closure.
     Sink(SinkHandler),
-    /// Mailbox has been explicitly dropped (ADR-0010). The slot stays
-    /// in place so the numeric id isn't reused, but any mail addressed
-    /// to it is discarded by the scheduler / ctx dispatch. The name is
-    /// released from the lookup table so a subsequent load can reuse
-    /// it.
+    /// Mailbox has been explicitly dropped (ADR-0010). Mail addressed
+    /// to a `Dropped` slot is discarded by the scheduler / ctx dispatch
+    /// until the same name is re-registered, at which point the slot
+    /// transitions back to `Component` under the same id (ADR-0029 ids
+    /// are a function of name, so they're stable across drop/reload).
     Dropped,
 }
 
@@ -49,14 +49,19 @@ pub struct Registry {
     inner: RwLock<Inner>,
 }
 
+/// One mailbox's bookkeeping. Grouped so a single lookup hits name,
+/// entry, and any future per-mailbox fields together.
+struct Mailbox {
+    name: String,
+    entry: MailboxEntry,
+}
+
 #[derive(Default)]
 struct Inner {
-    by_name: HashMap<String, MailboxId>,
-    entries: Vec<MailboxEntry>,
-    /// Parallel index: `mailbox_names[id]` is the name the mailbox was
-    /// registered with. Enables the `MailboxId` → name reverse lookup
-    /// used to stamp `origin` on observation mail (ADR-0011).
-    mailbox_names: Vec<String>,
+    /// Sparse, keyed on the deterministic `MailboxId` (ADR-0029).
+    /// Registration inserts; `drop_mailbox` transitions the entry to
+    /// `Dropped` so the id stays addressable until re-registered.
+    mailboxes: HashMap<MailboxId, Mailbox>,
     kind_by_name: HashMap<String, u32>,
     /// Parallel index: `kind_names[id]` is the canonical name the kind
     /// was first registered with. Kept in sync with `kind_by_name` so
@@ -143,84 +148,105 @@ impl Registry {
         }
     }
 
-    fn insert(&self, name: impl Into<String>, entry: MailboxEntry) -> MailboxId {
-        let name = name.into();
-        let mut inner = self.inner.write().unwrap();
-        if inner.by_name.contains_key(&name) {
-            panic!("mailbox name already registered: {name}");
+    /// Insert a mailbox, allocating its id from the name hash (ADR-0029).
+    /// On a `Dropped` entry at the same id (same name re-registered
+    /// after a drop), the entry transitions back to live. Any other
+    /// occupied entry is a collision.
+    fn insert(&self, name: String, entry: MailboxEntry) -> Result<MailboxId, NameConflict> {
+        let id = MailboxId::from_name(&name);
+        if id == MailboxId::NONE {
+            // Practically impossible at 64 bits, but the sentinel is
+            // reserved and silently shadowing it would break
+            // Option<MailboxId> semantics for the sender path.
+            return Err(NameConflict { name });
         }
-        let id = MailboxId(inner.entries.len() as u64);
-        inner.entries.push(entry);
-        inner.mailbox_names.push(name.clone());
-        inner.by_name.insert(name, id);
-        id
+        let mut inner = self.inner.write().unwrap();
+        match inner.mailboxes.get_mut(&id) {
+            Some(slot) if matches!(slot.entry, MailboxEntry::Dropped) && slot.name == name => {
+                slot.entry = entry;
+                Ok(id)
+            }
+            Some(_) => Err(NameConflict { name }),
+            None => {
+                inner.mailboxes.insert(id, Mailbox { name, entry });
+                Ok(id)
+            }
+        }
     }
 
-    /// Register a WASM component under `name`. The returned `MailboxId`
-    /// is handed to the scheduler alongside the component's `Actor`.
-    /// Panics on a name collision — callers that cannot assume unique
-    /// names (e.g. ADR-0010's load handler, which accepts names from
-    /// an agent) should use `try_register_component` instead.
+    /// Register a WASM component under `name`. Panics on a name
+    /// collision — callers that cannot assume unique names (e.g.
+    /// ADR-0010's load handler, which accepts names from an agent)
+    /// should use `try_register_component` instead.
     pub fn register_component(&self, name: impl Into<String>) -> MailboxId {
-        self.insert(name, MailboxEntry::Component)
+        let name = name.into();
+        match self.insert(name.clone(), MailboxEntry::Component) {
+            Ok(id) => id,
+            Err(_) => panic!("mailbox name already registered: {name}"),
+        }
     }
 
     /// Non-panicking variant of `register_component` for runtime
-    /// registrations. Returns `NameConflict` if the name is already in
-    /// use, leaving the registry untouched; otherwise allocates a
-    /// fresh `MailboxId` and records the component entry.
+    /// registrations. Returns `NameConflict` if the name is already
+    /// bound to a live mailbox (or collides with a different name at
+    /// the same hash — astronomically unlikely); otherwise derives the
+    /// id from the name and records the component entry.
     pub fn try_register_component(
         &self,
         name: impl Into<String>,
     ) -> Result<MailboxId, NameConflict> {
-        let name = name.into();
-        let mut inner = self.inner.write().unwrap();
-        if inner.by_name.contains_key(&name) {
-            return Err(NameConflict { name });
-        }
-        let id = MailboxId(inner.entries.len() as u64);
-        inner.entries.push(MailboxEntry::Component);
-        inner.mailbox_names.push(name.clone());
-        inner.by_name.insert(name, id);
-        Ok(id)
+        self.insert(name.into(), MailboxEntry::Component)
     }
 
-    /// Invalidate a component mailbox (ADR-0010). Releases the name
-    /// from the lookup table so a subsequent `load_component` may
-    /// reuse it, and marks the entry as `Dropped` so dispatch-path
-    /// readers can distinguish an intentional drop from an unknown
-    /// id. Returns the released name on success; callers that need
-    /// to tear down the underlying `Component` do so via the
-    /// scheduler's `remove_component`. Refuses to drop `Sink` entries
-    /// — those are substrate-owned and outlive the control plane.
+    /// Invalidate a component mailbox (ADR-0010). Transitions the entry
+    /// to `Dropped` so dispatch-path readers can distinguish an
+    /// intentional drop from an unknown id; the id itself (a function
+    /// of the name per ADR-0029) stays addressable and a subsequent
+    /// `try_register_component` with the same name reuses it. Returns
+    /// the released name on success. Refuses to drop `Sink` entries —
+    /// those are substrate-owned and outlive the control plane.
     pub fn drop_mailbox(&self, id: MailboxId) -> Result<String, DropError> {
         let mut inner = self.inner.write().unwrap();
-        let idx = id.0 as usize;
-        let Some(entry) = inner.entries.get(idx) else {
+        let Some(slot) = inner.mailboxes.get_mut(&id) else {
             return Err(DropError::UnknownId(id));
         };
-        match entry {
+        match slot.entry {
             MailboxEntry::Component => {}
             MailboxEntry::Sink(_) => {
                 return Err(DropError::NotComponent { id, kind: "sink" });
             }
             MailboxEntry::Dropped => return Err(DropError::AlreadyDropped(id)),
         }
-        let name = std::mem::take(&mut inner.mailbox_names[idx]);
-        inner.by_name.remove(&name);
-        inner.entries[idx] = MailboxEntry::Dropped;
-        Ok(name)
+        slot.entry = MailboxEntry::Dropped;
+        Ok(slot.name.clone())
     }
 
     /// Register a substrate-owned sink. Mail to this mailbox is handled
     /// inline on the thread that delivered it (or on the host-function
-    /// caller thread if a component sent it).
+    /// caller thread if a component sent it). Panics on a name
+    /// collision — sinks are substrate-internal names, collisions are
+    /// bugs.
     pub fn register_sink(&self, name: impl Into<String>, handler: SinkHandler) -> MailboxId {
-        self.insert(name, MailboxEntry::Sink(handler))
+        let name = name.into();
+        match self.insert(name.clone(), MailboxEntry::Sink(handler)) {
+            Ok(id) => id,
+            Err(_) => panic!("mailbox name already registered: {name}"),
+        }
     }
 
+    /// Does a live (non-`Dropped`) mailbox exist under `name`? Returns
+    /// its id if so. The id itself is deterministic (ADR-0029) —
+    /// callers that just want the id without a liveness check can use
+    /// `MailboxId::from_name` directly.
     pub fn lookup(&self, name: &str) -> Option<MailboxId> {
-        self.inner.read().unwrap().by_name.get(name).copied()
+        let id = MailboxId::from_name(name);
+        let inner = self.inner.read().unwrap();
+        match inner.mailboxes.get(&id) {
+            Some(slot) if slot.name == name && !matches!(slot.entry, MailboxEntry::Dropped) => {
+                Some(id)
+            }
+            _ => None,
+        }
     }
 
     /// Fetch the entry for a mailbox id. Returns an owned clone so the
@@ -230,21 +256,21 @@ impl Registry {
         self.inner
             .read()
             .unwrap()
-            .entries
-            .get(id.0 as usize)
-            .cloned()
+            .mailboxes
+            .get(&id)
+            .map(|m| m.entry.clone())
     }
 
     /// Reverse of `lookup`: name for a given mailbox id, or `None` if
-    /// the id is out of range. Used by the sink dispatch path to stamp
+    /// the id is unknown. Used by the sink dispatch path to stamp
     /// `origin` on observation mail (ADR-0011).
     pub fn mailbox_name(&self, id: MailboxId) -> Option<String> {
         self.inner
             .read()
             .unwrap()
-            .mailbox_names
-            .get(id.0 as usize)
-            .cloned()
+            .mailboxes
+            .get(&id)
+            .map(|m| m.name.clone())
     }
 
     /// Register a mail kind by name, defaulting the schema to `Bytes`
@@ -347,11 +373,11 @@ impl Registry {
     }
 
     pub fn len(&self) -> usize {
-        self.inner.read().unwrap().entries.len()
+        self.inner.read().unwrap().mailboxes.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.read().unwrap().entries.is_empty()
+        self.inner.read().unwrap().mailboxes.is_empty()
     }
 }
 
@@ -371,7 +397,7 @@ mod tests {
     fn register_and_lookup_component() {
         let r = Registry::new();
         let id = r.register_component("physics");
-        assert_eq!(id, MailboxId(0));
+        assert_eq!(id, MailboxId::from_name("physics"));
         assert_eq!(r.lookup("physics"), Some(id));
         assert!(matches!(r.entry(id), Some(MailboxEntry::Component)));
     }
@@ -396,14 +422,18 @@ mod tests {
     }
 
     #[test]
-    fn mailbox_ids_are_dense_and_sequential() {
+    fn mailbox_ids_are_name_derived() {
         let r = Registry::new();
         let a = r.register_component("a");
         let b = r.register_sink("b", Arc::new(|_, _, _, _, _| {}));
         let c = r.register_component("c");
-        assert_eq!(a, MailboxId(0));
-        assert_eq!(b, MailboxId(1));
-        assert_eq!(c, MailboxId(2));
+        assert_eq!(a, MailboxId::from_name("a"));
+        assert_eq!(b, MailboxId::from_name("b"));
+        assert_eq!(c, MailboxId::from_name("c"));
+        // All three distinct names produce distinct ids.
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
         assert_eq!(r.len(), 3);
     }
 
@@ -572,10 +602,13 @@ mod tests {
             matches!(r.entry(id), Some(MailboxEntry::Dropped)),
             "entry must mark id as dropped"
         );
-        // Reload the same name — allocates a fresh id after the dropped slot.
+        // Under ADR-0029 the id is a function of the name, so a
+        // re-register produces the *same* id and flips the entry back
+        // to `Component`.
         let reloaded = r.try_register_component("loaded").unwrap();
-        assert_ne!(reloaded, id);
+        assert_eq!(reloaded, id);
         assert_eq!(r.lookup("loaded"), Some(reloaded));
+        assert!(matches!(r.entry(reloaded), Some(MailboxEntry::Component)));
     }
 
     #[test]

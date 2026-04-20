@@ -15,9 +15,6 @@ use crate::sender_table::SenderEntry;
 /// Returned by `resolve_kind` when the requested name has not been
 /// registered. Guests use this as a "lookup failed" sentinel.
 pub const KIND_NOT_FOUND: u32 = u32::MAX;
-/// Symmetric sentinel for `resolve_mailbox`. Widened to 64 bits in
-/// lockstep with `MailboxId` (ADR-0029 PR 1).
-pub const MAILBOX_NOT_FOUND: u64 = u64::MAX;
 
 /// Map a resolved kind name to the substrate input stream it belongs
 /// to. The four built-in input kinds (`aether.tick`, `aether.key`,
@@ -141,12 +138,6 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    // Symmetric to `resolve_kind`: lookup a mailbox by its registered
-    // name and return the `MailboxId`. Runtime-loaded components rely
-    // on this to reach substrate-owned sinks (`render`,
-    // `hub.claude.broadcast`, `aether.control`) without hardcoding
-    // numeric ids — ADR-0010's empty boot removed the fixed boot
-    // order that such hardcoding used to depend on.
     // ADR-0016 §2: save_state buffers the component's migration payload
     // into a substrate-owned slot on the store ctx. The guest passes a
     // `version` (opaque to the substrate) and a `(ptr, len)` pair
@@ -251,32 +242,9 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
-    linker.func_wrap(
-        "aether",
-        "resolve_mailbox_p32",
-        |mut caller: Caller<'_, SubstrateCtx>, name_ptr: u32, name_len: u32| -> u64 {
-            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
-                Some(m) => m,
-                None => return MAILBOX_NOT_FOUND,
-            };
-            let data = memory.data(&caller);
-            let start = name_ptr as usize;
-            let end = match start.checked_add(name_len as usize) {
-                Some(e) if e <= data.len() => e,
-                _ => return MAILBOX_NOT_FOUND,
-            };
-            let name = match std::str::from_utf8(&data[start..end]) {
-                Ok(s) => s,
-                Err(_) => return MAILBOX_NOT_FOUND,
-            };
-            caller
-                .data()
-                .registry
-                .lookup(name)
-                .map(|id| id.0)
-                .unwrap_or(MAILBOX_NOT_FOUND)
-        },
-    )?;
+    // `resolve_mailbox_p32` was retired in ADR-0029: mailbox ids are
+    // now a deterministic hash of the mailbox name, computed on the
+    // guest side. The corresponding host fn is gone.
 
     Ok(())
 }
