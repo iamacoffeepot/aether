@@ -4,17 +4,18 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-# Pull in the hub-protocol descriptor types so the `Schema` trait and
-# its blanket impls become available. Off by default so wasm guests
-# stay free of std-bound deps.
-descriptors = ["dep:aether-hub-protocol"]
 # Re-export `#[derive(Kind)]` and `#[derive(Schema)]` from
 # `aether-mail-derive`. Off by default so guests that hand-write
 # `impl Kind for ...` don't pay the proc-macro compile cost.
 derive = ["dep:aether-mail-derive"]
 
 [dependencies]
-aether-hub-protocol = { path = "../aether-hub-protocol", optional = true }
+# No feature gate: ADR-0032 moved `aether-hub-protocol` to no_std + alloc
+# with framing helpers gated behind its own `std` feature. The schema
+# vocabulary and canonical serializers are always available, so the
+# `Schema` trait and the derive's `const ID` emission work uniformly
+# on host and wasm.
+aether-hub-protocol = { path = "../aether-hub-protocol", default-features = false }
 aether-mail-derive = { path = "../aether-mail-derive", optional = true }
 bytemuck = { version = "1.19", features = ["derive"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }

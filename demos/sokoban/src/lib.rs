@@ -21,7 +21,7 @@
 
 use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
 use aether_kinds::{DrawTriangle, Tick, Vertex};
-use aether_mail::Kind;
+use aether_mail::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
 pub const GRID_MAX: usize = 16;
@@ -45,7 +45,7 @@ pub const DIR_WEST: u8 = 3;
 /// directions or blocked moves are no-ops — the component still
 /// replies with a fresh state so the caller always sees ground truth.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable, Kind)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable, Kind, Schema)]
 #[kind(name = "demo.sokoban.move")]
 pub struct SokobanMove {
     pub direction: u8,
@@ -53,14 +53,14 @@ pub struct SokobanMove {
 }
 
 /// Claude → component: reload the currently-active level. No payload.
-#[derive(Kind)]
+#[derive(Kind, Schema)]
 #[kind(name = "demo.sokoban.reset")]
 pub struct SokobanReset;
 
 /// Claude → component: swap to a different built-in level by index.
 /// Out-of-range ids are treated as no-ops (state reply still fires).
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable, Kind)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable, Kind, Schema)]
 #[kind(name = "demo.sokoban.load_level")]
 pub struct SokobanLoadLevel {
     pub id: u32,
@@ -71,7 +71,7 @@ pub struct SokobanLoadLevel {
 /// cells in `cells` are `CELL_FLOOR` (0). Consumers read `width` and
 /// `height` before indexing.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable, Kind)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Kind, Schema)]
 #[kind(name = "demo.sokoban.state")]
 pub struct SokobanState {
     pub width: u32,

@@ -10,16 +10,10 @@ proc-macro = true
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
-# ADR-0028: the derive builds a KindDescriptor for each `#[derive(Kind)]`
-# type at macro-expansion time, postcard-encodes it, and emits the
-# resulting bytes as a literal array in a wasm custom section. The
-# proc-macro runs on the host, so pulling hub-protocol + postcard here
-# only affects proc-macro compile time, not consumer binaries.
-aether-hub-protocol = { path = "../aether-hub-protocol" }
-postcard = { version = "1", features = ["alloc"] }
 
 [dev-dependencies]
-# Tests need both the runtime traits and the macro re-exports, plus
-# the `descriptors` feature so `Schema` resolves.
-aether-mail = { path = "../aether-mail", features = ["derive", "descriptors"] }
+# Tests need the runtime traits and the macro re-exports. ADR-0032
+# dropped the `descriptors` feature — hub-protocol types are always
+# available now.
+aether-mail = { path = "../aether-mail", features = ["derive"] }
 aether-hub-protocol = { path = "../aether-hub-protocol" }

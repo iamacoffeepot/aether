@@ -1,31 +1,37 @@
 //! Proc-macro home for `#[derive(Kind)]` and `#[derive(Schema)]` per
-//! ADR-0019. Kept separate from `aether-mail` because Rust requires
-//! proc-macro crates to opt into `proc-macro = true` and forbids them
-//! from exporting non-macro items; pairing them in the same crate would
-//! force every consumer through the proc-macro toolchain even when they
-//! just want the runtime traits.
+//! ADR-0019 / ADR-0031 / ADR-0032. Kept separate from `aether-mail`
+//! because Rust requires proc-macro crates to opt into
+//! `proc-macro = true` and forbids them from exporting non-macro
+//! items; pairing them in the same crate would force every consumer
+//! through the proc-macro toolchain even when they just want the
+//! runtime traits.
 //!
-//! `Kind` emits only the `aether_mail::Kind` impl — a `const NAME` and
-//! nothing else. Wasm guests that just want to address a kind by name
-//! derive only this and stay free of hub-protocol entirely.
+//! `Kind` emits the `aether_mail::Kind` impl (`const NAME`, `const ID`,
+//! optional `const IS_INPUT`) plus the `#[link_section]` statics for
+//! both `aether.kinds` (canonical schema bytes) and
+//! `aether.kinds.labels` (nominal sidecar). The ID is
+//! `fnv1a_64_bytes(canonical_bytes_of_(name, schema))`, matching the
+//! substrate-side derivation byte-for-byte (ADR-0030 Phase 2 /
+//! ADR-0032). Consumers must also derive (or hand-roll) `Schema`
+//! on the type — the Kind derive walks `<Self as Schema>::SCHEMA`
+//! for canonical bytes and `<Self as Schema>::LABEL_NODE` for
+//! the labels tree.
 //!
-//! `Schema` is opt-in (typically gated on a `descriptors` feature so
-//! it expands only in std consumers). It emits *both* the
-//! `aether_mail::Schema` impl returning a `SchemaType` AND a
-//! `CastEligible` impl whose `ELIGIBLE` const propagates each field's
-//! eligibility against `#[repr(C)]` presence. Pairing them here means
-//! types used as schema fields (helper structs like `Vertex`) get
-//! `CastEligible` for free without needing a separate derive — the
-//! Schema derive is the only place that needs eligibility, so it owns
-//! the impl.
+//! `Schema` emits three consts per impl: `SCHEMA` (the `SchemaType`
+//! tree, const-constructible per ADR-0031), `LABEL` (the
+//! `Option<&'static str>` Rust type path from `module_path!()`), and
+//! `LABEL_NODE` (the parallel-shape labels tree the kind's
+//! sidecar record embeds). It also emits `CastEligible` so `repr_c`
+//! flags propagate — field types used as cast-shaped payloads get
+//! eligibility for free without a second derive.
 //!
-//! Field-type handling is the trickiest part. For most field types we
-//! delegate to `<FieldT as Schema>::schema()` and let the blanket impls
-//! in `aether-mail` do the work. The one exception is `Vec<u8>` —
-//! stable Rust forbids the specialization (`Vec<u8>` would overlap
-//! `Vec<T>` because `u8: Schema`), so the derive pattern-matches the
-//! field type's syntax and emits `SchemaType::Bytes` directly when it
-//! sees `Vec<u8>`. Every other shape goes through the trait.
+//! Field-type handling delegates to `<FieldT as Schema>::SCHEMA` /
+//! `LABEL_NODE` for all cross-crate resolution. The one exception is
+//! `Vec<u8>` — stable Rust forbids the specialization (`Vec<u8>`
+//! would overlap `Vec<T>` because `u8: Schema`), so the derive
+//! pattern-matches the field type's syntax and emits
+//! `SchemaType::Bytes` / `LabelNode::Anonymous` directly when it
+//! sees `Vec<u8>`. Every other shape goes through trait dispatch.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -34,8 +40,6 @@ use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, GenericArgument, Lit, Meta,
     PathArguments, Type, parse_macro_input, spanned::Spanned,
 };
-
-mod manifest;
 
 #[proc_macro_derive(Kind, attributes(kind))]
 pub fn derive_kind(input: TokenStream) -> TokenStream {
@@ -67,92 +71,106 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
             "Kind derive does not support unions",
         ));
     }
-    // Only emit `IS_INPUT` when true — relying on the trait default
-    // for non-input kinds keeps the generated code minimal and makes
-    // grep-for-IS_INPUT-true a reliable audit of the input set.
     let is_input_item = if is_input {
         quote! { const IS_INPUT: bool = true; }
     } else {
         quote! {}
     };
-    // ADR-0028: emit the kind's postcard-encoded descriptor into the
-    // `aether.kinds` wasm custom section when the type is syntactically
-    // resolvable (see `manifest::resolve`). Unresolvable types (nested
-    // cross-crate user types) quietly skip emission — the substrate
-    // reads what's in the section and falls back to other registration
-    // paths for anything it doesn't see there.
-    let manifest_static = build_manifest_static(name, &kind_name, &input.data, &input.attrs);
+
+    // ADR-0032 section emission goes through trait dispatch, not a
+    // syntactic walker. `<Self as Schema>::SCHEMA` / `::LABEL_NODE`
+    // resolve at const-eval after every consumer-side impl is in
+    // scope; the canonical serializers below fold to byte arrays at
+    // compile time. No quiet skips — a type with no `Schema` impl
+    // fails to compile here, which is the behavior ADR-0032 locks
+    // in to keep producer/consumer hashes in lockstep.
+    let upper = to_screaming_snake_case(&name.to_string());
+    let schema_static_ident = quote::format_ident!("__AETHER_SCHEMA_{}", upper);
+    let canonical_len_ident = quote::format_ident!("__AETHER_CANONICAL_LEN_{}", upper);
+    let canonical_bytes_ident = quote::format_ident!("__AETHER_CANONICAL_BYTES_{}", upper);
+    let labels_ident = quote::format_ident!("__AETHER_KIND_LABELS_{}", upper);
+    let labels_len_ident = quote::format_ident!("__AETHER_LABELS_LEN_{}", upper);
+    let labels_bytes_ident = quote::format_ident!("__AETHER_LABELS_BYTES_{}", upper);
+    let kind_static_ident = quote::format_ident!("__AETHER_KIND_MANIFEST_{}", upper);
+    let kind_labels_static_ident = quote::format_ident!("__AETHER_KIND_LABELS_MANIFEST_{}", upper);
+
+    // `#[link_section]` is unsafe under edition 2024 — inert data so
+    // the practical risk is nil, but the `unsafe(...)` wrapper is
+    // required for the attribute to parse. Wasm-target gating keeps
+    // the bytes out of native test executables where they'd just
+    // bloat the binary with no reader.
     Ok(quote! {
         impl ::aether_mail::Kind for #name {
             const NAME: &'static str = #kind_name;
+            const ID: u64 = ::aether_mail::fnv1a_64_bytes(&#canonical_bytes_ident);
             #is_input_item
         }
-        #manifest_static
-    })
-}
 
-fn build_manifest_static(
-    type_ident: &syn::Ident,
-    kind_name: &str,
-    data: &Data,
-    attrs: &[Attribute],
-) -> TokenStream2 {
-    let descriptor = match data {
-        Data::Struct(DataStruct { fields, .. }) => {
-            let field_infos = collect_fields(fields);
-            manifest::struct_descriptor(kind_name, &field_infos, struct_has_repr_c(attrs))
-        }
-        Data::Enum(e) => manifest::enum_descriptor(kind_name, e),
-        Data::Union(_) => return quote! {},
-    };
-    let Some(descriptor) = descriptor else {
-        return quote! {};
-    };
-    let bytes = manifest::encode_record(&descriptor);
-    let len = bytes.len();
-    // A per-type static identifier keeps linker errors legible when
-    // two derives clash on section boundaries. `#[used]` blocks dead-
-    // code elimination from stripping the static before the linker
-    // writes it to the section. Wasm-target gating avoids placing
-    // these bytes in native test executables where the section is
-    // meaningless. Uppercase the type identifier so the generated
-    // const satisfies `non_upper_case_globals` — struct names come
-    // in as `CamelCase`, statics want `SCREAMING_SNAKE` by convention.
-    let upper = to_screaming_snake_case(&type_ident.to_string());
-    let static_ident = quote::format_ident!("__AETHER_KIND_MANIFEST_{}", upper);
-    // `#[link_section]` is an unsafe attribute under edition 2024
-    // — it places the static somewhere the compiler can't reason
-    // about. The bytes are inert data, so the practical risk is nil,
-    // but the `unsafe(...)` wrapper is still required for the
-    // attribute to parse.
-    quote! {
+        // Intermediate `static` holds the schema value — reading
+        // `<T as Schema>::SCHEMA` by value in a const expression
+        // materializes a temporary whose non-trivial Drop can't run
+        // at compile time. Taking `&SCHEMA_STATIC` sidesteps that
+        // (statics live for the whole program; destructor never runs).
+        static #schema_static_ident: ::aether_mail::__derive_runtime::SchemaType =
+            <#name as ::aether_mail::Schema>::SCHEMA;
+        const #canonical_len_ident: usize =
+            ::aether_mail::__derive_runtime::canonical::canonical_len_kind(
+                #kind_name,
+                &#schema_static_ident,
+            );
+        const #canonical_bytes_ident: [u8; #canonical_len_ident] =
+            ::aether_mail::__derive_runtime::canonical::canonical_serialize_kind::<#canonical_len_ident>(
+                #kind_name,
+                &#schema_static_ident,
+            );
+
+        // `static`, not `const`, because `KindLabels` holds `Cow`s
+        // whose non-trivial Drop impl is barred from const-eval.
+        // Statics have program-wide lifetime so the destructor never
+        // needs to run at compile time; const-fn serializers reading
+        // `&#labels_ident` see a stable `'static` reference.
+        static #labels_ident: ::aether_mail::__derive_runtime::KindLabels =
+            ::aether_mail::__derive_runtime::KindLabels {
+                kind_label: ::aether_mail::__derive_runtime::Cow::Borrowed(
+                    ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
+                ),
+                root: <#name as ::aether_mail::Schema>::LABEL_NODE,
+            };
+        const #labels_len_ident: usize =
+            ::aether_mail::__derive_runtime::canonical::canonical_len_labels(&#labels_ident);
+        const #labels_bytes_ident: [u8; #labels_len_ident] =
+            ::aether_mail::__derive_runtime::canonical::canonical_serialize_labels::<#labels_len_ident>(
+                &#labels_ident,
+            );
+
         #[cfg(target_arch = "wasm32")]
         #[used]
         #[unsafe(link_section = "aether.kinds")]
-        static #static_ident: [u8; #len] = [ #( #bytes ),* ];
-    }
-}
+        static #kind_static_ident: [u8; #canonical_len_ident + 1] = {
+            let mut out = [0u8; #canonical_len_ident + 1];
+            out[0] = 0x02;
+            let mut i = 0;
+            while i < #canonical_len_ident {
+                out[i + 1] = #canonical_bytes_ident[i];
+                i += 1;
+            }
+            out
+        };
 
-fn collect_fields(fields: &Fields) -> Vec<FieldInfo> {
-    match fields {
-        Fields::Named(named) => named
-            .named
-            .iter()
-            .map(|f| FieldInfo {
-                ident: f.ident.clone(),
-                ty: f.ty.clone(),
-            })
-            .collect(),
-        Fields::Unnamed(unnamed) => unnamed
-            .unnamed
-            .iter()
-            .map(|f| FieldInfo {
-                ident: None,
-                ty: f.ty.clone(),
-            })
-            .collect(),
-        Fields::Unit => Vec::new(),
-    }
+        #[cfg(target_arch = "wasm32")]
+        #[used]
+        #[unsafe(link_section = "aether.kinds.labels")]
+        static #kind_labels_static_ident: [u8; #labels_len_ident + 1] = {
+            let mut out = [0u8; #labels_len_ident + 1];
+            out[0] = 0x02;
+            let mut i = 0;
+            while i < #labels_len_ident {
+                out[i + 1] = #labels_bytes_ident[i];
+                i += 1;
+            }
+            out
+        };
+    })
 }
 
 fn cast_eligible_expr_for_struct(has_repr_c: bool, fields: &[FieldInfo]) -> TokenStream2 {
@@ -196,11 +214,11 @@ fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
     };
     Ok(quote! {
         impl ::aether_mail::Schema for #name {
-            const SCHEMA: ::aether_hub_protocol::SchemaType = #body;
+            const SCHEMA: ::aether_mail::__derive_runtime::SchemaType = #body;
             const LABEL: ::core::option::Option<&'static str> = ::core::option::Option::Some(
                 ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
             );
-            const LABEL_NODE: ::aether_hub_protocol::LabelNode = #label_node_body;
+            const LABEL_NODE: ::aether_mail::__derive_runtime::LabelNode = #label_node_body;
         }
 
         impl ::aether_mail::CastEligible for #name {
@@ -314,7 +332,7 @@ fn field_label_node_expr(ty: &Type) -> TokenStream2 {
 
 fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
     if fields.is_empty() {
-        return Ok(quote! { ::aether_hub_protocol::SchemaType::Unit });
+        return Ok(quote! { ::aether_mail::__derive_runtime::SchemaType::Unit });
     }
 
     let entries = fields.iter().enumerate().map(|(idx, f)| {
@@ -327,7 +345,7 @@ fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
         };
         let ty_expr = field_type_schema_expr(&f.ty);
         quote! {
-            ::aether_hub_protocol::NamedField {
+            ::aether_mail::__derive_runtime::NamedField {
                 name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
                 ty: #ty_expr,
             }
@@ -335,7 +353,7 @@ fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
     });
 
     Ok(quote! {
-        ::aether_hub_protocol::SchemaType::Struct {
+        ::aether_mail::__derive_runtime::SchemaType::Struct {
             fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #entries ),* ]),
             repr_c: <Self as ::aether_mail::CastEligible>::ELIGIBLE,
         }
@@ -348,7 +366,7 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
         let discriminant = idx as u32;
         match &v.fields {
             Fields::Unit => quote! {
-                ::aether_hub_protocol::EnumVariant::Unit {
+                ::aether_mail::__derive_runtime::EnumVariant::Unit {
                     name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
                     discriminant: #discriminant,
                 }
@@ -359,7 +377,7 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
                     .iter()
                     .map(|f| field_type_schema_expr(&f.ty));
                 quote! {
-                    ::aether_hub_protocol::EnumVariant::Tuple {
+                    ::aether_mail::__derive_runtime::EnumVariant::Tuple {
                         name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
                         discriminant: #discriminant,
                         fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #field_exprs ),* ]),
@@ -371,14 +389,14 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
                     let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
                     let ty_expr = field_type_schema_expr(&f.ty);
                     quote! {
-                        ::aether_hub_protocol::NamedField {
+                        ::aether_mail::__derive_runtime::NamedField {
                             name: ::aether_mail::__derive_runtime::Cow::Borrowed(#fname),
                             ty: #ty_expr,
                         }
                     }
                 });
                 quote! {
-                    ::aether_hub_protocol::EnumVariant::Struct {
+                    ::aether_mail::__derive_runtime::EnumVariant::Struct {
                         name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
                         discriminant: #discriminant,
                         fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #field_exprs ),* ]),
@@ -389,7 +407,7 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
     });
 
     Ok(quote! {
-        ::aether_hub_protocol::SchemaType::Enum {
+        ::aether_mail::__derive_runtime::SchemaType::Enum {
             variants: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #variant_entries ),* ]),
         }
     })
@@ -402,7 +420,7 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
 // const-constructible.
 fn field_type_schema_expr(ty: &Type) -> TokenStream2 {
     if is_vec_u8(ty) {
-        quote! { ::aether_hub_protocol::SchemaType::Bytes }
+        quote! { ::aether_mail::__derive_runtime::SchemaType::Bytes }
     } else {
         quote! { <#ty as ::aether_mail::Schema>::SCHEMA }
     }

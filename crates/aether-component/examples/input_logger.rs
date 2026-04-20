@@ -30,17 +30,15 @@
 
 use aether_component::{Component, Ctx, InitCtx, Mail, Sink};
 use aether_kinds::{Key, MouseButton, MouseMove, Tick};
-use aether_mail::Kind;
+use aether_mail::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, Kind, Schema)]
+#[kind(name = "demo.input_observed")]
 pub struct InputObserved {
     pub stream: u32,
     pub code: u32,
-}
-impl Kind for InputObserved {
-    const NAME: &'static str = "demo.input_observed";
 }
 
 pub struct InputLogger {

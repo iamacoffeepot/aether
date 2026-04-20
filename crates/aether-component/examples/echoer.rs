@@ -12,25 +12,21 @@
 // demonstrates.)
 
 use aether_component::{Component, Ctx, InitCtx, KindId, Mail};
-use aether_mail::Kind;
+use aether_mail::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, Kind, Schema)]
+#[kind(name = "demo.request")]
 pub struct Request {
     pub seq: u32,
 }
-impl Kind for Request {
-    const NAME: &'static str = "demo.request";
-}
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, Kind, Schema)]
+#[kind(name = "demo.response")]
 pub struct Response {
     pub seq: u32,
-}
-impl Kind for Response {
-    const NAME: &'static str = "demo.response";
 }
 
 pub struct Echoer {

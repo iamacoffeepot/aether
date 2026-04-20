@@ -2,7 +2,10 @@
 // the top-level enums `EngineToHub` / `HubToEngine`; the bodies are
 // plain structs so they're ergonomic to construct and pattern-match.
 
-use std::borrow::Cow;
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
@@ -280,6 +283,18 @@ pub enum VariantShape {
         discriminant: u32,
         fields: Vec<SchemaShape>,
     },
+}
+
+/// Kind-level canonical record — the name-plus-positional-schema pair
+/// the `aether.kinds` section carries (ADR-0032). Postcard-compatible
+/// with `KindDescriptor` at the `name` field (both serialize as
+/// length-prefixed UTF-8), and with the canonical schema bytes at the
+/// `schema` field. The hub decodes one `KindShape` per section record
+/// via `postcard::take_from_bytes`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KindShape {
+    pub name: Cow<'static, str>,
+    pub schema: SchemaShape,
 }
 
 /// Labels sidecar — parallel-shape tree of nominal information

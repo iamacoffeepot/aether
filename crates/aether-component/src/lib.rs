@@ -843,6 +843,7 @@ mod tests {
     struct FakeKind;
     impl Kind for FakeKind {
         const NAME: &'static str = "test.fake";
+        const ID: u64 = aether_mail::mailbox_id_from_name(Self::NAME);
     }
 
     #[test]
@@ -902,6 +903,7 @@ mod tests {
     }
     impl Kind for FakePod {
         const NAME: &'static str = "test.fake_pod";
+        const ID: u64 = aether_mail::mailbox_id_from_name(Self::NAME);
     }
 
     #[test]

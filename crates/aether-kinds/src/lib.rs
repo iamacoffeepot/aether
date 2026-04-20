@@ -10,23 +10,23 @@
 
 #![no_std]
 
-#[cfg(feature = "descriptors")]
 extern crate alloc;
 
-#[cfg(feature = "descriptors")]
 pub mod descriptors;
 
 use bytemuck::{Pod, Zeroable};
 
-// Every kind below derives `Kind` (always) plus `Schema` (gated on the
-// `descriptors` feature so wasm guests stay free of hub-protocol). The
-// `Schema` impls feed `descriptors.rs`, which `Hello`-ships the kind
-// vocabulary to the hub for agent-side encoding (ADR-0019).
+// Every kind below derives both `Kind` and `Schema`. Pre-ADR-0032
+// `Schema` was gated behind a `descriptors` feature so wasm guests
+// stayed free of hub-protocol; that gate retired once hub-protocol
+// went no_std + alloc. `Schema` drives both the canonical bytes the
+// `aether.kinds` section carries and the `LABEL_NODE` sidecar — so
+// it's load-bearing on every build, not an optional enrichment.
 
 /// Per-frame signal from the substrate's frame loop. Empty payload —
 /// elapsed-time is parked until a subscriber actually needs it.
 #[derive(aether_mail::Kind)]
-#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[derive(aether_mail::Schema)]
 #[kind(name = "aether.tick", input)]
 pub struct Tick;
 
@@ -34,7 +34,7 @@ pub struct Tick;
 /// as u32`. Dispatched on press only (not release, not repeat).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_mail::Kind)]
-#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[derive(aether_mail::Schema)]
 #[kind(name = "aether.key", input)]
 pub struct Key {
     pub code: u32,
@@ -42,14 +42,14 @@ pub struct Key {
 
 /// A mouse-button press. No payload today — which button isn't tracked.
 #[derive(aether_mail::Kind)]
-#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[derive(aether_mail::Schema)]
 #[kind(name = "aether.mouse_button", input)]
 pub struct MouseButton;
 
 /// Cursor position in window coordinates, as logical pixels cast to f32.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind)]
-#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[derive(aether_mail::Schema)]
 #[kind(name = "aether.mouse_move", input)]
 pub struct MouseMove {
     pub x: f32,
@@ -65,7 +65,7 @@ pub struct MouseMove {
 /// schema or eligibility info.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable)]
-#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[derive(aether_mail::Schema)]
 pub struct Vertex {
     pub x: f32,
     pub y: f32,
@@ -79,7 +79,7 @@ pub struct Vertex {
 /// sent as a slice.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind)]
-#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[derive(aether_mail::Schema)]
 #[kind(name = "aether.draw_triangle")]
 pub struct DrawTriangle {
     pub verts: [Vertex; 3],
@@ -91,7 +91,7 @@ pub struct DrawTriangle {
 /// session → component → session reply actually works end-to-end.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_mail::Kind)]
-#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[derive(aether_mail::Schema)]
 #[kind(name = "aether.ping")]
 pub struct Ping {
     pub seq: u32,
@@ -102,7 +102,7 @@ pub struct Ping {
 /// replies when multiple are in flight.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_mail::Kind)]
-#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[derive(aether_mail::Schema)]
 #[kind(name = "aether.pong")]
 pub struct Pong {
     pub seq: u32,
@@ -115,7 +115,7 @@ pub struct Pong {
 /// without having to poll the engine directly.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_mail::Kind)]
-#[cfg_attr(feature = "descriptors", derive(aether_mail::Schema))]
+#[derive(aether_mail::Schema)]
 #[kind(name = "aether.observation.frame_stats")]
 pub struct FrameStats {
     pub frame: u64,
@@ -136,10 +136,8 @@ pub struct FrameStats {
 // the alloc-heavy payload types (and have no business loading
 // components anyway).
 
-#[cfg(feature = "descriptors")]
 pub use control_plane::*;
 
-#[cfg(feature = "descriptors")]
 mod control_plane {
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -632,7 +630,6 @@ mod tests {
     // PR 5's switch-over of `descriptors.rs` from legacy `Pod`/`Signal`
     // arms to `Schema(...)` doesn't drift on wire bytes for cast-shaped
     // kinds.
-    #[cfg(feature = "descriptors")]
     mod schema {
         use super::*;
         use aether_hub_protocol::{Primitive, SchemaType};

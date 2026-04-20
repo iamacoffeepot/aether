@@ -22,10 +22,11 @@ use alloc::vec::Vec;
 use core::fmt;
 
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
-/// `"aether.tick"`, `"hello.npc_health"`). The name is resolved to a
-/// runtime `u64` id by the substrate's kind registry at init; see
-/// ADR-0005 for the resolution flow. (Widened from `u32` in ADR-0030
-/// Phase 1.)
+/// `"aether.tick"`, `"hello.npc_health"`) and a `u64` id derived from
+/// that name plus the kind's canonical schema bytes (ADR-0030 Phase 2,
+/// ADR-0032). Both sides of the FFI compute the id the same way — the
+/// substrate from the deserialized schema, the guest from the compile-
+/// time const — so routing stays in lockstep without a host-fn resolve.
 ///
 /// `IS_INPUT` marks the kind as a substrate-published input stream
 /// (`Tick`, `Key`, `MouseMove`, `MouseButton` — ADR-0021). Defaults
@@ -36,6 +37,7 @@ use core::fmt;
 /// touch this — leave the default alone.
 pub trait Kind {
     const NAME: &'static str;
+    const ID: u64;
     const IS_INPUT: bool = false;
 }
 
@@ -136,22 +138,23 @@ pub use aether_mail_derive::{Kind, Schema};
 /// (primitives, `String`, `[u8]`-shaped `Vec`s, fixed arrays,
 /// `Option`, generic `Vec`). User structs reach the trait via
 /// `#[derive(Schema)]`.
-#[cfg(feature = "descriptors")]
 pub use schema::Schema;
 
-/// Internal re-exports the `#[derive(Schema)]` macro points at so its
-/// output compiles in no_std + alloc consumer crates (notably
-/// aether-kinds) without the consumer needing `extern crate alloc;`
-/// at the site. Not part of the public API; the macro is the only
-/// intended caller.
-#[cfg(feature = "descriptors")]
+/// Internal re-exports the `#[derive(Schema)]` and `#[derive(Kind)]`
+/// macros point at so their output compiles in no_std + alloc
+/// consumer crates without those consumers needing `extern crate
+/// alloc;` or a direct `aether-hub-protocol` dep at the site.
+/// Not part of the public API; the macros are the only intended
+/// callers.
 #[doc(hidden)]
 pub mod __derive_runtime {
     pub use alloc::borrow::Cow;
-    pub use aether_hub_protocol::{LabelCell, LabelNode, VariantLabel};
+    pub use aether_hub_protocol::{
+        EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, SchemaType, VariantLabel,
+        canonical,
+    };
 }
 
-#[cfg(feature = "descriptors")]
 mod schema {
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -361,6 +364,11 @@ mod tests {
     }
     impl Kind for TestPod {
         const NAME: &'static str = "test.pod";
+        // Tests exercise encode/decode, not routing, so the exact ID
+        // doesn't matter. `mailbox_id_from_name` gives us a stable
+        // derivation without pulling Schema into tests that don't
+        // use it.
+        const ID: u64 = mailbox_id_from_name(Self::NAME);
     }
 
     #[repr(C)]
@@ -371,6 +379,7 @@ mod tests {
     }
     impl Kind for Vertex {
         const NAME: &'static str = "test.vertex";
+        const ID: u64 = mailbox_id_from_name(Self::NAME);
     }
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -380,11 +389,13 @@ mod tests {
     }
     impl Kind for TestStruct {
         const NAME: &'static str = "test.struct";
+        const ID: u64 = mailbox_id_from_name(Self::NAME);
     }
 
     struct Signal;
     impl Kind for Signal {
         const NAME: &'static str = "test.signal";
+        const ID: u64 = mailbox_id_from_name(Self::NAME);
     }
 
     #[test]

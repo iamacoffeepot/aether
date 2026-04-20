@@ -18,7 +18,7 @@
 //! const fns is a compile-time panic. Runtime consumers (the hub)
 //! decode the produced bytes back into `Owned` cells via postcard.
 
-use std::borrow::Cow;
+use alloc::borrow::Cow;
 
 use crate::types::{
     EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, Primitive, SchemaCell, SchemaType,
@@ -273,6 +273,28 @@ pub const fn canonical_serialize_schema<const N: usize>(schema: &SchemaType) -> 
     let written = write_schema(schema, &mut out, 0);
     if written != N {
         panic!("canonical_serialize_schema: size mismatch between len pass and serialize pass");
+    }
+    out
+}
+
+/// Byte length for a full `(name, schema)` canonical record —
+/// matches `postcard(KindShape { name, schema })`.
+pub const fn canonical_len_kind(name: &str, schema: &SchemaType) -> usize {
+    str_len(name) + canonical_len_schema(schema)
+}
+
+/// Serialize `(name, schema)` into `N` bytes of a canonical postcard
+/// record. These are the bytes that populate `aether.kinds` (one
+/// record per `#[derive(Kind)]` type) and that `Kind::ID` hashes over.
+pub const fn canonical_serialize_kind<const N: usize>(
+    name: &str,
+    schema: &SchemaType,
+) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut pos = write_str(name, &mut out, 0);
+    pos = write_schema(schema, &mut out, pos);
+    if pos != N {
+        panic!("canonical_serialize_kind: size mismatch between len pass and serialize pass");
     }
     out
 }
@@ -684,8 +706,8 @@ mod tests {
     //! against a hand-built `SchemaShape` that matches the stripped shape.
     use super::*;
     use crate::types::{
-        EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, Primitive, SchemaCell,
-        SchemaShape, SchemaType, VariantLabel, VariantShape,
+        EnumVariant, KindLabels, KindShape, LabelCell, LabelNode, NamedField, Primitive,
+        SchemaCell, SchemaShape, SchemaType, VariantLabel, VariantShape,
     };
 
     static F32: SchemaType = SchemaType::Scalar(Primitive::F32);
@@ -804,6 +826,20 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn canonical_kind_round_trips_as_kindshape() {
+        const NAME: &str = "test.triangle";
+        const N: usize = canonical_len_kind(NAME, &TRIANGLE);
+        const BYTES: [u8; N] = canonical_serialize_kind::<N>(NAME, &TRIANGLE);
+        let shape: KindShape = postcard::from_bytes(&BYTES).expect("decode");
+        assert_eq!(shape.name, "test.triangle");
+        let SchemaShape::Struct { fields, repr_c } = &shape.schema else {
+            panic!("expected Struct");
+        };
+        assert!(*repr_c);
+        assert_eq!(fields.len(), 1);
     }
 
     #[test]
