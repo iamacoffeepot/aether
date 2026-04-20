@@ -1,7 +1,8 @@
 # ADR-0028: Component-embedded kind manifest
 
-- **Status:** Proposed
+- **Status:** Accepted (phases 1–2 shipped)
 - **Date:** 2026-04-19
+- **Accepted:** 2026-04-19
 
 ## Context
 
