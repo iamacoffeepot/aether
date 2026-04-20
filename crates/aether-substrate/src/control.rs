@@ -1451,7 +1451,7 @@ mod tests {
             .unwrap_or_default()
     }
 
-    fn load_blank(plane: &ControlPlane, name: &str) -> u32 {
+    fn load_blank(plane: &ControlPlane, name: &str) -> u64 {
         let wasm = wat::parse_str(WAT).unwrap();
         let result = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
@@ -1468,7 +1468,7 @@ mod tests {
 
     fn do_subscribe(
         plane: &ControlPlane,
-        mailbox: u32,
+        mailbox: u64,
         stream: InputStream,
     ) -> SubscribeInputResult {
         plane.handle_subscribe(&postcard::to_allocvec(&SubscribeInput { stream, mailbox }).unwrap())
@@ -1476,7 +1476,7 @@ mod tests {
 
     fn do_unsubscribe(
         plane: &ControlPlane,
-        mailbox: u32,
+        mailbox: u64,
         stream: InputStream,
     ) -> SubscribeInputResult {
         plane.handle_unsubscribe(
@@ -1908,13 +1908,13 @@ mod tests {
     const WAT_FORWARDS_TO_SINK: &str = r#"
         (module
             (import "aether" "send_mail_p32"
-                (func $send_mail (param i32 i32 i32 i32 i32) (result i32)))
+                (func $send_mail (param i64 i32 i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (func (export "receive_p32")
                 (param $kind i32) (param $ptr i32) (param $count i32) (param $sender i32)
                 (result i32)
                 (drop (call $send_mail
-                    (i32.load8_u (local.get $ptr))
+                    (i64.load8_u (local.get $ptr))
                     (i32.const 0)
                     (i32.const 0)
                     (i32.const 0)

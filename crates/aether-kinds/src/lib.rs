@@ -167,7 +167,7 @@ mod control_plane {
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.load_result")]
     pub enum LoadResult {
-        Ok { mailbox_id: u32, name: String },
+        Ok { mailbox_id: u64, name: String },
         Err { error: String },
     }
 
@@ -176,7 +176,7 @@ mod control_plane {
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.drop_component")]
     pub struct DropComponent {
-        pub mailbox_id: u32,
+        pub mailbox_id: u64,
     }
 
     /// Reply to `DropComponent`. `Ok` on success; `Err` if the
@@ -199,7 +199,7 @@ mod control_plane {
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.replace_component")]
     pub struct ReplaceComponent {
-        pub mailbox_id: u32,
+        pub mailbox_id: u64,
         pub wasm: Vec<u8>,
         pub drain_timeout_ms: Option<u32>,
     }
@@ -252,7 +252,7 @@ mod control_plane {
     #[kind(name = "aether.control.subscribe_input")]
     pub struct SubscribeInput {
         pub stream: InputStream,
-        pub mailbox: u32,
+        pub mailbox: u64,
     }
 
     /// `aether.control.unsubscribe_input` — remove `mailbox` from the
@@ -263,7 +263,7 @@ mod control_plane {
     #[kind(name = "aether.control.unsubscribe_input")]
     pub struct UnsubscribeInput {
         pub stream: InputStream,
-        pub mailbox: u32,
+        pub mailbox: u64,
     }
 
     /// Reply to both subscribe and unsubscribe (ADR-0021 §2). Only

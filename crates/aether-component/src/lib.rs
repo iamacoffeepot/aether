@@ -56,7 +56,7 @@ pub const KIND_NOT_FOUND: u32 = u32::MAX;
 
 /// Sentinel returned by `raw::resolve_mailbox` when the substrate has
 /// not registered the requested mailbox name. Mirrors the host constant.
-pub const MAILBOX_NOT_FOUND: u32 = u32::MAX;
+pub const MAILBOX_NOT_FOUND: u64 = u64::MAX;
 
 /// Phantom-typed wrapper around a resolved kind id. A `KindId<Tick>`
 /// cannot be passed where a `KindId<DrawTriangle>` is expected — the
@@ -105,7 +105,7 @@ impl<K: Kind> KindId<K> {
 ///
 /// Built via `resolve_sink::<K>(name)` during init.
 pub struct Sink<K: Kind> {
-    mailbox: u32,
+    mailbox: u64,
     kind: u32,
     _k: PhantomData<fn() -> K>,
 }
@@ -120,7 +120,7 @@ impl<K: Kind> Clone for Sink<K> {
 impl<K: Kind> Sink<K> {
     /// Raw mailbox id. Exposed for components that need to pass the
     /// id to a host fn not yet wrapped by the SDK.
-    pub fn mailbox(self) -> u32 {
+    pub fn mailbox(self) -> u64 {
         self.mailbox
     }
 
@@ -876,11 +876,11 @@ mod tests {
     #[test]
     fn sink_accessors() {
         let s: Sink<FakeKind> = Sink {
-            mailbox: 3,
+            mailbox: 3u64,
             kind: 11,
             _k: PhantomData,
         };
-        assert_eq!(s.mailbox(), 3);
+        assert_eq!(s.mailbox(), 3u64);
         assert_eq!(s.kind(), 11);
     }
 

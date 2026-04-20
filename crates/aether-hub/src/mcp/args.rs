@@ -252,7 +252,7 @@ pub struct LoadComponentArgs {
 /// with `aether-kinds::LoadResult` — that type is canonical.
 #[derive(Debug, Deserialize)]
 pub(super) enum LoadResultWire {
-    Ok { mailbox_id: u32, name: String },
+    Ok { mailbox_id: u64, name: String },
     Err { error: String },
 }
 
@@ -261,7 +261,7 @@ pub struct LoadComponentResponse {
     /// Substrate-assigned mailbox id for the loaded component. Hand
     /// this to `replace_component` or use as the `mailbox` in
     /// `subscribe_input`.
-    pub mailbox_id: u32,
+    pub mailbox_id: u64,
     /// Substrate-resolved name. Matches the `name` in the request if
     /// provided; otherwise the substrate-defaulted value.
     pub name: String,
@@ -273,7 +273,7 @@ pub struct ReplaceComponentArgs {
     pub engine_id: String,
     /// Mailbox id of the live component to replace (from a prior
     /// `load_component` or `list_engines`-derived lookup).
-    pub mailbox_id: u32,
+    pub mailbox_id: u64,
     /// Absolute path to the replacement WASM binary on the hub's
     /// filesystem. Same filesystem rule as `load_component`. Kind
     /// vocabulary is embedded in the wasm's `aether.kinds` custom

@@ -32,13 +32,13 @@ use wasmtime::{Engine, Linker};
 const WAT: &str = r#"
 (module
   (import "aether" "send_mail_p32"
-    (func $send_mail (param i32 i32 i32 i32 i32) (result i32)))
+    (func $send_mail (param i64 i32 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
   (func (export "receive_p32")
     (param $kind i32) (param $ptr i32) (param $count i32) (param $sender i32)
     (result i32)
     (drop (call $send_mail
-        (i32.const 1) (i32.const 99) (i32.const 0) (i32.const 0) (i32.const 1)))
+        (i64.const 1) (i32.const 99) (i32.const 0) (i32.const 0) (i32.const 1)))
     i32.const 0))
 "#;
 
@@ -130,8 +130,8 @@ fn dispatch<K: serde::Serialize>(plane: &ControlPlane, kind_name: &str, payload:
     handler(kind_name, None, SessionToken::NIL, &bytes, 0);
 }
 
-fn load_wat(plane: &ControlPlane, name: &str) -> u32 {
-    let before: std::collections::HashSet<u32> = plane
+fn load_wat(plane: &ControlPlane, name: &str) -> u64 {
+    let before: std::collections::HashSet<u64> = plane
         .components
         .read()
         .unwrap()
@@ -146,7 +146,7 @@ fn load_wat(plane: &ControlPlane, name: &str) -> u32 {
             name: Some(name.into()),
         },
     );
-    let after: std::collections::HashSet<u32> = plane
+    let after: std::collections::HashSet<u64> = plane
         .components
         .read()
         .unwrap()
@@ -159,7 +159,7 @@ fn load_wat(plane: &ControlPlane, name: &str) -> u32 {
         .expect("load inserted a new component")
 }
 
-fn subscribe(plane: &ControlPlane, stream: InputStream, mailbox: u32) {
+fn subscribe(plane: &ControlPlane, stream: InputStream, mailbox: u64) {
     dispatch(
         plane,
         SubscribeInput::NAME,
@@ -167,7 +167,7 @@ fn subscribe(plane: &ControlPlane, stream: InputStream, mailbox: u32) {
     );
 }
 
-fn unsubscribe(plane: &ControlPlane, stream: InputStream, mailbox: u32) {
+fn unsubscribe(plane: &ControlPlane, stream: InputStream, mailbox: u64) {
     dispatch(
         plane,
         UnsubscribeInput::NAME,
@@ -175,7 +175,7 @@ fn unsubscribe(plane: &ControlPlane, stream: InputStream, mailbox: u32) {
     );
 }
 
-fn drop_component(plane: &ControlPlane, mailbox_id: u32) {
+fn drop_component(plane: &ControlPlane, mailbox_id: u64) {
     dispatch(plane, DropComponent::NAME, &DropComponent { mailbox_id });
 }
 

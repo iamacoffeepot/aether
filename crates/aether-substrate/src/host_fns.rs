@@ -12,11 +12,12 @@ use crate::ctx::{StateBundle, SubstrateCtx};
 use crate::mail::MailboxId;
 use crate::sender_table::SenderEntry;
 
-/// Returned by `resolve_kind` / `resolve_mailbox` when the requested
-/// name has not been registered. Guests use this as a "lookup failed"
-/// sentinel.
+/// Returned by `resolve_kind` when the requested name has not been
+/// registered. Guests use this as a "lookup failed" sentinel.
 pub const KIND_NOT_FOUND: u32 = u32::MAX;
-pub const MAILBOX_NOT_FOUND: u32 = u32::MAX;
+/// Symmetric sentinel for `resolve_mailbox`. Widened to 64 bits in
+/// lockstep with `MailboxId` (ADR-0029 PR 1).
+pub const MAILBOX_NOT_FOUND: u64 = u64::MAX;
 
 /// Map a resolved kind name to the substrate input stream it belongs
 /// to. The four built-in input kinds (`aether.tick`, `aether.key`,
@@ -73,7 +74,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
         "aether",
         "send_mail_p32",
         |mut caller: Caller<'_, SubstrateCtx>,
-         recipient: u32,
+         recipient: u64,
          kind: u32,
          ptr: u32,
          len: u32,
@@ -253,7 +254,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     linker.func_wrap(
         "aether",
         "resolve_mailbox_p32",
-        |mut caller: Caller<'_, SubstrateCtx>, name_ptr: u32, name_len: u32| -> u32 {
+        |mut caller: Caller<'_, SubstrateCtx>, name_ptr: u32, name_len: u32| -> u64 {
             let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                 Some(m) => m,
                 None => return MAILBOX_NOT_FOUND,
