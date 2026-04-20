@@ -119,9 +119,10 @@ pub const fn mailbox_id_from_name(name: &str) -> u64 {
 pub use aether_mail_derive::{Kind, Schema};
 
 /// ADR-0019 schema producer. The substrate (and tooling that builds
-/// hub descriptors) calls `T::schema()` to learn how a kind's payload
-/// is laid out. Wasm guests typically don't need this — they send and
-/// receive bytes — so the trait sits behind the `descriptors` feature.
+/// hub descriptors) reads `<T as Schema>::SCHEMA` — a compile-time
+/// const — to learn how a kind's payload is laid out. Wasm guests
+/// typically don't need this, so the trait sits behind the
+/// `descriptors` feature.
 ///
 /// Blanket impls cover the leaf types in the schema vocabulary
 /// (primitives, `String`, `[u8]`-shaped `Vec`s, fixed arrays,
@@ -130,46 +131,41 @@ pub use aether_mail_derive::{Kind, Schema};
 #[cfg(feature = "descriptors")]
 pub use schema::Schema;
 
-/// Internal helpers the `#[derive(Schema)]` macro uses to construct
-/// `String` and `Vec` values without forcing every consumer crate to
-/// `extern crate alloc;`. Not part of the public API; the macro is the
-/// only intended caller.
+/// Internal re-exports the `#[derive(Schema)]` macro points at so its
+/// output compiles in no_std + alloc consumer crates (notably
+/// aether-kinds) without the consumer needing `extern crate alloc;`
+/// at the site. Not part of the public API; the macro is the only
+/// intended caller.
 #[cfg(feature = "descriptors")]
 #[doc(hidden)]
 pub mod __derive_runtime {
-    use alloc::string::String;
-    use alloc::vec::Vec;
-
-    pub fn string_from(s: &str) -> String {
-        String::from(s)
-    }
-
-    pub fn vec_from<T, const N: usize>(arr: [T; N]) -> Vec<T> {
-        Vec::from(arr)
-    }
+    pub use alloc::borrow::Cow;
 }
 
 #[cfg(feature = "descriptors")]
 mod schema {
-    use alloc::boxed::Box;
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use aether_hub_protocol::{Primitive, SchemaType};
+    use aether_hub_protocol::{Primitive, SchemaCell, SchemaType};
 
     /// Produces the `SchemaType` describing how this type lays out as
     /// a mail payload. Implemented by `#[derive(Schema)]` on user
     /// structs, and by blanket impl on the schema-vocabulary leaves.
+    ///
+    /// ADR-0031: the schema is a compile-time `const` rather than a
+    /// runtime `fn`. Taking a reference produces a `&'static SchemaType`
+    /// which is what `SchemaCell::Static` holds, so nested types
+    /// (`Vec<T>`, `Option<T>`, `[T; N]`, user structs) resolve by
+    /// trait dispatch at compile time without a syntactic walker.
     pub trait Schema {
-        fn schema() -> SchemaType;
+        const SCHEMA: SchemaType;
     }
 
     macro_rules! scalar {
         ($t:ty, $p:ident) => {
             impl Schema for $t {
-                fn schema() -> SchemaType {
-                    SchemaType::Scalar(Primitive::$p)
-                }
+                const SCHEMA: SchemaType = SchemaType::Scalar(Primitive::$p);
             }
         };
     }
@@ -186,15 +182,11 @@ mod schema {
     scalar!(f64, F64);
 
     impl Schema for bool {
-        fn schema() -> SchemaType {
-            SchemaType::Bool
-        }
+        const SCHEMA: SchemaType = SchemaType::Bool;
     }
 
     impl Schema for String {
-        fn schema() -> SchemaType {
-            SchemaType::String
-        }
+        const SCHEMA: SchemaType = SchemaType::String;
     }
 
     // Generic `Vec<T>`. `Vec<u8>` is the canonical byte-buffer shape
@@ -206,25 +198,19 @@ mod schema {
     // `SchemaType::Bytes` directly, bypassing this blanket. Standalone
     // `Vec<u8>` outside a derived struct still routes through this
     // impl and lands as `Vec(Scalar(U8))`.
-    impl<T: Schema> Schema for Vec<T> {
-        fn schema() -> SchemaType {
-            SchemaType::Vec(Box::new(T::schema()))
-        }
+    impl<T: Schema + 'static> Schema for Vec<T> {
+        const SCHEMA: SchemaType = SchemaType::Vec(SchemaCell::Static(&T::SCHEMA));
     }
 
-    impl<T: Schema> Schema for Option<T> {
-        fn schema() -> SchemaType {
-            SchemaType::Option(Box::new(T::schema()))
-        }
+    impl<T: Schema + 'static> Schema for Option<T> {
+        const SCHEMA: SchemaType = SchemaType::Option(SchemaCell::Static(&T::SCHEMA));
     }
 
-    impl<T: Schema, const N: usize> Schema for [T; N] {
-        fn schema() -> SchemaType {
-            SchemaType::Array {
-                element: Box::new(T::schema()),
-                len: N as u32,
-            }
-        }
+    impl<T: Schema + 'static, const N: usize> Schema for [T; N] {
+        const SCHEMA: SchemaType = SchemaType::Array {
+            element: SchemaCell::Static(&T::SCHEMA),
+            len: N as u32,
+        };
     }
 }
 

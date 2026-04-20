@@ -146,7 +146,8 @@ mod tests {
                         fields: vec![NamedField {
                             name: "code".into(),
                             ty: SchemaType::Scalar(Primitive::U32),
-                        }],
+                        }]
+                        .into(),
                     },
                 },
             ],
@@ -420,17 +421,19 @@ mod tests {
                     name: "y".into(),
                     ty: SchemaType::Scalar(Primitive::F32),
                 },
-            ],
+            ]
+            .into(),
         };
         let triangle = SchemaType::Struct {
             repr_c: true,
             fields: vec![NamedField {
                 name: "verts".into(),
                 ty: SchemaType::Array {
-                    element: Box::new(vertex),
+                    element: SchemaCell::owned(vertex),
                     len: 3,
                 },
-            }],
+            }]
+            .into(),
         };
         let desc = KindDescriptor {
             name: "demo.draw_triangle".into(),
@@ -456,13 +459,14 @@ mod tests {
                 },
                 NamedField {
                     name: "name".into(),
-                    ty: SchemaType::Option(Box::new(SchemaType::String)),
+                    ty: SchemaType::Option(SchemaCell::owned(SchemaType::String)),
                 },
                 NamedField {
                     name: "tags".into(),
-                    ty: SchemaType::Vec(Box::new(SchemaType::String)),
+                    ty: SchemaType::Vec(SchemaCell::owned(SchemaType::String)),
                 },
-            ],
+            ]
+            .into(),
         };
         let desc = KindDescriptor {
             name: "demo.load_component".into(),
@@ -488,7 +492,7 @@ mod tests {
                 EnumVariant::Tuple {
                     name: "Ok".into(),
                     discriminant: 1,
-                    fields: vec![SchemaType::Scalar(Primitive::U64)],
+                    fields: vec![SchemaType::Scalar(Primitive::U64)].into(),
                 },
                 EnumVariant::Struct {
                     name: "Err".into(),
@@ -496,9 +500,11 @@ mod tests {
                     fields: vec![NamedField {
                         name: "reason".into(),
                         ty: SchemaType::String,
-                    }],
+                    }]
+                    .into(),
                 },
-            ],
+            ]
+            .into(),
         };
         let desc = KindDescriptor {
             name: "demo.load_result".into(),
@@ -528,7 +534,8 @@ mod tests {
                     fields: vec![NamedField {
                         name: "body".into(),
                         ty: SchemaType::String,
-                    }],
+                    }]
+                    .into(),
                 },
             }],
         });

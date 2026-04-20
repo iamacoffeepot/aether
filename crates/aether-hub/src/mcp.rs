@@ -271,7 +271,8 @@ mod tests {
                         name: "y".into(),
                         ty: SchemaType::Scalar(Primitive::F32),
                     },
-                ],
+                ]
+                .into(),
             },
         }];
         let (rec, mut rx) = record_with_kinds(3, kinds);
@@ -388,7 +389,8 @@ mod tests {
                     fields: vec![NamedField {
                         name: "body".into(),
                         ty: SchemaType::String,
-                    }],
+                    }]
+                    .into(),
                 },
             },
             KindDescriptor {
@@ -398,7 +400,8 @@ mod tests {
                     fields: vec![NamedField {
                         name: "n".into(),
                         ty: SchemaType::Scalar(Primitive::U32),
-                    }],
+                    }]
+                    .into(),
                 },
             },
         ];
@@ -556,7 +559,8 @@ mod tests {
                         name: "triangles".into(),
                         ty: SchemaType::Scalar(Primitive::U64),
                     },
-                ],
+                ]
+                .into(),
             },
         }];
         let (rec, _rx) = record_with_kinds(33, kinds);
@@ -609,7 +613,8 @@ mod tests {
                 fields: vec![NamedField {
                     name: "n".into(),
                     ty: SchemaType::Scalar(Primitive::U64),
-                }],
+                }]
+                .into(),
             },
         }];
         let (rec, _rx) = record_with_kinds(34, kinds);
@@ -750,7 +755,7 @@ mod tests {
     /// across capture_frame tests so they all exercise the same
     /// wire shape.
     fn capture_frame_kind_descriptor() -> aether_hub_protocol::KindDescriptor {
-        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaType};
+        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
         let envelope = SchemaType::Struct {
             repr_c: false,
             fields: vec![
@@ -770,7 +775,8 @@ mod tests {
                     name: "count".into(),
                     ty: SchemaType::Scalar(Primitive::U32),
                 },
-            ],
+            ]
+            .into(),
         };
         KindDescriptor {
             name: "aether.control.capture_frame".into(),
@@ -779,13 +785,14 @@ mod tests {
                 fields: vec![
                     NamedField {
                         name: "mails".into(),
-                        ty: SchemaType::Vec(Box::new(envelope.clone())),
+                        ty: SchemaType::Vec(SchemaCell::owned(envelope.clone())),
                     },
                     NamedField {
                         name: "after_mails".into(),
-                        ty: SchemaType::Vec(Box::new(envelope)),
+                        ty: SchemaType::Vec(SchemaCell::owned(envelope)),
                     },
-                ],
+                ]
+                .into(),
             },
         }
     }

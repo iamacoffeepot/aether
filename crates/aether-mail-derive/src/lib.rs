@@ -190,9 +190,7 @@ fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
     };
     Ok(quote! {
         impl ::aether_mail::Schema for #name {
-            fn schema() -> ::aether_hub_protocol::SchemaType {
-                #body
-            }
+            const SCHEMA: ::aether_hub_protocol::SchemaType = #body;
         }
 
         impl ::aether_mail::CastEligible for #name {
@@ -217,7 +215,7 @@ fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
         let ty_expr = field_type_schema_expr(&f.ty);
         quote! {
             ::aether_hub_protocol::NamedField {
-                name: ::aether_mail::__derive_runtime::string_from(#name),
+                name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
                 ty: #ty_expr,
             }
         }
@@ -225,7 +223,7 @@ fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         ::aether_hub_protocol::SchemaType::Struct {
-            fields: ::aether_mail::__derive_runtime::vec_from([ #( #entries ),* ]),
+            fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #entries ),* ]),
             repr_c: <Self as ::aether_mail::CastEligible>::ELIGIBLE,
         }
     })
@@ -238,7 +236,7 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
         match &v.fields {
             Fields::Unit => quote! {
                 ::aether_hub_protocol::EnumVariant::Unit {
-                    name: ::aether_mail::__derive_runtime::string_from(#name),
+                    name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
                     discriminant: #discriminant,
                 }
             },
@@ -249,9 +247,9 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
                     .map(|f| field_type_schema_expr(&f.ty));
                 quote! {
                     ::aether_hub_protocol::EnumVariant::Tuple {
-                        name: ::aether_mail::__derive_runtime::string_from(#name),
+                        name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
                         discriminant: #discriminant,
-                        fields: ::aether_mail::__derive_runtime::vec_from([ #( #field_exprs ),* ]),
+                        fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #field_exprs ),* ]),
                     }
                 }
             }
@@ -261,16 +259,16 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
                     let ty_expr = field_type_schema_expr(&f.ty);
                     quote! {
                         ::aether_hub_protocol::NamedField {
-                            name: ::aether_mail::__derive_runtime::string_from(#fname),
+                            name: ::aether_mail::__derive_runtime::Cow::Borrowed(#fname),
                             ty: #ty_expr,
                         }
                     }
                 });
                 quote! {
                     ::aether_hub_protocol::EnumVariant::Struct {
-                        name: ::aether_mail::__derive_runtime::string_from(#name),
+                        name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
                         discriminant: #discriminant,
-                        fields: ::aether_mail::__derive_runtime::vec_from([ #( #field_exprs ),* ]),
+                        fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #field_exprs ),* ]),
                     }
                 }
             }
@@ -279,19 +277,21 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         ::aether_hub_protocol::SchemaType::Enum {
-            variants: ::aether_mail::__derive_runtime::vec_from([ #( #variant_entries ),* ]),
+            variants: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #variant_entries ),* ]),
         }
     })
 }
 
 // Pattern-match `Vec<u8>` at the field-type level so it lands as
 // `SchemaType::Bytes` rather than the generic `Vec(Scalar(U8))`. Every
-// other shape just delegates to the `Schema` trait.
+// other shape delegates to the `Schema` trait's const — wrapped in
+// `SchemaCell::Static` at recursive positions so the literal stays
+// const-constructible.
 fn field_type_schema_expr(ty: &Type) -> TokenStream2 {
     if is_vec_u8(ty) {
         quote! { ::aether_hub_protocol::SchemaType::Bytes }
     } else {
-        quote! { <#ty as ::aether_mail::Schema>::schema() }
+        quote! { <#ty as ::aether_mail::Schema>::SCHEMA }
     }
 }
 

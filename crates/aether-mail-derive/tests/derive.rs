@@ -69,14 +69,14 @@ enum Outcome {
 #[test]
 fn unit_struct_emits_name_and_unit_schema() {
     assert_eq!(<Tick as Kind>::NAME, "test.tick");
-    assert!(matches!(<Tick as Schema>::schema(), SchemaType::Unit));
+    assert!(matches!(<Tick as Schema>::SCHEMA.clone(), SchemaType::Unit));
 }
 
 #[test]
 fn cast_eligible_struct_picks_repr_c_true() {
     assert_eq!(<Key as Kind>::NAME, "test.key");
     const { assert!(<Key as CastEligible>::ELIGIBLE) };
-    let SchemaType::Struct { repr_c, fields } = <Key as Schema>::schema() else {
+    let SchemaType::Struct { repr_c, fields } = <Key as Schema>::SCHEMA.clone() else {
         panic!("expected Struct schema");
     };
     assert!(repr_c);
@@ -89,7 +89,7 @@ fn cast_eligible_struct_picks_repr_c_true() {
 fn cast_eligible_propagates_through_array_of_substruct() {
     const { assert!(<Vertex as CastEligible>::ELIGIBLE) };
     const { assert!(<Triangle as CastEligible>::ELIGIBLE) };
-    let SchemaType::Struct { repr_c, fields } = <Triangle as Schema>::schema() else {
+    let SchemaType::Struct { repr_c, fields } = <Triangle as Schema>::SCHEMA.clone() else {
         panic!("expected Struct schema");
     };
     assert!(repr_c);
@@ -113,12 +113,12 @@ fn cast_eligible_propagates_through_array_of_substruct() {
 #[test]
 fn postcard_struct_marks_repr_c_false_and_specializes_bytes() {
     const { assert!(!<Note as CastEligible>::ELIGIBLE) };
-    let SchemaType::Struct { repr_c, fields } = <Note as Schema>::schema() else {
+    let SchemaType::Struct { repr_c, fields } = <Note as Schema>::SCHEMA.clone() else {
         panic!("expected Struct schema");
     };
     assert!(!repr_c);
     let by_name: std::collections::HashMap<&str, &SchemaType> =
-        fields.iter().map(|f| (f.name.as_str(), &f.ty)).collect();
+        fields.iter().map(|f| (&*f.name, &f.ty)).collect();
     assert_eq!(by_name["body"], &SchemaType::String);
     assert!(matches!(by_name["tags"], SchemaType::Vec(inner) if **inner == SchemaType::String));
     assert!(
@@ -132,7 +132,7 @@ fn postcard_struct_marks_repr_c_false_and_specializes_bytes() {
 
 #[test]
 fn tuple_struct_names_fields_positionally() {
-    let SchemaType::Struct { fields, repr_c } = <TupleStruct as Schema>::schema() else {
+    let SchemaType::Struct { fields, repr_c } = <TupleStruct as Schema>::SCHEMA.clone() else {
         panic!("expected Struct schema");
     };
     // No `#[repr(C)]` on the tuple struct → not cast eligible.
@@ -148,7 +148,7 @@ fn tuple_struct_names_fields_positionally() {
 fn enum_emits_each_variant_shape_with_sequential_discriminants() {
     assert_eq!(<Outcome as Kind>::NAME, "test.result");
     const { assert!(!<Outcome as CastEligible>::ELIGIBLE) };
-    let SchemaType::Enum { variants } = <Outcome as Schema>::schema() else {
+    let SchemaType::Enum { variants } = <Outcome as Schema>::SCHEMA.clone() else {
         panic!("expected Enum schema");
     };
     assert_eq!(variants.len(), 3);
@@ -207,7 +207,7 @@ fn cast_eligible_blocked_by_non_pod_field_even_with_repr_c() {
         label: String,
     }
     const { assert!(!<ReprCButStrung as CastEligible>::ELIGIBLE) };
-    let SchemaType::Struct { repr_c, .. } = <ReprCButStrung as Schema>::schema() else {
+    let SchemaType::Struct { repr_c, .. } = <ReprCButStrung as Schema>::SCHEMA.clone() else {
         panic!("expected Struct");
     };
     assert!(!repr_c);

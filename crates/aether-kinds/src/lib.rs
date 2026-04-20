@@ -640,9 +640,9 @@ mod tests {
 
         #[test]
         fn unit_kinds_emit_schema_unit() {
-            assert!(matches!(<Tick as Schema>::schema(), SchemaType::Unit));
+            assert!(matches!(<Tick as Schema>::SCHEMA.clone(), SchemaType::Unit));
             assert!(matches!(
-                <MouseButton as Schema>::schema(),
+                <MouseButton as Schema>::SCHEMA.clone(),
                 SchemaType::Unit
             ));
         }
@@ -660,7 +660,7 @@ mod tests {
 
         #[test]
         fn key_schema_is_one_u32_field() {
-            let SchemaType::Struct { repr_c, fields } = <Key as Schema>::schema() else {
+            let SchemaType::Struct { repr_c, fields } = <Key as Schema>::SCHEMA.clone() else {
                 panic!("expected Struct");
             };
             assert!(repr_c);
@@ -671,7 +671,8 @@ mod tests {
 
         #[test]
         fn draw_triangle_schema_recurses_into_vertex() {
-            let SchemaType::Struct { repr_c, fields } = <DrawTriangle as Schema>::schema() else {
+            let SchemaType::Struct { repr_c, fields } = <DrawTriangle as Schema>::SCHEMA.clone()
+            else {
                 panic!("expected Struct");
             };
             assert!(repr_c);
@@ -696,7 +697,8 @@ mod tests {
 
         #[test]
         fn frame_stats_schema_is_two_u64_fields() {
-            let SchemaType::Struct { repr_c, fields } = <FrameStats as Schema>::schema() else {
+            let SchemaType::Struct { repr_c, fields } = <FrameStats as Schema>::SCHEMA.clone()
+            else {
                 panic!("expected Struct");
             };
             assert!(repr_c);

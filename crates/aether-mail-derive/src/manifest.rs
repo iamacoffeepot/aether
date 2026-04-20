@@ -19,7 +19,11 @@
 //! per-record with a `0x01` version byte so the format can evolve
 //! (ADR-0028 §Versioning).
 
-use aether_hub_protocol::{EnumVariant, KindDescriptor, NamedField, Primitive, SchemaType};
+use std::borrow::Cow;
+
+use aether_hub_protocol::{
+    EnumVariant, KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType,
+};
 use syn::{DataEnum, Fields, GenericArgument, PathArguments, Type};
 
 use crate::FieldInfo;
@@ -46,12 +50,12 @@ pub fn struct_descriptor(
                 None => idx.to_string(),
             };
             named.push(NamedField {
-                name: fname,
+                name: Cow::Owned(fname),
                 ty: resolve(&f.ty)?,
             });
         }
         SchemaType::Struct {
-            fields: named,
+            fields: Cow::Owned(named),
             repr_c: has_repr_c,
         }
     };
@@ -70,7 +74,7 @@ pub fn enum_descriptor(name: &str, data: &DataEnum) -> Option<KindDescriptor> {
         let discriminant = idx as u32;
         let variant = match &v.fields {
             Fields::Unit => EnumVariant::Unit {
-                name: vname,
+                name: Cow::Owned(vname),
                 discriminant,
             },
             Fields::Unnamed(u) => {
@@ -79,9 +83,9 @@ pub fn enum_descriptor(name: &str, data: &DataEnum) -> Option<KindDescriptor> {
                     tys.push(resolve(&f.ty)?);
                 }
                 EnumVariant::Tuple {
-                    name: vname,
+                    name: Cow::Owned(vname),
                     discriminant,
-                    fields: tys,
+                    fields: Cow::Owned(tys),
                 }
             }
             Fields::Named(n) => {
@@ -89,14 +93,14 @@ pub fn enum_descriptor(name: &str, data: &DataEnum) -> Option<KindDescriptor> {
                 for f in &n.named {
                     let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
                     fs.push(NamedField {
-                        name: fname,
+                        name: Cow::Owned(fname),
                         ty: resolve(&f.ty)?,
                     });
                 }
                 EnumVariant::Struct {
-                    name: vname,
+                    name: Cow::Owned(vname),
                     discriminant,
-                    fields: fs,
+                    fields: Cow::Owned(fs),
                 }
             }
         };
@@ -104,7 +108,9 @@ pub fn enum_descriptor(name: &str, data: &DataEnum) -> Option<KindDescriptor> {
     }
     Some(KindDescriptor {
         name: name.to_string(),
-        schema: SchemaType::Enum { variants },
+        schema: SchemaType::Enum {
+            variants: Cow::Owned(variants),
+        },
     })
 }
 
@@ -128,7 +134,7 @@ fn resolve(ty: &Type) -> Option<SchemaType> {
             let element = resolve(&arr.elem)?;
             let len = array_len(&arr.len)?;
             Some(SchemaType::Array {
-                element: Box::new(element),
+                element: SchemaCell::owned(element),
                 len,
             })
         }
@@ -162,12 +168,12 @@ fn resolve(ty: &Type) -> Option<SchemaType> {
                     if is_u8_ident(inner) {
                         Some(SchemaType::Bytes)
                     } else {
-                        Some(SchemaType::Vec(Box::new(resolve(inner)?)))
+                        Some(SchemaType::Vec(SchemaCell::owned(resolve(inner)?)))
                     }
                 }
                 "Option" => {
                     let inner = first_generic(seg)?;
-                    Some(SchemaType::Option(Box::new(resolve(inner)?)))
+                    Some(SchemaType::Option(SchemaCell::owned(resolve(inner)?)))
                 }
                 _ => None,
             }

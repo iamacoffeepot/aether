@@ -74,7 +74,7 @@ pub fn all() -> Vec<KindDescriptor> {
 fn schema<K: Kind + Schema>() -> KindDescriptor {
     KindDescriptor {
         name: K::NAME.to_string(),
-        schema: K::schema(),
+        schema: K::SCHEMA.clone(),
     }
 }
 
@@ -204,7 +204,7 @@ mod tests {
         let SchemaType::Struct {
             repr_c: nested_repr,
             fields: nested_fields,
-        } = element.as_ref()
+        } = &**element
         else {
             panic!("expected nested Struct");
         };
