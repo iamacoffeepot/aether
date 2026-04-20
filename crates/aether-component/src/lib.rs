@@ -52,7 +52,8 @@ pub use kinds::{Cons, KindList, KindTable, Nil};
 
 /// Sentinel returned by `raw::resolve_kind` when the substrate has not
 /// registered the requested kind name. Mirrors the host constant.
-pub const KIND_NOT_FOUND: u32 = u32::MAX;
+/// Widened to `u64` in ADR-0030 Phase 1.
+pub const KIND_NOT_FOUND: u64 = u64::MAX;
 
 /// Phantom-typed wrapper around a resolved kind id. A `KindId<Tick>`
 /// cannot be passed where a `KindId<DrawTriangle>` is expected — the
@@ -63,7 +64,7 @@ pub const KIND_NOT_FOUND: u32 = u32::MAX;
 /// `kind` parameters in a hand-rolled `receive` shim (ADR-0014's
 /// `Mail::decode` will make the raw-int compare go away).
 pub struct KindId<K: Kind> {
-    raw: u32,
+    raw: u64,
     _k: PhantomData<fn() -> K>,
 }
 
@@ -82,14 +83,14 @@ impl<K: Kind> Eq for KindId<K> {}
 
 impl<K: Kind> KindId<K> {
     /// The raw kind id the substrate assigned. Exposed for hand-rolled
-    /// receive shims that `match` on the inbound `kind: u32` parameter.
-    pub fn raw(self) -> u32 {
+    /// receive shims that `match` on the inbound `kind: u64` parameter.
+    pub fn raw(self) -> u64 {
         self.raw
     }
 
     /// Returns `true` if `raw` is the id the substrate assigned to `K`.
     /// Convenience over `kind_id.raw() == raw`.
-    pub fn matches(self, raw: u32) -> bool {
+    pub fn matches(self, raw: u64) -> bool {
         self.raw == raw
     }
 }
@@ -102,7 +103,7 @@ impl<K: Kind> KindId<K> {
 /// Built via `resolve_sink::<K>(name)` during init.
 pub struct Sink<K: Kind> {
     mailbox: u64,
-    kind: u32,
+    kind: u64,
     _k: PhantomData<fn() -> K>,
 }
 
@@ -121,7 +122,7 @@ impl<K: Kind> Sink<K> {
     }
 
     /// Raw kind id. Exposed for the same reason as `mailbox`.
-    pub fn kind(self) -> u32 {
+    pub fn kind(self) -> u64 {
         self.kind
     }
 }
@@ -490,7 +491,7 @@ impl<'a> PriorState<'a> {
 /// linear memory (the substrate placed them there before the FFI
 /// call), so zero-copy is possible when alignment permits.
 pub struct Mail<'a> {
-    kind: u32,
+    kind: u64,
     // Stored as `usize` so `Mail::decode` can reconstruct a full host
     // pointer for tests, while the FFI path (`__from_raw`) widens the
     // incoming `u32` address. On wasm32 `usize == u32` so this is a
@@ -511,7 +512,7 @@ impl<'a> Mail<'a> {
     /// delivers `ptr` as a wasm32 offset (`u32`); this widens it.
     #[doc(hidden)]
     pub unsafe fn __from_raw(
-        kind: u32,
+        kind: u64,
         ptr: u32,
         count: u32,
         sender: u32,
@@ -531,7 +532,7 @@ impl<'a> Mail<'a> {
     /// from a host pointer go through here so 64-bit addresses survive.
     #[doc(hidden)]
     #[cfg(test)]
-    unsafe fn __from_ptr_test(kind: u32, ptr: usize, count: u32, sender: u32) -> Self {
+    unsafe fn __from_ptr_test(kind: u64, ptr: usize, count: u32, sender: u32) -> Self {
         Mail {
             kind,
             ptr,
@@ -547,7 +548,7 @@ impl<'a> Mail<'a> {
     #[doc(hidden)]
     #[cfg(test)]
     unsafe fn __from_ptr_test_with_table(
-        kind: u32,
+        kind: u64,
         ptr: usize,
         count: u32,
         sender: u32,
@@ -566,7 +567,7 @@ impl<'a> Mail<'a> {
     /// Raw kind id the substrate routed this mail under. Match against
     /// a cached `KindId<K>` via `kind_id.matches(mail.kind())`, or use
     /// `decode::<K>(kind_id)` and let it be the discriminator.
-    pub fn kind(&self) -> u32 {
+    pub fn kind(&self) -> u64 {
         self.kind
     }
 
@@ -779,7 +780,7 @@ macro_rules! export {
         /// mail with no meaningful reply target. Exported under the
         /// `_p32` suffix per ADR-0024 Phase 1.
         #[unsafe(export_name = "receive_p32")]
-        pub unsafe extern "C" fn receive(kind: u32, ptr: u32, count: u32, sender: u32) -> u32 {
+        pub unsafe extern "C" fn receive(kind: u64, ptr: u32, count: u32, sender: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };

@@ -33,7 +33,7 @@ const STATE_OFFSET: u32 = 8192;
 pub struct Component {
     store: Store<SubstrateCtx>,
     memory: Memory,
-    receive: TypedFunc<(u32, u32, u32, u32), u32>,
+    receive: TypedFunc<(u64, u32, u32, u32), u32>,
     on_replace: Option<TypedFunc<(), u32>>,
     on_drop: Option<TypedFunc<(), u32>>,
     on_rehydrate: Option<TypedFunc<(u32, u32, u32), u32>>,
@@ -55,7 +55,7 @@ impl Component {
             .get_memory(&mut store, "memory")
             .ok_or_else(|| wasmtime::Error::msg("guest exports no `memory`"))?;
         let receive =
-            instance.get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "receive_p32")?;
+            instance.get_typed_func::<(u64, u32, u32, u32), u32>(&mut store, "receive_p32")?;
 
         // Optional `init() -> u32` export: called once before the first
         // `receive`, used for one-shot bootstrap like resolving kind
@@ -249,7 +249,7 @@ mod tests {
     const WAT_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 i32.const 200
@@ -266,14 +266,14 @@ mod tests {
     const WAT_NO_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
                 i32.const 0))
     "#;
 
     const WAT_TRAP_ON_DROP: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_drop") (result i32)
                 unreachable))
@@ -287,7 +287,7 @@ mod tests {
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 300) "\de\ad\be\ef")
-            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -305,7 +305,7 @@ mod tests {
             (import "aether" "save_state_p32"
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -322,7 +322,7 @@ mod tests {
     const WAT_REHYDRATES: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_rehydrate_p32") (param i32 i32 i32) (result i32)
                 ;; *(u32*)396 = version
@@ -342,7 +342,7 @@ mod tests {
     const WAT_STORES_SENDER: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
                 i32.const 500
                 local.get 3
                 i32.store
@@ -355,12 +355,12 @@ mod tests {
     const WAT_REPLIES: &str = r#"
         (module
             (import "aether" "reply_mail_p32"
-                (func $reply_mail (param i32 i32 i32 i32 i32) (result i32)))
+                (func $reply_mail (param i32 i64 i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i32 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
                 (drop (call $reply_mail
                     (local.get 3) ;; sender handle from receive param
-                    (i32.const 0) ;; kind id 0 — registered in the test
+                    (i64.const 0) ;; kind id 0 — registered in the test
                     (i32.const 0) ;; ptr
                     (i32.const 0) ;; len
                     (i32.const 1))) ;; count
