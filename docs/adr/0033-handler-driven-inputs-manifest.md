@@ -1,7 +1,8 @@
 # ADR-0033: Handler-driven inputs manifest
 
-- **Status:** Proposed
+- **Status:** Accepted (phases 1–3 shipped)
 - **Date:** 2026-04-20
+- **Accepted:** 2026-04-20
 
 ## Context
 
@@ -207,9 +208,11 @@ Replies (ADR-0013) carry a kind id and route into the same `receive_p32` export.
 - New MCP tool `describe_component(engine_id, mailbox_id)` returns `{ name, doc, receives, fallback }` including author-written descriptions.
 - Substrate emits a warning (not yet an error) when mail arrives for a strict receiver's unhandled kind.
 
-**Phase 3** — Retirement:
-- Migrate remaining in-repo components (echoer, caller, input_logger, any sokoban/demo components).
-- Remove `Component::Kinds`, `Component::receive`, `Mail::is::<K>()`, `Mail::decode_typed::<K>()`, `KindList`, `Cons`, `Nil`, tuple-1..=32 impls, runtime `KindTable`.
+**Phase 3** — Retirement (shipped 2026-04-20):
+- Migrated remaining in-repo components (echoer, caller, input_logger, sokoban) to `#[handlers]`.
+- Removed `Component::Kinds`, `Component::receive`, `KindList`, `Cons`, `Nil`, tuple-1..=32 impls, runtime `KindTable`. `Mail::is::<K>()` and `Mail::decode_typed::<K>()` were retained with new bodies that compare `K::ID` directly (no `KindTable` lookup).
+- `#[handlers]` now emits an inherent `__aether_dispatch(&mut self, ctx, mail) -> u32` method (instead of a trait `receive`); the returned code is `DISPATCH_HANDLED` on match or `DISPATCH_UNKNOWN_KIND` on a strict-receiver miss, and `export!`'s `receive_p32` shim propagates it verbatim. This also fixes the gap filed as #142 (the scheduler's warn-on-unhandled-kind path now actually fires).
+- `#[handlers]` prepends `ctx.subscribe_input::<K>()` calls to the user's `init` for every `K::IS_INPUT` handler kind, replacing the retired `KindList::resolve_all` walker.
 - ADR-0027 marked **Superseded by ADR-0033**.
 - Optional follow-up ADR: substrate-side rejection of unhandled kinds (moves enforcement across the FFI boundary).
 
