@@ -80,9 +80,10 @@ pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
 
 /// Decode the component's `aether.kinds.inputs` section (ADR-0033)
 /// into a structured `ComponentCapabilities`. Components without the
-/// section return `ComponentCapabilities::default()` — matches
-/// behavior of a pre-ADR-0033 component that shipped with only
-/// `type Kinds` / `fn receive`.
+/// section return `ComponentCapabilities::default()` — valid only for
+/// components built against the pre-ADR-0033 SDK, which are no longer
+/// produceable after phase 3 retired the `type Kinds` / `fn receive`
+/// surface.
 ///
 /// Record shape: `[0x01][postcard(InputsRecord)]` back-to-back. The
 /// classifier walks the records in declaration order: every Handler

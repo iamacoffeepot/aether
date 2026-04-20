@@ -27,13 +27,11 @@ use bytemuck::{Pod, Zeroable};
 /// Per-frame signal from the substrate's frame loop. Empty payload —
 /// elapsed-time is parked until a subscriber actually needs it.
 ///
-/// ADR-0033 handler dispatch (`#[handlers]` synthesized `fn receive`)
-/// decodes every typed handler via `Mail::decode_typed::<K>()`, which
-/// requires `K: AnyBitPattern`. Zero-sized unit kinds like `Tick`
-/// trivially satisfy that through `Pod` + `Zeroable` — no padding,
-/// no uninitialized bits. Adding the derives preserves backward
-/// compatibility with the ADR-0027 `mail.is::<Tick>()` path (which
-/// only needed `Kind + 'static`) while unlocking typed dispatch.
+/// ADR-0033 handler dispatch (`#[handlers]` synthesized
+/// `__aether_dispatch`) decodes every typed handler via
+/// `Mail::decode_typed::<K>()`, which requires `K: AnyBitPattern`.
+/// Zero-sized unit kinds like `Tick` trivially satisfy that through
+/// `Pod` + `Zeroable` — no padding, no uninitialized bits.
 #[repr(C)]
 #[derive(
     Copy,
