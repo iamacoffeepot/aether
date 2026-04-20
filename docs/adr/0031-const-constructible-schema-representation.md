@@ -179,6 +179,51 @@ Rust struct identifiers, module paths, and crate names are **not** hashed. Conse
 
 The `manifest.rs` syntactic walker (`aether-mail-derive/src/manifest.rs`) retires entirely. The `aether.kinds` custom section is still emitted, but via `postcard::to_allocvec(&T::SCHEMA)` at build time — now possible because `T::SCHEMA` is a const value the derive can reference even if it's in another crate. (The derive can't call `postcard::to_allocvec` directly since it runs as a proc-macro; it emits a const byte array computed from the const schema via a const fn postcard serializer, or it emits the bytes by having the Kind derive depend on Schema and walking the const tree directly.)
 
+### Supported type vocabulary
+
+The derive commits to an explicit, closed set. Anything outside it is a compile error at the `#[derive(Schema)]` site — no silent skipping, no "best effort" fallback, no latent wire-shape divergence:
+
+- **Primitives**: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`, `bool`.
+- **Strings and bytes**: `String` (length-prefixed UTF-8), `Vec<u8>` (canonical `SchemaType::Bytes`, distinct from `Vec<T>` for hub-side bytes handling).
+- **Containers**: `Vec<T>`, `Option<T>`, `[T; N]` where `N` is a literal integer.
+- **Structs**: named, tuple, and unit forms. `#[repr(C)]` flag propagates into `SchemaType::Struct { repr_c }`.
+- **Enums**: unit, tuple, and struct variants. Discriminants are source-order indices by default; see "Explicit discriminants" below.
+
+**Explicitly unsupported** (derive emits a compile error naming the unsupported type and pointing at the supported vocabulary):
+
+- **`usize` / `isize`** — platform-dependent width. Postcard serializes them as varint, which is deterministic, but the ambiguity between "host pointer width" and "wire shape" is a wart we'd rather not paper over. Users pick `u32` / `u64` explicitly.
+- **Generic type parameters** (`struct Msg<T> { v: T }`) — the derive can't produce a `const SCHEMA` for a non-monomorphized type. Users with generic kinds either instantiate at the kind site (`type Msg = GenericMsg<u32>` with an explicit `Schema` impl on the alias), or expand the type.
+- **`HashMap<K, V>` / `BTreeMap<K, V>`** — hash iteration order is nondeterministic; BTreeMap is deterministic but cross-version ordering guarantees are thin. Users explicitly sort into `Vec<(K, V)>`.
+- **References, raw pointers, function pointers, trait objects** — no wire-shape meaning.
+- **`Cow<'_, _>`, `Box<dyn Trait>`, `PhantomData<T>`, `()` as a field type** — various flavors of "not a wire value."
+- **Complex const expressions** in array lengths (`[T; Self::LEN]`, `[T; N + 1]`) — the derive needs a literal `u32` to emit into `SchemaType::Array { len }`.
+
+**Type aliases** (`type Foo = u32;`) work transparently because `<Foo as Schema>::SCHEMA` dispatches through the trait impl — aliases never needed resolution at macro time under this design. This is a free improvement over the current syntactic walker, which fails on aliases.
+
+### Forbidden serde customizations
+
+The schema ↔ wire invariant is: **bytes on the wire are exactly what `postcard::serialize(&value)` produces for a type whose derived `Serialize` matches its declared `SCHEMA`**. Any serde attribute that makes those diverge is a compile error at the `#[derive(Schema)]` site:
+
+- `#[serde(rename = "...")]` / `#[serde(rename_all = "...")]` — changes wire field/variant names; SCHEMA would carry the Rust identifier.
+- `#[serde(skip)]` / `#[serde(skip_serializing)]` / `#[serde(skip_deserializing)]` — removes a field from the wire; SCHEMA would still list it.
+- `#[serde(flatten)]` — embeds one struct's fields into another on the wire; SCHEMA would describe the nested shape.
+- `#[serde(transparent)]` — single-field newtype serializes as the inner type; SCHEMA would describe it as a struct.
+- `#[serde(default)]` — affects deserialization but can mask missing fields; SCHEMA has no way to represent "optional on the wire, required in the type."
+- `#[serde(tag = ...)]`, `#[serde(content = ...)]`, `#[serde(untagged)]` — alternate enum encodings; SCHEMA assumes postcard's default tagged encoding.
+- **Manual `impl Serialize` / `impl Deserialize`** on a type that also derives `Schema` — the derive has no way to verify the manual impl matches the declared SCHEMA. Compile error; users pick one side.
+
+Attributes that don't affect wire shape (`#[serde(with = "...")]` for borrowing-only custom serializers, `#[serde(bound = "...")]` for generic constraints) remain allowed — but these are outside the kind-payload vocabulary anyway since kinds don't have borrow lifetimes.
+
+### Explicit enum discriminants
+
+`enum E { A = 5, B = 10, C }` — postcard uses varint-encoded declaration-index discriminants (`0, 1, 2`), ignoring the source-code `= 5` annotations. Today's derive also uses declaration indices. No mismatch against postcard, but the source-code discriminants are misleading and invite "the wire uses 5" confusion.
+
+Two options, picking one in the derive:
+- **Forbid explicit discriminants on kinds** — compile error at the `#[derive(Kind)]` site. Cleanest; forces users to accept "source order is wire order" as the contract.
+- **Allow explicit discriminants but encode declaration index anyway** — what today's derive does. Preserves Rust ergonomics (FFI enums sometimes need explicit reprs) at the cost of the naming-vs-wire drift risk.
+
+Decision: **forbid explicit discriminants on `#[derive(Kind)]` types**. Kinds are wire vocabulary, and the wire uses declaration order. Helper types that derive only `Schema` (not `Kind`) can keep explicit discriminants — they're not kinds, they're payload leaves, and the enclosing kind's SCHEMA captures whatever the helper's `Schema::SCHEMA` says.
+
 ### Substrate-side
 
 `Registry` stores schemas the same way it does today — owned values, now built from `SchemaType::Owned`-variant trees after deserialization. Nothing visible to callers changes at the `register_kind` API. The hash computation changes: the registry gains a `schema_hash(&SchemaType) -> u64` that walks the tree via the same const fn the derive uses, producing identical bytes on both sides.
@@ -194,6 +239,9 @@ The biggest downstream surface. `encoder.rs` and `decoder.rs` match on `SchemaTy
 ## Consequences
 
 - **Structural hashing, not nominal.** Rust type names and crate paths don't enter the hash — only kind names, field names, and shape. Crate reorganization leaves hashes intact; two structurally-identical structs collide (correctly — they're wire-equivalent).
+- **Closed type vocabulary, compile-time enforced.** Unsupported types (`usize`, `HashMap`, generics, etc.) and wire-shape-divergent serde attributes (`rename`, `flatten`, `transparent`, `skip`, custom `Serialize`) produce compile errors at the derive site, not silent skips or runtime mismatches. The SCHEMA ↔ wire invariant is the derive's promise.
+- **Type aliases work for free.** `type Foo = u32` dispatches through `<Foo as Schema>::SCHEMA` — no special handling needed. Today's syntactic walker can't resolve aliases; the new design sidesteps the problem entirely.
+- **Explicit enum discriminants forbidden on kinds.** Kinds commit to "source order is wire order"; helper types under `#[derive(Schema)]` alone keep Rust-ergonomic discriminant control.
 - **Unified representation.** One `SchemaType`, one walker, one hash. The `manifest.rs` syntactic-walker hack retires. Schema and Kind derives stop carrying two implementations of the same logic.
 - **ADR-0030 Phase 2 unblocks.** `const ID: u64` on `Kind` is a four-line derive change once `Schema::SCHEMA` is a const. Nested types (`DrawTriangle { verts: [Vertex; 3] }`) hash correctly on both sides because both sides see the same const tree.
 - **Size cycle handled explicitly.** `SchemaCell` is the size-breaking indirection; no arena, no new dependency. One heap allocation per recursive node on deserialize — same cost envelope as today's `Box<SchemaType>`.
