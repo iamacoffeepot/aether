@@ -27,7 +27,8 @@ use crate::spawn::{DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, SpawnOpts
 
 use super::args::{
     CaptureFrameArgs, CaptureFrameResultWire, DescribeKindsArgs, EngineInfo, EngineLogEntry,
-    EngineLogsArgs, EngineLogsResponse, MailSpec, MailStatus, ReceiveMailArgs, ReceivedMail,
+    EngineLogsArgs, EngineLogsResponse, LoadComponentArgs, LoadComponentResponse, LoadResultWire,
+    MailSpec, MailStatus, ReceiveMailArgs, ReceivedMail, ReplaceComponentArgs, ReplaceResultWire,
     SendMailArgs, SpawnResult, SpawnSubstrateArgs, TerminateResult, TerminateSubstrateArgs,
     log_level_to_str,
 };
@@ -41,6 +42,18 @@ use super::{Hub, HubState};
 /// compatibility.
 const KIND_CAPTURE_FRAME: &str = "aether.control.capture_frame";
 const KIND_CAPTURE_FRAME_RESULT: &str = "aether.control.capture_frame_result";
+const KIND_LOAD_COMPONENT: &str = "aether.control.load_component";
+const KIND_LOAD_RESULT: &str = "aether.control.load_result";
+const KIND_REPLACE_COMPONENT: &str = "aether.control.replace_component";
+const KIND_REPLACE_RESULT: &str = "aether.control.replace_result";
+
+/// Shared default/cap for await-reply tools. `DEFAULT_CAPTURE_TIMEOUT`
+/// is reused directly by name from the capture path; these aliases
+/// exist so the load/replace paths don't have to reach across the
+/// implementation to share the constant. Same values: 5s default, 30s
+/// ceiling.
+const DEFAULT_REPLY_TIMEOUT: Duration = DEFAULT_CAPTURE_TIMEOUT;
+const MAX_REPLY_TIMEOUT: Duration = MAX_CAPTURE_TIMEOUT;
 
 /// Default cap on how long `capture_frame` waits for the substrate's
 /// reply before returning an error. Long enough to tolerate one
@@ -386,6 +399,187 @@ impl Hub {
                     "image/png",
                 )]))
             }
+        }
+    }
+
+    #[tool(
+        description = "Load a WASM component into the substrate by filesystem path. The hub reads the binary from `binary_path`, forwards the bytes to the substrate as `aether.control.load_component`, and waits for the substrate's `LoadResult` reply — returning `{mailbox_id, name}` inline or an error. Path must exist as given (no `~` expansion, no relative resolution — same rule as `spawn_substrate`). The `kinds` array is the same shape as the underlying kind's `kinds` field (see `describe_kinds`). Rejects with \"already in flight\" if a prior `load_component` on this session hasn't completed. Default timeout 5000ms; clamped to 30000. Agents never inline the wasm bytes through the tool call — that's what the path is for."
+    )]
+    pub(super) async fn load_component(
+        &self,
+        Parameters(args): Parameters<LoadComponentArgs>,
+    ) -> Result<String, McpError> {
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+        if self.state.engines.get(&id).is_none() {
+            return Err(McpError::invalid_params(
+                format!("unknown engine_id {}", args.engine_id),
+                None,
+            ));
+        }
+
+        let wasm = tokio::fs::read(&args.binary_path).await.map_err(|e| {
+            McpError::invalid_params(
+                format!("reading binary_path {:?}: {e}", args.binary_path),
+                None,
+            )
+        })?;
+
+        let params = serde_json::json!({
+            "wasm": wasm,
+            "kinds": args.kinds,
+            "name": args.name,
+        });
+
+        let (_guard, rx) = self
+            .session
+            .replies
+            .register(KIND_LOAD_RESULT.to_owned())
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    "a load_component is already in flight on this session; wait for it to complete"
+                        .to_owned(),
+                    None,
+                )
+            })?;
+
+        let spec = MailSpec {
+            engine_id: args.engine_id.clone(),
+            recipient_name: "aether.control".to_owned(),
+            kind_name: KIND_LOAD_COMPONENT.to_owned(),
+            params: Some(params),
+            count: 1,
+        };
+        deliver_one(spec, &self.state.engines, self.session.token)
+            .await
+            .map_err(|e| McpError::internal_error(format!("send failed: {e}"), None))?;
+
+        let wait = args
+            .timeout_ms
+            .map(|ms| Duration::from_millis(ms as u64).min(MAX_REPLY_TIMEOUT))
+            .unwrap_or(DEFAULT_REPLY_TIMEOUT);
+        let queued = match timeout(wait, rx).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(_)) => {
+                return Err(McpError::internal_error(
+                    "load_result channel closed before reply arrived".to_owned(),
+                    None,
+                ));
+            }
+            Err(_) => {
+                return Err(McpError::internal_error(
+                    format!(
+                        "timed out after {}ms waiting for load_result",
+                        wait.as_millis()
+                    ),
+                    None,
+                ));
+            }
+        };
+
+        let result: LoadResultWire = postcard::from_bytes(&queued.payload)
+            .map_err(|e| McpError::internal_error(format!("decode reply: {e}"), None))?;
+        match result {
+            LoadResultWire::Err { error } => Err(McpError::internal_error(
+                format!("substrate load failed: {error}"),
+                None,
+            )),
+            LoadResultWire::Ok { mailbox_id, name } => {
+                let response = LoadComponentResponse { mailbox_id, name };
+                serde_json::to_string(&response)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))
+            }
+        }
+    }
+
+    #[tool(
+        description = "Atomically replace a live component's WASM with a new binary loaded from a filesystem path (ADR-0022 freeze-drain-swap). The hub reads the binary from `binary_path` and forwards `aether.control.replace_component` to the substrate, which freezes the target mailbox, drains in-flight mail on the old instance up to `drain_timeout_ms` (substrate default 5000), then swaps. On drain timeout the old instance stays bound and the reply is an error — a loud failure rather than silent dropped mail. Path must exist as given. Waits for the substrate's `ReplaceResult`; returns `\"Ok\"` on success. Rejects with \"already in flight\" if a prior replace is pending on this session. Tool timeout default 5000ms, clamped to 30000 — set it above `drain_timeout_ms`."
+    )]
+    pub(super) async fn replace_component(
+        &self,
+        Parameters(args): Parameters<ReplaceComponentArgs>,
+    ) -> Result<String, McpError> {
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+        if self.state.engines.get(&id).is_none() {
+            return Err(McpError::invalid_params(
+                format!("unknown engine_id {}", args.engine_id),
+                None,
+            ));
+        }
+
+        let wasm = tokio::fs::read(&args.binary_path).await.map_err(|e| {
+            McpError::invalid_params(
+                format!("reading binary_path {:?}: {e}", args.binary_path),
+                None,
+            )
+        })?;
+
+        let params = serde_json::json!({
+            "mailbox_id": args.mailbox_id,
+            "wasm": wasm,
+            "kinds": args.kinds,
+            "drain_timeout_ms": args.drain_timeout_ms,
+        });
+
+        let (_guard, rx) = self
+            .session
+            .replies
+            .register(KIND_REPLACE_RESULT.to_owned())
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    "a replace_component is already in flight on this session; wait for it to complete"
+                        .to_owned(),
+                    None,
+                )
+            })?;
+
+        let spec = MailSpec {
+            engine_id: args.engine_id.clone(),
+            recipient_name: "aether.control".to_owned(),
+            kind_name: KIND_REPLACE_COMPONENT.to_owned(),
+            params: Some(params),
+            count: 1,
+        };
+        deliver_one(spec, &self.state.engines, self.session.token)
+            .await
+            .map_err(|e| McpError::internal_error(format!("send failed: {e}"), None))?;
+
+        let wait = args
+            .timeout_ms
+            .map(|ms| Duration::from_millis(ms as u64).min(MAX_REPLY_TIMEOUT))
+            .unwrap_or(DEFAULT_REPLY_TIMEOUT);
+        let queued = match timeout(wait, rx).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(_)) => {
+                return Err(McpError::internal_error(
+                    "replace_result channel closed before reply arrived".to_owned(),
+                    None,
+                ));
+            }
+            Err(_) => {
+                return Err(McpError::internal_error(
+                    format!(
+                        "timed out after {}ms waiting for replace_result",
+                        wait.as_millis()
+                    ),
+                    None,
+                ));
+            }
+        };
+
+        let result: ReplaceResultWire = postcard::from_bytes(&queued.payload)
+            .map_err(|e| McpError::internal_error(format!("decode reply: {e}"), None))?;
+        match result {
+            ReplaceResultWire::Err { error } => Err(McpError::internal_error(
+                format!("substrate replace failed: {error}"),
+                None,
+            )),
+            ReplaceResultWire::Ok => Ok("\"Ok\"".to_owned()),
         }
     }
 

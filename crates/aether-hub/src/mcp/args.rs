@@ -223,6 +223,88 @@ pub(super) enum CaptureFrameResultWire {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct LoadComponentArgs {
+    /// Hub-assigned engine UUID as a string (from `list_engines`).
+    pub engine_id: String,
+    /// Absolute path to the WASM component binary on the hub's
+    /// filesystem. The hub reads the file and sends the bytes to the
+    /// substrate — agents don't inline wasm bytes through the tool
+    /// call. Must exist as given; no `~` expansion, no relative-path
+    /// resolution. Matches `spawn_substrate`'s path rule.
+    pub binary_path: String,
+    /// Runtime-registered kinds the component intends to use. Same
+    /// shape as `aether.control.load_component`'s `kinds` field (see
+    /// `describe_kinds` for the schema). Passed through unchanged to
+    /// the substrate.
+    #[serde(default)]
+    pub kinds: serde_json::Value,
+    /// Optional human-readable name. The substrate defaults one if
+    /// absent and echoes it back in the result.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Maximum time to wait for the substrate's `LoadResult` reply,
+    /// in milliseconds. Defaults to 5000. Clamped to 30000.
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+}
+
+/// Wire-format mirror of `aether.control.load_result`. Postcard-
+/// decoded from the substrate's reply payload. Must stay in lockstep
+/// with `aether-kinds::LoadResult` — that type is canonical.
+#[derive(Debug, Deserialize)]
+pub(super) enum LoadResultWire {
+    Ok { mailbox_id: u32, name: String },
+    Err { error: String },
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LoadComponentResponse {
+    /// Substrate-assigned mailbox id for the loaded component. Hand
+    /// this to `replace_component` or use as the `mailbox` in
+    /// `subscribe_input`.
+    pub mailbox_id: u32,
+    /// Substrate-resolved name. Matches the `name` in the request if
+    /// provided; otherwise the substrate-defaulted value.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReplaceComponentArgs {
+    /// Hub-assigned engine UUID as a string (from `list_engines`).
+    pub engine_id: String,
+    /// Mailbox id of the live component to replace (from a prior
+    /// `load_component` or `list_engines`-derived lookup).
+    pub mailbox_id: u32,
+    /// Absolute path to the replacement WASM binary on the hub's
+    /// filesystem. Same filesystem rule as `load_component`.
+    pub binary_path: String,
+    /// Runtime-registered kinds the replacement component intends to
+    /// use. Same shape as `load_component.kinds`.
+    #[serde(default)]
+    pub kinds: serde_json::Value,
+    /// Drain timeout in milliseconds for in-flight mail on the old
+    /// instance (ADR-0022). `None` uses the substrate default (5000).
+    /// If the drain exceeds this, the replace fails and the old
+    /// instance stays bound.
+    #[serde(default)]
+    pub drain_timeout_ms: Option<u32>,
+    /// Maximum time to wait for the substrate's `ReplaceResult` reply,
+    /// in milliseconds. Defaults to 5000. Clamped to 30000. Set higher
+    /// than `drain_timeout_ms` so the reply has room to arrive after
+    /// the substrate declares drain failure.
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+}
+
+/// Wire-format mirror of `aether.control.replace_result`. Must stay
+/// in lockstep with `aether-kinds::ReplaceResult`.
+#[derive(Debug, Deserialize)]
+pub(super) enum ReplaceResultWire {
+    Ok,
+    Err { error: String },
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReceiveMailArgs {
     /// Maximum number of items to return in this call. `None` drains
     /// everything currently queued. Defaults to unlimited.
