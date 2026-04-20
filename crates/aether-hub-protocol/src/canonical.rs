@@ -33,15 +33,13 @@ use crate::types::{
     VariantLabel,
 };
 
-// ---- Cow accessors ---------------------------------------------------
-//
 // `Cow::Borrowed::deref` isn't const, so `&cow[i]` / `&cow.as_str()`
 // can't be called from a const fn. Hand-roll a `match` per concrete
 // slice/str type to narrow `Cow<'static, [T]>` to `&[T]` (or
 // `Cow<str>` to `&str`). All panic on `Owned` — only the derive-
-// emitted `Cow::Borrowed` path is legal at const-eval here. See
-// the module-level `#![allow(clippy::ptr_arg)]` for why these take
-// `&Cow` rather than `&[T]` / `&str`.
+// emitted `Cow::Borrowed` path is legal at const-eval here. See the
+// module-level `#![allow(clippy::ptr_arg)]` for why these take `&Cow`
+// rather than `&[T]` / `&str`.
 
 const fn cow_named_fields<'a>(c: &'a Cow<'static, [NamedField]>) -> &'a [NamedField] {
     match c {
@@ -92,11 +90,10 @@ const fn cow_str_as_str<'a>(c: &'a Cow<'static, str>) -> &'a str {
     }
 }
 
-// ---- tag constants ---------------------------------------------------
-//
-// Hand-pinned (not "source order"-inferred) so rearranging an enum in
-// `types.rs` can't silently change the wire without the change showing
-// up here too. Substrate/hub `SchemaShape` must keep the same ordering.
+// Variant discriminants are hand-pinned (not "source order"-inferred)
+// so rearranging an enum in `types.rs` can't silently change the wire
+// without the change showing up here too. Substrate/hub `SchemaShape`
+// must keep the same ordering.
 
 const SCHEMA_UNIT: u8 = 0;
 const SCHEMA_BOOL: u8 = 1;
@@ -134,8 +131,6 @@ const LABEL_ENUM: u8 = 5;
 const VARIANT_LABEL_UNIT: u8 = 0;
 const VARIANT_LABEL_TUPLE: u8 = 1;
 const VARIANT_LABEL_STRUCT: u8 = 2;
-
-// ---- varint helpers --------------------------------------------------
 
 /// Byte count of `val` in postcard's unsigned-varint encoding
 /// (7 bits per byte, MSB set until the last byte).
@@ -194,8 +189,6 @@ const fn str_len(s: &str) -> usize {
     let bytes = s.as_bytes();
     varint_usize_len(bytes.len()) + bytes.len()
 }
-
-// ---- SchemaType serializer ------------------------------------------
 
 /// Byte length the canonical schema encoding will take.
 pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
@@ -442,8 +435,6 @@ const fn primitive_tag(p: Primitive) -> u8 {
         Primitive::F64 => PRIM_F64,
     }
 }
-
-// ---- Labels serializer ----------------------------------------------
 
 /// Byte length for `KindLabels` postcard encoding.
 pub const fn canonical_len_labels(labels: &KindLabels) -> usize {

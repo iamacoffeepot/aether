@@ -439,8 +439,6 @@ fn is_vec_u8(ty: &Type) -> bool {
     inner.path.is_ident("u8")
 }
 
-// ----- attribute and shape helpers --------------------------------------
-
 struct KindAttr {
     name: String,
     is_input: bool,
