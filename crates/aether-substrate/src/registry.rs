@@ -1,6 +1,8 @@
 // Name registries. Two tables: mailboxes (MailboxId → name + entry,
 // ids derived from name via ADR-0029's stable hash) and kinds (name →
-// u32 kind id, per ADR-0005 — still sequentially assigned). The
+// u64 kind id, per ADR-0005 — still sequentially assigned; ADR-0030
+// Phase 1 widened the id type ahead of Phase 2's switch to hashed
+// derivation). The
 // registry uses interior mutability (`RwLock`) so mailboxes and kinds
 // can be added at runtime — ADR-0010's runtime component loading
 // mutates both tables after an `Arc<Registry>` has already been shared
@@ -62,7 +64,7 @@ struct Inner {
     /// Registration inserts; `drop_mailbox` transitions the entry to
     /// `Dropped` so the id stays addressable until re-registered.
     mailboxes: HashMap<MailboxId, Mailbox>,
-    kind_by_name: HashMap<String, u32>,
+    kind_by_name: HashMap<String, u64>,
     /// Parallel index: `kind_names[id]` is the canonical name the kind
     /// was first registered with. Kept in sync with `kind_by_name` so
     /// `kind_name(id)` is O(1); used by `SinkHandler` dispatch to hand
@@ -281,7 +283,7 @@ impl Registry {
     /// registrations that don't need the hub to encode params;
     /// production init should prefer `register_kind_with_descriptor`
     /// so the descriptor stored here matches the type definition.
-    pub fn register_kind(&self, name: impl Into<String>) -> u32 {
+    pub fn register_kind(&self, name: impl Into<String>) -> u64 {
         let name = name.into();
         let descriptor = KindDescriptor {
             name: name.clone(),
@@ -307,7 +309,7 @@ impl Registry {
     pub fn register_kind_with_descriptor(
         &self,
         descriptor: KindDescriptor,
-    ) -> Result<u32, KindConflict> {
+    ) -> Result<u64, KindConflict> {
         let name = descriptor.name.clone();
         self.register_kind_internal(name, descriptor, /*reject_conflict=*/ true)
     }
@@ -317,7 +319,7 @@ impl Registry {
         name: String,
         descriptor: KindDescriptor,
         reject_conflict: bool,
-    ) -> Result<u32, KindConflict> {
+    ) -> Result<u64, KindConflict> {
         let mut inner = self.inner.write().unwrap();
         if let Some(&id) = inner.kind_by_name.get(&name) {
             let existing = &inner.kind_descriptors[id as usize];
@@ -330,21 +332,21 @@ impl Registry {
             }
             return Ok(id);
         }
-        let id = inner.kind_names.len() as u32;
+        let id = inner.kind_names.len() as u64;
         inner.kind_names.push(name.clone());
         inner.kind_descriptors.push(descriptor);
         inner.kind_by_name.insert(name, id);
         Ok(id)
     }
 
-    pub fn kind_id(&self, name: &str) -> Option<u32> {
+    pub fn kind_id(&self, name: &str) -> Option<u64> {
         self.inner.read().unwrap().kind_by_name.get(name).copied()
     }
 
     /// Reverse of `kind_id`: name for a given id, or `None` if the id
     /// is out of range. Used by the scheduler to hand sink handlers a
     /// kind name without them keeping their own map.
-    pub fn kind_name(&self, id: u32) -> Option<String> {
+    pub fn kind_name(&self, id: u64) -> Option<String> {
         self.inner
             .read()
             .unwrap()
@@ -356,7 +358,7 @@ impl Registry {
     /// The descriptor stored for a given kind id, or `None` if the id
     /// is out of range. Returned as an owned clone so callers don't
     /// hold the read lock while inspecting the encoding.
-    pub fn kind_descriptor(&self, id: u32) -> Option<KindDescriptor> {
+    pub fn kind_descriptor(&self, id: u64) -> Option<KindDescriptor> {
         self.inner
             .read()
             .unwrap()

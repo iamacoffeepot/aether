@@ -195,7 +195,7 @@ struct KindTableInner {
 #[derive(Copy, Clone)]
 struct Entry {
     type_id: Option<TypeId>,
-    raw: u32,
+    raw: u64,
 }
 
 impl KindTable {
@@ -220,7 +220,7 @@ impl KindTable {
     /// Caller must guarantee no concurrent access. Intended to be
     /// called only from `KindList::resolve_all`, which the `export!`
     /// macro's init shim invokes before any reads.
-    pub unsafe fn insert(&self, type_id: TypeId, raw: u32) {
+    pub unsafe fn insert(&self, type_id: TypeId, raw: u64) {
         let inner = unsafe { &mut *self.inner.get() };
         if inner.len >= MAX_KINDS {
             panic!("aether-component: KindTable overflow (>{MAX_KINDS} kinds)");
@@ -234,7 +234,7 @@ impl KindTable {
 
     /// Linear-scan lookup. Returns `Some(raw)` if `type_id` was
     /// inserted, `None` otherwise.
-    pub fn lookup(&self, type_id: TypeId) -> Option<u32> {
+    pub fn lookup(&self, type_id: TypeId) -> Option<u64> {
         let inner = unsafe { &*self.inner.get() };
         for i in 0..inner.len {
             let entry = inner.entries[i];

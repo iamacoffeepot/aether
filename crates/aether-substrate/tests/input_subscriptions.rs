@@ -35,13 +35,13 @@ fn tally_forwarding_wat(tally_id: u64) -> String {
         r#"
 (module
   (import "aether" "send_mail_p32"
-    (func $send_mail (param i64 i32 i32 i32 i32) (result i32)))
+    (func $send_mail (param i64 i64 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
   (func (export "receive_p32")
-    (param $kind i32) (param $ptr i32) (param $count i32) (param $sender i32)
+    (param $kind i64) (param $ptr i32) (param $count i32) (param $sender i32)
     (result i32)
     (drop (call $send_mail
-        (i64.const {tally_id}) (i32.const 99) (i32.const 0) (i32.const 0) (i32.const 1)))
+        (i64.const {tally_id}) (i64.const 99) (i32.const 0) (i32.const 0) (i32.const 1)))
     i32.const 0))
 "#,
     )
@@ -52,7 +52,7 @@ struct Harness {
     queue: Arc<MailQueue>,
     input_subscribers: InputSubscribers,
     counter: Arc<AtomicU32>,
-    kind_tick: u32,
+    kind_tick: u64,
     wat: String,
     _scheduler: Scheduler,
 }

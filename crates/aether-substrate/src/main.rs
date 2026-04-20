@@ -138,11 +138,11 @@ struct App {
     /// boot state — mean the event is dropped at the source.
     input_subscribers: InputSubscribers,
     broadcast_mbox: MailboxId,
-    kind_tick: u32,
-    kind_key: u32,
-    kind_mouse_button: u32,
-    kind_mouse_move: u32,
-    kind_frame_stats: u32,
+    kind_tick: u64,
+    kind_key: u64,
+    kind_mouse_button: u64,
+    kind_mouse_move: u64,
+    kind_frame_stats: u64,
     frame_vertices: Arc<Mutex<Vec<u8>>>,
     triangles_rendered: Arc<AtomicU64>,
     /// Shared single-slot queue with the control plane. On each

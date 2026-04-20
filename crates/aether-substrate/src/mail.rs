@@ -30,8 +30,9 @@ impl MailboxId {
 /// Host/guest contract tag for the payload layout. The substrate and the
 /// components that talk to it agree on a specific layout per kind. The
 /// typed facade over this is ADR-0005 (mail typing system) and ADR-0019
-/// (schema-described kinds).
-pub type MailKind = u32;
+/// (schema-described kinds). Widened to `u64` in ADR-0030 Phase 1 in
+/// preparation for hashed derivation (Phase 2).
+pub type MailKind = u64;
 
 /// The transport envelope. `payload` is the exact byte layout the kind
 /// implies; `count` is the number of items the layout implies, where

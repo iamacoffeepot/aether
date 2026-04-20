@@ -23,8 +23,9 @@ use core::fmt;
 
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
 /// `"aether.tick"`, `"hello.npc_health"`). The name is resolved to a
-/// runtime `u32` id by the substrate's kind registry at init; see
-/// ADR-0005 for the resolution flow.
+/// runtime `u64` id by the substrate's kind registry at init; see
+/// ADR-0005 for the resolution flow. (Widened from `u32` in ADR-0030
+/// Phase 1.)
 ///
 /// `IS_INPUT` marks the kind as a substrate-published input stream
 /// (`Tick`, `Key`, `MouseMove`, `MouseButton` — ADR-0021). Defaults

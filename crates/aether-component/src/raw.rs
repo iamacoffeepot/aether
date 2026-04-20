@@ -19,11 +19,11 @@
 #[link(wasm_import_module = "aether")]
 unsafe extern "C" {
     #[link_name = "send_mail_p32"]
-    pub fn send_mail(recipient: u64, kind: u32, ptr: u32, len: u32, count: u32) -> u32;
+    pub fn send_mail(recipient: u64, kind: u64, ptr: u32, len: u32, count: u32) -> u32;
     #[link_name = "reply_mail_p32"]
-    pub fn reply_mail(sender: u32, kind: u32, ptr: u32, len: u32, count: u32) -> u32;
+    pub fn reply_mail(sender: u32, kind: u64, ptr: u32, len: u32, count: u32) -> u32;
     #[link_name = "resolve_kind_p32"]
-    pub fn resolve_kind(name_ptr: u32, name_len: u32) -> u32;
+    pub fn resolve_kind(name_ptr: u32, name_len: u32) -> u64;
     #[link_name = "save_state_p32"]
     pub fn save_state(version: u32, ptr: u32, len: u32) -> u32;
 }
@@ -32,7 +32,7 @@ unsafe extern "C" {
 /// Host-target stub for the wasm `aether::send_mail` import. Always
 /// panics — callers on non-wasm targets are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
-pub unsafe fn send_mail(_recipient: u64, _kind: u32, _ptr: u32, _len: u32, _count: u32) -> u32 {
+pub unsafe fn send_mail(_recipient: u64, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
     panic!("aether-component: send_mail called on non-wasm target");
 }
 
@@ -40,7 +40,7 @@ pub unsafe fn send_mail(_recipient: u64, _kind: u32, _ptr: u32, _len: u32, _coun
 /// Host-target stub for the wasm `aether::reply_mail` import. Always
 /// panics — callers on non-wasm targets are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
-pub unsafe fn reply_mail(_sender: u32, _kind: u32, _ptr: u32, _len: u32, _count: u32) -> u32 {
+pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
     panic!("aether-component: reply_mail called on non-wasm target");
 }
 
@@ -48,7 +48,7 @@ pub unsafe fn reply_mail(_sender: u32, _kind: u32, _ptr: u32, _len: u32, _count:
 /// Host-target stub for the wasm `aether::resolve_kind` import. Always
 /// panics — callers on non-wasm targets are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
-pub unsafe fn resolve_kind(_name_ptr: u32, _name_len: u32) -> u32 {
+pub unsafe fn resolve_kind(_name_ptr: u32, _name_len: u32) -> u64 {
     panic!("aether-component: resolve_kind called on non-wasm target");
 }
 
