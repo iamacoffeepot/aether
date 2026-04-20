@@ -1,6 +1,6 @@
-// End-to-end wiring test for milestone 1 PR A. Uses an inline WAT guest
-// to avoid pulling in a separate guest crate at this stage — PR B adds
-// the real `aether-hello-component` guest and the build.rs integration.
+// End-to-end wiring test. Uses an inline WAT guest so the test stays
+// self-contained; `tests/*` that need the real `aether-hello-component`
+// guest pull it in separately.
 //
 // The test is deliberately shaped like the real substrate flow:
 //   1. Registry populated with one component mailbox + one sink.
