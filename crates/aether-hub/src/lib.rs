@@ -1,7 +1,7 @@
-// aether-hub: central broker between Claude MCP clients and engine
-// processes. This crate owns the engine-facing TCP listener, handshake,
-// and heartbeat/reaping per ADR-0006. The Claude-facing rmcp transport
-// and MCP tool surface land in a follow-up PR.
+//! aether-hub: central broker between Claude MCP clients and engine
+//! processes. Owns the engine-facing TCP listener, handshake, and
+//! heartbeat/reaping per ADR-0006, plus the Claude-facing rmcp
+//! transport and the MCP tool surface.
 
 use std::net::SocketAddr;
 

@@ -1,6 +1,6 @@
-// aether-substrate: the thin native base layer that owns hardware and
-// hosts the WASM runtime. See ADR-0002 for the architecture and
-// ADR-0004 for the scheduler baseline this library embodies.
+//! aether-substrate: the thin native base layer that owns hardware and
+//! hosts the WASM runtime. See ADR-0002 for the architecture and
+//! ADR-0004 for the scheduler baseline this library embodies.
 
 pub mod capture;
 pub mod component;

@@ -1,13 +1,14 @@
-// aether-hub-protocol: engine ↔ hub wire types and framing per ADR-0006.
-//
-// Uni-directional mail flow for V0: frames go Claude → hub → engine.
-// Engines send only lifecycle frames (Hello, Heartbeat, Goodbye) —
-// engine-originated mail and replies are parked.
-//
-// Framing: each frame on the TCP stream is a 4-byte little-endian
-// length prefix followed by the postcard-encoded message. Two enum
-// types (`EngineToHub`, `HubToEngine`) enforce direction at the type
-// level.
+//! aether-hub-protocol: engine ↔ hub wire types and framing per ADR-0006.
+//!
+//! Mail flows in both directions: Claude → hub → engine (dispatch) and
+//! engine → hub → Claude (observations and reply-to-sender, ADRs 0008
+//! and 0013). Engines also send lifecycle frames (Hello, Heartbeat,
+//! Goodbye) and `KindsChanged` notifications.
+//!
+//! Framing: each frame on the TCP stream is a 4-byte little-endian
+//! length prefix followed by the postcard-encoded message. Two enum
+//! types (`EngineToHub`, `HubToEngine`) enforce direction at the type
+//! level.
 
 use std::fmt;
 use std::io::{self, Read, Write};

@@ -1,14 +1,14 @@
-// First real aether component. On each tick it emits a fixed
-// clip-space triangle to the substrate's render sink. It also
-// answers ADR-0013 `aether.ping` mail with a matching `aether.pong`
-// back to the originating Claude session — a minimal round-trip
-// smoke test proving reply-to-sender works end-to-end over the hub.
-
-// ADR-0027 shape: receive-side kinds (`Tick`, `Ping`) live in
-// `type Kinds`; dispatch reads the per-component `KindTable` via
-// `mail.is::<Tick>()` and `mail.decode_typed::<Ping>()`. Reply kind
-// `Pong` keeps an explicit `KindId<Pong>` because `Ctx::reply` takes
-// one (sender-side, type-driven reply is a follow-up).
+//! First real aether component. On each tick it emits a fixed
+//! clip-space triangle to the substrate's render sink. It also
+//! answers ADR-0013 `aether.ping` mail with a matching `aether.pong`
+//! back to the originating Claude session — a minimal round-trip
+//! smoke test proving reply-to-sender works end-to-end over the hub.
+//!
+//! ADR-0027 shape: receive-side kinds (`Tick`, `Ping`) live in
+//! `type Kinds`; dispatch reads the per-component `KindTable` via
+//! `mail.is::<Tick>()` and `mail.decode_typed::<Ping>()`. Reply kind
+//! `Pong` keeps an explicit `KindId<Pong>` because `Ctx::reply` takes
+//! one (sender-side, type-driven reply is a follow-up).
 
 use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};

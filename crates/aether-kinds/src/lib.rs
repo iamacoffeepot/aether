@@ -1,12 +1,12 @@
-// aether-kinds: the substrate's own mail vocabulary. Imported
-// by any actor that wants to send mail to the substrate, receive mail
-// the substrate dispatches (tick, input), or consume the substrate's
-// sink kinds (draw_triangle). See ADR-0005.
-//
-// Kind ids are assigned at substrate boot via `Registry::register_kind`
-// and resolved by name at component init via the `resolve_kind` host
-// function. Consumers never depend on the id's numeric value — only on
-// the `NAME` constants on the `Kind` impls below.
+//! aether-kinds: the substrate's own mail vocabulary. Imported by any
+//! actor that wants to send mail to the substrate, receive mail the
+//! substrate dispatches (tick, input), or consume the substrate's sink
+//! kinds (draw_triangle). See ADR-0005.
+//!
+//! Kind ids are assigned at substrate boot via `Registry::register_kind`
+//! and resolved by name at component init via the `resolve_kind` host
+//! function. Consumers never depend on the id's numeric value — only on
+//! the `NAME` constants on the `Kind` impls below.
 
 #![no_std]
 

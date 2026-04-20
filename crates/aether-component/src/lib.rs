@@ -1,42 +1,42 @@
-// aether-component: guest-side SDK for WASM components that run on the
-// substrate. See ADR-0012 for motivation — this crate wraps the raw
-// `extern "C"` + `static mut u32` + sentinel pattern every component
-// previously wrote by hand, and presents typed handles instead.
-//
-// Shipped surfaces:
-//   - ADR-0012: `Sink<K>`, `KindId<K>`, `resolve::<K>()`, `resolve_sink::<K>(name)`,
-//     and the `raw` FFI module with host-target panicking stubs.
-//   - ADR-0014: `Component` trait (`init` / `receive`), typed `InitCtx`
-//     and `Ctx` with init-vs-receive capability fencing, `Mail<'_>` for
-//     inbound with typed `decode` / `decode_slice`, and the `export!`
-//     macro that owns the `#[no_mangle]` init/receive shims.
-//   - ADR-0015: Additive lifecycle hooks on the `Component` trait
-//     (`on_replace`, `on_drop`, `on_rehydrate`, all defaulted), plus
-//     the narrowed `DropCtx<'_>` capability type. `export!` emits the
-//     matching `#[no_mangle]` shims and the substrate invokes them at
-//     `drop_component` and `replace_component` call sites. Components
-//     that don't override stay green; hook traps are contained so a
-//     panicking hook doesn't stall teardown.
-//   - ADR-0016: Persistent state across hot reload. `DropCtx::save_state`
-//     lets `on_replace` deposit a version-tagged byte bundle; the
-//     substrate hands it to the new instance via `on_rehydrate` with
-//     a populated `PriorState<'_>`. Opt-in — components that don't
-//     override either hook migrate nothing.
-//   - ADR-0013: Reply-to-sender. `Mail::sender()` returns `Some(Sender)`
-//     for mail that came from a Claude session; `Ctx::reply` takes a
-//     `Sender` and a typed `KindId<K>` to answer the originating
-//     session. The 4-param `receive(kind, ptr, count, sender)` ABI is
-//     absorbed by the `export!` macro so component authors don't see it.
-//   - ADR-0027: Component-declared kind dependencies via `type Kinds`
-//     associated typelist. The SDK walks the list at init, resolves
-//     each `K::NAME`, and stashes `(TypeId, raw_id)` in a per-component
-//     `KindTable`. Receive-time helpers `Mail::is::<K>()` and
-//     `Mail::decode_typed::<K>()` consult the table by `TypeId`, so
-//     the user never threads a `KindId<K>` field through `Self` for
-//     kinds they only need at the dispatch site. Tuple syntax up to
-//     `MAX_KINDS = 32`; `Cons<H, T>` / `Nil` is the unbounded escape
-//     hatch. Coexists with the ADR-0014 `KindId<K>` field pattern;
-//     `Sink<K>` is unchanged.
+//! aether-component: guest-side SDK for WASM components that run on the
+//! substrate. See ADR-0012 for motivation — this crate wraps the raw
+//! `extern "C"` + `static mut u32` + sentinel pattern every component
+//! previously wrote by hand, and presents typed handles instead.
+//!
+//! Shipped surfaces:
+//!   - ADR-0012: `Sink<K>`, `KindId<K>`, `resolve::<K>()`, `resolve_sink::<K>(name)`,
+//!     and the `raw` FFI module with host-target panicking stubs.
+//!   - ADR-0014: `Component` trait (`init` / `receive`), typed `InitCtx`
+//!     and `Ctx` with init-vs-receive capability fencing, `Mail<'_>` for
+//!     inbound with typed `decode` / `decode_slice`, and the `export!`
+//!     macro that owns the `#[no_mangle]` init/receive shims.
+//!   - ADR-0015: Additive lifecycle hooks on the `Component` trait
+//!     (`on_replace`, `on_drop`, `on_rehydrate`, all defaulted), plus
+//!     the narrowed `DropCtx<'_>` capability type. `export!` emits the
+//!     matching `#[no_mangle]` shims and the substrate invokes them at
+//!     `drop_component` and `replace_component` call sites. Components
+//!     that don't override stay green; hook traps are contained so a
+//!     panicking hook doesn't stall teardown.
+//!   - ADR-0016: Persistent state across hot reload. `DropCtx::save_state`
+//!     lets `on_replace` deposit a version-tagged byte bundle; the
+//!     substrate hands it to the new instance via `on_rehydrate` with
+//!     a populated `PriorState<'_>`. Opt-in — components that don't
+//!     override either hook migrate nothing.
+//!   - ADR-0013: Reply-to-sender. `Mail::sender()` returns `Some(Sender)`
+//!     for mail that came from a Claude session; `Ctx::reply` takes a
+//!     `Sender` and a typed `KindId<K>` to answer the originating
+//!     session. The 4-param `receive(kind, ptr, count, sender)` ABI is
+//!     absorbed by the `export!` macro so component authors don't see it.
+//!   - ADR-0027: Component-declared kind dependencies via `type Kinds`
+//!     associated typelist. The SDK walks the list at init, resolves
+//!     each `K::NAME`, and stashes `(TypeId, raw_id)` in a per-component
+//!     `KindTable`. Receive-time helpers `Mail::is::<K>()` and
+//!     `Mail::decode_typed::<K>()` consult the table by `TypeId`, so
+//!     the user never threads a `KindId<K>` field through `Self` for
+//!     kinds they only need at the dispatch site. Tuple syntax up to
+//!     `MAX_KINDS = 32`; `Cons<H, T>` / `Nil` is the unbounded escape
+//!     hatch. Coexists with the ADR-0014 `KindId<K>` field pattern;
+//!     `Sink<K>` is unchanged.
 
 #![no_std]
 
