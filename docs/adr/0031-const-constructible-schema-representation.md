@@ -163,6 +163,20 @@ impl Kind for DrawTriangle {
 
 Where `kind_id_from_schema` is a `const fn` that walks a `SchemaType` tree via recursive `SchemaCell` deref and fnv1a-chains the bytes it encounters. No postcard at macro time; no duplication with `Schema`.
 
+### Structural, not nominal, hashing
+
+The hash input describes **wire shape**, not source identity. Rust type names (`Vertex`, `Point5D`, module paths, crate origin) do not appear in the byte stream. Nested `SchemaType::Struct` nodes are described purely by their structure: tag byte, `repr_c` flag, field count, and each field's `(name, type)` pair. Only three identifier-ish inputs feed the hash:
+
+- **Kind name** — `K::NAME`, hashed once at the top level. Identifies the kind on the wire and in logs; part of `K::ID` by ADR-0030's construction.
+- **Field names** — every `NamedField.name`, at every nesting depth. Field names are part of the wire contract because the hub uses them to map agent JSON params to postcard bytes; a rename is a wire-visible change.
+- **Enum variant names** — same reasoning; they're the wire-level discriminants alongside the discriminant integer.
+
+Rust struct identifiers, module paths, and crate names are **not** hashed. Consequences of this structural-only choice, all of them intentional:
+
+- **Crate reorganization is hash-free.** Moving `Vertex` from `aether-kinds` to `aether-mail`, or splitting it into its own crate, does not change any hash that references it. Refactors that don't alter wire shape don't invalidate compiled peers.
+- **Two same-shape structs with different Rust names collide.** `struct Vertex { x: f32, y: f32 }` and `struct Point2D { x: f32, y: f32 }` produce identical schemas, identical `const SCHEMA` byte streams, and — if either is used as a kind — identical kind ids. This is correct: on the wire they *are* interchangeable, and the Rust type system has already distinguished them at the source level where it matters. Anyone wanting them distinguished on the wire should differentiate via field shape (different names, different types, different counts) or by making them distinct kinds with distinct `#[kind(name = ...)]`.
+- **The `NamedField.name` bytes carry the disambiguation load.** A schema with `{ x: f32, y: f32 }` and one with `{ width: f32, height: f32 }` hash differently because the field names are in the byte stream. That's the primary axis developers use to signal "different concept, same primitive layout."
+
 The `manifest.rs` syntactic walker (`aether-mail-derive/src/manifest.rs`) retires entirely. The `aether.kinds` custom section is still emitted, but via `postcard::to_allocvec(&T::SCHEMA)` at build time — now possible because `T::SCHEMA` is a const value the derive can reference even if it's in another crate. (The derive can't call `postcard::to_allocvec` directly since it runs as a proc-macro; it emits a const byte array computed from the const schema via a const fn postcard serializer, or it emits the bytes by having the Kind derive depend on Schema and walking the const tree directly.)
 
 ### Substrate-side
@@ -179,6 +193,7 @@ The biggest downstream surface. `encoder.rs` and `decoder.rs` match on `SchemaTy
 
 ## Consequences
 
+- **Structural hashing, not nominal.** Rust type names and crate paths don't enter the hash — only kind names, field names, and shape. Crate reorganization leaves hashes intact; two structurally-identical structs collide (correctly — they're wire-equivalent).
 - **Unified representation.** One `SchemaType`, one walker, one hash. The `manifest.rs` syntactic-walker hack retires. Schema and Kind derives stop carrying two implementations of the same logic.
 - **ADR-0030 Phase 2 unblocks.** `const ID: u64` on `Kind` is a four-line derive change once `Schema::SCHEMA` is a const. Nested types (`DrawTriangle { verts: [Vertex; 3] }`) hash correctly on both sides because both sides see the same const tree.
 - **Size cycle handled explicitly.** `SchemaCell` is the size-breaking indirection; no arena, no new dependency. One heap allocation per recursive node on deserialize — same cost envelope as today's `Box<SchemaType>`.
