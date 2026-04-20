@@ -137,7 +137,7 @@ fn decode_cast_struct(
     for field in fields {
         let field_path = format!("{path}.{}", field.name);
         let value = decode_cast_field(cur, &field.ty, &field_path)?;
-        out.insert(field.name.clone(), value);
+        out.insert(field.name.to_string(), value);
     }
     Ok(out)
 }
@@ -304,10 +304,10 @@ fn decode_postcard(
             // Postcard struct: concatenated field bytes in declaration
             // order.
             let mut obj = Map::with_capacity(fields.len());
-            for field in fields {
+            for field in fields.iter() {
                 let field_path = format!("{path}.{}", field.name);
                 let value = decode_postcard(cur, &field.ty, &field_path)?;
-                obj.insert(field.name.clone(), value);
+                obj.insert(field.name.to_string(), value);
             }
             Ok(Value::Object(obj))
         }
@@ -392,10 +392,10 @@ fn decode_enum_body(
         }
         EnumVariant::Struct { fields, .. } => {
             let mut body = Map::with_capacity(fields.len());
-            for field in fields {
+            for field in fields.iter() {
                 let nested = format!("{path}::{name}.{}", field.name);
                 let v = decode_postcard(cur, &field.ty, &nested)?;
-                body.insert(field.name.clone(), v);
+                body.insert(field.name.to_string(), v);
             }
             let mut obj = Map::with_capacity(1);
             obj.insert(name, Value::Object(body));
@@ -490,25 +490,26 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
     use crate::encoder::encode_schema;
+    use aether_hub_protocol::SchemaCell;
     use serde_json::json;
 
     fn scalar(name: &str, ty: Primitive) -> NamedField {
         NamedField {
-            name: name.into(),
+            name: name.to_string().into(),
             ty: SchemaType::Scalar(ty),
         }
     }
 
     fn cast_struct(fields: Vec<NamedField>) -> SchemaType {
         SchemaType::Struct {
-            fields,
+            fields: fields.into(),
             repr_c: true,
         }
     }
 
     fn pc_struct(fields: Vec<NamedField>) -> SchemaType {
         SchemaType::Struct {
-            fields,
+            fields: fields.into(),
             repr_c: false,
         }
     }
@@ -588,7 +589,7 @@ mod tests {
             &cast_struct(vec![NamedField {
                 name: "xs".into(),
                 ty: SchemaType::Array {
-                    element: Box::new(SchemaType::Scalar(Primitive::U8)),
+                    element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)),
                     len: 4,
                 },
             }]),
@@ -615,12 +616,13 @@ mod tests {
                 scalar("r", Primitive::F32),
                 scalar("g", Primitive::F32),
                 scalar("b", Primitive::F32),
-            ],
+            ]
+            .into(),
         };
         let triangle = cast_struct(vec![NamedField {
             name: "verts".into(),
             ty: SchemaType::Array {
-                element: Box::new(vertex),
+                element: SchemaCell::owned(vertex),
                 len: 3,
             },
         }]);
@@ -703,7 +705,7 @@ mod tests {
     fn postcard_option_some_and_none() {
         let schema = pc_struct(vec![NamedField {
             name: "name".into(),
-            ty: SchemaType::Option(Box::new(SchemaType::String)),
+            ty: SchemaType::Option(SchemaCell::owned(SchemaType::String)),
         }]);
         roundtrip(json!({"name": "Aether"}), &schema);
         roundtrip(json!({"name": null}), &schema);
@@ -713,7 +715,7 @@ mod tests {
     fn postcard_vec_of_strings() {
         let schema = pc_struct(vec![NamedField {
             name: "tags".into(),
-            ty: SchemaType::Vec(Box::new(SchemaType::String)),
+            ty: SchemaType::Vec(SchemaCell::owned(SchemaType::String)),
         }]);
         roundtrip(json!({"tags": ["alpha", "beta", "gamma"]}), &schema);
     }
@@ -723,7 +725,7 @@ mod tests {
         let inner = pc_struct(vec![scalar("seq", Primitive::U32)]);
         let schema = pc_struct(vec![NamedField {
             name: "items".into(),
-            ty: SchemaType::Vec(Box::new(inner)),
+            ty: SchemaType::Vec(SchemaCell::owned(inner)),
         }]);
         roundtrip(
             json!({"items": [{"seq": 1u32}, {"seq": 256u32}, {"seq": 0xDEADu32}]}),
@@ -741,7 +743,7 @@ mod tests {
                 EnumVariant::Tuple {
                     name: "Ok".into(),
                     discriminant: 1,
-                    fields: vec![SchemaType::Scalar(Primitive::U64)],
+                    fields: vec![SchemaType::Scalar(Primitive::U64)].into(),
                 },
                 EnumVariant::Struct {
                     name: "Err".into(),
@@ -749,9 +751,11 @@ mod tests {
                     fields: vec![NamedField {
                         name: "reason".into(),
                         ty: SchemaType::String,
-                    }],
+                    }]
+                    .into(),
                 },
-            ],
+            ]
+            .into(),
         }
     }
 

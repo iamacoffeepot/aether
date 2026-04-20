@@ -105,9 +105,10 @@ mod tests {
             name: "test.kind".to_string(),
             schema: SchemaType::Struct {
                 fields: vec![NamedField {
-                    name: "x".to_string(),
+                    name: "x".into(),
                     ty: SchemaType::Scalar(Primitive::U32),
-                }],
+                }]
+                .into(),
                 repr_c: true,
             },
         };

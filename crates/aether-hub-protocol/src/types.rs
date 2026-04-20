@@ -2,7 +2,9 @@
 // the top-level enums `EngineToHub` / `HubToEngine`; the bodies are
 // plain structs so they're ergonomic to construct and pattern-match.
 
-use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 /// Hub-assigned stable identity for an engine connection. Fresh per
@@ -62,6 +64,13 @@ pub struct KindDescriptor {
 /// cast-eligible — `Scalar`, `Array` of cast-eligible elements, or a
 /// nested `Struct { repr_c: true, .. }`. `String`, `Bytes`, `Vec`,
 /// `Option`, and `Enum` fields disqualify a struct from `repr_c`.
+///
+/// ADR-0031: every recursive field uses `SchemaCell` (static-or-owned)
+/// and every collection/string uses `Cow<'static, _>` so the whole type
+/// is const-constructible. Derive(Schema) emits a single
+/// `const SCHEMA: SchemaType = …` literal; the hub's deserializer
+/// produces the `Owned` / `Cow::Owned` variants. Walkers Deref through
+/// both without observing the difference.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SchemaType {
     Unit,
@@ -69,19 +78,90 @@ pub enum SchemaType {
     Scalar(Primitive),
     String,
     Bytes,
-    Option(Box<SchemaType>),
-    Vec(Box<SchemaType>),
+    Option(SchemaCell),
+    Vec(SchemaCell),
     Array {
-        element: Box<SchemaType>,
+        element: SchemaCell,
         len: u32,
     },
     Struct {
-        fields: Vec<NamedField>,
+        fields: Cow<'static, [NamedField]>,
         repr_c: bool,
     },
     Enum {
-        variants: Vec<EnumVariant>,
+        variants: Cow<'static, [EnumVariant]>,
     },
+}
+
+/// Recursion-breaking indirection for nested `SchemaType` fields
+/// (ADR-0031). `Static(&'static SchemaType)` is the const-literal arm —
+/// derives and hand-rolled impls reference the nested type's
+/// `<T as Schema>::SCHEMA` through this variant at compile time.
+/// `Owned(Box<SchemaType>)` is the wire arm — the hub's postcard
+/// decoder allocates one `Box` per recursive node. Both `Deref` to
+/// `&SchemaType`, so walkers don't observe which variant carries the
+/// value. `Cow<'static, SchemaType>` would infinite-size through its
+/// `Owned(T)` arm; `SchemaCell` breaks the cycle via `Box`.
+#[derive(Debug)]
+pub enum SchemaCell {
+    Static(&'static SchemaType),
+    Owned(Box<SchemaType>),
+}
+
+impl SchemaCell {
+    /// Construct an `Owned` cell from a schema value. Convenience for
+    /// code paths that build schemas at runtime (mostly tests and the
+    /// hub's decoder). Production const callers use `Static(&FOO)`.
+    pub fn owned(schema: SchemaType) -> Self {
+        SchemaCell::Owned(Box::new(schema))
+    }
+}
+
+impl core::ops::Deref for SchemaCell {
+    type Target = SchemaType;
+    fn deref(&self) -> &SchemaType {
+        match self {
+            SchemaCell::Static(r) => r,
+            SchemaCell::Owned(b) => b,
+        }
+    }
+}
+
+impl AsRef<SchemaType> for SchemaCell {
+    fn as_ref(&self) -> &SchemaType {
+        self
+    }
+}
+
+impl Clone for SchemaCell {
+    fn clone(&self) -> Self {
+        // Clone normalizes to Owned so the clone doesn't require the
+        // source to be 'static. A Static cell cloned from a const
+        // literal lands as Owned(Box::new(copy_of_value)); the value
+        // is identical, the variant chosen expresses "this clone has
+        // its own allocation."
+        SchemaCell::Owned(Box::new((**self).clone()))
+    }
+}
+
+impl PartialEq for SchemaCell {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for SchemaCell {}
+
+impl Serialize for SchemaCell {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (**self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaCell {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        SchemaType::deserialize(deserializer).map(SchemaCell::owned)
+    }
 }
 
 /// One field inside a `SchemaType::Struct` or struct-shaped enum
@@ -89,7 +169,7 @@ pub enum SchemaType {
 /// structs (`repr_c: true`) it also matches `#[repr(C)]` layout.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedField {
-    pub name: String,
+    pub name: Cow<'static, str>,
     pub ty: SchemaType,
 }
 
@@ -100,18 +180,18 @@ pub struct NamedField {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnumVariant {
     Unit {
-        name: String,
+        name: Cow<'static, str>,
         discriminant: u32,
     },
     Tuple {
-        name: String,
+        name: Cow<'static, str>,
         discriminant: u32,
-        fields: Vec<SchemaType>,
+        fields: Cow<'static, [SchemaType]>,
     },
     Struct {
-        name: String,
+        name: Cow<'static, str>,
         discriminant: u32,
-        fields: Vec<NamedField>,
+        fields: Cow<'static, [NamedField]>,
     },
 }
 
@@ -123,7 +203,7 @@ impl EnumVariant {
         match self {
             EnumVariant::Unit { name, .. }
             | EnumVariant::Tuple { name, .. }
-            | EnumVariant::Struct { name, .. } => name.as_str(),
+            | EnumVariant::Struct { name, .. } => name,
         }
     }
 

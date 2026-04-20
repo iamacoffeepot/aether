@@ -640,11 +640,8 @@ mod tests {
 
         #[test]
         fn unit_kinds_emit_schema_unit() {
-            assert!(matches!(<Tick as Schema>::schema(), SchemaType::Unit));
-            assert!(matches!(
-                <MouseButton as Schema>::schema(),
-                SchemaType::Unit
-            ));
+            assert!(matches!(<Tick as Schema>::SCHEMA, SchemaType::Unit));
+            assert!(matches!(<MouseButton as Schema>::SCHEMA, SchemaType::Unit));
         }
 
         #[test]
@@ -660,10 +657,10 @@ mod tests {
 
         #[test]
         fn key_schema_is_one_u32_field() {
-            let SchemaType::Struct { repr_c, fields } = <Key as Schema>::schema() else {
+            let SchemaType::Struct { repr_c, fields } = &<Key as Schema>::SCHEMA else {
                 panic!("expected Struct");
             };
-            assert!(repr_c);
+            assert!(*repr_c);
             assert_eq!(fields.len(), 1);
             assert_eq!(fields[0].name, "code");
             assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
@@ -671,10 +668,10 @@ mod tests {
 
         #[test]
         fn draw_triangle_schema_recurses_into_vertex() {
-            let SchemaType::Struct { repr_c, fields } = <DrawTriangle as Schema>::schema() else {
+            let SchemaType::Struct { repr_c, fields } = &<DrawTriangle as Schema>::SCHEMA else {
                 panic!("expected Struct");
             };
-            assert!(repr_c);
+            assert!(*repr_c);
             assert_eq!(fields.len(), 1);
             assert_eq!(fields[0].name, "verts");
             let SchemaType::Array { element, len } = &fields[0].ty else {
@@ -684,7 +681,7 @@ mod tests {
             let SchemaType::Struct {
                 repr_c: nested_repr,
                 fields: nested_fields,
-            } = element.as_ref()
+            } = &**element
             else {
                 panic!("expected nested Struct");
             };
@@ -696,10 +693,10 @@ mod tests {
 
         #[test]
         fn frame_stats_schema_is_two_u64_fields() {
-            let SchemaType::Struct { repr_c, fields } = <FrameStats as Schema>::schema() else {
+            let SchemaType::Struct { repr_c, fields } = &<FrameStats as Schema>::SCHEMA else {
                 panic!("expected Struct");
             };
-            assert!(repr_c);
+            assert!(*repr_c);
             assert_eq!(fields.len(), 2);
             assert_eq!(fields[0].name, "frame");
             assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U64));

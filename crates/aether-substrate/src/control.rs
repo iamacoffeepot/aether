@@ -960,9 +960,10 @@ mod tests {
             name: "demo.embedded.kind".to_string(),
             schema: SchemaType::Struct {
                 fields: vec![NamedField {
-                    name: "code".to_string(),
+                    name: "code".into(),
                     ty: SchemaType::Scalar(Primitive::U32),
-                }],
+                }]
+                .into(),
                 repr_c: true,
             },
         };
