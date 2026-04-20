@@ -37,8 +37,9 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
-    Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, GenericArgument, Lit, Meta,
-    PathArguments, Type, parse_macro_input, spanned::Spanned,
+    Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprLit, Fields, FnArg,
+    GenericArgument, ImplItem, ItemImpl, Lit, Meta, PathArguments, Signature, Type,
+    parse_macro_input, spanned::Spanned,
 };
 
 #[proc_macro_derive(Kind, attributes(kind))]
@@ -546,4 +547,553 @@ fn to_screaming_snake_case(s: &str) -> String {
         out.push(ch.to_ascii_uppercase());
     }
     out
+}
+
+// ADR-0033: `#[handlers]` applied to `impl Component for C` blocks.
+// Reshapes the impl so `#[handler] fn on_X(&mut self, &mut Ctx, K)`
+// methods plus an optional `#[fallback]` method become both (a)
+// dispatcher arms on a synthesized `Component::receive` and (b) per-
+// record statics in the `aether.kinds.inputs` custom section (hub-
+// facing capability advertisement). Non-trait helper methods migrate
+// to a sibling inherent impl since `impl Trait for Type` can't host
+// them.
+//
+// The `type Kinds = (K1, K2, ...)` associated type is synthesized from
+// the handler set so the existing ADR-0027 / ADR-0030 init walker
+// (`KindList::resolve_all`) populates the per-component `KindTable` and
+// auto-subscribes every `K::IS_INPUT` kind unchanged.
+//
+// Rustdoc capture: `///` comments on the impl block (component-level),
+// each `#[handler]`, and each `#[fallback]` become MCP-facing prose. If
+// a `# Agent` section is present, only that section's body is sent;
+// otherwise the full doc is sent. `cargo doc` still renders the whole
+// comment — the `# Agent` heading sits alongside `# Safety`/`# Examples`
+// as a conventional reader-specific section.
+
+#[proc_macro_attribute]
+pub fn handlers(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[handlers] takes no arguments",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let item = parse_macro_input!(item as ItemImpl);
+    match expand_handlers(item) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_attribute]
+pub fn handler(_attr: TokenStream, _item: TokenStream) -> TokenStream {
+    // Real logic runs inside `#[handlers]` (the enclosing impl-block
+    // attribute scans for #[handler] markers). This standalone shim
+    // only exists so rustc accepts `#[handler]` syntactically outside
+    // macro expansion and so rust-analyzer doesn't redline it.
+    syn::Error::new(
+        proc_macro2::Span::call_site(),
+        "#[handler] may only appear inside a `#[handlers] impl Component for T` block",
+    )
+    .to_compile_error()
+    .into()
+}
+
+#[proc_macro_attribute]
+pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
+    // Same story as `#[handler]` — marker attribute consumed by the
+    // enclosing `#[handlers]` scan. Standalone invocation is a
+    // compile-time error.
+    syn::Error::new(
+        proc_macro2::Span::call_site(),
+        "#[fallback] may only appear inside a `#[handlers] impl Component for T` block",
+    )
+    .to_compile_error()
+    .into()
+}
+
+struct HandlerFn {
+    method: syn::ImplItemFn,
+    kind_ty: Type,
+    agent_doc: Option<String>,
+}
+
+struct FallbackFn {
+    method: syn::ImplItemFn,
+    agent_doc: Option<String>,
+}
+
+fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
+    if item.trait_.is_none() {
+        return Err(syn::Error::new_spanned(
+            &item,
+            "#[handlers] must wrap `impl Component for T` — not an inherent impl",
+        ));
+    }
+    let self_ty = &item.self_ty;
+    let generics = &item.generics;
+    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+    let trait_path = item
+        .trait_
+        .as_ref()
+        .map(|(_, p, _)| p)
+        .expect("trait_ checked above");
+
+    let component_doc = extract_agent_doc(&item.attrs);
+
+    let mut init_method: Option<syn::ImplItemFn> = None;
+    let mut lifecycle_methods: Vec<syn::ImplItemFn> = Vec::new();
+    let mut handlers: Vec<HandlerFn> = Vec::new();
+    let mut fallback: Option<FallbackFn> = None;
+    let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
+
+    for impl_item in item.items {
+        match impl_item {
+            ImplItem::Type(it) if it.ident == "Kinds" => {
+                return Err(syn::Error::new_spanned(
+                    it,
+                    "#[handlers] synthesizes `type Kinds` from the #[handler] methods; remove this declaration",
+                ));
+            }
+            ImplItem::Fn(mut f) => {
+                let name = f.sig.ident.to_string();
+                let handler_attr_idx = f.attrs.iter().position(|a| a.path().is_ident("handler"));
+                let fallback_attr_idx = f.attrs.iter().position(|a| a.path().is_ident("fallback"));
+
+                if handler_attr_idx.is_some() && fallback_attr_idx.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        &f,
+                        "method cannot be both #[handler] and #[fallback]",
+                    ));
+                }
+
+                if let Some(idx) = handler_attr_idx {
+                    let kind_ty = extract_handler_kind_type(&f.sig)?;
+                    let agent_doc = extract_agent_doc(&f.attrs);
+                    f.attrs.remove(idx);
+                    handlers.push(HandlerFn {
+                        method: f,
+                        kind_ty,
+                        agent_doc,
+                    });
+                } else if let Some(idx) = fallback_attr_idx {
+                    if fallback.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            &f,
+                            "at most one #[fallback] method per component",
+                        ));
+                    }
+                    validate_fallback_sig(&f.sig)?;
+                    let agent_doc = extract_agent_doc(&f.attrs);
+                    f.attrs.remove(idx);
+                    fallback = Some(FallbackFn {
+                        method: f,
+                        agent_doc,
+                    });
+                } else if name == "init" {
+                    init_method = Some(f);
+                } else if matches!(name.as_str(), "on_replace" | "on_drop" | "on_rehydrate") {
+                    lifecycle_methods.push(f);
+                } else if name == "receive" {
+                    return Err(syn::Error::new_spanned(
+                        &f,
+                        "#[handlers] synthesizes `fn receive`; remove this definition",
+                    ));
+                } else {
+                    helpers.push(f);
+                }
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "unexpected item in #[handlers] impl (only fns and the synthesized `type Kinds` are allowed)",
+                ));
+            }
+        }
+    }
+
+    let init_method = init_method.ok_or_else(|| {
+        syn::Error::new_spanned(
+            self_ty,
+            "#[handlers] requires `fn init(ctx: &mut InitCtx<'_>) -> Self`",
+        )
+    })?;
+
+    if handlers.is_empty() && fallback.is_none() {
+        return Err(syn::Error::new_spanned(
+            self_ty,
+            "#[handlers] requires at least one #[handler] method or a #[fallback] method",
+        ));
+    }
+
+    let kinds_typelist = build_kinds_typelist(&handlers);
+    let receive_body = build_receive_body(&handlers, fallback.as_ref());
+
+    let handler_methods_tokens = handlers.iter().map(|h| &h.method);
+    let fallback_method_tokens = fallback.as_ref().map(|f| &f.method);
+    let helper_methods_tokens = helpers.iter();
+
+    let statics =
+        build_inputs_section_statics(self_ty, &handlers, fallback.as_ref(), &component_doc);
+
+    Ok(quote! {
+        impl #impl_generics #trait_path for #self_ty #where_clause {
+            type Kinds = #kinds_typelist;
+
+            #init_method
+
+            fn receive(
+                &mut self,
+                __aether_ctx: &mut ::aether_component::Ctx<'_>,
+                __aether_mail: ::aether_component::Mail<'_>,
+            ) {
+                #receive_body
+            }
+
+            #(#lifecycle_methods)*
+        }
+
+        impl #impl_generics #self_ty #where_clause {
+            #(#handler_methods_tokens)*
+            #fallback_method_tokens
+            #(#helper_methods_tokens)*
+        }
+
+        #statics
+    })
+}
+
+/// Extract `K` from a handler method's third parameter (`arg: K`).
+/// Accepts any type path — trait-bound validation lives in the
+/// generated call site: the `mail.decode_typed::<K>()` in the
+/// synthesized dispatcher requires `K: Kind + AnyBitPattern + 'static`,
+/// so unsupported types surface as a trait-bound error pointing at
+/// the user's signature.
+fn extract_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
+    if sig.inputs.len() != 3 {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[handler] method must have signature `(&mut self, ctx: &mut Ctx<'_>, arg: K)`",
+        ));
+    }
+    let first = &sig.inputs[0];
+    if !matches!(first, FnArg::Receiver(_)) {
+        return Err(syn::Error::new_spanned(
+            first,
+            "#[handler] first parameter must be `&mut self`",
+        ));
+    }
+    let third = &sig.inputs[2];
+    let FnArg::Typed(pt) = third else {
+        return Err(syn::Error::new_spanned(
+            third,
+            "#[handler] third parameter must be a typed `arg: K`",
+        ));
+    };
+    Ok((*pt.ty).clone())
+}
+
+/// Soft validation that a `#[fallback]` method's signature is shaped
+/// for `Mail<'_>`. We don't do deep type equality against
+/// `::aether_component::Mail<'_>` — the synthesized dispatcher's call
+/// to `self.<fallback>(ctx, mail)` will type-check at the call site
+/// and produce a clear error if the user wrote the wrong arg type.
+fn validate_fallback_sig(sig: &Signature) -> syn::Result<()> {
+    if sig.inputs.len() != 3 {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[fallback] method must have signature `(&mut self, ctx: &mut Ctx<'_>, mail: Mail<'_>)`",
+        ));
+    }
+    let first = &sig.inputs[0];
+    if !matches!(first, FnArg::Receiver(_)) {
+        return Err(syn::Error::new_spanned(
+            first,
+            "#[fallback] first parameter must be `&mut self`",
+        ));
+    }
+    let third = &sig.inputs[2];
+    if !matches!(third, FnArg::Typed(_)) {
+        return Err(syn::Error::new_spanned(
+            third,
+            "#[fallback] third parameter must be `mail: Mail<'_>`",
+        ));
+    }
+    Ok(())
+}
+
+/// Build the `type Kinds = (K1, K2, ...)` right-hand side. Matches
+/// ADR-0027's typelist so `KindList::resolve_all` populates the
+/// per-component `KindTable` and auto-subscribes input kinds without
+/// any macro-side duplication of that walker.
+fn build_kinds_typelist(handlers: &[HandlerFn]) -> TokenStream2 {
+    if handlers.is_empty() {
+        return quote! { () };
+    }
+    let tys = handlers.iter().map(|h| &h.kind_ty);
+    quote! { ( #( #tys, )* ) }
+}
+
+/// Synthesized body of `fn receive`. Compares `mail.kind()` against
+/// each `<K as Kind>::ID` const; on match, decodes the kind via
+/// `decode_typed::<K>()` (same runtime path the ADR-0027 helpers use)
+/// and calls the inherent-impl method the `#[handler]` annotation
+/// produced. When a `#[fallback]` exists, unhandled kinds land there;
+/// otherwise unhandled kinds silently drop (strict receiver).
+fn build_receive_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) -> TokenStream2 {
+    let arms = handlers.iter().map(|h| {
+        let k = &h.kind_ty;
+        let method = &h.method.sig.ident;
+        quote! {
+            if __aether_kind == <#k as ::aether_component::__macro_internals::Kind>::ID {
+                if let ::core::option::Option::Some(__aether_decoded) =
+                    __aether_mail.decode_typed::<#k>()
+                {
+                    self.#method(__aether_ctx, __aether_decoded);
+                }
+                return;
+            }
+        }
+    });
+
+    let fallback_call = match fallback {
+        Some(f) => {
+            let method = &f.method.sig.ident;
+            quote! { self.#method(__aether_ctx, __aether_mail); }
+        }
+        None => quote! { /* strict receiver: unhandled kinds drop */ },
+    };
+
+    quote! {
+        let __aether_kind = __aether_mail.kind();
+        __aether_ctx.__set_sender(__aether_mail.sender());
+        #( #arms )*
+        #fallback_call
+    }
+}
+
+/// Emit the `#[link_section = "aether.kinds.inputs"]` statics — one
+/// per `#[handler]`, one for `#[fallback]` (when present), and one
+/// for the component-level doc (when present). Each static's bytes
+/// are `[INPUTS_SECTION_VERSION, ..postcard(InputsRecord)..]`
+/// assembled at const-eval via the hub-protocol const-fn encoders.
+/// Statics are gated to `target_arch = "wasm32"` to keep the bytes
+/// out of native test executables (same pattern as the existing
+/// `aether.kinds` emission in the `Kind` derive).
+fn build_inputs_section_statics(
+    self_ty: &Type,
+    handlers: &[HandlerFn],
+    fallback: Option<&FallbackFn>,
+    component_doc: &Option<String>,
+) -> TokenStream2 {
+    let self_ty_hint = type_hint(self_ty);
+
+    let handler_statics = handlers.iter().enumerate().map(|(idx, h)| {
+        let len_ident = quote::format_ident!(
+            "__AETHER_INPUT_HANDLER_{}_{}_LEN",
+            self_ty_hint,
+            idx
+        );
+        let bytes_ident = quote::format_ident!(
+            "__AETHER_INPUT_HANDLER_{}_{}_BYTES",
+            self_ty_hint,
+            idx
+        );
+        let section_ident = quote::format_ident!(
+            "__AETHER_INPUT_HANDLER_{}_{}_SECTION",
+            self_ty_hint,
+            idx
+        );
+        let k = &h.kind_ty;
+        let doc_expr = option_str_token(&h.agent_doc);
+        quote! {
+            const #len_ident: usize =
+                ::aether_component::__macro_internals::canonical::inputs_handler_len(
+                    <#k as ::aether_component::__macro_internals::Kind>::ID,
+                    <#k as ::aether_component::__macro_internals::Kind>::NAME,
+                    #doc_expr,
+                );
+            const #bytes_ident: [u8; #len_ident] =
+                ::aether_component::__macro_internals::canonical::write_inputs_handler::<#len_ident>(
+                    <#k as ::aether_component::__macro_internals::Kind>::ID,
+                    <#k as ::aether_component::__macro_internals::Kind>::NAME,
+                    #doc_expr,
+                );
+            #[cfg(target_arch = "wasm32")]
+            #[used]
+            #[unsafe(link_section = "aether.kinds.inputs")]
+            static #section_ident: [u8; #len_ident + 1] = {
+                let mut out = [0u8; #len_ident + 1];
+                out[0] = 0x01;
+                let mut i = 0;
+                while i < #len_ident {
+                    out[i + 1] = #bytes_ident[i];
+                    i += 1;
+                }
+                out
+            };
+        }
+    });
+
+    let fallback_static = fallback.map(|f| {
+        let len_ident = quote::format_ident!("__AETHER_INPUT_FALLBACK_{}_LEN", self_ty_hint);
+        let bytes_ident = quote::format_ident!("__AETHER_INPUT_FALLBACK_{}_BYTES", self_ty_hint);
+        let section_ident =
+            quote::format_ident!("__AETHER_INPUT_FALLBACK_{}_SECTION", self_ty_hint);
+        let doc_expr = option_str_token(&f.agent_doc);
+        quote! {
+            const #len_ident: usize =
+                ::aether_component::__macro_internals::canonical::inputs_fallback_len(#doc_expr);
+            const #bytes_ident: [u8; #len_ident] =
+                ::aether_component::__macro_internals::canonical::write_inputs_fallback::<#len_ident>(#doc_expr);
+            #[cfg(target_arch = "wasm32")]
+            #[used]
+            #[unsafe(link_section = "aether.kinds.inputs")]
+            static #section_ident: [u8; #len_ident + 1] = {
+                let mut out = [0u8; #len_ident + 1];
+                out[0] = 0x01;
+                let mut i = 0;
+                while i < #len_ident {
+                    out[i + 1] = #bytes_ident[i];
+                    i += 1;
+                }
+                out
+            };
+        }
+    });
+
+    let component_static = component_doc.as_ref().map(|doc| {
+        let len_ident = quote::format_ident!("__AETHER_INPUT_COMPONENT_{}_LEN", self_ty_hint);
+        let bytes_ident = quote::format_ident!("__AETHER_INPUT_COMPONENT_{}_BYTES", self_ty_hint);
+        let section_ident =
+            quote::format_ident!("__AETHER_INPUT_COMPONENT_{}_SECTION", self_ty_hint);
+        let doc_lit = doc.as_str();
+        quote! {
+            const #len_ident: usize =
+                ::aether_component::__macro_internals::canonical::inputs_component_len(#doc_lit);
+            const #bytes_ident: [u8; #len_ident] =
+                ::aether_component::__macro_internals::canonical::write_inputs_component::<#len_ident>(#doc_lit);
+            #[cfg(target_arch = "wasm32")]
+            #[used]
+            #[unsafe(link_section = "aether.kinds.inputs")]
+            static #section_ident: [u8; #len_ident + 1] = {
+                let mut out = [0u8; #len_ident + 1];
+                out[0] = 0x01;
+                let mut i = 0;
+                while i < #len_ident {
+                    out[i + 1] = #bytes_ident[i];
+                    i += 1;
+                }
+                out
+            };
+        }
+    });
+
+    quote! {
+        #(#handler_statics)*
+        #fallback_static
+        #component_static
+    }
+}
+
+/// Produce an identifier-safe hint from the Self type. For a plain
+/// type path (`InputLogger`, `my_crate::Hello`), use the last segment;
+/// otherwise fall back to "COMPONENT" so the statics still compile.
+fn type_hint(ty: &Type) -> syn::Ident {
+    if let Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+    {
+        return syn::Ident::new(
+            &to_screaming_snake_case(&seg.ident.to_string()),
+            seg.ident.span(),
+        );
+    }
+    syn::Ident::new("COMPONENT", proc_macro2::Span::call_site())
+}
+
+/// Produce the token stream for `Option<&'static str>` from an
+/// `Option<String>` captured at macro expansion. Used for every
+/// rustdoc-sourced doc field.
+fn option_str_token(doc: &Option<String>) -> TokenStream2 {
+    match doc {
+        Some(s) => {
+            let lit = s.as_str();
+            quote! { ::core::option::Option::Some(#lit) }
+        }
+        None => quote! { ::core::option::Option::None },
+    }
+}
+
+/// Extract rustdoc from a set of attributes and filter through the
+/// `# Agent` section convention. Returns `None` when there's no
+/// rustdoc at all; `Some(body)` otherwise — `body` is the `# Agent`
+/// section's content if one is present, or the full (trimmed) doc
+/// text if not.
+///
+/// Rustdoc `///` comments lower to `#[doc = "text"]` attributes with
+/// one attribute per source line. The text retains its leading space
+/// (`/// foo` → `" foo"`), which we preserve verbatim for the joined
+/// output — stripping it would alter the agent's view of formatted
+/// doc blocks and obscure intentional indentation.
+fn extract_agent_doc(attrs: &[Attribute]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for attr in attrs {
+        if !attr.path().is_ident("doc") {
+            continue;
+        }
+        let Meta::NameValue(nv) = &attr.meta else {
+            continue;
+        };
+        let Expr::Lit(ExprLit {
+            lit: Lit::Str(s), ..
+        }) = &nv.value
+        else {
+            continue;
+        };
+        lines.push(s.value());
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let full = lines.join("\n");
+    let full_trimmed = full.trim();
+    if full_trimmed.is_empty() {
+        return None;
+    }
+
+    // Scan for a `# Agent` heading (conventional rustdoc section
+    // heading, top-level `#` followed by space). Capture everything
+    // until the next top-level heading or end-of-doc.
+    let mut in_agent = false;
+    let mut found_agent = false;
+    let mut agent_lines: Vec<&str> = Vec::new();
+    for line in full.lines() {
+        let trimmed = line.trim_start();
+        let starts_h1 = trimmed.starts_with("# ") && !trimmed.starts_with("## ");
+        if starts_h1 {
+            if in_agent {
+                // A new top-level heading ends the Agent section.
+                break;
+            }
+            let heading = trimmed.trim_start_matches('#').trim();
+            if heading.eq_ignore_ascii_case("Agent") {
+                in_agent = true;
+                found_agent = true;
+                continue;
+            }
+            continue;
+        }
+        if in_agent {
+            agent_lines.push(line);
+        }
+    }
+
+    if found_agent {
+        let s = agent_lines.join("\n").trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    } else {
+        Some(full_trimmed.to_string())
+    }
 }

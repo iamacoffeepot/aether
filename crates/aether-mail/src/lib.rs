@@ -124,9 +124,14 @@ pub const fn fnv1a_64_bytes(bytes: &[u8]) -> u64 {
 
 /// Re-exported derive macros from `aether-mail-derive`. Behind the
 /// `derive` feature so `cargo build` on a guest that hand-writes
-/// `impl Kind` doesn't pay the proc-macro compile cost.
+/// `impl Kind` doesn't pay the proc-macro compile cost. The
+/// `#[handlers]` / `#[handler]` / `#[fallback]` attribute macros
+/// (ADR-0033) ride in the same crate because adding a second proc-
+/// macro crate would double consumer compile cost for no separation
+/// gain — both derives and attributes expand into the same runtime
+/// surface.
 #[cfg(feature = "derive")]
-pub use aether_mail_derive::{Kind, Schema};
+pub use aether_mail_derive::{Kind, Schema, fallback, handler, handlers};
 
 /// ADR-0019 schema producer. The substrate (and tooling that builds
 /// hub descriptors) reads `<T as Schema>::SCHEMA` — a compile-time

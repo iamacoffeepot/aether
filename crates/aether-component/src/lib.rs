@@ -52,6 +52,27 @@ pub mod raw;
 
 pub use kinds::{Cons, KindList, KindTable, Nil};
 
+/// ADR-0033 attribute macros. Applied to `impl Component for C`
+/// blocks: `#[handlers]` at the impl level; `#[handler]` on each
+/// typed handler method; `#[fallback]` on an optional catchall.
+/// Forwarded from `aether-mail-derive` so the full component
+/// vocabulary sits behind one `use aether_component::*` line.
+pub use aether_mail::{fallback, handler, handlers};
+
+/// Re-exports the `#[handlers]` macro relies on at expansion sites
+/// that don't depend on `aether-mail` directly (e.g., component
+/// crates that only pull in `aether-component`). Keeping the macro's
+/// emitted paths rooted at `::aether_component::__macro_internals`
+/// removes the "add aether-mail to your Cargo.toml" boilerplate that
+/// `::aether_mail::...` paths would otherwise force on every consumer.
+///
+/// Not part of the public API; the macro is the only intended caller.
+#[doc(hidden)]
+pub mod __macro_internals {
+    pub use aether_mail::__derive_runtime::canonical;
+    pub use aether_mail::Kind;
+}
+
 /// Phantom-typed wrapper around a resolved kind id. A `KindId<Tick>`
 /// cannot be passed where a `KindId<DrawTriangle>` is expected — the
 /// mismatch is a compile error rather than a runtime bad-dispatch.
@@ -338,7 +359,16 @@ impl InitCtx<'_> {
 /// Per-receive capability handle. Exposes send primitives only.
 /// Resolution is intentionally absent — runtime resolution after init
 /// is not a supported shape.
+///
+/// ADR-0033: typed handlers receive `K` by value, so they no longer
+/// hold a `Mail<'_>` to call `mail.sender()` on. The synthesized
+/// dispatcher threads the inbound mail's sender onto `Ctx` via
+/// `__set_sender` before every handler call, and `Ctx::sender()`
+/// reads it back. Components using the ADR-0027 `fn receive(&mut
+/// self, ctx, mail)` shape keep calling `mail.sender()` directly —
+/// the `Ctx` field stays `None` for them.
 pub struct Ctx<'a> {
+    sender: Option<u32>,
     _borrow: PhantomData<&'a ()>,
 }
 
@@ -347,8 +377,27 @@ impl Ctx<'_> {
     #[doc(hidden)]
     pub fn __new() -> Self {
         Ctx {
+            sender: None,
             _borrow: PhantomData,
         }
+    }
+
+    /// Not part of the public API; called only by the `#[handlers]`
+    /// dispatcher. Accepts `None` or `Some(Sender)` — the dispatcher
+    /// passes `mail.sender()` verbatim so component-origin and
+    /// broadcast mail (which have no reply target) land as `None`.
+    #[doc(hidden)]
+    pub fn __set_sender(&mut self, sender: Option<Sender>) {
+        self.sender = sender.map(|s| s.raw);
+    }
+
+    /// Reply handle for the mail currently being dispatched. `None`
+    /// for component-origin and broadcast-origin mail; `Some(Sender)`
+    /// when the inbound came from a Claude session. Pass the returned
+    /// `Sender` back to `Ctx::reply` to answer the originating
+    /// session (ADR-0013).
+    pub fn sender(&self) -> Option<Sender> {
+        self.sender.map(|raw| Sender { raw })
     }
 
     /// Send a single payload to `sink`. Typed wrapper around

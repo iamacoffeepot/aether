@@ -4,13 +4,13 @@
 //! back to the originating Claude session — a minimal round-trip
 //! smoke test proving reply-to-sender works end-to-end over the hub.
 //!
-//! ADR-0027 shape: receive-side kinds (`Tick`, `Ping`) live in
-//! `type Kinds`; dispatch reads the per-component `KindTable` via
-//! `mail.is::<Tick>()` and `mail.decode_typed::<Ping>()`. Reply kind
-//! `Pong` keeps an explicit `KindId<Pong>` because `Ctx::reply` takes
-//! one (sender-side, type-driven reply is a follow-up).
+//! ADR-0033 shape: `#[handlers]` on the `impl Component` block emits
+//! both the dispatcher and the `aether.kinds.inputs` section entries.
+//! Per-handler rustdoc (with an optional `# Agent` section) feeds
+//! MCP via the same section so the harness sees typed capabilities
+//! plus author-written intent for each inbox.
 
-use aether_component::{Component, Ctx, InitCtx, KindId, Mail, Sink};
+use aether_component::{Component, Ctx, InitCtx, KindId, Sink, handlers};
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
@@ -39,14 +39,21 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
     ],
 };
 
+/// Minimal end-to-end smoke component: draws a static triangle every
+/// tick and echoes pings back to the sender.
+///
+/// # Agent
+/// Watch the render output (via `capture_frame`) to see the triangle —
+/// if the frame goes solid color the tick path stalled. Send
+/// `aether.ping` with an incrementing `seq` to exercise reply-to-
+/// sender; the matching `aether.pong` lands back at your session.
 pub struct Hello {
     pong: KindId<Pong>,
     render: Sink<DrawTriangle>,
 }
 
+#[handlers]
 impl Component for Hello {
-    type Kinds = (Tick, Ping);
-
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Hello {
             pong: ctx.resolve::<Pong>(),
@@ -54,16 +61,28 @@ impl Component for Hello {
         }
     }
 
-    fn receive(&mut self, ctx: &mut Ctx<'_>, mail: Mail<'_>) {
-        if mail.is::<Tick>() {
-            ctx.send(&self.render, &TRIANGLE);
-        } else if let Some(ping) = mail.decode_typed::<Ping>()
-            && let Some(sender) = mail.sender()
-        {
-            // Echo the sequence number so the caller can pair request
-            // and reply when multiple pings are in flight. No sender
-            // (component-origin or broadcast) silently drops the ping
-            // — there's nothing to reply to.
+    /// Emits the configured triangle to the render sink every tick.
+    ///
+    /// # Agent
+    /// Not useful to send manually — the substrate drives this from
+    /// its own tick loop. The effect is visible in `capture_frame`
+    /// output.
+    #[handler]
+    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
+        ctx.send(&self.render, &TRIANGLE);
+    }
+
+    /// Replies to a ping with a pong carrying the same sequence
+    /// number. Silently drops pings that have no sender (component-
+    /// origin or broadcast) since there's nothing to reply to.
+    ///
+    /// # Agent
+    /// Send `{ seq: N }` and expect a matching pong at your session.
+    /// The seq echo lets you pair requests and replies when multiple
+    /// are in flight.
+    #[handler]
+    fn on_ping(&mut self, ctx: &mut Ctx<'_>, ping: Ping) {
+        if let Some(sender) = ctx.sender() {
             ctx.reply(sender, self.pong, &Pong { seq: ping.seq });
         }
     }
