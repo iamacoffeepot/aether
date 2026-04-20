@@ -18,6 +18,14 @@
 //! const fns is a compile-time panic. Runtime consumers (the hub)
 //! decode the produced bytes back into `Owned` cells via postcard.
 
+// clippy's `ptr_arg` rightly recommends `&[T]` / `&str` over
+// `&Cow<[T]>` / `&Cow<str>` in most APIs — deref coercion makes
+// `&cow` usable as `&[T]` automatically. But that deref isn't
+// `const`, so the helpers below can't accept `&[T]`: they need to
+// match on the `Cow` variant to narrow `Cow::Borrowed` to `&[T]`
+// by hand. Module-scoped allow documents the single exemption.
+#![allow(clippy::ptr_arg)]
+
 use alloc::borrow::Cow;
 
 use crate::types::{
@@ -31,7 +39,9 @@ use crate::types::{
 // can't be called from a const fn. Hand-roll a `match` per concrete
 // slice/str type to narrow `Cow<'static, [T]>` to `&[T]` (or
 // `Cow<str>` to `&str`). All panic on `Owned` — only the derive-
-// emitted `Cow::Borrowed` path is legal at const-eval here.
+// emitted `Cow::Borrowed` path is legal at const-eval here. See
+// the module-level `#![allow(clippy::ptr_arg)]` for why these take
+// `&Cow` rather than `&[T]` / `&str`.
 
 const fn cow_named_fields<'a>(c: &'a Cow<'static, [NamedField]>) -> &'a [NamedField] {
     match c {
@@ -286,10 +296,7 @@ pub const fn canonical_len_kind(name: &str, schema: &SchemaType) -> usize {
 /// Serialize `(name, schema)` into `N` bytes of a canonical postcard
 /// record. These are the bytes that populate `aether.kinds` (one
 /// record per `#[derive(Kind)]` type) and that `Kind::ID` hashes over.
-pub const fn canonical_serialize_kind<const N: usize>(
-    name: &str,
-    schema: &SchemaType,
-) -> [u8; N] {
+pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &SchemaType) -> [u8; N] {
     let mut out = [0u8; N];
     let mut pos = write_str(name, &mut out, 0);
     pos = write_schema(schema, &mut out, pos);
@@ -673,11 +680,7 @@ const fn write_variant_label(v: &VariantLabel, out: &mut [u8], cursor: usize) ->
     pos
 }
 
-const fn write_option_str(
-    s: &Option<Cow<'static, str>>,
-    out: &mut [u8],
-    cursor: usize,
-) -> usize {
+const fn write_option_str(s: &Option<Cow<'static, str>>, out: &mut [u8], cursor: usize) -> usize {
     let mut pos = cursor;
     match s {
         None => {

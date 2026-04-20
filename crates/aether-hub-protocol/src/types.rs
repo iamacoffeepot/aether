@@ -261,9 +261,17 @@ pub enum SchemaShape {
     Bytes,
     Option(Box<SchemaShape>),
     Vec(Box<SchemaShape>),
-    Array { element: Box<SchemaShape>, len: u32 },
-    Struct { fields: Vec<SchemaShape>, repr_c: bool },
-    Enum { variants: Vec<VariantShape> },
+    Array {
+        element: Box<SchemaShape>,
+        len: u32,
+    },
+    Struct {
+        fields: Vec<SchemaShape>,
+        repr_c: bool,
+    },
+    Enum {
+        variants: Vec<VariantShape>,
+    },
 }
 
 /// Positional enum variant — `VariantShape::Tuple { discriminant, fields }`
@@ -478,9 +486,7 @@ impl Serialize for LabelNode {
         use serde::ser::SerializeStructVariant;
         use serde::ser::SerializeTupleVariant;
         match self {
-            LabelNode::Anonymous => {
-                serializer.serialize_unit_variant("LabelNode", 0, "Anonymous")
-            }
+            LabelNode::Anonymous => serializer.serialize_unit_variant("LabelNode", 0, "Anonymous"),
             LabelNode::Option(cell) => {
                 let mut s = serializer.serialize_tuple_variant("LabelNode", 1, "Option", 1)?;
                 s.serialize_field(cell)?;
@@ -501,8 +507,7 @@ impl Serialize for LabelNode {
                 field_names,
                 fields,
             } => {
-                let mut s =
-                    serializer.serialize_struct_variant("LabelNode", 4, "Struct", 3)?;
+                let mut s = serializer.serialize_struct_variant("LabelNode", 4, "Struct", 3)?;
                 s.serialize_field("type_label", type_label)?;
                 s.serialize_field("field_names", field_names)?;
                 s.serialize_field("fields", fields)?;
@@ -512,8 +517,7 @@ impl Serialize for LabelNode {
                 type_label,
                 variants,
             } => {
-                let mut s =
-                    serializer.serialize_struct_variant("LabelNode", 5, "Enum", 2)?;
+                let mut s = serializer.serialize_struct_variant("LabelNode", 5, "Enum", 2)?;
                 s.serialize_field("type_label", type_label)?;
                 s.serialize_field("variants", variants)?;
                 s.end()
@@ -641,8 +645,7 @@ impl Serialize for VariantLabel {
                 field_names,
                 fields,
             } => {
-                let mut s =
-                    serializer.serialize_struct_variant("VariantLabel", 2, "Struct", 3)?;
+                let mut s = serializer.serialize_struct_variant("VariantLabel", 2, "Struct", 3)?;
                 s.serialize_field("name", name)?;
                 s.serialize_field("field_names", field_names)?;
                 s.serialize_field("fields", fields)?;

@@ -148,11 +148,11 @@ pub use schema::Schema;
 /// callers.
 #[doc(hidden)]
 pub mod __derive_runtime {
-    pub use alloc::borrow::Cow;
     pub use aether_hub_protocol::{
         EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, SchemaType, VariantLabel,
         canonical,
     };
+    pub use alloc::borrow::Cow;
 }
 
 mod schema {

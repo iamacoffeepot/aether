@@ -269,10 +269,7 @@ fn expand_label_node_enum(type_ident: &str, data: &DataEnum) -> TokenStream2 {
                 }
             },
             Fields::Unnamed(unnamed) => {
-                let field_exprs = unnamed
-                    .unnamed
-                    .iter()
-                    .map(|f| field_label_node_expr(&f.ty));
+                let field_exprs = unnamed.unnamed.iter().map(|f| field_label_node_expr(&f.ty));
                 quote! {
                     ::aether_mail::__derive_runtime::VariantLabel::Tuple {
                         name: ::aether_mail::__derive_runtime::Cow::Borrowed(#vname),
@@ -287,8 +284,7 @@ fn expand_label_node_enum(type_ident: &str, data: &DataEnum) -> TokenStream2 {
                     let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
                     quote! { ::aether_mail::__derive_runtime::Cow::Borrowed(#fname) }
                 });
-                let field_node_exprs =
-                    named.named.iter().map(|f| field_label_node_expr(&f.ty));
+                let field_node_exprs = named.named.iter().map(|f| field_label_node_expr(&f.ty));
                 quote! {
                     ::aether_mail::__derive_runtime::VariantLabel::Struct {
                         name: ::aether_mail::__derive_runtime::Cow::Borrowed(#vname),

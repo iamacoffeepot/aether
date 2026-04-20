@@ -730,7 +730,7 @@ impl ControlPlane {
 mod tests {
     use super::*;
     use crate::mail::Mail;
-    use aether_hub_protocol::{NamedField, Primitive, SchemaType, SessionToken};
+    use aether_hub_protocol::{Primitive, SchemaType, SessionToken};
     use std::sync::atomic::AtomicU32;
 
     #[test]
@@ -945,42 +945,47 @@ mod tests {
         assert!(matches!(result, LoadResult::Err { .. }));
     }
 
-    /// ADR-0028 happy path: a component ships kind descriptors in
-    /// its `aether.kinds` custom section, with an empty legacy
-    /// `LoadKind` list on the payload. The substrate reads the
-    /// section and registers each kind before instantiation.
+    /// ADR-0028 / ADR-0032 happy path: a component ships both its
+    /// canonical `aether.kinds` record and the paired
+    /// `aether.kinds.labels` sidecar. The substrate reads both and
+    /// registers the named kind before instantiation.
     #[test]
     fn load_component_registers_kinds_from_embedded_manifest() {
         let plane = make_plane();
 
-        // Hand-roll a record the way the derive would emit it:
-        // `[0x01] [postcard(KindDescriptor { name, schema })]`.
-        // Placed into the WAT via `(@custom "aether.kinds" ...)`.
-        let desc = KindDescriptor {
-            name: "demo.embedded.kind".to_string(),
-            schema: SchemaType::Struct {
-                fields: vec![NamedField {
-                    name: "code".into(),
-                    ty: SchemaType::Scalar(Primitive::U32),
-                }]
-                .into(),
+        // Hand-roll the v0x02 records the derive would emit.
+        let shape = aether_hub_protocol::KindShape {
+            name: std::borrow::Cow::Borrowed("demo.embedded.kind"),
+            schema: aether_hub_protocol::SchemaShape::Struct {
+                fields: vec![aether_hub_protocol::SchemaShape::Scalar(Primitive::U32)],
                 repr_c: true,
             },
         };
-        let mut section = vec![0x01u8];
-        section.extend(postcard::to_allocvec(&desc).unwrap());
-        let escaped: String = section.iter().map(|b| format!("\\{b:02x}")).collect();
+        let labels = aether_hub_protocol::KindLabels {
+            kind_label: std::borrow::Cow::Borrowed("demo::EmbeddedKind"),
+            root: aether_hub_protocol::LabelNode::Struct {
+                type_label: Some(std::borrow::Cow::Borrowed("demo::EmbeddedKind")),
+                field_names: std::borrow::Cow::Owned(vec![std::borrow::Cow::Borrowed("code")]),
+                fields: std::borrow::Cow::Owned(vec![aether_hub_protocol::LabelNode::Anonymous]),
+            },
+        };
+        let mut canonical = vec![0x02u8];
+        canonical.extend(postcard::to_allocvec(&shape).unwrap());
+        let mut labels_bytes = vec![0x02u8];
+        labels_bytes.extend(postcard::to_allocvec(&labels).unwrap());
+        let esc = |bs: &[u8]| -> String { bs.iter().map(|b| format!("\\{b:02x}")).collect() };
         let wat = format!(
             r#"(module
-                (@custom "aether.kinds" "{escaped}")
+                (@custom "aether.kinds" "{}")
+                (@custom "aether.kinds.labels" "{}")
                 (memory (export "memory") 1)
                 (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
-                    i32.const 0))"#
+                    i32.const 0))"#,
+            esc(&canonical),
+            esc(&labels_bytes),
         );
         let wasm = wat::parse_str(wat).unwrap();
 
-        // Empty `kinds` — the whole point is that the embedded
-        // manifest is the source of truth now.
         let loaded = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm,
@@ -1000,7 +1005,12 @@ mod tests {
             .registry
             .kind_descriptor(registered_id)
             .expect("descriptor recoverable");
-        assert_eq!(back.schema, desc.schema);
+        let SchemaType::Struct { fields, repr_c } = &back.schema else {
+            panic!("expected Struct");
+        };
+        assert!(*repr_c);
+        assert_eq!(fields[0].name, "code");
+        assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
     }
 
     /// Same flow, but the embedded manifest conflicts with a kind
@@ -1011,7 +1021,6 @@ mod tests {
     fn load_component_rejects_embedded_manifest_conflict() {
         let plane = make_plane();
 
-        // Pre-register a kind with a specific schema.
         plane
             .registry
             .register_kind_with_descriptor(KindDescriptor {
@@ -1020,21 +1029,28 @@ mod tests {
             })
             .unwrap();
 
-        // Now embed a section declaring the same name with a
-        // different schema — must fail the load.
-        let desc = KindDescriptor {
-            name: "demo.conflict".into(),
-            schema: SchemaType::Scalar(Primitive::U64),
+        let shape = aether_hub_protocol::KindShape {
+            name: std::borrow::Cow::Borrowed("demo.conflict"),
+            schema: aether_hub_protocol::SchemaShape::Scalar(Primitive::U64),
         };
-        let mut section = vec![0x01u8];
-        section.extend(postcard::to_allocvec(&desc).unwrap());
-        let escaped: String = section.iter().map(|b| format!("\\{b:02x}")).collect();
+        let labels = aether_hub_protocol::KindLabels {
+            kind_label: std::borrow::Cow::Borrowed("demo::Conflict"),
+            root: aether_hub_protocol::LabelNode::Anonymous,
+        };
+        let mut canonical = vec![0x02u8];
+        canonical.extend(postcard::to_allocvec(&shape).unwrap());
+        let mut labels_bytes = vec![0x02u8];
+        labels_bytes.extend(postcard::to_allocvec(&labels).unwrap());
+        let esc = |bs: &[u8]| -> String { bs.iter().map(|b| format!("\\{b:02x}")).collect() };
         let wat = format!(
             r#"(module
-                (@custom "aether.kinds" "{escaped}")
+                (@custom "aether.kinds" "{}")
+                (@custom "aether.kinds.labels" "{}")
                 (memory (export "memory") 1)
                 (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
-                    i32.const 0))"#
+                    i32.const 0))"#,
+            esc(&canonical),
+            esc(&labels_bytes),
         );
         let wasm = wat::parse_str(wat).unwrap();
 
