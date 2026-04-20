@@ -25,9 +25,10 @@
 use std::borrow::Cow;
 
 use aether_hub_protocol::{
-    EnumVariant, KindDescriptor, KindLabels, KindShape, LabelNode, NamedField, SchemaCell,
-    SchemaShape, SchemaType, VariantLabel,
+    EnumVariant, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KindDescriptor, KindLabels,
+    KindShape, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType, VariantLabel,
 };
+use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
 use wasmparser::{Parser, Payload};
 
 /// Section name the derive writes to for canonical schema bytes.
@@ -75,6 +76,92 @@ pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
         descriptors.push(merge(shape, label));
     }
     Ok(descriptors)
+}
+
+/// Decode the component's `aether.kinds.inputs` section (ADR-0033)
+/// into a structured `ComponentCapabilities`. Components without the
+/// section return `ComponentCapabilities::default()` — matches
+/// behavior of a pre-ADR-0033 component that shipped with only
+/// `type Kinds` / `fn receive`.
+///
+/// Record shape: `[0x01][postcard(InputsRecord)]` back-to-back. The
+/// classifier walks the records in declaration order: every Handler
+/// enters `handlers`, at most one Fallback populates `fallback`, and
+/// at most one Component populates `doc`. Duplicate Fallback /
+/// Component records are a substrate-rejected load error — the macro
+/// emits at most one of each so seeing two means the component
+/// binary was built against a different manifest contract.
+pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, String> {
+    let mut records: Vec<InputsRecord> = Vec::new();
+
+    for payload in Parser::new(0).parse_all(wasm) {
+        let payload = payload.map_err(|e| format!("wasmparser: {e}"))?;
+        let Payload::CustomSection(reader) = payload else {
+            continue;
+        };
+        if reader.name() != INPUTS_SECTION {
+            continue;
+        }
+        decode_inputs_records(reader.data(), &mut records)?;
+    }
+
+    let mut caps = ComponentCapabilities::default();
+    for record in records {
+        match record {
+            InputsRecord::Handler { id, name, doc } => {
+                caps.handlers.push(HandlerCapability {
+                    id,
+                    name: name.into_owned(),
+                    doc: doc.map(|d| d.into_owned()),
+                });
+            }
+            InputsRecord::Fallback { doc } => {
+                if caps.fallback.is_some() {
+                    return Err(format!(
+                        "{INPUTS_SECTION}: duplicate Fallback record — macro emits at most one"
+                    ));
+                }
+                caps.fallback = Some(FallbackCapability {
+                    doc: doc.map(|d| d.into_owned()),
+                });
+            }
+            InputsRecord::Component { doc } => {
+                if caps.doc.is_some() {
+                    return Err(format!(
+                        "{INPUTS_SECTION}: duplicate Component record — macro emits at most one"
+                    ));
+                }
+                caps.doc = Some(doc.into_owned());
+            }
+        }
+    }
+    Ok(caps)
+}
+
+fn decode_inputs_records(data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(), String> {
+    let mut cursor = data;
+    while !cursor.is_empty() {
+        let version = cursor[0];
+        if version != INPUTS_SECTION_VERSION {
+            return Err(format!(
+                "{INPUTS_SECTION}: record version {version:#x} not understood by this substrate build"
+            ));
+        }
+        let body = &cursor[1..];
+        match postcard::take_from_bytes::<InputsRecord>(body) {
+            Ok((record, rest)) => {
+                out.push(record);
+                cursor = rest;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "{INPUTS_SECTION}: postcard decode failed at record {}: {e}",
+                    out.len() + 1
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Walk one custom section: `[version][postcard(T)]` records until
@@ -530,5 +617,116 @@ mod tests {
         };
         assert_eq!(inner_fields[0].name, "x");
         assert_eq!(inner_fields[1].name, "y");
+    }
+
+    // ADR-0033: `aether.kinds.inputs` reader. The macro emits
+    // `[INPUTS_SECTION_VERSION][postcard(InputsRecord)]` back to back;
+    // these tests pin the classifier that turns those records into
+    // `ComponentCapabilities`.
+
+    fn inputs_section(records: &[InputsRecord]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for rec in records {
+            out.push(INPUTS_SECTION_VERSION);
+            out.extend(postcard::to_allocvec(rec).unwrap());
+        }
+        out
+    }
+
+    #[test]
+    fn reads_handlers_plus_component_doc() {
+        let section = inputs_section(&[
+            InputsRecord::Component {
+                doc: "Draws triangles on tick.".into(),
+            },
+            InputsRecord::Handler {
+                id: 42,
+                name: "aether.tick".into(),
+                doc: Some("substrate drives this".into()),
+            },
+            InputsRecord::Handler {
+                id: 0xff,
+                name: "aether.ping".into(),
+                doc: None,
+            },
+        ]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let caps = read_inputs_from_bytes(&wasm).unwrap();
+        assert_eq!(caps.doc.as_deref(), Some("Draws triangles on tick."));
+        assert_eq!(caps.handlers.len(), 2);
+        assert_eq!(caps.handlers[0].id, 42);
+        assert_eq!(caps.handlers[0].name, "aether.tick");
+        assert_eq!(
+            caps.handlers[0].doc.as_deref(),
+            Some("substrate drives this")
+        );
+        assert_eq!(caps.handlers[1].id, 0xff);
+        assert_eq!(caps.handlers[1].name, "aether.ping");
+        assert!(caps.handlers[1].doc.is_none());
+        assert!(caps.fallback.is_none());
+    }
+
+    #[test]
+    fn reads_fallback_record() {
+        let section = inputs_section(&[InputsRecord::Fallback {
+            doc: Some("catchall".into()),
+        }]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let caps = read_inputs_from_bytes(&wasm).unwrap();
+        assert!(caps.handlers.is_empty());
+        let fallback = caps.fallback.expect("fallback present");
+        assert_eq!(fallback.doc.as_deref(), Some("catchall"));
+    }
+
+    #[test]
+    fn absent_section_returns_default_capabilities() {
+        let wasm = wat::parse_str(r#"(module (func (export "noop")))"#).unwrap();
+        let caps = read_inputs_from_bytes(&wasm).unwrap();
+        assert!(caps.handlers.is_empty());
+        assert!(caps.fallback.is_none());
+        assert!(caps.doc.is_none());
+    }
+
+    #[test]
+    fn duplicate_fallback_is_rejected() {
+        let section = inputs_section(&[
+            InputsRecord::Fallback { doc: None },
+            InputsRecord::Fallback {
+                doc: Some("two".into()),
+            },
+        ]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let err = read_inputs_from_bytes(&wasm).unwrap_err();
+        assert!(err.contains("duplicate Fallback"), "err: {err}");
+    }
+
+    #[test]
+    fn unknown_inputs_version_rejected() {
+        let wasm = wasm_with_section(INPUTS_SECTION, &[0xff, 0x00]);
+        let err = read_inputs_from_bytes(&wasm).unwrap_err();
+        assert!(err.contains("0xff"), "err: {err}");
+    }
+
+    #[test]
+    fn reads_hello_component_inputs_section() {
+        // End-to-end sanity: the real hello-component's section
+        // decodes into the expected shape without wiring every byte by
+        // hand. Skips if the wasm isn't built — the cargo-test harness
+        // builds workspace members lazily.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/wasm32-unknown-unknown/release/aether_hello_component.wasm"
+        );
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("skipping: hello-component wasm not built at {path}");
+            return;
+        };
+        let caps = read_inputs_from_bytes(&bytes).expect("decode");
+        assert!(caps.doc.is_some(), "component-level doc present");
+        assert_eq!(caps.handlers.len(), 2, "tick + ping handlers");
+        let names: Vec<&str> = caps.handlers.iter().map(|h| h.name.as_str()).collect();
+        assert!(names.contains(&"aether.tick"));
+        assert!(names.contains(&"aether.ping"));
+        assert!(caps.fallback.is_none(), "strict receiver");
     }
 }

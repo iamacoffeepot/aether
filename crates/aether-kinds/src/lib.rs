@@ -232,15 +232,59 @@ mod control_plane {
         pub name: Option<String>,
     }
 
-    /// Reply to `LoadComponent`. `Ok` carries the assigned mailbox id
-    /// and the resolved name (so callers that omitted `name` learn
-    /// the substrate-defaulted one). `Err` carries the failure reason
-    /// — kind-descriptor conflict, invalid WASM, name conflict, etc.
+    /// Reply to `LoadComponent`. `Ok` carries the assigned mailbox id,
+    /// the resolved name (so callers that omitted `name` learn the
+    /// substrate-defaulted one), and the component's advertised
+    /// receive-side capabilities parsed from `aether.kinds.inputs`
+    /// (ADR-0033). `Err` carries the failure reason — kind-descriptor
+    /// conflict, invalid WASM, name conflict, etc.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.load_result")]
     pub enum LoadResult {
-        Ok { mailbox_id: u64, name: String },
-        Err { error: String },
+        Ok {
+            mailbox_id: u64,
+            name: String,
+            capabilities: ComponentCapabilities,
+        },
+        Err {
+            error: String,
+        },
+    }
+
+    /// ADR-0033 receive-side capability surface for a component. Built
+    /// from the `aether.kinds.inputs` wasm custom section at load time;
+    /// the substrate extracts the structured handler / fallback /
+    /// component-doc records from the raw section bytes and packs them
+    /// into this shape so the hub can store and the MCP harness can
+    /// render without a second parser. Empty `handlers` + `None`
+    /// fallback + `None` doc describes a component that shipped
+    /// without the `#[handlers]` macro (ADR-0027 shape) — the hub can
+    /// tell those apart from a truly empty receive surface.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+    pub struct ComponentCapabilities {
+        pub handlers: Vec<HandlerCapability>,
+        pub fallback: Option<FallbackCapability>,
+        pub doc: Option<String>,
+    }
+
+    /// One `#[handler]` method's advertised capability. `id` is the
+    /// compile-time `<K as Kind>::ID` (ADR-0030); `name` is `K::NAME`;
+    /// `doc` carries the author's rustdoc filtered through the
+    /// `# Agent` section convention when present, else the full doc.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct HandlerCapability {
+        pub id: u64,
+        pub name: String,
+        pub doc: Option<String>,
+    }
+
+    /// A `#[fallback]` method's advertised presence + optional doc.
+    /// Components without a fallback are strict receivers; absence of
+    /// this field on `ComponentCapabilities` means "no catchall — mail
+    /// for unhandled kinds will land as `DISPATCH_UNKNOWN_KIND`".
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct FallbackCapability {
+        pub doc: Option<String>,
     }
 
     /// `aether.control.drop_component` — remove a component from the
@@ -276,12 +320,13 @@ mod control_plane {
         pub drain_timeout_ms: Option<u32>,
     }
 
-    /// Reply to `ReplaceComponent`. Same shape as `DropResult` —
-    /// success or a free-form error string.
+    /// Reply to `ReplaceComponent`. Carries the new component's
+    /// advertised capabilities on `Ok` so the hub's cached state
+    /// reflects the swapped binary; `Err` carries a free-form reason.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.replace_result")]
     pub enum ReplaceResult {
-        Ok,
+        Ok { capabilities: ComponentCapabilities },
         Err { error: String },
     }
 

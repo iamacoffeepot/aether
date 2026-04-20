@@ -217,11 +217,23 @@ fn worker_loop(ctx: Arc<WorkerContext>) {
                             continue;
                         }
                         entry.pending.fetch_add(1, Ordering::AcqRel);
-                        {
+                        let rc = {
                             let mut c = entry.component.lock().unwrap();
-                            c.deliver(&mail).expect("component.deliver failed");
-                        }
+                            c.deliver(&mail).expect("component.deliver failed")
+                        };
                         entry.pending.fetch_sub(1, Ordering::AcqRel);
+                        if rc == crate::component::DISPATCH_UNKNOWN_KIND {
+                            let kind_name = ctx
+                                .registry
+                                .kind_name(mail.kind)
+                                .unwrap_or_else(|| format!("kind#{:#x}", mail.kind));
+                            tracing::warn!(
+                                target: "aether_substrate::scheduler",
+                                mailbox = ?recipient,
+                                kind = %kind_name,
+                                "component has no handler for mail kind (ADR-0033 strict receiver); dropped",
+                            );
+                        }
                     }
                     None => {
                         tracing::warn!(

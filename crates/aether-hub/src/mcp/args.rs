@@ -18,6 +18,29 @@ pub struct DescribeKindsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct DescribeComponentArgs {
+    /// Hub-assigned engine UUID as a string (from `list_engines`).
+    pub engine_id: String,
+    /// Mailbox id of the loaded component (from `load_component`'s
+    /// response). Passed as a string because MCP clients serialize
+    /// JSON numbers through IEEE-754 double, which loses precision
+    /// beyond 2^53 — and mailbox ids are full 64-bit name hashes
+    /// (ADR-0029).
+    pub mailbox_id: String,
+}
+
+/// Structured response for `describe_component` (ADR-0033). Mirrors
+/// the `LoadResult` capabilities but adds the component's name so an
+/// agent that only has the mailbox id can still render it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DescribeComponentResponse {
+    pub name: String,
+    pub doc: Option<String>,
+    pub receives: Vec<HandlerCapabilityWire>,
+    pub fallback: Option<FallbackCapabilityWire>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SendMailArgs {
     /// One or more mail items to deliver. Each item is processed
     /// independently — a single failure doesn't abort the batch. The
@@ -252,8 +275,40 @@ pub struct LoadComponentArgs {
 /// with `aether-kinds::LoadResult` — that type is canonical.
 #[derive(Debug, Deserialize)]
 pub(super) enum LoadResultWire {
-    Ok { mailbox_id: u64, name: String },
-    Err { error: String },
+    Ok {
+        mailbox_id: u64,
+        name: String,
+        capabilities: ComponentCapabilitiesWire,
+    },
+    Err {
+        error: String,
+    },
+}
+
+/// Wire-format mirror of `aether-kinds::ComponentCapabilities` (ADR-
+/// 0033). The hub decodes this from the substrate's `LoadResult` and
+/// caches a per-mailbox copy so the `describe_component` MCP tool can
+/// surface it without round-tripping the substrate. Same lockstep
+/// discipline as `LoadResultWire` — canonical form lives in aether-kinds.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct ComponentCapabilitiesWire {
+    pub handlers: Vec<HandlerCapabilityWire>,
+    pub fallback: Option<FallbackCapabilityWire>,
+    pub doc: Option<String>,
+}
+
+/// One `#[handler]` method's capability entry — see `aether-kinds::HandlerCapability`.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct HandlerCapabilityWire {
+    pub id: u64,
+    pub name: String,
+    pub doc: Option<String>,
+}
+
+/// `#[fallback]` presence + optional doc — see `aether-kinds::FallbackCapability`.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct FallbackCapabilityWire {
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -265,6 +320,12 @@ pub struct LoadComponentResponse {
     /// Substrate-resolved name. Matches the `name` in the request if
     /// provided; otherwise the substrate-defaulted value.
     pub name: String,
+    /// Receive-side capability surface the component advertised via
+    /// `aether.kinds.inputs` (ADR-0033). Empty `handlers` + no
+    /// fallback + no doc describes a component that shipped without
+    /// the `#[handlers]` macro — still loadable, just opaque to
+    /// `describe_component`.
+    pub capabilities: ComponentCapabilitiesWire,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -297,8 +358,12 @@ pub struct ReplaceComponentArgs {
 /// in lockstep with `aether-kinds::ReplaceResult`.
 #[derive(Debug, Deserialize)]
 pub(super) enum ReplaceResultWire {
-    Ok,
-    Err { error: String },
+    Ok {
+        capabilities: ComponentCapabilitiesWire,
+    },
+    Err {
+        error: String,
+    },
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

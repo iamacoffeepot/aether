@@ -77,6 +77,7 @@ pub async fn handle_connection(
         pid: hello.pid,
         version: hello.version.clone(),
         kinds: hello.kinds,
+        components: std::collections::HashMap::new(),
         mail_tx,
         spawned,
     });

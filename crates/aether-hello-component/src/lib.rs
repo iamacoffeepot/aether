@@ -39,6 +39,12 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
     ],
 };
 
+/// Per-instance state for the hello component.
+pub struct Hello {
+    pong: KindId<Pong>,
+    render: Sink<DrawTriangle>,
+}
+
 /// Minimal end-to-end smoke component: draws a static triangle every
 /// tick and echoes pings back to the sender.
 ///
@@ -47,11 +53,6 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
 /// if the frame goes solid color the tick path stalled. Send
 /// `aether.ping` with an incrementing `seq` to exercise reply-to-
 /// sender; the matching `aether.pong` lands back at your session.
-pub struct Hello {
-    pong: KindId<Pong>,
-    render: Sink<DrawTriangle>,
-}
-
 #[handlers]
 impl Component for Hello {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
