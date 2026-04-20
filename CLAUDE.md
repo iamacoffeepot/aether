@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Early-stage Rust project (edition 2024). Vision: a game engine where Claude sits in a harness as assistant/engineer/designer. Architectural direction (see `docs/adr/`): a thin native **substrate** owns I/O, GPU, audio, and hosts a WASM runtime; engine **components** run as WASM modules and communicate via a **mail** system. (The whole system — substrate + components + tooling — is "Aether" or "the engine"; the substrate is just the native base layer.)
+Pre-1.0 Rust project (edition 2024). Vision: a game engine where Claude sits in a harness as assistant/engineer/designer. Architectural direction (see `docs/adr/`): a thin native **substrate** owns I/O, GPU, audio, and hosts a WASM runtime; engine **components** run as WASM modules and communicate via a **mail** system. (The whole system — substrate + components + tooling — is "Aether" or "the engine"; the substrate is just the native base layer.)
 
 ## Workflow
 
@@ -37,7 +37,9 @@ Input streams (tick, key, mouse_move, mouse_button) are publish/subscribe (ADR-0
 
 `aether.control.replace_component` is freeze-drain-swap (ADR-0022): the substrate freezes the target mailbox, waits for in-flight `deliver` calls on the old instance to complete, then swaps. If the drain exceeds `drain_timeout_ms` (default 5000, per-replace overridable) the reply is `Err { error: "drain timeout ..." }` and the old instance stays bound — a loud failure rather than silent dropped mail. Mail that arrives during the freeze is parked and flushed through whichever instance ends up bound (new on success, old on timeout).
 
-Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encoding), ADR-0008 (observation path), ADR-0009 (hub-supervised substrate spawn), ADR-0020 (symmetric receive_mail decode), ADR-0021 (input stream subscriptions), ADR-0022 (drain-on-swap for replace_component), ADR-0023 (substrate log capture + engine_logs), and ADR-0024 (`_p32`-suffixed FFI in anticipation of wasm64).
+Window + platform state is mailed, not MCP-toolled. `aether.control.platform_info` returns a `PlatformInfoResult` snapshot (OS + arch, engine version + worker count + kind count, GPU adapter/limits, full monitor list with available video modes, current window mode + size). `aether.control.set_window_mode` switches the window at runtime between `Windowed { width?, height? }`, `FullscreenBorderless`, and `FullscreenExclusive { width, height, refresh_mhz }`; the substrate resolves exclusive modes against the window's current monitor and replies with the actually-applied size. Boot-time override: set `AETHER_WINDOW_MODE` to `windowed`, `windowed:WxH`, `fullscreen-borderless`, or `exclusive:WxH@HZ` (integer Hz) to pick the initial mode before any component loads.
+
+Design detail lives in ADR-0006 (wire + topology), ADR-0007 (schema-driven encoding), ADR-0008 (observation path), ADR-0009 (hub-supervised substrate spawn), ADR-0020 (symmetric receive_mail decode), ADR-0021 (input stream subscriptions), ADR-0022 (drain-on-swap for replace_component), ADR-0023 (substrate log capture + engine_logs), ADR-0024 (`_p32`-suffixed FFI in anticipation of wasm64), and ADR-0027 (component-declared kind-dependency typelists).
 
 The component FFI surface uses a `_p32` suffix on every pointer-typed import (`aether::send_mail_p32`, `reply_mail_p32`, `resolve_kind_p32`, `resolve_mailbox_p32`, `save_state_p32`) and on the `receive_p32` / `on_rehydrate_p32` exports. Non-pointer exports (`init`, `on_replace`, `on_drop`) are unsuffixed. The suffix locks the wasm32/wasm64 naming convention without committing to dual registration today — see ADR-0024 for the deferred Phase 2.
 
