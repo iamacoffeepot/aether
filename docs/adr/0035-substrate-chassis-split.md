@@ -98,6 +98,16 @@ Per-chassis CLI / env flags currently handled in `main.rs` (`AETHER_WINDOW_MODE`
 
 **Phase 4 — Follow-up.** Update tests that depended on the substrate being one crate. Update docs (CLAUDE.md, README) to reflect the chassis taxonomy. Address any trait-surface issues surfaced by the headless chassis before they fossilize.
 
+### CI matrix scope
+
+After the split, CI OS-matrix testing should narrow to the chassis crate that actually exercises per-OS behavior:
+
+- **`aether-substrate-desktop`** — full matrix (ubuntu + macos + windows). This is where winit event loops, wgpu driver init, and platform-specific frame-capture paths live; per-OS coverage catches real bugs here.
+- **`aether-substrate-core`, `aether-substrate-headless`, `aether-substrate-hub`** — linux only. Pure Rust runtime code with no OS-specific system calls; the matrix would just triple CI time without catching anything the linux run doesn't.
+- **Workspace-wide `cargo test --workspace`** — linux only. Non-chassis crates (aether-kinds, aether-mail, aether-hub-protocol, aether-component, aether-mail-derive, demo components) have no per-OS behavior.
+
+The Phase 2 PR (or a follow-up `ci/` PR) flips `.github/workflows/ci.yml`: the existing matrix `test` job becomes linux-only and runs the workspace; a separate `desktop` job matrix-tests `cargo test -p aether-substrate-desktop --all-targets` on macos + windows.
+
 ### Deferred
 
 - **Hub-chassis** — owned by ADR-0034 Phase 1, not this ADR.
