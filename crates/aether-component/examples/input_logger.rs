@@ -1,34 +1,20 @@
-// Smoke component for ADR-0021 input subscriptions. Resolves the
-// four substrate-published input kinds (Tick / Key / MouseMove /
-// MouseButton) and the `hub.claude.broadcast` sink, then on every
-// received input event emits a `demo.input_observed { stream, code }`
-// observation so the driving Claude session can see the dispatch
-// land via `receive_mail`.
-//
-// The component itself doesn't subscribe to anything — that's the
-// agent's job. From the harness:
-//
-//   1. `load_component` with this `.wasm` (or compile and use the
-//      built artifact at `target/wasm32-unknown-unknown/release/
-//      examples/input_logger.wasm`).
-//   2. `send_mail` `aether.control.subscribe_input` with
-//      `{ stream: "Key", mailbox: <id from load_result> }`.
-//   3. Press keys in the substrate window (or otherwise drive the
-//      platform layer).
-//   4. `receive_mail` — each press lands as a
-//      `demo.input_observed { stream: 1, code: <keycode> }`.
-//
-// `stream` is encoded as: 0=Tick, 1=Key, 2=MouseButton, 3=MouseMove.
-// `code` carries the keycode for Key, the rounded cursor `x` for
-// MouseMove, and `0` for the empty-payload kinds (Tick and
-// MouseButton).
-//
-// ADR-0027 shape: the four input kinds live in `type Kinds`;
-// dispatch reads from the per-component `KindTable` via
-// `mail.is::<K>()` for signal kinds and `mail.decode_typed::<K>()`
-// for payload-bearing ones.
+//! Smoke component for ADR-0021 input subscriptions. Observes the
+//! four substrate-published input kinds (Tick / Key / MouseMove /
+//! MouseButton) and emits a `demo.input_observed { stream, code }`
+//! observation to `hub.claude.broadcast` so the driving Claude
+//! session sees each dispatch land via `receive_mail`.
+//!
+//! `stream` encoding: 0=Tick, 1=Key, 2=MouseButton, 3=MouseMove.
+//! `code` carries the keycode for Key, the rounded cursor `x` for
+//! MouseMove, and `0` for the empty-payload kinds (Tick and
+//! MouseButton).
+//!
+//! ADR-0033 phase 3: each input kind has its own `#[handler]`
+//! method. `#[handlers]` auto-subscribes every `K::IS_INPUT` handler
+//! kind at init, so the test harness just loads the component and
+//! starts driving input — no manual `subscribe_input` needed.
 
-use aether_component::{Component, Ctx, InitCtx, Mail, Sink};
+use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
 use aether_kinds::{Key, MouseButton, MouseMove, Tick};
 use aether_mail::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
@@ -45,34 +31,44 @@ pub struct InputLogger {
     observe: Sink<InputObserved>,
 }
 
+#[handlers]
 impl Component for InputLogger {
-    type Kinds = (Tick, Key, MouseButton, MouseMove);
-
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         InputLogger {
             observe: ctx.resolve_sink::<InputObserved>("hub.claude.broadcast"),
         }
     }
 
-    fn receive(&mut self, ctx: &mut Ctx<'_>, mail: Mail<'_>) {
-        let observation = if mail.is::<Tick>() {
-            Some(InputObserved { stream: 0, code: 0 })
-        } else if mail.is::<MouseButton>() {
-            Some(InputObserved { stream: 2, code: 0 })
-        } else if let Some(k) = mail.decode_typed::<Key>() {
-            Some(InputObserved {
+    #[handler]
+    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
+        ctx.send(&self.observe, &InputObserved { stream: 0, code: 0 });
+    }
+
+    #[handler]
+    fn on_key(&mut self, ctx: &mut Ctx<'_>, key: Key) {
+        ctx.send(
+            &self.observe,
+            &InputObserved {
                 stream: 1,
-                code: k.code,
-            })
-        } else {
-            mail.decode_typed::<MouseMove>().map(|m| InputObserved {
+                code: key.code,
+            },
+        );
+    }
+
+    #[handler]
+    fn on_mouse_button(&mut self, ctx: &mut Ctx<'_>, _mb: MouseButton) {
+        ctx.send(&self.observe, &InputObserved { stream: 2, code: 0 });
+    }
+
+    #[handler]
+    fn on_mouse_move(&mut self, ctx: &mut Ctx<'_>, m: MouseMove) {
+        ctx.send(
+            &self.observe,
+            &InputObserved {
                 stream: 3,
                 code: m.x as u32,
-            })
-        };
-        if let Some(obs) = observation {
-            ctx.send(&self.observe, &obs);
-        }
+            },
+        );
     }
 }
 

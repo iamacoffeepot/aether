@@ -79,9 +79,9 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     // guest side via the `Kind` derive's `const ID`. The host fn and
     // its `KIND_NOT_FOUND` sentinel are gone. Input-stream auto-
     // subscribe (the side-effect that used to ride this host fn)
-    // moved to the guest SDK — `KindList::resolve_all` mails
-    // `aether.control.subscribe_input` for every `K::IS_INPUT` kind in
-    // the component's typelist.
+    // moved to the guest SDK — ADR-0033 phase 3 has `#[handlers]`
+    // prepend `ctx.subscribe_input::<K>()` for every `K::IS_INPUT`
+    // handler kind to the user's `init` body.
 
     // ADR-0016 §2: save_state buffers the component's migration payload
     // into a substrate-owned slot on the store ctx. The guest passes a

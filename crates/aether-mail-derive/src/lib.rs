@@ -549,19 +549,32 @@ fn to_screaming_snake_case(s: &str) -> String {
     out
 }
 
-// ADR-0033: `#[handlers]` applied to `impl Component for C` blocks.
-// Reshapes the impl so `#[handler] fn on_X(&mut self, &mut Ctx, K)`
-// methods plus an optional `#[fallback]` method become both (a)
-// dispatcher arms on a synthesized `Component::receive` and (b) per-
-// record statics in the `aether.kinds.inputs` custom section (hub-
-// facing capability advertisement). Non-trait helper methods migrate
-// to a sibling inherent impl since `impl Trait for Type` can't host
-// them.
+// ADR-0033 phase 3: `#[handlers]` on an `impl Component for C` block
+// is the one receive path for every component. The macro emits:
 //
-// The `type Kinds = (K1, K2, ...)` associated type is synthesized from
-// the handler set so the existing ADR-0027 / ADR-0030 init walker
-// (`KindList::resolve_all`) populates the per-component `KindTable` and
-// auto-subscribes every `K::IS_INPUT` kind unchanged.
+//   (a) An inherent method `__aether_dispatch(&mut self, ctx, mail)
+//       -> u32` on `C` that `export!`'s `receive_p32` shim calls. The
+//       body matches `mail.kind()` against each `<K as Kind>::ID`
+//       const (ADR-0030 Phase 2) and dispatches to the user-written
+//       inherent handler method; a `#[fallback]` catches unmatched
+//       kinds; strict receivers (no fallback) return
+//       `DISPATCH_UNKNOWN_KIND` so the substrate's scheduler logs the
+//       miss (issue #142).
+//
+//   (b) A wrapper around the user's `init` that prepends
+//       `ctx.subscribe_input::<K>()` for every `K::IS_INPUT` handler
+//       kind. Replaces the ADR-0027 `KindList::resolve_all` walker.
+//       Guarded by `if <K as Kind>::IS_INPUT` so non-input kinds
+//       compile down to no-ops.
+//
+//   (c) Per-method `aether.kinds.inputs` custom-section statics — one
+//       per `#[handler]`, one per `#[fallback]` (when present), one
+//       for the component-level doc (when present) — read by the hub
+//       at load_component for MCP capability surfacing.
+//
+// The user's handler methods ride as inherent methods on `C` (since
+// `impl Trait for C` can't host non-trait items); helpers go the same
+// way. The trait impl retains only `init` and lifecycle hooks.
 //
 // Rustdoc capture: `///` comments on the impl block (component-level),
 // each `#[handler]`, and each `#[fallback]` become MCP-facing prose. If
@@ -728,8 +741,8 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
         ));
     }
 
-    let kinds_typelist = build_kinds_typelist(&handlers);
-    let receive_body = build_receive_body(&handlers, fallback.as_ref());
+    let wrapped_init = wrap_init_with_subscribes(init_method, &handlers)?;
+    let dispatch_body = build_dispatch_body(&handlers, fallback.as_ref());
 
     let handler_methods_tokens = handlers.iter().map(|h| &h.method);
     let fallback_method_tokens = fallback.as_ref().map(|f| &f.method);
@@ -740,22 +753,21 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         impl #impl_generics #trait_path for #self_ty #where_clause {
-            type Kinds = #kinds_typelist;
-
-            #init_method
-
-            fn receive(
-                &mut self,
-                __aether_ctx: &mut ::aether_component::Ctx<'_>,
-                __aether_mail: ::aether_component::Mail<'_>,
-            ) {
-                #receive_body
-            }
+            #wrapped_init
 
             #(#lifecycle_methods)*
         }
 
         impl #impl_generics #self_ty #where_clause {
+            #[doc(hidden)]
+            pub fn __aether_dispatch(
+                &mut self,
+                __aether_ctx: &mut ::aether_component::Ctx<'_>,
+                __aether_mail: ::aether_component::Mail<'_>,
+            ) -> u32 {
+                #dispatch_body
+            }
+
             #(#handler_methods_tokens)*
             #fallback_method_tokens
             #(#helper_methods_tokens)*
@@ -824,25 +836,15 @@ fn validate_fallback_sig(sig: &Signature) -> syn::Result<()> {
     Ok(())
 }
 
-/// Build the `type Kinds = (K1, K2, ...)` right-hand side. Matches
-/// ADR-0027's typelist so `KindList::resolve_all` populates the
-/// per-component `KindTable` and auto-subscribes input kinds without
-/// any macro-side duplication of that walker.
-fn build_kinds_typelist(handlers: &[HandlerFn]) -> TokenStream2 {
-    if handlers.is_empty() {
-        return quote! { () };
-    }
-    let tys = handlers.iter().map(|h| &h.kind_ty);
-    quote! { ( #( #tys, )* ) }
-}
-
-/// Synthesized body of `fn receive`. Compares `mail.kind()` against
-/// each `<K as Kind>::ID` const; on match, decodes the kind via
-/// `decode_typed::<K>()` (same runtime path the ADR-0027 helpers use)
-/// and calls the inherent-impl method the `#[handler]` annotation
-/// produced. When a `#[fallback]` exists, unhandled kinds land there;
-/// otherwise unhandled kinds silently drop (strict receiver).
-fn build_receive_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) -> TokenStream2 {
+/// Synthesized body of `__aether_dispatch`. Compares `mail.kind()`
+/// against each `<K as Kind>::ID` const (ADR-0030 Phase 2); on match,
+/// decodes via `Mail::decode_typed::<K>()` (now a pure `K::ID`
+/// compare + byte read, no `KindTable`) and calls the inherent-impl
+/// handler method. Returns `DISPATCH_HANDLED` on a match or when the
+/// `#[fallback]` ran; returns `DISPATCH_UNKNOWN_KIND` on strict-
+/// receiver miss so the substrate's scheduler logs the drop (issue
+/// #142).
+fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) -> TokenStream2 {
     let arms = handlers.iter().map(|h| {
         let k = &h.kind_ty;
         let method = &h.method.sig.ident;
@@ -853,25 +855,84 @@ fn build_receive_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) -> 
                 {
                     self.#method(__aether_ctx, __aether_decoded);
                 }
-                return;
+                return ::aether_component::DISPATCH_HANDLED;
             }
         }
     });
 
-    let fallback_call = match fallback {
+    let tail = match fallback {
         Some(f) => {
             let method = &f.method.sig.ident;
-            quote! { self.#method(__aether_ctx, __aether_mail); }
+            quote! {
+                self.#method(__aether_ctx, __aether_mail);
+                ::aether_component::DISPATCH_HANDLED
+            }
         }
-        None => quote! { /* strict receiver: unhandled kinds drop */ },
+        None => quote! { ::aether_component::DISPATCH_UNKNOWN_KIND },
     };
 
     quote! {
         let __aether_kind = __aether_mail.kind();
         __aether_ctx.__set_sender(__aether_mail.sender());
         #( #arms )*
-        #fallback_call
+        #tail
     }
+}
+
+/// Rewrite the user's `fn init` so its body is prepended with
+/// `ctx.subscribe_input::<K>()` for every handler kind `K` where
+/// `K::IS_INPUT` (ADR-0021, ADR-0030 Phase 2). Non-input kinds fold
+/// out at const-eval. Replaces the ADR-0027 `KindList::resolve_all`
+/// walker that phase 3 retires.
+fn wrap_init_with_subscribes(
+    mut init_method: syn::ImplItemFn,
+    handlers: &[HandlerFn],
+) -> syn::Result<syn::ImplItemFn> {
+    let ctx_ident = init_ctx_param_ident(&init_method.sig)?;
+    let subscribe_stmts: Vec<syn::Stmt> = handlers
+        .iter()
+        .map(|h| {
+            let k = &h.kind_ty;
+            syn::parse_quote! {
+                if <#k as ::aether_component::__macro_internals::Kind>::IS_INPUT {
+                    #ctx_ident.subscribe_input::<#k>();
+                }
+            }
+        })
+        .collect();
+    // Prepend: splice the subscribe block before the user's body so
+    // subscriptions are live before any user-side work (including
+    // `send`s that might race the first tick).
+    let mut new_stmts: Vec<syn::Stmt> = subscribe_stmts;
+    new_stmts.append(&mut init_method.block.stmts);
+    init_method.block.stmts = new_stmts;
+    Ok(init_method)
+}
+
+/// Pull the identifier of `init`'s `ctx` parameter so the synthesized
+/// subscribe calls reference the same binding the user's body uses.
+/// Accepts the conventional `ctx: &mut InitCtx<'_>` signature; any
+/// deviation is flagged with a clear error.
+fn init_ctx_param_ident(sig: &Signature) -> syn::Result<syn::Ident> {
+    if sig.inputs.len() != 1 {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[handlers] requires `fn init(ctx: &mut InitCtx<'_>) -> Self`",
+        ));
+    }
+    let FnArg::Typed(pt) = &sig.inputs[0] else {
+        return Err(syn::Error::new_spanned(
+            &sig.inputs[0],
+            "#[handlers] `init` cannot take `self`",
+        ));
+    };
+    let syn::Pat::Ident(pat_ident) = pt.pat.as_ref() else {
+        return Err(syn::Error::new_spanned(
+            &pt.pat,
+            "#[handlers] `init` ctx param must be a plain binding (e.g. `ctx: &mut InitCtx<'_>`)",
+        ));
+    };
+    Ok(pat_ident.ident.clone())
 }
 
 /// Emit the `#[link_section = "aether.kinds.inputs"]` statics — one

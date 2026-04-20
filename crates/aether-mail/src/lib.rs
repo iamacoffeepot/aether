@@ -30,11 +30,12 @@ use core::fmt;
 ///
 /// `IS_INPUT` marks the kind as a substrate-published input stream
 /// (`Tick`, `Key`, `MouseMove`, `MouseButton` — ADR-0021). Defaults
-/// to `false`; the guest SDK auto-subscribes a component's mailbox
-/// to every input kind in its typelist before the first `receive`
-/// fires, so components declaring `type Kinds = (Tick, ...)` don't
-/// need to send `subscribe_input` themselves. Non-input kinds never
-/// touch this — leave the default alone.
+/// to `false`; `#[handlers]` auto-subscribes a component's mailbox to
+/// every `K::IS_INPUT` handler kind before the user's `init` body
+/// runs (ADR-0033 phase 3), so components writing
+/// `#[handler] fn on_tick(..., tick: Tick)` don't need to send
+/// `subscribe_input` themselves. Non-input kinds never touch this —
+/// leave the default alone.
 pub trait Kind {
     const NAME: &'static str;
     const ID: u64;

@@ -1,8 +1,11 @@
 # ADR-0027: Component-declared kind dependencies via associated typelist
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0033](0033-handler-driven-inputs-manifest.md)
 - **Date:** 2026-04-19
 - **Accepted:** 2026-04-19
+- **Superseded:** 2026-04-20
+
+> ADR-0033's `#[handlers]` attribute took over the concerns this ADR addressed — a single `impl Component for T` block carries the kind set, the dispatcher, and the hub-facing capability surface, so the forget-hazard between `type Kinds` and `fn receive` is gone along with both surfaces themselves. Phase 3 of ADR-0033 (2026-04-20) retired `type Kinds`, `Component::receive`, `KindList`/`Cons`/`Nil`, and `KindTable` from the SDK.
 
 ## Context
 
