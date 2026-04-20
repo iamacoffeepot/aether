@@ -1,6 +1,6 @@
 # ADR-0030: Schema-hashed kind ids
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-20
 
 ## Context

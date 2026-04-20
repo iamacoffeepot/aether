@@ -40,6 +40,8 @@
 
 #![no_std]
 
+extern crate alloc;
+
 use core::any::TypeId;
 use core::marker::PhantomData;
 
@@ -49,11 +51,6 @@ pub mod kinds;
 pub mod raw;
 
 pub use kinds::{Cons, KindList, KindTable, Nil};
-
-/// Sentinel returned by `raw::resolve_kind` when the substrate has not
-/// registered the requested kind name. Mirrors the host constant.
-/// Widened to `u64` in ADR-0030 Phase 1.
-pub const KIND_NOT_FOUND: u64 = u64::MAX;
 
 /// Phantom-typed wrapper around a resolved kind id. A `KindId<Tick>`
 /// cannot be passed where a `KindId<DrawTriangle>` is expected — the
@@ -159,38 +156,29 @@ impl<K: Kind + bytemuck::NoUninit> Sink<K> {
     }
 }
 
-/// Resolve a kind by `K::NAME` and return a typed id. Panics if the
-/// substrate does not know the name — by ADR-0012's design, failed
-/// resolution is a loud init-time failure rather than a silent
-/// sentinel that shows up as mail to mailbox 0 at first send.
-///
-/// Must be called from within `init` (or a context where the substrate
-/// has the registry available). Calling post-init is not defined.
-pub fn resolve<K: Kind>() -> KindId<K> {
-    let name = K::NAME;
-    let id = unsafe { raw::resolve_kind(name.as_ptr().addr() as u32, name.len() as u32) };
-    if id == KIND_NOT_FOUND {
-        panic!("aether-component: resolve_kind failed");
-    }
+/// Resolve a kind, producing a typed id from the `const ID` the derive
+/// emits on the `Kind` impl. ADR-0030 Phase 2 made kind ids a pure
+/// function of `(name, schema)` at compile time — no host-fn round
+/// trip, no "kind not registered" failure mode at the guest boundary.
+/// The substrate and guest compute the same id independently; a
+/// mismatch means one side was compiled against a different schema
+/// revision, and that surfaces as "kind not found" on the first mail.
+pub const fn resolve<K: Kind>() -> KindId<K> {
     KindId {
-        raw: id,
+        raw: K::ID,
         _k: PhantomData,
     }
 }
 
 /// Bind a mailbox name to kind `K`, producing a typed `Sink<K>`. The
 /// mailbox id is derived from the name client-side (ADR-0029 stable
-/// hash) — no host-fn round trip, no requirement that the target
-/// mailbox already exist on the substrate side at init time. Kind
-/// resolution (`resolve::<K>()`) still hits `resolve_kind` under the
-/// hood, so this panics if the kind isn't registered — same "loud at
-/// init" discipline as ADR-0012.
-pub fn resolve_sink<K: Kind>(mailbox_name: &str) -> Sink<K> {
-    let mailbox = mailbox_id_from_name(mailbox_name);
-    let kind = resolve::<K>().raw();
+/// hash) and the kind id is `K::ID` (ADR-0030 Phase 2). No host-fn
+/// round trip, no requirement that the target mailbox or kind already
+/// exist on the substrate side at init time.
+pub const fn resolve_sink<K: Kind>(mailbox_name: &str) -> Sink<K> {
     Sink {
-        mailbox,
-        kind,
+        mailbox: mailbox_id_from_name(mailbox_name),
+        kind: K::ID,
         _k: PhantomData,
     }
 }
@@ -264,28 +252,86 @@ pub trait Component: Sized + 'static {
 /// `Ctx` fences "when can I resolve?" (init only) and "when can I
 /// send?" (receive only) at compile time — calling `resolve` from a
 /// `&mut Ctx` is a type error, not a convention.
+///
+/// The component's own mailbox id rides here — the substrate passes it
+/// into `init` at instantiation (ADR-0030 Phase 2) and the SDK uses
+/// it to self-address `aether.control.subscribe_input` mails for
+/// every `K::IS_INPUT` kind in `Component::Kinds`.
 pub struct InitCtx<'a> {
+    mailbox: u64,
     _borrow: PhantomData<&'a ()>,
 }
 
 impl InitCtx<'_> {
     /// Not part of the public API; called only by `export!`.
     #[doc(hidden)]
-    pub fn __new() -> Self {
+    pub fn __new(mailbox: u64) -> Self {
         InitCtx {
+            mailbox,
             _borrow: PhantomData,
         }
     }
 
-    /// Resolve a kind by `K::NAME`. Panics on failure (ADR-0012 §2).
-    pub fn resolve<K: Kind>(&self) -> KindId<K> {
+    /// The component's own mailbox id — the value the substrate uses
+    /// to address `receive` calls to this instance. Useful for
+    /// hand-rolled subscribe / self-mailing at init time when the
+    /// SDK's higher-level wrappers don't fit.
+    pub fn mailbox_id(&self) -> u64 {
+        self.mailbox
+    }
+
+    /// Resolve a kind by its `const ID`. Pure compile-time construction
+    /// under ADR-0030 Phase 2 — no host-fn round trip, never fails.
+    pub const fn resolve<K: Kind>(&self) -> KindId<K> {
         resolve::<K>()
     }
 
     /// Resolve a mailbox by name and bind it to kind `K`, producing a
-    /// typed `Sink<K>`. Panics on failure.
-    pub fn resolve_sink<K: Kind>(&self, name: &str) -> Sink<K> {
+    /// typed `Sink<K>`. Pure compile-time construction.
+    pub const fn resolve_sink<K: Kind>(&self, name: &str) -> Sink<K> {
         resolve_sink::<K>(name)
+    }
+
+    /// Send `aether.control.subscribe_input` with this component's
+    /// mailbox as the subscriber for `K`'s stream. Called by
+    /// `KindList::resolve_all` for every `K::IS_INPUT` kind — ADR-0030
+    /// Phase 2 moved the subscribe side effect out of `resolve_kind`
+    /// and into the guest SDK. No-op if `K` isn't one of the four
+    /// known substrate input kind types (input kinds defined downstream
+    /// of aether-kinds get to pick their own subscribe path).
+    ///
+    /// Stream selection goes through `TypeId` rather than `K::NAME`
+    /// so a future rename on either side of the pairing surfaces as a
+    /// type error instead of silently skipping the subscribe.
+    pub fn subscribe_input<K: Kind + 'static>(&self) {
+        use aether_kinds::{InputStream, Key, MouseButton, MouseMove, SubscribeInput, Tick};
+        let tid = TypeId::of::<K>();
+        let stream = if tid == TypeId::of::<Tick>() {
+            InputStream::Tick
+        } else if tid == TypeId::of::<Key>() {
+            InputStream::Key
+        } else if tid == TypeId::of::<MouseMove>() {
+            InputStream::MouseMove
+        } else if tid == TypeId::of::<MouseButton>() {
+            InputStream::MouseButton
+        } else {
+            return;
+        };
+        let payload = SubscribeInput {
+            stream,
+            mailbox: self.mailbox,
+        };
+        let bytes = postcard::to_allocvec(&payload).expect("SubscribeInput encode infallible");
+        let recipient = mailbox_id_from_name("aether.control");
+        unsafe {
+            raw::send_mail(
+                recipient,
+                <SubscribeInput as Kind>::ID,
+                bytes.as_ptr().addr() as u32,
+                bytes.len() as u32,
+                1,
+            );
+        }
     }
 }
 
@@ -753,12 +799,16 @@ macro_rules! export {
 
         /// # Safety
         /// Called exactly once by the substrate before any `receive`.
+        /// Receives the component's own mailbox id (ADR-0030 Phase 2)
+        /// so the SDK's init walker can auto-subscribe input kinds
+        /// without a host-fn round trip.
         #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn init() -> u32 {
-            let mut ctx = $crate::InitCtx::__new();
+        pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
+            let mut ctx = $crate::InitCtx::__new(mailbox_id);
             // ADR-0027: walk the Kinds typelist and populate
-            // __AETHER_KINDS before user init runs — preserves the
-            // loud-at-init resolve failure mode (ADR-0012 §2).
+            // __AETHER_KINDS before user init runs. ADR-0030 Phase 2:
+            // also mails `aether.control.subscribe_input` for each
+            // `K::IS_INPUT` kind through the same walker.
             unsafe {
                 <<$component as $crate::Component>::Kinds as $crate::KindList>::resolve_all(
                     &mut ctx,

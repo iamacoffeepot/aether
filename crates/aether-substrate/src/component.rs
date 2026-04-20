@@ -57,10 +57,16 @@ impl Component {
         let receive =
             instance.get_typed_func::<(u64, u32, u32, u32), u32>(&mut store, "receive_p32")?;
 
-        // Optional `init() -> u32` export: called once before the first
-        // `receive`, used for one-shot bootstrap like resolving kind
-        // names to ids. Per ADR-0005's registry-at-init flow.
-        if let Ok(init) = instance.get_typed_func::<(), u32>(&mut store, "init") {
+        // Optional `init(mailbox_id) -> u32` export: called once before
+        // the first `receive`, handed the component's own mailbox id so
+        // the SDK's typelist walker can auto-subscribe input kinds
+        // (ADR-0030 Phase 2). Falls back to the legacy `init()` shape
+        // so raw-FFI components predating the Phase 2 ABI still load —
+        // they just don't get auto-subscribe, which they never did.
+        let mailbox_id = store.data().sender.0;
+        if let Ok(init) = instance.get_typed_func::<u64, u32>(&mut store, "init") {
+            init.call(&mut store, mailbox_id)?;
+        } else if let Ok(init) = instance.get_typed_func::<(), u32>(&mut store, "init") {
             init.call(&mut store, ())?;
         }
 
@@ -349,10 +355,14 @@ mod tests {
                 i32.const 0))
     "#;
 
-    /// ADR-0013: `receive` echoes a reply back to the sender under
-    /// whatever kind id the caller registered. Payload is empty —
-    /// the round-trip is the observable behavior.
-    const WAT_REPLIES: &str = r#"
+    /// ADR-0013: `receive` echoes a reply back to the sender under a
+    /// caller-provided kind id. Payload is empty — the round-trip is
+    /// the observable behavior. ADR-0030 Phase 2 made kind ids hashed,
+    /// so the test builds the WAT with the live `kind_id_from_parts`
+    /// for "test.pong" rather than a hardcoded sequential 0.
+    fn wat_replies(kind_id: u64) -> String {
+        format!(
+            r#"
         (module
             (import "aether" "reply_mail_p32"
                 (func $reply_mail (param i32 i64 i32 i32 i32) (result i32)))
@@ -360,12 +370,14 @@ mod tests {
             (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
                 (drop (call $reply_mail
                     (local.get 3) ;; sender handle from receive param
-                    (i64.const 0) ;; kind id 0 — registered in the test
+                    (i64.const {kind_id}) ;; hashed kind id of "test.pong"
                     (i32.const 0) ;; ptr
                     (i32.const 0) ;; len
                     (i32.const 1))) ;; count
                 i32.const 0))
-    "#;
+        "#
+        )
+    }
 
     #[test]
     fn on_drop_invokes_export_and_writes_marker() {
@@ -533,6 +545,7 @@ mod tests {
     fn plane_ctx_for_reply() -> (
         SubstrateCtx,
         std::sync::mpsc::Receiver<aether_hub_protocol::EngineToHub>,
+        u64,
     ) {
         use aether_hub_protocol::{KindDescriptor, SchemaType};
 
@@ -541,8 +554,7 @@ mod tests {
 
         let (outbound, rx) = HubOutbound::test_channel();
         let registry = Arc::new(Registry::new());
-        // Kind id 0 is what `WAT_REPLIES` passes to reply_mail.
-        registry
+        let pong_id = registry
             .register_kind_with_descriptor(KindDescriptor {
                 name: "test.pong".into(),
                 schema: SchemaType::Unit,
@@ -555,7 +567,7 @@ mod tests {
             outbound,
             crate::input::new_subscribers(),
         );
-        (ctx, rx)
+        (ctx, rx, pong_id)
     }
 
     fn instantiate_with_ctx(wat: &str, ctx: SubstrateCtx) -> Component {
@@ -573,8 +585,8 @@ mod tests {
 
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
 
-        let (ctx, rx) = plane_ctx_for_reply();
-        let mut component = instantiate_with_ctx(WAT_REPLIES, ctx);
+        let (ctx, rx, pong_id) = plane_ctx_for_reply();
+        let mut component = instantiate_with_ctx(&wat_replies(pong_id), ctx);
 
         let token = SessionToken(Uuid::from_u128(0xbeef));
         let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_sender(token);
@@ -592,8 +604,8 @@ mod tests {
     fn reply_mail_with_unknown_handle_sends_no_frame() {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
 
-        let (ctx, rx) = plane_ctx_for_reply();
-        let mut component = instantiate_with_ctx(WAT_REPLIES, ctx);
+        let (ctx, rx, pong_id) = plane_ctx_for_reply();
+        let mut component = instantiate_with_ctx(&wat_replies(pong_id), ctx);
 
         // NIL sender → SENDER_NONE reaches the guest → reply_mail
         // returns REPLY_UNKNOWN_HANDLE and outbound stays quiet.
@@ -613,6 +625,7 @@ mod tests {
         std::sync::mpsc::Receiver<aether_hub_protocol::EngineToHub>,
         Arc<MailQueue>,
         crate::mail::MailboxId,
+        u64,
     ) {
         use aether_hub_protocol::{KindDescriptor, SchemaType};
 
@@ -622,7 +635,7 @@ mod tests {
         let (outbound, rx) = HubOutbound::test_channel();
         let registry = Arc::new(Registry::new());
         let caller = registry.register_component("caller");
-        registry
+        let pong_id = registry
             .register_kind_with_descriptor(KindDescriptor {
                 name: "test.pong".into(),
                 schema: SchemaType::Unit,
@@ -636,15 +649,15 @@ mod tests {
             outbound,
             crate::input::new_subscribers(),
         );
-        (ctx, rx, queue, caller)
+        (ctx, rx, queue, caller, pong_id)
     }
 
     #[test]
     fn reply_mail_to_component_enqueues_on_mailqueue() {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
 
-        let (ctx, rx_outbound, queue, caller) = plane_ctx_with_caller_mailbox();
-        let mut component = instantiate_with_ctx(WAT_REPLIES, ctx);
+        let (ctx, rx_outbound, queue, caller, pong_id) = plane_ctx_with_caller_mailbox();
+        let mut component = instantiate_with_ctx(&wat_replies(pong_id), ctx);
 
         // Inbound mail from "caller" — substrate allocates a
         // Component-variant handle. The guest's reply_mail call
@@ -660,20 +673,20 @@ mod tests {
         // The local queue picked up the reply addressed to caller.
         let queued = queue.try_pop().expect("reply enqueued");
         assert_eq!(queued.recipient, caller);
-        assert_eq!(queued.kind, 0);
+        assert_eq!(queued.kind, pong_id);
     }
 
     #[test]
     fn reply_mail_to_dropped_component_silently_discards() {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
 
-        let (ctx, rx_outbound, queue, caller) = plane_ctx_with_caller_mailbox();
+        let (ctx, rx_outbound, queue, caller, pong_id) = plane_ctx_with_caller_mailbox();
         // Drop the caller before the reply lands. SubstrateCtx::send
         // logs and discards rather than panicking — the inbound flow
         // still completes successfully from the receiving guest's
         // perspective.
         ctx.registry.drop_mailbox(caller).expect("drop caller");
-        let mut component = instantiate_with_ctx(WAT_REPLIES, ctx);
+        let mut component = instantiate_with_ctx(&wat_replies(pong_id), ctx);
 
         let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_origin(caller);
         component.deliver(&mail).expect("deliver");

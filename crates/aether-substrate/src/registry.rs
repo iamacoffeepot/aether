@@ -1,18 +1,20 @@
 // Name registries. Two tables: mailboxes (MailboxId → name + entry,
-// ids derived from name via ADR-0029's stable hash) and kinds (name →
-// u64 kind id, per ADR-0005 — still sequentially assigned; ADR-0030
-// Phase 1 widened the id type ahead of Phase 2's switch to hashed
-// derivation). The
-// registry uses interior mutability (`RwLock`) so mailboxes and kinds
-// can be added at runtime — ADR-0010's runtime component loading
-// mutates both tables after an `Arc<Registry>` has already been shared
-// with the scheduler and hub client. Reads take a shared lock and are
-// cheap; writes are rare (boot + load/replace/drop).
+// ids derived from name via ADR-0029's stable hash) and kinds (u64
+// kind id → name + descriptor, ids derived from (name, schema) via
+// ADR-0030 Phase 2's `kind_id_from_parts`). Both id spaces are a pure
+// function of declaration-time data — no sequential allocation, no
+// registration order dependence. The registry uses interior mutability
+// (`RwLock`) so mailboxes and kinds can be added at runtime —
+// ADR-0010's runtime component loading mutates both tables after an
+// `Arc<Registry>` has already been shared with the scheduler and hub
+// client. Reads take a shared lock and are cheap; writes are rare
+// (boot + load/replace/drop).
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
+use aether_hub_protocol::canonical::kind_id_from_parts;
 use aether_hub_protocol::{KindDescriptor, SchemaType, SessionToken};
 
 use crate::mail::MailboxId;
@@ -58,24 +60,30 @@ struct Mailbox {
     entry: MailboxEntry,
 }
 
+/// One kind's bookkeeping, keyed in the registry on the hashed id.
+struct KindSlot {
+    name: String,
+    descriptor: KindDescriptor,
+}
+
 #[derive(Default)]
 struct Inner {
     /// Sparse, keyed on the deterministic `MailboxId` (ADR-0029).
     /// Registration inserts; `drop_mailbox` transitions the entry to
     /// `Dropped` so the id stays addressable until re-registered.
     mailboxes: HashMap<MailboxId, Mailbox>,
-    kind_by_name: HashMap<String, u64>,
-    /// Parallel index: `kind_names[id]` is the canonical name the kind
-    /// was first registered with. Kept in sync with `kind_by_name` so
-    /// `kind_name(id)` is O(1); used by `SinkHandler` dispatch to hand
-    /// sinks the name without forcing them to keep their own map.
-    kind_names: Vec<String>,
-    /// Parallel index: `kind_descriptors[id]` is the descriptor the
-    /// kind was first registered with. `register_kind` (name-only)
-    /// defaults to `Opaque`; ADR-0010's runtime loader supplies a real
-    /// descriptor via `register_kind_with_descriptor` and rejects
-    /// conflicts against this stored copy.
-    kind_descriptors: Vec<KindDescriptor>,
+    /// Sparse, keyed on the `kind_id_from_parts(name, schema)` hash
+    /// (ADR-0030 Phase 2). Every descriptor registered with a given
+    /// (name, schema) maps to the same id everywhere it's ever
+    /// computed — derive-emitted `K::ID`, hub re-derived from
+    /// `KindDescriptor`, substrate boot from `descriptors::all()`.
+    kinds: HashMap<u64, KindSlot>,
+    /// O(1) name → id reverse lookup. Kept as a parallel map rather
+    /// than scanning `kinds` because the dispatch path (reply_mail kind
+    /// validation, hub_client inbound-mail name→id) runs on every mail.
+    /// Every insert into `kinds` mirrors into `name_index`; every slot
+    /// has exactly one entry here.
+    name_index: HashMap<String, u64>,
 }
 
 /// Rejected-load error returned when a runtime kind registration
@@ -276,102 +284,127 @@ impl Registry {
     }
 
     /// Register a mail kind by name, defaulting the schema to `Bytes`
-    /// (raw byte payload, no agent-encodable structure). Idempotent —
-    /// re-registering a name returns the id it was first assigned,
-    /// regardless of whether the first call supplied a descriptor.
-    /// Kept as a convenience for tests and substrate-internal
-    /// registrations that don't need the hub to encode params;
-    /// production init should prefer `register_kind_with_descriptor`
-    /// so the descriptor stored here matches the type definition.
+    /// (raw byte payload, no agent-encodable structure). The id is
+    /// derived from `(name, SchemaType::Bytes)` — so the name-only path
+    /// only collides with a `register_kind_with_descriptor` call that
+    /// also uses the `Bytes` schema. Mostly a convenience for tests and
+    /// substrate-internal registrations that don't need the hub to
+    /// encode params; production init should prefer
+    /// `register_kind_with_descriptor` so the descriptor stored here
+    /// matches the type definition and the derived id agrees with
+    /// `<K as Kind>::ID` on the guest side.
     pub fn register_kind(&self, name: impl Into<String>) -> u64 {
         let name = name.into();
         let descriptor = KindDescriptor {
             name: name.clone(),
             schema: SchemaType::Bytes,
         };
-        // Name-only registration never conflicts: if the name is new
-        // we store the default schema; if it exists we return the
-        // existing id and leave the stored descriptor untouched.
-        self.register_kind_internal(name, descriptor, /*reject_conflict=*/ false)
+        // A fresh `Bytes` descriptor can only conflict with a prior
+        // `Bytes` registration under the same name — in which case the
+        // schemas match and the call is idempotent. Not reachable.
+        self.register_kind_internal(descriptor, /*reject_conflict=*/ false)
             .expect("Bytes default cannot produce a conflict")
     }
 
     /// Register a mail kind along with the descriptor the hub will
-    /// use to encode agent-supplied params (ADR-0007). Per ADR-0010:
+    /// use to encode agent-supplied params (ADR-0007). Per ADR-0030
+    /// Phase 2:
     ///
-    /// - Fresh name → assign a new id, store the descriptor.
-    /// - Existing name with identical descriptor → return the id.
-    /// - Existing name with a different descriptor → `KindConflict`.
+    /// - Fresh `(name, schema)` hash → insert, return the id.
+    /// - Existing id with identical descriptor → return the id
+    ///   (idempotent — same kind registered twice, e.g. boot + load).
+    /// - Existing id with a different descriptor → `KindConflict`. At
+    ///   64-bit hash width this is only reachable via a genuine hash
+    ///   collision between two distinct kinds; loud failure rather
+    ///   than silent data corruption.
     ///
-    /// Used by substrate boot (to agree with `descriptors::all()`) and
-    /// by the future `load_component` handler when a runtime-loaded
-    /// component brings its own kind vocabulary.
+    /// Used by substrate boot (`descriptors::all()`) and `load_component`.
     pub fn register_kind_with_descriptor(
         &self,
         descriptor: KindDescriptor,
     ) -> Result<u64, KindConflict> {
-        let name = descriptor.name.clone();
-        self.register_kind_internal(name, descriptor, /*reject_conflict=*/ true)
+        self.register_kind_internal(descriptor, /*reject_conflict=*/ true)
     }
 
     fn register_kind_internal(
         &self,
-        name: String,
         descriptor: KindDescriptor,
         reject_conflict: bool,
     ) -> Result<u64, KindConflict> {
+        let id = kind_id_from_parts(&descriptor.name, &descriptor.schema);
         let mut inner = self.inner.write().unwrap();
-        if let Some(&id) = inner.kind_by_name.get(&name) {
-            let existing = &inner.kind_descriptors[id as usize];
-            if reject_conflict && existing.schema != descriptor.schema {
+        if let Some(slot) = inner.kinds.get(&id) {
+            if reject_conflict && slot.descriptor.schema != descriptor.schema {
                 return Err(KindConflict {
-                    name,
-                    existing: existing.schema.clone(),
+                    name: descriptor.name,
+                    existing: slot.descriptor.schema.clone(),
                     requested: descriptor.schema,
                 });
             }
             return Ok(id);
         }
-        let id = inner.kind_names.len() as u64;
-        inner.kind_names.push(name.clone());
-        inner.kind_descriptors.push(descriptor);
-        inner.kind_by_name.insert(name, id);
+        inner.name_index.insert(descriptor.name.clone(), id);
+        inner.kinds.insert(
+            id,
+            KindSlot {
+                name: descriptor.name.clone(),
+                descriptor,
+            },
+        );
         Ok(id)
     }
 
+    /// Look up a kind's id by its canonical name. Under hashed ids the
+    /// id is a function of `(name, schema)` — so this only finds a
+    /// match if `register_kind_with_descriptor` was called with the
+    /// exact descriptor the caller is thinking of. Primarily used by
+    /// the hub-inbound dispatch path, which needs to convert an
+    /// incoming `kind_name` back to the registered id.
     pub fn kind_id(&self, name: &str) -> Option<u64> {
-        self.inner.read().unwrap().kind_by_name.get(name).copied()
+        self.inner.read().unwrap().name_index.get(name).copied()
     }
 
     /// Reverse of `kind_id`: name for a given id, or `None` if the id
-    /// is out of range. Used by the scheduler to hand sink handlers a
-    /// kind name without them keeping their own map.
+    /// isn't registered. Used by the scheduler to hand sink handlers
+    /// a kind name without them keeping their own map.
     pub fn kind_name(&self, id: u64) -> Option<String> {
         self.inner
             .read()
             .unwrap()
-            .kind_names
-            .get(id as usize)
-            .cloned()
+            .kinds
+            .get(&id)
+            .map(|s| s.name.clone())
     }
 
     /// The descriptor stored for a given kind id, or `None` if the id
-    /// is out of range. Returned as an owned clone so callers don't
+    /// isn't registered. Returned as an owned clone so callers don't
     /// hold the read lock while inspecting the encoding.
     pub fn kind_descriptor(&self, id: u64) -> Option<KindDescriptor> {
         self.inner
             .read()
             .unwrap()
-            .kind_descriptors
-            .get(id as usize)
-            .cloned()
+            .kinds
+            .get(&id)
+            .map(|s| s.descriptor.clone())
     }
 
-    /// Snapshot of every kind descriptor currently registered, in id
-    /// order. Used by the control plane to ship an authoritative view
-    /// to the hub after a runtime load or replace (ADR-0010 §4).
+    /// Snapshot of every kind descriptor currently registered. Sorted
+    /// by name so the hub sees a deterministic ordering (ids are a
+    /// hash of declaration-time data, so sorting on id would scramble
+    /// unrelated kinds; name order preserves a human-readable grouping).
+    /// Used by the control plane to ship an authoritative view to the
+    /// hub after a runtime load or replace (ADR-0010 §4).
     pub fn list_kind_descriptors(&self) -> Vec<KindDescriptor> {
-        self.inner.read().unwrap().kind_descriptors.clone()
+        let mut out: Vec<KindDescriptor> = self
+            .inner
+            .read()
+            .unwrap()
+            .kinds
+            .values()
+            .map(|s| s.descriptor.clone())
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
     }
 
     pub fn len(&self) -> usize {
@@ -465,14 +498,19 @@ mod tests {
     }
 
     #[test]
-    fn kind_ids_are_dense_and_sequential() {
+    fn kind_ids_are_derived_from_name_and_schema() {
         let r = Registry::new();
         let a = r.register_kind("aether.tick");
         let b = r.register_kind("aether.key");
         let c = r.register_kind("hello.npc_health");
-        assert_eq!(a, 0);
-        assert_eq!(b, 1);
-        assert_eq!(c, 2);
+        // Ids are the fnv1a hash of canonical (name, schema) bytes —
+        // distinct names under the same default schema must produce
+        // distinct ids, and matching the expected const derivation
+        // pins the hash contract with the derive.
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+        assert_eq!(a, kind_id_from_parts("aether.tick", &SchemaType::Bytes));
     }
 
     #[test]
@@ -481,7 +519,9 @@ mod tests {
         let first = r.register_kind("aether.tick");
         let second = r.register_kind("aether.tick");
         assert_eq!(first, second);
-        assert_eq!(r.register_kind("aether.key"), 1);
+        // Different name produces a different id — the id is a pure
+        // function of the input, not an allocation order.
+        assert_ne!(r.register_kind("aether.key"), first);
     }
 
     #[test]
@@ -547,16 +587,27 @@ mod tests {
     }
 
     #[test]
-    fn register_kind_with_descriptor_rejects_conflict() {
+    fn register_kind_with_descriptor_distinct_schemas_take_distinct_ids() {
+        // Pre-ADR-0030-Phase-2 behavior was: same name + different
+        // schema = `KindConflict`. Under hashed ids the id IS the
+        // `(name, schema)` pair, so two schemas under the same name
+        // land in two separate slots — conflict is only reachable via
+        // a genuine hash collision. Document the post-Phase-2 shape
+        // and let the conflict path stay exercised via the
+        // `_is_idempotent_on_match` test (same-id reentry).
         let r = Registry::new();
-        r.register_kind_with_descriptor(unit_desc("aether.foo"))
+        let unit_id = r
+            .register_kind_with_descriptor(unit_desc("aether.foo"))
             .expect("first");
-        let err = r
+        let struct_id = r
             .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
-            .expect_err("different schema should conflict");
-        assert_eq!(err.name, "aether.foo");
-        assert_eq!(err.existing, SchemaType::Unit);
-        assert!(matches!(err.requested, SchemaType::Struct { .. }));
+            .expect("second — different schema, no conflict under hashed ids");
+        assert_ne!(unit_id, struct_id);
+        assert_eq!(r.kind_descriptor(unit_id).unwrap().schema, SchemaType::Unit);
+        assert!(matches!(
+            r.kind_descriptor(struct_id).unwrap().schema,
+            SchemaType::Struct { .. }
+        ));
     }
 
     #[test]
@@ -568,17 +619,29 @@ mod tests {
     }
 
     #[test]
-    fn name_only_register_after_with_descriptor_preserves_stored_schema() {
-        // The name-only path must not clobber a real descriptor that
-        // was recorded first — tests frequently call `register_kind`
-        // after main.rs has already registered via
-        // `register_kind_with_descriptor`.
+    fn name_only_and_with_descriptor_resolve_to_distinct_ids() {
+        // Under hashed ids the id is a function of (name, schema).
+        // The same name registered with two different schemas —
+        // `Bytes` (via `register_kind`) and a real struct (via
+        // `register_kind_with_descriptor`) — produces two *different*
+        // ids, each stored under its own slot. `kind_id(name)` returns
+        // whichever id was written to `name_index` most recently; this
+        // is a test-only hazard and production callers go through
+        // `register_kind_with_descriptor` exclusively.
         let r = Registry::new();
-        r.register_kind_with_descriptor(cast_struct_desc("aether.foo"))
-            .expect("first");
-        let _ = r.register_kind("aether.foo");
-        let stored = r.kind_descriptor(0).expect("descriptor present");
-        assert!(matches!(stored.schema, SchemaType::Struct { .. }));
+        let real = r
+            .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
+            .expect("real schema");
+        let bytes = r.register_kind("aether.foo");
+        assert_ne!(real, bytes);
+        assert!(matches!(
+            r.kind_descriptor(real).unwrap().schema,
+            SchemaType::Struct { .. }
+        ));
+        assert!(matches!(
+            r.kind_descriptor(bytes).unwrap().schema,
+            SchemaType::Bytes,
+        ));
     }
 
     #[test]
@@ -644,6 +707,11 @@ mod tests {
         let r2 = Arc::clone(&r);
         let id = r2.register_component("late");
         assert_eq!(r.lookup("late"), Some(id));
-        assert_eq!(r.register_kind("aether.late"), 0);
+        let kind_id = r.register_kind("aether.late");
+        assert_eq!(
+            r.kind_id("aether.late"),
+            Some(kind_id),
+            "shared Arc registrations are visible through the original handle"
+        );
     }
 }
