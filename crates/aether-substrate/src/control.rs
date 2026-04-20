@@ -28,9 +28,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use aether_hub_protocol::{
-    ClaudeAddress, EngineMailFrame, EngineToHub, KindDescriptor, NamedField, Primitive, SchemaType,
-};
+use aether_hub_protocol::{EngineToHub, KindDescriptor, NamedField, Primitive, SchemaType};
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, DropComponent, DropResult, LoadComponent, LoadKind,
     LoadKindEncoding, LoadKindPrimitive, LoadResult, MailEnvelope, PlatformInfo, ReplaceComponent,
@@ -38,7 +36,6 @@ use aether_kinds::{
     UnsubscribeInput,
 };
 use aether_mail::Kind;
-use serde::Serialize;
 use wasmtime::{Engine, Linker, Module};
 
 use crate::capture::{CaptureQueue, PendingCapture};
@@ -266,19 +263,19 @@ impl ControlPlane {
     fn dispatch(&self, kind_name: &str, sender: aether_hub_protocol::SessionToken, bytes: &[u8]) {
         if kind_name == LoadComponent::NAME {
             let result = self.handle_load(bytes);
-            self.reply(sender, LoadResult::NAME, &result);
+            self.outbound.send_reply(sender, &result);
         } else if kind_name == DropComponent::NAME {
             let result = self.handle_drop(bytes);
-            self.reply(sender, DropResult::NAME, &result);
+            self.outbound.send_reply(sender, &result);
         } else if kind_name == ReplaceComponent::NAME {
             let result = self.handle_replace(bytes);
-            self.reply(sender, ReplaceResult::NAME, &result);
+            self.outbound.send_reply(sender, &result);
         } else if kind_name == SubscribeInput::NAME {
             let result = self.handle_subscribe(bytes);
-            self.reply(sender, SubscribeInputResult::NAME, &result);
+            self.outbound.send_reply(sender, &result);
         } else if kind_name == UnsubscribeInput::NAME {
             let result = self.handle_unsubscribe(bytes);
-            self.reply(sender, SubscribeInputResult::NAME, &result);
+            self.outbound.send_reply(sender, &result);
         } else if kind_name == CaptureFrame::NAME {
             self.handle_capture_frame(sender, bytes);
         } else if kind_name == PlatformInfo::NAME {
@@ -319,7 +316,7 @@ impl ControlPlane {
             {
                 return LoadResult::Err {
                     error: format!(
-                        "kind {:?} already registered with a different encoding",
+                        "kind `{}` already registered with a different encoding",
                         kind.name
                     ),
                 };
@@ -504,7 +501,7 @@ impl ControlPlane {
                 let result = CaptureFrameResult::Err {
                     error: format!("postcard decode failed: {e}"),
                 };
-                self.reply(sender, CaptureFrameResult::NAME, &result);
+                self.outbound.send_reply(sender, &result);
                 return;
             }
         };
@@ -518,11 +515,8 @@ impl ControlPlane {
         let pre = match resolve_bundle(&self.registry, &payload.mails, "capture bundle") {
             Ok(v) => v,
             Err(e) => {
-                self.reply(
-                    sender,
-                    CaptureFrameResult::NAME,
-                    &CaptureFrameResult::Err { error: e },
-                );
+                self.outbound
+                    .send_reply(sender, &CaptureFrameResult::Err { error: e });
                 return;
             }
         };
@@ -530,11 +524,8 @@ impl ControlPlane {
             match resolve_bundle(&self.registry, &payload.after_mails, "capture after bundle") {
                 Ok(v) => v,
                 Err(e) => {
-                    self.reply(
-                        sender,
-                        CaptureFrameResult::NAME,
-                        &CaptureFrameResult::Err { error: e },
-                    );
+                    self.outbound
+                        .send_reply(sender, &CaptureFrameResult::Err { error: e });
                     return;
                 }
             };
@@ -557,7 +548,7 @@ impl ControlPlane {
                     request completes"
                     .to_owned(),
             };
-            self.reply(sender, CaptureFrameResult::NAME, &result);
+            self.outbound.send_reply(sender, &result);
         }
         // Else: render thread will reply on its next redraw.
     }
@@ -574,7 +565,7 @@ impl ControlPlane {
                 let result = SetWindowModeResult::Err {
                     error: format!("postcard decode failed: {e}"),
                 };
-                self.reply(sender, SetWindowModeResult::NAME, &result);
+                self.outbound.send_reply(sender, &result);
                 return;
             }
         };
@@ -602,17 +593,17 @@ impl ControlPlane {
             Some(crate::registry::MailboxEntry::Component) => {}
             Some(crate::registry::MailboxEntry::Sink(_)) => {
                 return ReplaceResult::Err {
-                    error: format!("mailbox {:?} is a sink, not a component", id),
+                    error: format!("mailbox {} is a sink, not a component", id.0),
                 };
             }
             Some(crate::registry::MailboxEntry::Dropped) => {
                 return ReplaceResult::Err {
-                    error: format!("mailbox {:?} already dropped", id),
+                    error: format!("mailbox {} already dropped", id.0),
                 };
             }
             None => {
                 return ReplaceResult::Err {
-                    error: format!("unknown mailbox id {:?}", id),
+                    error: format!("unknown mailbox id {}", id.0),
                 };
             }
         }
@@ -626,7 +617,7 @@ impl ControlPlane {
             {
                 return ReplaceResult::Err {
                     error: format!(
-                        "kind {:?} already registered with a different encoding",
+                        "kind `{}` already registered with a different encoding",
                         kind.name
                     ),
                 };
@@ -660,7 +651,7 @@ impl ControlPlane {
                 // — happens if instantiation lost the race with a
                 // concurrent drop. Treat as a stale id.
                 return ReplaceResult::Err {
-                    error: format!("mailbox {:?} has no bound component", id),
+                    error: format!("mailbox {} has no bound component", id.0),
                 };
             }
         };
@@ -787,27 +778,6 @@ impl ControlPlane {
     fn announce_kinds(&self) {
         let kinds = self.registry.list_kind_descriptors();
         self.outbound.send(EngineToHub::KindsChanged(kinds));
-    }
-
-    fn reply<T: Serialize>(
-        &self,
-        sender: aether_hub_protocol::SessionToken,
-        kind_name: &str,
-        result: &T,
-    ) {
-        let payload = match postcard::to_allocvec(result) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::error!(target: "aether_substrate::control", kind = %kind_name, error = %e, "result encode failed");
-                return;
-            }
-        };
-        self.outbound.send(EngineToHub::Mail(EngineMailFrame {
-            address: ClaudeAddress::Session(sender),
-            kind_name: kind_name.to_owned(),
-            payload,
-            origin: None,
-        }));
     }
 }
 

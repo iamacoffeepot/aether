@@ -27,7 +27,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_hub_protocol::{
-    EngineId, EngineToHub, Hello, HubToEngine, KindDescriptor, MailFrame, read_frame, write_frame,
+    ClaudeAddress, EngineId, EngineMailFrame, EngineToHub, Hello, HubToEngine, KindDescriptor,
+    MailFrame, SessionToken, read_frame, write_frame,
 };
 
 use crate::mail::Mail;
@@ -72,6 +73,36 @@ impl HubOutbound {
             Some(tx) => tx.send(frame).is_ok(),
             None => false,
         }
+    }
+
+    /// Encode `result` with postcard and send it as a reply addressed
+    /// at `sender`. Uses the kind's own `NAME` so call sites don't
+    /// repeat it. Silent on disconnected outbound (no hub attached)
+    /// and on encode failure (logged at error — a corrupt reply can't
+    /// be delivered meaningfully). Returns `true` when the frame was
+    /// enqueued on the writer channel.
+    pub fn send_reply<K>(&self, sender: SessionToken, result: &K) -> bool
+    where
+        K: aether_mail::Kind + serde::Serialize,
+    {
+        let payload = match postcard::to_allocvec(result) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(
+                    target: "aether_substrate::hub_client",
+                    kind = K::NAME,
+                    error = %e,
+                    "reply encode failed",
+                );
+                return false;
+            }
+        };
+        self.send(EngineToHub::Mail(EngineMailFrame {
+            address: ClaudeAddress::Session(sender),
+            kind_name: K::NAME.to_owned(),
+            payload,
+            origin: None,
+        }))
     }
 
     /// Whether this handle has a live outbound channel.
