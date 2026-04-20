@@ -5,6 +5,7 @@
 // as any other architectural change.
 
 use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
+use aether_kinds::InputStream;
 use wasmtime::{Caller, Linker};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
@@ -16,6 +17,25 @@ use crate::sender_table::SenderEntry;
 /// sentinel.
 pub const KIND_NOT_FOUND: u32 = u32::MAX;
 pub const MAILBOX_NOT_FOUND: u32 = u32::MAX;
+
+/// Map a resolved kind name to the substrate input stream it belongs
+/// to. The four built-in input kinds (`aether.tick`, `aether.key`,
+/// `aether.mouse_button`, `aether.mouse_move`) are the only inputs
+/// today; a new input kind here would also need a publisher change
+/// in `main.rs`. Keeping the mapping in a small match — rather than a
+/// boot-time map on `Registry` — lets the guest's `resolve_kind`
+/// auto-subscribe without any new shared state: the Kind trait's
+/// `IS_INPUT` const on the kind definition is what the derive flags,
+/// and this mapping is the substrate-side counterpart.
+fn input_stream_for_name(name: &str) -> Option<InputStream> {
+    match name {
+        "aether.tick" => Some(InputStream::Tick),
+        "aether.key" => Some(InputStream::Key),
+        "aether.mouse_move" => Some(InputStream::MouseMove),
+        "aether.mouse_button" => Some(InputStream::MouseButton),
+        _ => None,
+    }
+}
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
 /// `0` is success; non-zero values distinguish call-site errors
@@ -98,11 +118,25 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                 Ok(s) => s,
                 Err(_) => return KIND_NOT_FOUND,
             };
-            caller
-                .data()
-                .registry
-                .kind_id(name)
-                .unwrap_or(KIND_NOT_FOUND)
+            let ctx = caller.data();
+            let id = ctx.registry.kind_id(name).unwrap_or(KIND_NOT_FOUND);
+            // ADR-0021 auto-subscribe: if the resolved kind is one of
+            // the substrate's input streams, fold the caller's mailbox
+            // into the subscriber set. A component declaring
+            // `type Kinds = (Tick, ...)` gets Tick delivery without
+            // ever sending `aether.control.subscribe_input`. Idempotent:
+            // repeated resolves (e.g. replace_component) stay correct.
+            if id != KIND_NOT_FOUND
+                && let Some(stream) = input_stream_for_name(name)
+            {
+                ctx.input_subscribers
+                    .write()
+                    .unwrap()
+                    .entry(stream)
+                    .or_default()
+                    .insert(ctx.sender);
+            }
+            id
         },
     )?;
 

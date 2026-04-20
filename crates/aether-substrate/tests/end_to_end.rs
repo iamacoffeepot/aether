@@ -68,6 +68,7 @@ fn tick_roundtrip_component_to_sink() {
         Arc::clone(&registry),
         Arc::clone(&queue),
         HubOutbound::disconnected(),
+        aether_substrate::new_subscribers(),
     );
     let component = Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
 

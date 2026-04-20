@@ -230,6 +230,7 @@ mod tests {
             Arc::new(Registry::new()),
             Arc::new(MailQueue::new()),
             HubOutbound::disconnected(),
+            crate::input::new_subscribers(),
         )
     }
 
@@ -547,7 +548,13 @@ mod tests {
                 schema: SchemaType::Unit,
             })
             .expect("register kind");
-        let ctx = SubstrateCtx::new(M(0), registry, Arc::new(MailQueue::new()), outbound);
+        let ctx = SubstrateCtx::new(
+            M(0),
+            registry,
+            Arc::new(MailQueue::new()),
+            outbound,
+            crate::input::new_subscribers(),
+        );
         (ctx, rx)
     }
 
@@ -622,7 +629,13 @@ mod tests {
             })
             .expect("register kind");
         let queue = Arc::new(MailQueue::new());
-        let ctx = SubstrateCtx::new(M(0), registry, Arc::clone(&queue), outbound);
+        let ctx = SubstrateCtx::new(
+            M(0),
+            registry,
+            Arc::clone(&queue),
+            outbound,
+            crate::input::new_subscribers(),
+        );
         (ctx, rx, queue, caller)
     }
 

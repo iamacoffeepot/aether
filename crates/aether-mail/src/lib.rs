@@ -25,8 +25,17 @@ use core::fmt;
 /// `"aether.tick"`, `"hello.npc_health"`). The name is resolved to a
 /// runtime `u32` id by the substrate's kind registry at init; see
 /// ADR-0005 for the resolution flow.
+///
+/// `IS_INPUT` marks the kind as a substrate-published input stream
+/// (`Tick`, `Key`, `MouseMove`, `MouseButton` — ADR-0021). Defaults
+/// to `false`; the guest SDK auto-subscribes a component's mailbox
+/// to every input kind in its typelist before the first `receive`
+/// fires, so components declaring `type Kinds = (Tick, ...)` don't
+/// need to send `subscribe_input` themselves. Non-input kinds never
+/// touch this — leave the default alone.
 pub trait Kind {
     const NAME: &'static str;
+    const IS_INPUT: bool = false;
 }
 
 /// Compile-time predicate: can this type's payload travel across the
