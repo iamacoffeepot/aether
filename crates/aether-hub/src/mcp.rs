@@ -478,7 +478,7 @@ mod tests {
         let json = hub
             .describe_component(Parameters(args::DescribeComponentArgs {
                 engine_id: id.0.to_string(),
-                mailbox_id: 7,
+                mailbox_id: "7".into(),
             }))
             .await
             .unwrap();
@@ -505,7 +505,7 @@ mod tests {
         let err = hub
             .describe_component(Parameters(args::DescribeComponentArgs {
                 engine_id: id.0.to_string(),
-                mailbox_id: 999,
+                mailbox_id: "999".into(),
             }))
             .await
             .unwrap_err();
@@ -520,7 +520,7 @@ mod tests {
         let err = hub
             .describe_component(Parameters(args::DescribeComponentArgs {
                 engine_id: Uuid::from_u128(0xdead).to_string(),
-                mailbox_id: 0,
+                mailbox_id: "0".into(),
             }))
             .await
             .unwrap_err();

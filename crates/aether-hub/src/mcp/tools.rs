@@ -635,11 +635,14 @@ impl Hub {
                 None,
             ));
         }
-        let Some(component) = self.state.engines.get_component(&id, args.mailbox_id) else {
+        let mailbox_id: u64 = args.mailbox_id.parse().map_err(|e| {
+            McpError::invalid_params(format!("mailbox_id must be a u64-shaped string: {e}"), None)
+        })?;
+        let Some(component) = self.state.engines.get_component(&id, mailbox_id) else {
             return Err(McpError::invalid_params(
                 format!(
                     "no component at mailbox_id {} on engine {}",
-                    args.mailbox_id, args.engine_id
+                    mailbox_id, args.engine_id
                 ),
                 None,
             ));

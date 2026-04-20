@@ -22,8 +22,11 @@ pub struct DescribeComponentArgs {
     /// Hub-assigned engine UUID as a string (from `list_engines`).
     pub engine_id: String,
     /// Mailbox id of the loaded component (from `load_component`'s
-    /// response).
-    pub mailbox_id: u64,
+    /// response). Passed as a string because MCP clients serialize
+    /// JSON numbers through IEEE-754 double, which loses precision
+    /// beyond 2^53 — and mailbox ids are full 64-bit name hashes
+    /// (ADR-0029).
+    pub mailbox_id: String,
 }
 
 /// Structured response for `describe_component` (ADR-0033). Mirrors
