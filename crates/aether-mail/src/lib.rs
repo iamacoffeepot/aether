@@ -1,18 +1,18 @@
-// aether-mail: shared machinery for the mail typing system described in
-// ADR-0005. No concrete kinds live here — each actor owns its kinds in
-// its own crate (substrate in `aether-kinds`, components in
-// `{component}-mail` crates as they define their own).
-//
-// Two payload tiers:
-//   - POD: #[repr(C)] types implementing `bytemuck::NoUninit` /
-//     `AnyBitPattern`. Encoded as their native byte layout; decoded
-//     zero-copy to `&T` or `&[T]`. Used for vertex streams, fixed-layout
-//     structs, anything where throughput or zero-copy matters.
-//   - Structural: `serde::Serialize + DeserializeOwned` types. Encoded
-//     with postcard (Rust-native, varint-compact, no_std-friendly).
-//     Used for small control messages with Option/Vec/enum shape.
-//
-// A type picks one tier — not both — as part of its contract.
+//! aether-mail: shared machinery for the mail typing system described in
+//! ADR-0005. No concrete kinds live here — each actor owns its kinds in
+//! its own crate (substrate in `aether-kinds`, components in
+//! `{component}-mail` crates as they define their own).
+//!
+//! Two payload tiers:
+//!   - POD: `#[repr(C)]` types implementing `bytemuck::NoUninit` /
+//!     `AnyBitPattern`. Encoded as their native byte layout; decoded
+//!     zero-copy to `&T` or `&[T]`. Used for vertex streams, fixed-layout
+//!     structs, anything where throughput or zero-copy matters.
+//!   - Structural: `serde::Serialize + DeserializeOwned` types. Encoded
+//!     with postcard (Rust-native, varint-compact, no_std-friendly).
+//!     Used for small control messages with Option/Vec/enum shape.
+//!
+//! A type picks one tier — not both — as part of its contract.
 
 #![no_std]
 

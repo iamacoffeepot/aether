@@ -1,31 +1,31 @@
-// Proc-macro home for `#[derive(Kind)]` and `#[derive(Schema)]` per
-// ADR-0019. Kept separate from `aether-mail` because Rust requires
-// proc-macro crates to opt into `proc-macro = true` and forbids them
-// from exporting non-macro items; pairing them in the same crate would
-// force every consumer through the proc-macro toolchain even when they
-// just want the runtime traits.
-//
-// `Kind` emits only the `aether_mail::Kind` impl — a `const NAME` and
-// nothing else. Wasm guests that just want to address a kind by name
-// derive only this and stay free of hub-protocol entirely.
-//
-// `Schema` is opt-in (typically gated on a `descriptors` feature so
-// it expands only in std consumers). It emits *both* the
-// `aether_mail::Schema` impl returning a `SchemaType` AND a
-// `CastEligible` impl whose `ELIGIBLE` const propagates each field's
-// eligibility against `#[repr(C)]` presence. Pairing them here means
-// types used as schema fields (helper structs like `Vertex`) get
-// `CastEligible` for free without needing a separate derive — the
-// Schema derive is the only place that needs eligibility, so it owns
-// the impl.
-//
-// Field-type handling is the trickiest part. For most field types we
-// delegate to `<FieldT as Schema>::schema()` and let the blanket impls
-// in `aether-mail` do the work. The one exception is `Vec<u8>` —
-// stable Rust forbids the specialization (`Vec<u8>` would overlap
-// `Vec<T>` because `u8: Schema`), so the derive pattern-matches the
-// field type's syntax and emits `SchemaType::Bytes` directly when it
-// sees `Vec<u8>`. Every other shape goes through the trait.
+//! Proc-macro home for `#[derive(Kind)]` and `#[derive(Schema)]` per
+//! ADR-0019. Kept separate from `aether-mail` because Rust requires
+//! proc-macro crates to opt into `proc-macro = true` and forbids them
+//! from exporting non-macro items; pairing them in the same crate would
+//! force every consumer through the proc-macro toolchain even when they
+//! just want the runtime traits.
+//!
+//! `Kind` emits only the `aether_mail::Kind` impl — a `const NAME` and
+//! nothing else. Wasm guests that just want to address a kind by name
+//! derive only this and stay free of hub-protocol entirely.
+//!
+//! `Schema` is opt-in (typically gated on a `descriptors` feature so
+//! it expands only in std consumers). It emits *both* the
+//! `aether_mail::Schema` impl returning a `SchemaType` AND a
+//! `CastEligible` impl whose `ELIGIBLE` const propagates each field's
+//! eligibility against `#[repr(C)]` presence. Pairing them here means
+//! types used as schema fields (helper structs like `Vertex`) get
+//! `CastEligible` for free without needing a separate derive — the
+//! Schema derive is the only place that needs eligibility, so it owns
+//! the impl.
+//!
+//! Field-type handling is the trickiest part. For most field types we
+//! delegate to `<FieldT as Schema>::schema()` and let the blanket impls
+//! in `aether-mail` do the work. The one exception is `Vec<u8>` —
+//! stable Rust forbids the specialization (`Vec<u8>` would overlap
+//! `Vec<T>` because `u8: Schema`), so the derive pattern-matches the
+//! field type's syntax and emits `SchemaType::Bytes` directly when it
+//! sees `Vec<u8>`. Every other shape goes through the trait.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
