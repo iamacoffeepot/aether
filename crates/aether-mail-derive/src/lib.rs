@@ -171,16 +171,22 @@ fn cast_eligible_expr_for_struct(has_repr_c: bool, fields: &[FieldInfo]) -> Toke
 
 fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
-    let (body, cast_eligible_expr) = match &input.data {
+    let name_str = name.to_string();
+    let (body, label_node_body, cast_eligible_expr) = match &input.data {
         Data::Struct(_) => {
             let fields = struct_fields(input)?;
             let has_repr_c = struct_has_repr_c(&input.attrs);
             (
                 expand_schema_struct(&fields)?,
+                expand_label_node_struct(&name_str, &fields),
                 cast_eligible_expr_for_struct(has_repr_c, &fields),
             )
         }
-        Data::Enum(e) => (expand_schema_enum(e)?, quote! { false }),
+        Data::Enum(e) => (
+            expand_schema_enum(e)?,
+            expand_label_node_enum(&name_str, e),
+            quote! { false },
+        ),
         Data::Union(u) => {
             return Err(syn::Error::new_spanned(
                 u.union_token,
@@ -191,12 +197,119 @@ fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
     Ok(quote! {
         impl ::aether_mail::Schema for #name {
             const SCHEMA: ::aether_hub_protocol::SchemaType = #body;
+            const LABEL: ::core::option::Option<&'static str> = ::core::option::Option::Some(
+                ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
+            );
+            const LABEL_NODE: ::aether_hub_protocol::LabelNode = #label_node_body;
         }
 
         impl ::aether_mail::CastEligible for #name {
             const ELIGIBLE: bool = #cast_eligible_expr;
         }
     })
+}
+
+/// Emit the `LabelNode::Struct` literal for the type's `LABEL_NODE`
+/// const. Field names come from the Rust source; nested-field label
+/// nodes resolve via `<FieldT as Schema>::LABEL_NODE` trait dispatch.
+/// `Vec<u8>` field specialization: the schema side reports `Bytes`,
+/// the labels side reports `Anonymous` (no nominal info for a raw
+/// byte buffer).
+fn expand_label_node_struct(type_ident: &str, fields: &[FieldInfo]) -> TokenStream2 {
+    let field_names = fields.iter().enumerate().map(|(idx, f)| match &f.ident {
+        Some(id) => id.to_string(),
+        None => idx.to_string(),
+    });
+    let field_name_entries = field_names.map(|n| {
+        quote! { ::aether_mail::__derive_runtime::Cow::Borrowed(#n) }
+    });
+    let field_node_exprs = fields.iter().map(|f| field_label_node_expr(&f.ty));
+    quote! {
+        ::aether_mail::__derive_runtime::LabelNode::Struct {
+            type_label: ::core::option::Option::Some(
+                ::aether_mail::__derive_runtime::Cow::Borrowed(
+                    ::core::concat!(::core::module_path!(), "::", #type_ident),
+                ),
+            ),
+            field_names: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+                #( #field_name_entries ),*
+            ]),
+            fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+                #( #field_node_exprs ),*
+            ]),
+        }
+    }
+}
+
+fn expand_label_node_enum(type_ident: &str, data: &DataEnum) -> TokenStream2 {
+    let variant_entries = data.variants.iter().map(|v| {
+        let vname = v.ident.to_string();
+        match &v.fields {
+            Fields::Unit => quote! {
+                ::aether_mail::__derive_runtime::VariantLabel::Unit {
+                    name: ::aether_mail::__derive_runtime::Cow::Borrowed(#vname),
+                }
+            },
+            Fields::Unnamed(unnamed) => {
+                let field_exprs = unnamed
+                    .unnamed
+                    .iter()
+                    .map(|f| field_label_node_expr(&f.ty));
+                quote! {
+                    ::aether_mail::__derive_runtime::VariantLabel::Tuple {
+                        name: ::aether_mail::__derive_runtime::Cow::Borrowed(#vname),
+                        fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+                            #( #field_exprs ),*
+                        ]),
+                    }
+                }
+            }
+            Fields::Named(named) => {
+                let field_name_entries = named.named.iter().map(|f| {
+                    let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                    quote! { ::aether_mail::__derive_runtime::Cow::Borrowed(#fname) }
+                });
+                let field_node_exprs =
+                    named.named.iter().map(|f| field_label_node_expr(&f.ty));
+                quote! {
+                    ::aether_mail::__derive_runtime::VariantLabel::Struct {
+                        name: ::aether_mail::__derive_runtime::Cow::Borrowed(#vname),
+                        field_names: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+                            #( #field_name_entries ),*
+                        ]),
+                        fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+                            #( #field_node_exprs ),*
+                        ]),
+                    }
+                }
+            }
+        }
+    });
+    quote! {
+        ::aether_mail::__derive_runtime::LabelNode::Enum {
+            type_label: ::core::option::Option::Some(
+                ::aether_mail::__derive_runtime::Cow::Borrowed(
+                    ::core::concat!(::core::module_path!(), "::", #type_ident),
+                ),
+            ),
+            variants: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+                #( #variant_entries ),*
+            ]),
+        }
+    }
+}
+
+/// Expression for a field's `LabelNode` — trait dispatch through
+/// `<T as Schema>::LABEL_NODE` for most types. `Vec<u8>` is the one
+/// exception (pattern-matched just like `field_type_schema_expr`)
+/// and maps to `LabelNode::Anonymous` because `Bytes` carries no
+/// structural children to label.
+fn field_label_node_expr(ty: &Type) -> TokenStream2 {
+    if is_vec_u8(ty) {
+        quote! { ::aether_mail::__derive_runtime::LabelNode::Anonymous }
+    } else {
+        quote! { <#ty as ::aether_mail::Schema>::LABEL_NODE }
+    }
 }
 
 fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {

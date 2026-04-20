@@ -100,9 +100,17 @@ impl<T> CastEligible for Option<T> {
 /// as the no-sender sentinel — callers should reject on the astronomical
 /// chance of a collision with it.
 pub const fn mailbox_id_from_name(name: &str) -> u64 {
-    // FNV-1a 64 offset basis / prime.
+    fnv1a_64_bytes(name.as_bytes())
+}
+
+/// FNV-1a 64 over a byte slice (ADR-0032). Sibling of
+/// `mailbox_id_from_name` — same algorithm, same offset basis and
+/// prime, different input type. Used to derive `Kind::ID` from
+/// canonical schema bytes (ADR-0030 Phase 2). `const` so derives can
+/// emit `const ID: u64 = fnv1a_64_bytes(&CANONICAL_BYTES)` as a
+/// trait-assoc const.
+pub const fn fnv1a_64_bytes(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
-    let bytes = name.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         hash ^= bytes[i] as u64;
@@ -140,6 +148,7 @@ pub use schema::Schema;
 #[doc(hidden)]
 pub mod __derive_runtime {
     pub use alloc::borrow::Cow;
+    pub use aether_hub_protocol::{LabelCell, LabelNode, VariantLabel};
 }
 
 #[cfg(feature = "descriptors")]
@@ -147,7 +156,7 @@ mod schema {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use aether_hub_protocol::{Primitive, SchemaCell, SchemaType};
+    use aether_hub_protocol::{LabelCell, LabelNode, Primitive, SchemaCell, SchemaType};
 
     /// Produces the `SchemaType` describing how this type lays out as
     /// a mail payload. Implemented by `#[derive(Schema)]` on user
@@ -158,14 +167,29 @@ mod schema {
     /// which is what `SchemaCell::Static` holds, so nested types
     /// (`Vec<T>`, `Option<T>`, `[T; N]`, user structs) resolve by
     /// trait dispatch at compile time without a syntactic walker.
+    ///
+    /// ADR-0032: additionally exposes the Rust type path (`LABEL`) and
+    /// the parallel labels tree (`LABEL_NODE`). The canonical schema
+    /// bytes the `aether.kinds` section carries are positional-only
+    /// (no field/variant/type names); `LABEL_NODE` is serialized into
+    /// the `aether.kinds.labels` sidecar so the hub can reconstruct a
+    /// named `SchemaType` for its encoder/decoder and `describe_kinds`
+    /// output. Primitives, `String`, `Vec<T>`, `Option<T>`, `[T; N]`
+    /// all carry `LABEL = None` — the containers have no nominal
+    /// identity and primitives are uniquely determined by their
+    /// `SchemaType::Scalar(_)` tag.
     pub trait Schema {
         const SCHEMA: SchemaType;
+        const LABEL: Option<&'static str>;
+        const LABEL_NODE: LabelNode;
     }
 
     macro_rules! scalar {
         ($t:ty, $p:ident) => {
             impl Schema for $t {
                 const SCHEMA: SchemaType = SchemaType::Scalar(Primitive::$p);
+                const LABEL: Option<&'static str> = None;
+                const LABEL_NODE: LabelNode = LabelNode::Anonymous;
             }
         };
     }
@@ -183,10 +207,14 @@ mod schema {
 
     impl Schema for bool {
         const SCHEMA: SchemaType = SchemaType::Bool;
+        const LABEL: Option<&'static str> = None;
+        const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
     impl Schema for String {
         const SCHEMA: SchemaType = SchemaType::String;
+        const LABEL: Option<&'static str> = None;
+        const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
     // Generic `Vec<T>`. `Vec<u8>` is the canonical byte-buffer shape
@@ -200,10 +228,14 @@ mod schema {
     // impl and lands as `Vec(Scalar(U8))`.
     impl<T: Schema + 'static> Schema for Vec<T> {
         const SCHEMA: SchemaType = SchemaType::Vec(SchemaCell::Static(&T::SCHEMA));
+        const LABEL: Option<&'static str> = None;
+        const LABEL_NODE: LabelNode = LabelNode::Vec(LabelCell::Static(&T::LABEL_NODE));
     }
 
     impl<T: Schema + 'static> Schema for Option<T> {
         const SCHEMA: SchemaType = SchemaType::Option(SchemaCell::Static(&T::SCHEMA));
+        const LABEL: Option<&'static str> = None;
+        const LABEL_NODE: LabelNode = LabelNode::Option(LabelCell::Static(&T::LABEL_NODE));
     }
 
     impl<T: Schema + 'static, const N: usize> Schema for [T; N] {
@@ -211,6 +243,8 @@ mod schema {
             element: SchemaCell::Static(&T::SCHEMA),
             len: N as u32,
         };
+        const LABEL: Option<&'static str> = None;
+        const LABEL_NODE: LabelNode = LabelNode::Array(LabelCell::Static(&T::LABEL_NODE));
     }
 }
 

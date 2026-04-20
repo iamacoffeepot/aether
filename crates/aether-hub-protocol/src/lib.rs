@@ -20,6 +20,8 @@ pub use uuid::Uuid;
 mod types;
 pub use types::*;
 
+pub mod canonical;
+
 /// Maximum accepted frame body size. Bounded so a malformed length
 /// prefix cannot drive a reader into an OOM. 16 MiB is comfortably
 /// larger than any expected mail payload on the hub wire (vertex
