@@ -783,15 +783,14 @@ const fn write_option_str(s: &Option<Cow<'static, str>>, out: &mut [u8], cursor:
     pos
 }
 
-// --- ADR-0033: const-fn encoders for `InputsRecord` ---
-//
-// The `#[handlers]` macro emits one postcard-compatible byte array per
-// handler/fallback/component-doc record, length-prefixed with the
-// section version tag and placed in the `aether.kinds.inputs` custom
-// section. Writing those bytes at const-eval time keeps everything in
-// `#[link_section]` statics without a runtime serializer on the guest.
-// The wire shape matches `postcard(InputsRecord)` byte-for-byte so the
-// substrate/hub reader can decode via `postcard::take_from_bytes`.
+// ADR-0033: the `#[handlers]` macro emits one postcard-compatible
+// byte array per handler / fallback / component-doc record,
+// length-prefixed with the section version tag and placed in the
+// `aether.kinds.inputs` custom section. Writing those bytes at
+// const-eval time keeps everything in `#[link_section]` statics
+// without a runtime serializer on the guest. The wire shape matches
+// `postcard(InputsRecord)` byte-for-byte so the substrate/hub reader
+// can decode via `postcard::take_from_bytes`.
 
 /// Byte count of `val` in postcard's unsigned-varint encoding for u64.
 /// Extends `varint_u32_len` to the full u64 range needed by `Kind::ID`.

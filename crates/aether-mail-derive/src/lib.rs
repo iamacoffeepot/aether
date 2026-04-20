@@ -549,17 +549,14 @@ fn to_screaming_snake_case(s: &str) -> String {
     out
 }
 
-// ====================================================================
-// ADR-0033: `#[handlers]` attribute macro
-// ====================================================================
-//
-// Applied to `impl Component for C` blocks. Reshapes the impl so that
-// `#[handler] fn on_X(&mut self, &mut Ctx, K)` methods + an optional
-// `#[fallback]` method become both (a) dispatcher arms on a synthesized
-// `Component::receive` and (b) per-record statics in the
-// `aether.kinds.inputs` custom section (hub-facing capability
-// advertisement, ADR-0033). Non-trait helper methods migrate to a
-// sibling inherent impl since `impl Trait for Type` can't host them.
+// ADR-0033: `#[handlers]` applied to `impl Component for C` blocks.
+// Reshapes the impl so `#[handler] fn on_X(&mut self, &mut Ctx, K)`
+// methods plus an optional `#[fallback]` method become both (a)
+// dispatcher arms on a synthesized `Component::receive` and (b) per-
+// record statics in the `aether.kinds.inputs` custom section (hub-
+// facing capability advertisement). Non-trait helper methods migrate
+// to a sibling inherent impl since `impl Trait for Type` can't host
+// them.
 //
 // The `type Kinds = (K1, K2, ...)` associated type is synthesized from
 // the handler set so the existing ADR-0027 / ADR-0030 init walker
