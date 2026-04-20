@@ -179,62 +179,6 @@ struct App {
     _scheduler: Scheduler,
 }
 
-/// Encode + send a `CaptureFrameResult` reply addressed to the
-/// originating session. Silent if the outbound is disconnected (no
-/// hub attached) — the result goes nowhere, which matches the
-/// broadcast sink's behavior for observations.
-fn send_capture_reply(
-    outbound: &HubOutbound,
-    sender: aether_hub_protocol::SessionToken,
-    result: CaptureFrameResult,
-) {
-    let payload = match postcard::to_allocvec(&result) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(
-                target: "aether_substrate::capture",
-                error = %e,
-                "capture result encode failed",
-            );
-            return;
-        }
-    };
-    outbound.send(EngineToHub::Mail(EngineMailFrame {
-        address: ClaudeAddress::Session(sender),
-        kind_name: CaptureFrameResult::NAME.to_owned(),
-        payload,
-        origin: None,
-    }));
-}
-
-/// Encode + send a `PlatformInfoResult` reply addressed at the
-/// originating session. Mirrors `send_capture_reply` in shape — silent
-/// on disconnected outbound since `PlatformInfoNotifier` fired without
-/// awaiting an ack anyway.
-fn send_platform_info_reply(
-    outbound: &HubOutbound,
-    sender: aether_hub_protocol::SessionToken,
-    result: PlatformInfoResult,
-) {
-    let payload = match postcard::to_allocvec(&result) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(
-                target: "aether_substrate::platform_info",
-                error = %e,
-                "platform_info result encode failed",
-            );
-            return;
-        }
-    };
-    outbound.send(EngineToHub::Mail(EngineMailFrame {
-        address: ClaudeAddress::Session(sender),
-        kind_name: PlatformInfoResult::NAME.to_owned(),
-        payload,
-        origin: None,
-    }));
-}
-
 /// Copy winit's `VideoModeHandle` fields into the wire-stable mirror
 /// in `aether-kinds`. Separate type so the kind's schema doesn't ride
 /// winit's layout.
@@ -272,32 +216,6 @@ fn map_backend(b: wgpu::Backend) -> GpuBackend {
         wgpu::Backend::Gl => GpuBackend::Gl,
         wgpu::Backend::BrowserWebGpu => GpuBackend::BrowserWebGpu,
     }
-}
-
-/// Encode + send a `SetWindowModeResult` reply to the originating
-/// session. Mirrors the other `send_*_reply` helpers.
-fn send_set_window_mode_reply(
-    outbound: &HubOutbound,
-    sender: aether_hub_protocol::SessionToken,
-    result: SetWindowModeResult,
-) {
-    let payload = match postcard::to_allocvec(&result) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(
-                target: "aether_substrate::window_mode",
-                error = %e,
-                "set_window_mode result encode failed",
-            );
-            return;
-        }
-    };
-    outbound.send(EngineToHub::Mail(EngineMailFrame {
-        address: ClaudeAddress::Session(sender),
-        kind_name: SetWindowModeResult::NAME.to_owned(),
-        payload,
-        origin: None,
-    }));
 }
 
 /// Parse `AETHER_WINDOW_MODE`. Grammar:
@@ -422,7 +340,7 @@ impl App {
         // returning a half-populated snapshot.
         let Some(gpu) = self.gpu.as_ref() else {
             return PlatformInfoResult::Err {
-                error: "platform info requested before GPU / window came up".to_owned(),
+                error: "platform_info requested before GPU and window initialized".to_owned(),
             };
         };
 
@@ -513,7 +431,7 @@ impl App {
     ) -> SetWindowModeResult {
         let Some(window) = self.window.as_ref().cloned() else {
             return SetWindowModeResult::Err {
-                error: "window not ready; set_window_mode arrived before resumed".to_owned(),
+                error: "set_window_mode requested before window initialized".to_owned(),
             };
         };
         let monitor = window.current_monitor();
@@ -570,7 +488,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::PlatformInfo { sender } => {
                 let result = self.snapshot_platform_info(event_loop);
-                send_platform_info_reply(&self.outbound, sender, result);
+                self.outbound.send_reply(sender, &result);
             }
             UserEvent::SetWindowMode {
                 sender,
@@ -579,7 +497,7 @@ impl ApplicationHandler<UserEvent> for App {
                 height,
             } => {
                 let result = self.apply_window_mode(mode, width, height);
-                send_set_window_mode_reply(&self.outbound, sender, result);
+                self.outbound.send_reply(sender, &result);
             }
         }
     }
@@ -659,7 +577,7 @@ impl ApplicationHandler<UserEvent> for App {
                             for mail in req.after_mails {
                                 self.queue.push(mail);
                             }
-                            send_capture_reply(&self.outbound, req.sender, result);
+                            self.outbound.send_reply(req.sender, &result);
                         }
                         None => {
                             gpu.render(&verts);
@@ -671,10 +589,9 @@ impl ApplicationHandler<UserEvent> for App {
                     // caller hanging on an await-reply slot. `after_mails`
                     // is dropped — the pre-capture bundle wasn't processed
                     // either, so there's nothing to clean up.
-                    send_capture_reply(
-                        &self.outbound,
+                    self.outbound.send_reply(
                         req.sender,
-                        CaptureFrameResult::Err {
+                        &CaptureFrameResult::Err {
                             error: "capture requested before GPU initialized".to_owned(),
                         },
                     );
