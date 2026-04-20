@@ -13,8 +13,8 @@
 // `aether-kinds` as schema-described kinds (LoadComponent,
 // LoadResult, etc.) — no more separate `*Payload` structs in this
 // crate. The substrate decodes incoming mail as the kind type
-// directly via postcard, converts the runtime-loaded kind list
-// (`LoadKind`) to `KindDescriptor`s for the registry, and replies
+// directly via postcard, reads a component's kind vocabulary from
+// its `aether.kinds` wasm custom section (ADR-0028), and replies
 // with the matching result kind.
 //
 // Error discipline: agent-visible failures (bad postcard, kind
@@ -28,12 +28,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use aether_hub_protocol::{EngineToHub, KindDescriptor, NamedField, Primitive, SchemaType};
+use aether_hub_protocol::{EngineToHub, KindDescriptor};
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, DropComponent, DropResult, LoadComponent, LoadKind,
-    LoadKindEncoding, LoadKindPrimitive, LoadResult, MailEnvelope, PlatformInfo, ReplaceComponent,
-    ReplaceResult, SetWindowMode, SetWindowModeResult, SubscribeInput, SubscribeInputResult,
-    UnsubscribeInput,
+    CaptureFrame, CaptureFrameResult, DropComponent, DropResult, LoadComponent, LoadResult,
+    MailEnvelope, PlatformInfo, ReplaceComponent, ReplaceResult, SetWindowMode,
+    SetWindowModeResult, SubscribeInput, SubscribeInputResult, UnsubscribeInput,
 };
 use aether_mail::Kind;
 use wasmtime::{Engine, Linker, Module};
@@ -154,46 +153,6 @@ fn register_or_match_all(
     Ok(())
 }
 
-/// Translate a `LoadKind` (the flat, agent-shippable descriptor) into
-/// the recursive `KindDescriptor` the registry stores. `Signal`
-/// becomes `Schema(Unit)`; `Pod` becomes `Schema(Struct{repr_c:true,
-/// fields:[...]})` — same wire format as PR 4's substrate-mail
-/// kinds, so a runtime-registered kind is indistinguishable from a
-/// boot-registered one on the wire.
-fn lift_load_kind(k: &LoadKind) -> KindDescriptor {
-    let schema = match &k.encoding {
-        LoadKindEncoding::Signal => SchemaType::Unit,
-        LoadKindEncoding::Pod { fields } => {
-            let named = fields
-                .iter()
-                .map(|f| NamedField {
-                    name: f.name.clone(),
-                    ty: lift_load_field_type(f.primitive, f.array_len),
-                })
-                .collect();
-            SchemaType::Struct {
-                fields: named,
-                repr_c: true,
-            }
-        }
-    };
-    KindDescriptor {
-        name: k.name.clone(),
-        schema,
-    }
-}
-
-fn lift_load_field_type(primitive: LoadKindPrimitive, array_len: Option<u32>) -> SchemaType {
-    let scalar = SchemaType::Scalar(lift_primitive(primitive));
-    match array_len {
-        None => scalar,
-        Some(len) => SchemaType::Array {
-            element: Box::new(scalar),
-            len,
-        },
-    }
-}
-
 /// Shared validation for `subscribe_input` / `unsubscribe_input`: the
 /// mailbox id must name a live component. Sinks are rejected because
 /// they handle mail inline and have no business receiving fan-out
@@ -209,21 +168,6 @@ fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(),
             Err(format!("mailbox {:?} already dropped", id))
         }
         None => Err(format!("unknown mailbox id {:?}", id)),
-    }
-}
-
-fn lift_primitive(p: LoadKindPrimitive) -> Primitive {
-    match p {
-        LoadKindPrimitive::U8 => Primitive::U8,
-        LoadKindPrimitive::U16 => Primitive::U16,
-        LoadKindPrimitive::U32 => Primitive::U32,
-        LoadKindPrimitive::U64 => Primitive::U64,
-        LoadKindPrimitive::I8 => Primitive::I8,
-        LoadKindPrimitive::I16 => Primitive::I16,
-        LoadKindPrimitive::I32 => Primitive::I32,
-        LoadKindPrimitive::I64 => Primitive::I64,
-        LoadKindPrimitive::F32 => Primitive::F32,
-        LoadKindPrimitive::F64 => Primitive::F64,
     }
 }
 
@@ -349,25 +293,16 @@ impl ControlPlane {
             Err(error) => return LoadResult::Err { error },
         };
 
-        // Merge the ADR-0028 embedded manifest (read from the
-        // raw wasm bytes) with any legacy `LoadKind` entries on
-        // the payload. The embedded path is the source of truth
-        // going forward; `payload.kinds` stays for backwards
-        // compatibility until ADR-0028 phase 2 removes the field.
-        // Duplicate names across both sources fall through the
-        // same schema-equality conflict check — identical
-        // descriptors dedupe, disagreements fail the load.
-        //
-        // Reading the section before `Module::new` lets a bad
-        // manifest fail before we spend cycles compiling the
-        // module, and keeps the "no partial registry state on
-        // failure" property the original code had.
-        let mut descriptors: Vec<KindDescriptor> =
-            match kind_manifest::read_from_bytes(&payload.wasm) {
-                Ok(d) => d,
-                Err(error) => return LoadResult::Err { error },
-            };
-        descriptors.extend(payload.kinds.iter().map(lift_load_kind));
+        // ADR-0028: the component's kind vocabulary rides in its
+        // wasm `aether.kinds` custom section. Reading before
+        // `Module::new` lets a bad manifest fail before we spend
+        // cycles compiling, and keeps the "no partial registry
+        // state on failure" property — the registry is untouched
+        // until every descriptor passes conflict detection.
+        let descriptors: Vec<KindDescriptor> = match kind_manifest::read_from_bytes(&payload.wasm) {
+            Ok(d) => d,
+            Err(error) => return LoadResult::Err { error },
+        };
         if let Err(error) = register_or_match_all(&self.registry, &descriptors) {
             return LoadResult::Err { error };
         }
@@ -628,14 +563,12 @@ impl ControlPlane {
             }
         }
 
-        // ADR-0028 embedded manifest + legacy `LoadKind` entries.
-        // See `handle_load` for the merge rationale.
-        let mut descriptors: Vec<KindDescriptor> =
-            match kind_manifest::read_from_bytes(&payload.wasm) {
-                Ok(d) => d,
-                Err(error) => return ReplaceResult::Err { error },
-            };
-        descriptors.extend(payload.kinds.iter().map(lift_load_kind));
+        // ADR-0028: read the kind vocabulary from the wasm's
+        // `aether.kinds` custom section; see `handle_load`.
+        let descriptors: Vec<KindDescriptor> = match kind_manifest::read_from_bytes(&payload.wasm) {
+            Ok(d) => d,
+            Err(error) => return ReplaceResult::Err { error },
+        };
         if let Err(error) = register_or_match_all(&self.registry, &descriptors) {
             return ReplaceResult::Err { error };
         }
@@ -797,24 +730,19 @@ impl ControlPlane {
 mod tests {
     use super::*;
     use crate::mail::Mail;
-    use aether_hub_protocol::SessionToken;
+    use aether_hub_protocol::{NamedField, Primitive, SchemaType, SessionToken};
     use std::sync::atomic::AtomicU32;
 
     #[test]
     fn load_payload_roundtrip() {
         let p = LoadComponent {
             wasm: vec![0, 1, 2, 3],
-            kinds: vec![LoadKind {
-                name: "hello.foo".into(),
-                encoding: LoadKindEncoding::Signal,
-            }],
             name: Some("hello".into()),
         };
         let bytes = postcard::to_allocvec(&p).unwrap();
         let back: LoadComponent = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(back.wasm, p.wasm);
         assert_eq!(back.name.as_deref(), Some("hello"));
-        assert_eq!(back.kinds.len(), 1);
     }
 
     #[test]
@@ -960,17 +888,12 @@ mod tests {
         let wasm = wat::parse_str(WAT).expect("compile WAT");
         let payload = LoadComponent {
             wasm,
-            kinds: vec![LoadKind {
-                name: "loaded.ping".into(),
-                encoding: LoadKindEncoding::Signal,
-            }],
             name: Some("loaded".into()),
         };
         let result = plane.handle_load(&postcard::to_allocvec(&payload).unwrap());
         match result {
             LoadResult::Ok { mailbox_id, name } => {
                 assert_eq!(name, "loaded");
-                assert!(plane.registry.kind_id("loaded.ping").is_some());
                 assert_eq!(plane.registry.lookup("loaded"), Some(MailboxId(mailbox_id)));
                 assert!(
                     plane
@@ -988,11 +911,7 @@ mod tests {
     fn load_component_defaults_name_on_absent() {
         let plane = make_plane();
         let wasm = wat::parse_str(WAT).unwrap();
-        let payload = LoadComponent {
-            wasm,
-            kinds: vec![],
-            name: None,
-        };
+        let payload = LoadComponent { wasm, name: None };
         let result = plane.handle_load(&postcard::to_allocvec(&payload).unwrap());
         match result {
             LoadResult::Ok { name, .. } => {
@@ -1003,50 +922,12 @@ mod tests {
     }
 
     #[test]
-    fn load_component_rejects_kind_conflict() {
-        let plane = make_plane();
-        // Pre-register "shared" as a Pod struct via the descriptor
-        // path. The load below requests it as a Signal — different
-        // schema arm, so the conflict check rejects.
-        plane
-            .registry
-            .register_kind_with_descriptor(KindDescriptor {
-                name: "shared".into(),
-                schema: SchemaType::Struct {
-                    fields: vec![NamedField {
-                        name: "n".into(),
-                        ty: SchemaType::Scalar(Primitive::U32),
-                    }],
-                    repr_c: true,
-                },
-            })
-            .unwrap();
-        let wasm = wat::parse_str(WAT).unwrap();
-        let payload = LoadComponent {
-            wasm,
-            kinds: vec![LoadKind {
-                name: "shared".into(),
-                encoding: LoadKindEncoding::Signal,
-            }],
-            name: Some("conflict_case".into()),
-        };
-        let result = plane.handle_load(&postcard::to_allocvec(&payload).unwrap());
-        assert!(
-            matches!(result, LoadResult::Err { .. }),
-            "expected conflict error, got {result:?}"
-        );
-        // Mailbox not allocated on conflict.
-        assert!(plane.registry.lookup("conflict_case").is_none());
-    }
-
-    #[test]
     fn load_component_rejects_name_conflict() {
         let plane = make_plane();
         plane.registry.register_component("taken");
         let wasm = wat::parse_str(WAT).unwrap();
         let payload = LoadComponent {
             wasm,
-            kinds: vec![],
             name: Some("taken".into()),
         };
         let result = plane.handle_load(&postcard::to_allocvec(&payload).unwrap());
@@ -1058,7 +939,6 @@ mod tests {
         let plane = make_plane();
         let payload = LoadComponent {
             wasm: vec![0, 1, 2, 3],
-            kinds: vec![],
             name: Some("bad_wasm".into()),
         };
         let result = plane.handle_load(&postcard::to_allocvec(&payload).unwrap());
@@ -1103,7 +983,6 @@ mod tests {
         let loaded = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm,
-                kinds: vec![],
                 name: Some("embedded_consumer".into()),
             })
             .unwrap(),
@@ -1161,7 +1040,6 @@ mod tests {
         let result = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm,
-                kinds: vec![],
                 name: Some("conflict_consumer".into()),
             })
             .unwrap(),
@@ -1180,7 +1058,6 @@ mod tests {
         let loaded = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm,
-                kinds: vec![],
                 name: Some("victim".into()),
             })
             .unwrap(),
@@ -1228,7 +1105,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm,
-                kinds: vec![],
                 name: Some("once".into()),
             })
             .unwrap(),
@@ -1247,7 +1123,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id, name } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm: wasm.clone(),
-                kinds: vec![],
                 name: Some("swap_target".into()),
             })
             .unwrap(),
@@ -1260,7 +1135,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id,
                 wasm,
-                kinds: vec![],
                 drain_timeout_ms: None,
             })
             .unwrap(),
@@ -1288,7 +1162,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id: 99,
                 wasm,
-                kinds: vec![],
                 drain_timeout_ms: None,
             })
             .unwrap(),
@@ -1303,7 +1176,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm: wasm.clone(),
-                kinds: vec![],
                 name: Some("gone".into()),
             })
             .unwrap(),
@@ -1315,7 +1187,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id,
                 wasm,
-                kinds: vec![],
                 drain_timeout_ms: None,
             })
             .unwrap(),
@@ -1330,7 +1201,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm,
-                kinds: vec![],
                 name: Some("target".into()),
             })
             .unwrap(),
@@ -1341,7 +1211,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id,
                 wasm: vec![0, 1, 2, 3],
-                kinds: vec![],
                 drain_timeout_ms: None,
             })
             .unwrap(),
@@ -1359,7 +1228,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm,
-                kinds: vec![],
                 name: Some("hooked".into()),
             })
             .unwrap(),
@@ -1380,7 +1248,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm,
-                kinds: vec![],
                 name: Some("crasher".into()),
             })
             .unwrap(),
@@ -1408,7 +1275,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm: wasm_old,
-                kinds: vec![],
                 name: Some("swap_me".into()),
             })
             .unwrap(),
@@ -1420,7 +1286,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id,
                 wasm: wasm_new,
-                kinds: vec![],
                 drain_timeout_ms: None,
             })
             .unwrap(),
@@ -1445,7 +1310,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm: wat::parse_str(WAT_SAVES_STATE).unwrap(),
-                kinds: vec![],
                 name: Some("stateful".into()),
             })
             .unwrap(),
@@ -1457,7 +1321,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id,
                 wasm: wat::parse_str(WAT_REHYDRATES).unwrap(),
-                kinds: vec![],
                 drain_timeout_ms: None,
             })
             .unwrap(),
@@ -1482,7 +1345,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm: wat::parse_str(WAT_SAVES_TOO_LARGE).unwrap(),
-                kinds: vec![],
                 name: Some("greedy".into()),
             })
             .unwrap(),
@@ -1494,7 +1356,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id,
                 wasm: wat::parse_str(WAT).unwrap(),
-                kinds: vec![],
                 drain_timeout_ms: None,
             })
             .unwrap(),
@@ -1522,7 +1383,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm: wat::parse_str(WAT_SAVES_STATE).unwrap(),
-                kinds: vec![],
                 name: Some("orphan_save".into()),
             })
             .unwrap(),
@@ -1534,7 +1394,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id,
                 wasm: wat::parse_str(WAT).unwrap(),
-                kinds: vec![],
                 drain_timeout_ms: None,
             })
             .unwrap(),
@@ -1552,7 +1411,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm: wat::parse_str(WAT).unwrap(),
-                kinds: vec![],
                 name: Some("stateless_old".into()),
             })
             .unwrap(),
@@ -1564,7 +1422,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id,
                 wasm: wat::parse_str(WAT_REHYDRATES).unwrap(),
-                kinds: vec![],
                 drain_timeout_ms: None,
             })
             .unwrap(),
@@ -1599,7 +1456,6 @@ mod tests {
         let result = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm,
-                kinds: vec![],
                 name: Some(name.into()),
             })
             .unwrap(),
@@ -1768,7 +1624,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id: id,
                 wasm: wat::parse_str(WAT).unwrap(),
-                kinds: vec![],
                 drain_timeout_ms: None,
             })
             .unwrap(),
@@ -1860,7 +1715,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id: id,
                 wasm: wat::parse_str(WAT).unwrap(),
-                kinds: vec![],
                 drain_timeout_ms: Some(20),
             })
             .unwrap(),
@@ -1910,7 +1764,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id: id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm: wat::parse_str(WAT_FORWARDS_TO_SINK).unwrap(),
-                kinds: vec![],
                 name: Some("flusher".into()),
             })
             .unwrap(),
@@ -1948,7 +1801,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id: id,
                 wasm: wat::parse_str(WAT_FORWARDS_TO_SINK).unwrap(),
-                kinds: vec![],
                 drain_timeout_ms: Some(500),
             })
             .unwrap(),
@@ -1990,7 +1842,6 @@ mod tests {
         let LoadResult::Ok { mailbox_id: id, .. } = plane.handle_load(
             &postcard::to_allocvec(&LoadComponent {
                 wasm: wat::parse_str(WAT_FORWARDS_TO_SINK).unwrap(),
-                kinds: vec![],
                 name: Some("survivor".into()),
             })
             .unwrap(),
@@ -2022,7 +1873,6 @@ mod tests {
             &postcard::to_allocvec(&ReplaceComponent {
                 mailbox_id: id,
                 wasm: wat::parse_str(WAT_FORWARDS_TO_SINK).unwrap(),
-                kinds: vec![],
                 drain_timeout_ms: Some(20),
             })
             .unwrap(),

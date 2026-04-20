@@ -403,7 +403,7 @@ impl Hub {
     }
 
     #[tool(
-        description = "Load a WASM component into the substrate by filesystem path. The hub reads the binary from `binary_path`, forwards the bytes to the substrate as `aether.control.load_component`, and waits for the substrate's `LoadResult` reply — returning `{mailbox_id, name}` inline or an error. Path must exist as given (no `~` expansion, no relative resolution — same rule as `spawn_substrate`). The `kinds` array is the same shape as the underlying kind's `kinds` field (see `describe_kinds`). Rejects with \"already in flight\" if a prior `load_component` on this session hasn't completed. Default timeout 5000ms; clamped to 30000. Agents never inline the wasm bytes through the tool call — that's what the path is for."
+        description = "Load a WASM component into the substrate by filesystem path. The hub reads the binary from `binary_path`, forwards the bytes to the substrate as `aether.control.load_component`, and waits for the substrate's `LoadResult` reply — returning `{mailbox_id, name}` inline or an error. Path must exist as given (no `~` expansion, no relative resolution — same rule as `spawn_substrate`). The component's kind vocabulary rides in the wasm's `aether.kinds` custom section (ADR-0028) — the loader doesn't declare kinds separately. Rejects with \"already in flight\" if a prior `load_component` on this session hasn't completed. Default timeout 5000ms; clamped to 30000. Agents never inline the wasm bytes through the tool call — that's what the path is for."
     )]
     pub(super) async fn load_component(
         &self,
@@ -429,7 +429,6 @@ impl Hub {
 
         let params = serde_json::json!({
             "wasm": wasm,
-            "kinds": args.kinds,
             "name": args.name,
         });
 
@@ -495,7 +494,7 @@ impl Hub {
     }
 
     #[tool(
-        description = "Atomically replace a live component's WASM with a new binary loaded from a filesystem path (ADR-0022 freeze-drain-swap). The hub reads the binary from `binary_path` and forwards `aether.control.replace_component` to the substrate, which freezes the target mailbox, drains in-flight mail on the old instance up to `drain_timeout_ms` (substrate default 5000), then swaps. On drain timeout the old instance stays bound and the reply is an error — a loud failure rather than silent dropped mail. Path must exist as given. Waits for the substrate's `ReplaceResult`; returns `\"Ok\"` on success. Rejects with \"already in flight\" if a prior replace is pending on this session. Tool timeout default 5000ms, clamped to 30000 — set it above `drain_timeout_ms`."
+        description = "Atomically replace a live component's WASM with a new binary loaded from a filesystem path (ADR-0022 freeze-drain-swap). The hub reads the binary from `binary_path` and forwards `aether.control.replace_component` to the substrate, which freezes the target mailbox, drains in-flight mail on the old instance up to `drain_timeout_ms` (substrate default 5000), then swaps. Kind vocabulary rides in the wasm's `aether.kinds` custom section (ADR-0028). On drain timeout the old instance stays bound and the reply is an error — a loud failure rather than silent dropped mail. Path must exist as given. Waits for the substrate's `ReplaceResult`; returns `\"Ok\"` on success. Rejects with \"already in flight\" if a prior replace is pending on this session. Tool timeout default 5000ms, clamped to 30000 — set it above `drain_timeout_ms`."
     )]
     pub(super) async fn replace_component(
         &self,
@@ -522,7 +521,6 @@ impl Hub {
         let params = serde_json::json!({
             "mailbox_id": args.mailbox_id,
             "wasm": wasm,
-            "kinds": args.kinds,
             "drain_timeout_ms": args.drain_timeout_ms,
         });
 

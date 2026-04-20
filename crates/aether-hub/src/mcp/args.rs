@@ -231,13 +231,12 @@ pub struct LoadComponentArgs {
     /// substrate — agents don't inline wasm bytes through the tool
     /// call. Must exist as given; no `~` expansion, no relative-path
     /// resolution. Matches `spawn_substrate`'s path rule.
+    ///
+    /// ADR-0028: the component's kind vocabulary is embedded in the
+    /// wasm's `aether.kinds` custom section at compile time. The
+    /// loader doesn't declare kinds — the substrate reads them
+    /// straight from the binary.
     pub binary_path: String,
-    /// Runtime-registered kinds the component intends to use. Same
-    /// shape as `aether.control.load_component`'s `kinds` field (see
-    /// `describe_kinds` for the schema). Passed through unchanged to
-    /// the substrate.
-    #[serde(default)]
-    pub kinds: serde_json::Value,
     /// Optional human-readable name. The substrate defaults one if
     /// absent and echoes it back in the result.
     #[serde(default)]
@@ -276,12 +275,10 @@ pub struct ReplaceComponentArgs {
     /// `load_component` or `list_engines`-derived lookup).
     pub mailbox_id: u32,
     /// Absolute path to the replacement WASM binary on the hub's
-    /// filesystem. Same filesystem rule as `load_component`.
+    /// filesystem. Same filesystem rule as `load_component`. Kind
+    /// vocabulary is embedded in the wasm's `aether.kinds` custom
+    /// section (ADR-0028).
     pub binary_path: String,
-    /// Runtime-registered kinds the replacement component intends to
-    /// use. Same shape as `load_component.kinds`.
-    #[serde(default)]
-    pub kinds: serde_json::Value,
     /// Drain timeout in milliseconds for in-flight mail on the old
     /// instance (ADR-0022). `None` uses the substrate default (5000).
     /// If the drain exceeds this, the replace fails and the old

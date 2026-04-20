@@ -148,14 +148,15 @@ mod control_plane {
 
     /// `aether.control.load_component` — request the substrate load a
     /// WASM component into a freshly allocated mailbox. Carries the
-    /// raw WASM bytes, any new kinds the component intends to use,
-    /// and an optional human-readable name. The substrate replies
-    /// with `LoadResult`.
+    /// raw WASM bytes and an optional human-readable name. The
+    /// component's kind vocabulary ships embedded in the wasm's
+    /// `aether.kinds` custom section (ADR-0028) — the substrate
+    /// reads it directly and the loader doesn't need to declare
+    /// anything. Substrate replies with `LoadResult`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.load_component")]
     pub struct LoadComponent {
         pub wasm: Vec<u8>,
-        pub kinds: Vec<LoadKind>,
         pub name: Option<String>,
     }
 
@@ -192,14 +193,14 @@ mod control_plane {
     /// substrate freezes the target, drains in-flight mail through
     /// the old instance, then swaps. If the drain exceeds
     /// `drain_timeout_ms` (default 5000) the replace fails with
-    /// `ReplaceResult::Err` and the old instance stays bound. Reply:
-    /// `ReplaceResult`.
+    /// `ReplaceResult::Err` and the old instance stays bound. Kind
+    /// vocabulary rides in the wasm's `aether.kinds` custom section
+    /// (ADR-0028). Reply: `ReplaceResult`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.replace_component")]
     pub struct ReplaceComponent {
         pub mailbox_id: u32,
         pub wasm: Vec<u8>,
-        pub kinds: Vec<LoadKind>,
         pub drain_timeout_ms: Option<u32>,
     }
 
@@ -210,58 +211,6 @@ mod control_plane {
     pub enum ReplaceResult {
         Ok,
         Err { error: String },
-    }
-
-    /// One kind a `LoadComponent` (or `ReplaceComponent`) wants the
-    /// substrate to register before the wasm boots.
-    ///
-    /// Deliberately *flatter* than `aether_hub_protocol::SchemaType`:
-    /// the full vocabulary is recursive (`Box<SchemaType>` arms) and
-    /// `#[derive(Schema)]` has no way to break that recursion at the
-    /// derive site. The flat shape covers what runtime-loaded
-    /// components actually reach for today (signal kinds and
-    /// cast-shaped scalar/array structs); richer kinds — strings,
-    /// nested structs, enums on a runtime-registered kind — would
-    /// need either schema-evolution support in the hub-protocol
-    /// types or a separate registration path. Both are parked.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    pub struct LoadKind {
-        pub name: String,
-        pub encoding: LoadKindEncoding,
-    }
-
-    /// Encoding shape for a runtime-registered kind. `Signal` → empty
-    /// payload (becomes `SchemaType::Unit`); `Pod` → cast-shaped
-    /// struct (becomes `SchemaType::Struct { repr_c: true, .. }`).
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    pub enum LoadKindEncoding {
-        Signal,
-        Pod { fields: Vec<LoadKindField> },
-    }
-
-    /// One field on a runtime-registered Pod kind.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    pub struct LoadKindField {
-        pub name: String,
-        pub primitive: LoadKindPrimitive,
-        pub array_len: Option<u32>,
-    }
-
-    /// Scalar primitives expressible by `LoadKindField`. Mirrors
-    /// `aether_hub_protocol::Primitive`; the substrate's load handler
-    /// converts on the way into the registry.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
-    pub enum LoadKindPrimitive {
-        U8,
-        U16,
-        U32,
-        U64,
-        I8,
-        I16,
-        I32,
-        I64,
-        F32,
-        F64,
     }
 
     // ADR-0021 publish/subscribe routing for substrate input streams.
