@@ -1,6 +1,6 @@
 # ADR-0034: Hub-as-substrate
 
-- **Status:** Proposed
+- **Status:** Accepted (Phase 1 shipped; Phase 2 in progress)
 - **Date:** 2026-04-20
 
 ## Context
