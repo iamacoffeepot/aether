@@ -1,7 +1,8 @@
 # ADR-0035: Substrate-chassis split
 
-- **Status:** Proposed
+- **Status:** Accepted (phases 1–4 shipped)
 - **Date:** 2026-04-20
+- **Accepted:** 2026-04-20
 
 ## Context
 
