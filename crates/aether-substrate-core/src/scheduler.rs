@@ -1,31 +1,27 @@
-// Actor-per-component dispatch (ADR-0038 Phase 1).
+// Actor-per-component dispatch (ADR-0038 Phases 1–2).
 //
-// Each component owns a dedicated dispatcher thread that loops on an
-// mpsc inbox. The shared `MailQueue` is still pushed to by the existing
-// senders (host-fn `send_mail_p32`, platform input fan-out, hub-
-// delivered mail); a single router thread pops from it and forwards
-// each Mail to either the inline sink handler or the recipient
-// component's inbox. Per-mailbox FIFO is the channel's natural shape,
-// so the strand claim that the pre-ADR-0038 worker pool needed is gone
-// — along with `pending` / `frozen` / `strand_scheduled` / `parked`.
+// Phase 1 gave each component a dedicated dispatcher thread that
+// loops on an mpsc inbox. Phase 2 retires the router thread that
+// Phase 1 left in place: `MailQueue::push` now resolves the
+// recipient inline on the caller's thread and forwards directly into
+// the per-component inbox (see `queue.rs`). The per-mailbox dispatcher
+// is unchanged.
 //
-// wait_idle semantics are preserved: the shared queue's `outstanding`
-// counter increments on `push` and decrements inside the dispatcher
-// thread after `deliver` returns (for Component recipients) or inside
-// the router after a sink call (for Sink recipients). A drop-warn'd
-// mail decrements immediately.
+// `wait_idle` semantics are preserved: `MailQueue`'s `outstanding`
+// counter increments on `push` (before routing) and decrements inside
+// the dispatcher thread after `deliver` returns, or inline for sinks /
+// warn-drops. A `wait_idle` that returns still means every pushed
+// mail has reached its terminal state (delivered, dropped, or
+// discarded).
 //
-// Shutdown: `Scheduler::Drop` initiates shutdown on the queue, waking
-// the router, and joins it. Per-component dispatcher threads exit when
-// their `ComponentEntry` Arc drops (the `Sender` drops with it, the
-// inbox closes, `recv()` returns `None`, the thread returns the
-// `Component`). The owning layer (chassis / test) is responsible for
-// dropping the `ComponentTable` if it wants dispatchers to exit.
+// Shutdown: per-component dispatcher threads exit when their
+// `ComponentEntry` Arc drops (the `Sender` drops with it, the inbox
+// closes, `recv()` returns `None`). The owning layer (chassis / test)
+// disposes of the `ComponentTable`; the scheduler itself no longer
+// owns a router thread to join.
 //
-// Phase 2 will retire the shared queue entirely: senders push directly
-// to per-component inboxes, the router thread goes away, and
-// `MailQueue::outstanding` / `wait_idle` are replaced by per-mailbox
-// drain primitives.
+// Phase 3 will retire the global `outstanding` barrier in favour of
+// per-mailbox drains.
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -35,7 +31,7 @@ use std::thread::{self, JoinHandle};
 use crate::component::{Component, DISPATCH_UNKNOWN_KIND};
 use crate::mail::{Mail, MailboxId};
 use crate::queue::MailQueue;
-use crate::registry::{MailboxEntry, Registry};
+use crate::registry::Registry;
 
 /// Per-mailbox scheduler state. The `Component` (and its wasmtime
 /// `Store`) lives on the dispatcher thread's stack; the host side only
@@ -183,60 +179,42 @@ fn dispatcher_loop(
 }
 
 /// Shared, runtime-mutable table of bound components. Cloned into the
-/// scheduler's router and into the ADR-0010 load handler so both read
-/// and write through the same `RwLock`. Values are `Arc`-shared so
-/// short-lived clones (e.g. in the router's forward path) can outlive
-/// a concurrent `remove` without racing on `ComponentEntry`'s `Drop`.
+/// `MailQueue` (for inline routing on push) and into the ADR-0010
+/// load handler so both read and write through the same `RwLock`.
+/// Values are `Arc`-shared so short-lived clones (e.g. the router's
+/// forward path) can outlive a concurrent `remove` without racing on
+/// `ComponentEntry`'s `Drop`.
 pub type ComponentTable = Arc<RwLock<HashMap<MailboxId, Arc<ComponentEntry>>>>;
 
-/// Owned by the scheduler, shared with the router. Separate from the
-/// public `Scheduler` handle so the router can keep running while the
-/// owner thread is asleep on a `wait_idle`.
-struct WorkerContext {
+pub struct Scheduler {
     queue: Arc<MailQueue>,
     registry: Arc<Registry>,
     components: ComponentTable,
 }
 
-pub struct Scheduler {
-    ctx: Arc<WorkerContext>,
-    router: Option<JoinHandle<()>>,
-}
-
 impl Scheduler {
-    /// Build a scheduler over an empty component table. Spawns a
-    /// single router thread that pops from `queue` and forwards each
-    /// mail to the appropriate per-component inbox or the inline sink
-    /// handler.
-    ///
-    /// The `_k_workers` parameter is retained for boot-config
+    /// Build a scheduler over an empty component table and wire the
+    /// queue's inline router to the registry + components. The
+    /// `_k_workers` parameter is retained for boot-config
     /// compatibility (ADR-0004 sized the worker pool) but is ignored
     /// under ADR-0038: dispatch parallelism is one thread per
-    /// component, not a shared pool.
+    /// component, and Phase 2 retired the shared router thread.
     pub fn new(registry: Arc<Registry>, queue: Arc<MailQueue>, _k_workers: usize) -> Self {
         let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
-        let ctx = Arc::new(WorkerContext {
+        queue.wire(Arc::clone(&registry), Arc::clone(&components));
+        Self {
             queue,
             registry,
             components,
-        });
-        let ctx_r = Arc::clone(&ctx);
-        let router = thread::Builder::new()
-            .name("aether-mail-router".into())
-            .spawn(move || router_loop(ctx_r))
-            .expect("spawn router");
-        Self {
-            ctx,
-            router: Some(router),
         }
     }
 
     pub fn queue(&self) -> &Arc<MailQueue> {
-        &self.ctx.queue
+        &self.queue
     }
 
     pub fn registry(&self) -> &Arc<Registry> {
-        &self.ctx.registry
+        &self.registry
     }
 
     /// Handle to the runtime-mutable component table. ADR-0010's load
@@ -244,7 +222,7 @@ impl Scheduler {
     /// without needing an `Arc<Scheduler>` — which would create a
     /// cycle through any registry sink closures that referenced back.
     pub fn components(&self) -> &ComponentTable {
-        &self.ctx.components
+        &self.components
     }
 
     /// Spawn a dispatcher thread for `component` and register the
@@ -254,114 +232,14 @@ impl Scheduler {
     pub fn add_component(&self, id: MailboxId, component: Component) {
         let entry = ComponentEntry::spawn(
             component,
-            Arc::clone(&self.ctx.queue),
-            Arc::clone(&self.ctx.registry),
+            Arc::clone(&self.queue),
+            Arc::clone(&self.registry),
         );
-        self.ctx
-            .components
-            .write()
-            .unwrap()
-            .insert(id, Arc::new(entry));
+        self.components.write().unwrap().insert(id, Arc::new(entry));
     }
 }
-
-impl Drop for Scheduler {
-    fn drop(&mut self) {
-        self.ctx.queue.initiate_shutdown();
-        if let Some(h) = self.router.take() {
-            let _ = h.join();
-        }
-        // Per-component dispatcher threads exit when their
-        // `ComponentEntry` Arc drops (the `Sender` drops with it, the
-        // inbox closes, `recv()` returns `None`). Explicit join
-        // happens in `handle_drop` / `handle_replace`; on scheduler
-        // drop we let the owning layer (chassis / test) dispose of
-        // the `ComponentTable`.
-    }
-}
-
-fn router_loop(ctx: Arc<WorkerContext>) {
-    while let Some(mail) = ctx.queue.pop_blocking() {
-        dispatch_mail(&ctx, mail);
-    }
-}
-
-/// Route one mail. Sinks run inline on the router thread (consistent
-/// with the pre-ADR-0038 behaviour for mail that arrived at a sink via
-/// the queue, e.g. FrameStats). Component-bound mail is forwarded to
-/// the recipient's inbox; the per-component dispatcher calls
-/// `mark_completed` after `deliver` returns. Dropped / unknown
-/// recipients are discarded with a warn-log and immediate
-/// `mark_completed`.
-fn dispatch_mail(ctx: &Arc<WorkerContext>, mail: Mail) {
-    let recipient = mail.recipient;
-    match ctx.registry.entry(recipient) {
-        Some(MailboxEntry::Sink(handler)) => {
-            let kind_name = ctx.registry.kind_name(mail.kind).unwrap_or_default();
-            // Mail reaching a sink through the scheduler queue came
-            // from substrate core (e.g. the frame loop's FrameStats
-            // push) and has no sending mailbox; per ADR-0011 origin is
-            // `None`. Components reach sinks inline via
-            // `SubstrateCtx::send`, not this path.
-            handler(
-                mail.kind,
-                &kind_name,
-                None,
-                mail.sender,
-                &mail.payload,
-                mail.count,
-            );
-            ctx.queue.mark_completed();
-        }
-        Some(MailboxEntry::Component) => {
-            let entry = ctx
-                .components
-                .read()
-                .unwrap()
-                .get(&recipient)
-                .map(Arc::clone);
-            match entry {
-                Some(entry) => {
-                    if !entry.send(mail) {
-                        // Inbox closed — the component was dropped
-                        // between our registry check and our send.
-                        // Drop-warn and complete; matches the
-                        // Dropped-mailbox branch below in observable
-                        // behaviour.
-                        tracing::warn!(
-                            target: "aether_substrate::scheduler",
-                            mailbox = ?recipient,
-                            "component inbox closed; mail discarded",
-                        );
-                        ctx.queue.mark_completed();
-                    }
-                    // Happy path: dispatcher owns mark_completed.
-                }
-                None => {
-                    tracing::warn!(
-                        target: "aether_substrate::scheduler",
-                        mailbox = ?recipient,
-                        "mail to registered-component mailbox but no component bound — dropped",
-                    );
-                    ctx.queue.mark_completed();
-                }
-            }
-        }
-        Some(MailboxEntry::Dropped) => {
-            tracing::warn!(
-                target: "aether_substrate::scheduler",
-                mailbox = ?recipient,
-                "mail to dropped mailbox — discarded",
-            );
-            ctx.queue.mark_completed();
-        }
-        None => {
-            tracing::warn!(
-                target: "aether_substrate::scheduler",
-                mailbox = ?recipient,
-                "mail to unknown mailbox — dropped",
-            );
-            ctx.queue.mark_completed();
-        }
-    }
-}
+// Per-component dispatcher threads exit when their `ComponentEntry`
+// Arc drops (the `Sender` drops with it, the inbox closes, `recv()`
+// returns `None`). The scheduler no longer owns a router thread, so
+// its `Drop` impl is redundant — the owning layer (chassis / test)
+// disposes of the `ComponentTable` when it wants dispatchers to exit.
