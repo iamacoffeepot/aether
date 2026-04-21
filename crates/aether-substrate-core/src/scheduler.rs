@@ -175,35 +175,6 @@ impl Scheduler {
             .unwrap()
             .insert(id, Arc::new(ComponentEntry::new(component)));
     }
-
-    /// Remove and return the component bound to `id`, if any. The
-    /// caller is responsible for ensuring no further mail is dispatched
-    /// to this mailbox; workers that look up `id` after removal log a
-    /// "no component bound" drop, consistent with the pre-ADR-0010
-    /// unknown-mailbox path.
-    pub fn remove_component(&self, id: MailboxId) -> Option<Component> {
-        self.ctx
-            .components
-            .write()
-            .unwrap()
-            .remove(&id)
-            .map(extract_component)
-    }
-}
-
-/// Pull the wasmtime instance out of a removed entry. Panics if any
-/// other `Arc` clone is still live (e.g. a worker holding a reference
-/// across a deliver that's about to return). The control plane only
-/// removes entries after either (a) `drop_component` marked the
-/// mailbox `Dropped` so workers refuse new dispatches, or (b) the
-/// freeze-drain path of `handle_replace` confirmed `pending == 0`,
-/// so no worker should be holding a clone in either case.
-pub(crate) fn extract_component(entry: Arc<ComponentEntry>) -> Component {
-    Arc::into_inner(entry)
-        .expect("component entry still referenced by a worker")
-        .component
-        .into_inner()
-        .expect("component mutex poisoned")
 }
 
 impl Drop for Scheduler {
