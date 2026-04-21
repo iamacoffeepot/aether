@@ -125,7 +125,7 @@ pub async fn run_mcp_server(addr: SocketAddr, state: Arc<HubState>) -> std::io::
     let app = axum::Router::new().nest_service("/mcp", service);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
-    eprintln!("aether-hub: mcp listener bound on http://{bound}/mcp");
+    eprintln!("aether-substrate-hub: mcp listener bound on http://{bound}/mcp");
     axum::serve(listener, app).await
 }
 

@@ -81,25 +81,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-hub"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-hub-protocol",
- "axum",
- "base64 0.22.1",
- "bytemuck",
- "libc",
- "postcard",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
 name = "aether-hub-protocol"
 version = "0.2.0-alpha"
 dependencies = [
@@ -194,9 +175,20 @@ dependencies = [
 name = "aether-substrate-hub"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-hub",
+ "aether-hub-protocol",
  "aether-substrate-core",
+ "axum",
+ "base64 0.22.1",
+ "bytemuck",
+ "libc",
+ "postcard",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
  "tokio",
+ "tokio-util",
+ "uuid",
  "wasmtime",
 ]
 
