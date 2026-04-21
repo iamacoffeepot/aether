@@ -368,21 +368,40 @@ impl ControlPlane {
         // ADR-0021 §4: clear this mailbox from every input subscriber
         // set. Done after the registry marks the mailbox `Dropped` so
         // the invariant "every subscriber id references a live mailbox"
-        // holds across the short window before `remove_component`
-        // finishes — any mail the platform thread publishes in that
-        // window is already discarded by the scheduler's `Dropped`
-        // arm, so fan-out to a soon-to-be-empty subscriber set is
-        // harmless.
+        // holds across the short window before the entry is removed
+        // from the scheduler table — any mail the platform thread
+        // publishes in that window is already discarded by the
+        // scheduler's `Dropped` arm, so fan-out to a soon-to-be-empty
+        // subscriber set is harmless.
         input::remove_from_all(&self.input_subscribers, id);
-        // Pull the Component out of the scheduler table, fire the
-        // ADR-0015 `on_drop` hook on it, then let it drop at end of
-        // scope so wasmtime reclaims linear memory. The mailbox was
-        // already marked `Dropped` above, so any mail racing in
-        // parallel will be discarded regardless of when the hook
-        // runs.
-        if let Some(mut component) = self.remove_component(id) {
-            component.on_drop();
+        let Some(entry) = self.components.write().unwrap().remove(&id) else {
+            return DropResult::Ok;
+        };
+        // Bound-wait for any in-flight `deliver` to return. The
+        // registry is already `Dropped`, so workers that had not yet
+        // claimed this mailbox will take the Dropped branch (discard)
+        // rather than entering the Component branch; drain_pending
+        // only has to wait for workers already past the frozen check.
+        // Without the bound, a stuck wasm deliver would hang the
+        // control-plane thread indefinitely.
+        let timeout = Duration::from_millis(DEFAULT_DRAIN_TIMEOUT_MS as u64);
+        if !drain_pending(&entry, timeout) {
+            return DropResult::Err {
+                error: format!(
+                    "drain timeout after {}ms; component may be stuck in deliver",
+                    timeout.as_millis()
+                ),
+            };
         }
+        // Fire `on_drop` under the Component mutex. The entry `Arc`
+        // may still be clone-held by a worker's post-dispatch tail —
+        // harmless because the worker never touches `component` after
+        // `dispatch_mail` returns (any subsequent mail takes the
+        // Dropped branch). `ComponentEntry` deallocates when the last
+        // Arc clone drops: ours at end of scope, the worker's when it
+        // finishes its drain loop. Avoids the `Arc::into_inner` trap
+        // where the prior code panicked on strand-tail ownership.
+        entry.component.lock().unwrap().on_drop();
         DropResult::Ok
     }
 
@@ -611,11 +630,6 @@ impl ControlPlane {
             id,
             Arc::new(crate::scheduler::ComponentEntry::new(component)),
         );
-    }
-
-    fn remove_component(&self, id: MailboxId) -> Option<Component> {
-        let entry = self.components.write().unwrap().remove(&id)?;
-        Some(crate::scheduler::extract_component(entry))
     }
 
     /// Ship the complete current kind vocabulary to the hub so its
@@ -1040,6 +1054,48 @@ mod tests {
                 .contains_key(&MailboxId(mailbox_id)),
             "component must be removed from scheduler table",
         );
+    }
+
+    #[test]
+    fn drop_component_succeeds_with_outstanding_entry_arc_clone() {
+        // Regression for the scheduler strand-tail race: a worker's
+        // post-dispatch tail can still hold a clone of the
+        // `Arc<ComponentEntry>` at the instant `handle_drop` runs,
+        // because the worker's `strand_scheduled.store(false)` + Arc
+        // drop happens after `mark_completed` already woke any
+        // `wait_idle` the drop caller was parked on. Before the fix
+        // `handle_drop` panicked in `extract_component`'s
+        // `Arc::into_inner` when `strong_count > 1`.
+        let plane = make_plane();
+        let wasm = wat::parse_str(WAT).unwrap();
+        let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponent {
+                wasm,
+                name: Some("pinned".into()),
+            })
+            .unwrap(),
+        ) else {
+            panic!("load should succeed");
+        };
+
+        // Pin an extra Arc clone — mimics the worker's strand tail.
+        let pinned = plane
+            .components
+            .read()
+            .unwrap()
+            .get(&MailboxId(mailbox_id))
+            .cloned()
+            .expect("entry must be bound after load");
+
+        let result =
+            plane.handle_drop(&postcard::to_allocvec(&DropComponent { mailbox_id }).unwrap());
+        assert!(
+            matches!(result, DropResult::Ok),
+            "drop must succeed even with outstanding Arc clone",
+        );
+
+        // Cleanup: drop the extra ref so `ComponentEntry` deallocates.
+        drop(pinned);
     }
 
     #[test]
