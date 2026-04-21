@@ -1239,20 +1239,121 @@ mod tests {
         );
     }
 
-    // `replace_migrates_state_from_old_to_new` and its sibling
-    // rehydrate tests (`replace_without_rehydrate_hook_discards_bundle`,
-    // `replace_with_no_save_does_not_invoke_rehydrate`) peeked at the
-    // new component's linear memory via `cell.component.lock()` to
-    // verify `on_rehydrate` wrote the expected bytes. Under ADR-0038
-    // the `Component` lives on the dispatcher thread's stack and the
-    // host side never holds it, so those assertions can't be written
-    // as they were.
-    //
-    // Follow-up work: add a "snapshot to sink" kind that the test WATs
-    // handle by emitting the contents of specific memory offsets to a
-    // caller-provided sink id. That lets the test send a snapshot mail
-    // after replace, observe via the sink, and assert on rehydrated
-    // state. Tracked as a Phase 2 polish item.
+    /// ADR-0016 rehydrate path + "snapshot to sink" scaffolding: the
+    /// replacement component both restores state via `on_rehydrate_p32`
+    /// and, on any incoming mail, forwards `memory[396..404]` (the
+    /// offsets `WAT_REHYDRATES` writes to) to the sink id encoded in
+    /// the first 8 bytes of the payload. Lets a test assert rehydrate
+    /// correctness without peeking into `ComponentEntry` internals —
+    /// dispatch the snapshot mail, drain, observe via the sink.
+    #[allow(dead_code)]
+    const WAT_REHYDRATES_AND_SNAPSHOT: &str = r#"
+        (module
+            (import "aether" "send_mail_p32"
+                (func $send_mail (param i64 i64 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "receive_p32")
+                (param $kind i64) (param $ptr i32) (param $count i32) (param $sender i32)
+                (result i32)
+                ;; Payload: [sink_id:u64]. Forward memory[396..404] to it.
+                (drop (call $send_mail
+                    (i64.load (local.get $ptr))
+                    (local.get $kind)
+                    (i32.const 396)
+                    (i32.const 8)
+                    (i32.const 1)))
+                i32.const 0)
+            (func (export "on_rehydrate_p32") (param i32 i32 i32) (result i32)
+                i32.const 396
+                local.get 0
+                i32.store
+                i32.const 400
+                local.get 1
+                local.get 2
+                memory.copy
+                i32.const 0))
+    "#;
+
+    /// ADR-0016 migration end-to-end: load saves state on replace, new
+    /// instance rehydrates, then a follow-up snapshot mail proves the
+    /// rehydrate wrote `version=7` at offset 396 and `0xDEADBEEF` at
+    /// offset 400. Replaces the retired
+    /// `replace_migrates_state_from_old_to_new` test that peeked at
+    /// component memory directly — same intent, observation re-homed
+    /// onto the public send-and-observe surface per ADR-0038 Phase 1
+    /// follow-up.
+    #[test]
+    fn replace_migrates_state_observable_via_snapshot_sink() {
+        use aether_hub_protocol::{KindDescriptor, SchemaType};
+        use std::sync::Mutex as StdMutex;
+
+        let plane = make_plane();
+        // Scheduler::new is normally what wires the queue; the test
+        // plane is built without one, so wire it directly so
+        // `queue.push` can route the snapshot mail into the dispatcher.
+        plane
+            .queue
+            .wire(Arc::clone(&plane.registry), Arc::clone(&plane.components));
+
+        let snapshot_kind_id = plane
+            .registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: "test.snapshot".into(),
+                schema: SchemaType::Bytes,
+            })
+            .expect("register snapshot kind");
+
+        let captured: Arc<StdMutex<Option<Vec<u8>>>> = Arc::new(StdMutex::new(None));
+        let captured_for_sink = Arc::clone(&captured);
+        let sink_mbox = plane.registry.register_sink(
+            "snapshot-sink",
+            Arc::new(move |_kind_id, _kind, _origin, _sender, bytes, _count| {
+                *captured_for_sink.lock().unwrap() = Some(bytes.to_vec());
+            }),
+        );
+
+        let LoadResult::Ok { mailbox_id, .. } = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponent {
+                wasm: wat::parse_str(WAT_SAVES_STATE).unwrap(),
+                name: Some("stateful".into()),
+            })
+            .unwrap(),
+        ) else {
+            panic!("load should succeed");
+        };
+
+        let result = plane.handle_replace(
+            &postcard::to_allocvec(&ReplaceComponent {
+                mailbox_id,
+                wasm: wat::parse_str(WAT_REHYDRATES_AND_SNAPSHOT).unwrap(),
+                drain_timeout_ms: None,
+            })
+            .unwrap(),
+        );
+        assert!(matches!(result, ReplaceResult::Ok { .. }), "got {result:?}");
+
+        // Ask the rehydrated component to emit its rehydrated-state
+        // window to our sink. Payload: sink mailbox id as u64 LE.
+        let payload = sink_mbox.0.to_le_bytes().to_vec();
+        plane.queue.push(Mail::new(
+            MailboxId(mailbox_id),
+            snapshot_kind_id,
+            payload,
+            1,
+        ));
+        plane.queue.drain_all();
+
+        let bytes = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("sink must receive snapshot");
+        assert_eq!(
+            bytes,
+            vec![7, 0, 0, 0, 0xDE, 0xAD, 0xBE, 0xEF],
+            "rehydrated memory must match saved state",
+        );
+    }
 
     #[test]
     fn replace_aborts_when_save_state_over_cap() {
