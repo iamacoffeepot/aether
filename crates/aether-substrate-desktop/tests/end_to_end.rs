@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use aether_substrate_desktop::{
-    Component, HubOutbound, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
+    Component, HubOutbound, Mailer, Registry, Scheduler, SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
 };
 use wasmtime::{Engine, Linker, Module};
@@ -65,7 +65,7 @@ fn tick_roundtrip_component_to_sink() {
     let module = Module::new(&engine, forwards_to_sink_wat(sink_mbox)).expect("compile wat");
     assert_eq!(component_mbox, MailboxId::from_name("hello"));
     assert_eq!(sink_mbox, MailboxId::from_name("heartbeat"));
-    let queue = Arc::new(MailQueue::new());
+    let queue = Arc::new(Mailer::new());
 
     let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
     host_fns::register(&mut linker).expect("register host fns");
@@ -124,7 +124,7 @@ fn batched_mail_preserves_fifo_per_mailbox() {
 
     let module = Module::new(&engine, forwards_to_sink_wat(sink_mbox)).expect("compile wat");
 
-    let queue = Arc::new(MailQueue::new());
+    let queue = Arc::new(Mailer::new());
     let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
     host_fns::register(&mut linker).expect("register host fns");
 

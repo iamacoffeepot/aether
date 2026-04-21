@@ -37,7 +37,7 @@ pub const SENDER_NONE: u32 = u32::MAX;
 pub enum SenderEntry {
     /// Reply routes over `HubOutbound` as a session-addressed frame.
     Session(SessionToken),
-    /// Reply routes through the local `MailQueue` as ordinary
+    /// Reply routes through the local `Mailer` as ordinary
     /// component-to-component mail.
     Component(MailboxId),
 }

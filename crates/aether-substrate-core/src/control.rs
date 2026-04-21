@@ -40,7 +40,7 @@ use crate::hub_client::HubOutbound;
 use crate::input::{self, InputSubscribers};
 use crate::kind_manifest;
 use crate::mail::{Mail, MailboxId};
-use crate::queue::MailQueue;
+use crate::mailer::Mailer;
 use crate::registry::{Registry, SinkHandler};
 use crate::scheduler::{ComponentEntry, ComponentTable, close_and_join};
 
@@ -143,7 +143,7 @@ pub struct ControlPlane {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<SubstrateCtx>>,
     pub registry: Arc<Registry>,
-    pub queue: Arc<MailQueue>,
+    pub queue: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
     pub components: ComponentTable,
     /// ADR-0021 per-stream subscriber sets, shared with the platform
@@ -705,7 +705,7 @@ mod tests {
         let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
         crate::host_fns::register(&mut linker).expect("register host fns");
         let registry = Arc::new(Registry::new());
-        let queue = Arc::new(MailQueue::new());
+        let queue = Arc::new(Mailer::new());
         let outbound = HubOutbound::disconnected();
         let components: ComponentTable = Arc::default();
 

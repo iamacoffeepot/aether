@@ -22,7 +22,7 @@ use aether_kinds::{
 };
 use aether_mail::Kind;
 use aether_substrate_core::{
-    ChassisControlHandler, HubOutbound, MailQueue, Registry,
+    ChassisControlHandler, HubOutbound, Mailer, Registry,
     control::{decode_payload, resolve_bundle},
 };
 use winit::event_loop::EventLoopProxy;
@@ -63,7 +63,7 @@ pub fn chassis_control_handler(
     proxy: EventLoopProxy<UserEvent>,
     capture_queue: CaptureQueue,
     registry: Arc<Registry>,
-    queue: Arc<MailQueue>,
+    queue: Arc<Mailer>,
     outbound: Arc<HubOutbound>,
 ) -> ChassisControlHandler {
     Arc::new(
@@ -106,7 +106,7 @@ fn handle_capture_frame(
     proxy: &EventLoopProxy<UserEvent>,
     capture_queue: &CaptureQueue,
     registry: &Registry,
-    queue: &MailQueue,
+    queue: &Mailer,
     outbound: &HubOutbound,
     sender: SessionToken,
     bytes: &[u8],

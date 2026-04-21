@@ -2,7 +2,7 @@
 // Hello/Welcome handshake, then runs three background threads:
 //
 //   - a reader that blocks on `HubToEngine` frames and funnels inbound
-//     `Mail` into the scheduler's `MailQueue` after resolving the
+//     `Mail` into the scheduler's `Mailer` after resolving the
 //     recipient and kind against the local `Registry`,
 //   - a writer that drains a `std::sync::mpsc::Receiver<EngineToHub>`
 //     and serialises its frames onto the TCP stream,
@@ -32,7 +32,7 @@ use aether_hub_protocol::{
 };
 
 use crate::mail::Mail;
-use crate::queue::MailQueue;
+use crate::mailer::Mailer;
 use crate::registry::Registry;
 
 /// Cadence at which this client emits `Heartbeat` to the hub. Must be
@@ -149,7 +149,7 @@ impl HubClient {
         version: impl Into<String>,
         kinds: Vec<KindDescriptor>,
         registry: Arc<Registry>,
-        queue: Arc<MailQueue>,
+        queue: Arc<Mailer>,
         outbound: Arc<HubOutbound>,
     ) -> io::Result<Self> {
         let mut stream = TcpStream::connect(addr)?;
@@ -192,7 +192,7 @@ impl HubClient {
     }
 }
 
-fn run_reader(mut stream: TcpStream, registry: Arc<Registry>, queue: Arc<MailQueue>) {
+fn run_reader(mut stream: TcpStream, registry: Arc<Registry>, queue: Arc<Mailer>) {
     loop {
         match read_frame::<_, HubToEngine>(&mut stream) {
             Ok(HubToEngine::Mail(frame)) => dispatch_mail(frame, &registry, &queue),
@@ -230,7 +230,7 @@ fn run_heartbeat(tx: Sender<EngineToHub>) {
     }
 }
 
-fn dispatch_mail(frame: MailFrame, registry: &Registry, queue: &MailQueue) {
+fn dispatch_mail(frame: MailFrame, registry: &Registry, queue: &Mailer) {
     let Some(recipient) = registry.lookup(&frame.recipient_name) else {
         tracing::warn!(
             target: "aether_substrate::hub_client",

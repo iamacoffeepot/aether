@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use aether_kinds::{FrameStats, InputStream, Tick};
 use aether_mail::{Kind, encode, encode_empty};
 use aether_substrate_core::{
-    Chassis, ChassisCapabilities, InputSubscribers, MailQueue, Scheduler, SubstrateBoot,
+    Chassis, ChassisCapabilities, InputSubscribers, Mailer, Scheduler, SubstrateBoot,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -31,7 +31,7 @@ const LOG_EVERY_FRAMES: u64 = 120;
 /// substrates) or SIGINT (manual `cargo run`); there's no clean
 /// return path because there's no event source that can close.
 struct HeadlessChassis {
-    queue: Arc<MailQueue>,
+    queue: Arc<Mailer>,
     input_subscribers: InputSubscribers,
     broadcast_mbox: MailboxId,
     kind_tick: u64,

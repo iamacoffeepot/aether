@@ -19,7 +19,7 @@ use crate::mail::Mail;
 use crate::registry::{MailboxEntry, Registry};
 use crate::scheduler::ComponentTable;
 
-pub struct MailQueue {
+pub struct Mailer {
     /// Registry handle for resolving recipients on `push`. Wired once
     /// by `Scheduler::new`; expected to be set by the time any mail
     /// can land.
@@ -29,7 +29,7 @@ pub struct MailQueue {
     components: OnceLock<ComponentTable>,
 }
 
-impl MailQueue {
+impl Mailer {
     pub fn new() -> Self {
         Self {
             registry: OnceLock::new(),
@@ -43,10 +43,10 @@ impl MailQueue {
     pub fn wire(&self, registry: Arc<Registry>, components: ComponentTable) {
         self.registry
             .set(registry)
-            .unwrap_or_else(|_| panic!("MailQueue::wire called twice"));
+            .unwrap_or_else(|_| panic!("Mailer::wire called twice"));
         self.components
             .set(components)
-            .unwrap_or_else(|_| panic!("MailQueue::wire called twice"));
+            .unwrap_or_else(|_| panic!("Mailer::wire called twice"));
     }
 
     /// Hand `mail` to the substrate for dispatch. Sinks run on the
@@ -56,8 +56,8 @@ impl MailQueue {
     pub fn push(&self, mail: Mail) {
         route_mail(
             mail,
-            self.registry.get().expect("MailQueue not wired"),
-            self.components.get().expect("MailQueue not wired"),
+            self.registry.get().expect("Mailer not wired"),
+            self.components.get().expect("Mailer not wired"),
         );
     }
 
@@ -68,12 +68,12 @@ impl MailQueue {
     /// per-mailbox drain counter, re-checking in case one entry's
     /// delivery pushed fresh mail to another).
     pub fn drain_all(&self) {
-        let components = self.components.get().expect("MailQueue not wired");
+        let components = self.components.get().expect("Mailer not wired");
         crate::scheduler::drain_all(components);
     }
 }
 
-impl Default for MailQueue {
+impl Default for Mailer {
     fn default() -> Self {
         Self::new()
     }

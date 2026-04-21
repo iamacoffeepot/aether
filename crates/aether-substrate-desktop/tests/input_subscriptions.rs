@@ -17,7 +17,7 @@ use aether_kinds::{
 };
 use aether_mail::Kind;
 use aether_substrate_desktop::{
-    ControlPlane, HubOutbound, InputSubscribers, MailQueue, Registry, Scheduler, SubstrateCtx,
+    ControlPlane, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
     host_fns,
     mail::{Mail, MailboxId},
     new_subscribers, subscribers_for,
@@ -49,7 +49,7 @@ fn tally_forwarding_wat(tally_id: u64) -> String {
 
 struct Harness {
     plane: ControlPlane,
-    queue: Arc<MailQueue>,
+    queue: Arc<Mailer>,
     input_subscribers: InputSubscribers,
     counter: Arc<AtomicU32>,
     kind_tick: u64,
@@ -81,7 +81,7 @@ fn make_harness() -> Harness {
     );
     let wat = tally_forwarding_wat(sink_mbox.0);
 
-    let queue = Arc::new(MailQueue::new());
+    let queue = Arc::new(Mailer::new());
     let scheduler = Scheduler::new(Arc::clone(&registry), Arc::clone(&queue), 2);
 
     let input_subscribers = new_subscribers();
