@@ -284,6 +284,14 @@ fn is_board_full(board: &[[u8; 3]; 3]) -> bool {
     true
 }
 
+// Gated on wasm32: the `export!` macro emits `#[no_mangle]`
+// `init` / `receive_p32` / `on_drop` / `on_replace` /
+// `on_rehydrate_p32` shims the substrate calls over FFI. Those
+// symbols only mean something in a wasm guest — emitting them in
+// host builds causes duplicate-symbol link errors when a sibling
+// rlib (e.g. the tic-tac-toe-client demo) depends on this crate
+// and also has its own `export!`. Host unit tests don't need them.
+#[cfg(target_arch = "wasm32")]
 aether_component::export!(TicTacToe);
 
 #[cfg(test)]

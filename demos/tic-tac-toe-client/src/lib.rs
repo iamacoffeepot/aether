@@ -225,4 +225,8 @@ fn push_quad(
     *n += 2;
 }
 
+// Gated on wasm32 for the same reason the server crate gates its
+// `export!` — host test builds link against the server rlib and
+// would hit duplicate `init` / `receive_p32` / ... symbols.
+#[cfg(target_arch = "wasm32")]
 aether_component::export!(TicTacToeClient);
