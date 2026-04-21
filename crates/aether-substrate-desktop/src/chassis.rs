@@ -138,8 +138,9 @@ fn handle_capture_frame(
     };
 
     // Phase 2: push resolved pre-mails, enqueue capture, wake loop.
-    // `queue.wait_idle()` on the render thread is what enforces
-    // "capture after all mail processed".
+    // `queue.drain_all()` on the render thread is what enforces
+    // "capture after all mail processed" (per-mailbox drain under
+    // ADR-0038 Phase 3).
     for mail in pre {
         queue.push(mail);
     }

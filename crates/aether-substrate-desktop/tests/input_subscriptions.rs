@@ -165,7 +165,7 @@ fn publish_tick(h: &Harness) {
     for mbox in subscribers_for(&h.input_subscribers, InputStream::Tick) {
         h.queue.push(Mail::new(mbox, h.kind_tick, vec![], 1));
     }
-    h.queue.wait_idle();
+    h.queue.drain_all();
 }
 
 #[test]

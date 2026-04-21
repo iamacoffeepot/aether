@@ -426,11 +426,11 @@ mod control_plane {
     /// the frame) and `after_mails` dispatched *after* the readback
     /// completes (cleanup, e.g. restoring a flag the caller flipped
     /// for the capture). Both bundles plus the capture land in one
-    /// atomic tool call. The render thread's existing
-    /// `queue.wait_idle()` before the capture ensures every
-    /// `mails` entry has been fully processed by the time the frame
-    /// is read back. Empty vecs mean "just capture the current state"
-    /// / "no cleanup".
+    /// atomic tool call. The render thread's existing mail-drain
+    /// barrier before the capture ensures every `mails` entry has
+    /// been fully processed by the time the frame is read back.
+    /// Empty vecs mean "just capture the current state" /
+    /// "no cleanup".
     ///
     /// Abort-on-first-failure policy: if *any* envelope in *either*
     /// bundle fails to resolve (unknown kind or recipient), no mail

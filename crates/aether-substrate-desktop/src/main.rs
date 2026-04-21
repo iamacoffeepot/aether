@@ -561,7 +561,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.publish_window_size(size.width, size.height);
                     }
                 }
-                self.queue.wait_idle();
+                self.queue.drain_all();
                 let verts = std::mem::take(&mut *self.frame_vertices.lock().unwrap());
                 if let Some(gpu) = self.gpu.as_mut() {
                     match pending_capture {

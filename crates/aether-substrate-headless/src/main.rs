@@ -73,7 +73,7 @@ impl Chassis for HeadlessChassis {
                 self.queue
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
             }
-            self.queue.wait_idle();
+            self.queue.drain_all();
 
             if frame.is_multiple_of(LOG_EVERY_FRAMES) {
                 let stats = FrameStats {

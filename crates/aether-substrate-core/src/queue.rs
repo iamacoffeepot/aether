@@ -1,32 +1,19 @@
-// Dispatch barrier + inline router (ADR-0038 Phase 2).
+// Inline router (ADR-0038 Phase 3).
 //
-// With per-component dispatcher threads from Phase 1, the shared mail
-// queue no longer needs a VecDeque or a router thread. `push`
-// resolves the recipient against the registry on the caller's thread
-// and either runs the sink handler inline, forwards into the
-// recipient's dispatcher inbox, or warn-drops (dropped / unknown /
-// closed-inbox).
+// Phase 2 retired the VecDeque + router thread; Phase 3 retires the
+// global `outstanding` / `done_cv` barrier too. The per-component
+// drain primitive on `ComponentEntry` replaces `wait_idle` — callers
+// that previously waited for "all mail in flight" now drain the
+// specific mailboxes they care about (or iterate the full components
+// table via `scheduler::drain_all`).
 //
-// The `outstanding` counter + `done_cv` barrier survives unchanged:
-// `push` increments before routing; the per-component dispatcher
-// decrements after each `deliver`, and the inline sink / warn-drop
-// arms decrement directly. `wait_idle` callers see end-to-end
-// completion semantics identical to Phase 1.
-//
-// Invariants:
-//   - `push` increments `outstanding` BEFORE any routing work. A
-//     producer cannot hand the mail off to a consumer and race its
-//     decrement past a `wait_idle` observing zero.
-//   - Consumers decrement after processing via `mark_completed`.
-//   - `wait_idle` blocks until the counter reaches zero. Safe to call
-//     multiple times in sequence (the next frame's pushes re-raise
-//     the counter).
-//
-// Phase 3 will retire the global barrier altogether: `wait_idle`
-// callers (desktop frame barrier, capture_frame pre-bundle, headless
-// tick cadence) migrate to per-mailbox drain primitives.
+// What survives: `push(mail)` resolves the recipient inline on the
+// caller's thread (sinks run inline; components forward to inbox;
+// dropped / unknown warn-drop). The module's only state is the
+// `Registry` + `ComponentTable` handles, wired once by
+// `Scheduler::new`.
 
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use crate::mail::Mail;
 use crate::registry::{MailboxEntry, Registry};
@@ -40,8 +27,6 @@ pub struct MailQueue {
     /// Components table for forwarding into per-component inboxes.
     /// Wired alongside `registry`.
     components: OnceLock<ComponentTable>,
-    outstanding: Mutex<usize>,
-    done_cv: Condvar,
 }
 
 impl MailQueue {
@@ -49,8 +34,6 @@ impl MailQueue {
         Self {
             registry: OnceLock::new(),
             components: OnceLock::new(),
-            outstanding: Mutex::new(0),
-            done_cv: Condvar::new(),
         }
     }
 
@@ -66,38 +49,27 @@ impl MailQueue {
             .unwrap_or_else(|_| panic!("MailQueue::wire called twice"));
     }
 
-    /// Hand `mail` to the substrate for dispatch. Increments
-    /// `outstanding`, then routes inline: sinks run on the caller
-    /// thread, component mail forwards into the recipient's inbox,
-    /// dropped / unknown recipients warn-and-discard.
+    /// Hand `mail` to the substrate for dispatch. Sinks run on the
+    /// caller thread; component mail forwards into the recipient's
+    /// inbox (which bumps the per-entry drain counter); dropped /
+    /// unknown recipients warn-and-discard.
     pub fn push(&self, mail: Mail) {
-        {
-            let mut n = self.outstanding.lock().unwrap();
-            *n += 1;
-        }
         route_mail(
             mail,
             self.registry.get().expect("MailQueue not wired"),
             self.components.get().expect("MailQueue not wired"),
-            self,
         );
     }
 
-    /// Block until every mail enqueued so far has been processed.
-    /// Used by the frame loop to wait for a frame to drain.
-    pub fn wait_idle(&self) {
-        let mut n = self.outstanding.lock().unwrap();
-        while *n > 0 {
-            n = self.done_cv.wait(n).unwrap();
-        }
-    }
-
-    pub(crate) fn mark_completed(&self) {
-        let mut n = self.outstanding.lock().unwrap();
-        *n -= 1;
-        if *n == 0 {
-            self.done_cv.notify_all();
-        }
+    /// Block until every live component's inbox is empty and no
+    /// `deliver` is in flight. Phase-3 replacement for Phase-2's
+    /// `wait_idle` barrier — equivalent end-to-end semantics
+    /// (iterates the components table and waits on each entry's
+    /// per-mailbox drain counter, re-checking in case one entry's
+    /// delivery pushed fresh mail to another).
+    pub fn drain_all(&self) {
+        let components = self.components.get().expect("MailQueue not wired");
+        crate::scheduler::drain_all(components);
     }
 }
 
@@ -109,10 +81,10 @@ impl Default for MailQueue {
 
 /// Resolve `mail.recipient` against the registry + components and
 /// dispatch inline. Sinks run on the caller thread; component mail
-/// forwards into the per-component dispatcher inbox (which decrements
-/// `outstanding` after `deliver` returns). Dropped / unknown
-/// recipients and closed inboxes warn-log and decrement immediately.
-fn route_mail(mail: Mail, registry: &Registry, components: &ComponentTable, queue: &MailQueue) {
+/// forwards into the per-component dispatcher inbox (which bumps the
+/// entry's drain counter). Dropped / unknown recipients and closed
+/// inboxes warn-log and drop the mail.
+fn route_mail(mail: Mail, registry: &Registry, components: &ComponentTable) {
     let recipient = mail.recipient;
     match registry.entry(recipient) {
         Some(MailboxEntry::Sink(handler)) => {
@@ -130,7 +102,6 @@ fn route_mail(mail: Mail, registry: &Registry, components: &ComponentTable, queu
                 &mail.payload,
                 mail.count,
             );
-            queue.mark_completed();
         }
         Some(MailboxEntry::Component) => {
             let entry = components.read().unwrap().get(&recipient).map(Arc::clone);
@@ -142,9 +113,7 @@ fn route_mail(mail: Mail, registry: &Registry, components: &ComponentTable, queu
                             mailbox = ?recipient,
                             "component inbox closed; mail discarded",
                         );
-                        queue.mark_completed();
                     }
-                    // Happy path: dispatcher owns mark_completed.
                 }
                 None => {
                     tracing::warn!(
@@ -152,7 +121,6 @@ fn route_mail(mail: Mail, registry: &Registry, components: &ComponentTable, queu
                         mailbox = ?recipient,
                         "mail to registered-component mailbox but no component bound — dropped",
                     );
-                    queue.mark_completed();
                 }
             }
         }
@@ -162,7 +130,6 @@ fn route_mail(mail: Mail, registry: &Registry, components: &ComponentTable, queu
                 mailbox = ?recipient,
                 "mail to dropped mailbox — discarded",
             );
-            queue.mark_completed();
         }
         None => {
             tracing::warn!(
@@ -170,7 +137,6 @@ fn route_mail(mail: Mail, registry: &Registry, components: &ComponentTable, queu
                 mailbox = ?recipient,
                 "mail to unknown mailbox — dropped",
             );
-            queue.mark_completed();
         }
     }
 }
