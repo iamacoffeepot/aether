@@ -1,11 +1,19 @@
 [package]
-name = "aether-substrate"
+name = "aether-substrate-desktop"
 version.workspace = true
 edition.workspace = true
 
-# ADR-0035 Phase 1: runtime moved to aether-substrate-core. This crate
-# is the desktop chassis binary — winit event loop + wgpu renderer +
-# frame capture. Phase 2 will rename this to aether-substrate-desktop.
+# ADR-0035 desktop chassis binary: winit event loop, wgpu renderer,
+# frame capture, platform info. The shared runtime (scheduler, mail,
+# wasmtime host, control plane, hub client) lives in
+# aether-substrate-core; this crate binds that core to the desktop
+# peripheral stack. The binary is still named `aether-substrate` so
+# existing `spawn_substrate` paths, docs, and tool scripts keep
+# working — the package is what got renamed.
+
+[[bin]]
+name = "aether-substrate"
+path = "src/main.rs"
 
 [dependencies]
 aether-substrate-core = { path = "../aether-substrate-core" }

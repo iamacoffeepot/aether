@@ -28,7 +28,7 @@ use aether_kinds::{
 };
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
-use aether_substrate::{
+use aether_substrate_desktop::{
     CaptureQueue, Chassis, ChassisCapabilities, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound,
     InputSubscribers, MailQueue, Registry, Scheduler, SubstrateCtx, UserEvent,
     chassis_control_handler, host_fns,
@@ -645,7 +645,7 @@ fn main() -> wasmtime::Result<()> {
 
     // ADR-0023: install the tracing subscriber + log capture early so
     // bring-up errors (renderer init, hub handshake) are captured.
-    aether_substrate::log_capture::init(Arc::clone(&outbound));
+    aether_substrate_desktop::log_capture::init(Arc::clone(&outbound));
 
     let engine = Arc::new(Engine::default());
 
@@ -747,7 +747,7 @@ fn main() -> wasmtime::Result<()> {
     // ADR-0021 subscriber table, shared with the control plane so
     // subscribe / unsubscribe / drop write through the same `Arc`
     // the platform thread reads when publishing events.
-    let input_subscribers = aether_substrate::new_subscribers();
+    let input_subscribers = aether_substrate_desktop::new_subscribers();
 
     // Build the event loop up front so we can hand its proxy to
     // `CaptureQueue` as a waker — the capture handler pokes the
@@ -776,7 +776,7 @@ fn main() -> wasmtime::Result<()> {
         Arc::clone(&outbound),
     );
     {
-        let control_plane = aether_substrate::ControlPlane {
+        let control_plane = aether_substrate_desktop::ControlPlane {
             engine: Arc::clone(&engine),
             linker: Arc::clone(&linker),
             registry: Arc::clone(&registry),
@@ -788,7 +788,7 @@ fn main() -> wasmtime::Result<()> {
             chassis_handler: Some(chassis_handler),
         };
         registry.register_sink(
-            aether_substrate::AETHER_CONTROL,
+            aether_substrate_desktop::AETHER_CONTROL,
             control_plane.into_sink_handler(),
         );
     }

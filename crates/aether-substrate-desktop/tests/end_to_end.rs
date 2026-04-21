@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use aether_substrate::{
+use aether_substrate_desktop::{
     Component, HubOutbound, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
 };
@@ -74,7 +74,7 @@ fn tick_roundtrip_component_to_sink() {
         Arc::clone(&registry),
         Arc::clone(&queue),
         HubOutbound::disconnected(),
-        aether_substrate::new_subscribers(),
+        aether_substrate_desktop::new_subscribers(),
     );
     let component = Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
 
