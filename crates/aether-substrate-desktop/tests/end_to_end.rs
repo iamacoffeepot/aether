@@ -79,9 +79,8 @@ fn tick_roundtrip_component_to_sink() {
     );
     let component = Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
 
-    let mut components = std::collections::HashMap::new();
-    components.insert(component_mbox, component);
-    let _scheduler = Scheduler::new(registry, Arc::clone(&queue), components, 2);
+    let scheduler = Scheduler::new(registry, Arc::clone(&queue), 2);
+    scheduler.add_component(component_mbox, component);
 
     // Drive three "frames" — each frame, enqueue one tick mail and wait.
     for frame in 1..=3u32 {
@@ -138,12 +137,15 @@ fn batched_mail_preserves_fifo_per_mailbox() {
     );
     let component = Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
 
-    let mut components = std::collections::HashMap::new();
-    components.insert(component_mbox, component);
-    // Two workers — the race the strand fix closes only manifests
-    // with workers > 1 and the guest's deliver fast enough that
-    // both threads contend on the component mutex.
-    let _scheduler = Scheduler::new(registry, Arc::clone(&queue), components, 2);
+    // ADR-0038: dispatch parallelism is one thread per component now,
+    // not a shared pool — the original strand-claim race the pre-ADR-0038
+    // fix guarded against no longer exists, because the per-component
+    // dispatcher has a single consumer on an mpsc inbox. The test is
+    // kept as a regression guard on FIFO-per-mailbox under the new
+    // shape: with N=200 mails routed through a single router thread
+    // and forwarded via mpsc, order must still match the push order.
+    let scheduler = Scheduler::new(registry, Arc::clone(&queue), 2);
+    scheduler.add_component(component_mbox, component);
 
     for i in 1..=N {
         queue.push(Mail::new(component_mbox, 1, vec![], i));

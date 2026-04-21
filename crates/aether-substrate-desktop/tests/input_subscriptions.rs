@@ -82,12 +82,7 @@ fn make_harness() -> Harness {
     let wat = tally_forwarding_wat(sink_mbox.0);
 
     let queue = Arc::new(MailQueue::new());
-    let scheduler = Scheduler::new(
-        Arc::clone(&registry),
-        Arc::clone(&queue),
-        std::collections::HashMap::new(),
-        2,
-    );
+    let scheduler = Scheduler::new(Arc::clone(&registry), Arc::clone(&queue), 2);
 
     let input_subscribers = new_subscribers();
     let plane = ControlPlane {

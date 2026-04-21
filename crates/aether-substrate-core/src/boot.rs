@@ -17,7 +17,6 @@
 //! needs to close over while staying on the happy path where the
 //! `ControlPlane` is wired up once, not in two steps.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
@@ -167,12 +166,7 @@ impl<'a> SubstrateBootBuilder<'a> {
         host_fns::register(&mut linker)?;
         let linker = Arc::new(linker);
 
-        let scheduler = Scheduler::new(
-            Arc::clone(&registry),
-            Arc::clone(&queue),
-            HashMap::new(),
-            self.workers,
-        );
+        let scheduler = Scheduler::new(Arc::clone(&registry), Arc::clone(&queue), self.workers);
 
         let input_subscribers = new_subscribers();
 
