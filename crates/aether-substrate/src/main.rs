@@ -682,7 +682,12 @@ fn main() -> wasmtime::Result<()> {
     registry.register_sink(
         "render",
         Arc::new(
-            move |_kind: &str, _origin: Option<&str>, _sender, bytes: &[u8], count: u32| {
+            move |_kind_id: u64,
+                  _kind_name: &str,
+                  _origin: Option<&str>,
+                  _sender,
+                  bytes: &[u8],
+                  count: u32| {
                 verts_for_sink.lock().unwrap().extend_from_slice(bytes);
                 tris_for_sink.fetch_add(u64::from(count), Ordering::Relaxed);
             },
@@ -699,7 +704,8 @@ fn main() -> wasmtime::Result<()> {
         registry.register_sink(
             HUB_CLAUDE_BROADCAST,
             Arc::new(
-                move |kind_name: &str,
+                move |_kind_id: u64,
+                      kind_name: &str,
                       origin: Option<&str>,
                       _sender,
                       bytes: &[u8],

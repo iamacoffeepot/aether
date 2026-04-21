@@ -75,7 +75,7 @@ fn make_harness() -> Harness {
     let c2 = Arc::clone(&counter);
     let sink_mbox = registry.register_sink(
         "tally",
-        Arc::new(move |_kind, _origin, _sender, _bytes, count| {
+        Arc::new(move |_kind_id, _kind, _origin, _sender, _bytes, count| {
             c2.fetch_add(count, Ordering::SeqCst);
         }),
     );
@@ -117,10 +117,10 @@ fn make_harness() -> Harness {
 /// sink-handler surface. `ControlPlane::into_sink_handler` consumes
 /// its receiver, so the harness clones the plane (`Arc`-cheap) for
 /// each call. Mirrors how main.rs wires the handler at boot.
-fn dispatch<K: serde::Serialize>(plane: &ControlPlane, kind_name: &str, payload: &K) {
+fn dispatch<K: aether_mail::Kind + serde::Serialize>(plane: &ControlPlane, payload: &K) {
     let bytes = postcard::to_allocvec(payload).unwrap();
     let handler = plane.clone().into_sink_handler();
-    handler(kind_name, None, SessionToken::NIL, &bytes, 0);
+    handler(K::ID, K::NAME, None, SessionToken::NIL, &bytes, 0);
 }
 
 fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> u64 {
@@ -133,7 +133,6 @@ fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> u64 {
         .collect();
     dispatch(
         plane,
-        LoadComponent::NAME,
         &LoadComponent {
             wasm: wat::parse_str(wat).expect("compile WAT"),
             name: Some(name.into()),
@@ -153,23 +152,15 @@ fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> u64 {
 }
 
 fn subscribe(plane: &ControlPlane, stream: InputStream, mailbox: u64) {
-    dispatch(
-        plane,
-        SubscribeInput::NAME,
-        &SubscribeInput { stream, mailbox },
-    );
+    dispatch(plane, &SubscribeInput { stream, mailbox });
 }
 
 fn unsubscribe(plane: &ControlPlane, stream: InputStream, mailbox: u64) {
-    dispatch(
-        plane,
-        UnsubscribeInput::NAME,
-        &UnsubscribeInput { stream, mailbox },
-    );
+    dispatch(plane, &UnsubscribeInput { stream, mailbox });
 }
 
 fn drop_component(plane: &ControlPlane, mailbox_id: u64) {
-    dispatch(plane, DropComponent::NAME, &DropComponent { mailbox_id });
+    dispatch(plane, &DropComponent { mailbox_id });
 }
 
 /// Publish one Tick exactly as `App::window_event` does: snapshot the

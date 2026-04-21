@@ -217,7 +217,7 @@ pub struct ControlPlane {
 /// The chassis is responsible for decoding, replying (via the
 /// outbound it constructed with), and any mail orchestration.
 pub type ChassisControlHandler =
-    Arc<dyn Fn(&str, aether_hub_protocol::SessionToken, &[u8]) + Send + Sync>;
+    Arc<dyn Fn(u64, &str, aether_hub_protocol::SessionToken, &[u8]) + Send + Sync>;
 
 impl ControlPlane {
     /// Build the sink handler that should be registered against the
@@ -226,34 +226,41 @@ impl ControlPlane {
     /// the caller can discard the `ControlPlane` after registration.
     pub fn into_sink_handler(self) -> SinkHandler {
         Arc::new(
-            move |kind_name: &str,
+            move |kind_id: u64,
+                  kind_name: &str,
                   _origin: Option<&str>,
                   sender: aether_hub_protocol::SessionToken,
                   bytes: &[u8],
                   _count: u32| {
-                self.dispatch(kind_name, sender, bytes);
+                self.dispatch(kind_id, kind_name, sender, bytes);
             },
         )
     }
 
-    fn dispatch(&self, kind_name: &str, sender: aether_hub_protocol::SessionToken, bytes: &[u8]) {
-        if kind_name == LoadComponent::NAME {
+    fn dispatch(
+        &self,
+        kind_id: u64,
+        kind_name: &str,
+        sender: aether_hub_protocol::SessionToken,
+        bytes: &[u8],
+    ) {
+        if kind_id == LoadComponent::ID {
             let result = self.handle_load(bytes);
             self.outbound.send_reply(sender, &result);
-        } else if kind_name == DropComponent::NAME {
+        } else if kind_id == DropComponent::ID {
             let result = self.handle_drop(bytes);
             self.outbound.send_reply(sender, &result);
-        } else if kind_name == ReplaceComponent::NAME {
+        } else if kind_id == ReplaceComponent::ID {
             let result = self.handle_replace(bytes);
             self.outbound.send_reply(sender, &result);
-        } else if kind_name == SubscribeInput::NAME {
+        } else if kind_id == SubscribeInput::ID {
             let result = self.handle_subscribe(bytes);
             self.outbound.send_reply(sender, &result);
-        } else if kind_name == UnsubscribeInput::NAME {
+        } else if kind_id == UnsubscribeInput::ID {
             let result = self.handle_unsubscribe(bytes);
             self.outbound.send_reply(sender, &result);
         } else if let Some(handler) = &self.chassis_handler {
-            handler(kind_name, sender, bytes);
+            handler(kind_id, kind_name, sender, bytes);
         } else {
             tracing::warn!(
                 target: "aether_substrate::control",
@@ -1248,7 +1255,12 @@ mod tests {
         let plane = make_plane();
         // No panic; no outbound reply. Unknown kind arriving at the
         // control mailbox just logs and moves on.
-        plane.dispatch("aether.control.does_not_exist", SessionToken::NIL, &[]);
+        plane.dispatch(
+            0xdead_beef_dead_beef,
+            "aether.control.does_not_exist",
+            SessionToken::NIL,
+            &[],
+        );
     }
 
     #[test]
@@ -1519,7 +1531,7 @@ mod tests {
         let plane = make_plane();
         let sink = plane
             .registry
-            .register_sink("some.sink", Arc::new(|_, _, _, _, _| {}));
+            .register_sink("some.sink", Arc::new(|_, _, _, _, _, _| {}));
         assert!(matches!(
             do_subscribe(&plane, sink.0, InputStream::Tick),
             SubscribeInputResult::Err { .. }
@@ -1599,6 +1611,7 @@ mod tests {
         let plane = make_plane();
         let id = load_blank(&plane, "listener");
         plane.dispatch(
+            SubscribeInput::ID,
             SubscribeInput::NAME,
             SessionToken::NIL,
             &postcard::to_allocvec(&SubscribeInput {
@@ -1608,6 +1621,7 @@ mod tests {
             .unwrap(),
         );
         plane.dispatch(
+            UnsubscribeInput::ID,
             UnsubscribeInput::NAME,
             SessionToken::NIL,
             &postcard::to_allocvec(&UnsubscribeInput {
@@ -1706,7 +1720,7 @@ mod tests {
         let counter_for_sink = Arc::clone(&counter);
         let sink_id = plane.registry.register_sink(
             "drain-flush-sink",
-            Arc::new(move |_kind, _origin, _sender, _bytes, count| {
+            Arc::new(move |_kind_id, _kind, _origin, _sender, _bytes, count| {
                 counter_for_sink.fetch_add(count, Ordering::SeqCst);
             }),
         );
@@ -1784,7 +1798,7 @@ mod tests {
         let counter_for_sink = Arc::clone(&counter);
         let sink_id = plane.registry.register_sink(
             "drain-timeout-sink",
-            Arc::new(move |_kind, _origin, _sender, _bytes, count| {
+            Arc::new(move |_kind_id, _kind, _origin, _sender, _bytes, count| {
                 counter_for_sink.fetch_add(count, Ordering::SeqCst);
             }),
         );

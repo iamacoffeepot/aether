@@ -195,7 +195,14 @@ fn worker_loop(ctx: Arc<WorkerContext>) {
                 // FrameStats push) and has no sending mailbox; per
                 // ADR-0011 origin is `None`. Components reach sinks
                 // inline via `SubstrateCtx::send`, not this path.
-                handler(&kind_name, None, mail.sender, &mail.payload, mail.count);
+                handler(
+                    mail.kind,
+                    &kind_name,
+                    None,
+                    mail.sender,
+                    &mail.payload,
+                    mail.count,
+                );
             }
             Some(MailboxEntry::Component) => {
                 let entry = ctx

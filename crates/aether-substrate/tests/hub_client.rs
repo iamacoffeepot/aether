@@ -100,7 +100,8 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     let recipient = registry.register_sink(
         "hello",
         Arc::new(
-            move |_kind: &str,
+            move |_kind_id: u64,
+                  _kind: &str,
                   _origin: Option<&str>,
                   sender: SessionToken,
                   bytes: &[u8],
