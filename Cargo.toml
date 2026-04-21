@@ -4,6 +4,7 @@ members = [
     "crates/aether-substrate-core",
     "crates/aether-substrate-desktop",
     "crates/aether-substrate-headless",
+    "crates/aether-substrate-hub",
     "crates/aether-kinds",
     "crates/aether-component",
     "crates/aether-hello-component",

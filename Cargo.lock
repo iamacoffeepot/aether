@@ -191,6 +191,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-substrate-hub"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-hub",
+ "aether-substrate-core",
+ "tokio",
+ "wasmtime",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

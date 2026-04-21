@@ -1,0 +1,10 @@
+[package]
+name = "aether-substrate-hub"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+aether-hub = { path = "../aether-hub" }
+aether-substrate-core = { path = "../aether-substrate-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+wasmtime = "30"
