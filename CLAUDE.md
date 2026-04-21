@@ -18,7 +18,7 @@ Pre-1.0 Rust project (edition 2024). Vision: a game engine where Claude sits in 
 
 ## MCP harness
 
-Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision. Starting `cargo run -p aether-hub` (and either letting the hub spawn substrates via `spawn_substrate`, or running `AETHER_HUB_URL=127.0.0.1:8889 cargo run -p aether-substrate` by hand) exposes ten tools to a Claude Code session pointed at the project-scoped `.mcp.json`:
+Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision. Starting `cargo run -p aether-hub` (and either letting the hub spawn substrates via `spawn_substrate`, or running `AETHER_HUB_URL=127.0.0.1:8889 cargo run -p aether-substrate-desktop` by hand) exposes ten tools to a Claude Code session pointed at the project-scoped `.mcp.json`:
 
 - `mcp__aether-hub__list_engines` — connected engines (UUID + name/pid/version + `spawned` flag: `true` if the hub launched the process, `false` if it connected externally).
 - `mcp__aether-hub__describe_kinds(engine_id)` — the kind vocabulary the engine declared at handshake, with enough structural detail to build params.

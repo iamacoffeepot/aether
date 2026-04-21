@@ -16,7 +16,7 @@ use aether_kinds::{
     DropComponent, InputStream, LoadComponent, SubscribeInput, Tick, UnsubscribeInput,
 };
 use aether_mail::Kind;
-use aether_substrate::{
+use aether_substrate_desktop::{
     ControlPlane, HubOutbound, InputSubscribers, MailQueue, Registry, Scheduler, SubstrateCtx,
     host_fns,
     mail::{Mail, MailboxId},

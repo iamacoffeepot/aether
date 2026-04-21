@@ -14,7 +14,9 @@ use aether_hub_protocol::{
     ClaudeAddress, EngineId, EngineMailFrame, EngineToHub, Goodbye, HubToEngine, MailFrame,
     SessionToken, Uuid, Welcome, read_frame, write_frame,
 };
-use aether_substrate::{HubClient, HubOutbound, MailQueue, Registry, Scheduler, mail::MailboxId};
+use aether_substrate_desktop::{
+    HubClient, HubOutbound, MailQueue, Registry, Scheduler, mail::MailboxId,
+};
 
 /// Start a mock hub on a random port. Returns the bound address and a
 /// `TcpStream` for the single connection it will accept.

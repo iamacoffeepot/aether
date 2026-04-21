@@ -122,7 +122,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-substrate"
+name = "aether-substrate-core"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-hub-protocol",
+ "aether-kinds",
+ "aether-mail",
+ "bytemuck",
+ "postcard",
+ "serde",
+ "tracing",
+ "tracing-subscriber",
+ "wasmparser 0.224.1",
+ "wasmtime",
+ "wat",
+]
+
+[[package]]
+name = "aether-substrate-desktop"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-hub-protocol",
@@ -140,23 +157,6 @@ dependencies = [
  "wat",
  "wgpu",
  "winit",
-]
-
-[[package]]
-name = "aether-substrate-core"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-hub-protocol",
- "aether-kinds",
- "aether-mail",
- "bytemuck",
- "postcard",
- "serde",
- "tracing",
- "tracing-subscriber",
- "wasmparser 0.224.1",
- "wasmtime",
- "wat",
 ]
 
 [[package]]
