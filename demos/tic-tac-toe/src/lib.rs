@@ -129,7 +129,17 @@ pub struct TicTacToe {
     state: GameState,
     move_result_kind: KindId<MoveResult>,
     broadcast: Sink<GameState>,
+    client_observer: Sink<GameState>,
 }
+
+/// Well-known local mailbox name the server fans `GameState` to in
+/// addition to `hub.claude.broadcast`. Any component loaded under
+/// this name on the same substrate as the server will receive every
+/// state update — the intended consumer is the `aether-demo-tic-tac-
+/// toe-client` renderer, but any observer-style component works.
+/// If no component is registered under this name the send is a
+/// harmless "mailbox unknown" warn-drop.
+pub const CLIENT_OBSERVER: &str = "tic_tac_toe.client";
 
 /// Authoritative tic-tac-toe server. Accepts `PlayMove` and `Reset`
 /// from any attached Claude session, replies to the sender with the
@@ -154,6 +164,7 @@ impl Component for TicTacToe {
             state: GameState::new_game(),
             move_result_kind: ctx.resolve::<MoveResult>(),
             broadcast: ctx.resolve_sink::<GameState>("hub.claude.broadcast"),
+            client_observer: ctx.resolve_sink::<GameState>(CLIENT_OBSERVER),
         }
     }
 
@@ -174,6 +185,7 @@ impl Component for TicTacToe {
         self.reply(ctx, status);
         if status == MOVE_OK {
             ctx.send(&self.broadcast, &self.state);
+            ctx.send(&self.client_observer, &self.state);
         }
     }
 
@@ -189,6 +201,7 @@ impl Component for TicTacToe {
         self.state = GameState::new_game();
         self.reply(ctx, MOVE_OK);
         ctx.send(&self.broadcast, &self.state);
+        ctx.send(&self.client_observer, &self.state);
     }
 }
 
@@ -299,6 +312,7 @@ mod tests {
             state: GameState::new_game(),
             move_result_kind: aether_component::resolve::<MoveResult>(),
             broadcast: aether_component::resolve_sink::<GameState>("hub.claude.broadcast"),
+            client_observer: aether_component::resolve_sink::<GameState>(CLIENT_OBSERVER),
         }
     }
 

@@ -64,6 +64,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-demo-tic-tac-toe-client"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-component",
+ "aether-demo-tic-tac-toe",
+ "aether-kinds",
+]
+
+[[package]]
 name = "aether-hello-component"
 version = "0.2.0-alpha"
 dependencies = [
