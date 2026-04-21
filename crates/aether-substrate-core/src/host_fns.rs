@@ -128,7 +128,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     // Branches on the `SenderEntry` variant:
     //   - Session: ship as a `ClaudeAddress::Session` frame through
     //     `HubOutbound` (same route as ADR-0013's original design).
-    //   - Component: enqueue on the local `MailQueue` via
+    //   - Component: enqueue on the local `Mailer` via
     //     `SubstrateCtx::send`. Dropped-mailbox discard is handled
     //     there already, so a component that vanished between the
     //     request and the reply silently drops — the same contract

@@ -3,7 +3,7 @@
 //! ADR-0035 split peripheral code out of the runtime, but left every
 //! chassis's `main()` copying ~80 lines of identical initialisation:
 //! `HubOutbound` + `log_capture::init` + `Engine` + `Registry` + kind
-//! descriptor loop + broadcast sink + `MailQueue` + `Linker` +
+//! descriptor loop + broadcast sink + `Mailer` + `Linker` +
 //! `host_fns::register` + `Scheduler` + input subscribers +
 //! `ControlPlane` + optional `AETHER_HUB_URL` connect. `SubstrateBoot`
 //! folds that path into a single builder so adding a new chassis
@@ -25,7 +25,7 @@ use wasmtime::{Engine, Linker};
 
 use crate::{
     AETHER_CONTROL, ChassisControlHandler, ControlPlane, HUB_CLAUDE_BROADCAST, HubClient,
-    HubOutbound, InputSubscribers, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
+    HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx, host_fns,
     input::new_subscribers, log_capture, mail::MailboxId,
 };
 
@@ -39,7 +39,7 @@ pub struct SubstrateBoot {
     pub engine: Arc<Engine>,
     pub registry: Arc<Registry>,
     pub linker: Arc<Linker<SubstrateCtx>>,
-    pub queue: Arc<MailQueue>,
+    pub queue: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
     pub input_subscribers: InputSubscribers,
     pub broadcast_mbox: MailboxId,
@@ -61,7 +61,7 @@ pub struct SubstrateBoot {
 /// ownership away from the boot itself.
 pub struct ChassisHandlerContext<'a> {
     pub registry: &'a Arc<Registry>,
-    pub queue: &'a Arc<MailQueue>,
+    pub queue: &'a Arc<Mailer>,
     pub outbound: &'a Arc<HubOutbound>,
 }
 
@@ -160,7 +160,7 @@ impl<'a> SubstrateBootBuilder<'a> {
             )
         };
 
-        let queue = Arc::new(MailQueue::new());
+        let queue = Arc::new(Mailer::new());
 
         let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
         host_fns::register(&mut linker)?;

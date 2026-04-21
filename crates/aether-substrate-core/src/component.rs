@@ -236,14 +236,14 @@ mod tests {
     use super::*;
     use crate::hub_client::HubOutbound;
     use crate::mail::MailboxId;
-    use crate::queue::MailQueue;
+    use crate::mailer::Mailer;
     use crate::registry::Registry;
 
     fn ctx() -> SubstrateCtx {
         SubstrateCtx::new(
             MailboxId(0),
             Arc::new(Registry::new()),
-            Arc::new(MailQueue::new()),
+            Arc::new(Mailer::new()),
             HubOutbound::disconnected(),
             crate::input::new_subscribers(),
         )
@@ -572,7 +572,7 @@ mod tests {
         let ctx = SubstrateCtx::new(
             M(0),
             registry,
-            Arc::new(MailQueue::new()),
+            Arc::new(Mailer::new()),
             outbound,
             crate::input::new_subscribers(),
         );
@@ -627,13 +627,13 @@ mod tests {
     /// has both a fake originating-component mailbox (id 1, name
     /// "caller") and a "test.pong" kind. When `WAT_REPLIES` calls
     /// `reply_mail` with the Component-variant handle the substrate
-    /// allocated, the reply lands on the local `MailQueue` —
+    /// allocated, the reply lands on the local `Mailer` —
     /// outbound stays empty.
     #[allow(dead_code)]
     fn plane_ctx_with_caller_mailbox() -> (
         SubstrateCtx,
         std::sync::mpsc::Receiver<aether_hub_protocol::EngineToHub>,
-        Arc<MailQueue>,
+        Arc<Mailer>,
         crate::mail::MailboxId,
         u64,
     ) {
@@ -651,7 +651,7 @@ mod tests {
                 schema: SchemaType::Unit,
             })
             .expect("register kind");
-        let queue = Arc::new(MailQueue::new());
+        let queue = Arc::new(Mailer::new());
         let ctx = SubstrateCtx::new(
             M(0),
             registry,
@@ -663,7 +663,7 @@ mod tests {
     }
 
     // Retired under ADR-0038 Phase 2: these two tests peeked at
-    // `MailQueue::try_pop` to observe reply-mail routing, but Phase 2
+    // `Mailer::try_pop` to observe reply-mail routing, but Phase 2
     // retired the queue's inspectable deque in favour of inline
     // routing directly into per-component inboxes. The component-
     // reply path (ADR-0017) is still covered end-to-end by the MCP

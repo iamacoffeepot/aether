@@ -6,7 +6,7 @@
 // Deliberately does NOT hold the scheduler's full shared state — doing
 // so would create an Arc cycle through `Scheduler owns Actor, Actor
 // owns Store<SubstrateCtx>, SubstrateCtx back to Scheduler`. By holding
-// only `Arc<Registry>` and `Arc<MailQueue>` the cycle is broken: neither
+// only `Arc<Registry>` and `Arc<Mailer>` the cycle is broken: neither
 // of those owns any actor.
 
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use aether_hub_protocol::SessionToken;
 use crate::hub_client::HubOutbound;
 use crate::input::InputSubscribers;
 use crate::mail::{Mail, MailKind, MailboxId};
-use crate::queue::MailQueue;
+use crate::mailer::Mailer;
 use crate::registry::{MailboxEntry, Registry};
 use crate::sender_table::SenderTable;
 
@@ -34,7 +34,7 @@ pub struct StateBundle {
 pub struct SubstrateCtx {
     pub sender: MailboxId,
     pub registry: Arc<Registry>,
-    pub queue: Arc<MailQueue>,
+    pub queue: Arc<Mailer>,
     /// ADR-0013: direct outbound handle so the `reply_mail` host fn
     /// can address a specific Claude session without routing through
     /// a well-known sink. Broadcast still goes through
@@ -56,7 +56,7 @@ pub struct SubstrateCtx {
     /// receives an opaque `u32` handle as the 4th param on its
     /// `receive` shim and passes it back to `reply_mail`; the
     /// substrate routes either over `HubOutbound` or back through
-    /// `MailQueue` based on the variant.
+    /// `Mailer` based on the variant.
     pub sender_table: SenderTable,
     /// Set by the `save_state` host fn during `on_replace`. The
     /// substrate extracts it after hooks return via
@@ -80,7 +80,7 @@ impl SubstrateCtx {
     pub fn new(
         sender: MailboxId,
         registry: Arc<Registry>,
-        queue: Arc<MailQueue>,
+        queue: Arc<Mailer>,
         outbound: Arc<HubOutbound>,
         input_subscribers: InputSubscribers,
     ) -> Self {

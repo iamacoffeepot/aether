@@ -31,7 +31,7 @@ pub mod input;
 pub mod kind_manifest;
 pub mod log_capture;
 pub mod mail;
-pub mod queue;
+pub mod mailer;
 pub mod registry;
 pub mod scheduler;
 pub mod sender_table;
@@ -44,7 +44,7 @@ pub use ctx::SubstrateCtx;
 pub use hub_client::{HubClient, HubOutbound};
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
 pub use mail::{Mail, MailKind, MailboxId};
-pub use queue::MailQueue;
+pub use mailer::Mailer;
 pub use registry::{MailboxEntry, Registry, SinkHandler};
 pub use scheduler::Scheduler;
 

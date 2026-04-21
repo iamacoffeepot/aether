@@ -2,12 +2,12 @@
 //
 // Phase 1 gave each component a dedicated dispatcher thread that
 // loops on an mpsc inbox. Phase 2 retires the router thread that
-// Phase 1 left in place: `MailQueue::push` now resolves the
+// Phase 1 left in place: `Mailer::push` now resolves the
 // recipient inline on the caller's thread and forwards directly into
 // the per-component inbox (see `queue.rs`). The per-mailbox dispatcher
 // is unchanged.
 //
-// `wait_idle` semantics are preserved: `MailQueue`'s `outstanding`
+// `wait_idle` semantics are preserved: `Mailer`'s `outstanding`
 // counter increments on `push` (before routing) and decrements inside
 // the dispatcher thread after `deliver` returns, or inline for sinks /
 // warn-drops. A `wait_idle` that returns still means every pushed
@@ -31,7 +31,7 @@ use std::thread::{self, JoinHandle};
 
 use crate::component::{Component, DISPATCH_UNKNOWN_KIND};
 use crate::mail::{Mail, MailboxId};
-use crate::queue::MailQueue;
+use crate::mailer::Mailer;
 use crate::registry::Registry;
 
 /// Per-entry quiescence counter + condvar, shared with the dispatcher
@@ -39,7 +39,7 @@ use crate::registry::Registry;
 /// the dispatcher decrements after each `deliver` and signals when the
 /// counter reaches zero. `drain` waits on the condvar for that signal,
 /// giving callers a per-mailbox barrier equivalent to the Phase-2
-/// global `MailQueue::wait_idle`.
+/// global `Mailer::wait_idle`.
 #[derive(Default)]
 struct PendingGate {
     pending: AtomicU32,
@@ -233,7 +233,7 @@ fn dispatcher_loop(
 }
 
 /// Shared, runtime-mutable table of bound components. Cloned into the
-/// `MailQueue` (for inline routing on push) and into the ADR-0010
+/// `Mailer` (for inline routing on push) and into the ADR-0010
 /// load handler so both read and write through the same `RwLock`.
 /// Values are `Arc`-shared so short-lived clones (e.g. the router's
 /// forward path) can outlive a concurrent `remove` without racing on
@@ -241,7 +241,7 @@ fn dispatcher_loop(
 pub type ComponentTable = Arc<RwLock<HashMap<MailboxId, Arc<ComponentEntry>>>>;
 
 pub struct Scheduler {
-    queue: Arc<MailQueue>,
+    queue: Arc<Mailer>,
     registry: Arc<Registry>,
     components: ComponentTable,
 }
@@ -253,7 +253,7 @@ impl Scheduler {
     /// compatibility (ADR-0004 sized the worker pool) but is ignored
     /// under ADR-0038: dispatch parallelism is one thread per
     /// component, and Phase 2 retired the shared router thread.
-    pub fn new(registry: Arc<Registry>, queue: Arc<MailQueue>, _k_workers: usize) -> Self {
+    pub fn new(registry: Arc<Registry>, queue: Arc<Mailer>, _k_workers: usize) -> Self {
         let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
         queue.wire(Arc::clone(&registry), Arc::clone(&components));
         Self {
@@ -263,7 +263,7 @@ impl Scheduler {
         }
     }
 
-    pub fn queue(&self) -> &Arc<MailQueue> {
+    pub fn queue(&self) -> &Arc<Mailer> {
         &self.queue
     }
 
@@ -289,7 +289,7 @@ impl Scheduler {
     }
 }
 
-/// Barrier equivalent to the Phase-2 `MailQueue::wait_idle`: block
+/// Barrier equivalent to the Phase-2 `Mailer::wait_idle`: block
 /// until every component in `components` has an empty inbox and no
 /// in-flight `deliver`. Iterates + re-checks in case a component's
 /// delivery pushes fresh mail to one we already drained (e.g. a

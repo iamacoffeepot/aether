@@ -27,8 +27,8 @@ use aether_kinds::{
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate_desktop::{
-    CaptureQueue, Chassis, ChassisCapabilities, HubClient, HubOutbound, InputSubscribers,
-    MailQueue, Scheduler, SubstrateBoot, UserEvent, chassis_control_handler,
+    CaptureQueue, Chassis, ChassisCapabilities, HubClient, HubOutbound, InputSubscribers, Mailer,
+    Scheduler, SubstrateBoot, UserEvent, chassis_control_handler,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -93,7 +93,7 @@ impl Chassis for DesktopChassis {
 }
 
 struct App {
-    queue: Arc<MailQueue>,
+    queue: Arc<Mailer>,
     /// ADR-0021 per-stream subscribers. Shared with the control plane
     /// so subscribe / unsubscribe / drop write through the same table
     /// the platform thread reads on each event. Empty sets — the
