@@ -85,7 +85,7 @@ fn tick_roundtrip_component_to_sink() {
     // Drive three "frames" — each frame, enqueue one tick mail and wait.
     for frame in 1..=3u32 {
         queue.push(Mail::new(component_mbox, 1, vec![], frame));
-        queue.wait_idle();
+        queue.drain_all();
     }
 
     // Sink saw count=1 + count=2 + count=3 = 6.
@@ -150,7 +150,7 @@ fn batched_mail_preserves_fifo_per_mailbox() {
     for i in 1..=N {
         queue.push(Mail::new(component_mbox, 1, vec![], i));
     }
-    queue.wait_idle();
+    queue.drain_all();
 
     let got = recorded.lock().unwrap().clone();
     assert_eq!(got.len(), N as usize, "sink saw the wrong number of mails");
