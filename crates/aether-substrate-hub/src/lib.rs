@@ -15,6 +15,7 @@ mod decoder;
 mod encoder;
 mod engine;
 mod log_store;
+mod loopback;
 mod mcp;
 mod registry;
 mod session;
@@ -23,6 +24,7 @@ mod spawn;
 pub use chassis::HubChassis;
 pub use decoder::{DecodeError, decode_schema};
 pub use encoder::{EncodeError, encode_schema};
+pub use loopback::HUB_SELF_ENGINE_ID;
 
 pub use engine::HEARTBEAT_INTERVAL;
 pub use engine::READ_TIMEOUT;

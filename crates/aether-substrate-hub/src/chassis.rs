@@ -20,14 +20,16 @@ use std::sync::Arc;
 
 use aether_substrate_core::{Chassis, ChassisCapabilities};
 
+use crate::loopback::{LoopbackEngine, run_inbound_drainer, spawn_outbound_drainer};
 use crate::{
     DEFAULT_ENGINE_PORT, DEFAULT_MCP_PORT, EngineRegistry, HubState, LogStore, PendingSpawns,
     SessionRegistry, run_engine_listener, run_mcp_server,
 };
 
 /// Hub chassis handle. Holds the bound addresses + shared state
-/// handles; `run(self)` builds a tokio runtime and drives the
-/// listeners to termination.
+/// handles and the in-process loopback engine (ADR-0034 Phase 2
+/// sub-phase A); `run(self)` builds a tokio runtime and drives the
+/// listeners + the loopback drainers to termination.
 pub struct HubChassis {
     engine_addr: SocketAddr,
     mcp_addr: SocketAddr,
@@ -36,17 +38,22 @@ pub struct HubChassis {
     pending: PendingSpawns,
     logs: LogStore,
     state: Arc<HubState>,
+    loopback: LoopbackEngine,
 }
 
 impl HubChassis {
     /// Build a hub chassis with the given listener addresses. Fresh
     /// registry / session / spawn / log stores are created inline —
-    /// they never outlive the chassis.
-    pub fn new(engine_addr: SocketAddr, mcp_addr: SocketAddr) -> Self {
+    /// they never outlive the chassis. Boots the in-process
+    /// `SubstrateBoot` and registers it in the engine registry
+    /// under `HUB_SELF_ENGINE_ID` before returning, so MCP tools
+    /// see the hub-self engine from the moment `new()` completes.
+    pub fn new(engine_addr: SocketAddr, mcp_addr: SocketAddr) -> wasmtime::Result<Self> {
         let registry = EngineRegistry::new();
         let sessions = SessionRegistry::new();
         let pending = PendingSpawns::new();
         let logs = LogStore::new();
+        let loopback = LoopbackEngine::boot(&registry)?;
         let state = HubState::new(
             registry.clone(),
             sessions.clone(),
@@ -54,7 +61,7 @@ impl HubChassis {
             logs.clone(),
             engine_addr,
         );
-        Self {
+        Ok(Self {
             engine_addr,
             mcp_addr,
             registry,
@@ -62,7 +69,8 @@ impl HubChassis {
             pending,
             logs,
             state,
-        }
+            loopback,
+        })
     }
 
     /// Read `AETHER_ENGINE_PORT` / `AETHER_MCP_PORT` from the
@@ -70,7 +78,7 @@ impl HubChassis {
     /// `DEFAULT_MCP_PORT` when unset or unparseable. Binds both
     /// listeners on `127.0.0.1` — intentional for the current
     /// single-host development story.
-    pub fn from_env() -> Self {
+    pub fn from_env() -> wasmtime::Result<Self> {
         use std::net::{IpAddr, Ipv4Addr};
         let engine_port = env_port("AETHER_ENGINE_PORT").unwrap_or(DEFAULT_ENGINE_PORT);
         let mcp_port = env_port("AETHER_MCP_PORT").unwrap_or(DEFAULT_MCP_PORT);
@@ -90,7 +98,31 @@ impl HubChassis {
             pending,
             logs,
             state,
+            loopback,
         } = self;
+
+        let LoopbackEngine {
+            boot,
+            inbound_rx,
+            outbound_rx,
+        } = loopback;
+
+        // Loopback drainers. The inbound task runs alongside the
+        // TCP + MCP listeners; the outbound drainer runs on a
+        // dedicated std::thread because `std::sync::mpsc::Receiver`
+        // blocks synchronously. Both exit when their channel closes
+        // (at drop time on process shutdown).
+        let loopback_inbound_task = tokio::spawn(run_inbound_drainer(
+            inbound_rx,
+            Arc::clone(&boot.registry),
+            Arc::clone(&boot.queue),
+        ));
+        let _loopback_outbound_thread = spawn_outbound_drainer(
+            outbound_rx,
+            registry.clone(),
+            sessions.clone(),
+            logs.clone(),
+        );
 
         let engine_task = tokio::spawn(run_engine_listener(
             engine_addr,
@@ -104,10 +136,18 @@ impl HubChassis {
         tokio::select! {
             r = engine_task => log_exit("engine listener", r),
             r = mcp_task => log_exit("mcp listener", r),
+            r = loopback_inbound_task => log_exit("loopback inbound", r.map(Ok)),
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("aether-substrate-hub: shutting down");
             }
         }
+
+        // `boot` drops here — scheduler workers join, HubOutbound's
+        // Sender drops (closing the outbound channel), which lets
+        // the outbound drainer thread exit naturally. We don't
+        // explicitly join the thread: process shutdown handles any
+        // still-draining frames.
+        drop(boot);
     }
 }
 

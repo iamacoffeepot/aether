@@ -7,5 +7,5 @@ use aether_substrate_core::Chassis;
 use aether_substrate_hub::HubChassis;
 
 fn main() -> wasmtime::Result<()> {
-    HubChassis::from_env().run()
+    HubChassis::from_env()?.run()
 }

@@ -59,7 +59,15 @@ impl HubOutbound {
         })
     }
 
-    fn attach(&self, tx: Sender<EngineToHub>) {
+    /// Wire an outbound writer channel to this handle. Called once,
+    /// either by `HubClient::connect` after the TCP handshake
+    /// completes, or by a loopback chassis (ADR-0034 Phase 2) that
+    /// drains `EngineToHub` frames in-process rather than serialising
+    /// them over TCP. A second attach is ignored with a warning —
+    /// `HubOutbound` is single-writer by design so heartbeats and
+    /// outbound mail can't race on the socket (or the loopback
+    /// channel).
+    pub fn attach(&self, tx: Sender<EngineToHub>) {
         if self.tx.set(tx).is_err() {
             tracing::warn!(target: "aether_substrate::hub_client", "HubOutbound attached twice — ignoring second attach");
         }
@@ -195,7 +203,7 @@ impl HubClient {
 fn run_reader(mut stream: TcpStream, registry: Arc<Registry>, queue: Arc<Mailer>) {
     loop {
         match read_frame::<_, HubToEngine>(&mut stream) {
-            Ok(HubToEngine::Mail(frame)) => dispatch_mail(frame, &registry, &queue),
+            Ok(HubToEngine::Mail(frame)) => dispatch_hub_to_engine_mail(frame, &registry, &queue),
             Ok(HubToEngine::Heartbeat) => {}
             Ok(HubToEngine::Welcome(_)) => {
                 tracing::warn!(target: "aether_substrate::hub_client", "unexpected post-handshake Welcome, ignoring");
@@ -230,7 +238,12 @@ fn run_heartbeat(tx: Sender<EngineToHub>) {
     }
 }
 
-fn dispatch_mail(frame: MailFrame, registry: &Registry, queue: &Mailer) {
+/// Resolve a `HubToEngine::Mail` frame against the substrate's
+/// `Registry` and push the decoded `Mail` onto `queue`. Shared by the
+/// TCP `HubClient` reader (the canonical path) and the hub-chassis
+/// loopback drainer (ADR-0034 Phase 2), so both paths drop on unknown
+/// mailbox/kind with the same warning shape.
+pub fn dispatch_hub_to_engine_mail(frame: MailFrame, registry: &Registry, queue: &Mailer) {
     let Some(recipient) = registry.lookup(&frame.recipient_name) else {
         tracing::warn!(
             target: "aether_substrate::hub_client",
