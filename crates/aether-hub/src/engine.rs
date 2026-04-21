@@ -16,6 +16,7 @@ use aether_hub_protocol::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::time::timeout;
 
 use crate::log_store::LogStore;
@@ -161,9 +162,27 @@ async fn read_loop(
 }
 
 /// Fan an `EngineToHub::Mail` frame out to the addressed session(s).
-/// Unknown / disconnected tokens are logged and dropped; the engine
-/// wire has no reply, so there's nowhere to surface "sessionGone" to
-/// today. `Broadcast` to an empty registry is a no-op — not an error.
+///
+/// Delivery is **non-blocking** (`try_send`): if a session's mpsc is
+/// full, the mail is dropped with a warn and we keep going. See issue
+/// 159 — the original `send(...).await` here could block the caller
+/// (the per-engine `read_loop`) waiting for a slow MCP client to drain
+/// its queue. Under broadcast fan-out across N sessions, that also
+/// meant one lagging session gated mail delivery to every *other*
+/// session on the same loop iteration. Worst case, a queued engine
+/// SIGKILL during the block delayed reap indefinitely because the
+/// read loop never got back to its next `read_exact`.
+///
+/// Observation mail is fire-and-forget by design (ADR-0008). A
+/// bounded per-session ring with drop-oldest-semantics was always the
+/// implicit contract; `try_send` plus drop-on-full makes it
+/// explicit and unblocks the engine path. Targeted replies matched
+/// by `PendingReplies::try_deliver` bypass the queue entirely, so
+/// synchronous tool calls are unaffected.
+///
+/// Unknown / disconnected session tokens are logged and dropped; the
+/// engine wire has no reply, so there's nowhere to surface
+/// "sessionGone". `Broadcast` to an empty registry is a no-op.
 async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail: EngineMailFrame) {
     let EngineMailFrame {
         address,
@@ -185,22 +204,16 @@ async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail
                 // registered a waiter for this exact kind on this
                 // session, the mail goes to the oneshot and skips the
                 // general inbound queue. Unmatched mail falls through
-                // unchanged.
+                // to the non-blocking session-queue path.
                 let kind_name = queued.kind_name.clone();
-                let remainder = record.replies.try_deliver(&kind_name, queued);
-                if let Some(queued) = remainder
-                    && record.mail_tx.send(queued).await.is_err()
-                {
-                    eprintln!(
-                        "aether-hub: engine {} mail to session {} dropped: receiver closed",
-                        engine_id.0, token.0
-                    );
+                if let Some(queued) = record.replies.try_deliver(&kind_name, queued) {
+                    dispatch_session_mail(engine_id, &record.mail_tx, token.0, queued);
                 }
             }
             None => {
                 eprintln!(
-                    "aether-hub: engine {} mail dropped: unknown/expired session token {}",
-                    engine_id.0, token.0
+                    "aether-hub: engine {} mail dropped: unknown/expired session token {} kind={}",
+                    engine_id.0, token.0, kind_name
                 );
             }
         },
@@ -217,13 +230,34 @@ async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail
                     broadcast: true,
                     origin: origin.clone(),
                 };
-                if record.mail_tx.send(queued).await.is_err() {
-                    eprintln!(
-                        "aether-hub: engine {} broadcast to session {} dropped: receiver closed",
-                        engine_id.0, record.token.0
-                    );
-                }
+                dispatch_session_mail(engine_id, &record.mail_tx, record.token.0, queued);
             }
+        }
+    }
+}
+
+/// Non-blocking session enqueue. Logs Full (slow-client drop) and
+/// Closed (receiver gone) separately — they're different failure
+/// modes worth telling apart in triage.
+fn dispatch_session_mail(
+    engine_id: EngineId,
+    mail_tx: &mpsc::Sender<QueuedMail>,
+    session_token: Uuid,
+    queued: QueuedMail,
+) {
+    match mail_tx.try_send(queued) {
+        Ok(()) => {}
+        Err(TrySendError::Full(queued)) => {
+            eprintln!(
+                "aether-hub: engine {} mail to session {} dropped: queue full (kind={}, broadcast={})",
+                engine_id.0, session_token, queued.kind_name, queued.broadcast
+            );
+        }
+        Err(TrySendError::Closed(queued)) => {
+            eprintln!(
+                "aether-hub: engine {} mail to session {} dropped: receiver closed (kind={}, broadcast={})",
+                engine_id.0, session_token, queued.kind_name, queued.broadcast
+            );
         }
     }
 }
@@ -357,5 +391,101 @@ mod tests {
             mail(ClaudeAddress::Broadcast, vec![]),
         )
         .await;
+    }
+
+    /// Issue 159 regression. Fill a session's inbound mpsc to capacity,
+    /// then route one more mail. The pre-fix path called
+    /// `mail_tx.send(...).await` and would block here — if that
+    /// happens we'll hang the test. With `try_send` the extra mail is
+    /// dropped (Full) and the call returns promptly.
+    #[tokio::test]
+    async fn session_queue_full_drops_instead_of_blocking() {
+        let sessions = SessionRegistry::new();
+        let (a, mut rx_a) = SessionHandle::mint(&sessions);
+
+        // Fill the channel right up to capacity.
+        for _ in 0..crate::session::SESSION_CHANNEL_CAPACITY {
+            route_engine_mail(
+                &sessions,
+                engine_id(1),
+                mail(ClaudeAddress::Session(a.token), vec![0]),
+            )
+            .await;
+        }
+
+        // One more. Pre-fix: blocks forever. Post-fix: drops,
+        // returns promptly. The test's own timeout is the assertion.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            route_engine_mail(
+                &sessions,
+                engine_id(1),
+                mail(ClaudeAddress::Session(a.token), vec![99]),
+            ),
+        )
+        .await
+        .expect("route_engine_mail must not block when session queue is full");
+
+        // Consumer drains capacity + the dropped one *must not* be in there
+        // (last_tail is the final enqueued entry, which is the 256th, not 99).
+        let mut last_payload = None;
+        while let Ok(frame) = rx_a.try_recv() {
+            last_payload = Some(frame.payload);
+        }
+        assert_eq!(last_payload, Some(vec![0]));
+    }
+
+    /// Complementary: broadcast fan-out must not block on any one
+    /// slow session. If session A is full and B is empty, B still
+    /// receives the broadcast.
+    #[tokio::test]
+    async fn broadcast_skips_full_session_without_blocking_others() {
+        let sessions = SessionRegistry::new();
+        let (_a, mut rx_a) = SessionHandle::mint(&sessions);
+        let (_b, mut rx_b) = SessionHandle::mint(&sessions);
+
+        // Fill only session A.
+        for _ in 0..crate::session::SESSION_CHANNEL_CAPACITY {
+            rx_b.try_recv().ok();
+            route_engine_mail(
+                &sessions,
+                engine_id(1),
+                mail(ClaudeAddress::Broadcast, vec![0]),
+            )
+            .await;
+            // Drain B as we go so it stays empty; A fills up.
+            while rx_b.try_recv().is_ok() {}
+        }
+
+        // One more broadcast. A is full, must drop; B is empty, must
+        // receive. The fact that the call returns promptly is what the
+        // timeout wrapper verifies.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            route_engine_mail(
+                &sessions,
+                engine_id(1),
+                mail(ClaudeAddress::Broadcast, vec![77]),
+            ),
+        )
+        .await
+        .expect("broadcast must not block when one session is full");
+
+        let got_b = rx_b
+            .try_recv()
+            .expect("session B should have received the final broadcast");
+        assert_eq!(got_b.payload, vec![77]);
+        // A's queue is full of 0-payload sends from the fill loop; the
+        // final 77 was dropped. Drain and check we never see 77.
+        let mut saw_77 = false;
+        while let Ok(frame) = rx_a.try_recv() {
+            if frame.payload == vec![77] {
+                saw_77 = true;
+            }
+        }
+        assert!(
+            !saw_77,
+            "session A's queue was full; the final broadcast must not have landed"
+        );
     }
 }
