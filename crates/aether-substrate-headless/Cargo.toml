@@ -1,0 +1,18 @@
+[package]
+name = "aether-substrate-headless"
+version.workspace = true
+edition.workspace = true
+
+# ADR-0035 headless chassis binary. No winit, no wgpu — just the core
+# runtime + a std-timer tick driver + the hub client. Proves the
+# `Chassis` trait surface works for a non-GPU target; serves dedicated
+# game servers, CI test harnesses, and processing workloads that don't
+# want the desktop peripheral stack bolted on.
+
+[dependencies]
+aether-substrate-core = { path = "../aether-substrate-core" }
+aether-hub-protocol = { path = "../aether-hub-protocol" }
+aether-mail = { path = "../aether-mail" }
+aether-kinds = { path = "../aether-kinds" }
+tracing = "0.1"
+wasmtime = "30"

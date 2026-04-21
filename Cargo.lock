@@ -160,6 +160,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-substrate-headless"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-hub-protocol",
+ "aether-kinds",
+ "aether-mail",
+ "aether-substrate-core",
+ "tracing",
+ "wasmtime",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
