@@ -1,9 +1,10 @@
-//! Desktop-chassis control-plane handler. Registers against core's
-//! `ControlPlane::chassis_handler` fallback so the three desktop-only
-//! kinds (`capture_frame`, `set_window_mode`, `platform_info`) are
-//! handled here instead of in `aether-substrate-core`. Core's
-//! dispatch covers load/drop/replace/subscribe/unsubscribe only;
-//! anything else falls through to this module.
+//! Desktop chassis: `DesktopChassis` implementing the core `Chassis`
+//! trait (ADR-0035), plus the chassis-registered control-plane
+//! handler that owns the three desktop-only kinds (`capture_frame`,
+//! `set_window_mode`, `platform_info`). Core's dispatch covers
+//! load/drop/replace/subscribe/unsubscribe only; anything else falls
+//! through to the `chassis_control_handler` closure this module
+//! builds.
 //!
 //! The handler runs on a scheduler worker (same thread as every
 //! other sink handler), so the two operations that need winit/wgpu
@@ -12,13 +13,6 @@
 //! mail envelopes (pre-capture bundle push + after-capture bundle
 //! resolution) and routes through `CaptureQueue` to hand off to the
 //! render thread.
-//!
-//! Keeping this module here means the chassis trait is no longer a
-//! thing: each chassis registers its own control handler with the
-//! kinds it cares about. A headless chassis registers none and gets
-//! the drop-warn for unrecognised control kinds; a hub chassis will
-//! register its own routing/operator kinds without needing to agree
-//! on a trait shape.
 
 use std::sync::Arc;
 

@@ -6,20 +6,21 @@
 //! peripherals (window, GPU, TCP listener, event loop) live in the
 //! chassis crate that binds this as a dependency. See ADR-0035.
 //!
-//! Core does NOT define a `Chassis` trait. The chassis boundary is
-//! the control-plane fallback on `ControlPlane::chassis_handler`:
-//! core dispatches its own kinds (load/drop/replace/subscribe/
-//! unsubscribe) and falls through to the chassis-registered handler
-//! for everything else. Each chassis owns the control kinds it cares
-//! about (desktop registers capture_frame / set_window_mode /
-//! platform_info; headless registers nothing; hub chassis will
-//! register its own). No per-chassis no-op methods, no trait surface
-//! to keep in sync.
+//! The `Chassis` trait (lifecycle + capabilities) is universal but
+//! intentionally narrow: `const KIND`, `const CAPABILITIES`, and
+//! `fn run(self) -> Result<()>`. Chassis-specific control kinds
+//! (desktop's `capture_frame` / `set_window_mode` / `platform_info`,
+//! hub's future routing/operator kinds) ride through
+//! `ControlPlane::chassis_handler` — the fallback closure core's
+//! dispatch falls into for unknown kinds. That keeps any single
+//! chassis from having to implement `Unsupported` stubs for
+//! operations it doesn't support.
 //!
 //! Helpers for chassis-side handlers live under `control`:
 //! `decode_payload` and `resolve_bundle` are pub so chassis dispatch
 //! can validate mail bundles the same way core does.
 
+pub mod chassis;
 pub mod component;
 pub mod control;
 pub mod ctx;
@@ -34,6 +35,7 @@ pub mod registry;
 pub mod scheduler;
 pub mod sender_table;
 
+pub use chassis::{Chassis, ChassisCapabilities};
 pub use component::Component;
 pub use control::{AETHER_CONTROL, ChassisControlHandler, ControlPlane};
 pub use ctx::SubstrateCtx;

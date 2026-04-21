@@ -29,8 +29,9 @@ use aether_kinds::{
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
-    CaptureQueue, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, MailQueue,
-    Registry, Scheduler, SubstrateCtx, UserEvent, chassis_control_handler, host_fns,
+    CaptureQueue, Chassis, ChassisCapabilities, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound,
+    InputSubscribers, MailQueue, Registry, Scheduler, SubstrateCtx, UserEvent,
+    chassis_control_handler, host_fns,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -45,6 +46,50 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 const WORKERS: usize = 2;
 const LOG_EVERY_FRAMES: u64 = 120;
+
+/// ADR-0035 desktop chassis. Owns the winit event loop and the
+/// `App` that drives it. The `Chassis` trait's `run(self) -> Result`
+/// takes ownership and blocks until the event loop exits (normally
+/// on window close); shutdown telemetry rides inside `run` so every
+/// chassis type is responsible for its own exit log, matching each
+/// chassis's own loop-termination shape.
+struct DesktopChassis {
+    event_loop: EventLoop<UserEvent>,
+    app: App,
+    triangles_rendered: Arc<AtomicU64>,
+}
+
+impl Chassis for DesktopChassis {
+    const KIND: &'static str = "desktop";
+    const CAPABILITIES: ChassisCapabilities = ChassisCapabilities {
+        has_gpu: true,
+        has_window: true,
+        has_tcp_listener: false,
+    };
+
+    fn run(self) -> wasmtime::Result<()> {
+        let DesktopChassis {
+            event_loop,
+            mut app,
+            triangles_rendered,
+        } = self;
+        event_loop
+            .run_app(&mut app)
+            .map_err(|e| wasmtime::Error::msg(format!("event loop: {e}")))?;
+
+        let total = triangles_rendered.load(Ordering::Relaxed);
+        let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();
+        tracing::info!(
+            target: "aether_substrate::shutdown",
+            frames = app.frame,
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+            fps = app.frame as f64 / elapsed.as_secs_f64().max(0.001),
+            triangles = total,
+            "frame loop exited",
+        );
+        Ok(())
+    }
+}
 
 struct App {
     queue: Arc<MailQueue>,
@@ -795,7 +840,7 @@ fn main() -> wasmtime::Result<()> {
         },
         Err(_) => (WindowMode::Windowed, None),
     };
-    let mut app = App {
+    let app = App {
         queue,
         input_subscribers,
         broadcast_mbox,
@@ -820,19 +865,20 @@ fn main() -> wasmtime::Result<()> {
         _scheduler: scheduler,
     };
 
-    event_loop.run_app(&mut app)?;
-
-    let total = triangles_rendered.load(Ordering::Relaxed);
-    let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();
+    let chassis = DesktopChassis {
+        event_loop,
+        app,
+        triangles_rendered,
+    };
     tracing::info!(
-        target: "aether_substrate::shutdown",
-        frames = app.frame,
-        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
-        fps = app.frame as f64 / elapsed.as_secs_f64().max(0.001),
-        triangles = total,
-        "frame loop exited",
+        target: "aether_substrate::boot",
+        kind = DesktopChassis::KIND,
+        has_gpu = DesktopChassis::CAPABILITIES.has_gpu,
+        has_window = DesktopChassis::CAPABILITIES.has_window,
+        has_tcp_listener = DesktopChassis::CAPABILITIES.has_tcp_listener,
+        "chassis initialised",
     );
-    Ok(())
+    chassis.run()
 }
 
 #[cfg(test)]
