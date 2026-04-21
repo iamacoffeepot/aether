@@ -1,6 +1,6 @@
 # ADR-0038: Actor-per-component dispatch
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-21
 
 ## Context
