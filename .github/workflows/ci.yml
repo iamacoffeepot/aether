@@ -61,6 +61,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    # Normal run is ≤ 2 min; cap at 15 so a hang doesn't eat the
+    # default 6h quota before anyone notices. If this tripping
+    # becomes routine, lower it — routine failure is a signal.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -78,6 +82,12 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
+    # Normal run is ≤ 2 min; cap at 15 so a runner stall (hub mac
+    # CI flaked on 2026-04-21 against PR #164's commit, then
+    # re-ran clean on the same SHA) doesn't eat the default 6h
+    # quota. Long-term we'd rather treat repeat flakes as a real
+    # scheduler/concurrency signal than keep growing this bound.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
