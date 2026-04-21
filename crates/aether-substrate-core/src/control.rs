@@ -479,7 +479,6 @@ impl ControlPlane {
                 &entry,
                 old_component,
                 new_rx,
-                Arc::clone(&self.queue),
                 Arc::clone(&self.registry),
             );
             return ReplaceResult::Err { error: err };
@@ -507,7 +506,6 @@ impl ControlPlane {
                         &entry,
                         old_component,
                         new_rx,
-                        Arc::clone(&self.queue),
                         Arc::clone(&self.registry),
                     );
                     return ReplaceResult::Err {
@@ -527,7 +525,6 @@ impl ControlPlane {
                 &entry,
                 old_component,
                 new_rx,
-                Arc::clone(&self.queue),
                 Arc::clone(&self.registry),
             );
             return ReplaceResult::Err {
@@ -543,7 +540,6 @@ impl ControlPlane {
             &entry,
             new_component,
             new_rx,
-            Arc::clone(&self.queue),
             Arc::clone(&self.registry),
         );
 
@@ -552,11 +548,7 @@ impl ControlPlane {
     }
 
     fn insert_component(&self, id: MailboxId, component: Component) {
-        let entry = ComponentEntry::spawn(
-            component,
-            Arc::clone(&self.queue),
-            Arc::clone(&self.registry),
-        );
+        let entry = ComponentEntry::spawn(component, Arc::clone(&self.registry));
         self.components.write().unwrap().insert(id, Arc::new(entry));
     }
 
