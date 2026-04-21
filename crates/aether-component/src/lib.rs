@@ -322,7 +322,9 @@ impl InitCtx<'_> {
     /// so a future rename on either side of the pairing surfaces as a
     /// type error instead of silently skipping the subscribe.
     pub fn subscribe_input<K: Kind + 'static>(&self) {
-        use aether_kinds::{InputStream, Key, MouseButton, MouseMove, SubscribeInput, Tick};
+        use aether_kinds::{
+            InputStream, Key, MouseButton, MouseMove, SubscribeInput, Tick, WindowSize,
+        };
         let tid = TypeId::of::<K>();
         let stream = if tid == TypeId::of::<Tick>() {
             InputStream::Tick
@@ -332,6 +334,8 @@ impl InitCtx<'_> {
             InputStream::MouseMove
         } else if tid == TypeId::of::<MouseButton>() {
             InputStream::MouseButton
+        } else if tid == TypeId::of::<WindowSize>() {
+            InputStream::WindowSize
         } else {
             return;
         };

@@ -22,7 +22,7 @@ use std::time::Instant;
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, InputStream,
     Key, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult, SetWindowModeResult,
-    Tick, VideoMode, WindowInfo, WindowMode,
+    Tick, VideoMode, WindowInfo, WindowMode, WindowSize,
 };
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
@@ -104,6 +104,7 @@ struct App {
     kind_key: u64,
     kind_mouse_button: u64,
     kind_mouse_move: u64,
+    kind_window_size: u64,
     kind_frame_stats: u64,
     frame_vertices: Arc<Mutex<Vec<u8>>>,
     triangles_rendered: Arc<AtomicU64>,
@@ -421,6 +422,18 @@ impl App {
         }
     }
 
+    fn publish_window_size(&self, width: u32, height: u32) {
+        let subs = subscribers_for(&self.input_subscribers, InputStream::WindowSize);
+        if subs.is_empty() {
+            return;
+        }
+        let payload = encode(&WindowSize { width, height });
+        for mbox in subs {
+            self.queue
+                .push(Mail::new(mbox, self.kind_window_size, payload.clone(), 1));
+        }
+    }
+
     fn set_occluded(&mut self, occluded: bool, event_loop: &ActiveEventLoop) {
         if self.occluded == occluded {
             return;
@@ -490,8 +503,15 @@ impl ApplicationHandler<UserEvent> for App {
         let window = Arc::new(event_loop.create_window(attrs).expect("create_window"));
         self.gpu = Some(Gpu::new(Arc::clone(&window)));
         window.request_redraw();
+        let initial_size = window.inner_size();
         self.window = Some(window);
         self.started = Some(Instant::now());
+        // Publish the first WindowSize so subscribers that auto-wired
+        // at init time get a value before their first `MouseMove` or
+        // tick — without this they'd only learn the size on the first
+        // resize, which never happens for a user who just opens the
+        // window and clicks.
+        self.publish_window_size(initial_size.width, initial_size.height);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -504,6 +524,12 @@ impl ApplicationHandler<UserEvent> for App {
                 // Windows reports minimize as a zero-dimension resize;
                 // macOS uses Occluded. Treat both as "pause the loop".
                 self.set_occluded(size.width == 0 || size.height == 0, event_loop);
+                // Skip the zero-dim publish — a minimized window's
+                // size isn't useful to components and would break
+                // divide-by-width math downstream.
+                if size.width != 0 && size.height != 0 {
+                    self.publish_window_size(size.width, size.height);
+                }
             }
             WindowEvent::Occluded(occluded) => {
                 self.set_occluded(occluded, event_loop);
@@ -521,6 +547,19 @@ impl ApplicationHandler<UserEvent> for App {
                 for mbox in tick_subs {
                     self.queue
                         .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
+                }
+                // Re-pulse WindowSize every tick so components that
+                // subscribed *after* `resumed` fired (the common case
+                // — they load via MCP long after boot) pick up the
+                // current size within one frame. Steady-state cost is
+                // one tiny 8-byte payload per subscriber per tick;
+                // the subscriber-empty check keeps it to a hashmap
+                // read when nobody cares.
+                if let Some(window) = &self.window {
+                    let size = window.inner_size();
+                    if size.width != 0 && size.height != 0 {
+                        self.publish_window_size(size.width, size.height);
+                    }
                 }
                 self.queue.wait_idle();
                 let verts = std::mem::take(&mut *self.frame_vertices.lock().unwrap());
@@ -679,6 +718,10 @@ fn main() -> wasmtime::Result<()> {
         .registry
         .kind_id(MouseMove::NAME)
         .expect("MouseMove registered");
+    let kind_window_size = boot
+        .registry
+        .kind_id(WindowSize::NAME)
+        .expect("WindowSize registered");
     let kind_frame_stats = boot
         .registry
         .kind_id(FrameStats::NAME)
@@ -741,6 +784,7 @@ fn main() -> wasmtime::Result<()> {
         kind_key,
         kind_mouse_button,
         kind_mouse_move,
+        kind_window_size,
         kind_frame_stats,
         frame_vertices,
         triangles_rendered: Arc::clone(&triangles_rendered),

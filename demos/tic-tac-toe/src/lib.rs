@@ -141,6 +141,13 @@ pub struct TicTacToe {
 /// harmless "mailbox unknown" warn-drop.
 pub const CLIENT_OBSERVER: &str = "tic_tac_toe.client";
 
+/// Well-known mailbox name the authoritative server is conventionally
+/// loaded under. Callers that want to mail `PlayMove` / `Reset` to
+/// the server can resolve this name at init; matches the default
+/// `load_component` name the server advertises via its top-level
+/// rustdoc.
+pub const SERVER: &str = "tic_tac_toe";
+
 /// Authoritative tic-tac-toe server. Accepts `PlayMove` and `Reset`
 /// from any attached Claude session, replies to the sender with the
 /// outcome, and broadcasts the new `GameState` to

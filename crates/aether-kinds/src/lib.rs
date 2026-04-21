@@ -98,6 +98,33 @@ pub struct MouseMove {
     pub y: f32,
 }
 
+/// Current window size in physical pixels. Published by the desktop
+/// chassis on startup (once the window exists) and on every
+/// `WindowEvent::Resized` that isn't a zero-dimension minimize.
+/// Headless and hub chassis never publish — they have no window. A
+/// client that needs to map pixel-space input (e.g. `MouseMove`) to
+/// clip-space geometry subscribes to this kind and caches the latest
+/// value; the initial value arrives right after the component's
+/// auto-subscribe fires, without any request/reply dance.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_mail::Kind,
+    aether_mail::Schema,
+)]
+#[kind(name = "aether.window_size", input)]
+pub struct WindowSize {
+    pub width: u32,
+    pub height: u32,
+}
+
 /// A single clip-space vertex with per-vertex color. Matches the
 /// substrate's `VertexBufferLayout`: `(pos: vec2<f32>, color: vec3<f32>)`,
 /// 20 bytes on the wire. Not a kind on its own — only addressable as
@@ -357,6 +384,7 @@ mod control_plane {
         Key,
         MouseMove,
         MouseButton,
+        WindowSize,
     }
 
     /// `aether.control.subscribe_input` — add `mailbox` to the
