@@ -21,15 +21,17 @@ use crate::mail::MailboxId;
 
 /// Handler invoked when mail is delivered to a substrate-owned sink.
 /// Called on a scheduler worker thread; must be `Send + Sync`.
-/// Arguments: kind name (resolved by the dispatcher so sinks don't
-/// need a reverse lookup), the sending mailbox's registered name if
-/// the mail came from a component (`None` for substrate-core pushes
-/// with no sending mailbox, per ADR-0011), the originating Claude
-/// session token for hub-inbound mail (or `SessionToken::NIL` for
-/// substrate-local mail) per ADR-0008's reply-to-sender primitive,
-/// payload bytes, and the kind-implied count.
+/// Arguments: the kind's id (`K::ID`, ADR-0030 schema hash), the
+/// kind's registered name (resolved by the dispatcher for diagnostic
+/// logging — sinks that only match on id can ignore it), the sending
+/// mailbox's registered name if the mail came from a component
+/// (`None` for substrate-core pushes with no sending mailbox, per
+/// ADR-0011), the originating Claude session token for hub-inbound
+/// mail (or `SessionToken::NIL` for substrate-local mail) per
+/// ADR-0008's reply-to-sender primitive, payload bytes, and the
+/// kind-implied count.
 pub type SinkHandler =
-    Arc<dyn Fn(&str, Option<&str>, SessionToken, &[u8], u32) + Send + Sync + 'static>;
+    Arc<dyn Fn(u64, &str, Option<&str>, SessionToken, &[u8], u32) + Send + Sync + 'static>;
 
 /// What a given mailbox actually is. The registry records this so the
 /// scheduler can dispatch appropriately without a per-mail type check.
@@ -444,15 +446,16 @@ mod tests {
         let c2 = Arc::clone(&counter);
         let id = r.register_sink(
             "heartbeat",
-            Arc::new(move |_kind, _origin, _sender, _bytes, count| {
+            Arc::new(move |_kind_id, _kind, _origin, _sender, _bytes, count| {
                 c2.fetch_add(count, Ordering::SeqCst);
             }),
         );
         let Some(MailboxEntry::Sink(h)) = r.entry(id) else {
             panic!("expected sink")
         };
-        h("aether.tick", None, SessionToken::NIL, &[], 7);
-        h("aether.tick", Some("physics"), SessionToken::NIL, &[], 3);
+        // Test-side id is irrelevant — the handler ignores it.
+        h(0, "aether.tick", None, SessionToken::NIL, &[], 7);
+        h(0, "aether.tick", Some("physics"), SessionToken::NIL, &[], 3);
         assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
 
@@ -460,7 +463,7 @@ mod tests {
     fn mailbox_ids_are_name_derived() {
         let r = Registry::new();
         let a = r.register_component("a");
-        let b = r.register_sink("b", Arc::new(|_, _, _, _, _| {}));
+        let b = r.register_sink("b", Arc::new(|_, _, _, _, _, _| {}));
         let c = r.register_component("c");
         assert_eq!(a, MailboxId::from_name("a"));
         assert_eq!(b, MailboxId::from_name("b"));
@@ -491,7 +494,7 @@ mod tests {
     fn mailbox_name_reverse_lookup() {
         let r = Registry::new();
         let a = r.register_component("physics");
-        let b = r.register_sink("hub.claude.broadcast", Arc::new(|_, _, _, _, _| {}));
+        let b = r.register_sink("hub.claude.broadcast", Arc::new(|_, _, _, _, _, _| {}));
         assert_eq!(r.mailbox_name(a).as_deref(), Some("physics"));
         assert_eq!(r.mailbox_name(b).as_deref(), Some("hub.claude.broadcast"));
         assert!(r.mailbox_name(MailboxId(999)).is_none());
@@ -680,7 +683,7 @@ mod tests {
     #[test]
     fn drop_mailbox_rejects_sink_and_unknown_and_repeat() {
         let r = Registry::new();
-        let sink = r.register_sink("heartbeat", Arc::new(|_, _, _, _, _| {}));
+        let sink = r.register_sink("heartbeat", Arc::new(|_, _, _, _, _, _| {}));
         assert!(matches!(
             r.drop_mailbox(sink),
             Err(DropError::NotComponent { .. })

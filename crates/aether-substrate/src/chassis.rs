@@ -66,32 +66,34 @@ pub fn chassis_control_handler(
     queue: Arc<MailQueue>,
     outbound: Arc<HubOutbound>,
 ) -> ChassisControlHandler {
-    Arc::new(move |kind_name: &str, sender: SessionToken, bytes: &[u8]| {
-        if kind_name == CaptureFrame::NAME {
-            handle_capture_frame(
-                &proxy,
-                &capture_queue,
-                &registry,
-                &queue,
-                &outbound,
-                sender,
-                bytes,
-            );
-        } else if kind_name == PlatformInfo::NAME {
-            // Empty payload; forward the sender straight to the event
-            // loop and let it snapshot + reply on its own thread
-            // (winit monitor / scale-factor APIs require it).
-            let _ = proxy.send_event(UserEvent::PlatformInfo { sender });
-        } else if kind_name == SetWindowMode::NAME {
-            handle_set_window_mode(&proxy, &outbound, sender, bytes);
-        } else {
-            tracing::warn!(
-                target: "aether_substrate::chassis",
-                kind = %kind_name,
-                "desktop chassis has no handler for control kind — dropping",
-            );
-        }
-    })
+    Arc::new(
+        move |kind_id: u64, kind_name: &str, sender: SessionToken, bytes: &[u8]| {
+            if kind_id == CaptureFrame::ID {
+                handle_capture_frame(
+                    &proxy,
+                    &capture_queue,
+                    &registry,
+                    &queue,
+                    &outbound,
+                    sender,
+                    bytes,
+                );
+            } else if kind_id == PlatformInfo::ID {
+                // Empty payload; forward the sender straight to the
+                // event loop and let it snapshot + reply on its own
+                // thread (winit monitor / scale-factor APIs require it).
+                let _ = proxy.send_event(UserEvent::PlatformInfo { sender });
+            } else if kind_id == SetWindowMode::ID {
+                handle_set_window_mode(&proxy, &outbound, sender, bytes);
+            } else {
+                tracing::warn!(
+                    target: "aether_substrate::chassis",
+                    kind = %kind_name,
+                    "desktop chassis has no handler for control kind — dropping",
+                );
+            }
+        },
+    )
 }
 
 /// Two-phase capture request (pre-capture mail push + render handoff).

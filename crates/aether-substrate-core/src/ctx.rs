@@ -109,6 +109,7 @@ impl SubstrateCtx {
                 // `NIL` — component sends never have a reply-to target.
                 let origin = self.registry.mailbox_name(self.sender);
                 handler(
+                    kind,
                     &kind_name,
                     origin.as_deref(),
                     SessionToken::NIL,
