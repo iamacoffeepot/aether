@@ -1,108 +1,197 @@
-// Worker-pool scheduler. Shape borrowed from
-// `spikes/aether-mail-spike-host/src/scheduler.rs` per ADR-0004:
-// shared queue, per-component `Mutex`, frame-barrier counter, all
-// under `std` primitives only. The spike crate is not a dependency.
+// Actor-per-component dispatch (ADR-0038 Phase 1).
 //
-// Design notes carried from ADR-0004:
-//   - Single `Mutex<VecDeque<Mail>>` + `Condvar` as the shared queue.
-//     Work-stealing per-worker deques are the identified next-lever
-//     candidate but are not pulled here.
-//   - Sinks are NOT dispatched here. They are handled inline by
-//     `SubstrateCtx::send` when a component invokes the `send_mail`
-//     host function; they never enter the queue under normal use.
-//     If mail for a sink does end up in the queue (e.g. a future
-//     caller chooses to enqueue one), the worker handles it in line
-//     with the component path — lookup, call, decrement.
+// Each component owns a dedicated dispatcher thread that loops on an
+// mpsc inbox. The shared `MailQueue` is still pushed to by the existing
+// senders (host-fn `send_mail_p32`, platform input fan-out, hub-
+// delivered mail); a single router thread pops from it and forwards
+// each Mail to either the inline sink handler or the recipient
+// component's inbox. Per-mailbox FIFO is the channel's natural shape,
+// so the strand claim that the pre-ADR-0038 worker pool needed is gone
+// — along with `pending` / `frozen` / `strand_scheduled` / `parked`.
 //
-// ADR-0010 makes the component table runtime-mutable: load_component
-// inserts, drop_component removes, replace_component rebinds. Reads
-// take the shared lock (one per dispatch); writes are rare and held
-// briefly (insert/remove). The per-component `Mutex` serialises
-// deliver calls for a single component as before.
+// wait_idle semantics are preserved: the shared queue's `outstanding`
+// counter increments on `push` and decrements inside the dispatcher
+// thread after `deliver` returns (for Component recipients) or inside
+// the router after a sink call (for Sink recipients). A drop-warn'd
+// mail decrements immediately.
 //
-// ADR-0022 layers freeze-drain semantics on top of the table:
-// `replace_component` flips a per-entry `frozen` flag so workers park
-// new mail on the entry instead of dispatching, then waits for the
-// per-entry `pending` count of in-flight `deliver` calls to reach
-// zero before swapping. The swap step (and the parked-mail flush) is
-// driven by `ControlPlane::handle_replace`; this module just owns
-// the per-entry state and the worker dispatch path that respects it.
+// Shutdown: `Scheduler::Drop` initiates shutdown on the queue, waking
+// the router, and joins it. Per-component dispatcher threads exit when
+// their `ComponentEntry` Arc drops (the `Sender` drops with it, the
+// inbox closes, `recv()` returns `None`, the thread returns the
+// `Component`). The owning layer (chassis / test) is responsible for
+// dropping the `ComponentTable` if it wants dispatchers to exit.
 //
-// Issue 157 (2026-04-20): the original worker loop popped mail in
-// FIFO order from the main queue and serialised delivery through
-// `Mutex<Component>`. That preserved "one deliver at a time per
-// component" but NOT "deliver in pop order": mutex acquisition is
-// non-FIFO under contention, so two workers each popping sequential
-// mails for the same mailbox could invert the deliver order (the
-// `_row_/_col_` scramble the tic-tac-toe batch smoke caught). The fix
-// is the per-mailbox strand: `ComponentEntry.strand_scheduled` is a
-// claim flag the worker sets under the queue lock during the pop
-// scan, and the strand owner drains every same-recipient mail still
-// in the queue before releasing. Different mailboxes still dispatch
-// in parallel; only same-mailbox mail serialises, and now it
-// serialises in pop (== push) order.
+// Phase 2 will retire the shared queue entirely: senders push directly
+// to per-component inboxes, the router thread goes away, and
+// `MailQueue::outstanding` / `wait_idle` are replaced by per-mailbox
+// drain primitives.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 
-use crate::component::Component;
+use crate::component::{Component, DISPATCH_UNKNOWN_KIND};
 use crate::mail::{Mail, MailboxId};
 use crate::queue::MailQueue;
 use crate::registry::{MailboxEntry, Registry};
 
-/// Per-mailbox scheduler state. Beyond the wasmtime instance itself we
-/// track ADR-0022's freeze-drain bookkeeping: `pending` counts mail
-/// currently being delivered to this component, `frozen` halts dispatch
-/// for replace's quiescence window, and `parked` holds mail popped
-/// while frozen so it can be replayed against whichever component is
-/// bound after the swap (new instance on success, old on timeout).
+/// Per-mailbox scheduler state. The `Component` (and its wasmtime
+/// `Store`) lives on the dispatcher thread's stack; the host side only
+/// sees the `Sender` (for forwarding mail) and the `JoinHandle` (for
+/// recovering the `Component` on teardown).
+///
+/// Both are behind `Mutex<Option<_>>` so `handle_replace` can swap
+/// them in-place without moving the `ComponentEntry` out of the
+/// scheduler table: the entry stays alive through a replace, keeping
+/// the `MailboxId` continuously addressable, and mail sent during the
+/// swap buffers in the new inbox until the new dispatcher starts
+/// consuming.
 pub struct ComponentEntry {
-    pub component: Mutex<Component>,
-    pub pending: AtomicU32,
-    pub frozen: AtomicBool,
-    pub parked: Mutex<VecDeque<Mail>>,
-    /// Per-mailbox strand lock. A worker that pops mail for this
-    /// component flips this to `true` before leaving the queue's scan
-    /// path; other workers whose scan lands on mail for the same
-    /// recipient treat the strand as unavailable and keep scanning.
-    /// The strand owner drains every same-recipient mail in the queue
-    /// before flipping this back to `false`. Net effect: FIFO per
-    /// mailbox even across multiple workers, without serialising the
-    /// whole scheduler.
-    ///
-    /// Preserves the invariant the old `Mutex<Component>`-only design
-    /// tried to rely on: that `pop_blocking` FIFO order equals deliver
-    /// order for a given mailbox. The `Mutex<Component>` alone did not
-    /// preserve it — mutex acquisition is not FIFO under contention, so
-    /// two workers popping mail for the same mailbox could invert the
-    /// deliver order. See issue 157.
-    pub strand_scheduled: AtomicBool,
+    sender: Mutex<Option<Sender<Mail>>>,
+    handle: Mutex<Option<JoinHandle<Component>>>,
 }
 
 impl ComponentEntry {
-    pub fn new(component: Component) -> Self {
+    /// Spawn a dispatcher thread for `component`, wire it to a fresh
+    /// mpsc inbox, and return the entry. `queue` is the shared
+    /// `MailQueue`; the dispatcher calls `mark_completed` on it after
+    /// each delivery so `wait_idle` still reflects end-to-end
+    /// completion.
+    pub fn spawn(component: Component, queue: Arc<MailQueue>, registry: Arc<Registry>) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::Builder::new()
+            .name("aether-component-dispatch".into())
+            .spawn(move || dispatcher_loop(component, rx, queue, registry))
+            .expect("spawn component dispatcher");
         Self {
-            component: Mutex::new(component),
-            pending: AtomicU32::new(0),
-            frozen: AtomicBool::new(false),
-            parked: Mutex::new(VecDeque::new()),
-            strand_scheduled: AtomicBool::new(false),
+            sender: Mutex::new(Some(tx)),
+            handle: Mutex::new(Some(handle)),
+        }
+    }
+
+    /// Forward `mail` to this component's inbox. Returns `false` if
+    /// the inbox is closed (caller should warn-and-drop).
+    pub fn send(&self, mail: Mail) -> bool {
+        match self.sender.lock().unwrap().as_ref() {
+            Some(tx) => tx.send(mail).is_ok(),
+            None => false,
         }
     }
 }
 
+/// Close the inbox on `entry` and block until the dispatcher thread
+/// returns the `Component`. The caller must hold the last external
+/// strong reference to `entry`; short-lived Arc clones (e.g. the
+/// router mid-forward) will drop on their own. Dropping the last
+/// external strong ref through this function drops the `Sender`
+/// (pulled out via `.take()` below), which closes the channel so the
+/// dispatcher's `recv()` returns `None` after draining any queued mail.
+///
+/// Panics if the handle / sender have already been taken (a prior
+/// `close_and_join` or `splice_inbox` consumed them).
+pub fn close_and_join(entry: Arc<ComponentEntry>) -> Component {
+    // Drop the Sender so the dispatcher sees recv() == None after it
+    // drains any queued mail.
+    let _ = entry
+        .sender
+        .lock()
+        .unwrap()
+        .take()
+        .expect("component sender already taken");
+    let handle = entry
+        .handle
+        .lock()
+        .unwrap()
+        .take()
+        .expect("component dispatcher already joined");
+    drop(entry);
+    handle.join().expect("component dispatcher panicked")
+}
+
+/// Splice a new inbox onto `entry`: creates a fresh `(Sender,
+/// Receiver)` pair, swaps the entry's `Sender` for the new one (so
+/// future mail goes to the new inbox), drops the old `Sender` (closing
+/// the old channel), joins the old dispatcher (returning the old
+/// `Component` and the new `Receiver`), and leaves the caller to
+/// decide what dispatcher to wire onto the new inbox.
+///
+/// Used by `handle_replace` (ADR-0022 drain invariant): mail sent
+/// between the `splice_inbox` return and the new dispatcher's spawn
+/// buffers in the new `Receiver`, preserving FIFO across the swap.
+pub fn splice_inbox(entry: &Arc<ComponentEntry>) -> (Component, Receiver<Mail>) {
+    let (new_tx, new_rx) = mpsc::channel();
+    let old_tx = entry
+        .sender
+        .lock()
+        .unwrap()
+        .replace(new_tx)
+        .expect("component sender already taken");
+    drop(old_tx);
+    let old_handle = entry
+        .handle
+        .lock()
+        .unwrap()
+        .take()
+        .expect("component dispatcher already joined");
+    let old_component = old_handle.join().expect("component dispatcher panicked");
+    (old_component, new_rx)
+}
+
+/// Spawn a fresh dispatcher onto `entry`'s current inbox (`rx`) with
+/// `component`, and record the new `JoinHandle`. Pairs with
+/// `splice_inbox` to complete a replace (or, on replace failure, to
+/// restore the old `Component` onto the post-splice inbox).
+pub fn spawn_dispatcher_on(
+    entry: &Arc<ComponentEntry>,
+    component: Component,
+    rx: Receiver<Mail>,
+    queue: Arc<MailQueue>,
+    registry: Arc<Registry>,
+) {
+    let handle = thread::Builder::new()
+        .name("aether-component-dispatch".into())
+        .spawn(move || dispatcher_loop(component, rx, queue, registry))
+        .expect("spawn component dispatcher");
+    let prev = entry.handle.lock().unwrap().replace(handle);
+    debug_assert!(prev.is_none(), "entry handle slot must be empty");
+}
+
+fn dispatcher_loop(
+    mut component: Component,
+    rx: Receiver<Mail>,
+    queue: Arc<MailQueue>,
+    registry: Arc<Registry>,
+) -> Component {
+    while let Ok(mail) = rx.recv() {
+        let rc = component.deliver(&mail).expect("component.deliver failed");
+        if rc == DISPATCH_UNKNOWN_KIND {
+            let kind_name = registry
+                .kind_name(mail.kind)
+                .unwrap_or_else(|| format!("kind#{:#x}", mail.kind));
+            tracing::warn!(
+                target: "aether_substrate::scheduler",
+                mailbox = ?mail.recipient,
+                kind = %kind_name,
+                "component has no handler for mail kind (ADR-0033 strict receiver); dropped",
+            );
+        }
+        queue.mark_completed();
+    }
+    component
+}
+
 /// Shared, runtime-mutable table of bound components. Cloned into the
-/// scheduler's workers and into the ADR-0010 load handler so both read
-/// and write through the same `RwLock`. Values are `Arc`-shared so the
-/// freeze-drain path in `replace_component` can hold a long-lived
-/// reference to one entry without keeping the table read lock open.
+/// scheduler's router and into the ADR-0010 load handler so both read
+/// and write through the same `RwLock`. Values are `Arc`-shared so
+/// short-lived clones (e.g. in the router's forward path) can outlive
+/// a concurrent `remove` without racing on `ComponentEntry`'s `Drop`.
 pub type ComponentTable = Arc<RwLock<HashMap<MailboxId, Arc<ComponentEntry>>>>;
 
-/// Owned by the scheduler, shared with every worker. Separate from the
-/// public `Scheduler` handle so workers can keep running even while the
-/// owner thread is asleep waiting on a frame drain.
+/// Owned by the scheduler, shared with the router. Separate from the
+/// public `Scheduler` handle so the router can keep running while the
+/// owner thread is asleep on a `wait_idle`.
 struct WorkerContext {
     queue: Arc<MailQueue>,
     registry: Arc<Registry>,
@@ -111,40 +200,35 @@ struct WorkerContext {
 
 pub struct Scheduler {
     ctx: Arc<WorkerContext>,
-    workers: Vec<JoinHandle<()>>,
+    router: Option<JoinHandle<()>>,
 }
 
 impl Scheduler {
-    /// Build a scheduler over `components` keyed by `MailboxId`. The
-    /// registry is the same one every component's `SubstrateCtx` holds
-    /// — it defines what mailbox names resolve to what entries.
-    pub fn new(
-        registry: Arc<Registry>,
-        queue: Arc<MailQueue>,
-        components: HashMap<MailboxId, Component>,
-        k_workers: usize,
-    ) -> Self {
-        assert!(k_workers >= 1, "need at least one worker");
-
-        let components: ComponentTable = Arc::new(RwLock::new(
-            components
-                .into_iter()
-                .map(|(id, c)| (id, Arc::new(ComponentEntry::new(c))))
-                .collect(),
-        ));
+    /// Build a scheduler over an empty component table. Spawns a
+    /// single router thread that pops from `queue` and forwards each
+    /// mail to the appropriate per-component inbox or the inline sink
+    /// handler.
+    ///
+    /// The `_k_workers` parameter is retained for boot-config
+    /// compatibility (ADR-0004 sized the worker pool) but is ignored
+    /// under ADR-0038: dispatch parallelism is one thread per
+    /// component, not a shared pool.
+    pub fn new(registry: Arc<Registry>, queue: Arc<MailQueue>, _k_workers: usize) -> Self {
+        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
         let ctx = Arc::new(WorkerContext {
             queue,
             registry,
             components,
         });
-
-        let mut workers = Vec::with_capacity(k_workers);
-        for _ in 0..k_workers {
-            let ctx = Arc::clone(&ctx);
-            workers.push(thread::spawn(move || worker_loop(ctx)));
+        let ctx_r = Arc::clone(&ctx);
+        let router = thread::Builder::new()
+            .name("aether-mail-router".into())
+            .spawn(move || router_loop(ctx_r))
+            .expect("spawn router");
+        Self {
+            ctx,
+            router: Some(router),
         }
-
-        Self { ctx, workers }
     }
 
     pub fn queue(&self) -> &Arc<MailQueue> {
@@ -163,101 +247,53 @@ impl Scheduler {
         &self.ctx.components
     }
 
-    /// Insert a freshly instantiated component under `id`. Called by
-    /// the load handler once instantiation succeeds and the mailbox
-    /// id has been assigned. Silently replaces any existing component
-    /// at `id` — replacement is an ADR-0010 primitive in its own
-    /// right, handled by `ControlPlane::handle_replace` (ADR-0022).
+    /// Spawn a dispatcher thread for `component` and register the
+    /// entry under `id`. Silently replaces any existing component at
+    /// `id` — replacement is an ADR-0010 primitive in its own right,
+    /// handled by `ControlPlane::handle_replace`.
     pub fn add_component(&self, id: MailboxId, component: Component) {
+        let entry = ComponentEntry::spawn(
+            component,
+            Arc::clone(&self.ctx.queue),
+            Arc::clone(&self.ctx.registry),
+        );
         self.ctx
             .components
             .write()
             .unwrap()
-            .insert(id, Arc::new(ComponentEntry::new(component)));
+            .insert(id, Arc::new(entry));
     }
 }
 
 impl Drop for Scheduler {
     fn drop(&mut self) {
         self.ctx.queue.initiate_shutdown();
-        for h in self.workers.drain(..) {
+        if let Some(h) = self.router.take() {
             let _ = h.join();
         }
+        // Per-component dispatcher threads exit when their
+        // `ComponentEntry` Arc drops (the `Sender` drops with it, the
+        // inbox closes, `recv()` returns `None`). Explicit join
+        // happens in `handle_drop` / `handle_replace`; on scheduler
+        // drop we let the owning layer (chassis / test) dispose of
+        // the `ComponentTable`.
     }
 }
 
-fn worker_loop(ctx: Arc<WorkerContext>) {
-    loop {
-        // Pick the next runnable mail. For Component recipients,
-        // `pop_blocking_if`'s predicate tries to claim the per-mailbox
-        // strand atomically; the pop only commits if the claim
-        // succeeds. Sinks, dropped/unknown recipients, and dangling
-        // component ids (registered but no `ComponentEntry`) pop
-        // unconditionally.
-        let claimed_entry = std::sync::Mutex::new(None::<Arc<ComponentEntry>>);
-        let Some(mail) = ctx.queue.pop_blocking_if(|m| {
-            match ctx.registry.entry(m.recipient) {
-                Some(MailboxEntry::Component) => {
-                    let entry = ctx
-                        .components
-                        .read()
-                        .unwrap()
-                        .get(&m.recipient)
-                        .map(Arc::clone);
-                    match entry {
-                        Some(e) => {
-                            // `swap(true)` returns the previous value.
-                            // If it was `false` we just claimed the
-                            // strand; otherwise another worker owns it
-                            // and we keep scanning.
-                            if !e.strand_scheduled.swap(true, Ordering::AcqRel) {
-                                *claimed_entry.lock().unwrap() = Some(e);
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                        // Dangling id: warn-drop path below handles it;
-                        // nothing to serialise on.
-                        None => true,
-                    }
-                }
-                // Sinks are stateless and safe under concurrent calls;
-                // dropped/unknown mail just warn-drops.
-                _ => true,
-            }
-        }) else {
-            return;
-        };
-
-        // Capture the recipient before `mail` is consumed — we need
-        // it to drain same-recipient follow-ups below.
-        let recipient = mail.recipient;
-        let strand = claimed_entry.lock().unwrap().take();
-        dispatch_mail(&ctx, mail, strand.as_ref());
-
-        // If we owned a strand, drain any further mail for the same
-        // recipient before releasing it. This is what preserves FIFO
-        // per-mailbox: same-recipient mail that arrived between the
-        // first pop and this drain goes through us, not through a
-        // racing worker.
-        if let Some(entry) = strand {
-            while let Some(next) = ctx.queue.try_pop_for_recipient(recipient) {
-                dispatch_mail(&ctx, next, Some(&entry));
-            }
-            entry.strand_scheduled.store(false, Ordering::Release);
-            // Wake any worker that skipped this recipient during the
-            // drain so it can re-scan the queue.
-            ctx.queue.notify_waiters();
-        }
+fn router_loop(ctx: Arc<WorkerContext>) {
+    while let Some(mail) = ctx.queue.pop_blocking() {
+        dispatch_mail(&ctx, mail);
     }
 }
 
-/// Deliver one mail to its recipient. Strand claim (if any) is the
-/// caller's job — this function only dispatches. `strand` carries the
-/// already-claimed `ComponentEntry` for Component recipients so we
-/// don't hit the components table lookup twice.
-fn dispatch_mail(ctx: &Arc<WorkerContext>, mail: Mail, strand: Option<&Arc<ComponentEntry>>) {
+/// Route one mail. Sinks run inline on the router thread (consistent
+/// with the pre-ADR-0038 behaviour for mail that arrived at a sink via
+/// the queue, e.g. FrameStats). Component-bound mail is forwarded to
+/// the recipient's inbox; the per-component dispatcher calls
+/// `mark_completed` after `deliver` returns. Dropped / unknown
+/// recipients are discarded with a warn-log and immediate
+/// `mark_completed`.
+fn dispatch_mail(ctx: &Arc<WorkerContext>, mail: Mail) {
     let recipient = mail.recipient;
     match ctx.registry.entry(recipient) {
         Some(MailboxEntry::Sink(handler)) => {
@@ -278,49 +314,28 @@ fn dispatch_mail(ctx: &Arc<WorkerContext>, mail: Mail, strand: Option<&Arc<Compo
             ctx.queue.mark_completed();
         }
         Some(MailboxEntry::Component) => {
-            let entry = match strand {
-                Some(e) => Some(Arc::clone(e)),
-                None => ctx
-                    .components
-                    .read()
-                    .unwrap()
-                    .get(&recipient)
-                    .map(Arc::clone),
-            };
+            let entry = ctx
+                .components
+                .read()
+                .unwrap()
+                .get(&recipient)
+                .map(Arc::clone);
             match entry {
                 Some(entry) => {
-                    // ADR-0022 freeze-drain: while frozen, mail is
-                    // parked on the entry without entering the pending
-                    // count. handle_replace flushes the parked queue
-                    // under the write lock once the swap (or timeout)
-                    // resolves. The strand claim we made above stays
-                    // live — the freeze path coordinates with us via
-                    // `pending` (which we never incremented for parked
-                    // mail), not via `strand_scheduled`.
-                    if entry.frozen.load(Ordering::Acquire) {
-                        entry.parked.lock().unwrap().push_back(mail);
-                        ctx.queue.mark_completed();
-                        return;
-                    }
-                    entry.pending.fetch_add(1, Ordering::AcqRel);
-                    let rc = {
-                        let mut c = entry.component.lock().unwrap();
-                        c.deliver(&mail).expect("component.deliver failed")
-                    };
-                    entry.pending.fetch_sub(1, Ordering::AcqRel);
-                    if rc == crate::component::DISPATCH_UNKNOWN_KIND {
-                        let kind_name = ctx
-                            .registry
-                            .kind_name(mail.kind)
-                            .unwrap_or_else(|| format!("kind#{:#x}", mail.kind));
+                    if !entry.send(mail) {
+                        // Inbox closed — the component was dropped
+                        // between our registry check and our send.
+                        // Drop-warn and complete; matches the
+                        // Dropped-mailbox branch below in observable
+                        // behaviour.
                         tracing::warn!(
                             target: "aether_substrate::scheduler",
                             mailbox = ?recipient,
-                            kind = %kind_name,
-                            "component has no handler for mail kind (ADR-0033 strict receiver); dropped",
+                            "component inbox closed; mail discarded",
                         );
+                        ctx.queue.mark_completed();
                     }
-                    ctx.queue.mark_completed();
+                    // Happy path: dispatcher owns mark_completed.
                 }
                 None => {
                     tracing::warn!(

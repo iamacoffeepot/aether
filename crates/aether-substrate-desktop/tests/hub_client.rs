@@ -3,7 +3,6 @@
 // scripted exchange, and asserts against the substrate's local
 // registry/queue state.
 
-use std::collections::HashMap;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::{Condvar, Mutex};
@@ -120,7 +119,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     registry.register_kind("aether.tick");
     let queue = Arc::new(MailQueue::new());
 
-    let _sched = Scheduler::new(Arc::clone(&registry), Arc::clone(&queue), HashMap::new(), 1);
+    let _sched = Scheduler::new(Arc::clone(&registry), Arc::clone(&queue), 1);
 
     let client_handle = thread::spawn({
         let registry = Arc::clone(&registry);
