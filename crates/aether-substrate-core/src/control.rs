@@ -30,21 +30,18 @@ use std::time::{Duration, Instant};
 
 use aether_hub_protocol::{EngineToHub, KindDescriptor};
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, DropComponent, DropResult, LoadComponent, LoadResult,
-    MailEnvelope, PlatformInfo, ReplaceComponent, ReplaceResult, SetWindowMode,
-    SetWindowModeResult, SubscribeInput, SubscribeInputResult, UnsubscribeInput,
+    DropComponent, DropResult, LoadComponent, LoadResult, MailEnvelope, ReplaceComponent,
+    ReplaceResult, SubscribeInput, SubscribeInputResult, UnsubscribeInput,
 };
 use aether_mail::Kind;
 use wasmtime::{Engine, Linker, Module};
 
-use crate::capture::{CaptureQueue, PendingCapture};
 use crate::component::Component;
 use crate::ctx::SubstrateCtx;
 use crate::hub_client::HubOutbound;
 use crate::input::{self, InputSubscribers};
 use crate::kind_manifest;
 use crate::mail::{Mail, MailboxId};
-use crate::platform_info::{PlatformInfoNotifier, WindowModeNotifier};
 use crate::queue::MailQueue;
 use crate::registry::{Registry, SinkHandler};
 use crate::scheduler::ComponentTable;
@@ -69,7 +66,8 @@ const DRAIN_POLL_INTERVAL: Duration = Duration::from_micros(200);
 /// Postcard-decode a control-plane payload with the one error-message
 /// shape every handler uses. Handlers wrap the `String` in their own
 /// `*Result::Err` variant — the shape is uniform, the enum differs.
-fn decode_payload<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+/// `pub` so chassis-side control handlers can reuse the same shape.
+pub fn decode_payload<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     postcard::from_bytes(bytes).map_err(|e| format!("postcard decode failed: {e}"))
 }
 
@@ -154,8 +152,9 @@ fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(),
 /// Resolve every envelope in `bundle` against the registry, returning
 /// fully-typed `Mail`s. On any resolve failure, return a formatted
 /// error string tagged with `label` (e.g. `"capture bundle"`); the
-/// caller surfaces it as a `CaptureFrameResult::Err`.
-fn resolve_bundle(
+/// caller surfaces it as a `CaptureFrameResult::Err`. `pub` so chassis-
+/// side handlers can reuse the same mail-envelope validation.
+pub fn resolve_bundle(
     registry: &Registry,
     bundle: &[MailEnvelope],
     label: &str,
@@ -193,19 +192,6 @@ pub struct ControlPlane {
     pub queue: Arc<MailQueue>,
     pub outbound: Arc<HubOutbound>,
     pub components: ComponentTable,
-    /// Handoff slot for `aether.control.capture_frame`. The handler
-    /// pushes a pending request here; the render thread pulls it on
-    /// the next frame and fulfils the reply.
-    pub capture_queue: CaptureQueue,
-    /// Fire-and-forget notifier for `aether.control.platform_info`.
-    /// The handler just hands the sender over; the event-loop thread
-    /// snapshots + replies. Tests use `NoopPlatformInfoNotifier`.
-    pub platform_info_notifier: Arc<dyn PlatformInfoNotifier>,
-    /// Fire-and-forget notifier for `aether.control.set_window_mode`.
-    /// Carries the requested mode + optional Windowed size; the
-    /// event-loop thread resolves fullscreen modes, applies the
-    /// change, and replies with the resulting state.
-    pub window_mode_notifier: Arc<dyn WindowModeNotifier>,
     /// ADR-0021 per-stream subscriber sets, shared with the platform
     /// thread. The control plane mutates this table on subscribe /
     /// unsubscribe / drop; the platform thread reads it to fan out
@@ -214,7 +200,24 @@ pub struct ControlPlane {
     /// Monotonic counter for default component names. Only consulted
     /// when the load payload omits `name`.
     pub default_name_counter: Arc<AtomicU64>,
+    /// ADR-0035 chassis fallback. Core's dispatch handles only the
+    /// core-concern kinds (load/drop/replace/subscribe/unsubscribe);
+    /// anything else falls through to this handler so the chassis
+    /// can register its own control-plane surface (capture_frame,
+    /// set_window_mode, platform_info on desktop; whatever each
+    /// future chassis wants). `None` routes unknown kinds to the
+    /// drop-warn log — fine for tests and the hub chassis that
+    /// inherits nothing peripheral.
+    pub chassis_handler: Option<ChassisControlHandler>,
 }
+
+/// Closure contract for a chassis-registered control-plane handler.
+/// Called with `(kind_name, sender, bytes)` for every mail arriving
+/// at `aether.control` that core's ControlPlane doesn't recognise.
+/// The chassis is responsible for decoding, replying (via the
+/// outbound it constructed with), and any mail orchestration.
+pub type ChassisControlHandler =
+    Arc<dyn Fn(&str, aether_hub_protocol::SessionToken, &[u8]) + Send + Sync>;
 
 impl ControlPlane {
     /// Build the sink handler that should be registered against the
@@ -249,20 +252,13 @@ impl ControlPlane {
         } else if kind_name == UnsubscribeInput::NAME {
             let result = self.handle_unsubscribe(bytes);
             self.outbound.send_reply(sender, &result);
-        } else if kind_name == CaptureFrame::NAME {
-            self.handle_capture_frame(sender, bytes);
-        } else if kind_name == PlatformInfo::NAME {
-            // Empty payload; forward the sender straight to the event
-            // loop and let it snapshot + reply on its own thread
-            // (winit monitor / scale-factor APIs require it).
-            self.platform_info_notifier.notify(sender);
-        } else if kind_name == SetWindowMode::NAME {
-            self.handle_set_window_mode(sender, bytes);
+        } else if let Some(handler) = &self.chassis_handler {
+            handler(kind_name, sender, bytes);
         } else {
             tracing::warn!(
                 target: "aether_substrate::control",
                 kind = %kind_name,
-                "{AETHER_CONTROL} received unrecognised kind — dropping",
+                "{AETHER_CONTROL} received unrecognised kind (no chassis handler registered) — dropping",
             );
         }
     }
@@ -426,101 +422,6 @@ impl ControlPlane {
             set.remove(&id);
         }
         SubscribeInputResult::Ok
-    }
-
-    /// Handler for `aether.control.capture_frame`. Two phases:
-    ///
-    /// 1. Resolve every envelope in *both* the `mails` (pre-capture)
-    ///    and `after_mails` (post-capture cleanup) bundles against
-    ///    the registry. If *any* envelope fails, abort the whole
-    ///    request: no mail is pushed, no capture is requested, reply
-    ///    is `Err`. Atomicity guarantee covers both bundles.
-    /// 2. Push every resolved pre-capture mail onto the queue, then
-    ///    request the capture with the resolved `after_mails` stashed
-    ///    on the `PendingCapture`. The render thread's existing
-    ///    `queue.wait_idle()` → `take capture` ordering ensures the
-    ///    captured frame reflects the pre-capture bundle's effects;
-    ///    after readback, the render thread pushes `after_mails`
-    ///    before replying.
-    ///
-    /// The capture itself happens on the render thread (where the
-    /// wgpu device lives), so this handler returns without replying
-    /// on the happy path; the render thread fulfils via `outbound`.
-    /// `Err` replies (decode failure, envelope-resolve failure,
-    /// capture-already-pending) are sent inline.
-    fn handle_capture_frame(&self, sender: aether_hub_protocol::SessionToken, bytes: &[u8]) {
-        let payload: CaptureFrame = match decode_payload(bytes) {
-            Ok(p) => p,
-            Err(error) => {
-                self.outbound
-                    .send_reply(sender, &CaptureFrameResult::Err { error });
-                return;
-            }
-        };
-
-        // Phase 1: resolve every envelope in both bundles before
-        // pushing anything or requesting a capture. Any failure
-        // aborts the whole request so a partial dispatch can't leak
-        // into the next frame — and so a bad `after_mails` bundle
-        // can't slip through after the pre-capture mail has already
-        // been queued.
-        let pre = match resolve_bundle(&self.registry, &payload.mails, "capture bundle") {
-            Ok(v) => v,
-            Err(e) => {
-                self.outbound
-                    .send_reply(sender, &CaptureFrameResult::Err { error: e });
-                return;
-            }
-        };
-        let after =
-            match resolve_bundle(&self.registry, &payload.after_mails, "capture after bundle") {
-                Ok(v) => v,
-                Err(e) => {
-                    self.outbound
-                        .send_reply(sender, &CaptureFrameResult::Err { error: e });
-                    return;
-                }
-            };
-
-        // Phase 2: push every resolved pre-capture mail, then request
-        // the capture. Order matters on the wire but workers dispatch
-        // concurrently; `queue.wait_idle()` on the render thread is
-        // what enforces "capture after all mail processed".
-        for mail in pre {
-            self.queue.push(mail);
-        }
-
-        let pending = PendingCapture {
-            sender,
-            after_mails: after,
-        };
-        if !self.capture_queue.request(pending) {
-            let result = CaptureFrameResult::Err {
-                error: "capture already pending; try again once the in-flight \
-                    request completes"
-                    .to_owned(),
-            };
-            self.outbound.send_reply(sender, &result);
-        }
-        // Else: render thread will reply on its next redraw.
-    }
-
-    /// Handler for `aether.control.set_window_mode`. Decodes the
-    /// request, then hands it to the event-loop thread via
-    /// `window_mode_notifier` — the event loop resolves video modes,
-    /// applies the change, and replies on its own. Decode failures
-    /// reply inline so the caller doesn't hang on a malformed body.
-    fn handle_set_window_mode(&self, sender: aether_hub_protocol::SessionToken, bytes: &[u8]) {
-        let payload: SetWindowMode = match decode_payload(bytes) {
-            Ok(p) => p,
-            Err(error) => {
-                self.outbound
-                    .send_reply(sender, &SetWindowModeResult::Err { error });
-                return;
-            }
-        };
-        self.window_mode_notifier
-            .request(sender, payload.mode, payload.width, payload.height);
     }
 
     fn handle_replace(&self, bytes: &[u8]) -> ReplaceResult {
@@ -876,9 +777,7 @@ mod tests {
             components,
             input_subscribers: input::new_subscribers(),
             default_name_counter: Arc::new(AtomicU64::new(0)),
-            capture_queue: CaptureQueue::new(),
-            platform_info_notifier: Arc::new(crate::platform_info::NoopPlatformInfoNotifier),
-            window_mode_notifier: Arc::new(crate::platform_info::NoopWindowModeNotifier),
+            chassis_handler: None,
         }
     }
 

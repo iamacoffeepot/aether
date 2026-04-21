@@ -1,0 +1,30 @@
+[package]
+name = "aether-substrate-core"
+version.workspace = true
+edition.workspace = true
+
+# ADR-0035 Phase 1: runtime (wasmtime host, mail scheduler, kind
+# manifest, registry, control-plane dispatch, hub client) factored
+# out of `aether-substrate` so the same runtime can power multiple
+# chassis (desktop today, headless + hub incoming). Core deliberately
+# excludes winit, wgpu, png, pollster — those live in whichever
+# chassis crate actually drives a GPU or window.
+
+[dependencies]
+aether-hub-protocol = { path = "../aether-hub-protocol" }
+aether-mail = { path = "../aether-mail" }
+aether-kinds = { path = "../aether-kinds" }
+bytemuck = "1.19"
+postcard = { version = "1.1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wasmtime = "30"
+# Wasmtime 30 doesn't expose `custom_sections` on `Module`; use
+# wasmparser directly to walk the raw wasm bytes for the ADR-0028
+# `aether.kinds` section. Pin to the version wasmtime re-exports
+# transitively so we stay on a single compiled copy.
+wasmparser = "0.224"
+
+[dev-dependencies]
+wat = "1"

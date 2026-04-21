@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub, SessionToken};
+use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, InputStream,
     Key, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult, SetWindowModeResult,
@@ -29,106 +29,67 @@ use aether_kinds::{
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
-    CaptureQueue, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, MailQueue,
-    Registry, Scheduler, SubstrateCtx,
-    capture::CaptureWaker,
-    host_fns,
+    CaptureQueue, Chassis, ChassisCapabilities, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound,
+    InputSubscribers, MailQueue, Registry, Scheduler, SubstrateCtx, UserEvent,
+    chassis_control_handler, host_fns,
     mail::{Mail, MailboxId},
-    platform_info::{PlatformInfoNotifier, WindowModeNotifier},
     subscribers_for,
 };
 use render::Gpu;
 use wasmtime::{Engine, Linker};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::monitor::{MonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId};
 
-/// Events the event loop can receive from outside the winit thread.
-/// Each variant corresponds to a control-plane request that needs to
-/// run on the event-loop thread — either because winit APIs require
-/// it (monitor enumeration, window state) or because the work has to
-/// be ordered with frame rendering (captures).
-#[derive(Debug, Clone)]
-enum UserEvent {
-    /// A capture is pending on `CaptureQueue`; wake the loop so its
-    /// `RedrawRequested` handler pulls and fulfils it, even if the
-    /// window is occluded (and `ControlFlow::Wait` would otherwise
-    /// keep the loop asleep).
-    Capture,
-    /// An MCP session asked for a `platform_info` snapshot. The
-    /// handler is fire-and-forget — the sender rides inline, the
-    /// event loop snapshots on receipt and replies via `outbound`.
-    PlatformInfo { sender: SessionToken },
-    /// An MCP session asked to switch the window mode. The event
-    /// loop resolves fullscreen modes against the current monitor,
-    /// applies the change, and replies with the new state.
-    SetWindowMode {
-        sender: SessionToken,
-        mode: WindowMode,
-        width: Option<u32>,
-        height: Option<u32>,
-    },
-}
-
-/// Adapter that bridges `CaptureQueue::request` to the winit event
-/// loop. `request()` pokes `wake()`, which sends a `CaptureRequested`
-/// user event; `App::user_event` then runs a render pass even if the
-/// window is occluded so the capture resolves.
-struct CaptureRequestWaker {
-    proxy: EventLoopProxy<UserEvent>,
-}
-
-impl CaptureWaker for CaptureRequestWaker {
-    fn wake(&self) {
-        // `send_event` only fails if the event loop has shut down; in
-        // that case nothing listens for captures anyway.
-        let _ = self.proxy.send_event(UserEvent::Capture);
-    }
-}
-
-/// Adapter that bridges `ControlPlane`'s `platform_info_notifier` to
-/// the winit event loop — same idea as `CaptureRequestWaker` but the
-/// per-request payload (the originating session token) rides inline
-/// on the event itself, so no shared queue is needed.
-struct PlatformInfoProxy {
-    proxy: EventLoopProxy<UserEvent>,
-}
-
-impl PlatformInfoNotifier for PlatformInfoProxy {
-    fn notify(&self, sender: SessionToken) {
-        let _ = self.proxy.send_event(UserEvent::PlatformInfo { sender });
-    }
-}
-
-/// Companion to `PlatformInfoProxy` for window-mode writes. Wires
-/// the control-plane handler's `WindowModeNotifier` call into a
-/// `SetWindowModeRequested` user event on the event loop.
-struct SetWindowModeProxy {
-    proxy: EventLoopProxy<UserEvent>,
-}
-
-impl WindowModeNotifier for SetWindowModeProxy {
-    fn request(
-        &self,
-        sender: SessionToken,
-        mode: WindowMode,
-        width: Option<u32>,
-        height: Option<u32>,
-    ) {
-        let _ = self.proxy.send_event(UserEvent::SetWindowMode {
-            sender,
-            mode,
-            width,
-            height,
-        });
-    }
-}
-
 const WORKERS: usize = 2;
 const LOG_EVERY_FRAMES: u64 = 120;
+
+/// ADR-0035 desktop chassis. Owns the winit event loop and the
+/// `App` that drives it. The `Chassis` trait's `run(self) -> Result`
+/// takes ownership and blocks until the event loop exits (normally
+/// on window close); shutdown telemetry rides inside `run` so every
+/// chassis type is responsible for its own exit log, matching each
+/// chassis's own loop-termination shape.
+struct DesktopChassis {
+    event_loop: EventLoop<UserEvent>,
+    app: App,
+    triangles_rendered: Arc<AtomicU64>,
+}
+
+impl Chassis for DesktopChassis {
+    const KIND: &'static str = "desktop";
+    const CAPABILITIES: ChassisCapabilities = ChassisCapabilities {
+        has_gpu: true,
+        has_window: true,
+        has_tcp_listener: false,
+    };
+
+    fn run(self) -> wasmtime::Result<()> {
+        let DesktopChassis {
+            event_loop,
+            mut app,
+            triangles_rendered,
+        } = self;
+        event_loop
+            .run_app(&mut app)
+            .map_err(|e| wasmtime::Error::msg(format!("event loop: {e}")))?;
+
+        let total = triangles_rendered.load(Ordering::Relaxed);
+        let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();
+        tracing::info!(
+            target: "aether_substrate::shutdown",
+            frames = app.frame,
+            elapsed_ms = elapsed.as_secs_f64() * 1000.0,
+            fps = app.frame as f64 / elapsed.as_secs_f64().max(0.001),
+            triangles = total,
+            "frame loop exited",
+        );
+        Ok(())
+    }
+}
 
 struct App {
     queue: Arc<MailQueue>,
@@ -788,25 +749,26 @@ fn main() -> wasmtime::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    // Shared capture-request slot between the control plane (where
-    // the request arrives) and the render thread (which fulfils it).
-    let capture_queue = CaptureQueue::with_waker(Arc::new(CaptureRequestWaker {
-        proxy: event_loop.create_proxy(),
-    }));
-
-    // Fire-and-forget notifier for `platform_info`. Carries the
-    // sender inline on each user event — no shared queue required.
-    let platform_info_notifier = Arc::new(PlatformInfoProxy {
-        proxy: event_loop.create_proxy(),
-    });
-    let window_mode_notifier = Arc::new(SetWindowModeProxy {
-        proxy: event_loop.create_proxy(),
-    });
+    // The capture queue handoff slot is shared between the chassis-
+    // side capture handler (pushes requests) and the render thread
+    // (drains on each redraw). Only desktop handles captures — core
+    // doesn't know about it.
+    let capture_queue = CaptureQueue::new();
 
     // Wire the ADR-0010 control plane. Registered after the scheduler
     // exists so the handler can capture the runtime component table
     // directly rather than an `Arc<Scheduler>` (which would cycle back
-    // through the registry via this sink).
+    // through the registry via this sink). The chassis_handler hook
+    // registers desktop-specific kinds (capture_frame, set_window_mode,
+    // platform_info); core dispatches only load/drop/replace/subscribe/
+    // unsubscribe itself.
+    let chassis_handler = chassis_control_handler(
+        event_loop.create_proxy(),
+        capture_queue.clone(),
+        Arc::clone(&registry),
+        Arc::clone(&queue),
+        Arc::clone(&outbound),
+    );
     {
         let control_plane = aether_substrate::ControlPlane {
             engine: Arc::clone(&engine),
@@ -817,9 +779,7 @@ fn main() -> wasmtime::Result<()> {
             components: scheduler.components().clone(),
             input_subscribers: Arc::clone(&input_subscribers),
             default_name_counter: Arc::new(AtomicU64::new(0)),
-            capture_queue: capture_queue.clone(),
-            platform_info_notifier: platform_info_notifier.clone(),
-            window_mode_notifier: window_mode_notifier.clone(),
+            chassis_handler: Some(chassis_handler),
         };
         registry.register_sink(
             aether_substrate::AETHER_CONTROL,
@@ -880,7 +840,7 @@ fn main() -> wasmtime::Result<()> {
         },
         Err(_) => (WindowMode::Windowed, None),
     };
-    let mut app = App {
+    let app = App {
         queue,
         input_subscribers,
         broadcast_mbox,
@@ -905,19 +865,20 @@ fn main() -> wasmtime::Result<()> {
         _scheduler: scheduler,
     };
 
-    event_loop.run_app(&mut app)?;
-
-    let total = triangles_rendered.load(Ordering::Relaxed);
-    let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();
+    let chassis = DesktopChassis {
+        event_loop,
+        app,
+        triangles_rendered,
+    };
     tracing::info!(
-        target: "aether_substrate::shutdown",
-        frames = app.frame,
-        elapsed_ms = elapsed.as_secs_f64() * 1000.0,
-        fps = app.frame as f64 / elapsed.as_secs_f64().max(0.001),
-        triangles = total,
-        "frame loop exited",
+        target: "aether_substrate::boot",
+        kind = DesktopChassis::KIND,
+        has_gpu = DesktopChassis::CAPABILITIES.has_gpu,
+        has_window = DesktopChassis::CAPABILITIES.has_window,
+        has_tcp_listener = DesktopChassis::CAPABILITIES.has_tcp_listener,
+        "chassis initialised",
     );
-    Ok(())
+    chassis.run()
 }
 
 #[cfg(test)]
