@@ -67,7 +67,7 @@ pub async fn handle_connection(
     let spawned = pending.fulfill(hello.pid, engine_id);
 
     eprintln!(
-        "aether-hub: engine registered id={} name={} pid={} version={} spawned={}",
+        "aether-substrate-hub: engine registered id={} name={} pid={} version={} spawned={}",
         engine_id.0, hello.name, hello.pid, hello.version, spawned
     );
 
@@ -97,7 +97,7 @@ pub async fn handle_connection(
                 msg = mail_rx.recv() => match msg {
                     Some(m) => {
                         if let Err(e) = write_frame_async(&mut writer, &m).await {
-                            eprintln!("aether-hub: write failed: {e}");
+                            eprintln!("aether-substrate-hub: write failed: {e}");
                             break;
                         }
                     }
@@ -105,7 +105,7 @@ pub async fn handle_connection(
                 },
                 _ = interval.tick() => {
                     if let Err(e) = write_frame_async(&mut writer, &HubToEngine::Heartbeat).await {
-                        eprintln!("aether-hub: heartbeat write failed: {e}");
+                        eprintln!("aether-substrate-hub: heartbeat write failed: {e}");
                         break;
                     }
                 }
@@ -122,8 +122,8 @@ pub async fn handle_connection(
     let _ = writer_task.await;
 
     match &result {
-        Ok(()) => eprintln!("aether-hub: engine {} goodbye", engine_id.0),
-        Err(e) => eprintln!("aether-hub: engine {} dropped: {e}", engine_id.0),
+        Ok(()) => eprintln!("aether-substrate-hub: engine {} goodbye", engine_id.0),
+        Err(e) => eprintln!("aether-substrate-hub: engine {} dropped: {e}", engine_id.0),
     }
     result
 }
@@ -212,7 +212,7 @@ async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail
             }
             None => {
                 eprintln!(
-                    "aether-hub: engine {} mail dropped: unknown/expired session token {} kind={}",
+                    "aether-substrate-hub: engine {} mail dropped: unknown/expired session token {} kind={}",
                     engine_id.0, token.0, kind_name
                 );
             }
@@ -249,13 +249,13 @@ fn dispatch_session_mail(
         Ok(()) => {}
         Err(TrySendError::Full(queued)) => {
             eprintln!(
-                "aether-hub: engine {} mail to session {} dropped: queue full (kind={}, broadcast={})",
+                "aether-substrate-hub: engine {} mail to session {} dropped: queue full (kind={}, broadcast={})",
                 engine_id.0, session_token, queued.kind_name, queued.broadcast
             );
         }
         Err(TrySendError::Closed(queued)) => {
             eprintln!(
-                "aether-hub: engine {} mail to session {} dropped: receiver closed (kind={}, broadcast={})",
+                "aether-substrate-hub: engine {} mail to session {} dropped: receiver closed (kind={}, broadcast={})",
                 engine_id.0, session_token, queued.kind_name, queued.broadcast
             );
         }

@@ -8,7 +8,6 @@ members = [
     "crates/aether-kinds",
     "crates/aether-component",
     "crates/aether-hello-component",
-    "crates/aether-hub",
     "crates/aether-hub-protocol",
     "crates/aether-mail",
     "crates/aether-mail-derive",
