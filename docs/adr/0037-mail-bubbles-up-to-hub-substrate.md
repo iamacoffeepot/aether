@@ -1,6 +1,6 @@
 # ADR-0037: Mail bubbles up to the hub-substrate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-20
 
 ## Context
@@ -72,7 +72,7 @@ Reply routing is called out explicitly because it's the subtlety that defeats a 
 
 ## Follow-up work
 
-- **Phase dependency.** This ADR requires ADR-0034 Phase 1 (the hub-chassis binary). Implementation order: hub-chassis ships → bubbles-up lands on top → tic-tac-toe-client demo exercises the full round-trip.
+- **Phase dependency.** This ADR requires ADR-0034 Phase 2 sub-phase A (hub-chassis hosts components) — not just Phase 1 as originally written. The dispatch semantics above ("hub-substrate resolves the id against its own registry and dispatches locally") need the hub-chassis to embed a `SubstrateBoot` and register itself in its own engine registry, which Phase 1 explicitly deferred. Sub-phase A shipped that enabler (PR #176); bubbles-up lands on top. Implementation order: sub-phase A (done) → Phase 1 protocol + fire-and-forget → Phase 2 reply path → tic-tac-toe-client demo exercises the full round-trip.
 - **Reply-path peripheral.** The hub-chassis's reply mechanism — how it distinguishes engine-mailbox senders from session senders, how it routes outbound mail by `(engine_id, mailbox_id)` — needs a concrete implementation sketch inside the hub-chassis PR. Not ADR-worthy on its own but load-bearing.
 - **Typo diagnostics.** Design the "forwarded but unresolved" log path so a misrouted mail produces one clear warn at the caller's local `engine_logs`, not a silent drop at the hub. Candidate: hub sends a `mail.unresolved` observation back to the originating engine, which re-warns locally with full provenance.
 - **Hub-resident capability ADR.** First time a hub-resident component legitimately needs to enumerate engines, target a specific engine, or register a globally-routed name, capture those capabilities as their own ADR. Tic-tac-toe does not force this.
