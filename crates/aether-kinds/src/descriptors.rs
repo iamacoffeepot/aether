@@ -21,7 +21,7 @@ use crate::{
     CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats, Key,
     LoadComponent, LoadResult, MouseButton, MouseMove, Ping, PlatformInfo, PlatformInfoResult,
     Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult, SubscribeInput,
-    SubscribeInputResult, Tick, UnsubscribeInput,
+    SubscribeInputResult, Tick, UnsubscribeInput, WindowSize,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -32,6 +32,7 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<Key>(),
         schema::<MouseButton>(),
         schema::<MouseMove>(),
+        schema::<WindowSize>(),
         // DrawTriangle's schema recurses into Vertex; the cast wire
         // format keeps today's bytes (the hub encoder treats the
         // nested `Struct { repr_c: true }` exactly like a flat Pod).
