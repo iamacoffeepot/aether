@@ -72,7 +72,7 @@ impl ComponentEntry {
     /// Spawn a dispatcher thread for `component`, wire it to a fresh
     /// mpsc inbox, and return the entry. The `Arc<Registry>` is used
     /// by the dispatcher to format warn-logs for unknown kinds.
-    pub fn spawn(component: Component, _queue: Arc<MailQueue>, registry: Arc<Registry>) -> Self {
+    pub fn spawn(component: Component, registry: Arc<Registry>) -> Self {
         let (tx, rx) = mpsc::channel();
         let gate: Arc<PendingGate> = Arc::new(PendingGate::default());
         let gate_for_thread = Arc::clone(&gate);
@@ -197,7 +197,6 @@ pub fn spawn_dispatcher_on(
     entry: &Arc<ComponentEntry>,
     component: Component,
     rx: Receiver<Mail>,
-    _queue: Arc<MailQueue>,
     registry: Arc<Registry>,
 ) {
     let gate = Arc::clone(&entry.gate);
@@ -285,11 +284,7 @@ impl Scheduler {
     /// `id` — replacement is an ADR-0010 primitive in its own right,
     /// handled by `ControlPlane::handle_replace`.
     pub fn add_component(&self, id: MailboxId, component: Component) {
-        let entry = ComponentEntry::spawn(
-            component,
-            Arc::clone(&self.queue),
-            Arc::clone(&self.registry),
-        );
+        let entry = ComponentEntry::spawn(component, Arc::clone(&self.registry));
         self.components.write().unwrap().insert(id, Arc::new(entry));
     }
 }
