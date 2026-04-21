@@ -73,6 +73,12 @@ pub struct SubstrateBootBuilder<'a> {
     version: &'a str,
     workers: usize,
     build_handler: ChassisHandlerFactory,
+    /// When `true`, `build()` skips the `AETHER_HUB_URL` env-var check
+    /// and leaves `boot.hub = None` unconditionally. Set by the hub
+    /// chassis (ADR-0034 Phase 2) since the hub is the hub — there is
+    /// no upstream parent to dial, and attaching to its own listener
+    /// would deadlock the tokio runtime at boot.
+    skip_upstream_hub: bool,
 }
 
 impl SubstrateBoot {
@@ -86,6 +92,7 @@ impl SubstrateBoot {
             version,
             workers: 2,
             build_handler: Box::new(|_| None),
+            skip_upstream_hub: false,
         }
     }
 }
@@ -94,6 +101,17 @@ impl<'a> SubstrateBootBuilder<'a> {
     /// Scheduler worker count. Default 2.
     pub fn workers(mut self, workers: usize) -> Self {
         self.workers = workers;
+        self
+    }
+
+    /// Skip the `AETHER_HUB_URL` env-var check during `build()`.
+    /// The hub chassis (ADR-0034 Phase 2) uses this because it *is*
+    /// the hub — no upstream to dial, and self-dialling before the
+    /// listener task is running would deadlock the tokio runtime.
+    /// The hub chassis wires an in-process loopback to
+    /// `boot.outbound` after `build()` returns.
+    pub fn skip_upstream_hub(mut self) -> Self {
+        self.skip_upstream_hub = true;
         self
     }
 
@@ -192,28 +210,32 @@ impl<'a> SubstrateBootBuilder<'a> {
         };
         registry.register_sink(AETHER_CONTROL, control_plane.into_sink_handler());
 
-        let hub = match std::env::var("AETHER_HUB_URL") {
-            Ok(url) => match HubClient::connect(
-                url.as_str(),
-                self.name,
-                self.version,
-                boot_descriptors.clone(),
-                Arc::clone(&registry),
-                Arc::clone(&queue),
-                Arc::clone(&outbound),
-            ) {
-                Ok(c) => Some(c),
-                Err(e) => {
-                    tracing::error!(
-                        target: "aether_substrate::boot",
-                        url = %url,
-                        error = %e,
-                        "hub connect failed",
-                    );
-                    None
-                }
-            },
-            Err(_) => None,
+        let hub = if self.skip_upstream_hub {
+            None
+        } else {
+            match std::env::var("AETHER_HUB_URL") {
+                Ok(url) => match HubClient::connect(
+                    url.as_str(),
+                    self.name,
+                    self.version,
+                    boot_descriptors.clone(),
+                    Arc::clone(&registry),
+                    Arc::clone(&queue),
+                    Arc::clone(&outbound),
+                ) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        tracing::error!(
+                            target: "aether_substrate::boot",
+                            url = %url,
+                            error = %e,
+                            "hub connect failed",
+                        );
+                        None
+                    }
+                },
+                Err(_) => None,
+            }
         };
 
         Ok(SubstrateBoot {

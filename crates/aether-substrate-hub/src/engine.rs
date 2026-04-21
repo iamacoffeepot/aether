@@ -153,7 +153,7 @@ async fn read_loop(
                 )));
             }
             EngineToHub::Heartbeat => {}
-            EngineToHub::Mail(m) => route_engine_mail(sessions, engine_id, m).await,
+            EngineToHub::Mail(m) => route_engine_mail(sessions, engine_id, m),
             EngineToHub::KindsChanged(kinds) => registry.update_kinds(&engine_id, kinds),
             EngineToHub::LogBatch(entries) => logs.append(engine_id, entries),
             EngineToHub::Goodbye(_) => return Ok(()),
@@ -183,7 +183,11 @@ async fn read_loop(
 /// Unknown / disconnected session tokens are logged and dropped; the
 /// engine wire has no reply, so there's nowhere to surface
 /// "sessionGone". `Broadcast` to an empty registry is a no-op.
-async fn route_engine_mail(sessions: &SessionRegistry, engine_id: EngineId, mail: EngineMailFrame) {
+pub(crate) fn route_engine_mail(
+    sessions: &SessionRegistry,
+    engine_id: EngineId,
+    mail: EngineMailFrame,
+) {
     let EngineMailFrame {
         address,
         kind_name,
@@ -331,8 +335,7 @@ mod tests {
             &sessions,
             engine_id(1),
             mail_with_origin(ClaudeAddress::Session(a.token), vec![1, 2, 3], "physics"),
-        )
-        .await;
+        );
 
         let got = rx_a.try_recv().expect("frame for a");
         assert_eq!(got.payload, vec![1, 2, 3]);
@@ -352,8 +355,7 @@ mod tests {
             &sessions,
             engine_id(1),
             mail(ClaudeAddress::Session(nobody), vec![]),
-        )
-        .await;
+        );
 
         assert!(rx_a.try_recv().is_err());
     }
@@ -369,8 +371,7 @@ mod tests {
             &sessions,
             engine_id(1),
             mail_with_origin(ClaudeAddress::Broadcast, vec![42], "render"),
-        )
-        .await;
+        );
 
         for (name, rx) in [("a", &mut rx_a), ("b", &mut rx_b), ("c", &mut rx_c)] {
             let got = rx.try_recv().unwrap_or_else(|_| panic!("{name} no frame"));
@@ -389,8 +390,7 @@ mod tests {
             &sessions,
             engine_id(1),
             mail(ClaudeAddress::Broadcast, vec![]),
-        )
-        .await;
+        );
     }
 
     /// Issue 159 regression. Fill a session's inbound mpsc to capacity,
@@ -409,22 +409,18 @@ mod tests {
                 &sessions,
                 engine_id(1),
                 mail(ClaudeAddress::Session(a.token), vec![0]),
-            )
-            .await;
+            );
         }
 
         // One more. Pre-fix: blocks forever. Post-fix: drops,
-        // returns promptly. The test's own timeout is the assertion.
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            route_engine_mail(
-                &sessions,
-                engine_id(1),
-                mail(ClaudeAddress::Session(a.token), vec![99]),
-            ),
-        )
-        .await
-        .expect("route_engine_mail must not block when session queue is full");
+        // returns promptly. `route_engine_mail` is sync so a block
+        // would hang the test itself — the bare call *is* the
+        // assertion.
+        route_engine_mail(
+            &sessions,
+            engine_id(1),
+            mail(ClaudeAddress::Session(a.token), vec![99]),
+        );
 
         // Consumer drains capacity + the dropped one *must not* be in there
         // (last_tail is the final enqueued entry, which is the 256th, not 99).
@@ -451,25 +447,19 @@ mod tests {
                 &sessions,
                 engine_id(1),
                 mail(ClaudeAddress::Broadcast, vec![0]),
-            )
-            .await;
+            );
             // Drain B as we go so it stays empty; A fills up.
             while rx_b.try_recv().is_ok() {}
         }
 
-        // One more broadcast. A is full, must drop; B is empty, must
-        // receive. The fact that the call returns promptly is what the
-        // timeout wrapper verifies.
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            route_engine_mail(
-                &sessions,
-                engine_id(1),
-                mail(ClaudeAddress::Broadcast, vec![77]),
-            ),
-        )
-        .await
-        .expect("broadcast must not block when one session is full");
+        // One more broadcast. A is full, must drop; B is empty,
+        // must receive. A block here would hang the test since the
+        // call is sync.
+        route_engine_mail(
+            &sessions,
+            engine_id(1),
+            mail(ClaudeAddress::Broadcast, vec![77]),
+        );
 
         let got_b = rx_b
             .try_recv()
