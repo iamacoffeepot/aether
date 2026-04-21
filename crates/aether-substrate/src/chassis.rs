@@ -1,0 +1,193 @@
+//! Desktop-chassis control-plane handler. Registers against core's
+//! `ControlPlane::chassis_handler` fallback so the three desktop-only
+//! kinds (`capture_frame`, `set_window_mode`, `platform_info`) are
+//! handled here instead of in `aether-substrate-core`. Core's
+//! dispatch covers load/drop/replace/subscribe/unsubscribe only;
+//! anything else falls through to this module.
+//!
+//! The handler runs on a scheduler worker (same thread as every
+//! other sink handler), so the two operations that need winit/wgpu
+//! access forward to the event-loop thread via
+//! `EventLoopProxy<UserEvent>`. `capture_frame` orchestrates its own
+//! mail envelopes (pre-capture bundle push + after-capture bundle
+//! resolution) and routes through `CaptureQueue` to hand off to the
+//! render thread.
+//!
+//! Keeping this module here means the chassis trait is no longer a
+//! thing: each chassis registers its own control handler with the
+//! kinds it cares about. A headless chassis registers none and gets
+//! the drop-warn for unrecognised control kinds; a hub chassis will
+//! register its own routing/operator kinds without needing to agree
+//! on a trait shape.
+
+use std::sync::Arc;
+
+use aether_hub_protocol::SessionToken;
+use aether_kinds::{
+    CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode, SetWindowModeResult, WindowMode,
+};
+use aether_mail::Kind;
+use aether_substrate_core::{
+    ChassisControlHandler, HubOutbound, MailQueue, Registry,
+    control::{decode_payload, resolve_bundle},
+};
+use winit::event_loop::EventLoopProxy;
+
+use crate::capture::{CaptureQueue, PendingCapture};
+
+/// Event the event-loop thread consumes from the desktop chassis.
+/// Either a chassis-originated request for work that needs winit/wgpu
+/// context (platform info, window mode, capture) or a wake-up so the
+/// loop picks up a queued capture on the next redraw.
+#[derive(Debug, Clone)]
+pub enum UserEvent {
+    /// A capture was just enqueued on `CaptureQueue`; wake the loop
+    /// so `RedrawRequested` pulls and fulfils it, even under
+    /// `ControlFlow::Wait` when the window is occluded.
+    Capture,
+    /// An MCP session asked for a `platform_info` snapshot. The
+    /// event-loop thread snapshots + replies via outbound.
+    PlatformInfo { sender: SessionToken },
+    /// An MCP session asked to switch the window mode. The event
+    /// loop resolves fullscreen modes against the current monitor,
+    /// applies the change, and replies with the new state.
+    SetWindowMode {
+        sender: SessionToken,
+        mode: WindowMode,
+        width: Option<u32>,
+        height: Option<u32>,
+    },
+}
+
+/// Build the `ChassisControlHandler` closure desktop installs on
+/// `ControlPlane::chassis_handler`. Captures the handles each
+/// chassis-specific kind needs: the event-loop proxy for hand-off to
+/// winit/wgpu context; the capture queue for render-thread handoff;
+/// the registry + queue for capture_frame's mail-bundle orchestration;
+/// the outbound handle for inline error replies.
+pub fn chassis_control_handler(
+    proxy: EventLoopProxy<UserEvent>,
+    capture_queue: CaptureQueue,
+    registry: Arc<Registry>,
+    queue: Arc<MailQueue>,
+    outbound: Arc<HubOutbound>,
+) -> ChassisControlHandler {
+    Arc::new(move |kind_name: &str, sender: SessionToken, bytes: &[u8]| {
+        if kind_name == CaptureFrame::NAME {
+            handle_capture_frame(
+                &proxy,
+                &capture_queue,
+                &registry,
+                &queue,
+                &outbound,
+                sender,
+                bytes,
+            );
+        } else if kind_name == PlatformInfo::NAME {
+            // Empty payload; forward the sender straight to the event
+            // loop and let it snapshot + reply on its own thread
+            // (winit monitor / scale-factor APIs require it).
+            let _ = proxy.send_event(UserEvent::PlatformInfo { sender });
+        } else if kind_name == SetWindowMode::NAME {
+            handle_set_window_mode(&proxy, &outbound, sender, bytes);
+        } else {
+            tracing::warn!(
+                target: "aether_substrate::chassis",
+                kind = %kind_name,
+                "desktop chassis has no handler for control kind — dropping",
+            );
+        }
+    })
+}
+
+/// Two-phase capture request (pre-capture mail push + render handoff).
+/// Ports the old `ControlPlane::handle_capture_frame` verbatim: resolve
+/// both mail bundles atomically against the registry before touching
+/// the queue, push pre-mails, enqueue the capture, poke the event loop.
+/// Decode / resolve / queue-full errors reply inline; the render thread
+/// fulfils the happy path on its next redraw.
+fn handle_capture_frame(
+    proxy: &EventLoopProxy<UserEvent>,
+    capture_queue: &CaptureQueue,
+    registry: &Registry,
+    queue: &MailQueue,
+    outbound: &HubOutbound,
+    sender: SessionToken,
+    bytes: &[u8],
+) {
+    let payload: CaptureFrame = match decode_payload(bytes) {
+        Ok(p) => p,
+        Err(error) => {
+            outbound.send_reply(sender, &CaptureFrameResult::Err { error });
+            return;
+        }
+    };
+
+    // Phase 1: resolve every envelope in both bundles before pushing
+    // anything or requesting a capture. Any failure aborts the whole
+    // request so a partial dispatch can't leak into the next frame.
+    let pre = match resolve_bundle(registry, &payload.mails, "capture bundle") {
+        Ok(v) => v,
+        Err(e) => {
+            outbound.send_reply(sender, &CaptureFrameResult::Err { error: e });
+            return;
+        }
+    };
+    let after = match resolve_bundle(registry, &payload.after_mails, "capture after bundle") {
+        Ok(v) => v,
+        Err(e) => {
+            outbound.send_reply(sender, &CaptureFrameResult::Err { error: e });
+            return;
+        }
+    };
+
+    // Phase 2: push resolved pre-mails, enqueue capture, wake loop.
+    // `queue.wait_idle()` on the render thread is what enforces
+    // "capture after all mail processed".
+    for mail in pre {
+        queue.push(mail);
+    }
+
+    let pending = PendingCapture {
+        sender,
+        after_mails: after,
+    };
+    if !capture_queue.request(pending) {
+        outbound.send_reply(
+            sender,
+            &CaptureFrameResult::Err {
+                error: "capture already pending; try again once the in-flight \
+                    request completes"
+                    .to_owned(),
+            },
+        );
+        return;
+    }
+    // `send_event` only fails if the event loop has shut down; in
+    // that case nothing listens for captures anyway.
+    let _ = proxy.send_event(UserEvent::Capture);
+}
+
+/// Decode + forward to the event loop. Applying the mode requires
+/// winit APIs that only live on the main thread, so this handler
+/// doesn't reply inline on the happy path — the event loop does.
+fn handle_set_window_mode(
+    proxy: &EventLoopProxy<UserEvent>,
+    outbound: &HubOutbound,
+    sender: SessionToken,
+    bytes: &[u8],
+) {
+    let payload: SetWindowMode = match decode_payload(bytes) {
+        Ok(p) => p,
+        Err(error) => {
+            outbound.send_reply(sender, &SetWindowModeResult::Err { error });
+            return;
+        }
+    };
+    let _ = proxy.send_event(UserEvent::SetWindowMode {
+        sender,
+        mode: payload.mode,
+        width: payload.width,
+        height: payload.height,
+    });
+}

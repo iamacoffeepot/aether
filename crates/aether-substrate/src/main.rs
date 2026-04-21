@@ -20,7 +20,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub, SessionToken};
+use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, InputStream,
     Key, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult, SetWindowModeResult,
@@ -29,8 +29,8 @@ use aether_kinds::{
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate::{
-    CaptureQueue, Chassis, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers,
-    MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
+    CaptureQueue, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, MailQueue,
+    Registry, Scheduler, SubstrateCtx, UserEvent, chassis_control_handler, host_fns,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -38,75 +38,10 @@ use render::Gpu;
 use wasmtime::{Engine, Linker};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::monitor::{MonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId};
-
-/// Events the event loop can receive from outside the winit thread.
-/// Each variant corresponds to a control-plane request that needs to
-/// run on the event-loop thread — either because winit APIs require
-/// it (monitor enumeration, window state) or because the work has to
-/// be ordered with frame rendering (captures).
-#[derive(Debug, Clone)]
-enum UserEvent {
-    /// A capture is pending on `CaptureQueue`; wake the loop so its
-    /// `RedrawRequested` handler pulls and fulfils it, even if the
-    /// window is occluded (and `ControlFlow::Wait` would otherwise
-    /// keep the loop asleep).
-    Capture,
-    /// An MCP session asked for a `platform_info` snapshot. The
-    /// handler is fire-and-forget — the sender rides inline, the
-    /// event loop snapshots on receipt and replies via `outbound`.
-    PlatformInfo { sender: SessionToken },
-    /// An MCP session asked to switch the window mode. The event
-    /// loop resolves fullscreen modes against the current monitor,
-    /// applies the change, and replies with the new state.
-    SetWindowMode {
-        sender: SessionToken,
-        mode: WindowMode,
-        width: Option<u32>,
-        height: Option<u32>,
-    },
-}
-
-/// ADR-0035 desktop chassis: implements the `Chassis` trait by
-/// forwarding peripheral work to the winit event loop via
-/// `EventLoopProxy<UserEvent>`. Every method on the trait maps to a
-/// single `UserEvent` variant the event loop picks up on its own
-/// thread — the capture path goes through the shared `CaptureQueue`
-/// for backpressure, the window-mode and platform-info paths ride
-/// their payload inline on the event.
-struct DesktopChassis {
-    proxy: EventLoopProxy<UserEvent>,
-}
-
-impl Chassis for DesktopChassis {
-    fn wake_for_capture(&self) {
-        // `send_event` only fails if the event loop has shut down; in
-        // that case nothing listens for captures anyway.
-        let _ = self.proxy.send_event(UserEvent::Capture);
-    }
-
-    fn request_platform_info(&self, sender: SessionToken) {
-        let _ = self.proxy.send_event(UserEvent::PlatformInfo { sender });
-    }
-
-    fn request_set_window_mode(
-        &self,
-        sender: SessionToken,
-        mode: WindowMode,
-        width: Option<u32>,
-        height: Option<u32>,
-    ) {
-        let _ = self.proxy.send_event(UserEvent::SetWindowMode {
-            sender,
-            mode,
-            width,
-            height,
-        });
-    }
-}
 
 const WORKERS: usize = 2;
 const LOG_EVERY_FRAMES: u64 = 120;
@@ -769,19 +704,26 @@ fn main() -> wasmtime::Result<()> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    // Single DesktopChassis handle feeds both the CaptureQueue (for
-    // wake-on-request) and the ControlPlane (for platform_info /
-    // set_window_mode delegation). Cloning the Arc is cheap — each
-    // consumer holds its own reference.
-    let chassis: Arc<dyn Chassis> = Arc::new(DesktopChassis {
-        proxy: event_loop.create_proxy(),
-    });
-    let capture_queue = CaptureQueue::with_chassis(Arc::clone(&chassis));
+    // The capture queue handoff slot is shared between the chassis-
+    // side capture handler (pushes requests) and the render thread
+    // (drains on each redraw). Only desktop handles captures — core
+    // doesn't know about it.
+    let capture_queue = CaptureQueue::new();
 
     // Wire the ADR-0010 control plane. Registered after the scheduler
     // exists so the handler can capture the runtime component table
     // directly rather than an `Arc<Scheduler>` (which would cycle back
-    // through the registry via this sink).
+    // through the registry via this sink). The chassis_handler hook
+    // registers desktop-specific kinds (capture_frame, set_window_mode,
+    // platform_info); core dispatches only load/drop/replace/subscribe/
+    // unsubscribe itself.
+    let chassis_handler = chassis_control_handler(
+        event_loop.create_proxy(),
+        capture_queue.clone(),
+        Arc::clone(&registry),
+        Arc::clone(&queue),
+        Arc::clone(&outbound),
+    );
     {
         let control_plane = aether_substrate::ControlPlane {
             engine: Arc::clone(&engine),
@@ -792,8 +734,7 @@ fn main() -> wasmtime::Result<()> {
             components: scheduler.components().clone(),
             input_subscribers: Arc::clone(&input_subscribers),
             default_name_counter: Arc::new(AtomicU64::new(0)),
-            capture_queue: capture_queue.clone(),
-            chassis: Arc::clone(&chassis),
+            chassis_handler: Some(chassis_handler),
         };
         registry.register_sink(
             aether_substrate::AETHER_CONTROL,

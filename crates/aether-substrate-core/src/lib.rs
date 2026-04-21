@@ -6,15 +6,20 @@
 //! peripherals (window, GPU, TCP listener, event loop) live in the
 //! chassis crate that binds this as a dependency. See ADR-0035.
 //!
-//! The chassis surface is the `Chassis` trait re-exported at the
-//! crate root: core calls into it when a control-plane kind needs
-//! peripheral work (platform info snapshot, window mode change,
-//! capture-request wake); the chassis implements the trait over
-//! whatever event loop or proxy its environment provides. Tests and
-//! host paths that don't drive a real chassis wire `NoopChassis`.
+//! Core does NOT define a `Chassis` trait. The chassis boundary is
+//! the control-plane fallback on `ControlPlane::chassis_handler`:
+//! core dispatches its own kinds (load/drop/replace/subscribe/
+//! unsubscribe) and falls through to the chassis-registered handler
+//! for everything else. Each chassis owns the control kinds it cares
+//! about (desktop registers capture_frame / set_window_mode /
+//! platform_info; headless registers nothing; hub chassis will
+//! register its own). No per-chassis no-op methods, no trait surface
+//! to keep in sync.
+//!
+//! Helpers for chassis-side handlers live under `control`:
+//! `decode_payload` and `resolve_bundle` are pub so chassis dispatch
+//! can validate mail bundles the same way core does.
 
-pub mod capture;
-pub mod chassis;
 pub mod component;
 pub mod control;
 pub mod ctx;
@@ -29,10 +34,8 @@ pub mod registry;
 pub mod scheduler;
 pub mod sender_table;
 
-pub use capture::{CaptureQueue, PendingCapture};
-pub use chassis::{Chassis, NoopChassis, noop_chassis};
 pub use component::Component;
-pub use control::{AETHER_CONTROL, ControlPlane};
+pub use control::{AETHER_CONTROL, ChassisControlHandler, ControlPlane};
 pub use ctx::SubstrateCtx;
 pub use hub_client::{HubClient, HubOutbound};
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};

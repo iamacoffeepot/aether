@@ -99,8 +99,7 @@ fn make_harness() -> Harness {
         components: scheduler.components().clone(),
         input_subscribers: Arc::clone(&input_subscribers),
         default_name_counter: Arc::new(AtomicU64::new(0)),
-        capture_queue: aether_substrate::CaptureQueue::new(),
-        chassis: aether_substrate::noop_chassis(),
+        chassis_handler: None,
     };
 
     Harness {
