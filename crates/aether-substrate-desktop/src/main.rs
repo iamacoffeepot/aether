@@ -14,13 +14,11 @@
 
 mod render;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, InputStream,
     Key, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult, SetWindowModeResult,
@@ -29,14 +27,12 @@ use aether_kinds::{
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
 use aether_substrate_desktop::{
-    CaptureQueue, Chassis, ChassisCapabilities, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound,
-    InputSubscribers, MailQueue, Registry, Scheduler, SubstrateCtx, UserEvent,
-    chassis_control_handler, host_fns,
+    CaptureQueue, Chassis, ChassisCapabilities, HubClient, HubOutbound, InputSubscribers,
+    MailQueue, Scheduler, SubstrateBoot, UserEvent, chassis_control_handler,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
 use render::Gpu;
-use wasmtime::{Engine, Linker};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -57,6 +53,10 @@ struct DesktopChassis {
     event_loop: EventLoop<UserEvent>,
     app: App,
     triangles_rendered: Arc<AtomicU64>,
+    // Retained so the hub's reader + heartbeat threads stay spawned
+    // for the life of the chassis. `None` when `AETHER_HUB_URL` was
+    // unset — the substrate still renders locally.
+    _hub: Option<HubClient>,
 }
 
 impl Chassis for DesktopChassis {
@@ -72,6 +72,7 @@ impl Chassis for DesktopChassis {
             event_loop,
             mut app,
             triangles_rendered,
+            _hub,
         } = self;
         event_loop
             .run_app(&mut app)
@@ -636,190 +637,76 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 fn main() -> wasmtime::Result<()> {
-    // Reserved well-known sink: mail sent here is forwarded to every
-    // attached Claude session via the hub. The handle is created up
-    // front (before the hub is dialed) so the log capture layer can
-    // share it; the hub client populates it later if `AETHER_HUB_URL`
-    // is set, otherwise sends are silently dropped.
-    let outbound = HubOutbound::disconnected();
+    // Build the event loop + capture queue up front so the chassis
+    // handler closure can capture them during `SubstrateBoot::build`.
+    // The proxy wakes the loop on queued captures (important when the
+    // window is occluded — capture still lands via `user_event` ->
+    // `request_redraw`); the capture queue is the single-slot handoff
+    // the control-plane handler writes and the render thread drains.
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    event_loop.set_control_flow(ControlFlow::Poll);
+    let capture_queue = CaptureQueue::new();
 
-    // ADR-0023: install the tracing subscriber + log capture early so
-    // bring-up errors (renderer init, hub handshake) are captured.
-    aether_substrate_desktop::log_capture::init(Arc::clone(&outbound));
+    // Shared runtime bring-up: log capture, registry + kind descriptors,
+    // broadcast sink, scheduler, control plane, optional hub connect.
+    // The chassis handler closure is invoked during build() once
+    // `registry` / `queue` / `outbound` exist but before the control
+    // plane is wired, so it can `Arc::clone` what it needs to own.
+    let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
+        .workers(WORKERS)
+        .chassis_handler({
+            let proxy = event_loop.create_proxy();
+            let capture_queue = capture_queue.clone();
+            move |ctx| {
+                Some(chassis_control_handler(
+                    proxy,
+                    capture_queue,
+                    Arc::clone(ctx.registry),
+                    Arc::clone(ctx.queue),
+                    Arc::clone(ctx.outbound),
+                ))
+            }
+        })
+        .build()?;
 
-    let engine = Arc::new(Engine::default());
-
-    let registry = Arc::new(Registry::new());
-
-    // Pre-register every substrate-owned kind with its descriptor so
-    // the Registry agrees with what the hub receives at `Hello` and
-    // ADR-0010's load-time conflict check has the right reference.
-    // Ids are dense and assigned in the order below; not otherwise
-    // meaningful — consumers always resolve by name.
-    let boot_descriptors = aether_kinds::descriptors::all();
-    for d in &boot_descriptors {
-        registry
-            .register_kind_with_descriptor(d.clone())
-            .expect("duplicate kind in substrate init");
-    }
-    let kind_tick = registry.kind_id(Tick::NAME).expect("Tick registered");
-    let kind_key = registry.kind_id(Key::NAME).expect("Key registered");
-    let kind_mouse_button = registry
+    let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
+    let kind_key = boot.registry.kind_id(Key::NAME).expect("Key registered");
+    let kind_mouse_button = boot
+        .registry
         .kind_id(MouseButton::NAME)
         .expect("MouseButton registered");
-    let kind_mouse_move = registry
+    let kind_mouse_move = boot
+        .registry
         .kind_id(MouseMove::NAME)
         .expect("MouseMove registered");
-    let kind_frame_stats = registry
+    let kind_frame_stats = boot
+        .registry
         .kind_id(FrameStats::NAME)
         .expect("FrameStats registered");
 
+    // Desktop-only render sink: the winit render thread drains
+    // `frame_vertices` each redraw, so every `DrawTriangle` emitted
+    // before the next frame is consolidated into one vertex buffer.
     let frame_vertices = Arc::new(Mutex::new(Vec::<u8>::with_capacity(4096)));
     let triangles_rendered = Arc::new(AtomicU64::new(0));
-
-    let verts_for_sink = Arc::clone(&frame_vertices);
-    let tris_for_sink = Arc::clone(&triangles_rendered);
-    registry.register_sink(
-        "render",
-        Arc::new(
-            move |_kind_id: u64,
-                  _kind_name: &str,
-                  _origin: Option<&str>,
-                  _sender,
-                  bytes: &[u8],
-                  count: u32| {
-                verts_for_sink.lock().unwrap().extend_from_slice(bytes);
-                tris_for_sink.fetch_add(u64::from(count), Ordering::Relaxed);
-            },
-        ),
-    );
-
-    // Reserved well-known sink: mail sent here is forwarded to every
-    // attached Claude session via the hub. If no hub is connected, the
-    // outbound handle is disconnected and the sink silently drops —
-    // the component doesn't have to care either way. (Handle created
-    // earlier so the log capture layer could share it.)
-    let broadcast_mbox = {
-        let outbound = Arc::clone(&outbound);
-        registry.register_sink(
-            HUB_CLAUDE_BROADCAST,
+    {
+        let verts_for_sink = Arc::clone(&frame_vertices);
+        let tris_for_sink = Arc::clone(&triangles_rendered);
+        boot.registry.register_sink(
+            "render",
             Arc::new(
                 move |_kind_id: u64,
-                      kind_name: &str,
-                      origin: Option<&str>,
+                      _kind_name: &str,
+                      _origin: Option<&str>,
                       _sender,
                       bytes: &[u8],
-                      _count: u32| {
-                    if kind_name.is_empty() {
-                        tracing::warn!(
-                            target: "aether_substrate::broadcast",
-                            "{HUB_CLAUDE_BROADCAST} received mail with unregistered kind — dropping",
-                        );
-                        return;
-                    }
-                    outbound.send(EngineToHub::Mail(EngineMailFrame {
-                        address: ClaudeAddress::Broadcast,
-                        kind_name: kind_name.to_owned(),
-                        payload: bytes.to_vec(),
-                        origin: origin.map(str::to_owned),
-                    }));
+                      count: u32| {
+                    verts_for_sink.lock().unwrap().extend_from_slice(bytes);
+                    tris_for_sink.fetch_add(u64::from(count), Ordering::Relaxed);
                 },
             ),
-        )
-    };
-
-    let queue = Arc::new(MailQueue::new());
-
-    let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
-    host_fns::register(&mut linker)?;
-    let linker = Arc::new(linker);
-
-    // Substrate boots componentless (ADR-0010). Runtime load_component
-    // is how components arrive; the scheduler's runtime-mutable table
-    // accepts them as they're instantiated by the control plane.
-    let scheduler = Scheduler::new(
-        Arc::clone(&registry),
-        Arc::clone(&queue),
-        HashMap::new(),
-        WORKERS,
-    );
-
-    // ADR-0021 subscriber table, shared with the control plane so
-    // subscribe / unsubscribe / drop write through the same `Arc`
-    // the platform thread reads when publishing events.
-    let input_subscribers = aether_substrate_desktop::new_subscribers();
-
-    // Build the event loop up front so we can hand its proxy to
-    // `CaptureQueue` as a waker — the capture handler pokes the
-    // proxy, which wakes the loop even when the window is occluded.
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
-
-    // The capture queue handoff slot is shared between the chassis-
-    // side capture handler (pushes requests) and the render thread
-    // (drains on each redraw). Only desktop handles captures — core
-    // doesn't know about it.
-    let capture_queue = CaptureQueue::new();
-
-    // Wire the ADR-0010 control plane. Registered after the scheduler
-    // exists so the handler can capture the runtime component table
-    // directly rather than an `Arc<Scheduler>` (which would cycle back
-    // through the registry via this sink). The chassis_handler hook
-    // registers desktop-specific kinds (capture_frame, set_window_mode,
-    // platform_info); core dispatches only load/drop/replace/subscribe/
-    // unsubscribe itself.
-    let chassis_handler = chassis_control_handler(
-        event_loop.create_proxy(),
-        capture_queue.clone(),
-        Arc::clone(&registry),
-        Arc::clone(&queue),
-        Arc::clone(&outbound),
-    );
-    {
-        let control_plane = aether_substrate_desktop::ControlPlane {
-            engine: Arc::clone(&engine),
-            linker: Arc::clone(&linker),
-            registry: Arc::clone(&registry),
-            queue: Arc::clone(&queue),
-            outbound: Arc::clone(&outbound),
-            components: scheduler.components().clone(),
-            input_subscribers: Arc::clone(&input_subscribers),
-            default_name_counter: Arc::new(AtomicU64::new(0)),
-            chassis_handler: Some(chassis_handler),
-        };
-        registry.register_sink(
-            aether_substrate_desktop::AETHER_CONTROL,
-            control_plane.into_sink_handler(),
         );
     }
-
-    // Optional hub connection. If `AETHER_HUB_URL` is set, dial it and
-    // keep the `HubClient` alive for the lifetime of the process so the
-    // reader/heartbeat threads stay spawned. Failure to connect logs and
-    // continues — the substrate still renders locally.
-    let _hub = match std::env::var("AETHER_HUB_URL") {
-        Ok(url) => match HubClient::connect(
-            url.as_str(),
-            "hello-triangle",
-            env!("CARGO_PKG_VERSION"),
-            boot_descriptors.clone(),
-            Arc::clone(&registry),
-            Arc::clone(&queue),
-            Arc::clone(&outbound),
-        ) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                tracing::error!(
-                    target: "aether_substrate::boot",
-                    url = %url,
-                    error = %e,
-                    "hub connect failed",
-                );
-                None
-            }
-        },
-        Err(_) => None,
-    };
 
     tracing::info!(
         target: "aether_substrate::boot",
@@ -827,7 +714,7 @@ fn main() -> wasmtime::Result<()> {
         "componentless boot — close window to exit; load a component via aether.control.load_component",
     );
 
-    let boot_kinds_count = boot_descriptors.len() as u32;
+    let boot_kinds_count = boot.boot_descriptors.len() as u32;
     // Parse `AETHER_WINDOW_MODE` at boot. Unset → Windowed (default
     // size); bad value → log + fall back to Windowed rather than
     // refusing to boot.
@@ -847,9 +734,9 @@ fn main() -> wasmtime::Result<()> {
         Err(_) => (WindowMode::Windowed, None),
     };
     let app = App {
-        queue,
-        input_subscribers,
-        broadcast_mbox,
+        queue: boot.queue,
+        input_subscribers: boot.input_subscribers,
+        broadcast_mbox: boot.broadcast_mbox,
         kind_tick,
         kind_key,
         kind_mouse_button,
@@ -858,7 +745,7 @@ fn main() -> wasmtime::Result<()> {
         frame_vertices,
         triangles_rendered: Arc::clone(&triangles_rendered),
         capture_queue,
-        outbound: Arc::clone(&outbound),
+        outbound: Arc::clone(&boot.outbound),
         boot_kinds_count,
         window: None,
         gpu: None,
@@ -868,13 +755,14 @@ fn main() -> wasmtime::Result<()> {
         boot_mode: boot_mode.clone(),
         boot_size,
         current_mode: boot_mode,
-        _scheduler: scheduler,
+        _scheduler: boot.scheduler,
     };
 
     let chassis = DesktopChassis {
         event_loop,
         app,
         triangles_rendered,
+        _hub: boot.hub,
     };
     tracing::info!(
         target: "aether_substrate::boot",

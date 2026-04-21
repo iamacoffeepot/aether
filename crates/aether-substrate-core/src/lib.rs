@@ -20,6 +20,7 @@
 //! `decode_payload` and `resolve_bundle` are pub so chassis dispatch
 //! can validate mail bundles the same way core does.
 
+pub mod boot;
 pub mod chassis;
 pub mod component;
 pub mod control;
@@ -35,6 +36,7 @@ pub mod registry;
 pub mod scheduler;
 pub mod sender_table;
 
+pub use boot::{ChassisHandlerContext, SubstrateBoot, SubstrateBootBuilder};
 pub use chassis::{Chassis, ChassisCapabilities};
 pub use component::Component;
 pub use control::{AETHER_CONTROL, ChassisControlHandler, ControlPlane};

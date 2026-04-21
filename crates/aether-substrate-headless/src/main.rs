@@ -9,23 +9,17 @@
 
 mod chassis;
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use aether_kinds::{FrameStats, InputStream, Tick};
 use aether_mail::{Kind, encode, encode_empty};
 use aether_substrate_core::{
-    AETHER_CONTROL, Chassis, ChassisCapabilities, ControlPlane, HUB_CLAUDE_BROADCAST, HubClient,
-    HubOutbound, InputSubscribers, MailQueue, Registry, Scheduler, SubstrateCtx, host_fns,
-    log_capture,
+    Chassis, ChassisCapabilities, InputSubscribers, MailQueue, Scheduler, SubstrateBoot,
     mail::{Mail, MailboxId},
-    new_subscribers, subscribers_for,
+    subscribers_for,
 };
-use wasmtime::{Engine, Linker};
 
 const WORKERS: usize = 2;
 const DEFAULT_TICK_HZ: u32 = 60;
@@ -43,7 +37,10 @@ struct HeadlessChassis {
     kind_tick: u64,
     kind_frame_stats: u64,
     tick_period: Duration,
+    // Held so the scheduler's worker threads + the hub's reader /
+    // heartbeat threads stay alive for the life of the chassis.
     _scheduler: Scheduler,
+    _hub: Option<aether_substrate_core::HubClient>,
 }
 
 impl Chassis for HeadlessChassis {
@@ -121,20 +118,14 @@ fn parse_tick_hz_env() -> u32 {
 }
 
 fn main() -> wasmtime::Result<()> {
-    let outbound = HubOutbound::disconnected();
-    log_capture::init(Arc::clone(&outbound));
+    let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION"))
+        .workers(WORKERS)
+        .chassis_handler(|ctx| Some(chassis::chassis_control_handler(Arc::clone(ctx.outbound))))
+        .build()?;
 
-    let engine = Arc::new(Engine::default());
-    let registry = Arc::new(Registry::new());
-
-    let boot_descriptors = aether_kinds::descriptors::all();
-    for d in &boot_descriptors {
-        registry
-            .register_kind_with_descriptor(d.clone())
-            .expect("duplicate kind in substrate init");
-    }
-    let kind_tick = registry.kind_id(Tick::NAME).expect("Tick registered");
-    let kind_frame_stats = registry
+    let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
+    let kind_frame_stats = boot
+        .registry
         .kind_id(FrameStats::NAME)
         .expect("FrameStats registered");
 
@@ -142,9 +133,7 @@ fn main() -> wasmtime::Result<()> {
     // loaded on a headless substrate will emit `DrawTriangle` every
     // tick; without this sink, core's mailbox-resolution warn fires
     // at the tick rate and buries every other engine_logs entry.
-    // Registering a nop sink tells the substrate "yes, mail to
-    // render is expected here even though there's no renderer."
-    registry.register_sink(
+    boot.registry.register_sink(
         "render",
         Arc::new(
             |_kind_id: u64,
@@ -156,89 +145,6 @@ fn main() -> wasmtime::Result<()> {
         ),
     );
 
-    let broadcast_mbox = {
-        let outbound = Arc::clone(&outbound);
-        registry.register_sink(
-            HUB_CLAUDE_BROADCAST,
-            Arc::new(
-                move |_kind_id: u64,
-                      kind_name: &str,
-                      origin: Option<&str>,
-                      _sender,
-                      bytes: &[u8],
-                      _count: u32| {
-                    if kind_name.is_empty() {
-                        tracing::warn!(
-                            target: "aether_substrate::broadcast",
-                            "{HUB_CLAUDE_BROADCAST} received mail with unregistered kind — dropping",
-                        );
-                        return;
-                    }
-                    outbound.send(EngineToHub::Mail(EngineMailFrame {
-                        address: ClaudeAddress::Broadcast,
-                        kind_name: kind_name.to_owned(),
-                        payload: bytes.to_vec(),
-                        origin: origin.map(str::to_owned),
-                    }));
-                },
-            ),
-        )
-    };
-
-    let queue = Arc::new(MailQueue::new());
-
-    let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
-    host_fns::register(&mut linker)?;
-    let linker = Arc::new(linker);
-
-    let scheduler = Scheduler::new(
-        Arc::clone(&registry),
-        Arc::clone(&queue),
-        HashMap::new(),
-        WORKERS,
-    );
-
-    let input_subscribers = new_subscribers();
-
-    {
-        let control_plane = ControlPlane {
-            engine: Arc::clone(&engine),
-            linker: Arc::clone(&linker),
-            registry: Arc::clone(&registry),
-            queue: Arc::clone(&queue),
-            outbound: Arc::clone(&outbound),
-            components: scheduler.components().clone(),
-            input_subscribers: Arc::clone(&input_subscribers),
-            default_name_counter: Arc::new(AtomicU64::new(0)),
-            chassis_handler: Some(chassis::chassis_control_handler(Arc::clone(&outbound))),
-        };
-        registry.register_sink(AETHER_CONTROL, control_plane.into_sink_handler());
-    }
-
-    let _hub = match std::env::var("AETHER_HUB_URL") {
-        Ok(url) => match HubClient::connect(
-            url.as_str(),
-            "headless",
-            env!("CARGO_PKG_VERSION"),
-            boot_descriptors.clone(),
-            Arc::clone(&registry),
-            Arc::clone(&queue),
-            Arc::clone(&outbound),
-        ) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                tracing::error!(
-                    target: "aether_substrate::boot",
-                    url = %url,
-                    error = %e,
-                    "hub connect failed",
-                );
-                None
-            }
-        },
-        Err(_) => None,
-    };
-
     let tick_hz = parse_tick_hz_env();
     let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));
     tracing::info!(
@@ -249,13 +155,14 @@ fn main() -> wasmtime::Result<()> {
     );
 
     let chassis = HeadlessChassis {
-        queue,
-        input_subscribers,
-        broadcast_mbox,
+        queue: boot.queue,
+        input_subscribers: boot.input_subscribers,
+        broadcast_mbox: boot.broadcast_mbox,
         kind_tick,
         kind_frame_stats,
         tick_period,
-        _scheduler: scheduler,
+        _scheduler: boot.scheduler,
+        _hub: boot.hub,
     };
     tracing::info!(
         target: "aether_substrate::boot",
