@@ -69,6 +69,10 @@ impl MailQueue {
         self.pending.lock().unwrap().pop_front()
     }
 
+    /// Test helper — unconditional FIFO pop. Production workers use
+    /// `pop_blocking_if` so the per-mailbox strand claim can veto a
+    /// pop; tests that don't exercise strands keep the simple path.
+    #[cfg(test)]
     pub(crate) fn pop_blocking(&self) -> Option<Mail> {
         let mut q = self.pending.lock().unwrap();
         loop {
@@ -80,6 +84,55 @@ impl MailQueue {
             }
             q = self.pending_cv.wait(q).unwrap();
         }
+    }
+
+    /// Block until a mail for which `pred` returns `true` exists at
+    /// some position in the queue, then pop it. The scheduler's
+    /// per-mailbox strand uses this: `pred` atomically tries to claim
+    /// the strand for the mail's recipient, returning `true` (pop me)
+    /// iff it succeeded and `false` (skip me, try later mails)
+    /// otherwise. `pred` is called left-to-right across the queue each
+    /// scan and may short-circuit as soon as one mail returns `true`.
+    ///
+    /// `pred` is permitted to have atomic side effects (it must, to
+    /// reserve the strand). The contract: if `pred` returns `true`,
+    /// the caller guarantees to dispatch that mail; no "uncommit" path
+    /// is provided, so `pred` must not reserve on anything other than
+    /// the mail it's about to green-light.
+    pub(crate) fn pop_blocking_if<F>(&self, mut pred: F) -> Option<Mail>
+    where
+        F: FnMut(&Mail) -> bool,
+    {
+        let mut q = self.pending.lock().unwrap();
+        loop {
+            if let Some(idx) = q.iter().position(&mut pred) {
+                return q.remove(idx);
+            }
+            if self.shutdown.load(Ordering::SeqCst) {
+                return None;
+            }
+            q = self.pending_cv.wait(q).unwrap();
+        }
+    }
+
+    /// Non-blocking: pop the first mail whose recipient matches.
+    /// Returns `None` immediately if no matching mail is queued. Used
+    /// by the strand owner to drain every remaining mail for its
+    /// recipient before releasing the strand.
+    pub(crate) fn try_pop_for_recipient(&self, recipient: crate::mail::MailboxId) -> Option<Mail> {
+        let mut q = self.pending.lock().unwrap();
+        let idx = q.iter().position(|m| m.recipient == recipient)?;
+        q.remove(idx)
+    }
+
+    /// Wake every worker parked on `pending_cv`. Called when a strand
+    /// releases so workers that previously skipped mail for that
+    /// recipient can re-scan. `notify_one` on push is not enough on
+    /// its own: a release can happen without a push (the strand owner
+    /// drains the last pending mail for its recipient and finds the
+    /// queue contains only skipped mails that are now unblocked).
+    pub(crate) fn notify_waiters(&self) {
+        self.pending_cv.notify_all();
     }
 
     pub(crate) fn mark_completed(&self) {

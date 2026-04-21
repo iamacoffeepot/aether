@@ -27,6 +27,20 @@
 // zero before swapping. The swap step (and the parked-mail flush) is
 // driven by `ControlPlane::handle_replace`; this module just owns
 // the per-entry state and the worker dispatch path that respects it.
+//
+// Issue 157 (2026-04-20): the original worker loop popped mail in
+// FIFO order from the main queue and serialised delivery through
+// `Mutex<Component>`. That preserved "one deliver at a time per
+// component" but NOT "deliver in pop order": mutex acquisition is
+// non-FIFO under contention, so two workers each popping sequential
+// mails for the same mailbox could invert the deliver order (the
+// `_row_/_col_` scramble the tic-tac-toe batch smoke caught). The fix
+// is the per-mailbox strand: `ComponentEntry.strand_scheduled` is a
+// claim flag the worker sets under the queue lock during the pop
+// scan, and the strand owner drains every same-recipient mail still
+// in the queue before releasing. Different mailboxes still dispatch
+// in parallel; only same-mailbox mail serialises, and now it
+// serialises in pop (== push) order.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -49,6 +63,22 @@ pub struct ComponentEntry {
     pub pending: AtomicU32,
     pub frozen: AtomicBool,
     pub parked: Mutex<VecDeque<Mail>>,
+    /// Per-mailbox strand lock. A worker that pops mail for this
+    /// component flips this to `true` before leaving the queue's scan
+    /// path; other workers whose scan lands on mail for the same
+    /// recipient treat the strand as unavailable and keep scanning.
+    /// The strand owner drains every same-recipient mail in the queue
+    /// before flipping this back to `false`. Net effect: FIFO per
+    /// mailbox even across multiple workers, without serialising the
+    /// whole scheduler.
+    ///
+    /// Preserves the invariant the old `Mutex<Component>`-only design
+    /// tried to rely on: that `pop_blocking` FIFO order equals deliver
+    /// order for a given mailbox. The `Mutex<Component>` alone did not
+    /// preserve it — mutex acquisition is not FIFO under contention, so
+    /// two workers popping mail for the same mailbox could invert the
+    /// deliver order. See issue 157.
+    pub strand_scheduled: AtomicBool,
 }
 
 impl ComponentEntry {
@@ -58,6 +88,7 @@ impl ComponentEntry {
             pending: AtomicU32::new(0),
             frozen: AtomicBool::new(false),
             parked: Mutex::new(VecDeque::new()),
+            strand_scheduled: AtomicBool::new(false),
         }
     }
 }
@@ -185,87 +216,166 @@ impl Drop for Scheduler {
 }
 
 fn worker_loop(ctx: Arc<WorkerContext>) {
-    while let Some(mail) = ctx.queue.pop_blocking() {
-        let recipient = mail.recipient;
-        match ctx.registry.entry(recipient) {
-            Some(MailboxEntry::Sink(handler)) => {
-                let kind_name = ctx.registry.kind_name(mail.kind).unwrap_or_default();
-                // Mail reaching a sink through the scheduler queue
-                // came from substrate core (e.g. the frame loop's
-                // FrameStats push) and has no sending mailbox; per
-                // ADR-0011 origin is `None`. Components reach sinks
-                // inline via `SubstrateCtx::send`, not this path.
-                handler(
-                    mail.kind,
-                    &kind_name,
-                    None,
-                    mail.sender,
-                    &mail.payload,
-                    mail.count,
-                );
+    loop {
+        // Pick the next runnable mail. For Component recipients,
+        // `pop_blocking_if`'s predicate tries to claim the per-mailbox
+        // strand atomically; the pop only commits if the claim
+        // succeeds. Sinks, dropped/unknown recipients, and dangling
+        // component ids (registered but no `ComponentEntry`) pop
+        // unconditionally.
+        let claimed_entry = std::sync::Mutex::new(None::<Arc<ComponentEntry>>);
+        let Some(mail) = ctx.queue.pop_blocking_if(|m| {
+            match ctx.registry.entry(m.recipient) {
+                Some(MailboxEntry::Component) => {
+                    let entry = ctx
+                        .components
+                        .read()
+                        .unwrap()
+                        .get(&m.recipient)
+                        .map(Arc::clone);
+                    match entry {
+                        Some(e) => {
+                            // `swap(true)` returns the previous value.
+                            // If it was `false` we just claimed the
+                            // strand; otherwise another worker owns it
+                            // and we keep scanning.
+                            if !e.strand_scheduled.swap(true, Ordering::AcqRel) {
+                                *claimed_entry.lock().unwrap() = Some(e);
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        // Dangling id: warn-drop path below handles it;
+                        // nothing to serialise on.
+                        None => true,
+                    }
+                }
+                // Sinks are stateless and safe under concurrent calls;
+                // dropped/unknown mail just warn-drops.
+                _ => true,
             }
-            Some(MailboxEntry::Component) => {
-                let entry = ctx
+        }) else {
+            return;
+        };
+
+        // Capture the recipient before `mail` is consumed — we need
+        // it to drain same-recipient follow-ups below.
+        let recipient = mail.recipient;
+        let strand = claimed_entry.lock().unwrap().take();
+        dispatch_mail(&ctx, mail, strand.as_ref());
+
+        // If we owned a strand, drain any further mail for the same
+        // recipient before releasing it. This is what preserves FIFO
+        // per-mailbox: same-recipient mail that arrived between the
+        // first pop and this drain goes through us, not through a
+        // racing worker.
+        if let Some(entry) = strand {
+            while let Some(next) = ctx.queue.try_pop_for_recipient(recipient) {
+                dispatch_mail(&ctx, next, Some(&entry));
+            }
+            entry.strand_scheduled.store(false, Ordering::Release);
+            // Wake any worker that skipped this recipient during the
+            // drain so it can re-scan the queue.
+            ctx.queue.notify_waiters();
+        }
+    }
+}
+
+/// Deliver one mail to its recipient. Strand claim (if any) is the
+/// caller's job — this function only dispatches. `strand` carries the
+/// already-claimed `ComponentEntry` for Component recipients so we
+/// don't hit the components table lookup twice.
+fn dispatch_mail(ctx: &Arc<WorkerContext>, mail: Mail, strand: Option<&Arc<ComponentEntry>>) {
+    let recipient = mail.recipient;
+    match ctx.registry.entry(recipient) {
+        Some(MailboxEntry::Sink(handler)) => {
+            let kind_name = ctx.registry.kind_name(mail.kind).unwrap_or_default();
+            // Mail reaching a sink through the scheduler queue came
+            // from substrate core (e.g. the frame loop's FrameStats
+            // push) and has no sending mailbox; per ADR-0011 origin is
+            // `None`. Components reach sinks inline via
+            // `SubstrateCtx::send`, not this path.
+            handler(
+                mail.kind,
+                &kind_name,
+                None,
+                mail.sender,
+                &mail.payload,
+                mail.count,
+            );
+            ctx.queue.mark_completed();
+        }
+        Some(MailboxEntry::Component) => {
+            let entry = match strand {
+                Some(e) => Some(Arc::clone(e)),
+                None => ctx
                     .components
                     .read()
                     .unwrap()
                     .get(&recipient)
-                    .map(Arc::clone);
-                match entry {
-                    Some(entry) => {
-                        // ADR-0022 freeze-drain: while frozen, mail is
-                        // parked on the entry without entering the
-                        // pending count. handle_replace flushes the
-                        // parked queue under the write lock once the
-                        // swap (or timeout) resolves.
-                        if entry.frozen.load(Ordering::Acquire) {
-                            entry.parked.lock().unwrap().push_back(mail);
-                            ctx.queue.mark_completed();
-                            continue;
-                        }
-                        entry.pending.fetch_add(1, Ordering::AcqRel);
-                        let rc = {
-                            let mut c = entry.component.lock().unwrap();
-                            c.deliver(&mail).expect("component.deliver failed")
-                        };
-                        entry.pending.fetch_sub(1, Ordering::AcqRel);
-                        if rc == crate::component::DISPATCH_UNKNOWN_KIND {
-                            let kind_name = ctx
-                                .registry
-                                .kind_name(mail.kind)
-                                .unwrap_or_else(|| format!("kind#{:#x}", mail.kind));
-                            tracing::warn!(
-                                target: "aether_substrate::scheduler",
-                                mailbox = ?recipient,
-                                kind = %kind_name,
-                                "component has no handler for mail kind (ADR-0033 strict receiver); dropped",
-                            );
-                        }
+                    .map(Arc::clone),
+            };
+            match entry {
+                Some(entry) => {
+                    // ADR-0022 freeze-drain: while frozen, mail is
+                    // parked on the entry without entering the pending
+                    // count. handle_replace flushes the parked queue
+                    // under the write lock once the swap (or timeout)
+                    // resolves. The strand claim we made above stays
+                    // live — the freeze path coordinates with us via
+                    // `pending` (which we never incremented for parked
+                    // mail), not via `strand_scheduled`.
+                    if entry.frozen.load(Ordering::Acquire) {
+                        entry.parked.lock().unwrap().push_back(mail);
+                        ctx.queue.mark_completed();
+                        return;
                     }
-                    None => {
+                    entry.pending.fetch_add(1, Ordering::AcqRel);
+                    let rc = {
+                        let mut c = entry.component.lock().unwrap();
+                        c.deliver(&mail).expect("component.deliver failed")
+                    };
+                    entry.pending.fetch_sub(1, Ordering::AcqRel);
+                    if rc == crate::component::DISPATCH_UNKNOWN_KIND {
+                        let kind_name = ctx
+                            .registry
+                            .kind_name(mail.kind)
+                            .unwrap_or_else(|| format!("kind#{:#x}", mail.kind));
                         tracing::warn!(
                             target: "aether_substrate::scheduler",
                             mailbox = ?recipient,
-                            "mail to registered-component mailbox but no component bound — dropped",
+                            kind = %kind_name,
+                            "component has no handler for mail kind (ADR-0033 strict receiver); dropped",
                         );
                     }
+                    ctx.queue.mark_completed();
+                }
+                None => {
+                    tracing::warn!(
+                        target: "aether_substrate::scheduler",
+                        mailbox = ?recipient,
+                        "mail to registered-component mailbox but no component bound — dropped",
+                    );
+                    ctx.queue.mark_completed();
                 }
             }
-            Some(MailboxEntry::Dropped) => {
-                tracing::warn!(
-                    target: "aether_substrate::scheduler",
-                    mailbox = ?recipient,
-                    "mail to dropped mailbox — discarded",
-                );
-            }
-            None => {
-                tracing::warn!(
-                    target: "aether_substrate::scheduler",
-                    mailbox = ?recipient,
-                    "mail to unknown mailbox — dropped",
-                );
-            }
         }
-        ctx.queue.mark_completed();
+        Some(MailboxEntry::Dropped) => {
+            tracing::warn!(
+                target: "aether_substrate::scheduler",
+                mailbox = ?recipient,
+                "mail to dropped mailbox — discarded",
+            );
+            ctx.queue.mark_completed();
+        }
+        None => {
+            tracing::warn!(
+                target: "aether_substrate::scheduler",
+                mailbox = ?recipient,
+                "mail to unknown mailbox — dropped",
+            );
+            ctx.queue.mark_completed();
+        }
     }
 }
