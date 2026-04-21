@@ -14,6 +14,7 @@
 // barrier's push/decrement/wait cycle.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use aether_substrate_desktop::{
@@ -90,4 +91,70 @@ fn tick_roundtrip_component_to_sink() {
 
     // Sink saw count=1 + count=2 + count=3 = 6.
     assert_eq!(counter.load(Ordering::SeqCst), 1 + 2 + 3);
+}
+
+/// Regression for issue 157: batched mail to a single recipient must
+/// be delivered in push order even with multiple workers contending
+/// the component's mutex. Before the per-mailbox strand fix, two
+/// workers popping sequential mails from the FIFO queue could invert
+/// deliver order because `Mutex::lock()` is not FIFO under contention;
+/// the race showed up as `PlayMove { row, col }` values landing in
+/// the wrong cells during the tic-tac-toe batch smoke.
+///
+/// The test pushes N mails carrying `count = 1..=N` and lets the
+/// guest forward each one to a sink that appends the received `count`
+/// to a `Vec`. With the fix the vector ends up `[1, 2, ..., N]`; with
+/// the pre-fix scheduler it scrambled on most runs with workers=2 and
+/// N large enough to keep both workers busy.
+#[test]
+fn batched_mail_preserves_fifo_per_mailbox() {
+    const N: u32 = 200;
+
+    let engine = Engine::default();
+    let registry = Arc::new(Registry::new());
+    let component_mbox = registry.register_component("fifo");
+
+    let recorded: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::with_capacity(N as usize)));
+    let recorded_clone = Arc::clone(&recorded);
+    let sink_mbox = registry.register_sink(
+        "observer",
+        Arc::new(move |_kind_id, _kind, _origin, _sender, _bytes, count| {
+            recorded_clone.lock().unwrap().push(count);
+        }),
+    );
+
+    let module = Module::new(&engine, forwards_to_sink_wat(sink_mbox)).expect("compile wat");
+
+    let queue = Arc::new(MailQueue::new());
+    let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+    host_fns::register(&mut linker).expect("register host fns");
+
+    let ctx = SubstrateCtx::new(
+        component_mbox,
+        Arc::clone(&registry),
+        Arc::clone(&queue),
+        HubOutbound::disconnected(),
+        aether_substrate_desktop::new_subscribers(),
+    );
+    let component = Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
+
+    let mut components = std::collections::HashMap::new();
+    components.insert(component_mbox, component);
+    // Two workers — the race the strand fix closes only manifests
+    // with workers > 1 and the guest's deliver fast enough that
+    // both threads contend on the component mutex.
+    let _scheduler = Scheduler::new(registry, Arc::clone(&queue), components, 2);
+
+    for i in 1..=N {
+        queue.push(Mail::new(component_mbox, 1, vec![], i));
+    }
+    queue.wait_idle();
+
+    let got = recorded.lock().unwrap().clone();
+    assert_eq!(got.len(), N as usize, "sink saw the wrong number of mails");
+    let expected: Vec<u32> = (1..=N).collect();
+    assert_eq!(
+        got, expected,
+        "sink recorded out-of-order mail: per-mailbox FIFO broken"
+    );
 }
