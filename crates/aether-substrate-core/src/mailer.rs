@@ -130,7 +130,7 @@ fn route_mail(
                 mail.kind,
                 &kind_name,
                 None,
-                mail.sender,
+                mail.reply_to,
                 &mail.payload,
                 mail.count,
             );
@@ -176,7 +176,7 @@ fn route_mail(
             {
                 // ADR-0037 Phase 2: carry the local sending
                 // component's mailbox id so the hub can build a
-                // `Sender::EngineMailbox { engine_id, mailbox_id }`
+                // `ReplyTo::EngineMailbox { engine_id, mailbox_id }`
                 // for the receiving component. `None` for mail
                 // with no local component origin (broadcast-
                 // originated, substrate-generated).

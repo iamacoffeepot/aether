@@ -170,7 +170,7 @@ pub struct ControlPlane {
 /// at `aether.control` that core's ControlPlane doesn't recognise.
 /// The chassis is responsible for decoding, replying (via the
 /// outbound it constructed with), and any mail orchestration.
-pub type ChassisControlHandler = Arc<dyn Fn(u64, &str, crate::mail::Sender, &[u8]) + Send + Sync>;
+pub type ChassisControlHandler = Arc<dyn Fn(u64, &str, crate::mail::ReplyTo, &[u8]) + Send + Sync>;
 
 impl ControlPlane {
     /// Build the sink handler that should be registered against the
@@ -182,7 +182,7 @@ impl ControlPlane {
             move |kind_id: u64,
                   kind_name: &str,
                   _origin: Option<&str>,
-                  sender: crate::mail::Sender,
+                  sender: crate::mail::ReplyTo,
                   bytes: &[u8],
                   _count: u32| {
                 self.dispatch(kind_id, kind_name, sender, bytes);
@@ -190,7 +190,7 @@ impl ControlPlane {
         )
     }
 
-    fn dispatch(&self, kind_id: u64, kind_name: &str, sender: crate::mail::Sender, bytes: &[u8]) {
+    fn dispatch(&self, kind_id: u64, kind_name: &str, sender: crate::mail::ReplyTo, bytes: &[u8]) {
         if kind_id == LoadComponent::ID {
             let result = self.handle_load(bytes);
             self.outbound.send_reply(sender, &result);
@@ -1227,7 +1227,7 @@ mod tests {
         plane.dispatch(
             0xdead_beef_dead_beef,
             "aether.control.does_not_exist",
-            crate::mail::Sender::None,
+            crate::mail::ReplyTo::None,
             &[],
         );
     }
@@ -1668,7 +1668,7 @@ mod tests {
         plane.dispatch(
             SubscribeInput::ID,
             SubscribeInput::NAME,
-            crate::mail::Sender::None,
+            crate::mail::ReplyTo::None,
             &postcard::to_allocvec(&SubscribeInput {
                 stream: InputStream::Tick,
                 mailbox: id,
@@ -1678,7 +1678,7 @@ mod tests {
         plane.dispatch(
             UnsubscribeInput::ID,
             UnsubscribeInput::NAME,
-            crate::mail::Sender::None,
+            crate::mail::ReplyTo::None,
             &postcard::to_allocvec(&UnsubscribeInput {
                 stream: InputStream::Tick,
                 mailbox: id,
@@ -1816,7 +1816,7 @@ mod tests {
                 kind: 0,
                 payload: sink_id.0.to_le_bytes().to_vec(),
                 count: n,
-                sender: crate::mail::Sender::None,
+                sender: crate::mail::ReplyTo::None,
                 from_component: None,
             });
         }
@@ -1889,7 +1889,7 @@ mod tests {
                 kind: 0,
                 payload: sink_id.0.to_le_bytes().to_vec(),
                 count: n,
-                sender: crate::mail::Sender::None,
+                sender: crate::mail::ReplyTo::None,
                 from_component: None,
             });
         }

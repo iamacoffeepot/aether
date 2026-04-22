@@ -1,8 +1,8 @@
 //! aether-substrate-core: runtime that every substrate chassis shares.
 //!
 //! Hosts the wasmtime engine, the mail scheduler, the per-mailbox
-//! component table, the kind manifest, the sender table, the control-
-//! plane dispatcher, and the hub-socket client. Chassis-specific
+//! component table, the kind manifest, the reply-handle table, the
+//! control-plane dispatcher, and the hub-socket client. Chassis-specific
 //! peripherals (window, GPU, TCP listener, event loop) live in the
 //! chassis crate that binds this as a dependency. See ADR-0035.
 //!
@@ -33,8 +33,8 @@ pub mod log_capture;
 pub mod mail;
 pub mod mailer;
 pub mod registry;
+pub mod reply_table;
 pub mod scheduler;
-pub mod sender_table;
 
 pub use boot::{ChassisHandlerContext, SubstrateBoot, SubstrateBootBuilder};
 pub use chassis::{Chassis, ChassisCapabilities};
@@ -45,7 +45,7 @@ pub use hub_client::{
     HubClient, HubOutbound, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail,
 };
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
-pub use mail::{Mail, MailKind, MailboxId, Sender};
+pub use mail::{Mail, MailKind, MailboxId, ReplyTo};
 pub use mailer::Mailer;
 pub use registry::{MailboxEntry, Registry, SinkHandler};
 pub use scheduler::Scheduler;

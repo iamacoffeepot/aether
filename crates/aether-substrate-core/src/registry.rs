@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use aether_hub_protocol::canonical::kind_id_from_parts;
 use aether_hub_protocol::{KindDescriptor, SchemaType};
 
-use crate::mail::{MailboxId, Sender};
+use crate::mail::{MailboxId, ReplyTo};
 
 /// Handler invoked when mail is delivered to a substrate-owned sink.
 /// Called on a scheduler worker thread; must be `Send + Sync`.
@@ -27,11 +27,11 @@ use crate::mail::{MailboxId, Sender};
 /// mailbox's registered name if the mail came from a component
 /// (`None` for substrate-core pushes with no sending mailbox, per
 /// ADR-0011), the remote origin of the mail per ADR-0008 / ADR-0037
-/// (`Sender::Session` for hub-inbound, `Sender::EngineMailbox` for
-/// bubbled-up, `Sender::None` for substrate-local), payload bytes,
+/// (`Sender::Session` for hub-inbound, `ReplyTo::EngineMailbox` for
+/// bubbled-up, `ReplyTo::None` for substrate-local), payload bytes,
 /// and the kind-implied count.
 pub type SinkHandler =
-    Arc<dyn Fn(u64, &str, Option<&str>, Sender, &[u8], u32) + Send + Sync + 'static>;
+    Arc<dyn Fn(u64, &str, Option<&str>, ReplyTo, &[u8], u32) + Send + Sync + 'static>;
 
 /// What a given mailbox actually is. The registry records this so the
 /// scheduler can dispatch appropriately without a per-mail type check.
@@ -454,8 +454,8 @@ mod tests {
             panic!("expected sink")
         };
         // Test-side id is irrelevant — the handler ignores it.
-        h(0, "aether.tick", None, Sender::None, &[], 7);
-        h(0, "aether.tick", Some("physics"), Sender::None, &[], 3);
+        h(0, "aether.tick", None, ReplyTo::None, &[], 7);
+        h(0, "aether.tick", Some("physics"), ReplyTo::None, &[], 3);
         assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
 

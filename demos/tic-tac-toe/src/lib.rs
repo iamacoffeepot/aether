@@ -252,7 +252,7 @@ impl TicTacToe {
     }
 
     fn reply(&self, ctx: &mut Ctx<'_>, status: u8) {
-        let Some(sender) = ctx.sender() else {
+        let Some(sender) = ctx.reply_to() else {
             return;
         };
         let result = MoveResult {

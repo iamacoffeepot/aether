@@ -41,7 +41,7 @@ use aether_hub_protocol::{
     EngineId, EngineMailToHubSubstrateFrame, EngineToHub, HubToEngine, MailByIdFrame, Uuid,
 };
 use aether_substrate_core::{
-    Mail, MailboxId, Mailer, Registry, Sender, SubstrateBoot, dispatch_hub_to_engine_mail,
+    Mail, MailboxId, Mailer, Registry, ReplyTo, SubstrateBoot, dispatch_hub_to_engine_mail,
 };
 use tokio::sync::mpsc;
 
@@ -106,7 +106,7 @@ impl LoopbackHandle {
     /// `source_engine_id` is the originating engine (known by the
     /// hub from the TCP connection, not on the wire). Combined with
     /// `frame.source_mailbox_id` it becomes
-    /// `Sender::EngineMailbox { engine_id, mailbox_id }` on the
+    /// `ReplyTo::EngineMailbox { engine_id, mailbox_id }` on the
     /// delivered `Mail` — the hub-resident component's
     /// `ctx.reply(sender)` then routes through
     /// `HubOutbound::send_reply` which forks on the enum variant
@@ -134,14 +134,15 @@ impl LoopbackHandle {
             return;
         }
         let sender = match source_mailbox_id {
-            Some(mailbox_id) => Sender::EngineMailbox {
+            Some(mailbox_id) => ReplyTo::EngineMailbox {
                 engine_id: source_engine_id,
                 mailbox_id,
             },
-            None => Sender::None,
+            None => ReplyTo::None,
         };
         self.queue.push(
-            Mail::new(MailboxId(recipient_mailbox_id), kind_id, payload, count).with_sender(sender),
+            Mail::new(MailboxId(recipient_mailbox_id), kind_id, payload, count)
+                .with_reply_to(sender),
         );
     }
 }

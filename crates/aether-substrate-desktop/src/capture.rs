@@ -19,15 +19,15 @@
 
 use std::sync::{Arc, Mutex};
 
-use aether_substrate_core::{Mail, Sender};
+use aether_substrate_core::{Mail, ReplyTo};
 
-/// One pending capture request. Carries the originating sender so
-/// the render thread can reply-to-sender once it has bytes, plus a
-/// resolved list of `after_mails` the control plane already
-/// validated; the render thread pushes them onto the queue after
-/// readback, before replying.
+/// One pending capture request. Carries the reply handle so the
+/// render thread can reply once it has bytes, plus a resolved list
+/// of `after_mails` the control plane already validated; the
+/// render thread pushes them onto the queue after readback, before
+/// replying.
 pub struct PendingCapture {
-    pub sender: Sender,
+    pub reply_to: ReplyTo,
     pub after_mails: Vec<Mail>,
 }
 
@@ -69,13 +69,13 @@ mod tests {
     use super::*;
     use aether_hub_protocol::{SessionToken, Uuid};
 
-    fn sender(u: u128) -> Sender {
-        Sender::Session(SessionToken(Uuid::from_u128(u)))
+    fn reply_to(u: u128) -> ReplyTo {
+        ReplyTo::Session(SessionToken(Uuid::from_u128(u)))
     }
 
     fn pending(u: u128) -> PendingCapture {
         PendingCapture {
-            sender: sender(u),
+            reply_to: reply_to(u),
             after_mails: Vec::new(),
         }
     }
@@ -98,7 +98,7 @@ mod tests {
         let q = CaptureQueue::new();
         assert!(q.request(pending(1)));
         let got = q.take().expect("pending");
-        assert_eq!(got.sender, sender(1));
+        assert_eq!(got.reply_to, reply_to(1));
         // Slot is empty again.
         assert!(q.take().is_none());
         // Next request lands.

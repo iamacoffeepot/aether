@@ -873,7 +873,7 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
 
     quote! {
         let __aether_kind = __aether_mail.kind();
-        __aether_ctx.__set_sender(__aether_mail.sender());
+        __aether_ctx.__set_reply_to(__aether_mail.reply_to());
         #( #arms )*
         #tail
     }

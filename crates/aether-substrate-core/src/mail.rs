@@ -13,10 +13,10 @@ use aether_mail::mailbox_id_from_name;
 pub struct MailboxId(pub u64);
 
 impl MailboxId {
-    /// Reserved sentinel for "no sender". ADR-0011 / ADR-0017 treat
-    /// `MailboxId(0)` as the unassigned origin; registration rejects
-    /// any name whose hash collides with 0 (practical probability
-    /// ~2⁻⁶⁴, but the guard is cheap).
+    /// Reserved sentinel for "no origin". Registration rejects any
+    /// name whose hash collides with 0 (practical probability
+    /// ~2⁻⁶⁴, but the guard is cheap) so this id never belongs to a
+    /// real mailbox.
     pub const NONE: MailboxId = MailboxId(0);
 
     /// Compute the deterministic id for a mailbox name. Same algorithm
@@ -34,25 +34,30 @@ impl MailboxId {
 /// preparation for hashed derivation (Phase 2).
 pub type MailKind = u64;
 
-/// Attribution of the remote-origin side of a `Mail` (ADR-0008,
-/// ADR-0037). `None` is the default — broadcast / substrate-generated
-/// mail with no meaningful reply-over-the-hub-wire target. `Session`
-/// tags mail that arrived from a Claude MCP session (ADR-0008).
-/// `EngineMailbox` tags mail bubbled up from a component on another
-/// engine (ADR-0037 Phase 2) — the hub-chassis fills this in on the
-/// receiving side of `EngineMailToHubSubstrate` frames so the
-/// `ctx.reply` round trip can route back to the originating engine.
+/// Reply destination for a `Mail` (ADR-0008, ADR-0037). Strictly a
+/// reply-to hint: mail is pushed at a recipient, not sent from a
+/// mailbox, so there is no actual "sender" concept in the system —
+/// this field records where an optional reply should be routed.
 ///
-/// Note: local component-to-component attribution lives in
-/// `Mail.from_component`, not here — it's pure substrate-local and
-/// needs no hub-wire story. The two fields are complementary, not
-/// redundant (broadcast mail from a local sink arrives with
-/// `sender = None` and `from_component = None`; a session mail with
-/// a typo-routed recipient arrives with `sender = Session(token)`
-/// and `from_component = None`; a replied bubble arrives with
-/// `sender = EngineMailbox {..}` and `from_component = None`).
+/// `None` is the default — broadcast / substrate-generated mail
+/// with no meaningful reply target. `Session` tags mail that
+/// arrived from a Claude MCP session, so replies route back to
+/// that session (ADR-0008). `EngineMailbox` tags mail bubbled up
+/// from a component on another engine, so replies route to the
+/// originating engine's mailbox (ADR-0037 Phase 2). The hub-
+/// chassis fills in the engine id on `EngineMailToHubSubstrate`
+/// reception from the TCP connection it arrived on.
+///
+/// Local component-to-component reply routing lives in
+/// `Mail.from_component`, not here — that path is pure substrate-
+/// local and needs no hub-wire story. The two fields are
+/// complementary: broadcast mail from a local sink arrives with
+/// `reply_to = None` and `from_component = None`; session mail
+/// arrives with `reply_to = Session(token)` and `from_component =
+/// None`; a bubbled mail with an attributed source arrives with
+/// `reply_to = EngineMailbox { .. }` and `from_component = None`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Sender {
+pub enum ReplyTo {
     None,
     Session(SessionToken),
     EngineMailbox {
@@ -61,13 +66,12 @@ pub enum Sender {
     },
 }
 
-impl Sender {
-    /// Back-compat helper: true when the variant carries no reply
-    /// target (replaces the old `sender == SessionToken::NIL`
-    /// check). Callers deciding whether to allocate a sender table
-    /// handle use this before pattern matching on the payload.
+impl ReplyTo {
+    /// Whether the variant carries no reply target. Callers deciding
+    /// whether to allocate a reply-handle table entry use this
+    /// before pattern matching on the payload.
     pub fn is_none(&self) -> bool {
-        matches!(self, Sender::None)
+        matches!(self, ReplyTo::None)
     }
 }
 
@@ -75,26 +79,27 @@ impl Sender {
 /// implies; `count` is the number of items the layout implies, where
 /// applicable.
 ///
-/// Origin attribution is carried in two complementary fields:
-/// - `sender` is the remote origin (ADR-0008 / ADR-0037). `Session`
-///   means the mail arrived from a Claude MCP session;
-///   `EngineMailbox` means it bubbled up from a component on another
+/// Reply routing is carried in two complementary fields. Neither
+/// describes where the mail came from; both describe where a reply
+/// would go if the receiver chooses to make one.
+/// - `reply_to` is the remote destination (ADR-0008 / ADR-0037).
+///   `Session` means reply routes back to a Claude MCP session;
+///   `EngineMailbox` means reply routes to a component on another
 ///   engine; `None` means no remote reply target.
 /// - `from_component` is the `MailboxId` of a local originating
 ///   component for mail enqueued by `SubstrateCtx::send` (ADR-0017).
-///   `Some` means "originated from another component on this
-///   substrate."
+///   `Some` means reply routes back to that local mailbox.
 ///
-/// Both-absent (`sender = None`, `from_component = None`) means
-/// broadcast-origin or substrate-generated mail with no meaningful
-/// reply target.
+/// Both-absent (`reply_to = None`, `from_component = None`) means
+/// broadcast-origin or substrate-generated mail with no reply
+/// target.
 #[derive(Debug)]
 pub struct Mail {
     pub recipient: MailboxId,
     pub kind: MailKind,
     pub payload: Vec<u8>,
     pub count: u32,
-    pub sender: Sender,
+    pub reply_to: ReplyTo,
     pub from_component: Option<MailboxId>,
 }
 
@@ -105,25 +110,25 @@ impl Mail {
             kind,
             payload,
             count,
-            sender: Sender::None,
+            reply_to: ReplyTo::None,
             from_component: None,
         }
     }
 
-    /// Attach a sender attribution (session or engine mailbox). Used
-    /// by the hub client when forwarding inbound frames (ADR-0008)
-    /// and by the hub-chassis loopback when delivering bubbled-up
-    /// mail (ADR-0037 Phase 2); other mail paths leave the default
-    /// `Sender::None`.
-    pub fn with_sender(mut self, sender: Sender) -> Self {
-        self.sender = sender;
+    /// Attach a reply-to destination (session or engine mailbox).
+    /// Used by the hub client when forwarding inbound frames
+    /// (ADR-0008) and by the hub-chassis loopback when delivering
+    /// bubbled-up mail (ADR-0037 Phase 2); other mail paths leave
+    /// the default `ReplyTo::None`.
+    pub fn with_reply_to(mut self, reply_to: ReplyTo) -> Self {
+        self.reply_to = reply_to;
         self
     }
 
     /// Attach the originating component's mailbox id. Set by
     /// `SubstrateCtx::send` when enqueueing component-to-component
     /// mail (ADR-0017) so `Component::deliver` can allocate a
-    /// `SenderEntry::Component` handle for the receiving guest.
+    /// Component-variant reply handle for the receiving guest.
     pub fn with_origin(mut self, origin: MailboxId) -> Self {
         self.from_component = Some(origin);
         self

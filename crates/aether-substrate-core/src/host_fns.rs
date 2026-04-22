@@ -9,7 +9,7 @@ use wasmtime::{Caller, Linker};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
 use crate::mail::MailboxId;
-use crate::sender_table::SenderEntry;
+use crate::reply_table::ReplyEntry;
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
 /// `0` is success; non-zero values distinguish call-site errors
@@ -125,7 +125,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
 
     // ADR-0013 + ADR-0017: `reply_mail` addresses the originator of
     // the inbound mail whose sender handle the guest received.
-    // Branches on the `SenderEntry` variant:
+    // Branches on the `ReplyEntry` variant:
     //   - Session: ship as a `ClaudeAddress::Session` frame through
     //     `HubOutbound` (same route as ADR-0013's original design).
     //   - Component: enqueue on the local `Mailer` via
@@ -156,11 +156,11 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
             let payload = data[start..end].to_vec();
 
             let ctx = caller.data();
-            let Some(entry) = ctx.sender_table.resolve(sender) else {
+            let Some(entry) = ctx.reply_table.resolve(sender) else {
                 return REPLY_UNKNOWN_HANDLE;
             };
             match entry {
-                SenderEntry::Session(token) => {
+                ReplyEntry::Session(token) => {
                     let Some(kind_name) = ctx.registry.kind_name(kind) else {
                         return REPLY_KIND_NOT_FOUND;
                     };
@@ -172,7 +172,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                         origin,
                     }));
                 }
-                SenderEntry::Component(mbox) => {
+                ReplyEntry::Component(mbox) => {
                     // Validate the kind id cheaply — the guest might
                     // have passed a bogus one and we'd rather return
                     // a meaningful status than silently enqueue mail
@@ -182,7 +182,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                     }
                     ctx.send(mbox, kind, payload, count);
                 }
-                SenderEntry::RemoteEngineMailbox {
+                ReplyEntry::RemoteEngineMailbox {
                     engine_id,
                     mailbox_id,
                 } => {
