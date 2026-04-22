@@ -321,6 +321,75 @@ pub struct PlayerSetVelocity {
     pub vy: f32,
 }
 
+/// Switch the player between continuous and tile-step motion modes.
+/// `0 = continuous` (WASD / `PlayerSetVelocity` drive per-tick
+/// velocity — the original model). `1 = tile_step` (each WASD press
+/// emits a `PlayerRequestStep` to the world authority; the player's
+/// position changes only when it receives a `PlayerStepResult` back).
+/// Other values are ignored.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_mail::Kind,
+    aether_mail::Schema,
+)]
+#[kind(name = "aether.player.set_mode")]
+pub struct PlayerSetMode {
+    pub mode: u32,
+}
+
+/// Player → world-authority request: "I want to step by `(dx, dy)`
+/// world units — what actually happens?". Authority addressed by the
+/// mailbox name `"world"` (resolved as a sink during player init).
+/// Deltas are integer cell offsets in tile-step mode: `(+1, 0)` east,
+/// `(0, +1)` north (matching the engine's +Y-up world). The player
+/// does not apply the motion itself in tile-step mode — it waits for
+/// `PlayerStepResult` before updating its position.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_mail::Kind,
+    aether_mail::Schema,
+)]
+#[kind(name = "aether.player.request_step")]
+pub struct PlayerRequestStep {
+    pub dx: i32,
+    pub dy: i32,
+}
+
+/// World-authority → player reply to `PlayerRequestStep`. `accepted`
+/// is `1` when the requested motion was applied (with any side
+/// effects like a box push already committed on the world side) and
+/// `0` when the authority refused (wall, out of bounds, unpushable
+/// box, etc.). `new_x` / `new_y` are the player's post-resolution
+/// world position either way — authoritative. The player overwrites
+/// its own position from these fields, so a rejected step leaves the
+/// player where the world says it is, not where it tried to go.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.player.step_result")]
+pub struct PlayerStepResult {
+    pub accepted: u32,
+    pub new_x: f32,
+    pub new_y: f32,
+}
+
 /// Request addressed to a component that supports the ADR-0013
 /// reply-to-sender smoke path. The component answers with `Pong`
 /// carrying the same `seq`; the round trip proves that a Claude
@@ -997,6 +1066,9 @@ mod tests {
         assert_eq!(TopdownSetExtent::NAME, "aether.camera.topdown.set_extent");
         assert_eq!(PlayerSetPosition::NAME, "aether.player.set_position");
         assert_eq!(PlayerSetVelocity::NAME, "aether.player.set_velocity");
+        assert_eq!(PlayerSetMode::NAME, "aether.player.set_mode");
+        assert_eq!(PlayerRequestStep::NAME, "aether.player.request_step");
+        assert_eq!(PlayerStepResult::NAME, "aether.player.step_result");
     }
 
     #[test]
