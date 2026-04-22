@@ -21,9 +21,10 @@ use crate::{
     Camera, CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats,
     Key, LoadComponent, LoadResult, MouseButton, MouseMove, OrbitSetDistance, OrbitSetFov,
     OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo,
-    PlatformInfoResult, Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult, SubscribeInput, SubscribeInputResult, Tick,
-    TopdownSetCenter, TopdownSetExtent, UnresolvedMail, UnsubscribeInput, WindowSize,
+    PlatformInfoResult, PlayerSetPosition, PlayerSetVelocity, Pong, ReplaceComponent,
+    ReplaceResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
+    SubscribeInput, SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
+    UnsubscribeInput, WindowSize,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -97,6 +98,11 @@ pub fn all() -> Vec<KindDescriptor> {
         // fire-and-forget shape as the orbit controls.
         schema::<TopdownSetCenter>(),
         schema::<TopdownSetExtent>(),
+        // Player component control surface. Fire-and-forget cast
+        // kinds; state changes become visible via the player's next
+        // tick (new `TopdownSetCenter` + `DrawTriangle` emissions).
+        schema::<PlayerSetPosition>(),
+        schema::<PlayerSetVelocity>(),
     ]
 }
 
