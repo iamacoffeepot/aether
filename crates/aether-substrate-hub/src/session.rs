@@ -247,4 +247,63 @@ mod tests {
         assert!(tokens.contains(&h1.token));
         assert!(tokens.contains(&h3.token));
     }
+
+    /// Pins the check-and-insert atomicity of `PendingReplies::register`:
+    /// `N` threads racing to register the same kind must produce
+    /// exactly one `Some` and `N-1` `None`. Regression guard against a
+    /// future refactor that splits the `contains_key` check from the
+    /// `insert` across separate lock acquisitions — which would allow
+    /// two callers to both observe "not in flight" and both insert,
+    /// silently dropping one caller's waiter.
+    #[test]
+    fn register_is_atomic_under_concurrent_same_kind_calls() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        const RACERS: usize = 16;
+        const KIND: &str = "aether.capture_frame_result";
+
+        let replies = PendingReplies::new();
+        let barrier = Arc::new(Barrier::new(RACERS));
+
+        let handles: Vec<_> = (0..RACERS)
+            .map(|_| {
+                let replies = Arc::clone(&replies);
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    // Every racer hits the mutex at the same moment so
+                    // the contention window is maximally exercised.
+                    // The returned Option<(guard, rx)> must be held by
+                    // the caller for the duration of the test — the
+                    // `join`-into-Vec below keeps the winner's guard
+                    // alive, so its Drop doesn't fire early and let a
+                    // late racer win "after" the winner.
+                    barrier.wait();
+                    replies.register(KIND.to_string())
+                })
+            })
+            .collect();
+
+        let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let winners = outcomes.iter().filter(|o| o.is_some()).count();
+        let losers = outcomes.iter().filter(|o| o.is_none()).count();
+        assert_eq!(winners, 1, "exactly one racer must register successfully");
+        assert_eq!(losers, RACERS - 1, "every other racer must see None");
+    }
+
+    /// Companion to `register_is_atomic_...`: after the single winner
+    /// drops its guard, the slot is released and a subsequent
+    /// registration for the same kind succeeds. Protects against a
+    /// refactor that forgot to clear the map entry on drop.
+    #[test]
+    fn register_slot_is_reusable_after_guard_drop() {
+        let replies = PendingReplies::new();
+        let kind = "aether.capture_frame_result".to_string();
+
+        let first = replies.register(kind.clone()).expect("first register wins");
+        assert!(replies.register(kind.clone()).is_none());
+        drop(first);
+        let second = replies.register(kind.clone()).expect("slot reusable");
+        drop(second);
+    }
 }
