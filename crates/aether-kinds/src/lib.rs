@@ -172,6 +172,79 @@ pub struct Camera {
     pub view_proj: [f32; 16],
 }
 
+/// Set the orbit camera's distance from its target (eye radius).
+/// Typical values 1.0–100.0; 0.0 collapses to the target point and
+/// produces a degenerate view. Applied on the next tick.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.camera.orbit.set_distance")]
+pub struct OrbitSetDistance {
+    pub distance: f32,
+}
+
+/// Set the orbit camera's pitch (radians). Positive tilts the eye
+/// upward so the camera looks down; negative tilts down so it looks
+/// up. Not clamped — `±π/2` are degenerate.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.camera.orbit.set_pitch")]
+pub struct OrbitSetPitch {
+    pub pitch: f32,
+}
+
+/// Set the orbit camera's absolute yaw (radians). Auto-advance still
+/// ticks from this value on the next frame; pair with
+/// `OrbitSetSpeed { rad_per_tick: 0.0 }` to pin a specific yaw.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.camera.orbit.set_yaw")]
+pub struct OrbitSetYaw {
+    pub yaw: f32,
+}
+
+/// Set the orbit camera's auto-rotation rate (radians per tick).
+/// `0.0` freezes the camera at its current yaw. Negative reverses
+/// direction.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.camera.orbit.set_speed")]
+pub struct OrbitSetSpeed {
+    pub rad_per_tick: f32,
+}
+
+/// Set the orbit camera's vertical field of view (radians). Typical
+/// values `π/4` (45°) to `π/2` (90°).
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.camera.orbit.set_fov")]
+pub struct OrbitSetFov {
+    pub fov_y_rad: f32,
+}
+
+/// Set the world-space point the orbit camera orbits around (default
+/// `(0, 0, 0)`). Useful for following an object by re-targeting the
+/// camera each frame.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.camera.orbit.set_target")]
+pub struct OrbitSetTarget {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
 /// Request addressed to a component that supports the ADR-0013
 /// reply-to-sender smoke path. The component answers with `Pong`
 /// carrying the same `seq`; the round trip proves that a Claude
@@ -836,6 +909,12 @@ mod tests {
             "aether.control.set_window_title_result"
         );
         assert_eq!(Camera::NAME, "aether.camera");
+        assert_eq!(OrbitSetDistance::NAME, "aether.camera.orbit.set_distance");
+        assert_eq!(OrbitSetPitch::NAME, "aether.camera.orbit.set_pitch");
+        assert_eq!(OrbitSetYaw::NAME, "aether.camera.orbit.set_yaw");
+        assert_eq!(OrbitSetSpeed::NAME, "aether.camera.orbit.set_speed");
+        assert_eq!(OrbitSetFov::NAME, "aether.camera.orbit.set_fov");
+        assert_eq!(OrbitSetTarget::NAME, "aether.camera.orbit.set_target");
     }
 
     #[test]
