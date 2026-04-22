@@ -245,6 +245,31 @@ pub struct OrbitSetTarget {
     pub z: f32,
 }
 
+/// Pan the top-down camera's centerpoint in world xy. Z is implicit —
+/// the camera always looks down the `-Z` axis.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.camera.topdown.set_center")]
+pub struct TopdownSetCenter {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Set the top-down camera's orthographic extent — the half-height of
+/// the frustum in world units. The visible width is
+/// `extent * aspect`. Larger values zoom out. Must be positive; zero
+/// or negative degenerates the projection.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.camera.topdown.set_extent")]
+pub struct TopdownSetExtent {
+    pub extent: f32,
+}
+
 /// Request addressed to a component that supports the ADR-0013
 /// reply-to-sender smoke path. The component answers with `Pong`
 /// carrying the same `seq`; the round trip proves that a Claude
@@ -915,6 +940,8 @@ mod tests {
         assert_eq!(OrbitSetSpeed::NAME, "aether.camera.orbit.set_speed");
         assert_eq!(OrbitSetFov::NAME, "aether.camera.orbit.set_fov");
         assert_eq!(OrbitSetTarget::NAME, "aether.camera.orbit.set_target");
+        assert_eq!(TopdownSetCenter::NAME, "aether.camera.topdown.set_center");
+        assert_eq!(TopdownSetExtent::NAME, "aether.camera.topdown.set_extent");
     }
 
     #[test]
