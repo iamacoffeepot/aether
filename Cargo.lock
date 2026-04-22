@@ -122,6 +122,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-math"
+version = "0.2.0-alpha"
+dependencies = [
+ "libm",
+]
+
+[[package]]
 name = "aether-substrate-core"
 version = "0.2.0-alpha"
 dependencies = [

@@ -6,6 +6,7 @@ members = [
     "crates/aether-substrate-headless",
     "crates/aether-substrate-hub",
     "crates/aether-kinds",
+    "crates/aether-math",
     "crates/aether-component",
     "crates/aether-hello-component",
     "crates/aether-hub-protocol",
