@@ -22,7 +22,7 @@ use std::time::Instant;
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, InputStream,
     Key, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult, SetWindowModeResult,
-    Tick, VideoMode, WindowInfo, WindowMode, WindowSize,
+    SetWindowTitleResult, Tick, VideoMode, WindowInfo, WindowMode, WindowSize,
 };
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
@@ -133,6 +133,11 @@ struct App {
     /// Optional initial windowed size from `AETHER_WINDOW_MODE`.
     /// Only consulted when `boot_mode == Windowed`.
     boot_size: Option<(u32, u32)>,
+    /// Initial window title, parsed from `AETHER_WINDOW_TITLE` at
+    /// boot and applied when `resumed` creates the window. Runtime
+    /// `set_window_title` mail overrides this but doesn't update the
+    /// field — the current title lives on the `Window` itself.
+    boot_title: String,
     /// Currently-applied window mode. Updated by `set_window_mode`
     /// and read by `platform_info`'s window-state field. Starts as
     /// `boot_mode`.
@@ -422,6 +427,19 @@ impl App {
         }
     }
 
+    /// Apply a `SetWindowTitle` request. `Window::set_title` is
+    /// infallible on every winit platform, so the only failure mode
+    /// is the pre-resume case where no window exists yet.
+    fn apply_window_title(&self, title: String) -> SetWindowTitleResult {
+        let Some(window) = self.window.as_ref() else {
+            return SetWindowTitleResult::Err {
+                error: "set_window_title requested before window initialized".to_owned(),
+            };
+        };
+        window.set_title(&title);
+        SetWindowTitleResult::Ok { title }
+    }
+
     fn publish_window_size(&self, width: u32, height: u32) {
         let subs = subscribers_for(&self.input_subscribers, InputStream::WindowSize);
         if subs.is_empty() {
@@ -474,6 +492,10 @@ impl ApplicationHandler<UserEvent> for App {
                 let result = self.apply_window_mode(mode, width, height);
                 self.outbound.send_reply(reply_to, &result);
             }
+            UserEvent::SetWindowTitle { reply_to, title } => {
+                let result = self.apply_window_title(title);
+                self.outbound.send_reply(reply_to, &result);
+            }
         }
     }
 
@@ -484,7 +506,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Apply `AETHER_WINDOW_MODE` at window creation. Resolving
         // exclusive at boot uses the primary monitor since there's
         // no window yet to ask "which monitor am I on?".
-        let mut attrs = Window::default_attributes().with_title("aether hello-triangle");
+        let mut attrs = Window::default_attributes().with_title(&self.boot_title);
         if let Some((w, h)) = self.boot_size {
             attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h));
         }
@@ -776,6 +798,11 @@ fn main() -> wasmtime::Result<()> {
         },
         Err(_) => (WindowMode::Windowed, None),
     };
+    // `AETHER_WINDOW_TITLE` overrides the default title. Empty string
+    // is accepted — winit treats it as "no title" on most platforms —
+    // but unset gives the generic substrate name rather than leaking
+    // whatever demo-ish string last shipped in source.
+    let boot_title = std::env::var("AETHER_WINDOW_TITLE").unwrap_or_else(|_| "aether".to_owned());
     let app = App {
         queue: boot.queue,
         input_subscribers: boot.input_subscribers,
@@ -798,6 +825,7 @@ fn main() -> wasmtime::Result<()> {
         occluded: false,
         boot_mode: boot_mode.clone(),
         boot_size,
+        boot_title,
         current_mode: boot_mode,
         _scheduler: boot.scheduler,
     };
