@@ -25,6 +25,12 @@
 // texture (not the swapchain), so captures are independent of window
 // state. Non-capture frames pay nothing beyond the one extra texture
 // copy per frame.
+//
+// Depth: a `Depth32Float` texture paired with the offscreen target is
+// cleared to 1.0 each frame and paired with `LessEqual` depth testing.
+// Smaller clip-space z wins, so with the topdown camera (which looks
+// down -Z) larger world z draws on top. Convention: floors / backdrop
+// geometry at z=0, movers / foreground at z=0.1+.
 
 use std::sync::Arc;
 
@@ -34,6 +40,7 @@ use winit::window::Window;
 const VERTEX_STRIDE: u64 = 24; // 3 * f32 position + 3 * f32 color
 const VERTEX_BUFFER_BYTES: u64 = 64 * 1024;
 const CAMERA_UNIFORM_BYTES: u64 = 64; // 4x4 f32 column-major
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// Identity matrix in column-major order — what the camera uniform
 /// holds before the first `aether.camera` mail arrives, so components
@@ -74,6 +81,10 @@ pub struct Gpu {
     /// gets a `copy_texture_to_texture` blit + present. Sized to the
     /// surface, reallocated on resize.
     offscreen: OffscreenTarget,
+    /// Depth target paired with `offscreen`. Cleared to 1.0 each frame;
+    /// reallocated alongside the color target on resize. Same size +
+    /// sample count as `offscreen`.
+    depth: DepthTarget,
     /// Lazily-allocated readback buffer for the capture path. Sized
     /// to `padded_row_bytes * height`; reallocated on resize or first
     /// capture after a size change.
@@ -85,6 +96,12 @@ struct OffscreenTarget {
     view: wgpu::TextureView,
     width: u32,
     height: u32,
+}
+
+struct DepthTarget {
+    #[allow(dead_code)] // keep the texture alive; only the view is bound
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
 }
 
 struct Readback {
@@ -143,6 +160,7 @@ impl Gpu {
         surface.configure(&device, &config);
 
         let offscreen = create_offscreen(&device, format, config.width, config.height);
+        let depth = create_depth(&device, config.width, config.height);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("hello-triangle shader"),
@@ -232,7 +250,13 @@ impl Gpu {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -257,6 +281,7 @@ impl Gpu {
             camera_buffer,
             camera_bind_group,
             offscreen,
+            depth,
             readback: None,
         }
     }
@@ -274,6 +299,7 @@ impl Gpu {
             self.config.width,
             self.config.height,
         );
+        self.depth = create_depth(&self.device, self.config.width, self.config.height);
         // Invalidate the readback buffer — it's sized to the old
         // surface; the next capture reallocates.
         self.readback = None;
@@ -351,7 +377,14 @@ impl Gpu {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
@@ -577,6 +610,25 @@ fn create_offscreen(
         width,
         height,
     }
+}
+
+fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> DepthTarget {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("depth target"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    DepthTarget { texture, view }
 }
 
 /// Dimensions + wire-format info captured at `copy_texture_to_buffer`
