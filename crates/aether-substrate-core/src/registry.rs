@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-use aether_hub_protocol::canonical::kind_id_from_parts;
+use aether_hub_protocol::canonical::{canonical_kind_bytes, kind_id_from_parts};
 use aether_hub_protocol::{KindDescriptor, SchemaType};
 
 use crate::mail::{MailboxId, ReplyTo};
@@ -336,7 +336,17 @@ impl Registry {
         let id = kind_id_from_parts(&descriptor.name, &descriptor.schema);
         let mut inner = self.inner.write().unwrap();
         if let Some(slot) = inner.kinds.get(&id) {
-            if reject_conflict && slot.descriptor.schema != descriptor.schema {
+            if reject_conflict
+                && canonical_kind_bytes(&slot.descriptor.name, &slot.descriptor.schema)
+                    != canonical_kind_bytes(&descriptor.name, &descriptor.schema)
+            {
+                // Same 64-bit id but distinct canonical bytes — a real
+                // hash collision, keep the loud failure. Comparing
+                // canonical bytes (not `SchemaType` PartialEq) means
+                // nominal-only differences — named fields vs stripped
+                // names from a manifest round-trip — are treated as
+                // identical, since the canonical form is exactly the
+                // structure the id hashes over.
                 return Err(KindConflict {
                     name: descriptor.name,
                     existing: slot.descriptor.schema.clone(),
@@ -587,6 +597,48 @@ mod tests {
             .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
             .expect("same schema should succeed");
         assert_eq!(first, second);
+    }
+
+    /// The first registration stores the schema with named fields
+    /// (e.g. substrate boot via `aether_kinds::descriptors::all()`); a
+    /// second registration of the same structural kind with stripped
+    /// names (e.g. reconstructed from a component's `aether.kinds`
+    /// canonical bytes) must be accepted as idempotent because both
+    /// produce the same kind id. This is the path `#[handlers]`
+    /// consumer-crate retention relies on for cross-crate kinds that
+    /// duplicate boot-registered ones.
+    #[test]
+    fn register_kind_with_descriptor_accepts_nominal_only_differences() {
+        use aether_hub_protocol::{NamedField, Primitive};
+
+        let r = Registry::new();
+        let named_id = r
+            .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
+            .expect("first");
+
+        let unnamed = KindDescriptor {
+            name: "aether.foo".into(),
+            schema: SchemaType::Struct {
+                repr_c: true,
+                fields: vec![NamedField {
+                    name: "".into(),
+                    ty: SchemaType::Scalar(Primitive::U32),
+                }]
+                .into(),
+            },
+        };
+        let unnamed_id = r
+            .register_kind_with_descriptor(unnamed)
+            .expect("same canonical bytes = same id = idempotent");
+        assert_eq!(named_id, unnamed_id);
+
+        // Named version stays in the stored slot — first writer wins.
+        let stored = r.kind_descriptor(named_id).expect("still there");
+        if let SchemaType::Struct { fields, .. } = &stored.schema {
+            assert_eq!(fields[0].name, "x");
+        } else {
+            panic!("expected struct schema");
+        }
     }
 
     #[test]

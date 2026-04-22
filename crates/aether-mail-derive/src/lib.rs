@@ -750,6 +750,7 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
 
     let statics =
         build_inputs_section_statics(self_ty, &handlers, fallback.as_ref(), &component_doc);
+    let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers);
 
     Ok(quote! {
         impl #impl_generics #trait_path for #self_ty #where_clause {
@@ -774,6 +775,7 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
         }
 
         #statics
+        #kind_retention_statics
     })
 }
 
@@ -1057,6 +1059,97 @@ fn build_inputs_section_statics(
         #fallback_static
         #component_static
     }
+}
+
+/// Emit `#[link_section = "aether.kinds"]` statics in the consumer
+/// crate — one per `#[handler]`-handled kind — so every kind the
+/// component listens for survives wasm-ld dead-section stripping.
+///
+/// Why this exists: the `Kind` derive emits `aether.kinds` and
+/// `aether.kinds.labels` statics in the *defining* crate. When the
+/// kind lives in a dependency rlib (e.g. `aether-kinds` or a shared
+/// demo crate), the linker strips those statics from the final cdylib
+/// because no Rust code in the consumer references the symbol by
+/// name. `#[used]` keeps the symbol in the rlib's object file but
+/// doesn't cross the rlib→cdylib boundary under `--gc-sections`. The
+/// `aether.kinds.inputs` section survives only because
+/// `#[handlers]` emits it here, in the consumer's own compilation
+/// unit. We apply the same trick to `aether.kinds`.
+///
+/// The bytes are computed via trait dispatch on `<K as Kind>::NAME`
+/// and `<K as Schema>::SCHEMA` so this doesn't require the kind's
+/// derive to expose its private canonical-bytes statics. Duplicate
+/// records (one from the defining crate when it also builds as a
+/// cdylib, one here in the consumer) are harmless: the substrate's
+/// `register_kind_with_descriptor` is idempotent on `(name, schema)`
+/// match (ADR-0030 Phase 2).
+///
+/// Scope is limited to handler-side kinds — kinds the component only
+/// *sends* don't need local retention because the receiving substrate
+/// is responsible for having them registered (it either hosts a
+/// component that declares them, or is the hub with its own server
+/// component). If that assumption ever breaks, extend this emitter to
+/// walk `Sink<K>` resolutions too.
+fn build_kinds_section_retention_statics(self_ty: &Type, handlers: &[HandlerFn]) -> TokenStream2 {
+    let self_ty_hint = type_hint(self_ty);
+
+    let statics = handlers.iter().enumerate().map(|(idx, h)| {
+        let k = &h.kind_ty;
+        let schema_ident = quote::format_ident!(
+            "__AETHER_HANDLERS_KIND_SCHEMA_{}_{}",
+            self_ty_hint,
+            idx
+        );
+        let len_ident = quote::format_ident!(
+            "__AETHER_HANDLERS_KIND_CANONICAL_LEN_{}_{}",
+            self_ty_hint,
+            idx
+        );
+        let bytes_ident = quote::format_ident!(
+            "__AETHER_HANDLERS_KIND_CANONICAL_BYTES_{}_{}",
+            self_ty_hint,
+            idx
+        );
+        let section_ident = quote::format_ident!(
+            "__AETHER_HANDLERS_KIND_MANIFEST_{}_{}",
+            self_ty_hint,
+            idx
+        );
+        quote! {
+            // Mirrors the intermediate-static pattern in `expand_kind`
+            // (mail-derive/src/lib.rs) so const-eval of the serializer
+            // sees a `&'static SchemaType` instead of materializing a
+            // temporary whose non-trivial Drop can't run at compile
+            // time.
+            static #schema_ident: ::aether_component::__macro_internals::SchemaType =
+                <#k as ::aether_component::__macro_internals::Schema>::SCHEMA;
+            const #len_ident: usize =
+                ::aether_component::__macro_internals::canonical::canonical_len_kind(
+                    <#k as ::aether_component::__macro_internals::Kind>::NAME,
+                    &#schema_ident,
+                );
+            const #bytes_ident: [u8; #len_ident] =
+                ::aether_component::__macro_internals::canonical::canonical_serialize_kind::<#len_ident>(
+                    <#k as ::aether_component::__macro_internals::Kind>::NAME,
+                    &#schema_ident,
+                );
+            #[cfg(target_arch = "wasm32")]
+            #[used]
+            #[unsafe(link_section = "aether.kinds")]
+            static #section_ident: [u8; #len_ident + 1] = {
+                let mut out = [0u8; #len_ident + 1];
+                out[0] = 0x02;
+                let mut i = 0;
+                while i < #len_ident {
+                    out[i + 1] = #bytes_ident[i];
+                    i += 1;
+                }
+                out
+            };
+        }
+    });
+
+    quote! { #(#statics)* }
 }
 
 /// Produce an identifier-safe hint from the Self type. For a plain
