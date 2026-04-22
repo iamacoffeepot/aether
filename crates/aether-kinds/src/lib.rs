@@ -270,6 +270,32 @@ pub struct TopdownSetExtent {
     pub extent: f32,
 }
 
+/// Teleport the player to a world-space position. Also zeroes velocity
+/// isn't implied — send `PlayerSetVelocity { 0, 0 }` explicitly if you
+/// want to stop motion at the new point.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.player.set_position")]
+pub struct PlayerSetPosition {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Set the player's per-tick velocity in world units. `(0, 0)` stops
+/// motion; values compose per-axis so `(1, 0)` drifts +x, `(0, -1)`
+/// drifts -y.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.player.set_velocity")]
+pub struct PlayerSetVelocity {
+    pub vx: f32,
+    pub vy: f32,
+}
+
 /// Request addressed to a component that supports the ADR-0013
 /// reply-to-sender smoke path. The component answers with `Pong`
 /// carrying the same `seq`; the round trip proves that a Claude
@@ -942,6 +968,8 @@ mod tests {
         assert_eq!(OrbitSetTarget::NAME, "aether.camera.orbit.set_target");
         assert_eq!(TopdownSetCenter::NAME, "aether.camera.topdown.set_center");
         assert_eq!(TopdownSetExtent::NAME, "aether.camera.topdown.set_extent");
+        assert_eq!(PlayerSetPosition::NAME, "aether.player.set_position");
+        assert_eq!(PlayerSetVelocity::NAME, "aether.player.set_velocity");
     }
 
     #[test]
