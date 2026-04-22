@@ -19,8 +19,8 @@ use aether_mail::{Kind, Schema};
 
 use crate::{
     Camera, CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats,
-    Key, LoadComponent, LoadResult, MouseButton, MouseMove, OrbitSetDistance, OrbitSetFov,
-    OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo,
+    Key, KeyRelease, LoadComponent, LoadResult, MouseButton, MouseMove, OrbitSetDistance,
+    OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo,
     PlatformInfoResult, PlayerSetPosition, PlayerSetVelocity, Pong, ReplaceComponent,
     ReplaceResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
     SubscribeInput, SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
@@ -33,6 +33,7 @@ pub fn all() -> Vec<KindDescriptor> {
     vec![
         schema::<Tick>(),
         schema::<Key>(),
+        schema::<KeyRelease>(),
         schema::<MouseButton>(),
         schema::<MouseMove>(),
         schema::<WindowSize>(),
