@@ -160,7 +160,7 @@ impl Hub {
     }
 
     #[tool(
-        description = "Launch a substrate binary as a child process of the hub. The hub injects `AETHER_HUB_URL` so the child dials back to this hub instance. Blocks until the substrate completes its `Hello` handshake (or the handshake timeout fires — default 5 seconds, overridable via `timeout_ms`). Returns the assigned `engine_id` and the child `pid`. The hub owns the child for its lifetime; dropping the engine from the registry (socket disconnect or `terminate_substrate`) reaps the process."
+        description = "Launch a substrate binary as a child process of the hub. The hub injects `AETHER_HUB_URL` so the child dials back to this hub instance. Blocks until the substrate completes its `Hello` handshake (or the handshake timeout fires — default 5 seconds, overridable via `timeout_ms`). Returns the assigned `engine_id`, the child `pid`, and per-component results for anything in the optional `components` preload list. Preloads are all-or-nothing: any load failure SIGTERMs the freshly-spawned child and surfaces as a tool error. The hub owns the child for its lifetime; dropping the engine from the registry (socket disconnect or `terminate_substrate`) reaps the process."
     )]
     pub(super) async fn spawn_substrate(
         &self,
@@ -191,9 +191,47 @@ impl Hub {
             .get(&engine_id)
             .map(|r| r.pid)
             .unwrap_or(0);
+        let engine_id_str = engine_id.0.to_string();
+
+        // Preload components sequentially. Any failure aborts the whole
+        // spawn: we SIGTERM the freshly-spawned child before bubbling
+        // the error so a half-loaded substrate never leaks back to the
+        // caller as a successful-looking `SpawnResult`.
+        let mut components = Vec::with_capacity(args.components.len());
+        for (idx, spec) in args.components.into_iter().enumerate() {
+            match self
+                .do_load_component(
+                    &engine_id,
+                    &engine_id_str,
+                    &spec.binary_path,
+                    spec.name,
+                    args.timeout_ms,
+                )
+                .await
+            {
+                Ok(resp) => components.push(resp),
+                Err(load_err) => {
+                    let cleanup = self.state.engines.take_child(&engine_id).map(|child| {
+                        crate::spawn::terminate_substrate(child, DEFAULT_TERMINATE_GRACE)
+                    });
+                    if let Some(fut) = cleanup {
+                        let _ = fut.await;
+                    }
+                    return Err(McpError::internal_error(
+                        format!(
+                            "preload #{idx} failed; spawned child terminated: {}",
+                            load_err.message
+                        ),
+                        None,
+                    ));
+                }
+            }
+        }
+
         let result = SpawnResult {
-            engine_id: engine_id.0.to_string(),
+            engine_id: engine_id_str,
             pid,
+            components,
         };
         serde_json::to_string(&result).map_err(|e| McpError::internal_error(e.to_string(), None))
     }
@@ -421,16 +459,40 @@ impl Hub {
             ));
         }
 
-        let wasm = tokio::fs::read(&args.binary_path).await.map_err(|e| {
-            McpError::invalid_params(
-                format!("reading binary_path {:?}: {e}", args.binary_path),
-                None,
+        let response = self
+            .do_load_component(
+                &id,
+                &args.engine_id,
+                &args.binary_path,
+                args.name,
+                args.timeout_ms,
             )
+            .await?;
+        serde_json::to_string(&response).map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    /// Shared load-component core. `load_component` wraps this after
+    /// parsing the engine id from the MCP arg; `spawn_substrate` calls
+    /// it directly once per entry in its `components` preload list.
+    /// Reads the wasm file, dispatches `aether.control.load_component`
+    /// against the usual reply-guard, decodes the response, and
+    /// updates the engine registry on success — returning the same
+    /// `LoadComponentResponse` shape the public tool returns.
+    async fn do_load_component(
+        &self,
+        engine_id: &EngineId,
+        engine_id_str: &str,
+        binary_path: &str,
+        name: Option<String>,
+        timeout_ms: Option<u32>,
+    ) -> Result<LoadComponentResponse, McpError> {
+        let wasm = tokio::fs::read(binary_path).await.map_err(|e| {
+            McpError::invalid_params(format!("reading binary_path {binary_path:?}: {e}"), None)
         })?;
 
         let params = serde_json::json!({
             "wasm": wasm,
-            "name": args.name,
+            "name": name,
         });
 
         let (_guard, rx) = self
@@ -446,7 +508,7 @@ impl Hub {
             })?;
 
         let spec = MailSpec {
-            engine_id: args.engine_id.clone(),
+            engine_id: engine_id_str.to_owned(),
             recipient_name: "aether.control".to_owned(),
             kind_name: KIND_LOAD_COMPONENT.to_owned(),
             params: Some(params),
@@ -456,8 +518,7 @@ impl Hub {
             .await
             .map_err(|e| McpError::internal_error(format!("send failed: {e}"), None))?;
 
-        let wait = args
-            .timeout_ms
+        let wait = timeout_ms
             .map(|ms| Duration::from_millis(ms as u64).min(MAX_REPLY_TIMEOUT))
             .unwrap_or(DEFAULT_REPLY_TIMEOUT);
         let queued = match timeout(wait, rx).await {
@@ -492,20 +553,18 @@ impl Hub {
                 capabilities,
             } => {
                 self.state.engines.upsert_component(
-                    &id,
+                    engine_id,
                     mailbox_id,
                     ComponentRecord {
                         name: name.clone(),
                         capabilities: capabilities.clone(),
                     },
                 );
-                let response = LoadComponentResponse {
+                Ok(LoadComponentResponse {
                     mailbox_id,
                     name,
                     capabilities,
-                };
-                serde_json::to_string(&response)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))
+                })
             }
         }
     }

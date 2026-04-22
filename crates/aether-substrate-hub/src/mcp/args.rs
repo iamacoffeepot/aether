@@ -124,8 +124,39 @@ pub struct SpawnSubstrateArgs {
     pub env: HashMap<String, String>,
     /// Handshake timeout in milliseconds. Defaults to 5 seconds if
     /// omitted — override for slow CI machines or debug builds.
+    /// Applies both to the substrate's `Hello` handshake and to each
+    /// component load in `components` (each load waits up to this
+    /// timeout for its `LoadResult` reply).
     #[serde(default)]
     pub timeout_ms: Option<u32>,
+    /// Optional component preloads. After the substrate finishes its
+    /// `Hello` handshake, the hub reads each component's wasm and
+    /// loads it via the same path `load_component` uses, sequentially
+    /// in the declared order. All-or-nothing: a single load failure
+    /// SIGTERMs the freshly-spawned child and bubbles the error — no
+    /// half-loaded scene is ever returned to the caller.
+    ///
+    /// Ordering matters for scenes where one component mails another
+    /// by name at init time; the `topdown` camera + `player` pairing
+    /// is the canonical example.
+    #[serde(default)]
+    pub components: Vec<SpawnComponentSpec>,
+}
+
+/// One component to preload during `spawn_substrate`. Shape matches the
+/// relevant subset of `LoadComponentArgs`: a filesystem path and an
+/// optional caller-chosen name. No `timeout_ms` here — the spawn-level
+/// timeout governs each load.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SpawnComponentSpec {
+    /// Absolute path to the WASM component binary on the hub's
+    /// filesystem. Same path rule as top-level `binary_path`: no `~`
+    /// expansion, no relative resolution.
+    pub binary_path: String,
+    /// Optional human-readable name, passed through to the substrate's
+    /// `LoadComponent`. The substrate defaults one when omitted.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -135,6 +166,13 @@ pub struct SpawnResult {
     pub engine_id: String,
     /// Operating-system PID of the spawned substrate.
     pub pid: u32,
+    /// Per-component results for anything listed in the request's
+    /// `components` array, in the same order. Empty when no preloads
+    /// were requested. Every entry is a success; an all-or-nothing
+    /// failure surfaces as a tool-level error instead of a partial
+    /// `SpawnResult`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<LoadComponentResponse>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -311,7 +349,7 @@ pub struct FallbackCapabilityWire {
     pub doc: Option<String>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LoadComponentResponse {
     /// Substrate-assigned mailbox id for the loaded component. Hand
     /// this to `replace_component` or use as the `mailbox` in

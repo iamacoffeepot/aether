@@ -1256,6 +1256,7 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 timeout_ms: None,
+                components: vec![],
             }))
             .await
             .unwrap_err();
@@ -1374,6 +1375,7 @@ mod tests {
                 args: vec!["-c".into(), "sleep 60".into()],
                 env: HashMap::new(),
                 timeout_ms: Some(150),
+                components: vec![],
             }))
             .await
             .unwrap_err();
