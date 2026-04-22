@@ -144,6 +144,20 @@ fn main() -> wasmtime::Result<()> {
              _count: u32| {},
         ),
     );
+    // Same deal for `aether.camera` — a desktop-designed camera
+    // component will emit it every tick. Headless has no GPU to
+    // upload to, so silently discard.
+    boot.registry.register_sink(
+        "camera",
+        Arc::new(
+            |_kind_id: u64,
+             _kind_name: &str,
+             _origin: Option<&str>,
+             _sender,
+             _bytes: &[u8],
+             _count: u32| {},
+        ),
+    );
 
     let tick_hz = parse_tick_hz_env();
     let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));

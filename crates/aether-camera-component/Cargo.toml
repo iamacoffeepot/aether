@@ -1,0 +1,12 @@
+[package]
+name = "aether-camera-component"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-component = { path = "../aether-component" }
+aether-kinds = { path = "../aether-kinds" }
+aether-math = { path = "../aether-math" }

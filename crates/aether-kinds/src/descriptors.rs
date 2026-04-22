@@ -18,8 +18,8 @@ use aether_hub_protocol::KindDescriptor;
 use aether_mail::{Kind, Schema};
 
 use crate::{
-    CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats, Key,
-    LoadComponent, LoadResult, MouseButton, MouseMove, Ping, PlatformInfo, PlatformInfoResult,
+    Camera, CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats,
+    Key, LoadComponent, LoadResult, MouseButton, MouseMove, Ping, PlatformInfo, PlatformInfoResult,
     Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult, SetWindowTitle,
     SetWindowTitleResult, SubscribeInput, SubscribeInputResult, Tick, UnresolvedMail,
     UnsubscribeInput, WindowSize,
@@ -79,6 +79,10 @@ pub fn all() -> Vec<KindDescriptor> {
         // reply with an `unsupported` error.
         schema::<SetWindowTitle>(),
         schema::<SetWindowTitleResult>(),
+        // Per-frame camera state streamed into the desktop chassis's
+        // `camera` sink — latest value wins, uploaded to the GPU
+        // uniform before each draw. Fire-and-forget; no reply.
+        schema::<Camera>(),
     ]
 }
 
@@ -220,7 +224,7 @@ mod tests {
             panic!("expected nested Struct");
         };
         assert!(*nested_repr);
-        assert_eq!(nested_fields.len(), 5);
+        assert_eq!(nested_fields.len(), 6);
     }
 
     #[test]

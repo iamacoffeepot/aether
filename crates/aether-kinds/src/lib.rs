@@ -125,18 +125,18 @@ pub struct WindowSize {
     pub height: u32,
 }
 
-/// A single clip-space vertex with per-vertex color. Matches the
-/// substrate's `VertexBufferLayout`: `(pos: vec2<f32>, color: vec3<f32>)`,
-/// 20 bytes on the wire. Not a kind on its own — only addressable as
-/// the element type inside `DrawTriangle.verts`. The `Schema` derive
-/// is conditional so DrawTriangle's emitted schema can recurse into
-/// it under `descriptors`; without the feature, neither type emits
-/// schema or eligibility info.
+/// A single world-space vertex with per-vertex color. Matches the
+/// substrate's `VertexBufferLayout`: `(pos: vec3<f32>, color: vec3<f32>)`,
+/// 24 bytes on the wire. Positions are world-space; the shader
+/// multiplies by the camera's `view_proj` uniform to produce clip
+/// space. Not a kind on its own — only addressable as the element
+/// type inside `DrawTriangle.verts`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Schema)]
 pub struct Vertex {
     pub x: f32,
     pub y: f32,
+    pub z: f32,
     pub r: f32,
     pub g: f32,
     pub b: f32,
@@ -152,6 +152,24 @@ pub struct Vertex {
 #[kind(name = "aether.draw_triangle")]
 pub struct DrawTriangle {
     pub verts: [Vertex; 3],
+}
+
+/// Camera state: column-major `view_proj` matrix (world → clip). The
+/// desktop chassis's `camera` sink writes the latest payload into the
+/// GPU uniform every frame; the WGSL vertex shader multiplies each
+/// vertex position by this matrix. Column-major layout matches wgpu's
+/// uniform upload — 64 bytes uploaded verbatim, no transpose. Camera
+/// components emit this on every `Tick`; the substrate reads only the
+/// most recent value before issuing the next draw. Before the first
+/// `Camera` arrives, the uniform holds identity and vertices render
+/// in clip-space 1:1 (the pre-camera behaviour).
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.camera")]
+pub struct Camera {
+    pub view_proj: [f32; 16],
 }
 
 /// Request addressed to a component that supports the ADR-0013
@@ -760,6 +778,7 @@ mod tests {
         let v = Vertex {
             x: 0.0,
             y: 0.5,
+            z: 0.0,
             r: 1.0,
             g: 0.0,
             b: 0.0,
@@ -769,7 +788,7 @@ mod tests {
             DrawTriangle { verts: [v, v, v] },
         ];
         let bytes = encode_slice(&tris);
-        assert_eq!(bytes.len(), 2 * 60);
+        assert_eq!(bytes.len(), 2 * 72);
         let back: &[DrawTriangle] = decode_slice(&bytes).unwrap();
         assert_eq!(back, &tris);
     }
@@ -816,6 +835,7 @@ mod tests {
             SetWindowTitleResult::NAME,
             "aether.control.set_window_title_result"
         );
+        assert_eq!(Camera::NAME, "aether.camera");
     }
 
     #[test]
@@ -888,9 +908,10 @@ mod tests {
                 panic!("expected nested Struct");
             };
             assert!(*nested_repr);
-            assert_eq!(nested_fields.len(), 5);
+            assert_eq!(nested_fields.len(), 6);
             assert_eq!(nested_fields[0].name, "x");
-            assert_eq!(nested_fields[4].name, "b");
+            assert_eq!(nested_fields[2].name, "z");
+            assert_eq!(nested_fields[5].name, "b");
         }
 
         #[test]
