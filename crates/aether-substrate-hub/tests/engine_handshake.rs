@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use aether_hub_protocol::{EngineToHub, Goodbye, Hello, HubToEngine, encode_frame};
 use aether_substrate_hub::{
-    EngineRegistry, LogStore, PendingSpawns, SessionRegistry, run_engine_listener,
+    EngineRegistry, HUB_SELF_ENGINE_ID, LogStore, LoopbackEngine, LoopbackHandle, PendingSpawns,
+    SessionRegistry, run_engine_listener,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -20,13 +21,25 @@ async fn spawn_hub() -> (SocketAddr, EngineRegistry, SessionRegistry) {
     let registry = EngineRegistry::new();
     let sessions = SessionRegistry::new();
     let pending = PendingSpawns::new();
+    let loopback = LoopbackEngine::boot(&registry).expect("loopback boot");
+    let loopback_handle = LoopbackHandle::from_boot(&loopback.boot);
+    // These tests are about the engine TCP handshake path. Drop
+    // the hub-self record so `registry.len()` / `is_empty()` see
+    // only connected test engines; the loopback's substrate stays
+    // wired for the `run_engine_listener` arg (bubbled-up mail
+    // dispatch is exercised in dedicated tests).
+    registry.remove(&HUB_SELF_ENGINE_ID);
     tokio::spawn(run_engine_listener(
         addr,
         registry.clone(),
         sessions.clone(),
         pending,
         LogStore::new(),
+        loopback_handle,
     ));
+    // Keep the loopback alive for the test's lifetime — otherwise
+    // `boot` drops and the scheduler + outbound writer tear down.
+    Box::leak(Box::new(loopback));
     // Give the listener a beat to bind.
     tokio::time::sleep(Duration::from_millis(50)).await;
     (addr, registry, sessions)

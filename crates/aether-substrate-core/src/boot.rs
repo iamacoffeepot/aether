@@ -179,6 +179,7 @@ impl<'a> SubstrateBootBuilder<'a> {
         };
 
         let queue = Arc::new(Mailer::new());
+        queue.wire_outbound(Arc::clone(&outbound));
 
         let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
         host_fns::register(&mut linker)?;

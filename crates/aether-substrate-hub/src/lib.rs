@@ -24,7 +24,7 @@ mod spawn;
 pub use chassis::HubChassis;
 pub use decoder::{DecodeError, decode_schema};
 pub use encoder::{EncodeError, encode_schema};
-pub use loopback::HUB_SELF_ENGINE_ID;
+pub use loopback::{HUB_SELF_ENGINE_ID, LoopbackEngine, LoopbackHandle};
 
 pub use engine::HEARTBEAT_INTERVAL;
 pub use engine::READ_TIMEOUT;
@@ -52,6 +52,7 @@ pub async fn run_engine_listener(
     sessions: SessionRegistry,
     pending: PendingSpawns,
     logs: LogStore,
+    loopback: loopback::LoopbackHandle,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -63,9 +64,10 @@ pub async fn run_engine_listener(
         let sessions = sessions.clone();
         let pending = pending.clone();
         let logs = logs.clone();
+        let loopback = loopback.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                engine::handle_connection(stream, registry, sessions, pending, logs).await
+                engine::handle_connection(stream, registry, sessions, pending, logs, loopback).await
             {
                 eprintln!("aether-substrate-hub: engine {peer} dropped: {e}");
             }

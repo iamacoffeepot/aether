@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use aether_substrate_core::{Chassis, ChassisCapabilities};
 
-use crate::loopback::{LoopbackEngine, run_inbound_drainer, spawn_outbound_drainer};
+use crate::loopback::{
+    LoopbackEngine, LoopbackHandle, run_inbound_drainer, spawn_outbound_drainer,
+};
 use crate::{
     DEFAULT_ENGINE_PORT, DEFAULT_MCP_PORT, EngineRegistry, HubState, LogStore, PendingSpawns,
     SessionRegistry, run_engine_listener, run_mcp_server,
@@ -107,6 +109,8 @@ impl HubChassis {
             outbound_rx,
         } = loopback;
 
+        let loopback_handle = LoopbackHandle::from_boot(&boot);
+
         // Loopback drainers. The inbound task runs alongside the
         // TCP + MCP listeners; the outbound drainer runs on a
         // dedicated std::thread because `std::sync::mpsc::Receiver`
@@ -130,6 +134,7 @@ impl HubChassis {
             sessions,
             pending,
             logs,
+            loopback_handle,
         ));
         let mcp_task = tokio::spawn(run_mcp_server(mcp_addr, state));
 

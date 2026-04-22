@@ -13,7 +13,8 @@ use aether_hub_protocol::{
     EngineId, EngineToHub, Hello, HubToEngine, LogEntry, LogLevel, encode_frame,
 };
 use aether_substrate_hub::{
-    EngineRegistry, LogStore, PendingSpawns, SessionRegistry, run_engine_listener,
+    EngineRegistry, HUB_SELF_ENGINE_ID, LogStore, LoopbackEngine, LoopbackHandle, PendingSpawns,
+    SessionRegistry, run_engine_listener,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -28,13 +29,18 @@ async fn spawn_hub_with_logs() -> (SocketAddr, EngineRegistry, LogStore) {
     let sessions = SessionRegistry::new();
     let pending = PendingSpawns::new();
     let logs = LogStore::new();
+    let loopback = LoopbackEngine::boot(&registry).expect("loopback boot");
+    let loopback_handle = LoopbackHandle::from_boot(&loopback.boot);
+    registry.remove(&HUB_SELF_ENGINE_ID);
     tokio::spawn(run_engine_listener(
         addr,
         registry.clone(),
         sessions,
         pending,
         logs.clone(),
+        loopback_handle,
     ));
+    Box::leak(Box::new(loopback));
     tokio::time::sleep(Duration::from_millis(50)).await;
     (addr, registry, logs)
 }

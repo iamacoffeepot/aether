@@ -817,6 +817,27 @@ pub enum LogLevel {
     Error,
 }
 
+/// Mail bubbled up from an engine to the hub-substrate (ADR-0037
+/// Phase 1). An engine sends this when its local scheduler cannot
+/// resolve the target mailbox id — the expected case for a client
+/// component addressing a hub-resident component by name
+/// (`ctx.resolve_sink::<K>("tic_tac_toe.server")`). Fields are
+/// id-only: the sender hashed from the name already, and names
+/// don't survive the hash; the hub-substrate looks up the
+/// component by id against its own registry.
+///
+/// Phase 1 is fire-and-forget — no sender attribution, no reply
+/// path. Phase 2 (ADR-0037) widens this with source
+/// `(engine_id, mailbox_id)` so the hub-chassis's reply peripheral
+/// can route replies back to the originating engine's mailbox.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EngineMailToHubSubstrateFrame {
+    pub recipient_mailbox_id: u64,
+    pub kind_id: u64,
+    pub payload: Vec<u8>,
+    pub count: u32,
+}
+
 /// Frames an engine sends to the hub. `Mail` is the observation path
 /// (ADR-0008): engine-originated mail addressed to a Claude session
 /// or broadcast to all sessions. `KindsChanged` (ADR-0010 §4) tells
@@ -827,6 +848,9 @@ pub enum LogLevel {
 /// `LogBatch` (ADR-0023) carries captured log entries from the
 /// substrate's tracing layer; the hub appends them to a per-engine
 /// ring buffer served via the `engine_logs` MCP tool.
+/// `MailToHubSubstrate` (ADR-0037 Phase 1) carries mail the engine
+/// couldn't deliver locally — the hub-substrate resolves the id
+/// against its own registry and dispatches.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EngineToHub {
     Hello(Hello),
@@ -835,6 +859,7 @@ pub enum EngineToHub {
     KindsChanged(Vec<KindDescriptor>),
     LogBatch(Vec<LogEntry>),
     Goodbye(Goodbye),
+    MailToHubSubstrate(EngineMailToHubSubstrateFrame),
 }
 
 /// Frames the hub sends to an engine.
