@@ -19,10 +19,11 @@ use aether_mail::{Kind, Schema};
 
 use crate::{
     Camera, CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats,
-    Key, LoadComponent, LoadResult, MouseButton, MouseMove, Ping, PlatformInfo, PlatformInfoResult,
-    Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult, SetWindowTitle,
-    SetWindowTitleResult, SubscribeInput, SubscribeInputResult, Tick, UnresolvedMail,
-    UnsubscribeInput, WindowSize,
+    Key, LoadComponent, LoadResult, MouseButton, MouseMove, OrbitSetDistance, OrbitSetFov,
+    OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo,
+    PlatformInfoResult, Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult,
+    SetWindowTitle, SetWindowTitleResult, SubscribeInput, SubscribeInputResult, Tick,
+    UnresolvedMail, UnsubscribeInput, WindowSize,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -83,6 +84,15 @@ pub fn all() -> Vec<KindDescriptor> {
         // `camera` sink — latest value wins, uploaded to the GPU
         // uniform before each draw. Fire-and-forget; no reply.
         schema::<Camera>(),
+        // Orbit camera control surface. Each kind pokes one field of
+        // the camera component's state; no reply kinds — state
+        // changes become visible in the next frame's `Camera` mail.
+        schema::<OrbitSetDistance>(),
+        schema::<OrbitSetPitch>(),
+        schema::<OrbitSetYaw>(),
+        schema::<OrbitSetSpeed>(),
+        schema::<OrbitSetFov>(),
+        schema::<OrbitSetTarget>(),
     ]
 }
 
