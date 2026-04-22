@@ -108,7 +108,7 @@ A component that wants to remember a sender across receives can `sender.clone()`
 
 - Substrate: per-instance `SenderTable`, allocation on inbound dispatch, expiry hooks on replace/drop/session-gone.
 - Wire-through on the receive shim ABI: fourth param `sender: u32`, `SENDER_NONE` sentinel for broadcast-origin.
-- New `reply_mail` host fn in `aether-substrate/src/host_fns.rs` with full status codes.
+- New `reply_mail` host fn in `aether-substrate-core/src/host_fns.rs` with full status codes.
 - `Sender` type and `ctx.reply` in `aether-component` (blocked on ADR-0012 landing).
 - Port the receive-side of `aether-hello-component` to read sender for a trivial round-trip smoke test (Claude sends `aether.ping`, component replies with `aether.pong`).
 - **Parked, not committed:** generational sender handles, multi-reply semantics (one sender, N replies over time — already works; naming it if constraints emerge), cross-instance sender migration on replace (tied to ADR-0016).

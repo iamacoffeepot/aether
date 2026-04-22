@@ -38,7 +38,7 @@ Two phases, with a hard split.
 
 Rename every pointer-typed FFI symbol to a `_p32` suffix. This is the entire scope of Phase 1; nothing else in the substrate or SDK changes.
 
-**Imports renamed (substrate side, in `aether-substrate/src/host_fns.rs`):**
+**Imports renamed (substrate side, in `aether-substrate-core/src/host_fns.rs`):**
 
 | Before                       | After                              |
 | ---------------------------- | ---------------------------------- |

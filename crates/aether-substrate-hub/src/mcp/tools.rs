@@ -135,7 +135,7 @@ impl Hub {
         &self,
         Parameters(args): Parameters<ReceiveMailArgs>,
     ) -> Result<String, McpError> {
-        let cap = args.max.map(|n| n as usize).unwrap_or(usize::MAX);
+        let cap = args.max.map_or(usize::MAX, |n| n as usize);
         let mut rx = self.inbound.lock().await;
         let mut out = Vec::new();
         while out.len() < cap {

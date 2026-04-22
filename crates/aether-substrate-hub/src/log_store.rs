@@ -121,7 +121,7 @@ impl LogStore {
             // gap the caller is missing starts above `since` and
             // ends just below this. Empty buffer post-eviction
             // shouldn't happen in practice but is handled safely.
-            buf.entries.front().map(|e| e.sequence).unwrap_or(0)
+            buf.entries.front().map_or(0, |e| e.sequence)
         });
         let max = max.min(TOOL_MAX_ENTRIES);
         let mut out: Vec<LogEntry> = Vec::with_capacity(max.min(buf.entries.len()));
@@ -137,7 +137,7 @@ impl LogStore {
                 break;
             }
         }
-        let next_since = out.last().map(|e| e.sequence).unwrap_or(since);
+        let next_since = out.last().map_or(since, |e| e.sequence);
         ReadResult {
             entries: out,
             next_since,
