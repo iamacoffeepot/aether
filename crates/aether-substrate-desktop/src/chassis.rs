@@ -17,7 +17,8 @@
 use std::sync::Arc;
 
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode, SetWindowModeResult, WindowMode,
+    CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode, SetWindowModeResult,
+    SetWindowTitle, SetWindowTitleResult, WindowMode,
 };
 use aether_mail::Kind;
 use aether_substrate_core::{
@@ -50,6 +51,11 @@ pub enum UserEvent {
         width: Option<u32>,
         height: Option<u32>,
     },
+    /// An MCP session asked to update the window title. The event
+    /// loop calls `Window::set_title` and echoes the applied title
+    /// back on the reply. A missing window (before `resumed`) replies
+    /// with an `Err`.
+    SetWindowTitle { reply_to: ReplyTo, title: String },
 }
 
 /// Build the `ChassisControlHandler` closure desktop installs on
@@ -84,6 +90,8 @@ pub fn chassis_control_handler(
                 let _ = proxy.send_event(UserEvent::PlatformInfo { reply_to: sender });
             } else if kind_id == SetWindowMode::ID {
                 handle_set_window_mode(&proxy, &outbound, sender, bytes);
+            } else if kind_id == SetWindowTitle::ID {
+                handle_set_window_title(&proxy, &outbound, sender, bytes);
             } else {
                 tracing::warn!(
                     target: "aether_substrate::chassis",
@@ -185,5 +193,27 @@ fn handle_set_window_mode(
         mode: payload.mode,
         width: payload.width,
         height: payload.height,
+    });
+}
+
+/// Decode + forward to the event loop. `Window::set_title` needs to
+/// run on the main thread on every winit platform, so the same
+/// event-loop proxy hand-off `set_window_mode` uses.
+fn handle_set_window_title(
+    proxy: &EventLoopProxy<UserEvent>,
+    outbound: &HubOutbound,
+    sender: ReplyTo,
+    bytes: &[u8],
+) {
+    let payload: SetWindowTitle = match decode_payload(bytes) {
+        Ok(p) => p,
+        Err(error) => {
+            outbound.send_reply(sender, &SetWindowTitleResult::Err { error });
+            return;
+        }
+    };
+    let _ = proxy.send_event(UserEvent::SetWindowTitle {
+        reply_to: sender,
+        title: payload.title,
     });
 }

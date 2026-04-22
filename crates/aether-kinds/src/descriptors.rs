@@ -20,8 +20,9 @@ use aether_mail::{Kind, Schema};
 use crate::{
     CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats, Key,
     LoadComponent, LoadResult, MouseButton, MouseMove, Ping, PlatformInfo, PlatformInfoResult,
-    Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult, SubscribeInput,
-    SubscribeInputResult, Tick, UnresolvedMail, UnsubscribeInput, WindowSize,
+    Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult, SetWindowTitle,
+    SetWindowTitleResult, SubscribeInput, SubscribeInputResult, Tick, UnresolvedMail,
+    UnsubscribeInput, WindowSize,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -74,6 +75,10 @@ pub fn all() -> Vec<KindDescriptor> {
         // the resolved state.
         schema::<SetWindowMode>(),
         schema::<SetWindowModeResult>(),
+        // Runtime window-title update. Desktop-only; headless/hub
+        // reply with an `unsupported` error.
+        schema::<SetWindowTitle>(),
+        schema::<SetWindowTitleResult>(),
     ]
 }
 

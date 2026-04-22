@@ -705,6 +705,31 @@ mod control_plane {
             error: String,
         },
     }
+
+    /// `aether.control.set_window_title` — update the substrate
+    /// window's title at runtime. `winit::Window::set_title` is
+    /// infallible on every supported platform, so the desktop reply
+    /// always echoes the applied title back on `Ok`. Headless and hub
+    /// chassis reply `Err { error: "unsupported on headless..." }`.
+    /// Boot-time default comes from `AETHER_WINDOW_TITLE`; unset falls
+    /// back to the substrate's name.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.set_window_title")]
+    pub struct SetWindowTitle {
+        pub title: String,
+    }
+
+    /// Reply to `SetWindowTitle`. `Ok` echoes the applied title — same
+    /// value the caller sent, returned so MCP logs and agent memory
+    /// see the resulting state in one place. `Err` is reserved for
+    /// chassis that don't own a window (headless, hub) or for a
+    /// pre-window-ready request.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.control.set_window_title_result")]
+    pub enum SetWindowTitleResult {
+        Ok { title: String },
+        Err { error: String },
+    }
 }
 
 #[cfg(test)]
@@ -785,6 +810,11 @@ mod tests {
         assert_eq!(
             SetWindowModeResult::NAME,
             "aether.control.set_window_mode_result"
+        );
+        assert_eq!(SetWindowTitle::NAME, "aether.control.set_window_title");
+        assert_eq!(
+            SetWindowTitleResult::NAME,
+            "aether.control.set_window_title_result"
         );
     }
 

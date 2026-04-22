@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode, SetWindowModeResult,
+    SetWindowTitle, SetWindowTitleResult,
 };
 use aether_mail::Kind;
 use aether_substrate_core::{ChassisControlHandler, HubOutbound, ReplyTo};
@@ -34,6 +35,13 @@ pub fn chassis_control_handler(outbound: Arc<HubOutbound>) -> ChassisControlHand
                 outbound.send_reply(
                     sender,
                     &SetWindowModeResult::Err {
+                        error: UNSUPPORTED.to_owned(),
+                    },
+                );
+            } else if kind_id == SetWindowTitle::ID {
+                outbound.send_reply(
+                    sender,
+                    &SetWindowTitleResult::Err {
                         error: UNSUPPORTED.to_owned(),
                     },
                 );
