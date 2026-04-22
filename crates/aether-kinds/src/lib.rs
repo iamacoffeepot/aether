@@ -3,7 +3,7 @@
 //! substrate dispatches (tick, input), or consume the substrate's sink
 //! kinds (draw_triangle). See ADR-0005 / ADR-0030.
 //!
-//! Kind ids are `fnv1a_64(canonical(name, schema))` — a compile-time
+//! Kind ids are `fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))` — a compile-time
 //! const on the `Kind` trait (ADR-0030 Phase 2). Substrate boot and
 //! guest SDK arrive at the same id independently; no host-fn resolve
 //! round-trip. Consumers address kinds via the `NAME` constants and

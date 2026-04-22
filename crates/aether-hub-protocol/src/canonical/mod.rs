@@ -65,7 +65,10 @@ mod tests {
     //! is reachable in const context, runs both passes, and compares
     //! against a hand-built `SchemaShape` that matches the stripped shape.
     use super::*;
-    use super::{primitives::write_varint_u64, schema::fnv1a_64};
+    use super::{
+        primitives::write_varint_u64,
+        schema::{KIND_DOMAIN, fnv1a_64_prefixed},
+    };
     use crate::types::{
         EnumVariant, KindLabels, KindShape, LabelCell, LabelNode, NamedField, Primitive,
         SchemaCell, SchemaShape, SchemaType, VariantLabel, VariantShape,
@@ -218,7 +221,9 @@ mod tests {
         const NAME: &str = "test.triangle";
         const N: usize = canonical_len_kind(NAME, &TRIANGLE);
         const BYTES: [u8; N] = canonical_serialize_kind::<N>(NAME, &TRIANGLE);
-        let expected = fnv1a_64(&BYTES);
+        // Domain-prefixed (issue #186) — agrees with the derive macro's
+        // compile-time emission.
+        let expected = fnv1a_64_prefixed(KIND_DOMAIN, &BYTES);
         assert_eq!(kind_id_from_parts(NAME, &TRIANGLE), expected);
     }
 

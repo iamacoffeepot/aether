@@ -243,7 +243,8 @@ pub enum Primitive {
 /// Positional-only twin of `SchemaType`: same variant arms, same field
 /// ordering, but with every name field stripped (ADR-0032). This is the
 /// wire shape of the hashed `aether.kinds` manifest section and the
-/// input that `fnv1a_64` chews on to produce `Kind::ID`. Postcard-
+/// input that `fnv1a_64_prefixed` chews on (after the `KIND_DOMAIN`
+/// prefix) to produce `Kind::ID`. Postcard-
 /// compatible with `SchemaType` at the subset of bytes they share — the
 /// canonical serializer emits bytes that deserialize cleanly into
 /// `SchemaShape` via `postcard::from_bytes`.

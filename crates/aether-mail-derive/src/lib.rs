@@ -10,9 +10,10 @@
 //! optional `const IS_INPUT`) plus the `#[link_section]` statics for
 //! both `aether.kinds` (canonical schema bytes) and
 //! `aether.kinds.labels` (nominal sidecar). The ID is
-//! `fnv1a_64_bytes(canonical_bytes_of_(name, schema))`, matching the
-//! substrate-side derivation byte-for-byte (ADR-0030 Phase 2 /
-//! ADR-0032). Consumers must also derive (or hand-roll) `Schema`
+//! `fnv1a_64_prefixed(KIND_DOMAIN, canonical_bytes_of(name, schema))`,
+//! matching the substrate-side derivation byte-for-byte (ADR-0030
+//! Phase 2 / ADR-0032). The `KIND_DOMAIN` prefix disjoins the
+//! `Kind::ID` space from `MailboxId` (issue #186). Consumers must also derive (or hand-roll) `Schema`
 //! on the type — the Kind derive walks `<Self as Schema>::SCHEMA`
 //! for canonical bytes and `<Self as Schema>::LABEL_NODE` for
 //! the labels tree.
@@ -103,7 +104,10 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     Ok(quote! {
         impl ::aether_mail::Kind for #name {
             const NAME: &'static str = #kind_name;
-            const ID: u64 = ::aether_mail::fnv1a_64_bytes(&#canonical_bytes_ident);
+            const ID: u64 = ::aether_mail::fnv1a_64_prefixed(
+                ::aether_mail::KIND_DOMAIN,
+                &#canonical_bytes_ident,
+            );
             #is_input_item
         }
 

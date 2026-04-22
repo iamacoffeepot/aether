@@ -32,7 +32,7 @@ On wasm32 the natural worry is that a 64-bit id can't be passed across the FFI b
 
 - **Type:** `MailboxId(pub u64)`.
 - **Hash:** a non-cryptographic 64-bit hash with a stable output for a given input across builds and platforms. Candidates: `xxh3_64`, `wyhash`, FNV-1a 64, or SipHash with a fixed key. The exact choice is a small follow-up — the constraint is only "deterministic, 64-bit, fast, reasonable distribution." SipHash with a fixed zero key is attractive because Rust's stdlib already ships it and it gives adversarial resistance at no cost, but any of the candidates meet the requirements.
-- **Input:** the UTF-8 bytes of the mailbox name, unnormalized. Names are already bytestrings in the registry and on the wire (ADR-0006); there is no Unicode normalization to worry about.
+- **Input:** `MAILBOX_DOMAIN ++ name`, where `MAILBOX_DOMAIN = b"mailbox:"` (domain prefix added as a follow-up, issue #186, to disjoin this id space from `Kind::ID`). The name is the UTF-8 bytes of the mailbox name, unnormalized. Names are already bytestrings in the registry and on the wire (ADR-0006); there is no Unicode normalization to worry about.
 - **Reserved:** `MailboxId(0)` is reserved as the "unassigned / no sender" sentinel that ADR-0011 and ADR-0017 already treat as special. The hash is rejected at registration time if it collides with 0; probability ~2⁻⁶⁴, practically zero, but the guard is cheap.
 
 ### Registry changes

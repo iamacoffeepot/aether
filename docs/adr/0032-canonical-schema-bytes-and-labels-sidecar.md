@@ -52,11 +52,14 @@ Postcard-compatible but of a smaller positional type — effectively `postcard(S
 ```rust
 impl Kind for Triangle {
     const NAME: &'static str = "test.triangle";
-    const ID: u64 = aether_mail::fnv1a_64_bytes(&__AETHER_CANONICAL_BYTES_TRIANGLE);
+    const ID: u64 = aether_mail::fnv1a_64_prefixed(
+        aether_mail::KIND_DOMAIN,
+        &__AETHER_CANONICAL_BYTES_TRIANGLE,
+    );
 }
 ```
 
-`fnv1a_64_bytes(&[u8]) -> u64` is the byte-slice sibling of the existing `mailbox_id_from_name(&str) -> u64`. Same algorithm, same constants.
+`fnv1a_64_prefixed(prefix, payload) -> u64` hashes `prefix ++ payload` in one pass; same algorithm and constants as `mailbox_id_from_name`. The `KIND_DOMAIN` prefix (`b"kind:"`) disjoins the `Kind::ID` space from `MailboxId` (issue #186); the mailbox side uses `MAILBOX_DOMAIN = b"mailbox:"` symmetrically.
 
 Two structurally-identical kinds with different Rust type paths or field names produce the same `ID`. Consistent with ADR-0031's structural-not-nominal stance — they *are* interchangeable on the wire, the Rust type system distinguishes them at source level, and the labels sidecar disambiguates them for human consumers.
 
@@ -131,7 +134,7 @@ Other consumers (substrate-only decoders that work off raw postcard bytes, tooli
 
 The Schema derive emits three consts: `SCHEMA`, `LABEL`, `LABEL_NODE`. The Kind derive, which was previously building its manifest via the syntactic walker, now:
 
-1. Emits `const ID: u64 = fnv1a_64_bytes(&CANONICAL_BYTES)`.
+1. Emits `const ID: u64 = fnv1a_64_prefixed(KIND_DOMAIN, &CANONICAL_BYTES)`.
 2. Emits both section statics from `canonical_serialize(&SCHEMA)` and `canonical_serialize_labels(&kind_label, &LABEL_NODE)`.
 
 `aether-mail-derive::manifest` retires entirely. No more syntactic type resolution; no more silent skipping; types outside the supported vocabulary fail to compile at the `#[derive(Schema)]` site via trait-bound failures.

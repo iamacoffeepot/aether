@@ -223,24 +223,40 @@ fn variant_to_shape(v: &EnumVariant) -> crate::types::VariantShape {
     }
 }
 
+/// Domain tag prefixed to every kind-id hash input so the `Kind::ID`
+/// space is disjoint from `MailboxId`. Must stay byte-identical to
+/// `aether_mail::KIND_DOMAIN`; duplicated here for the same reason
+/// `fnv1a_64` is (aether-mail depends on hub-protocol, not the
+/// other way around).
+pub(crate) const KIND_DOMAIN: &[u8] = b"kind:";
+
 /// Derive a `Kind::ID` from a `(name, schema)` pair at runtime. Matches
-/// `fnv1a_64_bytes(canonical_kind_bytes(name, schema))` byte-for-byte
-/// with the derive's compile-time emission, so a substrate computing
-/// `kind_id_from_parts(&desc.name, &desc.schema)` after a runtime
-/// `register_kind_with_descriptor` agrees with the id the component
-/// published as `<K as Kind>::ID` (ADR-0030 Phase 2).
+/// `fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema))`
+/// byte-for-byte with the derive's compile-time emission, so a
+/// substrate computing `kind_id_from_parts(&desc.name, &desc.schema)`
+/// after a runtime `register_kind_with_descriptor` agrees with the id
+/// the component published as `<K as Kind>::ID` (ADR-0030 Phase 2).
 pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
-    fnv1a_64(&canonical_kind_bytes(name, schema))
+    fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema))
 }
 
-/// FNV-1a 64 — duplicated from `aether_mail::fnv1a_64_bytes` because
+/// FNV-1a 64 over `prefix ++ payload`, mirrored from
+/// `aether_mail::fnv1a_64_prefixed`. Duplicated here because
 /// `aether-mail` depends on `aether-hub-protocol`, not the other way
-/// around. Same offset basis and prime; identical output.
-pub(super) const fn fnv1a_64(bytes: &[u8]) -> u64 {
+/// around — same offset basis and prime, identical output. Exposed at
+/// crate scope so the hub's canonical-bytes path can hash
+/// `KIND_DOMAIN ++ bytes` without a transient `Vec<u8>`.
+pub(crate) const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut i = 0;
-    while i < bytes.len() {
-        hash ^= bytes[i] as u64;
+    while i < prefix.len() {
+        hash ^= prefix[i] as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+        i += 1;
+    }
+    let mut i = 0;
+    while i < payload.len() {
+        hash ^= payload[i] as u64;
         hash = hash.wrapping_mul(0x100000001b3);
         i += 1;
     }

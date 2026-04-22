@@ -75,7 +75,8 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     )?;
 
     // `resolve_kind_p32` was retired in ADR-0030 Phase 2: kind ids are
-    // the `fnv1a_64(canonical(name, schema))` hash, computed on the
+    // the `fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))` hash,
+    // computed on the
     // guest side via the `Kind` derive's `const ID`. The host fn and
     // its `KIND_NOT_FOUND` sentinel are gone. Input-stream auto-
     // subscribe (the side-effect that used to ride this host fn)
