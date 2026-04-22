@@ -41,6 +41,11 @@ const PLAYER_G: f32 = 0.3;
 const PLAYER_B: f32 = 0.9;
 /// Per-tick continuous-mode speed in world units.
 const KEY_SPEED: f32 = 0.05;
+/// World-z for the player body. Larger than floor/backdrop z so the
+/// desktop substrate's `LessEqual` depth test draws the player on top
+/// of overlapping grid geometry. See `crates/aether-substrate-desktop/
+/// src/render.rs` for the z-convention.
+const PLAYER_Z: f32 = 0.1;
 
 /// `PlayerSetMode.mode` values. Kept as raw `u32` on the wire so the
 /// kind stays cast-tier; these constants give the component a readable
@@ -162,7 +167,7 @@ impl Component for Player {
                 Vertex {
                     x: self.pos_x,
                     y: self.pos_y + PLAYER_HALF,
-                    z: 0.0,
+                    z: PLAYER_Z,
                     r: PLAYER_R,
                     g: PLAYER_G,
                     b: PLAYER_B,
@@ -170,7 +175,7 @@ impl Component for Player {
                 Vertex {
                     x: self.pos_x - PLAYER_HALF,
                     y: self.pos_y - PLAYER_HALF,
-                    z: 0.0,
+                    z: PLAYER_Z,
                     r: PLAYER_R,
                     g: PLAYER_G,
                     b: PLAYER_B,
@@ -178,7 +183,7 @@ impl Component for Player {
                 Vertex {
                     x: self.pos_x + PLAYER_HALF,
                     y: self.pos_y - PLAYER_HALF,
-                    z: 0.0,
+                    z: PLAYER_Z,
                     r: PLAYER_R,
                     g: PLAYER_G,
                     b: PLAYER_B,
