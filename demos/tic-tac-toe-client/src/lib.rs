@@ -1,11 +1,38 @@
 //! Tic-tac-toe client component: renders the board the
 //! `aether-demo-tic-tac-toe` server publishes and turns mouse clicks
 //! into `PlayMove` mail. Registers itself under the well-known name
-//! the server fans state to (`tic_tac_toe.client`), stores every
-//! incoming `GameState`, re-emits the board as colored quads each
-//! tick, and maps `MouseButton` presses against the latest
-//! `MouseMove` + `WindowSize` to send a move to the server's
-//! well-known mailbox (`tic_tac_toe`).
+//! the server fans state to (`tic_tac_toe.client`), caches the latest
+//! `GameState`, re-emits the board as colored quads each tick, and
+//! maps `MouseButton` presses against the latest `MouseMove` +
+//! `WindowSize` to send a move to the server's well-known mailbox
+//! (`tic_tac_toe`).
+//!
+//! State source depends on deployment:
+//! - **Same substrate** (server + client co-loaded): the server's
+//!   `client_observer` fan-out lands in `on_game_state` on every
+//!   move. Works pre-ADR-0037.
+//! - **Client on desktop, server on hub-substrate** (ADR-0037): the
+//!   hub→desktop fan-out isn't wired, so `on_game_state` never fires.
+//!   Instead, `PlayMove` bubbles up to the hub, the server's reply
+//!   travels the ADR-0037 Phase 2 reply path back to this mailbox,
+//!   and `on_move_result` captures the state from the reply. Known
+//!   limitation: the client only sees moves it originates — moves
+//!   initiated by attached Claude sessions via MCP go to
+//!   `hub.claude.broadcast`, which fans to sessions, not to
+//!   components.
+//!
+//! Hub-hosted deployment (ADR-0037 Phase 3):
+//! ```text
+//! cargo build -p aether-demo-tic-tac-toe --target wasm32-unknown-unknown --release
+//! cargo build -p aether-demo-tic-tac-toe-client --target wasm32-unknown-unknown --release
+//! cargo run -p aether-substrate-hub            # hub boots its own substrate
+//! # From a Claude session attached to the hub:
+//! #   load_component(hub_engine_id, "<path>/aether_demo_tic_tac_toe.wasm", name="tic_tac_toe")
+//! #   spawn_substrate("<path>/aether-substrate-desktop")
+//! #   load_component(desktop_engine_id, "<path>/aether_demo_tic_tac_toe_client.wasm",
+//! #                  name="tic_tac_toe.client")
+//! # Click the desktop window; capture_frame to observe the board.
+//! ```
 //!
 //! Rendering:
 //! - 3×3 grid of cell quads, slightly inset inside the window.
@@ -19,7 +46,9 @@
 //! are a rendering-polish pass for later.
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
-use aether_demo_tic_tac_toe::{CELL_EMPTY, GameState, LAST_MOVE_NONE, PLAYER_X, PlayMove, SERVER};
+use aether_demo_tic_tac_toe::{
+    CELL_EMPTY, GameState, LAST_MOVE_NONE, MoveResult, PLAYER_X, PlayMove, SERVER,
+};
 use aether_kinds::{DrawTriangle, MouseButton, MouseMove, Tick, Vertex, WindowSize};
 
 /// Clip-space half-extent the board uses. Board lives inside
@@ -104,7 +133,10 @@ impl Component for TicTacToeClient {
 
     /// Cached copy of the latest authoritative state. Overwrites
     /// unconditionally — the server is the source of truth and we
-    /// don't try to merge or validate.
+    /// don't try to merge or validate. Only fires in same-substrate
+    /// deployments where the server's `client_observer` fan-out
+    /// resolves locally; cross-substrate state arrives via the
+    /// `MoveResult` reply instead (see `on_move_result`).
     ///
     /// # Agent
     /// You shouldn't send this mail directly. It arrives from the
@@ -113,6 +145,22 @@ impl Component for TicTacToeClient {
     #[handler]
     fn on_game_state(&mut self, _ctx: &mut Ctx<'_>, state: GameState) {
         self.state = state;
+    }
+
+    /// The server replies to every `PlayMove` / `Reset` with a
+    /// `MoveResult` carrying the current board (post-move on
+    /// acceptance, unchanged on rejection — either way authoritative).
+    /// This is the state channel that works across substrates: the
+    /// ADR-0037 reply path routes it back to this component's mailbox
+    /// regardless of which engine the server runs on.
+    ///
+    /// # Agent
+    /// You shouldn't send this mail directly. It's the reply this
+    /// component receives after mailing `tic_tac_toe.play_move` or
+    /// `tic_tac_toe.reset` to the server.
+    #[handler]
+    fn on_move_result(&mut self, _ctx: &mut Ctx<'_>, result: MoveResult) {
+        self.state = result.state;
     }
 
     /// Cache the latest cursor position so the next mouse click has
