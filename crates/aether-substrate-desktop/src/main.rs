@@ -21,8 +21,9 @@ use std::time::Instant;
 
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, InputStream,
-    Key, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult, SetWindowModeResult,
-    SetWindowTitleResult, Tick, VideoMode, WindowInfo, WindowMode, WindowSize,
+    Key, KeyRelease, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult,
+    SetWindowModeResult, SetWindowTitleResult, Tick, VideoMode, WindowInfo, WindowMode, WindowSize,
+    keycode,
 };
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
@@ -36,7 +37,7 @@ use render::{Gpu, IDENTITY_VIEW_PROJ};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::PhysicalKey;
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::monitor::{MonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId};
 
@@ -102,6 +103,7 @@ struct App {
     broadcast_mbox: MailboxId,
     kind_tick: u64,
     kind_key: u64,
+    kind_key_release: u64,
     kind_mouse_button: u64,
     kind_mouse_move: u64,
     kind_window_size: u64,
@@ -156,6 +158,69 @@ struct App {
 /// Copy winit's `VideoModeHandle` fields into the wire-stable mirror
 /// in `aether-kinds`. Separate type so the kind's schema doesn't ride
 /// winit's layout.
+/// Translate a winit `KeyCode` into the engine's stable named-key u32
+/// space (`aether_kinds::keycode`). Returns `None` for any key the
+/// engine doesn't name yet — the event then drops at the source rather
+/// than leaking winit's unstable discriminants onto the wire. Adding
+/// a new key is a paired change: a constant in `aether-kinds::keycode`
+/// plus an arm here.
+fn map_winit_keycode(k: KeyCode) -> Option<u32> {
+    Some(match k {
+        KeyCode::KeyA => keycode::KEY_A,
+        KeyCode::KeyB => keycode::KEY_B,
+        KeyCode::KeyC => keycode::KEY_C,
+        KeyCode::KeyD => keycode::KEY_D,
+        KeyCode::KeyE => keycode::KEY_E,
+        KeyCode::KeyF => keycode::KEY_F,
+        KeyCode::KeyG => keycode::KEY_G,
+        KeyCode::KeyH => keycode::KEY_H,
+        KeyCode::KeyI => keycode::KEY_I,
+        KeyCode::KeyJ => keycode::KEY_J,
+        KeyCode::KeyK => keycode::KEY_K,
+        KeyCode::KeyL => keycode::KEY_L,
+        KeyCode::KeyM => keycode::KEY_M,
+        KeyCode::KeyN => keycode::KEY_N,
+        KeyCode::KeyO => keycode::KEY_O,
+        KeyCode::KeyP => keycode::KEY_P,
+        KeyCode::KeyQ => keycode::KEY_Q,
+        KeyCode::KeyR => keycode::KEY_R,
+        KeyCode::KeyS => keycode::KEY_S,
+        KeyCode::KeyT => keycode::KEY_T,
+        KeyCode::KeyU => keycode::KEY_U,
+        KeyCode::KeyV => keycode::KEY_V,
+        KeyCode::KeyW => keycode::KEY_W,
+        KeyCode::KeyX => keycode::KEY_X,
+        KeyCode::KeyY => keycode::KEY_Y,
+        KeyCode::KeyZ => keycode::KEY_Z,
+        KeyCode::Digit0 => keycode::KEY_0,
+        KeyCode::Digit1 => keycode::KEY_1,
+        KeyCode::Digit2 => keycode::KEY_2,
+        KeyCode::Digit3 => keycode::KEY_3,
+        KeyCode::Digit4 => keycode::KEY_4,
+        KeyCode::Digit5 => keycode::KEY_5,
+        KeyCode::Digit6 => keycode::KEY_6,
+        KeyCode::Digit7 => keycode::KEY_7,
+        KeyCode::Digit8 => keycode::KEY_8,
+        KeyCode::Digit9 => keycode::KEY_9,
+        KeyCode::Space => keycode::KEY_SPACE,
+        KeyCode::Escape => keycode::KEY_ESCAPE,
+        KeyCode::Enter => keycode::KEY_ENTER,
+        KeyCode::Tab => keycode::KEY_TAB,
+        KeyCode::Backspace => keycode::KEY_BACKSPACE,
+        KeyCode::ArrowLeft => keycode::KEY_LEFT,
+        KeyCode::ArrowRight => keycode::KEY_RIGHT,
+        KeyCode::ArrowUp => keycode::KEY_UP,
+        KeyCode::ArrowDown => keycode::KEY_DOWN,
+        KeyCode::ShiftLeft => keycode::KEY_SHIFT_LEFT,
+        KeyCode::ShiftRight => keycode::KEY_SHIFT_RIGHT,
+        KeyCode::ControlLeft => keycode::KEY_CTRL_LEFT,
+        KeyCode::ControlRight => keycode::KEY_CTRL_RIGHT,
+        KeyCode::AltLeft => keycode::KEY_ALT_LEFT,
+        KeyCode::AltRight => keycode::KEY_ALT_RIGHT,
+        _ => return None,
+    })
+}
+
 fn mirror_video_mode(m: winit::monitor::VideoModeHandle) -> VideoMode {
     VideoMode {
         width: m.size().width,
@@ -659,16 +724,41 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::KeyboardInput {
                 event: key_event, ..
-            } if key_event.state == ElementState::Pressed && !key_event.repeat => {
-                let subs = subscribers_for(&self.input_subscribers, InputStream::Key);
-                if !subs.is_empty() {
-                    let code: u32 = match key_event.physical_key {
-                        PhysicalKey::Code(k) => k as u32,
-                        PhysicalKey::Unidentified(_) => 0,
-                    };
-                    for mbox in subs {
-                        self.queue
-                            .push(Mail::new(mbox, self.kind_key, encode(&Key { code }), 1));
+            } if !key_event.repeat => {
+                // Unmapped keys drop at the source — `map_winit_keycode`
+                // returns None for anything the engine's stable code
+                // space doesn't name yet. Adding a new key is an
+                // additive constant in `aether-kinds::keycode` plus an
+                // arm here.
+                let Some(code) = (match key_event.physical_key {
+                    PhysicalKey::Code(k) => map_winit_keycode(k),
+                    PhysicalKey::Unidentified(_) => None,
+                }) else {
+                    return;
+                };
+                match key_event.state {
+                    ElementState::Pressed => {
+                        let subs = subscribers_for(&self.input_subscribers, InputStream::Key);
+                        for mbox in subs {
+                            self.queue.push(Mail::new(
+                                mbox,
+                                self.kind_key,
+                                encode(&Key { code }),
+                                1,
+                            ));
+                        }
+                    }
+                    ElementState::Released => {
+                        let subs =
+                            subscribers_for(&self.input_subscribers, InputStream::KeyRelease);
+                        for mbox in subs {
+                            self.queue.push(Mail::new(
+                                mbox,
+                                self.kind_key_release,
+                                encode(&KeyRelease { code }),
+                                1,
+                            ));
+                        }
                     }
                 }
             }
@@ -739,6 +829,10 @@ fn main() -> wasmtime::Result<()> {
 
     let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
     let kind_key = boot.registry.kind_id(Key::NAME).expect("Key registered");
+    let kind_key_release = boot
+        .registry
+        .kind_id(KeyRelease::NAME)
+        .expect("KeyRelease registered");
     let kind_mouse_button = boot
         .registry
         .kind_id(MouseButton::NAME)
@@ -855,6 +949,7 @@ fn main() -> wasmtime::Result<()> {
         broadcast_mbox: boot.broadcast_mbox,
         kind_tick,
         kind_key,
+        kind_key_release,
         kind_mouse_button,
         kind_mouse_move,
         kind_window_size,

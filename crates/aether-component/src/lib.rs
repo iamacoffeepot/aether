@@ -323,13 +323,15 @@ impl InitCtx<'_> {
     /// type error instead of silently skipping the subscribe.
     pub fn subscribe_input<K: Kind + 'static>(&self) {
         use aether_kinds::{
-            InputStream, Key, MouseButton, MouseMove, SubscribeInput, Tick, WindowSize,
+            InputStream, Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, Tick, WindowSize,
         };
         let tid = TypeId::of::<K>();
         let stream = if tid == TypeId::of::<Tick>() {
             InputStream::Tick
         } else if tid == TypeId::of::<Key>() {
             InputStream::Key
+        } else if tid == TypeId::of::<KeyRelease>() {
+            InputStream::KeyRelease
         } else if tid == TypeId::of::<MouseMove>() {
             InputStream::MouseMove
         } else if tid == TypeId::of::<MouseButton>() {

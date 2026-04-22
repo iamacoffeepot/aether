@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod descriptors;
+pub mod keycode;
 
 use bytemuck::{Pod, Zeroable};
 
@@ -48,8 +49,10 @@ use bytemuck::{Pod, Zeroable};
 #[kind(name = "aether.tick", input)]
 pub struct Tick;
 
-/// A single keyboard keypress, identified by `winit::keyboard::KeyCode
-/// as u32`. Dispatched on press only (not release, not repeat).
+/// A single keyboard keypress, identified by the stable codes in
+/// `keycode`. Dispatched on press only (no repeat). Released keys
+/// arrive as `KeyRelease`. Unmapped winit keys (any `KeyCode` variant
+/// the substrate doesn't translate) produce no mail.
 #[repr(C)]
 #[derive(
     Copy,
@@ -65,6 +68,28 @@ pub struct Tick;
 )]
 #[kind(name = "aether.key", input)]
 pub struct Key {
+    pub code: u32,
+}
+
+/// Release counterpart of `Key`. Dispatched once per key release, with
+/// the same `code` value the press carried. Components tracking
+/// hold-to-act semantics (e.g. WASD movement) pair subscription to
+/// both kinds so they can clear state on release.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_mail::Kind,
+    aether_mail::Schema,
+)]
+#[kind(name = "aether.key_release", input)]
+pub struct KeyRelease {
     pub code: u32,
 }
 
@@ -557,6 +582,7 @@ mod control_plane {
         MouseMove,
         MouseButton,
         WindowSize,
+        KeyRelease,
     }
 
     /// `aether.control.subscribe_input` — add `mailbox` to the
@@ -921,6 +947,7 @@ mod tests {
     fn kind_names_are_stable() {
         assert_eq!(Tick::NAME, "aether.tick");
         assert_eq!(Key::NAME, "aether.key");
+        assert_eq!(KeyRelease::NAME, "aether.key_release");
         assert_eq!(MouseButton::NAME, "aether.mouse_button");
         assert_eq!(MouseMove::NAME, "aether.mouse_move");
         assert_eq!(DrawTriangle::NAME, "aether.draw_triangle");
