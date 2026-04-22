@@ -102,6 +102,21 @@ impl EngineRegistry {
         self.inner.lock().unwrap().spawned_children.remove(id)
     }
 
+    /// Drain every adopted child, returning them for orderly shutdown.
+    /// Used by the hub's signal handler to explicitly terminate every
+    /// spawned substrate before the process exits, so a SIGTERM on the
+    /// hub doesn't orphan children into init. `take_child`'s per-id
+    /// path covers normal `terminate_substrate` calls; this bulk
+    /// variant exists for shutdown only.
+    pub fn drain_spawned_children(&self) -> Vec<(EngineId, Child)> {
+        self.inner
+            .lock()
+            .unwrap()
+            .spawned_children
+            .drain()
+            .collect()
+    }
+
     pub fn remove(&self, id: &EngineId) {
         let mut inner = self.inner.lock().unwrap();
         inner.records.remove(id);
