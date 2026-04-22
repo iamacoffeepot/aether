@@ -11,11 +11,9 @@
 
 use std::sync::Arc;
 
-use aether_hub_protocol::SessionToken;
-
 use crate::hub_client::HubOutbound;
 use crate::input::InputSubscribers;
-use crate::mail::{Mail, MailKind, MailboxId};
+use crate::mail::{Mail, MailKind, MailboxId, Sender};
 use crate::mailer::Mailer;
 use crate::registry::{MailboxEntry, Registry};
 use crate::sender_table::SenderTable;
@@ -105,14 +103,15 @@ impl SubstrateCtx {
                 let kind_name = self.registry.kind_name(kind).unwrap_or_default();
                 // Component-originated mail: the sender is this ctx's
                 // mailbox, so its registry name is the `origin` any
-                // sink cares about (ADR-0011). Claude-side session is
-                // `NIL` — component sends never have a reply-to target.
+                // sink cares about (ADR-0011). No remote sender —
+                // component-originated sends never have a
+                // reply-over-hub-wire target.
                 let origin = self.registry.mailbox_name(self.sender);
                 handler(
                     kind,
                     &kind_name,
                     origin.as_deref(),
-                    SessionToken::NIL,
+                    Sender::None,
                     &payload,
                     count,
                 );

@@ -41,9 +41,11 @@ pub use chassis::{Chassis, ChassisCapabilities};
 pub use component::Component;
 pub use control::{AETHER_CONTROL, ChassisControlHandler, ControlPlane};
 pub use ctx::SubstrateCtx;
-pub use hub_client::{HubClient, HubOutbound, dispatch_hub_to_engine_mail};
+pub use hub_client::{
+    HubClient, HubOutbound, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail,
+};
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
-pub use mail::{Mail, MailKind, MailboxId};
+pub use mail::{Mail, MailKind, MailboxId, Sender};
 pub use mailer::Mailer;
 pub use registry::{MailboxEntry, Registry, SinkHandler};
 pub use scheduler::Scheduler;

@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use aether_hub_protocol::SessionToken;
+use aether_hub_protocol::{EngineId, SessionToken};
 
 use crate::mail::MailboxId;
 
@@ -40,6 +40,15 @@ pub enum SenderEntry {
     /// Reply routes through the local `Mailer` as ordinary
     /// component-to-component mail.
     Component(MailboxId),
+    /// Reply routes over `HubOutbound` as
+    /// `EngineToHub::MailToEngineMailbox` (ADR-0037 Phase 2). The
+    /// hub forwards the frame to the target engine's connection as
+    /// `HubToEngine::MailById`; that engine's hub-client reader
+    /// resolves the mailbox id + kind locally and dispatches.
+    RemoteEngineMailbox {
+        engine_id: EngineId,
+        mailbox_id: u64,
+    },
 }
 
 /// Maintains the handle→entry map for one component instance.

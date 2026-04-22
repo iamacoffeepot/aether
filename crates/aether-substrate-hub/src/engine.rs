@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use aether_hub_protocol::{
     ClaudeAddress, EngineId, EngineMailFrame, EngineToHub, FrameError, HubToEngine, MAX_FRAME_SIZE,
-    Uuid, Welcome,
+    MailByIdFrame, Uuid, Welcome,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -167,7 +167,40 @@ async fn read_loop(
             EngineToHub::Mail(m) => route_engine_mail(sessions, engine_id, m),
             EngineToHub::KindsChanged(kinds) => registry.update_kinds(&engine_id, kinds),
             EngineToHub::LogBatch(entries) => logs.append(engine_id, entries),
-            EngineToHub::MailToHubSubstrate(frame) => loopback.deliver_bubbled_mail(frame),
+            EngineToHub::MailToHubSubstrate(frame) => {
+                // ADR-0037 Phase 2: attribute the bubbled-up mail
+                // to the sending engine so the hub-resident
+                // component's reply-to-sender has an `engine_id`
+                // to route back to.
+                loopback.deliver_bubbled_mail(engine_id, frame)
+            }
+            EngineToHub::MailToEngineMailbox(frame) => {
+                // ADR-0037 Phase 2: a remote engine's component
+                // replied to an engine-mailbox sender. Route the
+                // frame onward to the target engine's connection
+                // as `HubToEngine::MailById`. Drops silently if the
+                // target is unknown (could have disconnected
+                // mid-flight).
+                if let Some(record) = registry.get(&frame.target_engine_id) {
+                    let by_id = HubToEngine::MailById(MailByIdFrame {
+                        recipient_mailbox_id: frame.target_mailbox_id,
+                        kind_id: frame.kind_id,
+                        payload: frame.payload,
+                        count: frame.count,
+                    });
+                    if let Err(e) = record.mail_tx.try_send(by_id) {
+                        eprintln!(
+                            "aether-substrate-hub: reply to engine {:?} dropped: {e}",
+                            frame.target_engine_id,
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "aether-substrate-hub: reply to unknown engine {:?} dropped",
+                        frame.target_engine_id,
+                    );
+                }
+            }
             EngineToHub::Goodbye(_) => return Ok(()),
         }
     }

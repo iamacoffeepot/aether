@@ -14,7 +14,7 @@ use aether_hub_protocol::{
     SessionToken, Uuid, Welcome, read_frame, write_frame,
 };
 use aether_substrate_desktop::{
-    HubClient, HubOutbound, Mailer, Registry, Scheduler, mail::MailboxId,
+    HubClient, HubOutbound, Mailer, Registry, Scheduler, Sender, mail::MailboxId,
 };
 
 /// Start a mock hub on a random port. Returns the bound address and a
@@ -92,7 +92,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     struct Seen {
         count_sum: u32,
         payload_lens: Vec<usize>,
-        senders: Vec<SessionToken>,
+        senders: Vec<Sender>,
     }
     let seen = Arc::new((Mutex::new(Seen::default()), Condvar::new()));
     let seen_for_sink = Arc::clone(&seen);
@@ -104,7 +104,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
             move |_kind_id: u64,
                   _kind: &str,
                   _origin: Option<&str>,
-                  sender: SessionToken,
+                  sender: Sender,
                   bytes: &[u8],
                   count: u32| {
                 let (lock, cv) = &*seen_for_sink;
@@ -194,7 +194,10 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     }
     assert_eq!(s.count_sum, 8);
     assert_eq!(s.payload_lens, vec![3, 1]);
-    assert_eq!(s.senders, vec![alice, SessionToken::NIL]);
+    assert_eq!(
+        s.senders,
+        vec![Sender::Session(alice), Sender::Session(SessionToken::NIL)],
+    );
     assert_eq!(recipient, MailboxId::from_name("hello"));
 
     drop(stream);

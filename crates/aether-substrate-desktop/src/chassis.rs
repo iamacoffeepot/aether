@@ -16,13 +16,12 @@
 
 use std::sync::Arc;
 
-use aether_hub_protocol::SessionToken;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode, SetWindowModeResult, WindowMode,
 };
 use aether_mail::Kind;
 use aether_substrate_core::{
-    ChassisControlHandler, HubOutbound, Mailer, Registry,
+    ChassisControlHandler, HubOutbound, Mailer, Registry, Sender,
     control::{decode_payload, resolve_bundle},
 };
 use winit::event_loop::EventLoopProxy;
@@ -41,12 +40,12 @@ pub enum UserEvent {
     Capture,
     /// An MCP session asked for a `platform_info` snapshot. The
     /// event-loop thread snapshots + replies via outbound.
-    PlatformInfo { sender: SessionToken },
+    PlatformInfo { sender: Sender },
     /// An MCP session asked to switch the window mode. The event
     /// loop resolves fullscreen modes against the current monitor,
     /// applies the change, and replies with the new state.
     SetWindowMode {
-        sender: SessionToken,
+        sender: Sender,
         mode: WindowMode,
         width: Option<u32>,
         height: Option<u32>,
@@ -67,7 +66,7 @@ pub fn chassis_control_handler(
     outbound: Arc<HubOutbound>,
 ) -> ChassisControlHandler {
     Arc::new(
-        move |kind_id: u64, kind_name: &str, sender: SessionToken, bytes: &[u8]| {
+        move |kind_id: u64, kind_name: &str, sender: Sender, bytes: &[u8]| {
             if kind_id == CaptureFrame::ID {
                 handle_capture_frame(
                     &proxy,
@@ -108,7 +107,7 @@ fn handle_capture_frame(
     registry: &Registry,
     queue: &Mailer,
     outbound: &HubOutbound,
-    sender: SessionToken,
+    sender: Sender,
     bytes: &[u8],
 ) {
     let payload: CaptureFrame = match decode_payload(bytes) {
@@ -171,7 +170,7 @@ fn handle_capture_frame(
 fn handle_set_window_mode(
     proxy: &EventLoopProxy<UserEvent>,
     outbound: &HubOutbound,
-    sender: SessionToken,
+    sender: Sender,
     bytes: &[u8],
 ) {
     let payload: SetWindowMode = match decode_payload(bytes) {

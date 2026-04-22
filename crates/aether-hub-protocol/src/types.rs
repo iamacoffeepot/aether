@@ -826,12 +826,47 @@ pub enum LogLevel {
 /// don't survive the hash; the hub-substrate looks up the
 /// component by id against its own registry.
 ///
-/// Phase 1 is fire-and-forget — no sender attribution, no reply
-/// path. Phase 2 (ADR-0037) widens this with source
-/// `(engine_id, mailbox_id)` so the hub-chassis's reply peripheral
-/// can route replies back to the originating engine's mailbox.
+/// `source_mailbox_id` (Phase 2) carries the sending component's
+/// local mailbox id so the hub-chassis's reply peripheral can
+/// route replies back to it. The source `engine_id` isn't on the
+/// wire — the hub knows which TCP connection the frame arrived on.
+/// `None` means "no reply target" (broadcast-origin, substrate-
+/// generated, no `from_component` attribution); the hub-side
+/// sender handle will be `SENDER_NONE` for the receiving
+/// component.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineMailToHubSubstrateFrame {
+    pub recipient_mailbox_id: u64,
+    pub kind_id: u64,
+    pub payload: Vec<u8>,
+    pub count: u32,
+    pub source_mailbox_id: Option<u64>,
+}
+
+/// Reply mail leaving the hub-substrate for a remote engine's
+/// mailbox (ADR-0037 Phase 2). The hub-chassis's reply peripheral
+/// emits this when a hub-resident component calls `ctx.reply` on
+/// a sender that resolves to `SenderEntry::RemoteEngineMailbox`.
+/// The hub then forwards to the target engine's connection as
+/// `HubToEngine::MailById`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailToEngineMailboxFrame {
+    pub target_engine_id: EngineId,
+    pub target_mailbox_id: u64,
+    pub kind_id: u64,
+    pub payload: Vec<u8>,
+    pub count: u32,
+}
+
+/// Mail delivered to a specific mailbox id on an engine (ADR-0037
+/// Phase 2 reply path). Unlike `MailFrame` which carries
+/// `recipient_name` (used by `HubToEngine::Mail`), this is strictly
+/// id-addressed — replies land without the sender having to know
+/// the mailbox's name. The receiver's `HubClient` reader resolves
+/// the id against the local `Registry` and pushes onto the
+/// `Mailer`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailByIdFrame {
     pub recipient_mailbox_id: u64,
     pub kind_id: u64,
     pub payload: Vec<u8>,
@@ -860,13 +895,21 @@ pub enum EngineToHub {
     LogBatch(Vec<LogEntry>),
     Goodbye(Goodbye),
     MailToHubSubstrate(EngineMailToHubSubstrateFrame),
+    /// Reply to a remote engine's mailbox (ADR-0037 Phase 2). The
+    /// hub looks up the target engine in its registry and forwards
+    /// via `HubToEngine::MailById`.
+    MailToEngineMailbox(MailToEngineMailboxFrame),
 }
 
-/// Frames the hub sends to an engine.
+/// Frames the hub sends to an engine. `MailById` (ADR-0037
+/// Phase 2) is the id-addressed delivery path used for replies
+/// routed back to an engine whose component originated a bubbled-
+/// up mail.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HubToEngine {
     Welcome(Welcome),
     Heartbeat,
     Mail(MailFrame),
     Goodbye(Goodbye),
+    MailById(MailByIdFrame),
 }

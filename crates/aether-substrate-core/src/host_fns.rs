@@ -182,6 +182,30 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                     }
                     ctx.send(mbox, kind, payload, count);
                 }
+                SenderEntry::RemoteEngineMailbox {
+                    engine_id,
+                    mailbox_id,
+                } => {
+                    // ADR-0037 Phase 2: reply to a component on
+                    // another engine. Validate the kind exists
+                    // locally so we surface a meaningful status
+                    // rather than shipping a frame the receiver
+                    // can't decode. The hub forwards the frame to
+                    // the target engine's connection as
+                    // `HubToEngine::MailById`.
+                    if ctx.registry.kind_name(kind).is_none() {
+                        return REPLY_KIND_NOT_FOUND;
+                    }
+                    ctx.outbound.send(EngineToHub::MailToEngineMailbox(
+                        aether_hub_protocol::MailToEngineMailboxFrame {
+                            target_engine_id: engine_id,
+                            target_mailbox_id: mailbox_id,
+                            kind_id: kind,
+                            payload,
+                            count,
+                        },
+                    ));
+                }
             }
             REPLY_OK
         },
