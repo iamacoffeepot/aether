@@ -38,10 +38,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aether_hub_protocol::{
-    EngineId, EngineMailToHubSubstrateFrame, EngineToHub, HubToEngine, Uuid,
+    EngineId, EngineMailToHubSubstrateFrame, EngineToHub, HubToEngine, MailByIdFrame, Uuid,
 };
 use aether_substrate_core::{
-    Mail, MailboxId, Mailer, Registry, SubstrateBoot, dispatch_hub_to_engine_mail,
+    Mail, MailboxId, Mailer, Registry, Sender, SubstrateBoot, dispatch_hub_to_engine_mail,
 };
 use tokio::sync::mpsc;
 
@@ -96,18 +96,32 @@ impl LoopbackHandle {
     }
 
     /// Dispatch mail bubbled up from a remote engine (ADR-0037
-    /// Phase 1). The sender has already hashed the target
+    /// Phase 1 + Phase 2). The sender has already hashed the target
     /// mailbox's name into `recipient_mailbox_id`; we resolve it
     /// id-based against the loopback registry and push onto the
     /// `Mailer`. Unknown ids warn-drop on the hub side (end of
-    /// line for Phase 1 — Phase 2's reply path lets us route an
-    /// `mail.unresolved` observation back to the sender's logs).
-    pub fn deliver_bubbled_mail(&self, frame: EngineMailToHubSubstrateFrame) {
+    /// line for Phase 1 — a future `mail.unresolved` observation
+    /// sends the warn back to the originating engine's logs).
+    ///
+    /// `source_engine_id` is the originating engine (known by the
+    /// hub from the TCP connection, not on the wire). Combined with
+    /// `frame.source_mailbox_id` it becomes
+    /// `Sender::EngineMailbox { engine_id, mailbox_id }` on the
+    /// delivered `Mail` — the hub-resident component's
+    /// `ctx.reply(sender)` then routes through
+    /// `HubOutbound::send_reply` which forks on the enum variant
+    /// and emits `EngineToHub::MailToEngineMailbox` for this case.
+    pub fn deliver_bubbled_mail(
+        &self,
+        source_engine_id: EngineId,
+        frame: EngineMailToHubSubstrateFrame,
+    ) {
         let EngineMailToHubSubstrateFrame {
             recipient_mailbox_id,
             kind_id,
             payload,
             count,
+            source_mailbox_id,
         } = frame;
         // Kind lookup guards against an engine bubbling up a kind
         // the hub substrate doesn't know — without it the mail
@@ -119,12 +133,16 @@ impl LoopbackHandle {
             );
             return;
         }
-        self.queue.push(Mail::new(
-            MailboxId(recipient_mailbox_id),
-            kind_id,
-            payload,
-            count,
-        ));
+        let sender = match source_mailbox_id {
+            Some(mailbox_id) => Sender::EngineMailbox {
+                engine_id: source_engine_id,
+                mailbox_id,
+            },
+            None => Sender::None,
+        };
+        self.queue.push(
+            Mail::new(MailboxId(recipient_mailbox_id), kind_id, payload, count).with_sender(sender),
+        );
     }
 }
 
@@ -181,6 +199,9 @@ pub async fn run_inbound_drainer(
     while let Some(frame) = inbound_rx.recv().await {
         match frame {
             HubToEngine::Mail(mail) => dispatch_hub_to_engine_mail(mail, &registry, &queue),
+            HubToEngine::MailById(mail) => {
+                aether_substrate_core::dispatch_hub_mail_by_id(mail, &registry, &queue)
+            }
             HubToEngine::Heartbeat | HubToEngine::Welcome(_) | HubToEngine::Goodbye(_) => {}
         }
     }
@@ -234,6 +255,37 @@ pub fn spawn_outbound_drainer(
                         // future wiring change can't silently
                         // route hub-self bubbled mail to itself.
                     }
+                    EngineToHub::MailToEngineMailbox(frame) => {
+                        // ADR-0037 Phase 2: a hub-resident
+                        // component replied to a bubbled-up sender.
+                        // Look up the target engine's mail_tx in
+                        // our registry and forward as `MailById` so
+                        // the target engine's hub-client reader
+                        // resolves the mailbox id + kind locally
+                        // and dispatches. Drops silently if the
+                        // originating engine has since disconnected
+                        // — the mail was a reply to an engine that
+                        // no longer exists.
+                        if let Some(record) = engines.get(&frame.target_engine_id) {
+                            let by_id = HubToEngine::MailById(MailByIdFrame {
+                                recipient_mailbox_id: frame.target_mailbox_id,
+                                kind_id: frame.kind_id,
+                                payload: frame.payload,
+                                count: frame.count,
+                            });
+                            if let Err(e) = record.mail_tx.try_send(by_id) {
+                                eprintln!(
+                                    "aether-substrate-hub: reply to engine {:?} dropped: {e}",
+                                    frame.target_engine_id,
+                                );
+                            }
+                        } else {
+                            eprintln!(
+                                "aether-substrate-hub: reply to unknown engine {:?} dropped",
+                                frame.target_engine_id,
+                            );
+                        }
+                    }
                 }
             }
         })
@@ -269,6 +321,64 @@ mod tests {
         );
     }
 
+    /// ADR-0037 Phase 2: the outbound drainer forwards
+    /// `EngineToHub::MailToEngineMailbox` to the target engine's
+    /// `mail_tx` as `HubToEngine::MailById`. Proves the reply-path
+    /// routing hop without needing a full component stand-up.
+    #[tokio::test]
+    async fn outbound_drainer_routes_engine_mailbox_reply() {
+        use aether_hub_protocol::MailToEngineMailboxFrame;
+
+        use crate::registry::EngineRecord;
+
+        let engines = EngineRegistry::new();
+        let sessions = SessionRegistry::new();
+        let logs = LogStore::new();
+
+        // Synthesize a target engine with a mail_tx we control.
+        let (mail_tx, mut mail_rx) = mpsc::channel::<HubToEngine>(16);
+        let target_engine_id = EngineId(Uuid::new_v4());
+        engines.insert(EngineRecord {
+            id: target_engine_id,
+            name: "target".to_owned(),
+            pid: 1,
+            version: "0".to_owned(),
+            kinds: vec![],
+            components: HashMap::new(),
+            mail_tx,
+            spawned: false,
+        });
+
+        let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<EngineToHub>();
+        let _thread = spawn_outbound_drainer(outbound_rx, engines, sessions, logs);
+
+        // Simulate a hub-resident component's reply-to-engine-
+        // mailbox emission.
+        outbound_tx
+            .send(EngineToHub::MailToEngineMailbox(MailToEngineMailboxFrame {
+                target_engine_id,
+                target_mailbox_id: 99,
+                kind_id: 42,
+                payload: vec![1, 2, 3],
+                count: 1,
+            }))
+            .expect("outbound send");
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), mail_rx.recv())
+            .await
+            .expect("drainer forward timeout")
+            .expect("mail_rx closed");
+        match got {
+            HubToEngine::MailById(frame) => {
+                assert_eq!(frame.recipient_mailbox_id, 99);
+                assert_eq!(frame.kind_id, 42);
+                assert_eq!(frame.payload, vec![1, 2, 3]);
+                assert_eq!(frame.count, 1);
+            }
+            other => panic!("expected MailById, got {other:?}"),
+        }
+    }
+
     /// ADR-0037 Phase 1: `deliver_bubbled_mail` on an unknown kind
     /// id must drop silently (no panic, no queue push) — otherwise
     /// a component would receive mail of a layout it doesn't know.
@@ -285,12 +395,16 @@ mod tests {
         // registry has no entry for it, so the kind lookup inside
         // deliver_bubbled_mail returns None and the frame is
         // dropped.
-        handle.deliver_bubbled_mail(EngineMailToHubSubstrateFrame {
-            recipient_mailbox_id: 42,
-            kind_id: 0xDEAD_BEEF_DEAD_BEEF,
-            payload: vec![1, 2, 3],
-            count: 1,
-        });
+        handle.deliver_bubbled_mail(
+            EngineId(Uuid::from_u128(0x1234)),
+            EngineMailToHubSubstrateFrame {
+                recipient_mailbox_id: 42,
+                kind_id: 0xDEAD_BEEF_DEAD_BEEF,
+                payload: vec![1, 2, 3],
+                count: 1,
+                source_mailbox_id: None,
+            },
+        );
         // No panic == pass. The production flow logs a warn and
         // returns; we can't assert on the warn without threading
         // a tracing subscriber, which is out of scope for the

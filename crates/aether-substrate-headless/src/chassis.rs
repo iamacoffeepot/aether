@@ -12,18 +12,17 @@
 
 use std::sync::Arc;
 
-use aether_hub_protocol::SessionToken;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode, SetWindowModeResult,
 };
 use aether_mail::Kind;
-use aether_substrate_core::{ChassisControlHandler, HubOutbound};
+use aether_substrate_core::{ChassisControlHandler, HubOutbound, Sender};
 
 const UNSUPPORTED: &str = "unsupported on headless chassis — no GPU or window peripherals";
 
 pub fn chassis_control_handler(outbound: Arc<HubOutbound>) -> ChassisControlHandler {
     Arc::new(
-        move |kind_id: u64, kind_name: &str, sender: SessionToken, _bytes: &[u8]| {
+        move |kind_id: u64, kind_name: &str, sender: Sender, _bytes: &[u8]| {
             if kind_id == CaptureFrame::ID {
                 outbound.send_reply(
                     sender,

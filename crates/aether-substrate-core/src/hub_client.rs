@@ -21,17 +21,17 @@
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process;
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_hub_protocol::{
     ClaudeAddress, EngineId, EngineMailFrame, EngineToHub, Hello, HubToEngine, KindDescriptor,
-    MailFrame, SessionToken, read_frame, write_frame,
+    MailByIdFrame, MailFrame, MailToEngineMailboxFrame, read_frame, write_frame,
 };
 
-use crate::mail::Mail;
+use crate::mail::{Mail, Sender};
 use crate::mailer::Mailer;
 use crate::registry::Registry;
 
@@ -47,7 +47,7 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// isn't, the send silently drops. This lets the broadcast sink be
 /// registered unconditionally, before (or without) a hub connection.
 pub struct HubOutbound {
-    tx: OnceLock<Sender<EngineToHub>>,
+    tx: OnceLock<mpsc::Sender<EngineToHub>>,
 }
 
 impl HubOutbound {
@@ -67,7 +67,7 @@ impl HubOutbound {
     /// `HubOutbound` is single-writer by design so heartbeats and
     /// outbound mail can't race on the socket (or the loopback
     /// channel).
-    pub fn attach(&self, tx: Sender<EngineToHub>) {
+    pub fn attach(&self, tx: mpsc::Sender<EngineToHub>) {
         if self.tx.set(tx).is_err() {
             tracing::warn!(target: "aether_substrate::hub_client", "HubOutbound attached twice — ignoring second attach");
         }
@@ -84,12 +84,15 @@ impl HubOutbound {
     }
 
     /// Encode `result` with postcard and send it as a reply addressed
-    /// at `sender`. Uses the kind's own `NAME` so call sites don't
-    /// repeat it. Silent on disconnected outbound (no hub attached)
-    /// and on encode failure (logged at error — a corrupt reply can't
-    /// be delivered meaningfully). Returns `true` when the frame was
-    /// enqueued on the writer channel.
-    pub fn send_reply<K>(&self, sender: SessionToken, result: &K) -> bool
+    /// at `sender`. Forks on the sender variant: `Session` routes
+    /// back to the Claude MCP session (ADR-0008); `EngineMailbox`
+    /// routes via `EngineToHub::MailToEngineMailbox` to the hub,
+    /// which forwards to the target engine's mailbox (ADR-0037
+    /// Phase 2); `None` is a no-op (mail with no reply target).
+    /// Silent on disconnected outbound and on encode failure.
+    /// Returns `true` when the frame was enqueued on the writer
+    /// channel.
+    pub fn send_reply<K>(&self, sender: Sender, result: &K) -> bool
     where
         K: aether_mail::Kind + serde::Serialize,
     {
@@ -105,12 +108,25 @@ impl HubOutbound {
                 return false;
             }
         };
-        self.send(EngineToHub::Mail(EngineMailFrame {
-            address: ClaudeAddress::Session(sender),
-            kind_name: K::NAME.to_owned(),
-            payload,
-            origin: None,
-        }))
+        match sender {
+            Sender::Session(token) => self.send(EngineToHub::Mail(EngineMailFrame {
+                address: ClaudeAddress::Session(token),
+                kind_name: K::NAME.to_owned(),
+                payload,
+                origin: None,
+            })),
+            Sender::EngineMailbox {
+                engine_id,
+                mailbox_id,
+            } => self.send(EngineToHub::MailToEngineMailbox(MailToEngineMailboxFrame {
+                target_engine_id: engine_id,
+                target_mailbox_id: mailbox_id,
+                kind_id: K::ID,
+                payload,
+                count: 1,
+            })),
+            Sender::None => false,
+        }
     }
 
     /// Whether this handle has a live outbound channel.
@@ -204,6 +220,7 @@ fn run_reader(mut stream: TcpStream, registry: Arc<Registry>, queue: Arc<Mailer>
     loop {
         match read_frame::<_, HubToEngine>(&mut stream) {
             Ok(HubToEngine::Mail(frame)) => dispatch_hub_to_engine_mail(frame, &registry, &queue),
+            Ok(HubToEngine::MailById(frame)) => dispatch_hub_mail_by_id(frame, &registry, &queue),
             Ok(HubToEngine::Heartbeat) => {}
             Ok(HubToEngine::Welcome(_)) => {
                 tracing::warn!(target: "aether_substrate::hub_client", "unexpected post-handshake Welcome, ignoring");
@@ -229,7 +246,7 @@ fn run_writer(mut stream: TcpStream, rx: mpsc::Receiver<EngineToHub>) {
     }
 }
 
-fn run_heartbeat(tx: Sender<EngineToHub>) {
+fn run_heartbeat(tx: mpsc::Sender<EngineToHub>) {
     loop {
         thread::sleep(HEARTBEAT_INTERVAL);
         if tx.send(EngineToHub::Heartbeat).is_err() {
@@ -260,7 +277,35 @@ pub fn dispatch_hub_to_engine_mail(frame: MailFrame, registry: &Registry, queue:
         );
         return;
     };
-    queue.push(Mail::new(recipient, kind, frame.payload, frame.count).with_sender(frame.sender));
+    queue.push(
+        Mail::new(recipient, kind, frame.payload, frame.count)
+            .with_sender(Sender::Session(frame.sender)),
+    );
+}
+
+/// Resolve a `HubToEngine::MailById` frame against the substrate's
+/// `Registry` and push onto `queue`. Used by ADR-0037 Phase 2's
+/// reply path — the hub forwards engine-mailbox replies as
+/// id-addressed frames because the receiver's own mailbox name
+/// didn't make it across the hash boundary when the sender bubbled
+/// up. Public so the hub-chassis's engine read loop can call the
+/// same helper from its own side of the wire.
+pub fn dispatch_hub_mail_by_id(frame: MailByIdFrame, registry: &Registry, queue: &Mailer) {
+    if registry.kind_name(frame.kind_id).is_none() {
+        tracing::warn!(
+            target: "aether_substrate::hub_client",
+            kind_id = frame.kind_id,
+            mailbox_id = frame.recipient_mailbox_id,
+            "MailById with unknown kind — dropped",
+        );
+        return;
+    }
+    queue.push(Mail::new(
+        crate::mail::MailboxId(frame.recipient_mailbox_id),
+        frame.kind_id,
+        frame.payload,
+        frame.count,
+    ));
 }
 
 fn unix_now() -> u64 {

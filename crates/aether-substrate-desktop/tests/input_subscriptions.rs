@@ -11,7 +11,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use aether_hub_protocol::SessionToken;
 use aether_kinds::{
     DropComponent, InputStream, LoadComponent, SubscribeInput, Tick, UnsubscribeInput,
 };
@@ -115,7 +114,14 @@ fn make_harness() -> Harness {
 fn dispatch<K: aether_mail::Kind + serde::Serialize>(plane: &ControlPlane, payload: &K) {
     let bytes = postcard::to_allocvec(payload).unwrap();
     let handler = plane.clone().into_sink_handler();
-    handler(K::ID, K::NAME, None, SessionToken::NIL, &bytes, 0);
+    handler(
+        K::ID,
+        K::NAME,
+        None,
+        aether_substrate_desktop::Sender::None,
+        &bytes,
+        0,
+    );
 }
 
 fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> u64 {
