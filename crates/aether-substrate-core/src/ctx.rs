@@ -95,52 +95,117 @@ impl SubstrateCtx {
     }
 
     /// Dispatch mail. If the recipient is a sink, the handler runs inline
-    /// on the caller's thread. If it's a component, the mail is enqueued
-    /// for a worker to deliver. Unknown recipients are dropped.
+    /// on the caller's thread. Otherwise defer to the mailer, which
+    /// routes to the component's inbox, warn-drops dropped/unknown
+    /// mailboxes, or bubbles unknown ids up to the hub-substrate when
+    /// a `HubOutbound` is wired (ADR-0037).
     pub fn send(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32) {
-        match self.registry.entry(recipient) {
-            Some(MailboxEntry::Sink(handler)) => {
-                let kind_name = self.registry.kind_name(kind).unwrap_or_default();
-                // Component-originated mail: the sender is this ctx's
-                // mailbox, so its registry name is the `origin` any
-                // sink cares about (ADR-0011). No remote sender —
-                // component-originated sends never have a
-                // reply-over-hub-wire target.
-                let origin = self.registry.mailbox_name(self.sender);
-                handler(
-                    kind,
-                    &kind_name,
-                    origin.as_deref(),
-                    ReplyTo::None,
-                    &payload,
-                    count,
-                );
-            }
-            Some(MailboxEntry::Component) => {
-                // ADR-0017: component-to-component mail carries the
-                // sender's mailbox id so `Component::deliver` can
-                // allocate a Component-variant `ReplyEntry`. The
-                // receiving guest gets a reply-capable handle that
-                // routes back through the local queue.
-                self.queue
-                    .push(Mail::new(recipient, kind, payload, count).with_origin(self.sender));
-            }
-            Some(MailboxEntry::Dropped) => {
-                tracing::warn!(
-                    target: "aether_substrate::ctx",
-                    sender = ?self.sender,
-                    mailbox = ?recipient,
-                    "component sent mail to dropped mailbox — discarded",
-                );
-            }
-            None => {
-                tracing::warn!(
-                    target: "aether_substrate::ctx",
-                    sender = ?self.sender,
-                    mailbox = ?recipient,
-                    "component sent mail to unknown mailbox — dropped",
-                );
-            }
+        if let Some(MailboxEntry::Sink(handler)) = self.registry.entry(recipient) {
+            let kind_name = self.registry.kind_name(kind).unwrap_or_default();
+            // Component-originated mail: the sender is this ctx's
+            // mailbox, so its registry name is the `origin` any
+            // sink cares about (ADR-0011). No remote sender —
+            // component-originated sends never have a
+            // reply-over-hub-wire target.
+            let origin = self.registry.mailbox_name(self.sender);
+            handler(
+                kind,
+                &kind_name,
+                origin.as_deref(),
+                ReplyTo::None,
+                &payload,
+                count,
+            );
+            return;
         }
+
+        // Component / dropped / unknown all funnel through `Mailer::push`:
+        // - Component (ADR-0017): mail enters the recipient's inbox with
+        //   `from_component = self.sender` so `Component::deliver` can
+        //   allocate a Component-variant `ReplyEntry`.
+        // - Dropped: warn-drops in `route_mail`.
+        // - Unknown (ADR-0037): bubbles up to the hub-substrate via
+        //   `MailToHubSubstrate` with `source_mailbox_id = self.sender`
+        //   when a `HubOutbound` is connected; warn-drops otherwise.
+        self.queue
+            .push(Mail::new(recipient, kind, payload, count).with_origin(self.sender));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::RwLock;
+
+    use aether_hub_protocol::EngineToHub;
+
+    use super::*;
+
+    /// ADR-0037 Phase 1 + Phase 2: when a component sends to a mailbox
+    /// id the local registry doesn't know, `ctx.send` defers to the
+    /// mailer, which emits an upstream `MailToHubSubstrate` frame
+    /// carrying the sender's mailbox id so the hub can build a
+    /// `ReplyTo::EngineMailbox` for the receiving component.
+    #[test]
+    fn unknown_recipient_bubbles_up_with_sender_mailbox() {
+        let (outbound, outbound_rx) = HubOutbound::test_channel();
+        let registry = Arc::new(Registry::new());
+        let sender = registry.register_component("client");
+
+        let mailer = Arc::new(Mailer::new());
+        mailer.wire(Arc::clone(&registry), Arc::new(RwLock::new(HashMap::new())));
+        mailer.wire_outbound(Arc::clone(&outbound));
+
+        let ctx = SubstrateCtx::new(
+            sender,
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            outbound,
+            crate::input::new_subscribers(),
+        );
+
+        let unknown = MailboxId(0xDEADBEEF_u64);
+        let kind: u64 = 0xABCD_u64;
+        ctx.send(unknown, kind, vec![1, 2, 3], 1);
+
+        let frame = outbound_rx.try_recv().expect("bubble-up frame emitted");
+        match frame {
+            EngineToHub::MailToHubSubstrate(f) => {
+                assert_eq!(f.recipient_mailbox_id, unknown.0);
+                assert_eq!(f.kind_id, kind);
+                assert_eq!(f.payload, vec![1, 2, 3]);
+                assert_eq!(f.count, 1);
+                assert_eq!(f.source_mailbox_id, Some(sender.0));
+            }
+            other => panic!("expected MailToHubSubstrate, got {other:?}"),
+        }
+    }
+
+    /// No hub wired (disconnected substrate, or the hub chassis
+    /// itself): unknown recipients still warn-drop — no crash, no
+    /// upstream frame.
+    #[test]
+    fn unknown_recipient_without_outbound_warn_drops() {
+        let (outbound, outbound_rx) = HubOutbound::test_channel();
+        let registry = Arc::new(Registry::new());
+        let sender = registry.register_component("client");
+
+        let mailer = Arc::new(Mailer::new());
+        mailer.wire(Arc::clone(&registry), Arc::new(RwLock::new(HashMap::new())));
+        // Deliberately no `wire_outbound`.
+
+        let ctx = SubstrateCtx::new(
+            sender,
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            outbound,
+            crate::input::new_subscribers(),
+        );
+
+        ctx.send(MailboxId(0xDEADBEEF_u64), 0xABCD, vec![], 0);
+        assert!(
+            outbound_rx.try_recv().is_err(),
+            "no bubble-up without a wired outbound"
+        );
     }
 }
