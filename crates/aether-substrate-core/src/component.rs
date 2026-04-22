@@ -6,8 +6,8 @@
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
-use crate::mail::{Mail, Sender};
-use crate::sender_table::{SENDER_NONE, SenderEntry};
+use crate::mail::{Mail, ReplyTo};
+use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
 
 const MAIL_OFFSET: u32 = 1024;
 
@@ -32,7 +32,7 @@ const STATE_OFFSET: u32 = 8192;
 /// `receive(kind, ptr, count, sender) -> u32` entrypoint and a `memory`
 /// named `memory`. ADR-0013 widened the receive ABI with a fourth
 /// `sender: u32` parameter — a per-instance handle the guest can pass
-/// back to `reply_mail`, or `SENDER_NONE` for component-originated
+/// back to `reply_mail`, or `NO_REPLY_HANDLE` for component-originated
 /// mail. ADR-0015 adds optional `on_replace`, `on_drop`, and
 /// `on_rehydrate` exports; the substrate calls them at the right
 /// lifecycle moments when present and silently skips when absent
@@ -113,27 +113,27 @@ impl Component {
     /// `wasmtime::Error`).
     ///
     /// ADR-0013 + ADR-0017: a fresh sender handle is allocated from
-    /// the per-instance `SenderTable` for every inbound that has a
+    /// the per-instance `ReplyTable` for every inbound that has a
     /// meaningful reply target — a Claude session (non-NIL
     /// `SessionToken`) or another component (`from_component`
     /// populated by `SubstrateCtx::send`). Broadcast-origin and
-    /// system-generated mail pass `SENDER_NONE` so the guest's
-    /// `mail.sender()` accessor returns `None`.
+    /// system-generated mail pass `NO_REPLY_HANDLE` so the guest's
+    /// `mail.reply_to()` accessor returns `None`.
     pub fn deliver(&mut self, mail: &Mail) -> wasmtime::Result<u32> {
-        let entry = match &mail.sender {
-            Sender::Session(token) => Some(SenderEntry::Session(*token)),
-            Sender::EngineMailbox {
+        let entry = match &mail.reply_to {
+            ReplyTo::Session(token) => Some(ReplyEntry::Session(*token)),
+            ReplyTo::EngineMailbox {
                 engine_id,
                 mailbox_id,
-            } => Some(SenderEntry::RemoteEngineMailbox {
+            } => Some(ReplyEntry::RemoteEngineMailbox {
                 engine_id: *engine_id,
                 mailbox_id: *mailbox_id,
             }),
-            Sender::None => mail.from_component.map(SenderEntry::Component),
+            ReplyTo::None => mail.from_component.map(ReplyEntry::Component),
         };
         let handle = match entry {
-            Some(e) => self.store.data_mut().sender_table.allocate(e),
-            None => SENDER_NONE,
+            Some(e) => self.store.data_mut().reply_table.allocate(e),
+            None => NO_REPLY_HANDLE,
         };
         self.memory
             .write(&mut self.store, MAIL_OFFSET as usize, &mail.payload)?;
@@ -486,38 +486,38 @@ mod tests {
     #[test]
     fn deliver_with_nil_sender_passes_sender_none() {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
-        use crate::sender_table::SENDER_NONE;
+        use crate::reply_table::NO_REPLY_HANDLE;
 
         let mut component = instantiate(WAT_STORES_SENDER);
         // Mail::new defaults sender to SessionToken::NIL.
         let mail = SubstrateMail::new(M(0), 0, vec![], 1);
         component.deliver(&mail).expect("deliver");
-        assert_eq!(component.read_u32(500), SENDER_NONE);
+        assert_eq!(component.read_u32(500), NO_REPLY_HANDLE);
     }
 
     #[test]
     fn deliver_with_real_token_allocates_session_handle() {
         use aether_hub_protocol::{SessionToken, Uuid};
 
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M, Sender};
-        use crate::sender_table::{SENDER_NONE, SenderEntry};
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTo};
+        use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
 
         let mut component = instantiate(WAT_STORES_SENDER);
         let token = SessionToken(Uuid::from_u128(0xaaaa));
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_sender(Sender::Session(token));
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_reply_to(ReplyTo::Session(token));
         component.deliver(&mail).expect("deliver");
         let observed = component.read_u32(500);
-        assert_ne!(observed, SENDER_NONE);
+        assert_ne!(observed, NO_REPLY_HANDLE);
         assert_eq!(
-            component.store.data().sender_table.resolve(observed),
-            Some(SenderEntry::Session(token)),
+            component.store.data().reply_table.resolve(observed),
+            Some(ReplyEntry::Session(token)),
         );
     }
 
     #[test]
     fn deliver_with_from_component_allocates_component_handle() {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
-        use crate::sender_table::{SENDER_NONE, SenderEntry};
+        use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
 
         let mut component = instantiate(WAT_STORES_SENDER);
         // ADR-0017: component-origin mail (no session token, but a
@@ -525,10 +525,10 @@ mod tests {
         let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_origin(M(7));
         component.deliver(&mail).expect("deliver");
         let observed = component.read_u32(500);
-        assert_ne!(observed, SENDER_NONE);
+        assert_ne!(observed, NO_REPLY_HANDLE);
         assert_eq!(
-            component.store.data().sender_table.resolve(observed),
-            Some(SenderEntry::Component(M(7))),
+            component.store.data().reply_table.resolve(observed),
+            Some(ReplyEntry::Component(M(7))),
         );
     }
 
@@ -540,18 +540,18 @@ mod tests {
         // session is the more specific reply target.
         use aether_hub_protocol::{SessionToken, Uuid};
 
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M, Sender};
-        use crate::sender_table::SenderEntry;
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTo};
+        use crate::reply_table::ReplyEntry;
 
         let mut component = instantiate(WAT_STORES_SENDER);
         let token = SessionToken(Uuid::from_u128(0xbbbb));
         let mail = SubstrateMail::new(M(0), 0, vec![], 1)
-            .with_sender(Sender::Session(token))
+            .with_reply_to(ReplyTo::Session(token))
             .with_origin(M(99));
         component.deliver(&mail).expect("deliver");
         let observed = component.read_u32(500);
-        match component.store.data().sender_table.resolve(observed) {
-            Some(SenderEntry::Session(t)) => assert_eq!(t, token),
+        match component.store.data().reply_table.resolve(observed) {
+            Some(ReplyEntry::Session(t)) => assert_eq!(t, token),
             other => panic!("expected Session, got {other:?}"),
         }
     }
@@ -597,13 +597,13 @@ mod tests {
     fn reply_mail_emits_session_addressed_frame() {
         use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
 
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M, Sender};
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTo};
 
         let (ctx, rx, pong_id) = plane_ctx_for_reply();
         let mut component = instantiate_with_ctx(&wat_replies(pong_id), ctx);
 
         let token = SessionToken(Uuid::from_u128(0xbeef));
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_sender(Sender::Session(token));
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_reply_to(ReplyTo::Session(token));
         component.deliver(&mail).expect("deliver");
 
         let frame = rx.try_recv().expect("outbound frame queued");
@@ -621,7 +621,7 @@ mod tests {
         let (ctx, rx, pong_id) = plane_ctx_for_reply();
         let mut component = instantiate_with_ctx(&wat_replies(pong_id), ctx);
 
-        // NIL sender → SENDER_NONE reaches the guest → reply_mail
+        // NIL sender → NO_REPLY_HANDLE reaches the guest → reply_mail
         // returns REPLY_UNKNOWN_HANDLE and outbound stays quiet.
         let mail = SubstrateMail::new(M(0), 0, vec![], 1);
         component.deliver(&mail).expect("deliver");

@@ -832,7 +832,7 @@ pub enum LogLevel {
 /// wire — the hub knows which TCP connection the frame arrived on.
 /// `None` means "no reply target" (broadcast-origin, substrate-
 /// generated, no `from_component` attribution); the hub-side
-/// sender handle will be `SENDER_NONE` for the receiving
+/// sender handle will be `NO_REPLY_HANDLE` for the receiving
 /// component.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineMailToHubSubstrateFrame {
@@ -846,7 +846,7 @@ pub struct EngineMailToHubSubstrateFrame {
 /// Reply mail leaving the hub-substrate for a remote engine's
 /// mailbox (ADR-0037 Phase 2). The hub-chassis's reply peripheral
 /// emits this when a hub-resident component calls `ctx.reply` on
-/// a sender that resolves to `SenderEntry::RemoteEngineMailbox`.
+/// a sender that resolves to `ReplyEntry::RemoteEngineMailbox`.
 /// The hub then forwards to the target engine's connection as
 /// `HubToEngine::MailById`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

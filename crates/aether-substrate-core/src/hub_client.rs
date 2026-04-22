@@ -31,7 +31,7 @@ use aether_hub_protocol::{
     MailByIdFrame, MailFrame, MailToEngineMailboxFrame, read_frame, write_frame,
 };
 
-use crate::mail::{Mail, Sender};
+use crate::mail::{Mail, ReplyTo};
 use crate::mailer::Mailer;
 use crate::registry::Registry;
 
@@ -92,7 +92,7 @@ impl HubOutbound {
     /// Silent on disconnected outbound and on encode failure.
     /// Returns `true` when the frame was enqueued on the writer
     /// channel.
-    pub fn send_reply<K>(&self, sender: Sender, result: &K) -> bool
+    pub fn send_reply<K>(&self, sender: ReplyTo, result: &K) -> bool
     where
         K: aether_mail::Kind + serde::Serialize,
     {
@@ -109,13 +109,13 @@ impl HubOutbound {
             }
         };
         match sender {
-            Sender::Session(token) => self.send(EngineToHub::Mail(EngineMailFrame {
+            ReplyTo::Session(token) => self.send(EngineToHub::Mail(EngineMailFrame {
                 address: ClaudeAddress::Session(token),
                 kind_name: K::NAME.to_owned(),
                 payload,
                 origin: None,
             })),
-            Sender::EngineMailbox {
+            ReplyTo::EngineMailbox {
                 engine_id,
                 mailbox_id,
             } => self.send(EngineToHub::MailToEngineMailbox(MailToEngineMailboxFrame {
@@ -125,7 +125,7 @@ impl HubOutbound {
                 payload,
                 count: 1,
             })),
-            Sender::None => false,
+            ReplyTo::None => false,
         }
     }
 
@@ -279,7 +279,7 @@ pub fn dispatch_hub_to_engine_mail(frame: MailFrame, registry: &Registry, queue:
     };
     queue.push(
         Mail::new(recipient, kind, frame.payload, frame.count)
-            .with_sender(Sender::Session(frame.sender)),
+            .with_reply_to(ReplyTo::Session(frame.sender)),
     );
 }
 

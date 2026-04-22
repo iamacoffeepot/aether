@@ -461,18 +461,18 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
-            UserEvent::PlatformInfo { sender } => {
+            UserEvent::PlatformInfo { reply_to } => {
                 let result = self.snapshot_platform_info(event_loop);
-                self.outbound.send_reply(sender, &result);
+                self.outbound.send_reply(reply_to, &result);
             }
             UserEvent::SetWindowMode {
-                sender,
+                reply_to,
                 mode,
                 width,
                 height,
             } => {
                 let result = self.apply_window_mode(mode, width, height);
-                self.outbound.send_reply(sender, &result);
+                self.outbound.send_reply(reply_to, &result);
             }
         }
     }
@@ -578,7 +578,7 @@ impl ApplicationHandler<UserEvent> for App {
                             for mail in req.after_mails {
                                 self.queue.push(mail);
                             }
-                            self.outbound.send_reply(req.sender, &result);
+                            self.outbound.send_reply(req.reply_to, &result);
                         }
                         None => {
                             gpu.render(&verts);
@@ -591,7 +591,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // is dropped — the pre-capture bundle wasn't processed
                     // either, so there's nothing to clean up.
                     self.outbound.send_reply(
-                        req.sender,
+                        req.reply_to,
                         &CaptureFrameResult::Err {
                             error: "capture requested before GPU initialized".to_owned(),
                         },

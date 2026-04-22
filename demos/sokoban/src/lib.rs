@@ -301,7 +301,7 @@ impl Sokoban {
     }
 
     fn reply_state(&self, ctx: &mut Ctx<'_>) {
-        let Some(sender) = ctx.sender() else {
+        let Some(sender) = ctx.reply_to() else {
             return;
         };
         ctx.reply(sender, self.state_kind, &self.state);

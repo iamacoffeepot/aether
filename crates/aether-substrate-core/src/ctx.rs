@@ -13,10 +13,10 @@ use std::sync::Arc;
 
 use crate::hub_client::HubOutbound;
 use crate::input::InputSubscribers;
-use crate::mail::{Mail, MailKind, MailboxId, Sender};
+use crate::mail::{Mail, MailKind, MailboxId, ReplyTo};
 use crate::mailer::Mailer;
 use crate::registry::{MailboxEntry, Registry};
-use crate::sender_table::SenderTable;
+use crate::reply_table::ReplyTable;
 
 /// ADR-0016 §3: opt-in state migration payload. The substrate owns the
 /// buffer from the moment `save_state` is called on the old instance
@@ -49,13 +49,13 @@ pub struct SubstrateCtx {
     pub input_subscribers: InputSubscribers,
     /// ADR-0013 + ADR-0017: handle→entry map populated by
     /// `Component::deliver` whenever an inbound mail has a meaningful
-    /// reply target — a Claude session (`SenderEntry::Session`) or
-    /// another component (`SenderEntry::Component`). The guest
+    /// reply target — a Claude session (`ReplyEntry::Session`) or
+    /// another component (`ReplyEntry::Component`). The guest
     /// receives an opaque `u32` handle as the 4th param on its
     /// `receive` shim and passes it back to `reply_mail`; the
     /// substrate routes either over `HubOutbound` or back through
     /// `Mailer` based on the variant.
-    pub sender_table: SenderTable,
+    pub reply_table: ReplyTable,
     /// Set by the `save_state` host fn during `on_replace`. The
     /// substrate extracts it after hooks return via
     /// `Component::take_saved_state`. Never read by the guest —
@@ -72,7 +72,7 @@ pub struct SubstrateCtx {
 impl SubstrateCtx {
     /// Build a fresh ctx with empty state-migration slots and an
     /// empty sender table. Using this over the struct literal keeps
-    /// the private fields (sender_table, saved_state,
+    /// the private fields (reply_table, saved_state,
     /// save_state_error) internal to the wiring — callers should
     /// never set them directly.
     pub fn new(
@@ -88,7 +88,7 @@ impl SubstrateCtx {
             queue,
             outbound,
             input_subscribers,
-            sender_table: SenderTable::new(),
+            reply_table: ReplyTable::new(),
             saved_state: None,
             save_state_error: None,
         }
@@ -111,7 +111,7 @@ impl SubstrateCtx {
                     kind,
                     &kind_name,
                     origin.as_deref(),
-                    Sender::None,
+                    ReplyTo::None,
                     &payload,
                     count,
                 );
@@ -119,7 +119,7 @@ impl SubstrateCtx {
             Some(MailboxEntry::Component) => {
                 // ADR-0017: component-to-component mail carries the
                 // sender's mailbox id so `Component::deliver` can
-                // allocate a Component-variant `SenderEntry`. The
+                // allocate a Component-variant `ReplyEntry`. The
                 // receiving guest gets a reply-capable handle that
                 // routes back through the local queue.
                 self.queue

@@ -118,7 +118,7 @@ fn dispatch<K: aether_mail::Kind + serde::Serialize>(plane: &ControlPlane, paylo
         K::ID,
         K::NAME,
         None,
-        aether_substrate_desktop::Sender::None,
+        aether_substrate_desktop::ReplyTo::None,
         &bytes,
         0,
     );

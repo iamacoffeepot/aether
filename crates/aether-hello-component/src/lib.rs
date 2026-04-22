@@ -83,7 +83,7 @@ impl Component for Hello {
     /// are in flight.
     #[handler]
     fn on_ping(&mut self, ctx: &mut Ctx<'_>, ping: Ping) {
-        if let Some(sender) = ctx.sender() {
+        if let Some(sender) = ctx.reply_to() {
             ctx.reply(sender, self.pong, &Pong { seq: ping.seq });
         }
     }

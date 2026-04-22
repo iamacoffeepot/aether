@@ -3,7 +3,7 @@
 //! `demo.response { seq }` to whatever component sent it.
 //!
 //! ADR-0033 phase 3: uses `#[handlers]` as the only receive path.
-//! The synthesized dispatcher reads `ctx.sender()` (threaded from the
+//! The synthesized dispatcher reads `ctx.reply_to()` (threaded from the
 //! inbound mail by `#[handlers]`) so the handler body never touches
 //! `Mail<'_>` directly.
 
@@ -39,7 +39,7 @@ impl Component for Echoer {
 
     #[handler]
     fn on_request(&mut self, ctx: &mut Ctx<'_>, req: Request) {
-        if let Some(sender) = ctx.sender() {
+        if let Some(sender) = ctx.reply_to() {
             ctx.reply(sender, self.response, &Response { seq: req.seq });
         }
     }
