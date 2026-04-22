@@ -171,8 +171,11 @@ async fn read_loop(
                 // ADR-0037 Phase 2: attribute the bubbled-up mail
                 // to the sending engine so the hub-resident
                 // component's reply-to-sender has an `engine_id`
-                // to route back to.
-                loopback.deliver_bubbled_mail(engine_id, frame)
+                // to route back to. The `registry` (engine
+                // registry) is handed through so the loopback can
+                // reach the originator if it needs to emit an
+                // `aether.mail.unresolved` diagnostic (issue #185).
+                loopback.deliver_bubbled_mail(engine_id, frame, registry)
             }
             EngineToHub::MailToEngineMailbox(frame) => {
                 // ADR-0037 Phase 2: a remote engine's component

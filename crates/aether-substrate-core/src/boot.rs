@@ -24,8 +24,8 @@ use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub, KindDescr
 use wasmtime::{Engine, Linker};
 
 use crate::{
-    AETHER_CONTROL, ChassisControlHandler, ControlPlane, HUB_CLAUDE_BROADCAST, HubClient,
-    HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx, host_fns,
+    AETHER_CONTROL, AETHER_DIAGNOSTICS, ChassisControlHandler, ControlPlane, HUB_CLAUDE_BROADCAST,
+    HubClient, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx, host_fns,
     input::new_subscribers, log_capture, mail::MailboxId,
 };
 
@@ -177,6 +177,45 @@ impl<'a> SubstrateBootBuilder<'a> {
                 ),
             )
         };
+
+        // Diagnostic sink for hub → originating-engine typo reports
+        // (ADR-0037 follow-up, issue #185). Re-emits the unresolved-
+        // mail record as a local `tracing::warn!` so the detail
+        // surfaces in this engine's own `engine_logs` rather than only
+        // in the hub's. Kind vocabulary is `aether.mail.unresolved`
+        // today; the sink is structured as a general diagnostic
+        // channel so future diagnostic kinds can land here without
+        // needing another sink.
+        registry.register_sink(
+            AETHER_DIAGNOSTICS,
+            Arc::new(
+                |_kind_id: u64,
+                 kind_name: &str,
+                 _origin: Option<&str>,
+                 _sender,
+                 bytes: &[u8],
+                 _count: u32| {
+                    if kind_name == <aether_kinds::UnresolvedMail as aether_mail::Kind>::NAME
+                        && let Ok(record) =
+                            bytemuck::try_from_bytes::<aether_kinds::UnresolvedMail>(bytes)
+                    {
+                        tracing::warn!(
+                            target: "aether_substrate::diagnostics",
+                            recipient_mailbox_id = format_args!("{:#x}", record.recipient_mailbox_id),
+                            kind_id = format_args!("{:#x}", record.kind_id),
+                            "hub could not resolve bubbled-up mail recipient (ADR-0037); \
+                             mail dropped. Likely a typoed mailbox name at the sender.",
+                        );
+                        return;
+                    }
+                    tracing::warn!(
+                        target: "aether_substrate::diagnostics",
+                        kind = %kind_name,
+                        "aether.diagnostics received an unexpected kind or malformed payload",
+                    );
+                },
+            ),
+        );
 
         let queue = Arc::new(Mailer::new());
         queue.wire_outbound(Arc::clone(&outbound));

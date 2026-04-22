@@ -55,3 +55,11 @@ pub use scheduler::Scheduler;
 /// this name the same way it sends to any local sink; the forwarder
 /// translates to `EngineToHub::Mail { address: Broadcast, ... }`.
 pub const HUB_CLAUDE_BROADCAST: &str = "hub.claude.broadcast";
+
+/// Well-known mailbox name for substrate-level diagnostic events
+/// delivered back to this engine. Today the only kind delivered here
+/// is `aether.mail.unresolved` (issue #185), pushed by the hub when
+/// an engine's bubbled-up mail (ADR-0037) can't be resolved at the
+/// hub either. The sink handler re-warns via `tracing::warn!` so the
+/// diagnostic surfaces in this engine's own `engine_logs`.
+pub const AETHER_DIAGNOSTICS: &str = "aether.diagnostics";

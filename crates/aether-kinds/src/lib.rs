@@ -221,6 +221,36 @@ pub struct FrameStats {
     pub triangles: u64,
 }
 
+/// Diagnostic the hub emits back to an originating engine when mail
+/// that engine bubbled up (ADR-0037) doesn't resolve at the hub
+/// either. Lands on the engine's `aether.diagnostics` sink, which
+/// re-warns locally so the unresolved address surfaces in that
+/// engine's `engine_logs` rather than only in the hub's. Closes the
+/// "typo diagnostics" follow-up from ADR-0037 (issue #185).
+///
+/// `recipient_mailbox_id` is the hashed mailbox id the originator
+/// sent to — the id space is cross-process-stable (ADR-0029 /
+/// ADR-0030 / issue #186) so agents can map it back to a name in
+/// tooling. `kind_id` is the kind the original mail carried.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_mail::Kind,
+    aether_mail::Schema,
+)]
+#[kind(name = "aether.mail.unresolved")]
+pub struct UnresolvedMail {
+    pub recipient_mailbox_id: u64,
+    pub kind_id: u64,
+}
+
 // Reserved control-plane vocabulary (ADR-0010). The substrate handles
 // these kinds inline rather than dispatching to a component — the
 // namespace itself is the routing discriminator. ADR-0019 PR 5 turned

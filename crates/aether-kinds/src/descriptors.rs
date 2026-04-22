@@ -21,7 +21,7 @@ use crate::{
     CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats, Key,
     LoadComponent, LoadResult, MouseButton, MouseMove, Ping, PlatformInfo, PlatformInfoResult,
     Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult, SubscribeInput,
-    SubscribeInputResult, Tick, UnsubscribeInput, WindowSize,
+    SubscribeInputResult, Tick, UnresolvedMail, UnsubscribeInput, WindowSize,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -38,6 +38,11 @@ pub fn all() -> Vec<KindDescriptor> {
         // nested `Struct { repr_c: true }` exactly like a flat Pod).
         schema::<DrawTriangle>(),
         schema::<FrameStats>(),
+        // Hub → originating-engine diagnostic when a bubbled-up mail
+        // doesn't resolve at the hub either (ADR-0037 follow-up,
+        // issue #185). Delivered to the engine's `aether.diagnostics`
+        // sink, which re-warns locally.
+        schema::<UnresolvedMail>(),
         // ADR-0013 smoke-test vocabulary.
         schema::<Ping>(),
         schema::<Pong>(),
