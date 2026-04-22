@@ -1,8 +1,11 @@
 // wgpu plumbing: owns the device/queue/surface plus a fixed vertex
-// buffer, a shader module, and a render pipeline matching the
-// (pos vec2, color vec3) vertex layout. Each frame the main thread
-// hands in a byte blob drained from the render sink; render() uploads
-// it and issues one draw call.
+// buffer, a camera uniform buffer + bind group, a shader module, and
+// a render pipeline matching the (pos vec3, color vec3) vertex layout.
+// Each frame the main thread hands in a byte blob drained from the
+// render sink plus the latest camera view_proj; render() uploads
+// both and issues one draw call. World-space vertices flow through
+// the vertex shader's `camera.view_proj * vec4(position, 1.0)` to
+// produce clip space.
 //
 // The surface holds a `'static` lifetime because it takes an owned
 // `Arc<Window>`; the App owns the same Arc, so the window outlives
@@ -28,8 +31,19 @@ use std::sync::Arc;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-const VERTEX_STRIDE: u64 = 20; // 2 * f32 position + 3 * f32 color
+const VERTEX_STRIDE: u64 = 24; // 3 * f32 position + 3 * f32 color
 const VERTEX_BUFFER_BYTES: u64 = 64 * 1024;
+const CAMERA_UNIFORM_BYTES: u64 = 64; // 4x4 f32 column-major
+
+/// Identity matrix in column-major order — what the camera uniform
+/// holds before the first `aether.camera` mail arrives, so components
+/// that still emit clip-space-ish world coordinates keep rendering.
+pub const IDENTITY_VIEW_PROJ: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0, //
+];
 
 /// 256-byte row-alignment required by wgpu's `copy_texture_to_buffer`.
 /// Keeps padded-row math local to this module.
@@ -49,6 +63,13 @@ pub struct Gpu {
     pub limits: wgpu::Limits,
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
+    /// Uniform buffer holding the current camera `view_proj` matrix
+    /// (column-major, 64 bytes). Rewritten each frame from the shared
+    /// `camera_state` before the draw pass — bytes come straight from
+    /// whatever the `aether.camera` sink last captured, or identity
+    /// until the first camera mail.
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
     /// Intermediate render target. Everything draws here; the swapchain
     /// gets a `copy_texture_to_texture` blit + present. Sized to the
     /// surface, reallocated on resize.
@@ -128,9 +149,41 @@ impl Gpu {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("camera bind group layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(CAMERA_UNIFORM_BYTES),
+                    },
+                    count: None,
+                }],
+            });
+
+        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("camera uniform"),
+            size: CAMERA_UNIFORM_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&camera_buffer, 0, bytemuck::cast_slice(&IDENTITY_VIEW_PROJ));
+
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera bind group"),
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("hello-triangle pipeline layout"),
-            bind_group_layouts: &[],
+            bind_group_layouts: &[Some(&camera_bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -141,10 +194,10 @@ impl Gpu {
                 wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x2,
+                    format: wgpu::VertexFormat::Float32x3,
                 },
                 wgpu::VertexAttribute {
-                    offset: 8,
+                    offset: 12,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
                 },
@@ -201,6 +254,8 @@ impl Gpu {
             limits,
             pipeline,
             vertex_buffer,
+            camera_buffer,
+            camera_bind_group,
             offscreen,
             readback: None,
         }
@@ -224,8 +279,8 @@ impl Gpu {
         self.readback = None;
     }
 
-    pub fn render(&mut self, vertices: &[u8]) {
-        let _ = self.render_impl(vertices, false);
+    pub fn render(&mut self, vertices: &[u8], view_proj: &[f32; 16]) {
+        let _ = self.render_impl(vertices, view_proj, false);
     }
 
     /// Variant of `render` that also copies the offscreen texture into
@@ -233,18 +288,28 @@ impl Gpu {
     /// capture-path failure, returns `Err(reason)`; the frame itself
     /// still renders and (if the surface is available) presents, since
     /// capture is a side channel.
-    pub fn render_and_capture(&mut self, vertices: &[u8]) -> Result<Vec<u8>, String> {
-        self.render_impl(vertices, true)
+    pub fn render_and_capture(
+        &mut self,
+        vertices: &[u8],
+        view_proj: &[f32; 16],
+    ) -> Result<Vec<u8>, String> {
+        self.render_impl(vertices, view_proj, true)
             .ok_or_else(|| "capture did not produce a result".to_owned())?
     }
 
-    /// Draw `vertices` into the offscreen target, optionally encode a
-    /// capture copy, then best-effort blit to the swapchain and
-    /// present. Returns `Some(Ok(png))` / `Some(Err(reason))` when
-    /// `capture` is set; `None` when `capture` is false or the capture
-    /// path couldn't allocate. Surface unavailability does *not*
-    /// prevent capture — offscreen is the source of truth.
-    fn render_impl(&mut self, vertices: &[u8], capture: bool) -> Option<Result<Vec<u8>, String>> {
+    /// Draw `vertices` into the offscreen target with `view_proj` as
+    /// the camera uniform, optionally encode a capture copy, then
+    /// best-effort blit to the swapchain and present. Returns
+    /// `Some(Ok(png))` / `Some(Err(reason))` when `capture` is set;
+    /// `None` when `capture` is false or the capture path couldn't
+    /// allocate. Surface unavailability does *not* prevent capture —
+    /// offscreen is the source of truth.
+    fn render_impl(
+        &mut self,
+        vertices: &[u8],
+        view_proj: &[f32; 16],
+        capture: bool,
+    ) -> Option<Result<Vec<u8>, String>> {
         let vertex_bytes = vertices.len() as u64;
         if vertex_bytes > VERTEX_BUFFER_BYTES {
             tracing::warn!(
@@ -258,6 +323,10 @@ impl Gpu {
         if !vertices.is_empty() {
             self.queue.write_buffer(&self.vertex_buffer, 0, vertices);
         }
+        // Camera uniform: upload the latest view_proj every frame.
+        // 64 bytes is cheap enough that a dirty flag isn't worth it.
+        self.queue
+            .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(view_proj));
         let vertex_count = (vertex_bytes / VERTEX_STRIDE) as u32;
 
         let mut encoder = self
@@ -289,6 +358,7 @@ impl Gpu {
             });
             if vertex_count > 0 {
                 pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vertex_buffer.slice(..vertex_bytes));
                 pass.draw(0..vertex_count, 0..1);
             }

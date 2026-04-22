@@ -32,7 +32,7 @@ use aether_substrate_desktop::{
     mail::{Mail, MailboxId},
     subscribers_for,
 };
-use render::Gpu;
+use render::{Gpu, IDENTITY_VIEW_PROJ};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -107,6 +107,12 @@ struct App {
     kind_window_size: u64,
     kind_frame_stats: u64,
     frame_vertices: Arc<Mutex<Vec<u8>>>,
+    /// Latest `aether.camera` payload seen by the camera sink
+    /// (column-major `view_proj` matrix). Read by the render loop
+    /// each frame and uploaded to the GPU uniform before drawing.
+    /// Initialised to identity so components that emit
+    /// clip-space-ish world coords render pre-camera.
+    camera_state: Arc<Mutex<[f32; 16]>>,
     triangles_rendered: Arc<AtomicU64>,
     /// Shared single-slot queue with the control plane. On each
     /// redraw we `take()` any pending capture and, if present, use
@@ -585,10 +591,11 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.queue.drain_all();
                 let verts = std::mem::take(&mut *self.frame_vertices.lock().unwrap());
+                let view_proj = *self.camera_state.lock().unwrap();
                 if let Some(gpu) = self.gpu.as_mut() {
                     match pending_capture {
                         Some(req) => {
-                            let result = match gpu.render_and_capture(&verts) {
+                            let result = match gpu.render_and_capture(&verts, &view_proj) {
                                 Ok(png) => CaptureFrameResult::Ok { png },
                                 Err(error) => CaptureFrameResult::Err { error },
                             };
@@ -603,7 +610,7 @@ impl ApplicationHandler<UserEvent> for App {
                             self.outbound.send_reply(req.reply_to, &result);
                         }
                         None => {
-                            gpu.render(&verts);
+                            gpu.render(&verts, &view_proj);
                         }
                     }
                 } else if let Some(req) = pending_capture {
@@ -773,6 +780,45 @@ fn main() -> wasmtime::Result<()> {
         );
     }
 
+    // `aether.camera`: latest-value-wins sink. One payload is 64
+    // bytes (4x4 f32 column-major view_proj). The render loop reads
+    // the stored value each frame and uploads to the GPU uniform.
+    // Malformed payloads are dropped with a warn so a buggy component
+    // can't spook the camera.
+    let camera_state = Arc::new(Mutex::new(IDENTITY_VIEW_PROJ));
+    {
+        let cam_for_sink = Arc::clone(&camera_state);
+        boot.registry.register_sink(
+            "camera",
+            Arc::new(
+                move |_kind_id: u64,
+                      _kind_name: &str,
+                      _origin: Option<&str>,
+                      _sender,
+                      bytes: &[u8],
+                      _count: u32| {
+                    if bytes.len() != 64 {
+                        tracing::warn!(
+                            target: "aether_substrate::camera",
+                            got = bytes.len(),
+                            expected = 64,
+                            "camera sink: payload length mismatch, dropping",
+                        );
+                        return;
+                    }
+                    match bytemuck::try_pod_read_unaligned::<[f32; 16]>(bytes) {
+                        Ok(mat) => *cam_for_sink.lock().unwrap() = mat,
+                        Err(e) => tracing::warn!(
+                            target: "aether_substrate::camera",
+                            error = %e,
+                            "camera sink: cast failed, dropping",
+                        ),
+                    }
+                },
+            ),
+        );
+    }
+
     tracing::info!(
         target: "aether_substrate::boot",
         workers = WORKERS,
@@ -814,6 +860,7 @@ fn main() -> wasmtime::Result<()> {
         kind_window_size,
         kind_frame_stats,
         frame_vertices,
+        camera_state: Arc::clone(&camera_state),
         triangles_rendered: Arc::clone(&triangles_rendered),
         capture_queue,
         outbound: Arc::clone(&boot.outbound),

@@ -335,6 +335,7 @@ impl Sokoban {
                         Vertex {
                             x: x0,
                             y: y0,
+                            z: 0.0,
                             r,
                             g,
                             b,
@@ -342,6 +343,7 @@ impl Sokoban {
                         Vertex {
                             x: x1,
                             y: y0,
+                            z: 0.0,
                             r,
                             g,
                             b,
@@ -349,6 +351,7 @@ impl Sokoban {
                         Vertex {
                             x: x1,
                             y: y1,
+                            z: 0.0,
                             r,
                             g,
                             b,
@@ -360,6 +363,7 @@ impl Sokoban {
                         Vertex {
                             x: x0,
                             y: y0,
+                            z: 0.0,
                             r,
                             g,
                             b,
@@ -367,6 +371,7 @@ impl Sokoban {
                         Vertex {
                             x: x1,
                             y: y1,
+                            z: 0.0,
                             r,
                             g,
                             b,
@@ -374,6 +379,7 @@ impl Sokoban {
                         Vertex {
                             x: x0,
                             y: y1,
+                            z: 0.0,
                             r,
                             g,
                             b,

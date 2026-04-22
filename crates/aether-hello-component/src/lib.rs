@@ -1,8 +1,14 @@
 //! First real aether component. On each tick it emits a fixed
-//! clip-space triangle to the substrate's render sink. It also
+//! world-space triangle to the substrate's render sink. It also
 //! answers ADR-0013 `aether.ping` mail with a matching `aether.pong`
 //! back to the originating Claude session — a minimal round-trip
 //! smoke test proving reply-to-sender works end-to-end over the hub.
+//!
+//! The triangle sits at `z = 0` in world space. With no camera loaded
+//! the substrate's identity uniform passes `(x, y)` straight through
+//! to clip space, so visually this behaves exactly like the old
+//! clip-space-only version until a camera component starts driving
+//! `aether.camera`.
 //!
 //! ADR-0033 shape: `#[handlers]` on the `impl Component` block emits
 //! both the dispatcher and the `aether.kinds.inputs` section entries.
@@ -18,6 +24,7 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
         Vertex {
             x: 0.0,
             y: 0.5,
+            z: 0.0,
             r: 1.0,
             g: 0.0,
             b: 0.0,
@@ -25,6 +32,7 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
         Vertex {
             x: -0.5,
             y: -0.5,
+            z: 0.0,
             r: 0.0,
             g: 1.0,
             b: 0.0,
@@ -32,6 +40,7 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
         Vertex {
             x: 0.5,
             y: -0.5,
+            z: 0.0,
             r: 0.0,
             g: 0.0,
             b: 1.0,

@@ -337,6 +337,7 @@ fn push_quad(
     let tl = Vertex {
         x: x0,
         y: y1,
+        z: 0.0,
         r,
         g,
         b,
@@ -344,6 +345,7 @@ fn push_quad(
     let tr = Vertex {
         x: x1,
         y: y1,
+        z: 0.0,
         r,
         g,
         b,
@@ -351,6 +353,7 @@ fn push_quad(
     let br = Vertex {
         x: x1,
         y: y0,
+        z: 0.0,
         r,
         g,
         b,
@@ -358,6 +361,7 @@ fn push_quad(
     let bl = Vertex {
         x: x0,
         y: y0,
+        z: 0.0,
         r,
         g,
         b,

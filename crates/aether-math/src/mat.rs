@@ -81,6 +81,21 @@ impl Mat4 {
         m
     }
 
+    /// Flatten to a `[f32; 16]` in column-major order — the layout
+    /// every wgpu/GLSL `mat4x4<f32>` uniform expects. Use this when
+    /// embedding a matrix in a mail payload or uploading to a GPU
+    /// uniform buffer; bytes upload verbatim with no transpose.
+    #[inline]
+    pub fn to_cols_array(&self) -> [f32; 16] {
+        let [c0, c1, c2, c3] = self.cols;
+        [
+            c0.x, c0.y, c0.z, c0.w, //
+            c1.x, c1.y, c1.z, c1.w, //
+            c2.x, c2.y, c2.z, c2.w, //
+            c3.x, c3.y, c3.z, c3.w, //
+        ]
+    }
+
     #[inline]
     pub fn transpose(self) -> Self {
         let [c0, c1, c2, c3] = self.cols;
@@ -308,6 +323,16 @@ mod tests {
         let corner = proj * Vec4::new(1.0, 1.0, -5.0, 1.0);
         assert!((corner.x - 1.0).abs() < EPS);
         assert!((corner.y - 1.0).abs() < EPS);
+    }
+
+    #[test]
+    fn to_cols_array_is_column_major() {
+        let m = Mat4::from_translation(Vec3::new(7.0, 8.0, 9.0));
+        let arr = m.to_cols_array();
+        assert_eq!(&arr[0..4], &[1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(&arr[4..8], &[0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(&arr[8..12], &[0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(&arr[12..16], &[7.0, 8.0, 9.0, 1.0]);
     }
 
     #[test]
