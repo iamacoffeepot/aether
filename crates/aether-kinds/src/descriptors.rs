@@ -21,10 +21,10 @@ use crate::{
     Camera, CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats,
     Key, KeyRelease, LoadComponent, LoadResult, MouseButton, MouseMove, OrbitSetDistance,
     OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo,
-    PlatformInfoResult, PlayerSetPosition, PlayerSetVelocity, Pong, ReplaceComponent,
-    ReplaceResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
-    SubscribeInput, SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
-    UnsubscribeInput, WindowSize,
+    PlatformInfoResult, PlayerRequestStep, PlayerSetMode, PlayerSetPosition, PlayerSetVelocity,
+    PlayerStepResult, Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult,
+    SetWindowTitle, SetWindowTitleResult, SubscribeInput, SubscribeInputResult, Tick,
+    TopdownSetCenter, TopdownSetExtent, UnresolvedMail, UnsubscribeInput, WindowSize,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -104,6 +104,13 @@ pub fn all() -> Vec<KindDescriptor> {
         // tick (new `TopdownSetCenter` + `DrawTriangle` emissions).
         schema::<PlayerSetPosition>(),
         schema::<PlayerSetVelocity>(),
+        // Player ↔ world-authority tile-step protocol. The player
+        // emits `PlayerRequestStep` to the mailbox named `"world"`;
+        // the authority answers with `PlayerStepResult`. Mode is
+        // toggled by `PlayerSetMode`.
+        schema::<PlayerSetMode>(),
+        schema::<PlayerRequestStep>(),
+        schema::<PlayerStepResult>(),
     ]
 }
 

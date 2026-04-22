@@ -1,73 +1,76 @@
-//! Minimal player component: a world-space position that advances by a
-//! per-tick velocity, emits a small triangle at its location to the
-//! substrate's `render` sink, and pushes `TopdownSetCenter` to the
-//! top-down camera each tick so the camera follows.
+//! Player component. A world-space position + a small triangular body
+//! that renders itself and publishes `TopdownSetCenter` each tick so an
+//! attached top-down camera follows.
 //!
-//! Two control surfaces feed velocity:
+//! Two motion modes, swapped at runtime via `PlayerSetMode`:
 //!
-//! - **Direct MCP**: `PlayerSetPosition { x, y }` / `PlayerSetVelocity
-//!   { vx, vy }`. Useful for scripted movement and smoke tests.
-//! - **Keyboard**: WASD or arrow keys from the substrate's `aether.key`
-//!   / `aether.key_release` streams. While any direction key is held,
-//!   the derived velocity overrides whatever `PlayerSetVelocity` last
-//!   set; when all directional keys are released, velocity falls back
-//!   to the stored baseline.
+//! - **Continuous** (default). WASD / arrow keys drive per-tick
+//!   velocity (`KEY_SPEED` world units/tick while held); release
+//!   clears the flag and velocity falls back to whatever
+//!   `PlayerSetVelocity` last set. The body is free-floating — it
+//!   knows nothing about walls or world topology. Good for free-look
+//!   testing and non-grid scenes.
+//! - **Tile-step**. WASD press emits a `PlayerRequestStep { dx, dy }`
+//!   to a mailbox named `"world"` — the scene's world authority —
+//!   with integer cell deltas (W: `(0, +1)`, S: `(0, -1)`, D:
+//!   `(+1, 0)`, A: `(-1, 0)`). The player does **not** move itself;
+//!   it waits for `PlayerStepResult` back and overwrites its position
+//!   from the authority's reply. Releases are ignored. Continuous
+//!   velocity is suppressed. This is the shape sokoban-style grid
+//!   games use.
 //!
-//! The camera sink is hardcoded to the mailbox name `"topdown"` — load
-//! the top-down camera example under that name for follow to work. A
-//! different name (or no camera loaded) makes the `TopdownSetCenter`
-//! mail unresolved, which surfaces as an `UnresolvedMail` diagnostic
-//! but is otherwise inert.
+//! Scripted control surfaces (`PlayerSetPosition`, `PlayerSetVelocity`)
+//! remain available in both modes — useful for smoke tests over MCP.
+//! In tile-step mode, `PlayerSetVelocity` has no visible effect
+//! because velocity is not applied.
+//!
+//! Sink dependencies: `"render"` (substrate), `"topdown"` (the top-down
+//! camera, if any), `"world"` (the world authority in tile-step mode).
+//! Missing sinks surface as `UnresolvedMail` diagnostics but don't
+//! crash the player — the corresponding emissions just go to the abyss.
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
 use aether_kinds::{
-    DrawTriangle, Key, KeyRelease, PlayerSetPosition, PlayerSetVelocity, Tick, TopdownSetCenter,
-    Vertex, keycode,
+    DrawTriangle, Key, KeyRelease, PlayerRequestStep, PlayerSetMode, PlayerSetPosition,
+    PlayerSetVelocity, PlayerStepResult, Tick, TopdownSetCenter, Vertex, keycode,
 };
 
-/// Half-extent of the player's triangular body in world units. The
-/// triangle is an isoceles apex-up around the player position.
 const PLAYER_HALF: f32 = 0.25;
-/// RGB color of the triangle body. Bright magenta — reads distinctly
-/// against the sokoban grid and any hello-component triangle.
 const PLAYER_R: f32 = 1.0;
 const PLAYER_G: f32 = 0.3;
 const PLAYER_B: f32 = 0.9;
-/// Per-tick movement speed when a WASD/arrow key is held, in world
-/// units. 0.05 at 60Hz ≈ 3 units/second — slow enough to watch the
-/// camera track, fast enough not to feel sluggish.
+/// Per-tick continuous-mode speed in world units.
 const KEY_SPEED: f32 = 0.05;
+
+/// `PlayerSetMode.mode` values. Kept as raw `u32` on the wire so the
+/// kind stays cast-tier; these constants give the component a readable
+/// match surface.
+const MODE_CONTINUOUS: u32 = 0;
+const MODE_TILE_STEP: u32 = 1;
 
 pub struct Player {
     render: Sink<DrawTriangle>,
     camera_follow: Sink<TopdownSetCenter>,
+    world: Sink<PlayerRequestStep>,
     pos_x: f32,
     pos_y: f32,
-    // Baseline velocity set via `PlayerSetVelocity`. Applied every
-    // tick when no directional key is held.
     base_vx: f32,
     base_vy: f32,
-    // Per-direction key-held flags. Tick derives velocity from these
-    // when any is set; diagonals fall out naturally (holding W + D
-    // gives up-right).
     moving_up: bool,
     moving_down: bool,
     moving_left: bool,
     moving_right: bool,
+    /// Active motion model. See `MODE_*` constants.
+    mode: u32,
 }
 
 impl Player {
-    /// True while any WASD/arrow key is currently held. Used each tick
-    /// to decide whether WASD-derived velocity overrides the stored
-    /// baseline from `PlayerSetVelocity`.
     fn any_key_held(&self) -> bool {
         self.moving_up || self.moving_down || self.moving_left || self.moving_right
     }
 
-    /// Update a direction flag when a mapped keycode arrives. Returns
-    /// the same flag value that got assigned so a caller that wants
-    /// to know whether the event was consumed could check, though the
-    /// player doesn't today.
+    /// Translate a mapped keycode into a direction flag update.
+    /// Continuous-mode path — unrelated to tile-step motion.
     fn apply_key(&mut self, code: u32, pressed: bool) {
         match code {
             keycode::KEY_W | keycode::KEY_UP => self.moving_up = pressed,
@@ -77,36 +80,52 @@ impl Player {
             _ => {}
         }
     }
+
+    /// Map a mapped keycode to a tile-step delta. Returns `None` for
+    /// keys that aren't bound to movement.
+    fn step_delta(code: u32) -> Option<(i32, i32)> {
+        match code {
+            keycode::KEY_W | keycode::KEY_UP => Some((0, 1)),
+            keycode::KEY_S | keycode::KEY_DOWN => Some((0, -1)),
+            keycode::KEY_D | keycode::KEY_RIGHT => Some((1, 0)),
+            keycode::KEY_A | keycode::KEY_LEFT => Some((-1, 0)),
+            _ => None,
+        }
+    }
 }
 
-/// A player body with world-space position and per-tick velocity.
-/// Draws a small apex-up triangle at its position every tick and
-/// publishes `TopdownSetCenter` to a mailbox named `"topdown"` so an
-/// attached top-down camera follows. Keyboard-controllable via WASD
-/// or arrow keys (hold-to-move), or scripted via `PlayerSetPosition` /
-/// `PlayerSetVelocity`.
+/// Player body with runtime-switchable motion model.
 ///
 /// # Agent
-/// Load alongside `aether-camera-component`'s `topdown` example (under
-/// the name `"topdown"`) and optionally `aether-demo-sokoban` for a
-/// backdrop. Scripted controls:
+/// Load alongside the top-down camera (`aether-camera-component`'s
+/// `topdown` example, named `"topdown"`). For grid-game shapes, also
+/// load a world authority (e.g. `aether-demo-sokoban`, named
+/// `"world"`) and send `PlayerSetMode { mode: 1 }` to switch to
+/// tile-step motion.
 ///
-/// - `PlayerSetPosition { x, y }` — teleport. Velocity is untouched;
-///   send `PlayerSetVelocity { 0, 0 }` separately to stop.
-/// - `PlayerSetVelocity { vx, vy }` — per-tick drift in world units.
-///   `(0, 0)` stops motion. Overridden while any WASD/arrow key is
-///   held; restored when all are released.
+/// **Control surface**
 ///
-/// Keyboard controls require the substrate window to have focus —
-/// `capture_frame` alone won't deliver keys. For MCP-only smoke tests,
-/// send `Key { code: KEY_W }` / `KeyRelease { code: KEY_W }` directly
-/// to the player mailbox; the flag update path is the same.
+/// - `PlayerSetMode { mode }` — `0` continuous, `1` tile-step.
+/// - `PlayerSetPosition { x, y }` — teleport (both modes).
+/// - `PlayerSetVelocity { vx, vy }` — baseline velocity, applied each
+///   tick in continuous mode when no key is held. No-op visually in
+///   tile-step mode.
+///
+/// **Keyboard** (requires window focus for live keys; for MCP smoke
+/// tests send `Key` / `KeyRelease` directly to the player):
+///
+/// - Continuous mode: hold to move, release to stop.
+/// - Tile-step mode: press to request one cell step via the world
+///   authority; release does nothing. The world's reply updates the
+///   player's position, so a blocked step leaves the player where it
+///   was.
 #[handlers]
 impl Component for Player {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Player {
             render: ctx.resolve_sink::<DrawTriangle>("render"),
             camera_follow: ctx.resolve_sink::<TopdownSetCenter>("topdown"),
+            world: ctx.resolve_sink::<PlayerRequestStep>("world"),
             pos_x: 0.0,
             pos_y: 0.0,
             base_vx: 0.0,
@@ -115,24 +134,28 @@ impl Component for Player {
             moving_down: false,
             moving_left: false,
             moving_right: false,
+            mode: MODE_CONTINUOUS,
         }
     }
 
-    /// Advance position, draw body, and push a camera follow target.
+    /// Advance position (continuous mode only), draw the body, push a
+    /// camera follow target.
     ///
     /// # Agent
     /// Tick-driven; not useful to send manually.
     #[handler]
     fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
-        let (vx, vy) = if self.any_key_held() {
-            let dx = (self.moving_right as i32 - self.moving_left as i32) as f32;
-            let dy = (self.moving_up as i32 - self.moving_down as i32) as f32;
-            (dx * KEY_SPEED, dy * KEY_SPEED)
-        } else {
-            (self.base_vx, self.base_vy)
-        };
-        self.pos_x += vx;
-        self.pos_y += vy;
+        if self.mode == MODE_CONTINUOUS {
+            let (vx, vy) = if self.any_key_held() {
+                let dx = (self.moving_right as i32 - self.moving_left as i32) as f32;
+                let dy = (self.moving_up as i32 - self.moving_down as i32) as f32;
+                (dx * KEY_SPEED, dy * KEY_SPEED)
+            } else {
+                (self.base_vx, self.base_vy)
+            };
+            self.pos_x += vx;
+            self.pos_y += vy;
+        }
 
         let body = DrawTriangle {
             verts: [
@@ -173,41 +196,80 @@ impl Component for Player {
         );
     }
 
-    /// Teleport to a new world-space position.
+    /// Teleport. Honors both modes — in tile-step mode this is the
+    /// "force position" override (normally the world authority is the
+    /// only one driving position changes).
     #[handler]
     fn on_set_position(&mut self, _ctx: &mut Ctx<'_>, msg: PlayerSetPosition) {
         self.pos_x = msg.x;
         self.pos_y = msg.y;
     }
 
-    /// Replace the baseline per-tick velocity. `(0, 0)` stops.
-    /// Overridden while any WASD/arrow key is held; restored when all
-    /// are released.
+    /// Set continuous-mode baseline velocity. No-op visually in
+    /// tile-step mode (velocity isn't applied to position there).
     #[handler]
     fn on_set_velocity(&mut self, _ctx: &mut Ctx<'_>, msg: PlayerSetVelocity) {
         self.base_vx = msg.vx;
         self.base_vy = msg.vy;
     }
 
-    /// Record a key-down for WASD/arrow keys (other keys ignored).
+    /// Switch motion mode. Clears direction flags on transition to
+    /// avoid stale "still held" state leaking across modes.
     ///
     /// # Agent
-    /// Publish-subscribe; the substrate delivers this for every mapped
-    /// press. Holding a key produces one `Key` on the initial press
-    /// (winit suppresses auto-repeat) and one `KeyRelease` when
-    /// released — the component tracks hold state via that pair.
+    /// `0` = continuous (default, free-float), `1` = tile-step (grid
+    /// games with a `"world"` authority). Other values are ignored.
     #[handler]
-    fn on_key(&mut self, _ctx: &mut Ctx<'_>, key: Key) {
-        self.apply_key(key.code, true);
+    fn on_set_mode(&mut self, _ctx: &mut Ctx<'_>, msg: PlayerSetMode) {
+        if msg.mode == MODE_CONTINUOUS || msg.mode == MODE_TILE_STEP {
+            self.mode = msg.mode;
+            self.moving_up = false;
+            self.moving_down = false;
+            self.moving_left = false;
+            self.moving_right = false;
+        }
     }
 
-    /// Record a key-up for WASD/arrow keys (other keys ignored).
+    /// Handle a key-press mapped to movement. Dispatches by mode:
+    /// continuous sets a direction flag, tile-step fires off one
+    /// `PlayerRequestStep` to the world authority.
     ///
     /// # Agent
-    /// Publish-subscribe; the substrate delivers this on release.
+    /// Publish-subscribe; the substrate delivers this on every mapped
+    /// press. In tile-step mode, hold doesn't auto-repeat — one press
+    /// = one step request. Send a fresh `Key` for each step.
+    #[handler]
+    fn on_key(&mut self, ctx: &mut Ctx<'_>, key: Key) {
+        if self.mode == MODE_TILE_STEP {
+            if let Some((dx, dy)) = Self::step_delta(key.code) {
+                ctx.send(&self.world, &PlayerRequestStep { dx, dy });
+            }
+        } else {
+            self.apply_key(key.code, true);
+        }
+    }
+
+    /// Key-release. Continuous mode clears the direction flag;
+    /// tile-step mode ignores the event (each step is a fresh press).
     #[handler]
     fn on_key_release(&mut self, _ctx: &mut Ctx<'_>, key: KeyRelease) {
-        self.apply_key(key.code, false);
+        if self.mode == MODE_CONTINUOUS {
+            self.apply_key(key.code, false);
+        }
+    }
+
+    /// World-authority reply to a `PlayerRequestStep`. The authority
+    /// is the source of truth on where the player ended up — rejected
+    /// steps still carry a position (the unchanged original), so the
+    /// player overwrites its position unconditionally.
+    ///
+    /// # Agent
+    /// Replied by whichever component is loaded as `"world"`. No need
+    /// to send this manually unless simulating a world.
+    #[handler]
+    fn on_step_result(&mut self, _ctx: &mut Ctx<'_>, result: PlayerStepResult) {
+        self.pos_x = result.new_x;
+        self.pos_y = result.new_y;
     }
 }
 
