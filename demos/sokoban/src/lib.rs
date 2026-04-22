@@ -313,11 +313,20 @@ impl Sokoban {
         if w == 0 || h == 0 {
             return;
         }
-        // Fit the grid into a centered clip-space box with 0.05 margin.
-        let usable = 1.9_f32;
-        let cell = (usable / w.max(h) as f32).min(usable / w as f32);
-        let origin_x = -(w as f32 * cell) * 0.5;
-        let origin_y = (h as f32 * cell) * 0.5;
+        // World-space grid: one world unit per cell, centered on the
+        // origin with +Y up. Tile `(gx, gy)` (row-major, gy=0 is the
+        // top row) covers world rect
+        //   x ∈ [gx - w/2, gx - w/2 + 1]
+        //   y ∈ [h/2 - gy - 1, h/2 - gy]
+        // and sits at z=0. A top-down ortho camera with extent ≥
+        // max(w, h)/2 frames the whole grid; the substrate's default
+        // identity camera preserves world coords as clip-space, which
+        // means pre-camera rendering shrinks from full-window to a
+        // unit-sized box on screen — loading the topdown camera is
+        // the expected workflow.
+        let cell = 1.0_f32;
+        let origin_x = -(w as f32) * 0.5;
+        let origin_y = (h as f32) * 0.5;
 
         let mut tris = [DrawTriangle::default(); CELLS_MAX * 2];
         let mut n = 0;

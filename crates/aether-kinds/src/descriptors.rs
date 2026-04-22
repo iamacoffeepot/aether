@@ -23,7 +23,7 @@ use crate::{
     OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo,
     PlatformInfoResult, Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult,
     SetWindowTitle, SetWindowTitleResult, SubscribeInput, SubscribeInputResult, Tick,
-    UnresolvedMail, UnsubscribeInput, WindowSize,
+    TopdownSetCenter, TopdownSetExtent, UnresolvedMail, UnsubscribeInput, WindowSize,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -93,6 +93,10 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<OrbitSetSpeed>(),
         schema::<OrbitSetFov>(),
         schema::<OrbitSetTarget>(),
+        // Top-down orthographic camera control surface. Same
+        // fire-and-forget shape as the orbit controls.
+        schema::<TopdownSetCenter>(),
+        schema::<TopdownSetExtent>(),
     ]
 }
 
