@@ -20,6 +20,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::time::timeout;
 
 use crate::log_store::LogStore;
+use crate::loopback::LoopbackHandle;
 use crate::registry::{EngineRecord, EngineRegistry};
 use crate::session::{QueuedMail, SessionRegistry};
 use crate::spawn::PendingSpawns;
@@ -41,6 +42,7 @@ pub async fn handle_connection(
     sessions: SessionRegistry,
     pending: PendingSpawns,
     logs: LogStore,
+    loopback: LoopbackHandle,
 ) -> Result<(), FrameError> {
     let (mut reader, mut writer) = stream.into_split();
 
@@ -116,7 +118,15 @@ pub async fn handle_connection(
     // Reader loop: run until the engine goes silent, sends Goodbye, or
     // the socket errors. Removing the registry entry drops the only
     // remaining `mail_tx`, which lets the writer task complete.
-    let result = read_loop(&mut reader, &registry, &sessions, &logs, engine_id).await;
+    let result = read_loop(
+        &mut reader,
+        &registry,
+        &sessions,
+        &logs,
+        &loopback,
+        engine_id,
+    )
+    .await;
 
     registry.remove(&engine_id);
     let _ = writer_task.await;
@@ -133,6 +143,7 @@ async fn read_loop(
     registry: &EngineRegistry,
     sessions: &SessionRegistry,
     logs: &LogStore,
+    loopback: &LoopbackHandle,
     engine_id: EngineId,
 ) -> Result<(), FrameError> {
     loop {
@@ -156,6 +167,7 @@ async fn read_loop(
             EngineToHub::Mail(m) => route_engine_mail(sessions, engine_id, m),
             EngineToHub::KindsChanged(kinds) => registry.update_kinds(&engine_id, kinds),
             EngineToHub::LogBatch(entries) => logs.append(engine_id, entries),
+            EngineToHub::MailToHubSubstrate(frame) => loopback.deliver_bubbled_mail(frame),
             EngineToHub::Goodbye(_) => return Ok(()),
         }
     }

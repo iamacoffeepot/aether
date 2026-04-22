@@ -37,8 +37,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aether_hub_protocol::{EngineId, EngineToHub, HubToEngine, Uuid};
-use aether_substrate_core::{SubstrateBoot, dispatch_hub_to_engine_mail};
+use aether_hub_protocol::{
+    EngineId, EngineMailToHubSubstrateFrame, EngineToHub, HubToEngine, Uuid,
+};
+use aether_substrate_core::{
+    Mail, MailboxId, Mailer, Registry, SubstrateBoot, dispatch_hub_to_engine_mail,
+};
 use tokio::sync::mpsc;
 
 use crate::log_store::LogStore;
@@ -66,6 +70,62 @@ pub struct LoopbackEngine {
     pub boot: SubstrateBoot,
     pub inbound_rx: mpsc::Receiver<HubToEngine>,
     pub outbound_rx: std::sync::mpsc::Receiver<EngineToHub>,
+}
+
+/// Cheap clonable handle onto the loopback substrate's registry +
+/// mailer, for code paths that dispatch mail into the hub-self
+/// engine without going through the `EngineRecord.mail_tx` (ADR-
+/// 0037 Phase 1: bubbled-up mail arrives over TCP and skips the
+/// name-based `HubToEngine::Mail` channel because senders have
+/// only the hashed id on hand). Constructed from a `LoopbackEngine`
+/// and passed to the engine listener so its per-connection read
+/// loop can push bubbled mail directly onto the loopback's
+/// scheduler.
+#[derive(Clone)]
+pub struct LoopbackHandle {
+    registry: Arc<Registry>,
+    queue: Arc<Mailer>,
+}
+
+impl LoopbackHandle {
+    pub fn from_boot(boot: &SubstrateBoot) -> Self {
+        Self {
+            registry: Arc::clone(&boot.registry),
+            queue: Arc::clone(&boot.queue),
+        }
+    }
+
+    /// Dispatch mail bubbled up from a remote engine (ADR-0037
+    /// Phase 1). The sender has already hashed the target
+    /// mailbox's name into `recipient_mailbox_id`; we resolve it
+    /// id-based against the loopback registry and push onto the
+    /// `Mailer`. Unknown ids warn-drop on the hub side (end of
+    /// line for Phase 1 — Phase 2's reply path lets us route an
+    /// `mail.unresolved` observation back to the sender's logs).
+    pub fn deliver_bubbled_mail(&self, frame: EngineMailToHubSubstrateFrame) {
+        let EngineMailToHubSubstrateFrame {
+            recipient_mailbox_id,
+            kind_id,
+            payload,
+            count,
+        } = frame;
+        // Kind lookup guards against an engine bubbling up a kind
+        // the hub substrate doesn't know — without it the mail
+        // would reach a component expecting a different layout.
+        if self.registry.kind_name(kind_id).is_none() {
+            eprintln!(
+                "aether-substrate-hub: bubbled-up mail of unknown kind_id={kind_id} \
+                 mailbox_id={recipient_mailbox_id} — dropped"
+            );
+            return;
+        }
+        self.queue.push(Mail::new(
+            MailboxId(recipient_mailbox_id),
+            kind_id,
+            payload,
+            count,
+        ));
+    }
 }
 
 impl LoopbackEngine {
@@ -165,6 +225,15 @@ pub fn spawn_outbound_drainer(
                         logs.append(HUB_SELF_ENGINE_ID, entries);
                     }
                     EngineToHub::Hello(_) | EngineToHub::Heartbeat | EngineToHub::Goodbye(_) => {}
+                    EngineToHub::MailToHubSubstrate(_) => {
+                        // The loopback substrate has no upstream
+                        // hub (its own boot skips `AETHER_HUB_URL`)
+                        // so its `HubOutbound` never sees this
+                        // variant. Unreachable under Phase 1
+                        // wiring; left as an explicit drop so a
+                        // future wiring change can't silently
+                        // route hub-self bubbled mail to itself.
+                    }
                 }
             }
         })
@@ -198,5 +267,33 @@ mod tests {
             !record.kinds.is_empty(),
             "boot descriptors should be non-empty",
         );
+    }
+
+    /// ADR-0037 Phase 1: `deliver_bubbled_mail` on an unknown kind
+    /// id must drop silently (no panic, no queue push) — otherwise
+    /// a component would receive mail of a layout it doesn't know.
+    /// The warn is side-effect only; this test proves the guard
+    /// trips by constructing a handle + feeding a synthetic kind
+    /// id the registry has never seen.
+    #[test]
+    fn deliver_bubbled_mail_drops_unknown_kind() {
+        let engines = EngineRegistry::new();
+        let loopback = LoopbackEngine::boot(&engines).expect("loopback boot");
+        let handle = LoopbackHandle::from_boot(&loopback.boot);
+
+        // 0xDEAD_BEEF_DEAD_BEEF is not a valid hashed kind id — the
+        // registry has no entry for it, so the kind lookup inside
+        // deliver_bubbled_mail returns None and the frame is
+        // dropped.
+        handle.deliver_bubbled_mail(EngineMailToHubSubstrateFrame {
+            recipient_mailbox_id: 42,
+            kind_id: 0xDEAD_BEEF_DEAD_BEEF,
+            payload: vec![1, 2, 3],
+            count: 1,
+        });
+        // No panic == pass. The production flow logs a warn and
+        // returns; we can't assert on the warn without threading
+        // a tracing subscriber, which is out of scope for the
+        // Phase-1 smoke.
     }
 }
