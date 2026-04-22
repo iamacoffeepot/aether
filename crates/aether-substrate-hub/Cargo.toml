@@ -5,9 +5,12 @@ edition.workspace = true
 
 [dependencies]
 aether-hub-protocol = { path = "../aether-hub-protocol" }
+aether-kinds = { path = "../aether-kinds" }
+aether-mail = { path = "../aether-mail" }
 aether-substrate-core = { path = "../aether-substrate-core" }
 axum = "0.8"
 base64 = "0.22"
+bytemuck = { version = "1.19", features = ["derive"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 rmcp = { version = "0.8", features = [
     "server",
@@ -26,5 +29,4 @@ wasmtime = "30"
 libc = "0.2"
 
 [dev-dependencies]
-bytemuck = { version = "1.19", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

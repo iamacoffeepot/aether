@@ -176,6 +176,8 @@ name = "aether-substrate-hub"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-hub-protocol",
+ "aether-kinds",
+ "aether-mail",
  "aether-substrate-core",
  "axum",
  "base64 0.22.1",

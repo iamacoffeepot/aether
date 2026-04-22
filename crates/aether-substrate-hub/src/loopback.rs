@@ -40,8 +40,11 @@ use std::sync::Arc;
 use aether_hub_protocol::{
     EngineId, EngineMailToHubSubstrateFrame, EngineToHub, HubToEngine, MailByIdFrame, Uuid,
 };
+use aether_kinds::UnresolvedMail;
+use aether_mail::{Kind, mailbox_id_from_name};
 use aether_substrate_core::{
-    Mail, MailboxId, Mailer, Registry, ReplyTo, SubstrateBoot, dispatch_hub_to_engine_mail,
+    AETHER_DIAGNOSTICS, Mail, MailboxId, Mailer, Registry, ReplyTo, SubstrateBoot,
+    dispatch_hub_to_engine_mail,
 };
 use tokio::sync::mpsc;
 
@@ -99,9 +102,10 @@ impl LoopbackHandle {
     /// Phase 1 + Phase 2). The sender has already hashed the target
     /// mailbox's name into `recipient_mailbox_id`; we resolve it
     /// id-based against the loopback registry and push onto the
-    /// `Mailer`. Unknown ids warn-drop on the hub side (end of
-    /// line for Phase 1 — a future `mail.unresolved` observation
-    /// sends the warn back to the originating engine's logs).
+    /// `Mailer`. Unknown ids emit an `aether.mail.unresolved`
+    /// diagnostic back to the originating engine's
+    /// `aether.diagnostics` sink (issue #185) so the typo surfaces in
+    /// the sender's own `engine_logs`, not only the hub's.
     ///
     /// `source_engine_id` is the originating engine (known by the
     /// hub from the TCP connection, not on the wire). Combined with
@@ -111,10 +115,16 @@ impl LoopbackHandle {
     /// `ctx.reply(sender)` then routes through
     /// `HubOutbound::send_reply` which forks on the enum variant
     /// and emits `EngineToHub::MailToEngineMailbox` for this case.
+    ///
+    /// `engines` is the hub's engine registry; needed only on the
+    /// unresolved path to look up the originating engine's mail
+    /// channel for the diagnostic reach-back. Passed by the caller
+    /// (`engine::read_loop`) which already holds it.
     pub fn deliver_bubbled_mail(
         &self,
         source_engine_id: EngineId,
         frame: EngineMailToHubSubstrateFrame,
+        engines: &EngineRegistry,
     ) {
         let EngineMailToHubSubstrateFrame {
             recipient_mailbox_id,
@@ -133,6 +143,25 @@ impl LoopbackHandle {
             );
             return;
         }
+        // Recipient lookup: if the hub can't resolve the mailbox id,
+        // don't push onto the queue (where it'd warn-drop silently
+        // on the hub side). Instead, echo an
+        // `aether.mail.unresolved` observation back to the
+        // originating engine so the typo surfaces in that engine's
+        // own `engine_logs`. ADR-0037 follow-up / issue #185.
+        if self
+            .registry
+            .entry(MailboxId(recipient_mailbox_id))
+            .is_none()
+        {
+            eprintln!(
+                "aether-substrate-hub: bubbled-up mail from engine {source_engine_id:?} to \
+                 unknown mailbox_id={recipient_mailbox_id:#x} kind_id={kind_id:#x} — returning \
+                 `aether.mail.unresolved` diagnostic to originator"
+            );
+            send_unresolved_diagnostic(engines, source_engine_id, recipient_mailbox_id, kind_id);
+            return;
+        }
         let sender = match source_mailbox_id {
             Some(mailbox_id) => ReplyTo::EngineMailbox {
                 engine_id: source_engine_id,
@@ -143,6 +172,41 @@ impl LoopbackHandle {
         self.queue.push(
             Mail::new(MailboxId(recipient_mailbox_id), kind_id, payload, count)
                 .with_reply_to(sender),
+        );
+    }
+}
+
+/// Build an `aether.mail.unresolved` `HubToEngine::MailById` frame and
+/// push it onto the originating engine's `mail_tx`. Targets the
+/// engine's `aether.diagnostics` sink (pre-registered by
+/// `SubstrateBoot::build` so resolution is guaranteed on the receiver
+/// — no bubble-up loop). Silently drops if the originating engine is
+/// no longer connected or its channel is full; this is a best-effort
+/// diagnostic, not a guaranteed delivery.
+fn send_unresolved_diagnostic(
+    engines: &EngineRegistry,
+    source_engine_id: EngineId,
+    recipient_mailbox_id: u64,
+    kind_id: u64,
+) {
+    let Some(record) = engines.get(&source_engine_id) else {
+        return;
+    };
+    let payload = bytemuck::bytes_of(&UnresolvedMail {
+        recipient_mailbox_id,
+        kind_id,
+    })
+    .to_vec();
+    let frame = HubToEngine::MailById(MailByIdFrame {
+        recipient_mailbox_id: mailbox_id_from_name(AETHER_DIAGNOSTICS),
+        kind_id: UnresolvedMail::ID,
+        payload,
+        count: 1,
+    });
+    if let Err(e) = record.mail_tx.try_send(frame) {
+        eprintln!(
+            "aether-substrate-hub: unresolved-mail diagnostic to engine {source_engine_id:?} \
+             dropped: {e}"
         );
     }
 }
@@ -405,10 +469,74 @@ mod tests {
                 count: 1,
                 source_mailbox_id: None,
             },
+            &engines,
         );
         // No panic == pass. The production flow logs a warn and
         // returns; we can't assert on the warn without threading
         // a tracing subscriber, which is out of scope for the
         // Phase-1 smoke.
+    }
+
+    /// Issue #185: when the hub can't resolve a bubbled-up mail's
+    /// recipient mailbox id, it pushes an
+    /// `aether.mail.unresolved` `MailById` frame onto the
+    /// originating engine's `mail_tx`. Test by registering a fake
+    /// engine record in the registry, feeding a frame whose
+    /// recipient id has no hub-side mailbox, and asserting the
+    /// registered `mail_tx` receives exactly one `UnresolvedMail`
+    /// frame targeting the `aether.diagnostics` sink.
+    #[test]
+    fn deliver_bubbled_mail_unknown_recipient_emits_diagnostic_to_originator() {
+        let engines = EngineRegistry::new();
+        let loopback = LoopbackEngine::boot(&engines).expect("loopback boot");
+        let handle = LoopbackHandle::from_boot(&loopback.boot);
+
+        let originator_id = EngineId(Uuid::from_u128(0x4242));
+        let (mail_tx, mut mail_rx) = mpsc::channel::<HubToEngine>(8);
+        engines.insert(EngineRecord {
+            id: originator_id,
+            name: "test-originator".into(),
+            pid: 1,
+            version: "0".into(),
+            kinds: vec![],
+            components: HashMap::new(),
+            mail_tx,
+            spawned: false,
+        });
+
+        // Tick's id is registered; the recipient mailbox id is bogus
+        // (no hub-side component binds it, no sink uses it), so the
+        // unresolved path fires.
+        handle.deliver_bubbled_mail(
+            originator_id,
+            EngineMailToHubSubstrateFrame {
+                recipient_mailbox_id: 0xBAD_C0FFEE_u64,
+                kind_id: <aether_kinds::Tick as Kind>::ID,
+                payload: vec![],
+                count: 1,
+                source_mailbox_id: Some(0x5151),
+            },
+            &engines,
+        );
+
+        let got = mail_rx
+            .try_recv()
+            .expect("diagnostic frame pushed onto originator's mail_tx");
+        let HubToEngine::MailById(frame) = got else {
+            panic!("expected MailById, got {got:?}");
+        };
+        assert_eq!(frame.kind_id, UnresolvedMail::ID);
+        assert_eq!(
+            frame.recipient_mailbox_id,
+            mailbox_id_from_name(AETHER_DIAGNOSTICS),
+        );
+        let record: &UnresolvedMail = bytemuck::from_bytes(&frame.payload);
+        assert_eq!(record.recipient_mailbox_id, 0xBAD_C0FFEE_u64);
+        assert_eq!(record.kind_id, <aether_kinds::Tick as Kind>::ID);
+        assert_eq!(frame.count, 1);
+        assert!(
+            mail_rx.try_recv().is_err(),
+            "only one diagnostic frame per unresolved recipient",
+        );
     }
 }
