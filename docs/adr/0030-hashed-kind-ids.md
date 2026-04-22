@@ -27,8 +27,9 @@ The natural home is the guest's SDK: `KindList::resolve_all` walks the typelist 
 
 ### Hash input
 
-The hash input is `name_bytes ++ postcard(schema)`:
+The hash input is `KIND_DOMAIN ++ name_bytes ++ postcard(schema)` (domain prefix added as a follow-up, issue #186):
 
+- **Domain tag**: the literal ASCII bytes `b"kind:"`, stored as `aether_mail::KIND_DOMAIN`. Disjoins the `Kind::ID` space from `MailboxId` (which prefixes `b"mailbox:"`) so a future code path that confuses the two ids can't misattribute by construction.
 - **Name bytes**: the UTF-8 bytes of `K::NAME` (unchanged from ADR-0029's mailbox shape).
 - **Schema bytes**: `postcard::to_allocvec(&K::schema())`, the same encoding ADR-0028 records already carry. `SchemaType` is the canonical shape vocabulary — changing a field name, type, or layout changes the postcard bytes, therefore changes the id.
 
@@ -36,9 +37,9 @@ The hash input is `name_bytes ++ postcard(schema)`:
 
 ### Hash function
 
-FNV-1a 64, same algorithm as `aether_mail::mailbox_id_from_name`. Same justification (no-dep, deterministic, fast, distribution is fine at kind cardinality). Emitting a second algorithm would be churn without benefit; the two id spaces are unrelated by construction (different byte inputs) so there's no risk of cross-talk.
+FNV-1a 64, same algorithm as `aether_mail::mailbox_id_from_name`. Same justification (no-dep, deterministic, fast, distribution is fine at kind cardinality). Emitting a second algorithm would be churn without benefit; the two id spaces are disjoint by construction (domain prefixes make the inputs disjoint) so there's no risk of cross-talk.
 
-`MailboxId::from_name(name)` remains `fnv1a(name)`. The new `kind_id_from_schema(name, schema_bytes)` is `fnv1a(name ++ schema_bytes)` — same algorithm, different input. Both live in `aether-mail` and are `const fn` so derive-time use is cheap.
+`MailboxId::from_name(name)` is `fnv1a(MAILBOX_DOMAIN ++ name)`. `kind_id_from_parts(name, schema_bytes)` is `fnv1a(KIND_DOMAIN ++ name ++ schema_bytes)` — same algorithm, different domain-prefixed inputs. Both live in `aether-mail` and are `const fn` so derive-time use is cheap.
 
 ### Derive output
 

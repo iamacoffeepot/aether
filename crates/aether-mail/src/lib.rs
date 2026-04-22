@@ -103,20 +103,47 @@ impl<T> CastEligible for Option<T> {
 /// as the no-sender sentinel — callers should reject on the astronomical
 /// chance of a collision with it.
 pub const fn mailbox_id_from_name(name: &str) -> u64 {
-    fnv1a_64_bytes(name.as_bytes())
+    fnv1a_64_prefixed(MAILBOX_DOMAIN, name.as_bytes())
 }
 
-/// FNV-1a 64 over a byte slice (ADR-0032). Sibling of
-/// `mailbox_id_from_name` — same algorithm, same offset basis and
-/// prime, different input type. Used to derive `Kind::ID` from
-/// canonical schema bytes (ADR-0030 Phase 2). `const` so derives can
-/// emit `const ID: u64 = fnv1a_64_bytes(&CANONICAL_BYTES)` as a
-/// trait-assoc const.
+/// Domain tag prefixed to every mailbox-name hash so the `MailboxId`
+/// space is disjoint from `Kind::ID`. Both ids are 64-bit FNV-1a
+/// outputs; without a prefix the spaces overlap and a future bug that
+/// feeds a mailbox id into a kind-id slot (or vice versa) would
+/// misattribute silently. Prefixing makes the mis-attribution
+/// statistically impossible rather than relying on positional
+/// discipline at every call site.
+pub const MAILBOX_DOMAIN: &[u8] = b"mailbox:";
+
+/// Domain tag prefixed to every kind-id hash. See `MAILBOX_DOMAIN` for
+/// the rationale; the derive macro and `kind_id_from_parts` both
+/// prepend this before the canonical schema bytes.
+pub const KIND_DOMAIN: &[u8] = b"kind:";
+
+/// FNV-1a 64 over a byte slice (ADR-0032). Retained for the few
+/// call sites that hash neither a mailbox name nor a kind schema.
+/// New callers should prefer `fnv1a_64_prefixed` with an explicit
+/// domain so the output id space doesn't collide with an existing
+/// domain by accident.
 pub const fn fnv1a_64_bytes(bytes: &[u8]) -> u64 {
+    fnv1a_64_prefixed(&[], bytes)
+}
+
+/// FNV-1a 64 over `prefix ++ payload` without allocating. Equivalent
+/// to `fnv1a_64_bytes(&[prefix, payload].concat())` but `const`-safe.
+/// Used by `mailbox_id_from_name` (prefix `MAILBOX_DOMAIN`) and by
+/// `#[derive(Kind)]` through the macro (prefix `KIND_DOMAIN`).
+pub const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut i = 0;
-    while i < bytes.len() {
-        hash ^= bytes[i] as u64;
+    while i < prefix.len() {
+        hash ^= prefix[i] as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+        i += 1;
+    }
+    let mut i = 0;
+    while i < payload.len() {
+        hash ^= payload[i] as u64;
         hash = hash.wrapping_mul(0x100000001b3);
         i += 1;
     }
@@ -468,8 +495,25 @@ mod tests {
         let c = mailbox_id_from_name("render");
         assert_eq!(a, b);
         assert_ne!(a, c);
-        // Empty input gives the raw offset basis — useful as a quick
-        // sanity check that the algorithm matches FNV-1a 64.
-        assert_eq!(mailbox_id_from_name(""), 0xcbf29ce484222325);
+        // Empty name hashes the domain prefix alone. Pins the
+        // prefixing convention — a regression that drops the prefix
+        // would collapse to `0xcbf29ce484222325` (the raw FNV offset
+        // basis) here.
+        assert_eq!(
+            mailbox_id_from_name(""),
+            fnv1a_64_prefixed(MAILBOX_DOMAIN, &[]),
+        );
+        assert_ne!(mailbox_id_from_name(""), 0xcbf29ce484222325);
+    }
+
+    #[test]
+    fn mailbox_and_kind_domains_disjoin_identical_payloads() {
+        // The whole point of prefixing: even if a mailbox name and a
+        // kind's canonical bytes happened to be the same byte string,
+        // the resulting ids differ.
+        let payload = b"collision.test";
+        let as_mailbox = fnv1a_64_prefixed(MAILBOX_DOMAIN, payload);
+        let as_kind = fnv1a_64_prefixed(KIND_DOMAIN, payload);
+        assert_ne!(as_mailbox, as_kind);
     }
 }

@@ -10,7 +10,7 @@ After ADR-0027, ADR-0028, and ADR-0030 the per-component shape is:
 
 - **Received kinds** are declared twice: once in `type Kinds = (Tick, Key, ...)` (ADR-0027) which the SDK walks at init to populate a runtime `KindTable`, and a second time inside `fn receive` as a chain of `mail.is::<K>()` / `mail.decode_typed::<K>()` checks.
 - **Introduced kinds** (everything `#[derive(Kind)]` reaches) ride in the `aether.kinds` wasm custom section (ADR-0028) and are visible to the substrate and hub at load time without executing the component.
-- **Kind identity** is compile-time: `K::ID = fnv1a_64(canonical(name, schema))` (ADR-0030, ADR-0032). The substrate trusts these ids once registered.
+- **Kind identity** is compile-time: `K::ID = fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))` (ADR-0030, ADR-0032; domain prefix added in issue #186). The substrate trusts these ids once registered.
 - **FFI dispatch** is a single generic `receive_p32(kind_id, ptr, len, sender) -> u32` export per component; the SDK's per-component runtime consults the `KindTable` and routes.
 
 Three problems compound under this shape:
