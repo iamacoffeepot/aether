@@ -799,6 +799,7 @@ mod tests {
             },
         };
         let labels = aether_hub_protocol::KindLabels {
+            kind_id: aether_hub_protocol::canonical::kind_id_from_shape(&shape),
             kind_label: std::borrow::Cow::Borrowed("demo::EmbeddedKind"),
             root: aether_hub_protocol::LabelNode::Struct {
                 type_label: Some(std::borrow::Cow::Borrowed("demo::EmbeddedKind")),
@@ -808,7 +809,7 @@ mod tests {
         };
         let mut canonical = vec![0x02u8];
         canonical.extend(postcard::to_allocvec(&shape).unwrap());
-        let mut labels_bytes = vec![0x02u8];
+        let mut labels_bytes = vec![0x03u8];
         labels_bytes.extend(postcard::to_allocvec(&labels).unwrap());
         let esc = |bs: &[u8]| -> String { bs.iter().map(|b| format!("\\{b:02x}")).collect() };
         let wat = format!(
@@ -879,12 +880,13 @@ mod tests {
             schema: aether_hub_protocol::SchemaShape::Scalar(Primitive::U64),
         };
         let labels = aether_hub_protocol::KindLabels {
+            kind_id: aether_hub_protocol::canonical::kind_id_from_shape(&shape),
             kind_label: std::borrow::Cow::Borrowed("demo::Conflict"),
             root: aether_hub_protocol::LabelNode::Anonymous,
         };
         let mut canonical = vec![0x02u8];
         canonical.extend(postcard::to_allocvec(&shape).unwrap());
-        let mut labels_bytes = vec![0x02u8];
+        let mut labels_bytes = vec![0x03u8];
         labels_bytes.extend(postcard::to_allocvec(&labels).unwrap());
         let esc = |bs: &[u8]| -> String { bs.iter().map(|b| format!("\\{b:02x}")).collect() };
         let wat = format!(

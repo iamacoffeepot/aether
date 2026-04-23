@@ -693,11 +693,15 @@ impl<'de> Deserialize<'de> for VariantLabel {
 }
 
 /// One record in the `aether.kinds.labels` section: the kind's own
-/// Rust type label plus the parallel-shape `LabelNode` tree. Paired
-/// with the matching `SchemaShape` record from `aether.kinds` (same
-/// declaration order) to reconstruct a named `SchemaType`.
+/// `Kind::ID` (so the record is self-identifying), the Rust type
+/// label, and the parallel-shape `LabelNode` tree. Paired with the
+/// matching `SchemaShape` record from `aether.kinds` by id, not by
+/// declaration order — any emitter (the Kind derive, `#[handlers]`
+/// retention, a third-party shared-rlib wrapper) can write records
+/// in any order and the reader will rejoin them correctly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KindLabels {
+    pub kind_id: u64,
     pub kind_label: Cow<'static, str>,
     pub root: LabelNode,
 }

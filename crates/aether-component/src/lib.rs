@@ -84,7 +84,7 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 /// Not part of the public API; the macro is the only intended caller.
 #[doc(hidden)]
 pub mod __macro_internals {
-    pub use aether_mail::__derive_runtime::{SchemaType, canonical};
+    pub use aether_mail::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_mail::{Kind, Schema};
 }
 

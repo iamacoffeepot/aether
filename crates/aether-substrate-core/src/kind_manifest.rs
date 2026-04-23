@@ -1,19 +1,32 @@
 // ADR-0028 / ADR-0032: read a component's embedded kind manifest
-// from two wasm custom sections — `aether.kinds` (positional
-// canonical bytes, the `Kind::ID` hash input) and
-// `aether.kinds.labels` (Rust-nominal sidecar: type paths, field
-// names, variant names). Records in the two sections pair by
-// declaration order.
+// from two wasm custom sections — `aether.kinds` (canonical bytes,
+// the `Kind::ID` hash input) and `aether.kinds.labels` (Rust-nominal
+// sidecar: type paths, field names, variant names).
 //
-// Record format (v2):
-//   [0x02] [postcard(KindShape)] — in `aether.kinds`
-//   [0x02] [postcard(KindLabels)] — in `aether.kinds.labels`
+// Record formats:
+//   `aether.kinds`         — [0x02] [postcard(KindShape)]
+//   `aether.kinds.labels`  — [0x03] [postcard(KindLabels)]
+//
+// `aether.kinds` records are identified by computing
+// `kind_id_from_parts(&shape.name, &shape.schema)`. `aether.kinds.labels`
+// records carry their `kind_id` inline (v0x03 field), so the reader
+// indexes labels by id and looks up per shape. Pairing is robust
+// against emit order, duplicates, and mixed emitters (the Kind derive,
+// `#[handlers]` retention for kinds defined in rlib dependencies, and
+// future external sources of kind metadata).
+//
+// Pre-v0x03 labels lacked `kind_id` and were paired by declaration
+// order. That was fragile once any second emitter wrote to only one
+// of the two sections (issue tracked in the
+// "demo.sokoban.load_level.id" empty-field-name regression); v0x03
+// rejects old-format bytes loudly so a rebuild-required boundary is
+// explicit rather than "single-field cast kinds have empty fields
+// and encode-from-JSON silently fails."
 //
 // The parser walks each section sequentially; postcard stops decoding
 // exactly at the record's end, so the next byte is the next record's
 // version tag. Unknown version bytes abort the parse rather than
-// silently skip — a kind missing from the caller's build would
-// otherwise surface much later as an unrecognized-ID routing failure.
+// silently skip.
 //
 // Wasmtime 30 doesn't expose custom sections on `Module`, so we walk
 // the raw bytes via `wasmparser` before compilation. The section data
@@ -23,10 +36,12 @@
 // compile.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use aether_hub_protocol::{
     EnumVariant, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KindDescriptor, KindLabels,
     KindShape, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType, VariantLabel,
+    canonical::kind_id_from_shape,
 };
 use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
 use wasmparser::{Parser, Payload};
@@ -43,20 +58,31 @@ pub const MANIFEST_SECTION: &str = "aether.kinds";
 /// anonymous field names.
 pub const LABELS_SECTION: &str = "aether.kinds.labels";
 
-const SUPPORTED_VERSIONS: &[u8] = &[0x02];
+/// Wire versions accepted in `aether.kinds`. The shape record's bytes
+/// are `Kind::ID` hash input, so the format is pinned indefinitely at
+/// 0x02 — any change would shift every id.
+const KINDS_SUPPORTED_VERSIONS: &[u8] = &[0x02];
+
+/// Wire versions accepted in `aether.kinds.labels`. v0x03 added
+/// `kind_id` to `KindLabels`, making records self-identifying so the
+/// reader pairs by id rather than by declaration order. v0x02 is no
+/// longer accepted — a loud rebuild-required boundary.
+const LABELS_SUPPORTED_VERSIONS: &[u8] = &[0x03];
 
 /// Decode every kind record in the component's `aether.kinds` and
-/// (when present) `aether.kinds.labels` sections, merging each pair
-/// into a named `KindDescriptor`. Components without the canonical
-/// section return an empty vec — matches the behavior of a
-/// `LoadComponent` with empty `kinds` and lets WAT-only tests keep
-/// working. Components with canonical bytes but no labels produce
-/// anonymous descriptors (empty field names) — the load succeeds at
-/// the substrate but hub-side encode-from-JSON is expected to error
-/// on such kinds.
+/// (when present) `aether.kinds.labels` sections, merging labels into
+/// each shape by `Kind::ID`. Components without the canonical section
+/// return an empty vec — matches the behavior of a `LoadComponent`
+/// with empty `kinds` and lets WAT-only tests keep working. Shapes
+/// without a matching labels record produce anonymous descriptors
+/// (empty field names) — the load succeeds at the substrate but
+/// hub-side encode-from-JSON is expected to error on such kinds.
+/// Orphan labels (a labels record whose id has no shape) are
+/// silently ignored so third-party emitters can add labels for kinds
+/// not present in this particular binary without breaking loads.
 pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
     let mut shapes: Vec<KindShape> = Vec::new();
-    let mut labels: Vec<KindLabels> = Vec::new();
+    let mut labels_list: Vec<KindLabels> = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm) {
         let payload = payload.map_err(|e| format!("wasmparser: {e}"))?;
@@ -64,15 +90,29 @@ pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
             continue;
         };
         match reader.name() {
-            MANIFEST_SECTION => decode_records(MANIFEST_SECTION, reader.data(), &mut shapes)?,
-            LABELS_SECTION => decode_records(LABELS_SECTION, reader.data(), &mut labels)?,
+            MANIFEST_SECTION => decode_records(
+                MANIFEST_SECTION,
+                KINDS_SUPPORTED_VERSIONS,
+                reader.data(),
+                &mut shapes,
+            )?,
+            LABELS_SECTION => decode_records(
+                LABELS_SECTION,
+                LABELS_SUPPORTED_VERSIONS,
+                reader.data(),
+                &mut labels_list,
+            )?,
             _ => continue,
         }
     }
 
+    let labels_by_id: HashMap<u64, KindLabels> =
+        labels_list.into_iter().map(|l| (l.kind_id, l)).collect();
+
     let mut descriptors = Vec::with_capacity(shapes.len());
-    for (idx, shape) in shapes.into_iter().enumerate() {
-        let label = labels.get(idx);
+    for shape in shapes {
+        let id = kind_id_from_shape(&shape);
+        let label = labels_by_id.get(&id);
         descriptors.push(merge(shape, label));
     }
     Ok(descriptors)
@@ -167,16 +207,18 @@ fn decode_inputs_records(data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(),
 
 /// Walk one custom section: `[version][postcard(T)]` records until
 /// the section is exhausted. Abort on unknown version or postcard
-/// decode error.
+/// decode error. Per-section version allowlists are passed in so the
+/// shape and labels sections can evolve independently.
 fn decode_records<T: serde::de::DeserializeOwned>(
     section_name: &str,
+    supported_versions: &[u8],
     data: &[u8],
     out: &mut Vec<T>,
 ) -> Result<(), String> {
     let mut cursor = data;
     while !cursor.is_empty() {
         let version = cursor[0];
-        if !SUPPORTED_VERSIONS.contains(&version) {
+        if !supported_versions.contains(&version) {
             return Err(format!(
                 "{section_name}: record version {version:#x} not understood by this substrate build"
             ));
@@ -382,6 +424,23 @@ mod tests {
         wat::parse_str(wat).unwrap()
     }
 
+    /// Append `[0x02][postcard(shape)]` to `canonical`. Matches what
+    /// the Kind derive emits into the `aether.kinds` section.
+    fn push_shape(canonical: &mut Vec<u8>, shape: &KindShape) {
+        canonical.push(0x02);
+        canonical.extend(postcard::to_allocvec(shape).unwrap());
+    }
+
+    /// Append `[0x03][postcard(labels)]` to `labels_bytes`, and stamp
+    /// `labels.kind_id` from the paired shape so the reader's by-id
+    /// merge finds it. Matches what the Kind derive emits into
+    /// `aether.kinds.labels` (v0x03 adds `kind_id`).
+    fn push_labels(labels_bytes: &mut Vec<u8>, shape: &KindShape, labels: &mut KindLabels) {
+        labels.kind_id = kind_id_from_shape(shape);
+        labels_bytes.push(0x03);
+        labels_bytes.extend(postcard::to_allocvec(labels).unwrap());
+    }
+
     #[test]
     fn reads_single_record_with_labels() {
         let shape = KindShape {
@@ -391,7 +450,8 @@ mod tests {
                 repr_c: true,
             },
         };
-        let labels = KindLabels {
+        let mut labels = KindLabels {
+            kind_id: 0,
             kind_label: Cow::Borrowed("my_crate::TestKind"),
             root: LabelNode::Struct {
                 type_label: Some(Cow::Borrowed("my_crate::TestKind")),
@@ -399,10 +459,10 @@ mod tests {
                 fields: Cow::Owned(vec![LabelNode::Anonymous]),
             },
         };
-        let mut canonical = vec![0x02u8];
-        canonical.extend(postcard::to_allocvec(&shape).unwrap());
-        let mut labels_bytes = vec![0x02u8];
-        labels_bytes.extend(postcard::to_allocvec(&labels).unwrap());
+        let mut canonical = Vec::new();
+        push_shape(&mut canonical, &shape);
+        let mut labels_bytes = Vec::new();
+        push_labels(&mut labels_bytes, &shape, &mut labels);
 
         let wasm = wasm_with_two_sections(&canonical, &labels_bytes);
         let descs = read_from_bytes(&wasm).unwrap();
@@ -419,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_multiple_records_pair_by_index() {
+    fn reads_multiple_records_pair_by_id() {
         let shapes = [
             KindShape {
                 name: Cow::Borrowed("a"),
@@ -430,25 +490,26 @@ mod tests {
                 schema: SchemaShape::Scalar(Primitive::U8),
             },
         ];
-        let labels_a = KindLabels {
+        let mut labels_a = KindLabels {
+            kind_id: 0,
             kind_label: Cow::Borrowed("my::A"),
             root: LabelNode::Anonymous,
         };
-        let labels_b = KindLabels {
+        let mut labels_b = KindLabels {
+            kind_id: 0,
             kind_label: Cow::Borrowed("my::B"),
             root: LabelNode::Anonymous,
         };
 
         let mut canonical = Vec::new();
         for s in &shapes {
-            canonical.push(0x02);
-            canonical.extend(postcard::to_allocvec(s).unwrap());
+            push_shape(&mut canonical, s);
         }
+        // Emit labels in REVERSE order relative to shapes, to prove
+        // the reader's by-id pairing doesn't rely on declaration order.
         let mut labels_bytes = Vec::new();
-        for l in [&labels_a, &labels_b] {
-            labels_bytes.push(0x02);
-            labels_bytes.extend(postcard::to_allocvec(l).unwrap());
-        }
+        push_labels(&mut labels_bytes, &shapes[1], &mut labels_b);
+        push_labels(&mut labels_bytes, &shapes[0], &mut labels_a);
 
         let wasm = wasm_with_two_sections(&canonical, &labels_bytes);
         let descs = read_from_bytes(&wasm).unwrap();
@@ -495,6 +556,125 @@ mod tests {
     }
 
     #[test]
+    fn labels_v0x02_rejected_loudly() {
+        // Pre-id-pairing labels records lacked `kind_id`; a substrate
+        // running this build against an old wasm build would silently
+        // fail-merge everything and surface empty field names only at
+        // hub encode time. Reject with a clear version-mismatch error
+        // instead.
+        let old_labels_payload = [0x02, 0x00];
+        let wasm = wasm_with_section(LABELS_SECTION, &old_labels_payload);
+        let err = read_from_bytes(&wasm).unwrap_err();
+        assert!(err.contains("0x2"), "err was: {err}");
+        assert!(err.contains(LABELS_SECTION), "err was: {err}");
+    }
+
+    #[test]
+    fn duplicate_kinds_records_tolerated_under_by_id_pairing() {
+        // `#[handlers]` retention emits both an `aether.kinds` and an
+        // `aether.kinds.labels` record per handler kind; when the
+        // defining crate also emits via `Kind` derive, a kind ends up
+        // with duplicate records in both sections. The by-id merge
+        // tolerates duplicates because records with the same id are
+        // byte-identical by construction (name + schema → canonical
+        // bytes → hash).
+        let shape = KindShape {
+            name: Cow::Borrowed("test.dup"),
+            schema: SchemaShape::Struct {
+                fields: vec![SchemaShape::Scalar(Primitive::U32)],
+                repr_c: true,
+            },
+        };
+        let mut labels = KindLabels {
+            kind_id: 0,
+            kind_label: Cow::Borrowed("my::Dup"),
+            root: LabelNode::Struct {
+                type_label: Some(Cow::Borrowed("my::Dup")),
+                field_names: Cow::Owned(vec![Cow::Borrowed("n")]),
+                fields: Cow::Owned(vec![LabelNode::Anonymous]),
+            },
+        };
+        let mut canonical = Vec::new();
+        push_shape(&mut canonical, &shape);
+        push_shape(&mut canonical, &shape);
+        let mut labels_bytes = Vec::new();
+        push_labels(&mut labels_bytes, &shape, &mut labels);
+        push_labels(&mut labels_bytes, &shape, &mut labels);
+        let wasm = wasm_with_two_sections(&canonical, &labels_bytes);
+        let descs = read_from_bytes(&wasm).unwrap();
+        // Two shape records surface as two descriptors; merging each
+        // with the same labels record by id is the correct behavior
+        // (the substrate's `register_kind_with_descriptor` then
+        // dedupes by id on register).
+        assert_eq!(descs.len(), 2);
+        for desc in &descs {
+            let SchemaType::Struct { fields, .. } = &desc.schema else {
+                panic!("expected Struct");
+            };
+            assert_eq!(fields[0].name, "n");
+        }
+    }
+
+    #[test]
+    fn orphan_labels_record_ignored() {
+        // A labels record whose `kind_id` doesn't match any shape is
+        // harmlessly ignored. Future-proofs the reader against mixed
+        // manifests where a third-party emitter contributes labels
+        // for kinds not in this particular binary.
+        let shape = KindShape {
+            name: Cow::Borrowed("present"),
+            schema: SchemaShape::Unit,
+        };
+        let mut orphan = KindLabels {
+            // Deliberately a id that won't match `shape`.
+            kind_id: 0xDEADBEEF_DEADBEEF,
+            kind_label: Cow::Borrowed("my::Missing"),
+            root: LabelNode::Anonymous,
+        };
+        let mut canonical = Vec::new();
+        push_shape(&mut canonical, &shape);
+        let mut labels_bytes = Vec::new();
+        labels_bytes.push(0x03);
+        labels_bytes.extend(postcard::to_allocvec(&orphan).unwrap());
+        let wasm = wasm_with_two_sections(&canonical, &labels_bytes);
+        let descs = read_from_bytes(&wasm).unwrap();
+        assert_eq!(descs.len(), 1);
+        assert_eq!(descs[0].name, "present");
+        let _ = &mut orphan;
+    }
+
+    #[test]
+    fn sokoban_load_level_single_field_has_name() {
+        // Regression: `#[handlers]` retention historically wrote kinds
+        // records into `aether.kinds` without parallel labels records
+        // into `aether.kinds.labels`, desyncing the old by-index
+        // pairing. `demo.sokoban.load_level`'s single `id` field came
+        // back with an empty name, blocking hub encode-from-params
+        // for that kind. With by-id pairing + parallel labels
+        // retention the field name survives all emitter
+        // configurations. Skipped when the wasm isn't built.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/wasm32-unknown-unknown/release/aether_demo_sokoban.wasm"
+        );
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!("skipping: sokoban wasm not built at {path}");
+            return;
+        };
+        let descs = read_from_bytes(&bytes).expect("decode");
+        let load_level = descs
+            .iter()
+            .find(|d| d.name == "demo.sokoban.load_level")
+            .expect("load_level descriptor present");
+        let SchemaType::Struct { fields, repr_c } = &load_level.schema else {
+            panic!("expected Struct, got {:?}", load_level.schema);
+        };
+        assert!(*repr_c);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name, "id");
+    }
+
+    #[test]
     fn enum_shape_merges_variants_and_field_names() {
         let shape = KindShape {
             name: Cow::Borrowed("test.result"),
@@ -512,7 +692,8 @@ mod tests {
                 ],
             },
         };
-        let labels = KindLabels {
+        let mut labels = KindLabels {
+            kind_id: 0,
             kind_label: Cow::Borrowed("my::Outcome"),
             root: LabelNode::Enum {
                 type_label: Some(Cow::Borrowed("my::Outcome")),
@@ -532,10 +713,10 @@ mod tests {
                 ]),
             },
         };
-        let mut canonical = vec![0x02u8];
-        canonical.extend(postcard::to_allocvec(&shape).unwrap());
-        let mut labels_bytes = vec![0x02u8];
-        labels_bytes.extend(postcard::to_allocvec(&labels).unwrap());
+        let mut canonical = Vec::new();
+        push_shape(&mut canonical, &shape);
+        let mut labels_bytes = Vec::new();
+        push_labels(&mut labels_bytes, &shape, &mut labels);
         let wasm = wasm_with_two_sections(&canonical, &labels_bytes);
         let descs = read_from_bytes(&wasm).unwrap();
         let SchemaType::Enum { variants } = &descs[0].schema else {
@@ -587,7 +768,8 @@ mod tests {
         };
         // Array's child goes through a LabelCell::Owned because we
         // build it at runtime here. Derive-time would use Static.
-        let labels = KindLabels {
+        let mut labels = KindLabels {
+            kind_id: 0,
             kind_label: Cow::Borrowed("my::Triangle"),
             root: LabelNode::Struct {
                 type_label: Some(Cow::Borrowed("my::Triangle")),
@@ -595,10 +777,10 @@ mod tests {
                 fields: Cow::Owned(vec![LabelNode::Array(LabelCell::owned(vertex_labels))]),
             },
         };
-        let mut canonical = vec![0x02u8];
-        canonical.extend(postcard::to_allocvec(&shape).unwrap());
-        let mut labels_bytes = vec![0x02u8];
-        labels_bytes.extend(postcard::to_allocvec(&labels).unwrap());
+        let mut canonical = Vec::new();
+        push_shape(&mut canonical, &shape);
+        let mut labels_bytes = Vec::new();
+        push_labels(&mut labels_bytes, &shape, &mut labels);
         let wasm = wasm_with_two_sections(&canonical, &labels_bytes);
         let descs = read_from_bytes(&wasm).unwrap();
         let SchemaType::Struct { fields, .. } = &descs[0].schema else {

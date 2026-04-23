@@ -7,7 +7,8 @@ use crate::types::{KindLabels, LabelCell, LabelNode, VariantLabel};
 
 use super::primitives::{
     cow_label_nodes, cow_str_as_str, cow_strs, cow_variant_labels, option_str_len, str_len,
-    varint_usize_len, write_option_str, write_str, write_varint_usize,
+    varint_u64_len, varint_usize_len, write_option_str, write_str, write_varint_u64,
+    write_varint_usize,
 };
 
 const LABEL_ANONYMOUS: u8 = 0;
@@ -23,7 +24,9 @@ const VARIANT_LABEL_STRUCT: u8 = 2;
 
 /// Byte length for `KindLabels` postcard encoding.
 pub const fn canonical_len_labels(labels: &KindLabels) -> usize {
-    str_len(cow_str_as_str(&labels.kind_label)) + label_node_len(&labels.root)
+    varint_u64_len(labels.kind_id)
+        + str_len(cow_str_as_str(&labels.kind_label))
+        + label_node_len(&labels.root)
 }
 
 const fn label_node_len(node: &LabelNode) -> usize {
@@ -121,7 +124,8 @@ const fn variant_label_len(v: &VariantLabel) -> usize {
 /// Serialize `labels` into `N` bytes of canonical postcard form.
 pub const fn canonical_serialize_labels<const N: usize>(labels: &KindLabels) -> [u8; N] {
     let mut out = [0u8; N];
-    let mut pos = write_str(cow_str_as_str(&labels.kind_label), &mut out, 0);
+    let mut pos = write_varint_u64(labels.kind_id, &mut out, 0);
+    pos = write_str(cow_str_as_str(&labels.kind_label), &mut out, pos);
     pos = write_label_node(&labels.root, &mut out, pos);
     if pos != N {
         panic!("canonical_serialize_labels: size mismatch between len pass and serialize pass");
