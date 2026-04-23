@@ -17,6 +17,10 @@ aether-mail = { path = "../aether-mail", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { version = "1", default-features = false }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+# ADR-0040: `DropCtx::save_state_kind` / `PriorState::as_kind` bound
+# the typed state path on `serde::Serialize` / `DeserializeOwned`, and
+# the framing goes through postcard which is serde-driven end-to-end.
+serde = { version = "1", default-features = false, features = ["alloc"] }
 
 # Examples are standalone wasm cdylibs loaded via the substrate's
 # `load_component` control plane. Their dev-deps don't propagate to
@@ -24,6 +28,10 @@ postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 [dev-dependencies]
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { version = "1", features = ["derive"] }
+# ADR-0040 typed-state roundtrip tests derive `Serialize`/`Deserialize`
+# on fixture kinds; pull serde in as a dev-dep so tests don't rely on
+# the transitive re-export from aether-mail.
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 
 # ADR-0017 (component-to-component reply) smoke pair: caller sends
 # `demo.request` to "echoer" and observes the reply.

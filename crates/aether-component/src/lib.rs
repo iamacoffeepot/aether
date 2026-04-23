@@ -22,6 +22,14 @@
 //!     substrate hands it to the new instance via `on_rehydrate` with
 //!     a populated `PriorState<'_>`. Opt-in — components that don't
 //!     override either hook migrate nothing.
+//!   - ADR-0040: Kind-typed state on top of ADR-0016.
+//!     `DropCtx::save_state_kind::<K>` prepends `K::ID` to the
+//!     postcard encoding of `value` and writes the concatenation
+//!     through the unchanged host fn; `PriorState::as_kind::<K>`
+//!     reads the leading id and decodes on match, returning `None`
+//!     on mismatch so schema evolution (different `K::ID`) reboots
+//!     fresh. The raw `save_state` / `bytes()` API stays legal for
+//!     non-kind blobs and explicit migration flows.
 //!   - ADR-0013: Reply-to-sender. `Mail::sender()` returns `Some(ReplyTo)`
 //!     for mail that came from a Claude session; `Ctx::reply` takes a
 //!     `Sender` and a typed `KindId<K>` to answer the originating
@@ -50,7 +58,7 @@ extern crate alloc;
 use core::any::TypeId;
 use core::marker::PhantomData;
 
-use aether_mail::{Kind, mailbox_id_from_name};
+use aether_mail::{Kind, Schema, mailbox_id_from_name};
 
 pub mod raw;
 
@@ -237,9 +245,12 @@ pub trait Component: Sized + 'static {
 
     /// Called once on the old instance, immediately before a
     /// `replace_component` swap (ADR-0015 §3). Default is no-op;
-    /// override to serialize state (via `DropCtx::save_state`) that
-    /// the new instance can consume through `on_rehydrate`, or to
-    /// emit farewell mail. ADR-0016 §2 governs the save-bundle shape.
+    /// override to serialize state that the new instance can consume
+    /// through `on_rehydrate`, or to emit farewell mail. Prefer
+    /// `DropCtx::save_state_kind::<K>` (ADR-0040) to let the kind
+    /// system carry schema identity; reach for the raw
+    /// `DropCtx::save_state` only when persisting a non-kind blob or
+    /// driving an explicit migration off the leading id.
     fn on_replace(&mut self, ctx: &mut DropCtx<'_>) {
         let _ = ctx;
     }
@@ -256,10 +267,12 @@ pub trait Component: Sized + 'static {
 
     /// Called after `init` on a freshly-instantiated component that
     /// is replacing an older instance, if and only if the predecessor
-    /// produced a state bundle via `DropCtx::save_state` (ADR-0016 §3).
-    /// Default ignores the prior state; components that persist
-    /// across replace override to rehydrate and typically branch on
-    /// `prior.schema_version()`.
+    /// produced a state bundle via `DropCtx::save_state` (ADR-0016 §3)
+    /// or `DropCtx::save_state_kind` (ADR-0040). Default ignores the
+    /// prior state; components that persist across replace override to
+    /// rehydrate — typically `prior.as_kind::<MyState>()` for kind-
+    /// typed saves, or `prior.bytes()` + `prior.schema_version()` for
+    /// the raw path.
     fn on_rehydrate(&mut self, ctx: &mut Ctx<'_>, prior: PriorState<'_>) {
         let _ = ctx;
         let _ = prior;
@@ -535,6 +548,33 @@ impl DropCtx<'_> {
             panic!("aether-component: save_state failed (status {status})");
         }
     }
+
+    /// Persist a typed kind value across `replace_component`
+    /// (ADR-0040). The bundle is framed as `[0..8)` little-endian
+    /// `K::ID` followed by the postcard encoding of `value`; the
+    /// replacement instance recovers `K` via `PriorState::as_kind`.
+    ///
+    /// `K::ID` is the ADR-0030 schema hash — changing the shape of
+    /// `K` changes the id, which is what makes `as_kind::<K>`
+    /// automatically reject stale bytes after a schema evolution.
+    /// `version` is passed through to the substrate unchanged;
+    /// components typically leave it `0` since `K::ID` already
+    /// identifies the schema, but a non-zero value is legal for
+    /// components that want to stack a migration counter on top of
+    /// kind identity.
+    ///
+    /// Use the raw `save_state` when persisting bytes that aren't a
+    /// kind (external checkpoints, opaque buffers) or when driving an
+    /// explicit migration path that inspects the leading id itself.
+    pub fn save_state_kind<K>(&mut self, version: u32, value: &K)
+    where
+        K: Kind + Schema + serde::Serialize,
+    {
+        let mut out = alloc::vec::Vec::from(K::ID.to_le_bytes());
+        let payload = postcard::to_allocvec(value).expect("postcard encode to Vec is infallible");
+        out.extend_from_slice(&payload);
+        self.save_state(version, &out);
+    }
 }
 
 /// Opaque view of a prior state bundle handed to `on_rehydrate` by
@@ -578,6 +618,37 @@ impl<'a> PriorState<'a> {
         } else {
             unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len) }
         }
+    }
+
+    /// Decode the prior-state bundle as kind `K` (ADR-0040). Returns
+    /// `Some(K)` when the leading 8 bytes match `K::ID` (little-
+    /// endian) and the trailing bytes decode cleanly via postcard;
+    /// `None` on id mismatch, short buffer (fewer than 8 bytes), or
+    /// decode failure.
+    ///
+    /// Id mismatch is how schema evolution manifests: changing the
+    /// shape of `K` changes `K::ID`, so a replacement instance
+    /// compiled against the new schema sees `None` from the old
+    /// instance's save and boots fresh. Components that want to
+    /// migrate across a schema change can reach for `bytes()` +
+    /// `schema_version()` directly, or try `as_kind::<OldShape>()`
+    /// first and fall back if it returns `None`.
+    pub fn as_kind<K>(&self) -> Option<K>
+    where
+        K: Kind + Schema + serde::de::DeserializeOwned,
+    {
+        let bytes = self.bytes();
+        if bytes.len() < 8 {
+            return None;
+        }
+        let (id_bytes, payload) = bytes.split_at(8);
+        let mut id_arr = [0u8; 8];
+        id_arr.copy_from_slice(id_bytes);
+        let id = u64::from_le_bytes(id_arr);
+        if id != K::ID {
+            return None;
+        }
+        postcard::from_bytes(payload).ok()
     }
 }
 
@@ -1101,5 +1172,114 @@ mod tests {
         let mail = unsafe { Mail::__from_ptr_test(FakePod::ID, ptr_raw, 2, NO_REPLY_HANDLE) };
         let out = mail.decode_slice_typed::<FakePod>().unwrap();
         assert_eq!(out, &values);
+    }
+
+    // ADR-0040 typed-state framing. `DropCtx::save_state_kind` can't be
+    // exercised end-to-end on host (the underlying `raw::save_state`
+    // panics off-wasm, ADR-0015 §stub policy), so the tests below pair
+    // a hand-built bundle matching the documented framing
+    // (`[0..8) = K::ID LE`, `[8..) = postcard(value)`) against
+    // `PriorState::as_kind` — the one we *can* unit-test on host. A
+    // mismatch between framing and decode surfaces here before either
+    // diverges from the ADR's wire shape.
+    use alloc::vec::Vec;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(
+        aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
+    )]
+    #[kind(name = "test.state.struct")]
+    struct StateStruct {
+        tag: u32,
+        label: alloc::string::String,
+        items: Vec<u32>,
+    }
+
+    #[derive(
+        aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
+    )]
+    #[kind(name = "test.state.other")]
+    struct OtherState {
+        flag: bool,
+    }
+
+    fn frame_bundle<K: Kind + Schema + Serialize>(value: &K) -> Vec<u8> {
+        let mut out = Vec::from(K::ID.to_le_bytes());
+        let payload = postcard::to_allocvec(value).unwrap();
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    fn prior_from(buf: &[u8], version: u32) -> PriorState<'_> {
+        PriorState {
+            version,
+            ptr: buf.as_ptr().addr(),
+            len: buf.len(),
+            _borrow: PhantomData,
+        }
+    }
+
+    #[test]
+    fn as_kind_roundtrip() {
+        let value = StateStruct {
+            tag: 11,
+            label: alloc::string::String::from("phase-2"),
+            items: alloc::vec![1, 2, 3],
+        };
+        let buf = frame_bundle(&value);
+        let prior = prior_from(&buf, 0);
+        let decoded = prior.as_kind::<StateStruct>().unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn as_kind_id_mismatch_returns_none() {
+        // Frame under one kind, decode as a different one — the
+        // leading `K::ID` compare rejects before postcard runs.
+        let value = OtherState { flag: true };
+        let buf = frame_bundle(&value);
+        let prior = prior_from(&buf, 0);
+        assert!(prior.as_kind::<StateStruct>().is_none());
+    }
+
+    #[test]
+    fn as_kind_short_buffer_returns_none() {
+        // Buffer shorter than the 8-byte leading id — not a kind-
+        // typed save (or corrupt). Must not panic.
+        let buf: [u8; 3] = [1, 2, 3];
+        let prior = prior_from(&buf, 0);
+        assert!(prior.as_kind::<StateStruct>().is_none());
+    }
+
+    #[test]
+    fn as_kind_empty_buffer_returns_none() {
+        // `on_rehydrate` only fires when the predecessor saved
+        // something, but a hypothetical zero-length buffer must
+        // still fall through cleanly.
+        let prior = unsafe { PriorState::__from_raw(0, 0, 0) };
+        assert!(prior.as_kind::<StateStruct>().is_none());
+    }
+
+    #[test]
+    fn as_kind_correct_id_garbage_payload_returns_none() {
+        // Leading id matches but the postcard tail is truncated.
+        // Decode error must surface as None, not a panic.
+        let mut buf = Vec::from(StateStruct::ID.to_le_bytes());
+        buf.push(0xff);
+        let prior = prior_from(&buf, 0);
+        assert!(prior.as_kind::<StateStruct>().is_none());
+    }
+
+    #[test]
+    fn as_kind_preserves_raw_access_for_migration() {
+        // ADR-0040 keeps the raw bytes + version reachable so a
+        // component that sees `as_kind::<New>() = None` can pivot to
+        // an explicit migration path.
+        let value = OtherState { flag: false };
+        let buf = frame_bundle(&value);
+        let prior = prior_from(&buf, 7);
+        assert!(prior.as_kind::<StateStruct>().is_none());
+        assert_eq!(prior.schema_version(), 7);
+        assert_eq!(prior.bytes(), buf.as_slice());
     }
 }
