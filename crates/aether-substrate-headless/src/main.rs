@@ -158,20 +158,36 @@ fn main() -> wasmtime::Result<()> {
              _count: u32| {},
         ),
     );
-    // `aether.audio.*` per ADR-0039: headless has no audio device, so
-    // NoteOn / NoteOff / SetMasterGain are discarded. The sink keeps
-    // the mailbox resolvable so desktop-designed music components
-    // loaded on headless don't warn-storm. Phase 2 adds a loud reject
-    // path specifically for SetMasterGain on this chassis.
+    // `aether.audio.*` per ADR-0039 Phase 2. Headless has no audio
+    // device, so NoteOn / NoteOff are discarded silently (keeping the
+    // mailbox resolvable so desktop-designed music components loaded
+    // on headless don't warn-storm). SetMasterGain replies Err so
+    // agents attempting to control audio on a chassis that can't
+    // produce it fail fast rather than hang.
+    let kind_set_master_gain = boot
+        .registry
+        .kind_id(aether_kinds::SetMasterGain::NAME)
+        .expect("SetMasterGain registered");
+    let outbound_for_audio_sink = Arc::clone(&boot.outbound);
     boot.registry.register_sink(
         "audio",
         Arc::new(
-            |_kind_id: u64,
-             _kind_name: &str,
-             _origin: Option<&str>,
-             _sender,
-             _bytes: &[u8],
-             _count: u32| {},
+            move |kind_id: u64,
+                  _kind_name: &str,
+                  _origin: Option<&str>,
+                  sender,
+                  _bytes: &[u8],
+                  _count: u32| {
+                if kind_id == kind_set_master_gain {
+                    outbound_for_audio_sink.send_reply(
+                        sender,
+                        &aether_kinds::SetMasterGainResult::Err {
+                            error: "unsupported on headless chassis — no audio device".to_owned(),
+                        },
+                    );
+                }
+                // NoteOn / NoteOff fall through silently.
+            },
         ),
     );
 

@@ -21,6 +21,8 @@ aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-mail = { path = "../aether-mail" }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"
+cpal = "0.15"
+crossbeam-queue = "0.3"
 os_info = { version = "3", default-features = false }
 png = "0.17"
 pollster = "0.4.0"

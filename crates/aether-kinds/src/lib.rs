@@ -1038,6 +1038,18 @@ mod control_plane {
         Ok { title: String },
         Err { error: String },
     }
+
+    /// Reply to `SetMasterGain` (ADR-0039). `Ok` echoes the gain the
+    /// substrate actually applied — values above `1.0` are clamped, so
+    /// callers that sent `1.5` learn they got `1.0`. `Err` fires on
+    /// chassis without an audio device (headless, hub) or when audio
+    /// was disabled at boot via `AETHER_AUDIO_DISABLE`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.audio.set_master_gain_result")]
+    pub enum SetMasterGainResult {
+        Ok { applied_gain: f32 },
+        Err { error: String },
+    }
 }
 
 #[cfg(test)]
@@ -1143,6 +1155,10 @@ mod tests {
         assert_eq!(NoteOn::NAME, "aether.audio.note_on");
         assert_eq!(NoteOff::NAME, "aether.audio.note_off");
         assert_eq!(SetMasterGain::NAME, "aether.audio.set_master_gain");
+        assert_eq!(
+            SetMasterGainResult::NAME,
+            "aether.audio.set_master_gain_result"
+        );
     }
 
     #[test]
