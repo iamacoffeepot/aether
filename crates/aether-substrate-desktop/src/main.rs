@@ -336,7 +336,11 @@ fn handle_audio_mail(
     outbound: &HubOutbound,
 ) {
     if kind_id == kind_note_on {
-        let Ok(n) = bytemuck::try_from_bytes::<NoteOn>(bytes) else {
+        // Hub-delivered payloads arrive as un-aligned `Vec<u8>` slices
+        // from the reader thread's decode; `try_pod_read_unaligned`
+        // copies bytes rather than reinterpreting in place, matching
+        // how the camera sink reads its [f32; 16] payload.
+        let Ok(n) = bytemuck::try_pod_read_unaligned::<NoteOn>(bytes) else {
             tracing::warn!(
                 target: "aether_substrate::audio",
                 got = bytes.len(),
@@ -359,7 +363,7 @@ fn handle_audio_mail(
             }
         }
     } else if kind_id == kind_note_off {
-        let Ok(n) = bytemuck::try_from_bytes::<NoteOff>(bytes) else {
+        let Ok(n) = bytemuck::try_pod_read_unaligned::<NoteOff>(bytes) else {
             tracing::warn!(
                 target: "aether_substrate::audio",
                 got = bytes.len(),
@@ -381,7 +385,16 @@ fn handle_audio_mail(
             }
         }
     } else if kind_id == kind_set_master_gain {
-        let Ok(g) = bytemuck::try_from_bytes::<SetMasterGain>(bytes) else {
+        // f32 payload requires 4-byte alignment under `try_from_bytes`;
+        // hub-delivered Vec<u8> payloads have no alignment guarantee,
+        // so use the unaligned-read helper to avoid a spurious decode
+        // failure on non-aligned source bytes.
+        let Ok(g) = bytemuck::try_pod_read_unaligned::<SetMasterGain>(bytes) else {
+            tracing::warn!(
+                target: "aether_substrate::audio",
+                got = bytes.len(),
+                "set_master_gain: bad payload length, replying Err",
+            );
             outbound.send_reply(
                 sender,
                 &SetMasterGainResult::Err {
@@ -399,6 +412,12 @@ fn handle_audio_mail(
                     &SetMasterGainResult::Ok {
                         applied_gain: applied,
                     },
+                );
+                tracing::info!(
+                    target: "aether_substrate::audio",
+                    requested = g.gain,
+                    applied,
+                    "master gain set",
                 );
             }
             None => {
