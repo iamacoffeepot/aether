@@ -1,6 +1,6 @@
 # ADR-0039: Desktop MIDI synthesis and audio sink
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-23
 
 ## Context

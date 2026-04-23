@@ -390,6 +390,77 @@ pub struct PlayerStepResult {
     pub new_y: f32,
 }
 
+/// Start a note playing on the desktop chassis's MIDI synth (ADR-0039).
+/// `pitch` is a standard MIDI note number (0–127, middle C = 60).
+/// `velocity` is 0–127 (MIDI convention; 0 has the same effect as a
+/// `NoteOff`, but agents should prefer `NoteOff` for clarity).
+/// `instrument_id` indexes the substrate-resident instrument registry
+/// — v1 ships a fixed set; future patch-based instruments (Phase 2
+/// follow-up) will extend the id space without a wire change. The
+/// substrate keys the allocated voice by `(sender_mailbox, instrument_id,
+/// pitch)` so same-pitch notes from different senders or different
+/// instruments don't stomp each other. Fire-and-forget; no reply.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_mail::Kind,
+    aether_mail::Schema,
+)]
+#[kind(name = "aether.audio.note_on")]
+pub struct NoteOn {
+    pub pitch: u8,
+    pub velocity: u8,
+    pub instrument_id: u8,
+}
+
+/// Release a note previously started with `NoteOn`. The substrate
+/// matches on `(sender_mailbox, instrument_id, pitch)` — the sender
+/// is taken from the mail envelope, not carried in the payload. A
+/// `NoteOff` that doesn't match any live voice is silently ignored
+/// (normal during race windows between envelope release and late
+/// note-offs). Fire-and-forget; no reply.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_mail::Kind,
+    aether_mail::Schema,
+)]
+#[kind(name = "aether.audio.note_off")]
+pub struct NoteOff {
+    pub pitch: u8,
+    pub instrument_id: u8,
+}
+
+/// Set the substrate's master audio gain. `gain` is a linear scalar
+/// applied to the summed voice output before the cpal device buffer;
+/// `1.0` is unity, `0.0` mutes, values above `1.0` are clamped to
+/// avoid clipping. This is the only substrate-level gain control —
+/// per-source and bus-level attenuation are user-space concerns (ADR-0039).
+/// Desktop-only: headless and hub chassis reply with an
+/// `unsupported on <chassis>` error. Fire-and-forget in the happy path.
+#[repr(C)]
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+)]
+#[kind(name = "aether.audio.set_master_gain")]
+pub struct SetMasterGain {
+    pub gain: f32,
+}
+
 /// Request addressed to a component that supports the ADR-0013
 /// reply-to-sender smoke path. The component answers with `Pong`
 /// carrying the same `seq`; the round trip proves that a Claude
@@ -1069,6 +1140,9 @@ mod tests {
         assert_eq!(PlayerSetMode::NAME, "aether.player.set_mode");
         assert_eq!(PlayerRequestStep::NAME, "aether.player.request_step");
         assert_eq!(PlayerStepResult::NAME, "aether.player.step_result");
+        assert_eq!(NoteOn::NAME, "aether.audio.note_on");
+        assert_eq!(NoteOff::NAME, "aether.audio.note_off");
+        assert_eq!(SetMasterGain::NAME, "aether.audio.set_master_gain");
     }
 
     #[test]
