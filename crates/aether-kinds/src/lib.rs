@@ -1050,6 +1050,122 @@ mod control_plane {
         Ok { applied_gain: f32 },
         Err { error: String },
     }
+
+    // ADR-0041 substrate file I/O. Four request kinds on the `"io"`
+    // sink (read / write / delete / list), paired 1:1 with reply kinds
+    // that carry a structured `IoError` on failure. All postcard-
+    // shaped because every request carries String namespace/path
+    // fields and writes carry `Vec<u8>` bytes.
+    //
+    // `namespace` is the logical prefix without the `://`: mail
+    // carries `"save"`, not `"save://"`. Paths are relative to the
+    // namespace root; `..` and absolute prefixes are rejected at the
+    // adapter boundary as `IoError::Forbidden`.
+
+    /// Structured failure reason for an I/O request (ADR-0041 §1).
+    /// Components can pattern-match on the variant to decide whether
+    /// to retry (`AdapterError`), prompt the user (`NotFound`), or
+    /// surface a bug (`Forbidden` / `UnknownNamespace`). `AdapterError`
+    /// preserves backend-specific detail as free-form text — e.g.
+    /// permission-denied text from the OS, an HTTP status from a
+    /// future cloud adapter — without locking the enum shape to any
+    /// one backend.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum IoError {
+        NotFound,
+        Forbidden,
+        UnknownNamespace,
+        AdapterError(String),
+    }
+
+    /// `aether.io.read` — request the substrate read a file and reply
+    /// with its bytes. Mailed to the `"io"` sink; reply lands via
+    /// `reply_mail` as `ReadResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.io.read")]
+    pub struct Read {
+        pub namespace: String,
+        pub path: String,
+    }
+
+    /// Reply to `Read`. `Ok` carries the full file contents (the
+    /// adapter decides whether partial reads are permitted — v1's
+    /// local-file adapter is whole-file only). `Err` carries an
+    /// `IoError` variant.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.io.read_result")]
+    pub enum ReadResult {
+        Ok { bytes: Vec<u8> },
+        Err { error: IoError },
+    }
+
+    /// `aether.io.write` — request the substrate write `bytes` to
+    /// `namespace://path`. v1's local-file adapter stages to a
+    /// temporary sibling and `rename`s on success so a crash
+    /// mid-write leaves either the old contents or the new, never a
+    /// torn file. Reply: `WriteResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.io.write")]
+    pub struct Write {
+        pub namespace: String,
+        pub path: String,
+        pub bytes: Vec<u8>,
+    }
+
+    /// Reply to `Write`. `Ok` on success. `Err` carries an `IoError`
+    /// — `Forbidden` for read-only namespaces (e.g. `assets://`),
+    /// `AdapterError` for disk-full / permission / rename failures.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.io.write_result")]
+    pub enum WriteResult {
+        Ok,
+        Err { error: IoError },
+    }
+
+    /// `aether.io.delete` — request the substrate remove a file.
+    /// Missing files surface as `NotFound` (not silent success) so
+    /// callers that care about the distinction can tell; callers
+    /// that don't ignore it. Reply: `DeleteResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.io.delete")]
+    pub struct Delete {
+        pub namespace: String,
+        pub path: String,
+    }
+
+    /// Reply to `Delete`. `Ok` on successful removal. `Err` on any
+    /// adapter-reported failure, including `NotFound` for a file
+    /// that wasn't there to delete.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.io.delete_result")]
+    pub enum DeleteResult {
+        Ok,
+        Err { error: IoError },
+    }
+
+    /// `aether.io.list` — enumerate entries under `prefix` in
+    /// `namespace`. Shallow (no recursion) and prefix-filtered —
+    /// callers that want a tree walk paginate themselves. Empty
+    /// `prefix` lists the namespace root. Reply: `ListResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.io.list")]
+    pub struct List {
+        pub namespace: String,
+        pub prefix: String,
+    }
+
+    /// Reply to `List`. `Ok` carries the matching entry names —
+    /// bare file/dir names, not fully-qualified paths — so the caller
+    /// composes `{prefix}{entry}` when turning an entry back into a
+    /// read. Empty `Vec` means "namespace exists, nothing matched";
+    /// `Err { UnknownNamespace }` means the namespace itself wasn't
+    /// registered.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.io.list_result")]
+    pub enum ListResult {
+        Ok { entries: Vec<String> },
+        Err { error: IoError },
+    }
 }
 
 #[cfg(test)]
@@ -1159,6 +1275,14 @@ mod tests {
             SetMasterGainResult::NAME,
             "aether.audio.set_master_gain_result"
         );
+        assert_eq!(Read::NAME, "aether.io.read");
+        assert_eq!(ReadResult::NAME, "aether.io.read_result");
+        assert_eq!(Write::NAME, "aether.io.write");
+        assert_eq!(WriteResult::NAME, "aether.io.write_result");
+        assert_eq!(Delete::NAME, "aether.io.delete");
+        assert_eq!(DeleteResult::NAME, "aether.io.delete_result");
+        assert_eq!(List::NAME, "aether.io.list");
+        assert_eq!(ListResult::NAME, "aether.io.list_result");
     }
 
     #[test]
@@ -1248,6 +1372,92 @@ mod tests {
             assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U64));
             assert_eq!(fields[1].name, "triangles");
             assert_eq!(fields[1].ty, SchemaType::Scalar(Primitive::U64));
+        }
+    }
+
+    // ADR-0041 I/O kind roundtrips. Request types carry String /
+    // Vec<u8>, reply types are Ok/Err enums with the error arm
+    // wrapping `IoError`. postcard roundtrip proves the derived
+    // Serialize/Deserialize agree on the wire for each shape.
+    mod io_roundtrips {
+        use super::*;
+        use alloc::string::ToString;
+        use alloc::vec;
+
+        #[test]
+        fn read_request_roundtrip() {
+            let r = Read {
+                namespace: "save".to_string(),
+                path: "slot1.bin".to_string(),
+            };
+            let bytes = postcard::to_allocvec(&r).unwrap();
+            let back: Read = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(back.namespace, r.namespace);
+            assert_eq!(back.path, r.path);
+        }
+
+        #[test]
+        fn read_result_ok_roundtrip() {
+            let r = ReadResult::Ok {
+                bytes: vec![1, 2, 3, 4],
+            };
+            let bytes = postcard::to_allocvec(&r).unwrap();
+            let back: ReadResult = postcard::from_bytes(&bytes).unwrap();
+            match back {
+                ReadResult::Ok { bytes } => assert_eq!(bytes, vec![1, 2, 3, 4]),
+                ReadResult::Err { .. } => panic!("expected Ok"),
+            }
+        }
+
+        #[test]
+        fn read_result_err_roundtrip_preserves_io_error_variant() {
+            let r = ReadResult::Err {
+                error: IoError::NotFound,
+            };
+            let bytes = postcard::to_allocvec(&r).unwrap();
+            let back: ReadResult = postcard::from_bytes(&bytes).unwrap();
+            assert!(matches!(
+                back,
+                ReadResult::Err {
+                    error: IoError::NotFound
+                }
+            ));
+        }
+
+        #[test]
+        fn io_error_adapter_carries_payload() {
+            let e = IoError::AdapterError("disk full".to_string());
+            let bytes = postcard::to_allocvec(&e).unwrap();
+            let back: IoError = postcard::from_bytes(&bytes).unwrap();
+            match back {
+                IoError::AdapterError(msg) => assert_eq!(msg, "disk full"),
+                other => panic!("expected AdapterError, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn write_request_roundtrip() {
+            let w = Write {
+                namespace: "save".to_string(),
+                path: "state.bin".to_string(),
+                bytes: vec![0xde, 0xad, 0xbe, 0xef],
+            };
+            let bytes = postcard::to_allocvec(&w).unwrap();
+            let back: Write = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(back.bytes, vec![0xde, 0xad, 0xbe, 0xef]);
+        }
+
+        #[test]
+        fn list_result_ok_roundtrip_preserves_entry_order() {
+            let r = ListResult::Ok {
+                entries: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            };
+            let bytes = postcard::to_allocvec(&r).unwrap();
+            let back: ListResult = postcard::from_bytes(&bytes).unwrap();
+            match back {
+                ListResult::Ok { entries } => assert_eq!(entries, vec!["a", "b", "c"]),
+                ListResult::Err { .. } => panic!("expected Ok"),
+            }
         }
     }
 }

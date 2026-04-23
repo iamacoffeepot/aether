@@ -106,6 +106,7 @@ dependencies = [
  "aether-hub-protocol",
  "aether-mail",
  "bytemuck",
+ "postcard",
  "serde",
 ]
 

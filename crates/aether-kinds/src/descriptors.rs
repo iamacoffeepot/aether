@@ -18,14 +18,15 @@ use aether_hub_protocol::KindDescriptor;
 use aether_mail::{Kind, Schema};
 
 use crate::{
-    Camera, CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats,
-    Key, KeyRelease, LoadComponent, LoadResult, MouseButton, MouseMove, NoteOff, NoteOn,
-    OrbitSetDistance, OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping,
-    PlatformInfo, PlatformInfoResult, PlayerRequestStep, PlayerSetMode, PlayerSetPosition,
-    PlayerSetVelocity, PlayerStepResult, Pong, ReplaceComponent, ReplaceResult, SetMasterGain,
-    SetMasterGainResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
-    SubscribeInput, SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
-    UnsubscribeInput, WindowSize,
+    Camera, CaptureFrame, CaptureFrameResult, Delete, DeleteResult, DrawTriangle, DropComponent,
+    DropResult, FrameStats, Key, KeyRelease, List, ListResult, LoadComponent, LoadResult,
+    MouseButton, MouseMove, NoteOff, NoteOn, OrbitSetDistance, OrbitSetFov, OrbitSetPitch,
+    OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo, PlatformInfoResult,
+    PlayerRequestStep, PlayerSetMode, PlayerSetPosition, PlayerSetVelocity, PlayerStepResult, Pong,
+    Read, ReadResult, ReplaceComponent, ReplaceResult, SetMasterGain, SetMasterGainResult,
+    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeInput,
+    SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
+    UnsubscribeInput, WindowSize, Write, WriteResult,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -120,6 +121,19 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<NoteOff>(),
         schema::<SetMasterGain>(),
         schema::<SetMasterGainResult>(),
+        // Substrate file I/O (ADR-0041). Components mail Read / Write
+        // / Delete / List to the `io` sink with a namespace + path
+        // pair; the substrate resolves the namespace to an adapter
+        // (local file in v1) and replies with the paired `*Result`
+        // kind. Failure variants carry a structured `IoError`.
+        schema::<Read>(),
+        schema::<ReadResult>(),
+        schema::<Write>(),
+        schema::<WriteResult>(),
+        schema::<Delete>(),
+        schema::<DeleteResult>(),
+        schema::<List>(),
+        schema::<ListResult>(),
     ]
 }
 
@@ -158,6 +172,50 @@ mod tests {
         assert!(names.contains(&NoteOn::NAME));
         assert!(names.contains(&NoteOff::NAME));
         assert!(names.contains(&SetMasterGain::NAME));
+        assert!(names.contains(&Read::NAME));
+        assert!(names.contains(&ReadResult::NAME));
+        assert!(names.contains(&Write::NAME));
+        assert!(names.contains(&WriteResult::NAME));
+        assert!(names.contains(&Delete::NAME));
+        assert!(names.contains(&DeleteResult::NAME));
+        assert!(names.contains(&List::NAME));
+        assert!(names.contains(&ListResult::NAME));
+    }
+
+    #[test]
+    fn io_requests_are_postcard_schemas() {
+        // ADR-0041 §1: request kinds carry `String` namespace + path
+        // (and `Vec<u8>` bytes on `Write`), so they must serialize as
+        // non-cast structs. Catches an accidental `#[repr(C)]` +
+        // `Pod` derive that would silently flip the wire format.
+        let descs = all();
+        for name in [Read::NAME, Write::NAME, Delete::NAME, List::NAME] {
+            let d = descs.iter().find(|d| d.name == name).unwrap();
+            let SchemaType::Struct { repr_c, .. } = &d.schema else {
+                panic!("{name} should be Struct, got {:?}", d.schema);
+            };
+            assert!(!*repr_c, "{name} contains String/Vec, must be postcard");
+        }
+    }
+
+    #[test]
+    fn io_results_are_enum_schemas() {
+        // Each reply kind is an Ok/Err enum; `Err` wraps `IoError`,
+        // `Ok` shape varies per operation.
+        let descs = all();
+        for name in [
+            ReadResult::NAME,
+            WriteResult::NAME,
+            DeleteResult::NAME,
+            ListResult::NAME,
+        ] {
+            let d = descs.iter().find(|d| d.name == name).unwrap();
+            assert!(
+                matches!(d.schema, SchemaType::Enum { .. }),
+                "{name} should be Enum, got {:?}",
+                d.schema
+            );
+        }
     }
 
     #[test]
