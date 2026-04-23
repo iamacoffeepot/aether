@@ -874,6 +874,23 @@ fn main() -> wasmtime::Result<()> {
         );
     }
 
+    // `aether.audio.*`: Phase 1 stub per ADR-0039. The sink exists so
+    // components emitting NoteOn / NoteOff / SetMasterGain don't
+    // warn-drop, and so the mailbox name resolves on desktop chassis.
+    // Phase 2 wires a cpal stream + synth behind it via an SPSC queue;
+    // for now the handler discards every byte it receives.
+    boot.registry.register_sink(
+        "audio",
+        Arc::new(
+            |_kind_id: u64,
+             _kind_name: &str,
+             _origin: Option<&str>,
+             _sender,
+             _bytes: &[u8],
+             _count: u32| {},
+        ),
+    );
+
     // `aether.camera`: latest-value-wins sink. One payload is 64
     // bytes (4x4 f32 column-major view_proj). The render loop reads
     // the stored value each frame and uploads to the GPU uniform.

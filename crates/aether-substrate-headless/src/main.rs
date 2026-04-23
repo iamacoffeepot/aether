@@ -158,6 +158,22 @@ fn main() -> wasmtime::Result<()> {
              _count: u32| {},
         ),
     );
+    // `aether.audio.*` per ADR-0039: headless has no audio device, so
+    // NoteOn / NoteOff / SetMasterGain are discarded. The sink keeps
+    // the mailbox resolvable so desktop-designed music components
+    // loaded on headless don't warn-storm. Phase 2 adds a loud reject
+    // path specifically for SetMasterGain on this chassis.
+    boot.registry.register_sink(
+        "audio",
+        Arc::new(
+            |_kind_id: u64,
+             _kind_name: &str,
+             _origin: Option<&str>,
+             _sender,
+             _bytes: &[u8],
+             _count: u32| {},
+        ),
+    );
 
     let tick_hz = parse_tick_hz_env();
     let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));

@@ -19,12 +19,13 @@ use aether_mail::{Kind, Schema};
 
 use crate::{
     Camera, CaptureFrame, CaptureFrameResult, DrawTriangle, DropComponent, DropResult, FrameStats,
-    Key, KeyRelease, LoadComponent, LoadResult, MouseButton, MouseMove, OrbitSetDistance,
-    OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo,
-    PlatformInfoResult, PlayerRequestStep, PlayerSetMode, PlayerSetPosition, PlayerSetVelocity,
-    PlayerStepResult, Pong, ReplaceComponent, ReplaceResult, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult, SubscribeInput, SubscribeInputResult, Tick,
-    TopdownSetCenter, TopdownSetExtent, UnresolvedMail, UnsubscribeInput, WindowSize,
+    Key, KeyRelease, LoadComponent, LoadResult, MouseButton, MouseMove, NoteOff, NoteOn,
+    OrbitSetDistance, OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping,
+    PlatformInfo, PlatformInfoResult, PlayerRequestStep, PlayerSetMode, PlayerSetPosition,
+    PlayerSetVelocity, PlayerStepResult, Pong, ReplaceComponent, ReplaceResult, SetMasterGain,
+    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeInput,
+    SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
+    UnsubscribeInput, WindowSize,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -111,6 +112,13 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<PlayerSetMode>(),
         schema::<PlayerRequestStep>(),
         schema::<PlayerStepResult>(),
+        // Desktop MIDI synth (ADR-0039). Components emit `NoteOn` /
+        // `NoteOff` to the `audio` sink on desktop; `SetMasterGain`
+        // controls the substrate-level output scalar. Headless / hub
+        // nop the hot-path kinds and reject `SetMasterGain` loudly.
+        schema::<NoteOn>(),
+        schema::<NoteOff>(),
+        schema::<SetMasterGain>(),
     ]
 }
 
@@ -146,6 +154,9 @@ mod tests {
         assert!(names.contains(&SubscribeInput::NAME));
         assert!(names.contains(&UnsubscribeInput::NAME));
         assert!(names.contains(&SubscribeInputResult::NAME));
+        assert!(names.contains(&NoteOn::NAME));
+        assert!(names.contains(&NoteOff::NAME));
+        assert!(names.contains(&SetMasterGain::NAME));
     }
 
     #[test]
@@ -186,6 +197,9 @@ mod tests {
             FrameStats::NAME,
             Ping::NAME,
             Pong::NAME,
+            NoteOn::NAME,
+            NoteOff::NAME,
+            SetMasterGain::NAME,
         ] {
             let d = descs.iter().find(|d| d.name == name).unwrap();
             let SchemaType::Struct { repr_c, .. } = &d.schema else {
