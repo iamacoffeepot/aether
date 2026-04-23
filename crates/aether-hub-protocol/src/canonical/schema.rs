@@ -240,6 +240,17 @@ pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
     fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema))
 }
 
+/// Derive a `Kind::ID` from a decoded `KindShape`. Same hash as
+/// `kind_id_from_parts` — the canonical bytes format is
+/// `postcard(KindShape)`, so we postcard the shape directly without a
+/// `SchemaShape → SchemaType` detour. Used by `kind_manifest` to key
+/// labels records by id after decoding both sections off the wasm.
+pub fn kind_id_from_shape(shape: &crate::types::KindShape) -> u64 {
+    let bytes =
+        postcard::to_allocvec(shape).expect("canonical KindShape serialization is infallible");
+    fnv1a_64_prefixed(KIND_DOMAIN, &bytes)
+}
+
 /// FNV-1a 64 over `prefix ++ payload`, mirrored from
 /// `aether_mail::fnv1a_64_prefixed`. Duplicated here because
 /// `aether-mail` depends on `aether-hub-protocol`, not the other way

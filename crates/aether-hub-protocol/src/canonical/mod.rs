@@ -49,7 +49,7 @@ pub use labels::{canonical_len_labels, canonical_serialize_labels};
 pub use primitives::{varint_u32_len, varint_u64_len, varint_usize_len};
 pub use schema::{
     canonical_kind_bytes, canonical_len_kind, canonical_len_schema, canonical_serialize_kind,
-    canonical_serialize_schema, kind_id_from_parts,
+    canonical_serialize_schema, kind_id_from_parts, kind_id_from_shape,
 };
 
 #[cfg(test)]
@@ -274,6 +274,7 @@ mod tests {
     };
 
     static TRIANGLE_LABELS: KindLabels = KindLabels {
+        kind_id: 0,
         kind_label: Cow::Borrowed("my_crate::Triangle"),
         root: LabelNode::Struct {
             type_label: Some(Cow::Borrowed("my_crate::Triangle")),
@@ -291,6 +292,7 @@ mod tests {
     }
 
     static RESULT_LABELS: KindLabels = KindLabels {
+        kind_id: 0,
         kind_label: Cow::Borrowed("my_crate::Result"),
         root: LabelNode::Enum {
             type_label: Some(Cow::Borrowed("my_crate::Result")),

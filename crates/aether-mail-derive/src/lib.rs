@@ -136,6 +136,7 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // `&#labels_ident` see a stable `'static` reference.
         static #labels_ident: ::aether_mail::__derive_runtime::KindLabels =
             ::aether_mail::__derive_runtime::KindLabels {
+                kind_id: <#name as ::aether_mail::Kind>::ID,
                 kind_label: ::aether_mail::__derive_runtime::Cow::Borrowed(
                     ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
                 ),
@@ -167,7 +168,9 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         #[unsafe(link_section = "aether.kinds.labels")]
         static #kind_labels_static_ident: [u8; #labels_len_ident + 1] = {
             let mut out = [0u8; #labels_len_ident + 1];
-            out[0] = 0x02;
+            // v0x03: `KindLabels` gained `kind_id`, making records
+            // self-identifying. Reader pairs by id, not index.
+            out[0] = 0x03;
             let mut i = 0;
             while i < #labels_len_ident {
                 out[i + 1] = #labels_bytes_ident[i];
@@ -1119,12 +1122,32 @@ fn build_kinds_section_retention_statics(self_ty: &Type, handlers: &[HandlerFn])
             self_ty_hint,
             idx
         );
+        let labels_static_ident = quote::format_ident!(
+            "__AETHER_HANDLERS_KIND_LABELS_{}_{}",
+            self_ty_hint,
+            idx
+        );
+        let labels_len_ident = quote::format_ident!(
+            "__AETHER_HANDLERS_KIND_LABELS_LEN_{}_{}",
+            self_ty_hint,
+            idx
+        );
+        let labels_bytes_ident = quote::format_ident!(
+            "__AETHER_HANDLERS_KIND_LABELS_BYTES_{}_{}",
+            self_ty_hint,
+            idx
+        );
+        let labels_section_ident = quote::format_ident!(
+            "__AETHER_HANDLERS_KIND_LABELS_MANIFEST_{}_{}",
+            self_ty_hint,
+            idx
+        );
         quote! {
             // Mirrors the intermediate-static pattern in `expand_kind`
             // (mail-derive/src/lib.rs) so const-eval of the serializer
-            // sees a `&'static SchemaType` instead of materializing a
-            // temporary whose non-trivial Drop can't run at compile
-            // time.
+            // sees a `&'static SchemaType` / `&'static KindLabels`
+            // instead of materializing a temporary whose non-trivial
+            // Drop can't run at compile time.
             static #schema_ident: ::aether_component::__macro_internals::SchemaType =
                 <#k as ::aether_component::__macro_internals::Schema>::SCHEMA;
             const #len_ident: usize =
@@ -1146,6 +1169,49 @@ fn build_kinds_section_retention_statics(self_ty: &Type, handlers: &[HandlerFn])
                 let mut i = 0;
                 while i < #len_ident {
                     out[i + 1] = #bytes_ident[i];
+                    i += 1;
+                }
+                out
+            };
+
+            // Parallel labels retention. Without this, kinds defined
+            // in a dependency rlib (whose Kind-derive labels get
+            // stripped at rlib→cdylib) survive via `aether.kinds`
+            // retention but have no labels counterpart, and the
+            // reader can't reconstruct named fields — the symptom the
+            // by-id pairing replaced by-index pairing to avoid.
+            // `kind_label` falls back to the empty string for types
+            // without a `Schema::LABEL` (none today — every derived
+            // Kind sets one — but defensive against future hand-rolled
+            // Schema impls).
+            static #labels_static_ident: ::aether_component::__macro_internals::KindLabels =
+                ::aether_component::__macro_internals::KindLabels {
+                    kind_id: <#k as ::aether_component::__macro_internals::Kind>::ID,
+                    kind_label: ::aether_component::__macro_internals::Cow::Borrowed(
+                        match <#k as ::aether_component::__macro_internals::Schema>::LABEL {
+                            ::core::option::Option::Some(s) => s,
+                            ::core::option::Option::None => "",
+                        },
+                    ),
+                    root: <#k as ::aether_component::__macro_internals::Schema>::LABEL_NODE,
+                };
+            const #labels_len_ident: usize =
+                ::aether_component::__macro_internals::canonical::canonical_len_labels(
+                    &#labels_static_ident,
+                );
+            const #labels_bytes_ident: [u8; #labels_len_ident] =
+                ::aether_component::__macro_internals::canonical::canonical_serialize_labels::<#labels_len_ident>(
+                    &#labels_static_ident,
+                );
+            #[cfg(target_arch = "wasm32")]
+            #[used]
+            #[unsafe(link_section = "aether.kinds.labels")]
+            static #labels_section_ident: [u8; #labels_len_ident + 1] = {
+                let mut out = [0u8; #labels_len_ident + 1];
+                out[0] = 0x03;
+                let mut i = 0;
+                while i < #labels_len_ident {
+                    out[i + 1] = #labels_bytes_ident[i];
                     i += 1;
                 }
                 out
