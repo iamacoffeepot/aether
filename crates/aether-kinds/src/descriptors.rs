@@ -23,8 +23,8 @@ use crate::{
     OrbitSetDistance, OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping,
     PlatformInfo, PlatformInfoResult, PlayerRequestStep, PlayerSetMode, PlayerSetPosition,
     PlayerSetVelocity, PlayerStepResult, Pong, ReplaceComponent, ReplaceResult, SetMasterGain,
-    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeInput,
-    SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
+    SetMasterGainResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
+    SubscribeInput, SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
     UnsubscribeInput, WindowSize,
 };
 
@@ -119,6 +119,7 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<NoteOn>(),
         schema::<NoteOff>(),
         schema::<SetMasterGain>(),
+        schema::<SetMasterGainResult>(),
     ]
 }
 

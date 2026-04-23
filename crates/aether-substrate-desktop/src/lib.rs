@@ -13,6 +13,7 @@
 //! `[[bin]]` override in Cargo.toml) so `spawn_substrate` paths and
 //! existing tool scripts keep resolving it.
 
+pub mod audio;
 pub mod capture;
 pub mod chassis;
 
