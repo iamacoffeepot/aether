@@ -32,7 +32,7 @@ use aether_substrate_desktop::{
     Scheduler, SubstrateBoot, UserEvent,
     audio::{self, AudioEvent, AudioEventSender},
     chassis_control_handler,
-    mail::{Mail, MailboxId, ReplyTo},
+    mail::{Mail, MailboxId, ReplyTarget, ReplyTo},
     subscribers_for,
 };
 use render::{Gpu, IDENTITY_VIEW_PROJ};
@@ -318,8 +318,8 @@ fn build_audio_pipeline() -> Option<audio::AudioPipeline> {
 /// audio sink in practice) collapse to id `0`, sharing one voice
 /// slot per (instrument, pitch).
 fn sender_mailbox_id(sender: ReplyTo) -> u64 {
-    match sender {
-        ReplyTo::EngineMailbox { mailbox_id, .. } => mailbox_id,
+    match sender.target {
+        ReplyTarget::EngineMailbox { mailbox_id, .. } => mailbox_id,
         _ => 0,
     }
 }

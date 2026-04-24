@@ -14,7 +14,7 @@ use aether_hub_protocol::{
     SessionToken, Uuid, Welcome, read_frame, write_frame,
 };
 use aether_substrate_desktop::{
-    HubClient, HubOutbound, Mailer, Registry, ReplyTo, Scheduler, mail::MailboxId,
+    HubClient, HubOutbound, Mailer, Registry, ReplyTarget, ReplyTo, Scheduler, mail::MailboxId,
 };
 
 /// Start a mock hub on a random port. Returns the bound address and a
@@ -160,6 +160,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
             payload: vec![1, 2, 3],
             count: 7,
             sender: alice,
+            correlation_id: 0,
         },
         MailFrame {
             recipient_name: "hello".into(),
@@ -167,6 +168,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
             payload: vec![],
             count: 1,
             sender: SessionToken::NIL,
+            correlation_id: 0,
         },
         MailFrame {
             recipient_name: "hello".into(),
@@ -174,6 +176,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
             payload: vec![9],
             count: 1,
             sender: SessionToken::NIL,
+            correlation_id: 0,
         },
     ] {
         write_frame(&mut stream, &HubToEngine::Mail(frame)).unwrap();
@@ -196,7 +199,10 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     assert_eq!(s.payload_lens, vec![3, 1]);
     assert_eq!(
         s.senders,
-        vec![ReplyTo::Session(alice), ReplyTo::Session(SessionToken::NIL)],
+        vec![
+            ReplyTo::to(ReplyTarget::Session(alice)),
+            ReplyTo::to(ReplyTarget::Session(SessionToken::NIL)),
+        ],
     );
     assert_eq!(recipient, MailboxId::from_name("hello"));
 
@@ -348,6 +354,7 @@ fn outbound_sends_reach_the_hub_wire() {
         kind_name: "aether.observation.ping".into(),
         payload: vec![1, 2, 3],
         origin: Some("physics".into()),
+        correlation_id: 0,
     })));
 
     // Read it back on the server side. Heartbeats may arrive too —
@@ -378,6 +385,7 @@ fn outbound_send_without_attach_is_noop() {
         kind_name: "aether.tick".into(),
         payload: vec![],
         origin: None,
+        correlation_id: 0,
     }));
     assert!(!ok);
 }

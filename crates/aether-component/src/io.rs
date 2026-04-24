@@ -105,7 +105,7 @@ pub fn list(namespace: &str, prefix: &str) {
     });
 }
 
-fn send<K: Kind + Serialize>(value: &K) {
+fn send<K: Kind + Serialize>(value: &K) -> u64 {
     let bytes = encode_postcard(value);
     unsafe {
         raw::send_mail(
@@ -115,6 +115,11 @@ fn send<K: Kind + Serialize>(value: &K) {
             bytes.len() as u32,
             1,
         );
+        // ADR-0042: capture the correlation the substrate just
+        // minted so the sync wrappers can filter on it. For the
+        // async helpers (`read` / `write` / `delete` / `list`),
+        // this is harmless noise — they don't wait.
+        raw::prev_correlation()
     }
 }
 
@@ -162,15 +167,18 @@ const LIST_REPLY_CAP: usize = 256 * 1024;
 /// calling component; other components on the same substrate are
 /// unaffected.
 ///
-/// Use for multi-step I/O where the state-machine cost of the
-/// async [`read`] + `#[handler] fn on_read_result` shape outweighs
-/// the single-tracked-component cost of a sync wait. ADR-0042.
+/// Uses ADR-0042 correlation to filter out stale replies: the
+/// substrate mints a fresh id for each `send_mail`, auto-echoes it
+/// on the reply, and the wrapper waits for *its* correlation
+/// specifically — not the first `ReadResult` to arrive. This fixes
+/// a footgun where a sync call could consume a prior async
+/// `io::read` reply that happened to be queued.
 pub fn read_sync(namespace: &str, path: &str, timeout_ms: u32) -> Result<Vec<u8>, SyncIoError> {
-    send(&Read {
+    let correlation = send(&Read {
         namespace: namespace.to_string(),
         path: path.to_string(),
     });
-    let reply: ReadResult = wait::<ReadResult>(timeout_ms, READ_REPLY_CAP)?;
+    let reply: ReadResult = wait::<ReadResult>(timeout_ms, READ_REPLY_CAP, correlation)?;
     match reply {
         ReadResult::Ok { bytes, .. } => Ok(bytes),
         ReadResult::Err { error, .. } => Err(SyncIoError::Io(error)),
@@ -186,12 +194,12 @@ pub fn write_sync(
     bytes: &[u8],
     timeout_ms: u32,
 ) -> Result<(), SyncIoError> {
-    send(&Write {
+    let correlation = send(&Write {
         namespace: namespace.to_string(),
         path: path.to_string(),
         bytes: bytes.to_vec(),
     });
-    match wait::<WriteResult>(timeout_ms, SMALL_REPLY_CAP)? {
+    match wait::<WriteResult>(timeout_ms, SMALL_REPLY_CAP, correlation)? {
         WriteResult::Ok { .. } => Ok(()),
         WriteResult::Err { error, .. } => Err(SyncIoError::Io(error)),
     }
@@ -201,11 +209,11 @@ pub fn write_sync(
 /// `Err(SyncIoError::Io(IoError::NotFound))` — callers that don't
 /// care about the distinction can `.ok()` and discard.
 pub fn delete_sync(namespace: &str, path: &str, timeout_ms: u32) -> Result<(), SyncIoError> {
-    send(&Delete {
+    let correlation = send(&Delete {
         namespace: namespace.to_string(),
         path: path.to_string(),
     });
-    match wait::<DeleteResult>(timeout_ms, SMALL_REPLY_CAP)? {
+    match wait::<DeleteResult>(timeout_ms, SMALL_REPLY_CAP, correlation)? {
         DeleteResult::Ok { .. } => Ok(()),
         DeleteResult::Err { error, .. } => Err(SyncIoError::Io(error)),
     }
@@ -219,20 +227,21 @@ pub fn list_sync(
     prefix: &str,
     timeout_ms: u32,
 ) -> Result<Vec<String>, SyncIoError> {
-    send(&List {
+    let correlation = send(&List {
         namespace: namespace.to_string(),
         prefix: prefix.to_string(),
     });
-    match wait::<ListResult>(timeout_ms, LIST_REPLY_CAP)? {
+    match wait::<ListResult>(timeout_ms, LIST_REPLY_CAP, correlation)? {
         ListResult::Ok { entries, .. } => Ok(entries),
         ListResult::Err { error, .. } => Err(SyncIoError::Io(error)),
     }
 }
 
 /// Allocate a `capacity`-sized scratch buffer in guest memory, park
-/// on `raw::wait_reply` for a mail of kind `K`, and postcard-decode
-/// the written bytes. Shared by every `*_sync` wrapper.
-fn wait<K>(timeout_ms: u32, capacity: usize) -> Result<K, SyncIoError>
+/// on `raw::wait_reply` for a mail of kind `K` with the given
+/// `expected_correlation`, and postcard-decode the written bytes.
+/// Shared by every `*_sync` wrapper.
+fn wait<K>(timeout_ms: u32, capacity: usize, expected_correlation: u64) -> Result<K, SyncIoError>
 where
     K: Kind + serde::de::DeserializeOwned,
 {
@@ -243,6 +252,7 @@ where
             buf.as_mut_ptr().addr() as u32,
             buf.len() as u32,
             timeout_ms,
+            expected_correlation,
         )
     };
     match rc {

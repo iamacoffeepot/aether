@@ -207,6 +207,7 @@ mod tests {
             payload: vec![],
             count: 1,
             sender,
+            correlation_id: 0,
         });
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
@@ -230,6 +231,7 @@ mod tests {
             kind_name: "aether.observation.ping".into(),
             payload: vec![1, 2, 3],
             origin: Some("physics".into()),
+            correlation_id: 0,
         });
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();
@@ -252,6 +254,7 @@ mod tests {
             kind_name: "aether.observation.world".into(),
             payload: vec![],
             origin: None,
+            correlation_id: 0,
         });
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).unwrap();

@@ -46,7 +46,7 @@ pub use hub_client::{
     HubClient, HubOutbound, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail,
 };
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
-pub use mail::{Mail, MailKind, MailboxId, ReplyTo};
+pub use mail::{Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 pub use mailer::Mailer;
 pub use registry::{MailboxEntry, Registry, SinkHandler};
 pub use scheduler::Scheduler;

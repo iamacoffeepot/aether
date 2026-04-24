@@ -31,7 +31,7 @@ use aether_hub_protocol::{
     MailByIdFrame, MailFrame, MailToEngineMailboxFrame, read_frame, write_frame,
 };
 
-use crate::mail::{Mail, ReplyTo};
+use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use crate::mailer::Mailer;
 use crate::registry::Registry;
 
@@ -108,14 +108,15 @@ impl HubOutbound {
                 return false;
             }
         };
-        match sender {
-            ReplyTo::Session(token) => self.send(EngineToHub::Mail(EngineMailFrame {
+        match sender.target {
+            ReplyTarget::Session(token) => self.send(EngineToHub::Mail(EngineMailFrame {
                 address: ClaudeAddress::Session(token),
                 kind_name: K::NAME.to_owned(),
                 payload,
                 origin: None,
+                correlation_id: sender.correlation_id,
             })),
-            ReplyTo::EngineMailbox {
+            ReplyTarget::EngineMailbox {
                 engine_id,
                 mailbox_id,
             } => self.send(EngineToHub::MailToEngineMailbox(MailToEngineMailboxFrame {
@@ -124,12 +125,13 @@ impl HubOutbound {
                 kind_id: K::ID,
                 payload,
                 count: 1,
+                correlation_id: sender.correlation_id,
             })),
             // `Component` replies route through `Mailer::send_reply`,
             // not the hub — silently drop if a caller misroutes one
             // here rather than introduce a second truth for where
             // local replies go.
-            ReplyTo::None | ReplyTo::Component(_) => false,
+            ReplyTarget::None | ReplyTarget::Component(_) => false,
         }
     }
 
@@ -283,7 +285,7 @@ pub fn dispatch_hub_to_engine_mail(frame: MailFrame, registry: &Registry, queue:
     };
     queue.push(
         Mail::new(recipient, kind, frame.payload, frame.count)
-            .with_reply_to(ReplyTo::Session(frame.sender)),
+            .with_reply_to(ReplyTo::to(ReplyTarget::Session(frame.sender))),
     );
 }
 

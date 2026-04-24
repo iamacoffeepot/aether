@@ -20,9 +20,9 @@
 
 use std::collections::HashMap;
 
-use aether_hub_protocol::{EngineId, SessionToken};
+use aether_hub_protocol::SessionToken;
 
-use crate::mail::MailboxId;
+use crate::mail::{MailboxId, ReplyTarget};
 
 /// Sentinel passed to the guest's `receive` shim when the inbound
 /// mail has no reply target (broadcast origin — ADR-0013 §1). A
@@ -31,24 +31,42 @@ use crate::mail::MailboxId;
 pub const NO_REPLY_HANDLE: u32 = u32::MAX;
 
 /// What a reply handle resolves to on the substrate side. The guest
-/// sees only the opaque `u32` — the variant is purely host-side so
-/// `reply_mail` can pick the right outbound route.
+/// sees only the opaque `u32` — the `target` variant lets `reply_mail`
+/// pick the right outbound route, and `correlation_id` carries the
+/// ADR-0042 correlation from the inbound mail so the reply's echo
+/// happens automatically when `reply_mail` constructs the outbound
+/// `ReplyTo`.
+///
+/// Invariant: `target` is never `ReplyTarget::None` — the table only
+/// allocates entries for mail that had a meaningful reply target.
+/// The shared enum stays convenient (same shape as envelope-level
+/// `ReplyTo.target`), at the cost of a dead `None` variant here.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ReplyEntry {
-    /// Reply routes over `HubOutbound` as a session-addressed frame.
-    Session(SessionToken),
-    /// Reply routes through the local `Mailer` as ordinary
-    /// component-to-component mail.
-    Component(MailboxId),
-    /// Reply routes over `HubOutbound` as
-    /// `EngineToHub::MailToEngineMailbox` (ADR-0037 Phase 2). The
-    /// hub forwards the frame to the target engine's connection as
-    /// `HubToEngine::MailById`; that engine's hub-client reader
-    /// resolves the mailbox id + kind locally and dispatches.
-    RemoteEngineMailbox {
-        engine_id: EngineId,
-        mailbox_id: u64,
-    },
+pub struct ReplyEntry {
+    pub target: ReplyTarget,
+    pub correlation_id: u64,
+}
+
+impl ReplyEntry {
+    /// Short constructor: `target` + `correlation_id`.
+    pub fn new(target: ReplyTarget, correlation_id: u64) -> Self {
+        Self {
+            target,
+            correlation_id,
+        }
+    }
+
+    /// Back-compat shim for call sites that used the pre-correlation
+    /// `ReplyEntry::Session(token)` form. Builds an entry with no
+    /// correlation.
+    pub fn session(token: SessionToken) -> Self {
+        Self::new(ReplyTarget::Session(token), 0)
+    }
+
+    /// Back-compat shim for `ReplyEntry::Component(mailbox)`.
+    pub fn component(mailbox: MailboxId) -> Self {
+        Self::new(ReplyTarget::Component(mailbox), 0)
+    }
 }
 
 /// Maintains the handle→entry map for one component instance.
@@ -101,13 +119,13 @@ mod tests {
     #[test]
     fn allocate_session_and_component_handles_roundtrip() {
         let mut t = ReplyTable::new();
-        let h_sess = t.allocate(ReplyEntry::Session(token(1)));
-        let h_comp = t.allocate(ReplyEntry::Component(MailboxId(42)));
+        let h_sess = t.allocate(ReplyEntry::session(token(1)));
+        let h_comp = t.allocate(ReplyEntry::component(MailboxId(42)));
         assert_ne!(h_sess, h_comp);
-        assert_eq!(t.resolve(h_sess), Some(ReplyEntry::Session(token(1))));
+        assert_eq!(t.resolve(h_sess), Some(ReplyEntry::session(token(1))));
         assert_eq!(
             t.resolve(h_comp),
-            Some(ReplyEntry::Component(MailboxId(42))),
+            Some(ReplyEntry::component(MailboxId(42)))
         );
     }
 
@@ -120,7 +138,7 @@ mod tests {
     #[test]
     fn resolve_unknown_handle_is_none() {
         let mut t = ReplyTable::new();
-        let _ = t.allocate(ReplyEntry::Session(token(7)));
+        let _ = t.allocate(ReplyEntry::session(token(7)));
         assert!(t.resolve(9999).is_none());
     }
 
@@ -128,10 +146,19 @@ mod tests {
     fn allocate_skips_sentinel_on_wrap() {
         let mut t = ReplyTable::new();
         t.next = NO_REPLY_HANDLE;
-        let h = t.allocate(ReplyEntry::Session(token(3)));
+        let h = t.allocate(ReplyEntry::session(token(3)));
         // First handle after the wrap is 0 — the sentinel is never
         // handed out.
         assert_eq!(h, 0);
         assert_ne!(h, NO_REPLY_HANDLE);
+    }
+
+    #[test]
+    fn allocate_preserves_correlation_id() {
+        let mut t = ReplyTable::new();
+        let entry = ReplyEntry::new(ReplyTarget::Session(token(5)), 0xCAFEBABE);
+        let h = t.allocate(entry);
+        let got = t.resolve(h).expect("resolves");
+        assert_eq!(got.correlation_id, 0xCAFEBABE);
     }
 }

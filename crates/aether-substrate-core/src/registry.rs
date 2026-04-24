@@ -28,7 +28,7 @@ use crate::mail::{MailboxId, ReplyTo};
 /// (`None` for substrate-core pushes with no sending mailbox, per
 /// ADR-0011), the remote origin of the mail per ADR-0008 / ADR-0037
 /// (`Sender::Session` for hub-inbound, `ReplyTo::EngineMailbox` for
-/// bubbled-up, `ReplyTo::None` for substrate-local), payload bytes,
+/// bubbled-up, `ReplyTo::NONE` for substrate-local), payload bytes,
 /// and the kind-implied count.
 pub type SinkHandler =
     Arc<dyn Fn(u64, &str, Option<&str>, ReplyTo, &[u8], u32) + Send + Sync + 'static>;
@@ -464,8 +464,8 @@ mod tests {
             panic!("expected sink")
         };
         // Test-side id is irrelevant — the handler ignores it.
-        h(0, "aether.tick", None, ReplyTo::None, &[], 7);
-        h(0, "aether.tick", Some("physics"), ReplyTo::None, &[], 3);
+        h(0, "aether.tick", None, ReplyTo::NONE, &[], 7);
+        h(0, "aether.tick", Some("physics"), ReplyTo::NONE, &[], 3);
         assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
 

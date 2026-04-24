@@ -2,7 +2,8 @@
 
 - **Status:** Proposed
 - **Date:** 2026-04-23
-- **Amended:** 2026-04-24 — retired the filter-slot + oneshot mechanism in §1 / §4 / §6 in favour of a drain-and-buffer loop over the component's mpsc inbox. See _Amendment history_ below.
+- **Amended:** 2026-04-24 — retired the filter-slot + oneshot mechanism in §1 / §4 / §6 in favour of a drain-and-buffer loop over the component's mpsc inbox.
+- **Amended:** 2026-04-24 — added per-component correlation ids on `ReplyTo` + `prev_correlation_p32` host fn, so the drain loop can filter out stale replies of the same kind. See _Amendment history_ below.
 
 ## Context
 
@@ -47,37 +48,42 @@ This ADR commits to a synchronous-mail-wait primitive in the host FFI and the gu
 
 ## Decision
 
-### 1. Host fn: `wait_reply_p32`
+### 1. Host fns: `wait_reply_p32` + `prev_correlation_p32`
 
-One new import on the `aether` module, a sibling to `send_mail_p32` / `reply_mail_p32`:
+Two new imports on the `aether` module, siblings to `send_mail_p32` / `reply_mail_p32`:
 
 ```rust
-// Guest signature (Rust-side in aether-component::raw)
+// Guest signatures (Rust-side in aether-component::raw)
 pub fn wait_reply_p32(
-    expected_kind: u64,    // K::ID to wait for
-    out_ptr: u32,          // component-memory buffer to write the reply payload into
-    out_cap: u32,          // buffer capacity
-    timeout_ms: u32,       // 0 = return immediately if nothing matches; max clamped below
+    expected_kind: u64,             // K::ID to wait for
+    out_ptr: u32,                   // component-memory buffer to write the reply payload into
+    out_cap: u32,                   // buffer capacity
+    timeout_ms: u32,                // 0 = poll (try_recv only); max clamped below
+    expected_correlation: u64,      // 0 = kind-only match; nonzero = filter on reply_to.correlation_id
 ) -> i32;
+
+pub fn prev_correlation_p32() -> u64;
 ```
 
-Return value encoding:
+Return value encoding for `wait_reply_p32`:
 
 - `>= 0` — bytes written to `out_ptr`. Reply decoded against `expected_kind`.
 - `-1` — timeout elapsed with no matching reply.
 - `-2` — reply matched but the payload exceeded `out_cap` (bytes were dropped; caller retries with a larger buffer).
 - `-3` — substrate tore the component down while it was waiting (drop/replace during a wait); the guest treats this as "abort whatever you were doing."
 
-Substrate side (**drain + buffer**): the component's mpsc Receiver moves onto `SubstrateCtx` so the host fn can drive it directly. `wait_reply_p32` loops:
+`prev_correlation_p32` returns the correlation id the substrate auto-minted for this component's most recent `send_mail`. `0` before any send. Sync wrappers call it immediately after a send to capture the id, then pass it as `expected_correlation` on the matching `wait_reply_p32` — `(kind, correlation)` uniquely picks *our* reply out of the inbox rather than whatever `kind`-matching mail happens to be queued.
+
+Substrate side (**drain + buffer + correlation**): the component's mpsc Receiver moves onto `SubstrateCtx` so the host fn can drive it directly. `wait_reply_p32` loops:
 
 1. Pop a mail from the inbox mpsc (`recv_timeout(remaining)` or `try_recv` when `timeout_ms == 0`).
-2. If the mail's kind id matches `expected_kind`, decode the payload into the guest buffer and return the byte count.
+2. Match: `m.kind == expected_kind && (expected_correlation == 0 || m.reply_to.correlation_id == expected_correlation)`. On match, decode into the guest buffer and return the byte count.
 3. Otherwise, push the mail onto a per-component FIFO **overflow buffer** and loop again.
 4. On timeout, return `-1`. Buffered non-matching mail stays in overflow — the dispatcher drains it before pulling anything new from the mpsc on its next iteration.
 
 This means **no re-entrant deliver calls**. The component is one thread; that thread is parked inside the host fn's drain loop; non-match mail accumulates in the overflow buffer while the wait is live. When the wait returns (match, timeout, or disconnect), the dispatcher loop resumes, drains the overflow first (so FIFO order is preserved across the wait), and only then pulls new mail from the mpsc.
 
-Nothing new is needed on the send side: `SubstrateCtx::send` / `Mailer::push` / `ComponentEntry::send` all stay exactly as they were pre-wait. A reply to a sink-bound request arrives in the same mpsc that carries every other piece of mail; the host fn's drain loop picks it up. That removes the ordering trap an earlier version of this ADR introduced with a separate filter slot — a wait-bearing flow (`send` → sink replies synchronously → reply lands in mpsc → guest calls `wait_reply_p32`) works regardless of when the guest decides to park, because the mail is already sitting where the host fn reads from.
+Nothing new is needed on the send side from the guest's perspective: `raw::send_mail` keeps its 5-arg signature. What *did* change under the hood: `SubstrateCtx::send` now mints a fresh `correlation_id` on every call via a per-component `Cell<u64>` counter (single-threaded per ADR-0038, so no atomic), attaches it to the outgoing `ReplyTo`, and stores the value where `prev_correlation_p32` can read it. `Mailer::send_reply` auto-echoes the incoming correlation on the reply envelope. Sink authors never touch correlation — the mailer does it. A reply to a sink-bound request arrives in the same mpsc that carries every other piece of mail; the host fn's drain loop picks it up by matching the stashed correlation. That removes both the ordering trap an earlier version of this ADR introduced with a separate filter slot *and* the stale-reply trap where a sync call could consume a prior async reply of the same kind.
 
 ### 2. SDK surface: scoped to substrate sinks
 
@@ -191,3 +197,13 @@ On `timeout_ms = 0`, the guest uses `try_recv` instead of `recv_timeout` — sem
 **Why.** The filter-slot design's ordering invariant — filter must be installed before the mail it's meant to match arrives — didn't survive contact with ADR-0041's synchronous sink dispatch. A component calling `io::read` via `send_mail` dispatches the io sink inline on the dispatcher thread; the sink replies before `send_mail` returns, landing the reply in the mpsc. Any subsequent `wait_reply_p32` that both installs the filter and waits is too late — the match is already past. The clean fixes were (a) split install and wait into two host fns, or (b) drain the mpsc from the host fn. (b) is simpler and has no ordering trap: the host fn reads exactly where mail lives, so there's no "install before the race starts" step to get wrong.
 
 **Backward compatibility.** No guest SDK had shipped a `wait_reply` caller yet; no components were using the FFI. The retired `FilterSlot` type, `ComponentEntry.filter_slot` field, and `SubstrateCtx::with_filter_slot` builder are removed. `wait_reply_p32`'s wasm import name and return encoding are unchanged — guest code compiled against its signature still links correctly, only the body changed.
+
+### 2026-04-24 — per-component correlation ids on ReplyTo
+
+**What changed.** `ReplyTo` refactored from an enum to `struct ReplyTo { target: ReplyTarget, correlation_id: u64 }`. Every reply-bearing wire shape grows a `correlation_id: u64`: `EngineMailFrame`, `MailFrame`, `MailToEngineMailboxFrame`, `EngineMailToHubSubstrateFrame`, `MailByIdFrame`. Substrate-side, `SubstrateCtx` gains a `Cell<u64>` per-component counter minted on every `send` and auto-echoed on replies by `Mailer::send_reply`. `wait_reply_p32` grows a 5th arg `expected_correlation: u64` (0 = kind-only). New host fn `prev_correlation_p32() -> u64` reads the last-minted id.
+
+**Why.** The original drain+buffer design matched incoming mail by kind only. A component that fires an async `io::read` and *then* calls `io::read_sync` (of the same kind) would have the sync wait consume the prior async reply — silent cross-wiring. No queue-draining scheme fixes this in general: a prior async reply can land during the wait, and a kind-only match can't distinguish it from "ours." Correlating each request to its own reply fixes it cleanly. Making the substrate mint correlations automatically (rather than pushing the responsibility to the SDK) keeps the Rust-level `SubstrateCtx::send` signature unchanged — guests opt into filtering by calling `prev_correlation` + `wait_reply` with the returned id.
+
+**Per-component vs global.** Counter lives on `SubstrateCtx`, which is rebuilt per instance. Two components' correlation ids don't collide by accident (mail routes to separate inboxes) but more importantly the id-space is clean — each component starts at 1. On `replace_component`, the counter resets because the `SubstrateCtx` is rebuilt; in-flight correlations belong to the old instance, not the mailbox.
+
+**Backward compatibility.** Wire-level: all `correlation_id` fields derive `#[serde(default)]` so deserializing a pre-amendment frame yields `0` (the "no correlation" sentinel), matching kind-only behavior. `ReplyTo` API: enum variant matches become struct-with-target matches; a dozen call sites swept in the same PR. `ReplyEntry` (in the reply table) likewise grew a `correlation_id` field so `reply_mail_p32` echoes it on the outgoing reply. No components had shipped against the pre-correlation SDK; this amendment lands alongside the `*_sync` wrappers that first use it.

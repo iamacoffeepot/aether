@@ -750,7 +750,7 @@ mod tests {
     }
 
     fn session_sender() -> ReplyTo {
-        ReplyTo::Session(SessionToken(Uuid::nil()))
+        ReplyTo::to(crate::mail::ReplyTarget::Session(SessionToken(Uuid::nil())))
     }
 
     /// Build a fully-wired `Mailer` connected to a fresh test
@@ -1125,7 +1125,7 @@ mod tests {
             <Read as Kind>::ID,
             Read::NAME,
             Some("test_caller"),
-            ReplyTo::Component(caller_mailbox),
+            ReplyTo::to(crate::mail::ReplyTarget::Component(caller_mailbox)),
             &req,
             1,
         );

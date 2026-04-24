@@ -46,6 +46,12 @@ pub(super) async fn deliver_one(
         payload,
         count: spec.count,
         sender,
+        // ADR-0042: MCP `send_mail` doesn't expose correlation
+        // today — tooling can still invoke sync-like flows by
+        // manually matching on echoed namespace + path per
+        // ADR-0041, and we can widen MCP later when a concrete
+        // need surfaces.
+        correlation_id: 0,
     });
     record
         .mail_tx

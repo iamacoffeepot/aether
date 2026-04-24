@@ -11,8 +11,7 @@ use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use wasmtime::{Caller, Linker};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
-use crate::mail::MailboxId;
-use crate::reply_table::ReplyEntry;
+use crate::mail::{MailboxId, ReplyTarget};
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
 /// `0` is success; non-zero values distinguish call-site errors
@@ -177,8 +176,12 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
             let Some(entry) = ctx.reply_table.resolve(sender) else {
                 return REPLY_UNKNOWN_HANDLE;
             };
-            match entry {
-                ReplyEntry::Session(token) => {
+            // ADR-0042: echo the inbound correlation on every reply
+            // path so a parked `wait_reply_p32` on the originator
+            // can filter its own reply out of a busy inbox.
+            let correlation = entry.correlation_id;
+            match entry.target {
+                ReplyTarget::Session(token) => {
                     let Some(kind_name) = ctx.registry.kind_name(kind) else {
                         return REPLY_KIND_NOT_FOUND;
                     };
@@ -188,9 +191,10 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                         kind_name,
                         payload,
                         origin,
+                        correlation_id: correlation,
                     }));
                 }
-                ReplyEntry::Component(mbox) => {
+                ReplyTarget::Component(mbox) => {
                     // Validate the kind id cheaply — the guest might
                     // have passed a bogus one and we'd rather return
                     // a meaningful status than silently enqueue mail
@@ -200,7 +204,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                     }
                     ctx.send(mbox, kind, payload, count);
                 }
-                ReplyEntry::RemoteEngineMailbox {
+                ReplyTarget::EngineMailbox {
                     engine_id,
                     mailbox_id,
                 } => {
@@ -221,8 +225,15 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                             kind_id: kind,
                             payload,
                             count,
+                            correlation_id: correlation,
                         },
                     ));
+                }
+                ReplyTarget::None => {
+                    // Shouldn't happen — `ReplyEntry`s only get
+                    // allocated for mail with a real reply target.
+                    // Treat as unknown-handle to avoid silent drops.
+                    return REPLY_UNKNOWN_HANDLE;
                 }
             }
             REPLY_OK
@@ -254,7 +265,8 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
          expected_kind: u64,
          out_ptr: u32,
          out_cap: u32,
-         timeout_ms: u32|
+         timeout_ms: u32,
+         expected_correlation: u64|
          -> i32 {
             let clamped = timeout_ms.min(MAX_WAIT_TIMEOUT_MS);
             let deadline = Instant::now() + Duration::from_millis(clamped as u64);
@@ -293,9 +305,18 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                         }
                     };
                     match recv {
-                        Ok(m) if m.kind == expected_kind => break m,
+                        Ok(m)
+                            if m.kind == expected_kind
+                                && (expected_correlation == 0
+                                    || m.reply_to.correlation_id == expected_correlation) =>
+                        {
+                            break m;
+                        }
                         Ok(m) => {
-                            // Non-match: to overflow, keep draining.
+                            // Non-match (wrong kind, or right kind but
+                            // not our correlation): park on overflow
+                            // so the dispatcher picks it up after we
+                            // unwind. ADR-0042 correlation filter.
                             ctx.inbox_overflow.lock().unwrap().push_back(m);
                         }
                         Err(RecvTimeoutError::Timeout) => return WAIT_TIMEOUT,
@@ -353,6 +374,20 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
 
             mail.payload.len() as i32
         },
+    )?;
+
+    // ADR-0042: read back the correlation id the substrate minted
+    // for this component's most recent `send_mail`. Sync SDK
+    // wrappers call this right after a send to capture the id,
+    // then pass it to `wait_reply_p32` so the drain loop picks out
+    // the matching reply among any prior async-request replies
+    // that share the same kind. Returns `0` (the
+    // `NO_CORRELATION` sentinel) before any send has been made;
+    // matches the "kind-only" fallback in `wait_reply_p32`.
+    linker.func_wrap(
+        "aether",
+        "prev_correlation_p32",
+        |caller: Caller<'_, SubstrateCtx>| -> u64 { caller.data().prev_correlation() },
     )?;
 
     Ok(())
