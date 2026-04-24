@@ -68,6 +68,7 @@ use core::marker::PhantomData;
 use aether_mail::{Kind, Schema, mailbox_id_from_name};
 
 pub mod io;
+pub mod net;
 pub mod raw;
 
 /// ADR-0033 attribute macros. Applied to `impl Component for C`
