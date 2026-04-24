@@ -24,6 +24,15 @@ unsafe extern "C" {
     pub fn reply_mail(sender: u32, kind: u64, ptr: u32, len: u32, count: u32) -> u32;
     #[link_name = "save_state_p32"]
     pub fn save_state(version: u32, ptr: u32, len: u32) -> u32;
+    /// ADR-0042: block the component thread until a mail whose kind
+    /// id matches `expected_kind` arrives in the inbox, then copy up
+    /// to `out_cap` bytes of its payload to `out_ptr`. Return codes:
+    /// `>= 0` = bytes written, `-1` = timeout, `-2` = payload larger
+    /// than `out_cap` (mail is re-parked on overflow for retry),
+    /// `-3` = substrate tore the component down mid-wait. `timeout_ms`
+    /// is clamped to 30s substrate-side.
+    #[link_name = "wait_reply_p32"]
+    pub fn wait_reply(expected_kind: u64, out_ptr: u32, out_cap: u32, timeout_ms: u32) -> i32;
 }
 
 /// # Safety
@@ -48,4 +57,17 @@ pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count:
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
     panic!("aether-component: save_state called on non-wasm target");
+}
+
+/// # Safety
+/// Host-target stub for the wasm `aether::wait_reply` import. Always
+/// panics — callers on non-wasm targets are misusing the SDK.
+#[cfg(not(target_arch = "wasm32"))]
+pub unsafe fn wait_reply(
+    _expected_kind: u64,
+    _out_ptr: u32,
+    _out_cap: u32,
+    _timeout_ms: u32,
+) -> i32 {
+    panic!("aether-component: wait_reply called on non-wasm target");
 }
