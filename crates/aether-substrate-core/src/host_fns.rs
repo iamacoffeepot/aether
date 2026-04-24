@@ -4,6 +4,10 @@
 // surface. Growth of this surface should be reviewed as deliberately
 // as any other architectural change.
 
+use std::sync::Arc;
+use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+use std::time::Duration;
+
 use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use wasmtime::{Caller, Linker};
 
@@ -38,6 +42,20 @@ pub const SAVE_STATE_OK: u32 = 0;
 pub const SAVE_STATE_NO_MEMORY: u32 = 1;
 pub const SAVE_STATE_OOB: u32 = 2;
 pub const SAVE_STATE_TOO_LARGE: u32 = 3;
+
+/// Sentinel return values for `wait_reply_p32` (ADR-0042 §1). A
+/// non-negative result is the number of payload bytes written to the
+/// guest's out buffer; negatives are disjoint error codes.
+pub const WAIT_TIMEOUT: i32 = -1;
+pub const WAIT_BUFFER_TOO_SMALL: i32 = -2;
+pub const WAIT_CANCELLED: i32 = -3;
+
+/// Upper bound on the `timeout_ms` arg to `wait_reply_p32` (ADR-0042
+/// §3). Matches `capture_frame`'s ceiling so any substrate-side bug
+/// can't park a component thread indefinitely. Guests that want a
+/// genuine "wait forever" pass this constant and accept the eventual
+/// `WAIT_TIMEOUT`.
+pub const MAX_WAIT_TIMEOUT_MS: u32 = 30_000;
 
 /// Register the substrate host functions on `linker`. Components that
 /// want these capabilities must be instantiated via a linker that this
@@ -215,6 +233,90 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     // `resolve_mailbox_p32` was retired in ADR-0029: mailbox ids are
     // now a deterministic hash of the mailbox name, computed on the
     // guest side. The corresponding host fn is gone.
+
+    // ADR-0042: synchronous mail wait. The guest parks on a reply
+    // whose kind id matches `expected_kind`; the scheduler's send
+    // path diverts matching mail to the waiter's oneshot (PR 1). On
+    // match we copy the payload into the guest's `out` buffer and
+    // return the byte count; non-negative return means "success,
+    // this many bytes written." Negative codes (`-1`/`-2`/`-3`)
+    // are the failure modes the ADR enumerates.
+    //
+    // The host fn blocks the dispatcher thread for the duration of
+    // the wait — under ADR-0038's actor-per-component model the
+    // dispatcher IS the component thread, so parking it is the
+    // whole mechanism. Mail pushed to this component during the
+    // wait either matches (handed to the oneshot) or queues in the
+    // mpsc (drains through `deliver` after the wait returns).
+    linker.func_wrap(
+        "aether",
+        "wait_reply_p32",
+        |mut caller: Caller<'_, SubstrateCtx>,
+         expected_kind: u64,
+         out_ptr: u32,
+         out_cap: u32,
+         timeout_ms: u32|
+         -> i32 {
+            let filter_slot = Arc::clone(&caller.data().filter_slot);
+            let rx = filter_slot.install(expected_kind);
+
+            let clamped = timeout_ms.min(MAX_WAIT_TIMEOUT_MS);
+            let recv = if clamped == 0 {
+                // ADR-0042 §6: `timeout_ms == 0` polls the oneshot
+                // once without parking — useful for "check if a
+                // reply already landed" without paying a
+                // scheduler round trip.
+                match rx.try_recv() {
+                    Ok(m) => Ok(m),
+                    Err(TryRecvError::Empty) => Err(RecvTimeoutError::Timeout),
+                    Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
+                }
+            } else {
+                rx.recv_timeout(Duration::from_millis(clamped as u64))
+            };
+
+            let mail = match recv {
+                Ok(m) => m,
+                Err(RecvTimeoutError::Timeout) => {
+                    // Clear eagerly so a late-arriving matching mail
+                    // doesn't consume the now-dead filter — `try_match`
+                    // would already recover the mail on a dead sender,
+                    // but clearing avoids that extra round trip for
+                    // every subsequent send until the next install.
+                    filter_slot.clear();
+                    return WAIT_TIMEOUT;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    // ADR-0042 §5: teardown cleared the slot before
+                    // dropping the sender. Nothing left to clean up.
+                    return WAIT_CANCELLED;
+                }
+            };
+
+            // Single-shot semantics: `try_match` took the filter out
+            // on the match that produced this mail. Nothing to clear.
+
+            if mail.payload.len() > out_cap as usize {
+                return WAIT_BUFFER_TOO_SMALL;
+            }
+
+            let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+                // Guest exports no memory; treat as buffer-unusable.
+                return WAIT_BUFFER_TOO_SMALL;
+            };
+            let start = out_ptr as usize;
+            let Some(end) = start.checked_add(mail.payload.len()) else {
+                return WAIT_BUFFER_TOO_SMALL;
+            };
+            let data = memory.data_mut(&mut caller);
+            if end > data.len() {
+                return WAIT_BUFFER_TOO_SMALL;
+            }
+            data[start..end].copy_from_slice(&mail.payload);
+
+            mail.payload.len() as i32
+        },
+    )?;
 
     Ok(())
 }

@@ -736,4 +736,183 @@ mod tests {
             "reply to dropped mailbox must not enqueue"
         );
     }
+
+    /// ADR-0042 `wait_reply_p32` host fn. The guest expects a reply
+    /// of kind `0xAAAA_AAAA_AAAA_AAAA`, writes a maximum of 64 bytes
+    /// starting at offset 600, and uses the mail's `count` field as
+    /// the `timeout_ms` argument so tests can vary it per invocation.
+    /// The host fn's return value (bytes written, or a negative
+    /// sentinel) lands at offset 700.
+    const WAT_SYNC_WAIT: &str = r#"
+        (module
+            (import "aether" "wait_reply_p32"
+                (func $wait (param i64 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+                i32.const 700
+                (call $wait
+                    (i64.const -6148914691236517206) ;; 0xAAAA_AAAA_AAAA_AAAA reinterpreted as i64
+                    (i32.const 600)                  ;; out_ptr
+                    (i32.const 64)                   ;; out_cap
+                    (local.get 2))                   ;; timeout_ms = count
+                i32.store
+                i32.const 0))
+    "#;
+
+    const SYNC_WAIT_EXPECTED_KIND: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+
+    /// Helper: build a trigger mail whose `count` field carries the
+    /// timeout_ms argument into the WAT. The `kind` is irrelevant —
+    /// the guest ignores it and passes a hardcoded `expected_kind` to
+    /// the host fn.
+    fn trigger_wait(timeout_ms: u32) -> Mail {
+        use crate::mail::MailboxId;
+        Mail::new(MailboxId(0), 0xBEEF, vec![], timeout_ms)
+    }
+
+    #[test]
+    fn wait_reply_returns_timeout_when_no_match_arrives() {
+        let mut component = instantiate(WAT_SYNC_WAIT);
+        component.deliver(&trigger_wait(10)).expect("deliver");
+
+        let result = component.read_u32(700) as i32;
+        assert_eq!(
+            result,
+            crate::host_fns::WAIT_TIMEOUT,
+            "no matching mail pushed — expected WAIT_TIMEOUT",
+        );
+    }
+
+    #[test]
+    fn wait_reply_poll_mode_returns_timeout_immediately() {
+        // timeout_ms = 0 → try_recv path; no pre-queued mail → -1.
+        let mut component = instantiate(WAT_SYNC_WAIT);
+        component.deliver(&trigger_wait(0)).expect("deliver");
+
+        let result = component.read_u32(700) as i32;
+        assert_eq!(result, crate::host_fns::WAIT_TIMEOUT);
+    }
+
+    #[test]
+    fn wait_reply_writes_payload_and_returns_byte_count_on_match() {
+        use std::thread;
+        use std::time::Duration;
+
+        use wasmtime::{Engine, Linker, Module};
+
+        use crate::host_fns;
+        use crate::mail::MailboxId as M;
+
+        let engine = Engine::default();
+        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        host_fns::register(&mut linker).expect("register host fns");
+        let wasm = wat::parse_str(WAT_SYNC_WAIT).expect("compile WAT");
+        let module = Module::new(&engine, &wasm).expect("compile module");
+        let ctx = ctx();
+        // Stash the filter slot before ctx moves into the component —
+        // the push thread matches against it directly.
+        let filter_slot = Arc::clone(&ctx.filter_slot);
+        let component =
+            Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
+
+        // Deliver on a worker so we can push the matching mail from
+        // this thread while the guest is parked in the host fn.
+        let handle = thread::spawn(move || {
+            let mut component = component;
+            component.deliver(&trigger_wait(1000)).expect("deliver");
+            component
+        });
+
+        // Nudge past the `install`+`recv_timeout` prelude. The filter
+        // has to be installed before `try_match` will route to it.
+        thread::sleep(Duration::from_millis(50));
+
+        let payload = vec![1, 2, 3, 4, 5];
+        filter_slot
+            .try_match(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload.clone(), 1))
+            .expect("match");
+
+        let mut component = handle.join().expect("worker panicked");
+        let result = component.read_u32(700) as i32;
+        assert_eq!(result, payload.len() as i32, "byte count returned");
+        assert_eq!(
+            component.read_bytes(600, payload.len()),
+            payload,
+            "payload copied into guest memory at out_ptr",
+        );
+    }
+
+    #[test]
+    fn wait_reply_returns_buffer_too_small_when_payload_exceeds_cap() {
+        use std::thread;
+        use std::time::Duration;
+
+        use wasmtime::{Engine, Linker, Module};
+
+        use crate::host_fns;
+        use crate::mail::MailboxId as M;
+
+        let engine = Engine::default();
+        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        host_fns::register(&mut linker).expect("register host fns");
+        let wasm = wat::parse_str(WAT_SYNC_WAIT).expect("compile WAT");
+        let module = Module::new(&engine, &wasm).expect("compile module");
+        let ctx = ctx();
+        let filter_slot = Arc::clone(&ctx.filter_slot);
+        let component =
+            Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
+
+        let handle = thread::spawn(move || {
+            let mut component = component;
+            component.deliver(&trigger_wait(1000)).expect("deliver");
+            component
+        });
+
+        thread::sleep(Duration::from_millis(50));
+
+        // WAT's out_cap is 64; push a 128-byte payload.
+        let payload = vec![0x7Fu8; 128];
+        filter_slot
+            .try_match(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload, 1))
+            .expect("match");
+
+        let mut component = handle.join().expect("worker panicked");
+        let result = component.read_u32(700) as i32;
+        assert_eq!(result, host_fns::WAIT_BUFFER_TOO_SMALL);
+    }
+
+    #[test]
+    fn wait_reply_returns_cancelled_when_slot_cleared() {
+        use std::thread;
+        use std::time::Duration;
+
+        use wasmtime::{Engine, Linker, Module};
+
+        use crate::host_fns;
+
+        let engine = Engine::default();
+        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        host_fns::register(&mut linker).expect("register host fns");
+        let wasm = wat::parse_str(WAT_SYNC_WAIT).expect("compile WAT");
+        let module = Module::new(&engine, &wasm).expect("compile module");
+        let ctx = ctx();
+        let filter_slot = Arc::clone(&ctx.filter_slot);
+        let component =
+            Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
+
+        let handle = thread::spawn(move || {
+            let mut component = component;
+            component.deliver(&trigger_wait(1000)).expect("deliver");
+            component
+        });
+
+        thread::sleep(Duration::from_millis(50));
+        // Teardown-style cancellation: clear the slot so the waiter
+        // observes a `Disconnected` on its oneshot.
+        filter_slot.clear();
+
+        let mut component = handle.join().expect("worker panicked");
+        let result = component.read_u32(700) as i32;
+        assert_eq!(result, host_fns::WAIT_CANCELLED);
+    }
 }
