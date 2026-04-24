@@ -22,6 +22,13 @@
 //!     substrate hands it to the new instance via `on_rehydrate` with
 //!     a populated `PriorState<'_>`. Opt-in — components that don't
 //!     override either hook migrate nothing.
+//!   - ADR-0041: Guest helpers for the substrate's file I/O sink.
+//!     `io::read` / `io::write` / `io::delete` / `io::list` build
+//!     the typed request kinds, postcard-encode them, and send to
+//!     the substrate's `"io"` mailbox. Replies arrive as the paired
+//!     `*Result` kinds — declare `#[handler]` methods to consume
+//!     them. See `io` module rustdoc for the typical save-loader
+//!     shape.
 //!   - ADR-0040: Kind-typed state on top of ADR-0016.
 //!     `DropCtx::save_state_kind::<K>` prepends `K::ID` to the
 //!     postcard encoding of `value` and writes the concatenation
@@ -60,6 +67,7 @@ use core::marker::PhantomData;
 
 use aether_mail::{Kind, Schema, mailbox_id_from_name};
 
+pub mod io;
 pub mod raw;
 
 /// ADR-0033 attribute macros. Applied to `impl Component for C`
