@@ -21,9 +21,8 @@
 //! 3. `terminate_substrate`, spawn another, observe the count
 //!    bumped by one.
 
-use aether_component::{Component, Ctx, InitCtx, handlers, io, raw};
+use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io, resolve_sink};
 use aether_kinds::{IoError, Tick};
-use aether_mail::{Kind, mailbox_id_from_name};
 
 /// Broadcast payload the Claude session (or any component listening
 /// on `hub.claude.broadcast`) reads to track counter progress. The
@@ -44,6 +43,10 @@ const SAVE_PATH: &str = "counter.bin";
 /// should complete in sub-ms; larger backends (future cloud adapter)
 /// would want a bigger budget.
 const IO_TIMEOUT_MS: u32 = 1_000;
+/// Broadcast sink — `hub.claude.broadcast` fans out to every
+/// attached Claude session. `Count` is postcard-shaped, so the send
+/// goes through `Sink::send_postcard`.
+const BROADCAST: Sink<Count> = resolve_sink::<Count>("hub.claude.broadcast");
 
 pub struct SaveCounter {
     initialized: bool,
@@ -76,8 +79,13 @@ impl Component for SaveCounter {
 
         let current = read_counter_or_zero();
         let next = current.saturating_add(1);
-        write_counter(next);
-        broadcast_count(next);
+        let _ = io::write_sync(
+            SAVE_NAMESPACE,
+            SAVE_PATH,
+            &next.to_le_bytes(),
+            IO_TIMEOUT_MS,
+        );
+        BROADCAST.send_postcard(&Count { count: next });
     }
 }
 
@@ -98,28 +106,5 @@ fn read_counter_or_zero() -> u64 {
         Ok(_) => 0,
         Err(io::SyncIoError::Io(IoError::NotFound)) => 0,
         Err(_) => 0,
-    }
-}
-
-fn write_counter(value: u64) {
-    let bytes = value.to_le_bytes();
-    let _ = io::write_sync(SAVE_NAMESPACE, SAVE_PATH, &bytes, IO_TIMEOUT_MS);
-}
-
-/// Emit `Count { count }` to `hub.claude.broadcast` so every
-/// attached Claude session observes the new value. Goes through
-/// `raw::send_mail` rather than `Sink::send` because the `Count`
-/// schema is postcard-shaped, not bytemuck-castable.
-fn broadcast_count(count: u64) {
-    let payload =
-        postcard::to_allocvec(&Count { count }).expect("postcard encode Count is infallible");
-    unsafe {
-        raw::send_mail(
-            mailbox_id_from_name("hub.claude.broadcast"),
-            <Count as Kind>::ID,
-            payload.as_ptr().addr() as u32,
-            payload.len() as u32,
-            1,
-        );
     }
 }

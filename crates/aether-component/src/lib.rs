@@ -208,6 +208,29 @@ impl<K: Kind + bytemuck::NoUninit> Sink<K> {
     }
 }
 
+impl<K: Kind + serde::Serialize> Sink<K> {
+    /// Send a single postcard-encoded payload. Sibling of [`Sink::send`]
+    /// for schema-shaped kinds (`#[derive(Schema, Serialize)]` — e.g.
+    /// `Count`, `SubscribeInput`, the `io::*` request kinds) that
+    /// aren't bytemuck-castable. The substrate's `count` field is 1.
+    ///
+    /// No `send_postcard_many` — postcard has no efficient contiguous
+    /// batch shape, so batch sends stay bytemuck-only. A component
+    /// that wants to fan out N postcard payloads calls this in a loop.
+    pub fn send_postcard(self, payload: &K) {
+        let bytes = postcard::to_allocvec(payload).expect("postcard encode to Vec is infallible");
+        unsafe {
+            raw::send_mail(
+                self.mailbox,
+                self.kind,
+                bytes.as_ptr().addr() as u32,
+                bytes.len() as u32,
+                1,
+            );
+        }
+    }
+}
+
 /// Resolve a kind, producing a typed id from the `const ID` the derive
 /// emits on the `Kind` impl. ADR-0030 Phase 2 made kind ids a pure
 /// function of `(name, schema)` at compile time — no host-fn round
@@ -366,17 +389,7 @@ impl InitCtx<'_> {
             stream,
             mailbox: self.mailbox,
         };
-        let bytes = postcard::to_allocvec(&payload).expect("SubscribeInput encode infallible");
-        let recipient = mailbox_id_from_name("aether.control");
-        unsafe {
-            raw::send_mail(
-                recipient,
-                <SubscribeInput as Kind>::ID,
-                bytes.as_ptr().addr() as u32,
-                bytes.len() as u32,
-                1,
-            );
-        }
+        resolve_sink::<SubscribeInput>("aether.control").send_postcard(&payload);
     }
 }
 
@@ -434,6 +447,13 @@ impl Ctx<'_> {
     /// Send a slice of payloads as a contiguous batch.
     pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payloads: &[K]) {
         sink.send_many(payloads);
+    }
+
+    /// Send a postcard-encoded payload. Sibling of [`Ctx::send`] for
+    /// schema-shaped kinds — same dispatch discipline (receive-time
+    /// capability), different wire shape.
+    pub fn send_postcard<K: Kind + serde::Serialize>(&self, sink: &Sink<K>, payload: &K) {
+        sink.send_postcard(payload);
     }
 
     /// Reply to the Claude session that originated the inbound mail
@@ -532,6 +552,12 @@ impl DropCtx<'_> {
     /// Send a slice of payloads during a shutdown hook.
     pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payloads: &[K]) {
         sink.send_many(payloads);
+    }
+
+    /// Send a postcard-encoded payload during a shutdown hook. Sibling
+    /// of [`DropCtx::send`] for schema-shaped kinds.
+    pub fn send_postcard<K: Kind + serde::Serialize>(&self, sink: &Sink<K>, payload: &K) {
+        sink.send_postcard(payload);
     }
 
     /// Deposit a migration bundle for the substrate to hand to the
