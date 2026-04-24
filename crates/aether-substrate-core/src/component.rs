@@ -3,14 +3,13 @@
 // written to the guest at a static `MAIL_OFFSET`; a guest-side
 // allocator is parked until an actual use case forces the question.
 
-use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
 use crate::mail::{Mail, ReplyTo};
 use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
-use crate::wait::FilterSlot;
 
 const MAIL_OFFSET: u32 = 1024;
 
@@ -215,14 +214,36 @@ impl Component {
         Ok(())
     }
 
-    /// Share the ADR-0042 sync-wait filter slot with the per-mailbox
-    /// scheduler entry. The slot is created by `SubstrateCtx::new`;
-    /// this method hands out a cloned `Arc` so the mailer's send path
-    /// (running on the pushing thread) and the host fn populating
-    /// the slot (running on the component's dispatcher thread) route
-    /// through the same instance.
-    pub fn filter_slot(&self) -> Arc<FilterSlot> {
-        Arc::clone(&self.store.data().filter_slot)
+    /// Install the mpsc `Receiver` the dispatcher will read from
+    /// (ADR-0042). Called by `ComponentEntry::spawn` right after the
+    /// mpsc pair is built; the host fn for `wait_reply_p32` later
+    /// drains the same receiver when a guest parks on a reply.
+    pub fn install_inbox_rx(&mut self, rx: Receiver<Mail>) {
+        self.store.data().install_inbox_rx(rx);
+    }
+
+    /// Pop the next mail for the dispatcher. Drains the overflow
+    /// buffer first (FIFO-preserved mail that a completed
+    /// `wait_reply_p32` set aside), then reads from the mpsc
+    /// receiver installed via `install_inbox_rx`. `None` means both
+    /// are empty and the inbox has been disconnected — the
+    /// dispatcher takes that as its exit signal.
+    pub fn next_mail(&mut self) -> Option<Mail> {
+        self.store.data().next_mail()
+    }
+
+    /// Push a mail onto this component's overflow buffer directly.
+    /// Test-only: lets unit tests seed the overflow and observe that
+    /// `next_mail` drains it before the mpsc. Production code only
+    /// feeds the overflow through `wait_reply_p32`'s drain path.
+    #[cfg(test)]
+    pub fn push_overflow_for_test(&mut self, mail: Mail) {
+        self.store
+            .data()
+            .inbox_overflow
+            .lock()
+            .unwrap()
+            .push_back(mail);
     }
 
     /// Read a `u32` from guest linear memory at `offset`. Test-only
@@ -776,9 +797,31 @@ mod tests {
         Mail::new(MailboxId(0), 0xBEEF, vec![], timeout_ms)
     }
 
+    /// Build a sync-wait component with an installed inbox so
+    /// `wait_reply_p32` has something to drain. Returns the
+    /// component + the `Sender<Mail>` the test can push matching /
+    /// non-matching mail through; drop the Sender to trigger
+    /// disconnect.
+    fn instantiate_sync_wait_with_inbox() -> (Component, std::sync::mpsc::Sender<Mail>) {
+        use std::sync::mpsc;
+
+        use wasmtime::{Engine, Linker, Module};
+
+        let engine = Engine::default();
+        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        crate::host_fns::register(&mut linker).expect("register host fns");
+        let wasm = wat::parse_str(WAT_SYNC_WAIT).expect("compile WAT");
+        let module = Module::new(&engine, &wasm).expect("compile module");
+        let mut component =
+            Component::instantiate(&engine, &linker, &module, ctx()).expect("instantiate");
+        let (tx, rx) = mpsc::channel::<Mail>();
+        component.install_inbox_rx(rx);
+        (component, tx)
+    }
+
     #[test]
     fn wait_reply_returns_timeout_when_no_match_arrives() {
-        let mut component = instantiate(WAT_SYNC_WAIT);
+        let (mut component, _tx) = instantiate_sync_wait_with_inbox();
         component.deliver(&trigger_wait(10)).expect("deliver");
 
         let result = component.read_u32(700) as i32;
@@ -792,7 +835,7 @@ mod tests {
     #[test]
     fn wait_reply_poll_mode_returns_timeout_immediately() {
         // timeout_ms = 0 → try_recv path; no pre-queued mail → -1.
-        let mut component = instantiate(WAT_SYNC_WAIT);
+        let (mut component, _tx) = instantiate_sync_wait_with_inbox();
         component.deliver(&trigger_wait(0)).expect("deliver");
 
         let result = component.read_u32(700) as i32;
@@ -804,39 +847,27 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        use wasmtime::{Engine, Linker, Module};
-
         use crate::host_fns;
         use crate::mail::MailboxId as M;
 
-        let engine = Engine::default();
-        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
-        host_fns::register(&mut linker).expect("register host fns");
-        let wasm = wat::parse_str(WAT_SYNC_WAIT).expect("compile WAT");
-        let module = Module::new(&engine, &wasm).expect("compile module");
-        let ctx = ctx();
-        // Stash the filter slot before ctx moves into the component —
-        // the push thread matches against it directly.
-        let filter_slot = Arc::clone(&ctx.filter_slot);
-        let component =
-            Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
+        let (component, tx) = instantiate_sync_wait_with_inbox();
 
-        // Deliver on a worker so we can push the matching mail from
-        // this thread while the guest is parked in the host fn.
+        // Deliver on a worker so we can push matching mail from
+        // this thread while the guest is parked inside the host
+        // fn's drain loop.
         let handle = thread::spawn(move || {
             let mut component = component;
             component.deliver(&trigger_wait(1000)).expect("deliver");
             component
         });
 
-        // Nudge past the `install`+`recv_timeout` prelude. The filter
-        // has to be installed before `try_match` will route to it.
+        // Nudge past the host fn's entry so the drain is already
+        // parked on recv_timeout before our mail hits the mpsc.
         thread::sleep(Duration::from_millis(50));
 
         let payload = vec![1, 2, 3, 4, 5];
-        filter_slot
-            .try_match(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload.clone(), 1))
-            .expect("match");
+        tx.send(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload.clone(), 1))
+            .expect("send matching mail");
 
         let mut component = handle.join().expect("worker panicked");
         let result = component.read_u32(700) as i32;
@@ -846,6 +877,39 @@ mod tests {
             payload,
             "payload copied into guest memory at out_ptr",
         );
+        let _ = host_fns::WAIT_TIMEOUT; // keep import live without warning
+    }
+
+    #[test]
+    fn wait_reply_buffers_non_matching_mail_into_overflow() {
+        // ADR-0042 drain loop: a non-matching mail arriving during
+        // the wait must end up on the overflow buffer so the
+        // dispatcher serves it ahead of new mpsc mail afterwards.
+        use std::thread;
+        use std::time::Duration;
+
+        use crate::mail::MailboxId as M;
+
+        let (component, tx) = instantiate_sync_wait_with_inbox();
+        let handle = thread::spawn(move || {
+            let mut component = component;
+            component.deliver(&trigger_wait(1000)).expect("deliver");
+            component
+        });
+
+        thread::sleep(Duration::from_millis(50));
+
+        // Non-match first; then the real reply.
+        tx.send(Mail::new(M(0), 0xDEAD_BEEF, vec![42], 1))
+            .expect("send non-match");
+        tx.send(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, vec![7], 1))
+            .expect("send match");
+
+        let component = handle.join().expect("worker panicked");
+        // Match drained cleanly; the non-match should now be sitting
+        // in overflow, waiting for the dispatcher to pick it up.
+        let overflow_len = component.store.data().inbox_overflow.lock().unwrap().len();
+        assert_eq!(overflow_len, 1, "non-match mail should be buffered");
     }
 
     #[test]
@@ -853,21 +917,10 @@ mod tests {
         use std::thread;
         use std::time::Duration;
 
-        use wasmtime::{Engine, Linker, Module};
-
         use crate::host_fns;
         use crate::mail::MailboxId as M;
 
-        let engine = Engine::default();
-        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
-        host_fns::register(&mut linker).expect("register host fns");
-        let wasm = wat::parse_str(WAT_SYNC_WAIT).expect("compile WAT");
-        let module = Module::new(&engine, &wasm).expect("compile module");
-        let ctx = ctx();
-        let filter_slot = Arc::clone(&ctx.filter_slot);
-        let component =
-            Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
-
+        let (component, tx) = instantiate_sync_wait_with_inbox();
         let handle = thread::spawn(move || {
             let mut component = component;
             component.deliver(&trigger_wait(1000)).expect("deliver");
@@ -878,9 +931,8 @@ mod tests {
 
         // WAT's out_cap is 64; push a 128-byte payload.
         let payload = vec![0x7Fu8; 128];
-        filter_slot
-            .try_match(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload, 1))
-            .expect("match");
+        tx.send(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload, 1))
+            .expect("send matching-but-too-big mail");
 
         let mut component = handle.join().expect("worker panicked");
         let result = component.read_u32(700) as i32;
@@ -888,24 +940,13 @@ mod tests {
     }
 
     #[test]
-    fn wait_reply_returns_cancelled_when_slot_cleared() {
+    fn wait_reply_returns_cancelled_when_sender_drops() {
         use std::thread;
         use std::time::Duration;
 
-        use wasmtime::{Engine, Linker, Module};
-
         use crate::host_fns;
 
-        let engine = Engine::default();
-        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
-        host_fns::register(&mut linker).expect("register host fns");
-        let wasm = wat::parse_str(WAT_SYNC_WAIT).expect("compile WAT");
-        let module = Module::new(&engine, &wasm).expect("compile module");
-        let ctx = ctx();
-        let filter_slot = Arc::clone(&ctx.filter_slot);
-        let component =
-            Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
-
+        let (component, tx) = instantiate_sync_wait_with_inbox();
         let handle = thread::spawn(move || {
             let mut component = component;
             component.deliver(&trigger_wait(1000)).expect("deliver");
@@ -913,9 +954,10 @@ mod tests {
         });
 
         thread::sleep(Duration::from_millis(50));
-        // Teardown-style cancellation: clear the slot so the waiter
-        // observes a `Disconnected` on its oneshot.
-        filter_slot.clear();
+        // Teardown-style cancellation under the drain+buffer design
+        // is "drop the mpsc Sender" — the host fn's recv_timeout
+        // wakes with Disconnected.
+        drop(tx);
 
         let mut component = handle.join().expect("worker panicked");
         let result = component.read_u32(700) as i32;

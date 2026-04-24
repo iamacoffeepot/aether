@@ -4,9 +4,8 @@
 // surface. Growth of this surface should be reviewed as deliberately
 // as any other architectural change.
 
-use std::sync::Arc;
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use wasmtime::{Caller, Linker};
@@ -234,20 +233,20 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     // now a deterministic hash of the mailbox name, computed on the
     // guest side. The corresponding host fn is gone.
 
-    // ADR-0042: synchronous mail wait. The guest parks on a reply
-    // whose kind id matches `expected_kind`; the scheduler's send
-    // path diverts matching mail to the waiter's oneshot (PR 1). On
-    // match we copy the payload into the guest's `out` buffer and
-    // return the byte count; non-negative return means "success,
-    // this many bytes written." Negative codes (`-1`/`-2`/`-3`)
-    // are the failure modes the ADR enumerates.
+    // ADR-0042: synchronous mail wait via drain + buffer. The host
+    // fn drains the component's own mpsc inbox in a loop (the same
+    // `Receiver<Mail>` the dispatcher reads from — moved onto
+    // `SubstrateCtx` at spawn so both sides can reach it). Matching
+    // mail is copied into the guest's `out` buffer and returned as
+    // a byte count; non-matching mail is pushed onto the component's
+    // overflow buffer, where the dispatcher drains it FIFO-ahead of
+    // the mpsc on its next pass. Timeout → `-1`. Reply too big →
+    // `-2`. Inbox disconnected (teardown) → `-3`.
     //
-    // The host fn blocks the dispatcher thread for the duration of
-    // the wait — under ADR-0038's actor-per-component model the
-    // dispatcher IS the component thread, so parking it is the
-    // whole mechanism. Mail pushed to this component during the
-    // wait either matches (handed to the oneshot) or queues in the
-    // mpsc (drains through `deliver` after the wait returns).
+    // The drain runs on the dispatcher thread because the guest's
+    // host call IS the dispatcher (ADR-0038 actor-per-component).
+    // Other senders keep pushing into the mpsc during the wait;
+    // non-match accumulates in overflow until drain returns.
     linker.func_wrap(
         "aether",
         "wait_reply_p32",
@@ -257,59 +256,97 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
          out_cap: u32,
          timeout_ms: u32|
          -> i32 {
-            let filter_slot = Arc::clone(&caller.data().filter_slot);
-            let rx = filter_slot.install(expected_kind);
-
             let clamped = timeout_ms.min(MAX_WAIT_TIMEOUT_MS);
-            let recv = if clamped == 0 {
-                // ADR-0042 §6: `timeout_ms == 0` polls the oneshot
-                // once without parking — useful for "check if a
-                // reply already landed" without paying a
-                // scheduler round trip.
-                match rx.try_recv() {
-                    Ok(m) => Ok(m),
-                    Err(TryRecvError::Empty) => Err(RecvTimeoutError::Timeout),
-                    Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
-                }
-            } else {
-                rx.recv_timeout(Duration::from_millis(clamped as u64))
-            };
+            let deadline = Instant::now() + Duration::from_millis(clamped as u64);
 
-            let mail = match recv {
-                Ok(m) => m,
-                Err(RecvTimeoutError::Timeout) => {
-                    // Clear eagerly so a late-arriving matching mail
-                    // doesn't consume the now-dead filter — `try_match`
-                    // would already recover the mail on a dead sender,
-                    // but clearing avoids that extra round trip for
-                    // every subsequent send until the next install.
-                    filter_slot.clear();
-                    return WAIT_TIMEOUT;
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    // ADR-0042 §5: teardown cleared the slot before
-                    // dropping the sender. Nothing left to clean up.
+            // Drain loop. The inbox receiver lives on the ctx
+            // (`inbox_rx`); we lock it for the duration of this
+            // call. The same thread that owns the dispatcher is
+            // the thread running this host fn, so nobody else is
+            // contending for the lock — it's structural, not
+            // performance-critical.
+            let mail = {
+                let ctx = caller.data();
+                let rx_guard = ctx.inbox_rx.lock().unwrap();
+                let Some(rx) = rx_guard.as_ref() else {
+                    // No inbox installed — pathological. Treat
+                    // as disconnect so the guest aborts rather
+                    // than spins.
                     return WAIT_CANCELLED;
+                };
+                loop {
+                    let recv = if clamped == 0 {
+                        // `timeout_ms == 0`: try_recv only — drain
+                        // whatever's already queued, stop without
+                        // parking.
+                        match rx.try_recv() {
+                            Ok(m) => Ok(m),
+                            Err(TryRecvError::Empty) => Err(RecvTimeoutError::Timeout),
+                            Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
+                        }
+                    } else {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            Err(RecvTimeoutError::Timeout)
+                        } else {
+                            rx.recv_timeout(remaining)
+                        }
+                    };
+                    match recv {
+                        Ok(m) if m.kind == expected_kind => break m,
+                        Ok(m) => {
+                            // Non-match: to overflow, keep draining.
+                            ctx.inbox_overflow.lock().unwrap().push_back(m);
+                        }
+                        Err(RecvTimeoutError::Timeout) => return WAIT_TIMEOUT,
+                        Err(RecvTimeoutError::Disconnected) => return WAIT_CANCELLED,
+                    }
                 }
             };
-
-            // Single-shot semantics: `try_match` took the filter out
-            // on the match that produced this mail. Nothing to clear.
 
             if mail.payload.len() > out_cap as usize {
+                // ADR-0042: oversized payload preserves the caller's
+                // right to retry with a larger buffer. Park the mail
+                // back on overflow so a follow-up `wait_reply_p32`
+                // with a bigger `out_cap` can pick it up via the
+                // same drain (overflow is FIFO-first, so the retry
+                // sees the saved mail before anything newer).
+                caller
+                    .data()
+                    .inbox_overflow
+                    .lock()
+                    .unwrap()
+                    .push_front(mail);
                 return WAIT_BUFFER_TOO_SMALL;
             }
 
             let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
                 // Guest exports no memory; treat as buffer-unusable.
+                // Put the mail back on overflow so it isn't lost.
+                caller
+                    .data()
+                    .inbox_overflow
+                    .lock()
+                    .unwrap()
+                    .push_front(mail);
                 return WAIT_BUFFER_TOO_SMALL;
             };
             let start = out_ptr as usize;
             let Some(end) = start.checked_add(mail.payload.len()) else {
+                caller
+                    .data()
+                    .inbox_overflow
+                    .lock()
+                    .unwrap()
+                    .push_front(mail);
                 return WAIT_BUFFER_TOO_SMALL;
             };
             let data = memory.data_mut(&mut caller);
             if end > data.len() {
+                // Can't restore mail here — we've already moved past
+                // the ctx borrow by grabbing `data_mut`. The mail is
+                // dropped. Callers hitting this are misusing out_ptr;
+                // the loss is on them.
                 return WAIT_BUFFER_TOO_SMALL;
             }
             data[start..end].copy_from_slice(&mail.payload);
