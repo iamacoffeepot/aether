@@ -29,11 +29,20 @@ aether.io.write  { namespace: String, path: String, bytes: Vec<u8> }
 aether.io.delete { namespace: String, path: String }
 aether.io.list   { namespace: String, prefix: String }
 
-// Reply kinds routed back via reply_mail
-aether.io.read_result   : Ok { bytes: Vec<u8> } | Err { error: IoError }
-aether.io.write_result  : Ok | Err { error: IoError }
-aether.io.delete_result : Ok | Err { error: IoError }
-aether.io.list_result   : Ok { entries: Vec<String> } | Err { error: IoError }
+// Reply kinds routed back via reply_mail. Every reply echoes
+// `namespace` + `path` (or `prefix` for List) from the originating
+// request so the component correlates reply-to-request via the
+// echoed fields + the reply kind itself — no per-op id, no
+// dependency on sink-dispatch-order FIFO. Write's reply omits
+// `bytes` so a megabyte write still produces a small reply.
+aether.io.read_result   : Ok  { namespace, path, bytes: Vec<u8> }
+                        | Err { namespace, path, error: IoError }
+aether.io.write_result  : Ok  { namespace, path }
+                        | Err { namespace, path, error: IoError }
+aether.io.delete_result : Ok  { namespace, path }
+                        | Err { namespace, path, error: IoError }
+aether.io.list_result   : Ok  { namespace, prefix, entries: Vec<String> }
+                        | Err { namespace, prefix, error: IoError }
 
 enum IoError {
     NotFound,
@@ -44,6 +53,8 @@ enum IoError {
 ```
 
 `namespace` is the logical prefix without the `://`: mail carries `"save"`, not `"save://"`. The double-colon form is only a UX convention in docs and log lines. Reply kinds pair 1:1 with requests so callers can match on the specific result type.
+
+On a decode failure — malformed request bytes the dispatcher can't parse into a request kind — the echo fields collapse to empty strings. There's no parsed request to pull them from. `IoError::AdapterError` carries the decode diagnostic; empty-string echo is a loud signal that the request itself was corrupt rather than the adapter's operation.
 
 Mail-based transport means reads allocate (adapter→`Vec<u8>`→postcard→delivery→decoded component-side `Vec<u8>`). Fine for save files and config; wasteful for large assets. Deferred: a host-fn fast path for zero-copy reads into component memory. Not blocking for v1.
 
@@ -127,7 +138,7 @@ The precedence order is the commitment; which layers exist on day one is a separ
 - **Host fn surface unchanged.** Everything rides the existing mail FFI. No new `_p32` import, no wasm custom section, no schema wire change.
 - **Component SDK unchanged.** Components `ctx.send(&io_sink, &Read { ... })` and handle `ReadResult` through a `#[handler]` — the same shape they already use for any other sink reply. An SDK helper (`ctx.read("save://slot1.bin") -> async Result<Vec<u8>>`) is worth adding once the primitive lands but isn't load-bearing for v1.
 - **Hub chassis stays pure.** I/O is a desktop-and-headless feature; the hub remains a coordination plane. Same pattern as ADR-0039 audio (desktop-only) and the render/camera sinks (desktop-only).
-- **Reply correlation relies on FIFO + implicit reply typing.** v1's reply kinds carry only the result — no echoed request, no per-operation id. Correlation falls out of two invariants: (a) the substrate processes I/O serially on the sink dispatch thread, so replies arrive in the order the requests were submitted; (b) the reply kind (`read_result` vs `write_result` vs ...) names the operation that produced it. A component firing multiple reads can `pop_front()` a queue of pending contexts on each `on_read_result`; a component firing concurrent reads of the *same* resource gets indistinguishable replies but that's fine — each one is a valid observation at some point in the FIFO timeline, and "latest wins" recovers the most recent contents. A parked follow-up echoes `namespace` + `path` on every reply (omitting `Write.bytes` to avoid redundant payload) which drops even the FIFO assumption; today it's carry-your-own-context.
+- **Reply correlation is self-describing.** Every reply echoes the originating `namespace` + `path` (or `prefix` for `List`), paired with the reply kind itself naming the operation. Components never need a pending-op queue or a `HashMap<request_id, context>` — they consume each reply in whatever order it arrives, matching against their own state by the echoed fields. Identical concurrent reads of the same resource still produce indistinguishable replies, but that's the correct semantic (each reply is a valid observation at some point in the filesystem's timeline), and "latest wins" recovers the most recent contents. Wire cost: one `String` + one `String` per reply (`~dozen bytes` for typical saves); `Write` omits its `bytes` field from the reply so a megabyte write still produces a small reply.
 
 ## Alternatives considered
 
@@ -143,9 +154,9 @@ The precedence order is the commitment; which layers exist on day one is a separ
 - **PR**: substrate-side — define `FileAdapter` trait, ship `LocalFileAdapter`, wire the `"io"` sink to dispatch the four kinds, add env-var config resolution and `dirs`-crate defaults.
 - **PR**: kinds — add the eight kinds (four requests + four replies) to `aether-kinds`, plus the `IoError` shape.
 - **PR**: component SDK ergonomics — `ctx.read(namespace, path)` / `ctx.write(...)` helpers that wrap the mail send + reply handler so components don't hand-roll the envelope.
+- **PR**: reply-echo — add `namespace` + `path` (or `prefix` for `List`) to every `*Result` variant so components correlate reply-to-request without a pending-op queue or sink-dispatch-order FIFO assumption. Omitted from `Write.bytes` so big writes don't produce big replies.
 - **Parked, not committed**: host-fn fast path for large reads (`read_file_p32` into a pre-allocated component buffer), once asset streaming forces it.
 - **Parked, not committed**: TOML config file + bootstrap resolver, once a second adapter type ships.
 - **Parked, not committed**: CLI argument parser, once dev-ergonomics (running a substrate by hand) actually asks for it.
 - **Parked, not committed**: `BundledAdapter` reading from an `include_bytes!` archive so shipped builds bundle `assets://` into the binary.
 - **Parked, not committed**: SDK sugar on ADR-0040 — `ctx.save_to_disk::<K>(namespace, path, &state)` that combines kind-typed framing with the I/O sink, closing the loop the "file serialization layer" discussion pointed at.
-- **Parked, not committed**: echo `namespace` + `path` on every `*Result` reply (omitting `Write.bytes` so the reply payload stays small) — decouples cross-resource correlation from sink-dispatch-order FIFO and makes replies self-describing for diagnostics. Components never need a pending-op queue for the cross-resource case; identical concurrent reads still collapse to "latest wins" via FIFO, which is the correct semantic anyway. Pulled in when the substrate either parallelizes the sink (at which point FIFO stops holding) or when the diagnostic value (debug logs naming the resource) earns the ~dozen bytes per reply. A stronger `request_id: u64` variant was considered but rejected — it adds caller-side counter + `HashMap` bookkeeping on every request for introspection value (which-reply-matches-which-specific-send latency) that no use case has asked for.
