@@ -8,7 +8,7 @@ use std::sync::mpsc::Receiver;
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
-use crate::mail::{Mail, ReplyTo};
+use crate::mail::{Mail, ReplyTarget};
 use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
 
 const MAIL_OFFSET: u32 = 1024;
@@ -122,22 +122,34 @@ impl Component {
     /// system-generated mail pass `NO_REPLY_HANDLE` so the guest's
     /// `mail.reply_to()` accessor returns `None`.
     pub fn deliver(&mut self, mail: &Mail) -> wasmtime::Result<u32> {
-        let entry = match &mail.reply_to {
-            ReplyTo::Session(token) => Some(ReplyEntry::Session(*token)),
-            ReplyTo::EngineMailbox {
+        // ADR-0042: carry the incoming correlation through to the
+        // ReplyEntry so a subsequent `reply_mail` echoes it on the
+        // outgoing reply. Session / engine mail that didn't originate
+        // a correlation carries 0 — fine, echo of 0 is a no-op.
+        let correlation = mail.reply_to.correlation_id;
+        let entry = match &mail.reply_to.target {
+            ReplyTarget::Session(token) => {
+                Some(ReplyEntry::new(ReplyTarget::Session(*token), correlation))
+            }
+            ReplyTarget::EngineMailbox {
                 engine_id,
                 mailbox_id,
-            } => Some(ReplyEntry::RemoteEngineMailbox {
-                engine_id: *engine_id,
-                mailbox_id: *mailbox_id,
-            }),
+            } => Some(ReplyEntry::new(
+                ReplyTarget::EngineMailbox {
+                    engine_id: *engine_id,
+                    mailbox_id: *mailbox_id,
+                },
+                correlation,
+            )),
             // Component-variant reply_to reaches a real component's
             // `deliver` only via the mailer-routed reply path (the
             // sink replied to a local component): the reply itself
             // has no one to reply back to, so the guest sees no
             // `reply_to`. Falls through to the `from_component`
             // check, matching the None path.
-            ReplyTo::None | ReplyTo::Component(_) => mail.from_component.map(ReplyEntry::Component),
+            ReplyTarget::None | ReplyTarget::Component(_) => mail
+                .from_component
+                .map(|m| ReplyEntry::new(ReplyTarget::Component(m), correlation)),
         };
         let handle = match entry {
             Some(e) => self.store.data_mut().reply_table.allocate(e),
@@ -539,18 +551,19 @@ mod tests {
     fn deliver_with_real_token_allocates_session_handle() {
         use aether_hub_protocol::{SessionToken, Uuid};
 
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTo};
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
         use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
 
         let mut component = instantiate(WAT_STORES_SENDER);
         let token = SessionToken(Uuid::from_u128(0xaaaa));
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_reply_to(ReplyTo::Session(token));
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1)
+            .with_reply_to(ReplyTo::to(ReplyTarget::Session(token)));
         component.deliver(&mail).expect("deliver");
         let observed = component.read_u32(500);
         assert_ne!(observed, NO_REPLY_HANDLE);
         assert_eq!(
             component.store.data().reply_table.resolve(observed),
-            Some(ReplyEntry::Session(token)),
+            Some(ReplyEntry::session(token)),
         );
     }
 
@@ -568,7 +581,7 @@ mod tests {
         assert_ne!(observed, NO_REPLY_HANDLE);
         assert_eq!(
             component.store.data().reply_table.resolve(observed),
-            Some(ReplyEntry::Component(M(7))),
+            Some(ReplyEntry::component(M(7))),
         );
     }
 
@@ -580,18 +593,21 @@ mod tests {
         // session is the more specific reply target.
         use aether_hub_protocol::{SessionToken, Uuid};
 
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTo};
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
         use crate::reply_table::ReplyEntry;
 
         let mut component = instantiate(WAT_STORES_SENDER);
         let token = SessionToken(Uuid::from_u128(0xbbbb));
         let mail = SubstrateMail::new(M(0), 0, vec![], 1)
-            .with_reply_to(ReplyTo::Session(token))
+            .with_reply_to(ReplyTo::to(ReplyTarget::Session(token)))
             .with_origin(M(99));
         component.deliver(&mail).expect("deliver");
         let observed = component.read_u32(500);
         match component.store.data().reply_table.resolve(observed) {
-            Some(ReplyEntry::Session(t)) => assert_eq!(t, token),
+            Some(ReplyEntry {
+                target: ReplyTarget::Session(t),
+                ..
+            }) => assert_eq!(t, token),
             other => panic!("expected Session, got {other:?}"),
         }
     }
@@ -637,13 +653,14 @@ mod tests {
     fn reply_mail_emits_session_addressed_frame() {
         use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
 
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTo};
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
 
         let (ctx, rx, pong_id) = plane_ctx_for_reply();
         let mut component = instantiate_with_ctx(&wat_replies(pong_id), ctx);
 
         let token = SessionToken(Uuid::from_u128(0xbeef));
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_reply_to(ReplyTo::Session(token));
+        let mail = SubstrateMail::new(M(0), 0, vec![], 1)
+            .with_reply_to(ReplyTo::to(ReplyTarget::Session(token)));
         component.deliver(&mail).expect("deliver");
 
         let frame = rx.try_recv().expect("outbound frame queued");
@@ -773,7 +790,7 @@ mod tests {
     const WAT_SYNC_WAIT: &str = r#"
         (module
             (import "aether" "wait_reply_p32"
-                (func $wait (param i64 i32 i32 i32) (result i32)))
+                (func $wait (param i64 i32 i32 i32 i64) (result i32)))
             (memory (export "memory") 1)
             (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
                 i32.const 700
@@ -781,7 +798,8 @@ mod tests {
                     (i64.const -6148914691236517206) ;; 0xAAAA_AAAA_AAAA_AAAA reinterpreted as i64
                     (i32.const 600)                  ;; out_ptr
                     (i32.const 64)                   ;; out_cap
-                    (local.get 2))                   ;; timeout_ms = count
+                    (local.get 2)                    ;; timeout_ms = count
+                    (i64.const 0))                   ;; expected_correlation = 0 (kind-only filter)
                 i32.store
                 i32.const 0))
     "#;
@@ -937,6 +955,88 @@ mod tests {
         let mut component = handle.join().expect("worker panicked");
         let result = component.read_u32(700) as i32;
         assert_eq!(result, host_fns::WAIT_BUFFER_TOO_SMALL);
+    }
+
+    /// ADR-0042 correlation: a sync wait filters on
+    /// `expected_correlation` so it picks *its own* reply out of
+    /// the inbox rather than the first `ReadResult`-kind mail that
+    /// happens to be queued. Regression guard — without the
+    /// correlation filter, a stale prior reply of the same kind
+    /// would be consumed as if it were the one we're waiting on.
+    #[test]
+    fn wait_reply_filters_by_correlation_not_just_kind() {
+        use std::sync::mpsc;
+
+        use wasmtime::{Engine, Linker, Module};
+
+        use crate::mail::{MailboxId as M, ReplyTarget, ReplyTo};
+
+        // WAT that waits on kind `SYNC_WAIT_EXPECTED_KIND` with
+        // expected_correlation = 42, timeout = 1s. Stores payload
+        // byte count at offset 700.
+        const WAT: &str = r#"
+            (module
+                (import "aether" "wait_reply_p32"
+                    (func $wait (param i64 i32 i32 i32 i64) (result i32)))
+                (memory (export "memory") 1)
+                (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+                    i32.const 700
+                    (call $wait
+                        (i64.const -6148914691236517206) ;; expected_kind = 0xAAAA...
+                        (i32.const 600)                  ;; out_ptr
+                        (i32.const 64)                   ;; out_cap
+                        (i32.const 1000)                 ;; timeout_ms
+                        (i64.const 42))                  ;; expected_correlation
+                    i32.store
+                    i32.const 0))
+        "#;
+
+        let engine = Engine::default();
+        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        crate::host_fns::register(&mut linker).expect("register host fns");
+        let wasm = wat::parse_str(WAT).expect("compile WAT");
+        let module = Module::new(&engine, &wasm).expect("compile module");
+        let mut component =
+            Component::instantiate(&engine, &linker, &module, ctx()).expect("instantiate");
+        let (tx, rx) = mpsc::channel::<Mail>();
+        component.install_inbox_rx(rx);
+
+        // Pre-queue a decoy reply: same kind, different correlation.
+        // Without the correlation filter the sync wait would consume
+        // THIS one (first-in) as if it were the one we're waiting on.
+        let decoy_payload = vec![0xDE, 0xAD];
+        tx.send(
+            Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, decoy_payload, 1)
+                .with_reply_to(ReplyTo::with_correlation(ReplyTarget::None, 10)),
+        )
+        .expect("send decoy");
+
+        // Now the reply we're actually waiting on: correlation = 42.
+        let real_payload = vec![1, 2, 3, 4, 5];
+        tx.send(
+            Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, real_payload.clone(), 1)
+                .with_reply_to(ReplyTo::with_correlation(ReplyTarget::None, 42)),
+        )
+        .expect("send real reply");
+
+        component.deliver(&trigger_wait(0)).expect("deliver");
+
+        let result = component.read_u32(700) as i32;
+        assert_eq!(
+            result,
+            real_payload.len() as i32,
+            "expected byte count for the correlation-42 reply"
+        );
+        assert_eq!(
+            component.read_bytes(600, real_payload.len()),
+            real_payload,
+            "host fn copied the wrong payload — decoy reply consumed instead of real one",
+        );
+        // Decoy should still be sitting in overflow — the dispatcher
+        // would deliver it on its next pass after the wait returned.
+        let overflow = component.store.data().inbox_overflow.lock().unwrap();
+        assert_eq!(overflow.len(), 1, "decoy mail should be in overflow");
+        assert_eq!(overflow[0].reply_to.correlation_id, 10);
     }
 
     #[test]

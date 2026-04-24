@@ -43,7 +43,7 @@ use aether_hub_protocol::{
 use aether_kinds::UnresolvedMail;
 use aether_mail::{Kind, mailbox_id_from_name};
 use aether_substrate_core::{
-    AETHER_DIAGNOSTICS, Mail, MailboxId, Mailer, Registry, ReplyTo, SubstrateBoot,
+    AETHER_DIAGNOSTICS, Mail, MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,
     dispatch_hub_to_engine_mail,
 };
 use tokio::sync::mpsc;
@@ -132,6 +132,7 @@ impl LoopbackHandle {
             payload,
             count,
             source_mailbox_id,
+            correlation_id,
         } = frame;
         // Kind lookup guards against an engine bubbling up a kind
         // the hub substrate doesn't know — without it the mail
@@ -163,11 +164,14 @@ impl LoopbackHandle {
             return;
         }
         let sender = match source_mailbox_id {
-            Some(mailbox_id) => ReplyTo::EngineMailbox {
-                engine_id: source_engine_id,
-                mailbox_id,
-            },
-            None => ReplyTo::None,
+            Some(mailbox_id) => ReplyTo::with_correlation(
+                ReplyTarget::EngineMailbox {
+                    engine_id: source_engine_id,
+                    mailbox_id,
+                },
+                correlation_id,
+            ),
+            None => ReplyTo::with_correlation(ReplyTarget::None, correlation_id),
         };
         self.queue.push(
             Mail::new(MailboxId(recipient_mailbox_id), kind_id, payload, count)
@@ -202,6 +206,7 @@ fn send_unresolved_diagnostic(
         kind_id: UnresolvedMail::ID,
         payload,
         count: 1,
+        correlation_id: 0,
     });
     if let Err(e) = record.mail_tx.try_send(frame) {
         eprintln!(
@@ -337,6 +342,7 @@ pub fn spawn_outbound_drainer(
                                 kind_id: frame.kind_id,
                                 payload: frame.payload,
                                 count: frame.count,
+                                correlation_id: frame.correlation_id,
                             });
                             if let Err(e) = record.mail_tx.try_send(by_id) {
                                 eprintln!(
@@ -426,6 +432,7 @@ mod tests {
                 kind_id: 42,
                 payload: vec![1, 2, 3],
                 count: 1,
+                correlation_id: 0,
             }))
             .expect("outbound send");
 
@@ -468,6 +475,7 @@ mod tests {
                 payload: vec![1, 2, 3],
                 count: 1,
                 source_mailbox_id: None,
+                correlation_id: 0,
             },
             &engines,
         );
@@ -515,6 +523,7 @@ mod tests {
                 payload: vec![],
                 count: 1,
                 source_mailbox_id: Some(0x5151),
+                correlation_id: 0,
             },
             &engines,
         );

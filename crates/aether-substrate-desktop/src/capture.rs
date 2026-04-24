@@ -66,11 +66,13 @@ impl CaptureQueue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use aether_hub_protocol::{SessionToken, Uuid};
+    use aether_substrate_core::ReplyTarget;
+
+    use super::*;
 
     fn reply_to(u: u128) -> ReplyTo {
-        ReplyTo::Session(SessionToken(Uuid::from_u128(u)))
+        ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(u))))
     }
 
     fn pending(u: u128) -> PendingCapture {

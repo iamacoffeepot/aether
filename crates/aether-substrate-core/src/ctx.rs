@@ -9,13 +9,14 @@
 // only `Arc<Registry>` and `Arc<Mailer>` the cycle is broken: neither
 // of those owns any actor.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use crate::hub_client::HubOutbound;
 use crate::input::InputSubscribers;
-use crate::mail::{Mail, MailKind, MailboxId, ReplyTo};
+use crate::mail::{Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 use crate::mailer::Mailer;
 use crate::registry::{MailboxEntry, Registry};
 use crate::reply_table::ReplyTable;
@@ -79,6 +80,17 @@ pub struct SubstrateCtx {
     /// `Mutex`es empty / default because it has no scheduler.
     pub inbox_rx: Mutex<Option<Receiver<Mail>>>,
     pub inbox_overflow: Mutex<VecDeque<Mail>>,
+    /// ADR-0042 correlation counter. Per-component (one
+    /// `SubstrateCtx` per component instance). Holds the *next* id
+    /// to mint; `prev_correlation()` reads `counter - 1` to return
+    /// the last one minted. Starts at `1` so that `0` always means
+    /// "no correlation" (backward-compat sentinel for waits that
+    /// don't filter, and for `prev_correlation` before any send).
+    ///
+    /// `Cell` instead of `AtomicU64`: the component is single-
+    /// threaded (ADR-0038 actor-per-component), so the counter is
+    /// never touched from multiple threads.
+    correlation_counter: Cell<u64>,
 }
 
 impl SubstrateCtx {
@@ -105,7 +117,29 @@ impl SubstrateCtx {
             save_state_error: None,
             inbox_rx: Mutex::new(None),
             inbox_overflow: Mutex::new(VecDeque::new()),
+            correlation_counter: Cell::new(1),
         }
+    }
+
+    /// Mint the next correlation id and bump the counter. Private —
+    /// callers that want a correlation use `SubstrateCtx::send`,
+    /// which mints internally and tags the outgoing mail.
+    fn mint_correlation(&self) -> u64 {
+        let id = self.correlation_counter.get();
+        self.correlation_counter.set(id + 1);
+        id
+    }
+
+    /// Return the correlation id used by the most recent
+    /// `SubstrateCtx::send` call. The `prev_correlation_p32` host fn
+    /// surfaces this to the guest so sync wrappers know what to
+    /// filter on in `wait_reply_p32`. Returns `0` (the "no
+    /// correlation" sentinel) before any send has been made.
+    pub fn prev_correlation(&self) -> u64 {
+        // counter holds the *next* id to mint; subtract to get the
+        // last one. `.saturating_sub(1)` covers the pre-send case
+        // where counter is still `1` (initial) → returns `0`.
+        self.correlation_counter.get().saturating_sub(1)
     }
 
     /// Install the mpsc `Receiver` the dispatcher will read from.
@@ -136,21 +170,30 @@ impl SubstrateCtx {
     /// mailboxes, or bubbles unknown ids up to the hub-substrate when
     /// a `HubOutbound` is wired (ADR-0037).
     pub fn send(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32) {
+        // ADR-0042: mint a fresh correlation_id for this send and
+        // stash it on `last_correlation` so `prev_correlation_p32`
+        // can return it to the guest. The minted id rides on the
+        // outgoing `ReplyTo.correlation_id`; the reply's echo
+        // (auto-routed by `Mailer::send_reply`) carries it back, and
+        // `wait_reply_p32` filters on it.
+        let correlation = self.mint_correlation();
+        let reply_to = ReplyTo::with_correlation(ReplyTarget::Component(self.sender), correlation);
+
         if let Some(MailboxEntry::Sink(handler)) = self.registry.entry(recipient) {
             let kind_name = self.registry.kind_name(kind).unwrap_or_default();
             // Component-originated mail: the sender is this ctx's
             // mailbox, so its registry name is the `origin` any
             // sink cares about (ADR-0011), and the same mailbox id
-            // rides on `ReplyTo::Component` so sink handlers that
-            // want to reply (ADR-0041's io sink is the motivating
-            // case) can route `*Result` back to this component via
+            // rides on `reply_to.target` so sink handlers that want
+            // to reply (ADR-0041's io sink is the motivating case)
+            // can route `*Result` back to this component via
             // `Mailer::send_reply`.
             let origin = self.registry.mailbox_name(self.sender);
             handler(
                 kind,
                 &kind_name,
                 origin.as_deref(),
-                ReplyTo::Component(self.sender),
+                reply_to,
                 &payload,
                 count,
             );
@@ -165,8 +208,11 @@ impl SubstrateCtx {
         // - Unknown (ADR-0037): bubbles up to the hub-substrate via
         //   `MailToHubSubstrate` with `source_mailbox_id = self.sender`
         //   when a `HubOutbound` is connected; warn-drops otherwise.
-        self.queue
-            .push(Mail::new(recipient, kind, payload, count).with_origin(self.sender));
+        self.queue.push(
+            Mail::new(recipient, kind, payload, count)
+                .with_reply_to(reply_to)
+                .with_origin(self.sender),
+        );
     }
 }
 

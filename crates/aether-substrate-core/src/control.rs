@@ -1234,7 +1234,7 @@ mod tests {
         plane.dispatch(
             0xdead_beef_dead_beef,
             "aether.control.does_not_exist",
-            crate::mail::ReplyTo::None,
+            crate::mail::ReplyTo::NONE,
             &[],
         );
     }
@@ -1675,7 +1675,7 @@ mod tests {
         plane.dispatch(
             SubscribeInput::ID,
             SubscribeInput::NAME,
-            crate::mail::ReplyTo::None,
+            crate::mail::ReplyTo::NONE,
             &postcard::to_allocvec(&SubscribeInput {
                 stream: InputStream::Tick,
                 mailbox: id,
@@ -1685,7 +1685,7 @@ mod tests {
         plane.dispatch(
             UnsubscribeInput::ID,
             UnsubscribeInput::NAME,
-            crate::mail::ReplyTo::None,
+            crate::mail::ReplyTo::NONE,
             &postcard::to_allocvec(&UnsubscribeInput {
                 stream: InputStream::Tick,
                 mailbox: id,
@@ -1823,7 +1823,7 @@ mod tests {
                 kind: 0,
                 payload: sink_id.0.to_le_bytes().to_vec(),
                 count: n,
-                sender: crate::mail::ReplyTo::None,
+                sender: crate::mail::ReplyTo::NONE,
                 from_component: None,
             });
         }
@@ -1896,7 +1896,7 @@ mod tests {
                 kind: 0,
                 payload: sink_id.0.to_le_bytes().to_vec(),
                 count: n,
-                sender: crate::mail::ReplyTo::None,
+                sender: crate::mail::ReplyTo::NONE,
                 from_component: None,
             });
         }

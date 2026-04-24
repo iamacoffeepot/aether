@@ -18,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 use aether_hub_protocol::{EngineMailToHubSubstrateFrame, EngineToHub};
 
 use crate::hub_client::HubOutbound;
-use crate::mail::{Mail, ReplyTo};
+use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use crate::registry::{MailboxEntry, Registry};
 use crate::scheduler::ComponentTable;
 
@@ -103,13 +103,15 @@ impl Mailer {
     where
         K: aether_mail::Kind + serde::Serialize,
     {
-        match sender {
-            ReplyTo::None => false,
-            ReplyTo::Session(_) | ReplyTo::EngineMailbox { .. } => match self.outbound.get() {
-                Some(outbound) => outbound.send_reply(sender, result),
-                None => false,
-            },
-            ReplyTo::Component(mailbox) => {
+        match sender.target {
+            ReplyTarget::None => false,
+            ReplyTarget::Session(_) | ReplyTarget::EngineMailbox { .. } => {
+                match self.outbound.get() {
+                    Some(outbound) => outbound.send_reply(sender, result),
+                    None => false,
+                }
+            }
+            ReplyTarget::Component(mailbox) => {
                 let payload = match postcard::to_allocvec(result) {
                     Ok(p) => p,
                     Err(e) => {
@@ -122,7 +124,12 @@ impl Mailer {
                         return false;
                     }
                 };
-                self.push(Mail::new(mailbox, K::ID, payload, 1));
+                // ADR-0042: echo the caller's correlation_id onto the
+                // reply envelope so a `wait_reply_p32` parked on this
+                // correlation picks the right reply out of the mpsc.
+                // Reply target is None — nobody replies to a reply.
+                let reply_to = ReplyTo::with_correlation(ReplyTarget::None, sender.correlation_id);
+                self.push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
                 true
             }
         }
@@ -221,6 +228,10 @@ fn route_mail(
                 // with no local component origin (broadcast-
                 // originated, substrate-generated).
                 let source_mailbox_id = mail.from_component.map(|mbox| mbox.0);
+                // ADR-0042: carry the correlation through the bubble-
+                // up frame so a reply coming back via Phase-2 reply
+                // routing lands at the originator's `wait_reply_p32`.
+                let correlation_id = mail.reply_to.correlation_id;
                 let sent = outbound.send(EngineToHub::MailToHubSubstrate(
                     EngineMailToHubSubstrateFrame {
                         recipient_mailbox_id: recipient.0,
@@ -228,6 +239,7 @@ fn route_mail(
                         payload: mail.payload,
                         count: mail.count,
                         source_mailbox_id,
+                        correlation_id,
                     },
                 ));
                 if !sent {

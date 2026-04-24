@@ -190,6 +190,9 @@ async fn read_loop(
                         kind_id: frame.kind_id,
                         payload: frame.payload,
                         count: frame.count,
+                        // ADR-0042: forward the correlation so the
+                        // target engine's `wait_reply_p32` can match it.
+                        correlation_id: frame.correlation_id,
                     });
                     if let Err(e) = record.mail_tx.try_send(by_id) {
                         eprintln!(
@@ -241,6 +244,7 @@ pub(crate) fn route_engine_mail(
         kind_name,
         payload,
         origin,
+        correlation_id: _,
     } = mail;
     match address {
         ClaudeAddress::Session(token) => match sessions.get(&token) {
@@ -361,6 +365,7 @@ mod tests {
             kind_name: "aether.observation.ping".into(),
             payload,
             origin: None,
+            correlation_id: 0,
         }
     }
 
@@ -370,6 +375,7 @@ mod tests {
             kind_name: "aether.observation.ping".into(),
             payload,
             origin: Some(origin.into()),
+            correlation_id: 0,
         }
     }
 

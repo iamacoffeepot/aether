@@ -759,6 +759,13 @@ pub struct MailFrame {
     pub payload: Vec<u8>,
     pub count: u32,
     pub sender: SessionToken,
+    /// ADR-0042: opaque correlation id the session-originating
+    /// caller attached. Echoed verbatim on any reply the engine
+    /// emits. `0` means "no correlation" — current MCP `send_mail`
+    /// doesn't populate this; tooling that wants end-to-end
+    /// correlation sets it explicitly.
+    #[serde(default)]
+    pub correlation_id: u64,
 }
 
 /// A piece of mail the engine is sending to one or more Claude
@@ -774,6 +781,13 @@ pub struct EngineMailFrame {
     pub kind_name: String,
     pub payload: Vec<u8>,
     pub origin: Option<String>,
+    /// ADR-0042 correlation echo. For session-addressed replies,
+    /// the engine copies the `correlation_id` off the inbound
+    /// `MailFrame` so the originating session can correlate its
+    /// request to the reply. `0` for broadcasts and substrate-
+    /// originated mail that didn't originate a correlation.
+    #[serde(default)]
+    pub correlation_id: u64,
 }
 
 /// How an engine-originated mail is addressed at the hub. `Session`
@@ -846,6 +860,13 @@ pub struct EngineMailToHubSubstrateFrame {
     pub payload: Vec<u8>,
     pub count: u32,
     pub source_mailbox_id: Option<u64>,
+    /// ADR-0042 correlation id the originating component's
+    /// `SubstrateCtx::send` minted. Carried across the hub so a
+    /// bubbled-up mail's reply (ADR-0037 Phase 2) can echo back
+    /// through `MailByIdFrame` and reach a parked `wait_reply_p32`
+    /// on the original sender.
+    #[serde(default)]
+    pub correlation_id: u64,
 }
 
 /// Reply mail leaving the hub-substrate for a remote engine's
@@ -861,6 +882,11 @@ pub struct MailToEngineMailboxFrame {
     pub kind_id: u64,
     pub payload: Vec<u8>,
     pub count: u32,
+    /// ADR-0042 correlation echo. Set by the reply-emitting engine
+    /// so the target engine can correlate the reply to its original
+    /// bubble-up request.
+    #[serde(default)]
+    pub correlation_id: u64,
 }
 
 /// Mail delivered to a specific mailbox id on an engine (ADR-0037
@@ -876,6 +902,12 @@ pub struct MailByIdFrame {
     pub kind_id: u64,
     pub payload: Vec<u8>,
     pub count: u32,
+    /// ADR-0042 correlation echo. Carries through from
+    /// `EngineMailToHubSubstrateFrame.correlation_id` when the hub
+    /// forwards a reply for a bubbled-up request back to the
+    /// originating engine.
+    #[serde(default)]
+    pub correlation_id: u64,
 }
 
 /// Frames an engine sends to the hub. `Mail` is the observation path

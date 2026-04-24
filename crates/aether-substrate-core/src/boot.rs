@@ -157,7 +157,7 @@ impl<'a> SubstrateBootBuilder<'a> {
                     move |_kind_id: u64,
                           kind_name: &str,
                           origin: Option<&str>,
-                          _sender,
+                          sender: crate::mail::ReplyTo,
                           bytes: &[u8],
                           _count: u32| {
                         if kind_name.is_empty() {
@@ -167,11 +167,18 @@ impl<'a> SubstrateBootBuilder<'a> {
                             );
                             return;
                         }
+                        // ADR-0042: preserve the auto-minted
+                        // correlation end-to-end so MCP-side tooling
+                        // can correlate broadcasts with their
+                        // originating sends if it wants to. Most
+                        // broadcast uses are fire-and-forget and
+                        // ignore it.
                         outbound.send(EngineToHub::Mail(EngineMailFrame {
                             address: ClaudeAddress::Broadcast,
                             kind_name: kind_name.to_owned(),
                             payload: bytes.to_vec(),
                             origin: origin.map(str::to_owned),
+                            correlation_id: sender.correlation_id,
                         }));
                     },
                 ),
