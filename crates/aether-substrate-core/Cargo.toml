@@ -23,6 +23,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Application Support on macOS, AppData on Windows without reimple-
 # menting platform-specific path logic per chassis.
 dirs = "5"
+# ADR-0043 net sink — blocking HTTP client with rustls TLS, no
+# tokio. `ureq` 3.x pulls rustls + webpki-roots transitively;
+# `url` parses URLs for allowlist host extraction.
+ureq = { version = "3", features = ["rustls"] }
+url = "2"
 wasmtime = "30"
 # Wasmtime 30 doesn't expose `custom_sections` on `Module`; use
 # wasmparser directly to walk the raw wasm bytes for the ADR-0028

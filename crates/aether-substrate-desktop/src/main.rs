@@ -1164,6 +1164,18 @@ fn main() -> wasmtime::Result<()> {
         }
     }
 
+    // `aether.net.fetch`: ADR-0043 substrate HTTP egress. Deny-by-
+    // default: if `AETHER_NET_ALLOWLIST` is unset or empty, every
+    // fetch replies `AllowlistDenied`. `AETHER_NET_DISABLE=1` short-
+    // circuits to a nop adapter that replies `Disabled`. The sink
+    // always registers so mail isn't silently bubble-dropped — the
+    // adapter carries the gating.
+    let net_adapter = aether_substrate_core::net::build_default_adapter();
+    boot.registry.register_sink(
+        "net",
+        aether_substrate_core::net::net_sink_handler(net_adapter, Arc::clone(&boot.queue)),
+    );
+
     tracing::info!(
         target: "aether_substrate::boot",
         workers = WORKERS,

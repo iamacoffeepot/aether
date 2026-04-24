@@ -19,13 +19,13 @@ use aether_mail::{Kind, Schema};
 
 use crate::{
     Camera, CaptureFrame, CaptureFrameResult, Delete, DeleteResult, DrawTriangle, DropComponent,
-    DropResult, FrameStats, Key, KeyRelease, List, ListResult, LoadComponent, LoadResult,
-    MouseButton, MouseMove, NoteOff, NoteOn, OrbitSetDistance, OrbitSetFov, OrbitSetPitch,
-    OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo, PlatformInfoResult,
-    PlayerRequestStep, PlayerSetMode, PlayerSetPosition, PlayerSetVelocity, PlayerStepResult, Pong,
-    Read, ReadResult, ReplaceComponent, ReplaceResult, SetMasterGain, SetMasterGainResult,
-    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeInput,
-    SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
+    DropResult, Fetch, FetchResult, FrameStats, Key, KeyRelease, List, ListResult, LoadComponent,
+    LoadResult, MouseButton, MouseMove, NoteOff, NoteOn, OrbitSetDistance, OrbitSetFov,
+    OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo,
+    PlatformInfoResult, PlayerRequestStep, PlayerSetMode, PlayerSetPosition, PlayerSetVelocity,
+    PlayerStepResult, Pong, Read, ReadResult, ReplaceComponent, ReplaceResult, SetMasterGain,
+    SetMasterGainResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
+    SubscribeInput, SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
     UnsubscribeInput, WindowSize, Write, WriteResult,
 };
 
@@ -134,6 +134,13 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<DeleteResult>(),
         schema::<List>(),
         schema::<ListResult>(),
+        // Substrate HTTP egress (ADR-0043). Components mail `Fetch`
+        // to the `net` sink with url + method + headers + body;
+        // the substrate resolves through a `NetAdapter` (ureq +
+        // rustls in v1) and replies with `FetchResult`. Failure
+        // variants carry a structured `NetError`.
+        schema::<Fetch>(),
+        schema::<FetchResult>(),
     ]
 }
 
@@ -180,6 +187,8 @@ mod tests {
         assert!(names.contains(&DeleteResult::NAME));
         assert!(names.contains(&List::NAME));
         assert!(names.contains(&ListResult::NAME));
+        assert!(names.contains(&Fetch::NAME));
+        assert!(names.contains(&FetchResult::NAME));
     }
 
     #[test]
