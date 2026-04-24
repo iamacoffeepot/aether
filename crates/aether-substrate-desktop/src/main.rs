@@ -1134,6 +1134,36 @@ fn main() -> wasmtime::Result<()> {
         );
     }
 
+    // `aether.io.*`: ADR-0041 substrate file I/O. Build the default
+    // adapter registry (save/assets/config roots from env vars or
+    // dirs-crate defaults) and wire the `"io"` sink. If the boot-time
+    // filesystem setup fails (usually a perms issue on one of the
+    // root directories), log loud and skip the sink — components
+    // mailing `io` then warn-drop as "unknown mailbox" so failure is
+    // visible rather than silent.
+    match aether_substrate_desktop::io::build_default_registry() {
+        Ok((registry, roots)) => {
+            tracing::info!(
+                target: "aether_substrate::io",
+                save = %roots.save.display(),
+                assets = %roots.assets.display(),
+                config = %roots.config.display(),
+                "io adapters registered",
+            );
+            boot.registry.register_sink(
+                "io",
+                aether_substrate_desktop::io::io_sink_handler(registry, Arc::clone(&boot.outbound)),
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                target: "aether_substrate::io",
+                error = %e,
+                "io adapter init failed — `io` sink not registered",
+            );
+        }
+    }
+
     tracing::info!(
         target: "aether_substrate::boot",
         workers = WORKERS,

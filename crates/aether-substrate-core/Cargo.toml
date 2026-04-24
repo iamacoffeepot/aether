@@ -19,6 +19,10 @@ postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# ADR-0041 I/O namespace defaults. `dirs` resolves XDG on Linux,
+# Application Support on macOS, AppData on Windows without reimple-
+# menting platform-specific path logic per chassis.
+dirs = "5"
 wasmtime = "30"
 # Wasmtime 30 doesn't expose `custom_sections` on `Module`; use
 # wasmparser directly to walk the raw wasm bytes for the ADR-0028
