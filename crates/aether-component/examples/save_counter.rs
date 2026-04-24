@@ -1,21 +1,25 @@
-//! Save-counter component: on first tick, synchronously reads a
-//! `u64` counter from `save://counter.bin`, increments it, writes it
-//! back, and broadcasts the new value as `demo.save_counter.count`.
-//! Every subsequent boot of the component sees the incremented
-//! count, proving persistent storage + the ADR-0042 sync-I/O flow.
+//! Save-counter example for ADR-0042. On first tick the component
+//! synchronously reads a `u64` counter from `save://counter.bin`,
+//! increments it, writes it back, and broadcasts the new value as
+//! `demo.save_counter.count` on `hub.claude.broadcast`. Every
+//! subsequent boot of the component sees the incremented count —
+//! proof that persistent storage + the drain+buffer sync-I/O flow
+//! compose end-to-end.
 //!
-//! The body reads as straight-line control flow thanks to
-//! `io::read_sync` / `io::write_sync` — no handler state machine,
-//! no phase enum. That's the whole point of ADR-0042 in one
-//! component.
+//! The whole thing fits in a straight-line `on_tick` body because
+//! `io::read_sync` / `io::write_sync` hide the mpsc drain loop
+//! behind a linear call. The async equivalent would need a phase
+//! enum + two `#[handler]` methods to cover the read → write state
+//! machine.
 //!
-//! Runs best via the MCP harness:
+//! Run via MCP:
+//!
 //! 1. `spawn_substrate` a desktop / headless chassis with this
 //!    component preloaded.
-//! 2. `receive_mail` on the hub session — `Count` frames surface
+//! 2. `receive_mail` — `demo.save_counter.count` frames surface
 //!    with the current counter value.
-//! 3. `terminate_substrate`, then spawn another one — count
-//!    increments on top of the previous run.
+//! 3. `terminate_substrate`, spawn another, observe the count
+//!    bumped by one.
 
 use aether_component::{Component, Ctx, InitCtx, handlers, io, raw};
 use aether_kinds::{IoError, Tick};
@@ -36,8 +40,9 @@ pub struct Count {
 /// Namespace + path under which the counter is persisted.
 const SAVE_NAMESPACE: &str = "save";
 const SAVE_PATH: &str = "counter.bin";
-/// Timeout for each sync I/O call. Generous — local file adapter
-/// should complete in sub-ms.
+/// Timeout for each sync I/O call. Generous — the local file adapter
+/// should complete in sub-ms; larger backends (future cloud adapter)
+/// would want a bigger budget.
 const IO_TIMEOUT_MS: u32 = 1_000;
 
 pub struct SaveCounter {
