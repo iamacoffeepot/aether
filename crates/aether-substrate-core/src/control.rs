@@ -479,13 +479,22 @@ impl ControlPlane {
         let saved = old_component.take_saved_state();
         old_component.on_drop();
 
+        // ADR-0042: the ADR-0022 invariant that a replaced mailbox is
+        // continuous — same `MailboxId`, preserved subscriptions,
+        // buffered mail drains through the new instance — extends to
+        // the sync-wait filter slot. The `ComponentEntry` consults a
+        // specific `Arc<FilterSlot>` on `send`; the incoming
+        // `SubstrateCtx` has to point at that same `Arc` so the new
+        // instance's `wait_reply_p32` host fn installs filters where
+        // `send` actually looks for them.
         let ctx = SubstrateCtx::new(
             id,
             Arc::clone(&self.registry),
             Arc::clone(&self.queue),
             Arc::clone(&self.outbound),
             Arc::clone(&self.input_subscribers),
-        );
+        )
+        .with_filter_slot(entry.filter_slot());
         let mut new_component =
             match Component::instantiate(&self.engine, &self.linker, &module, ctx) {
                 Ok(c) => c,

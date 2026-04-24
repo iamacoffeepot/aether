@@ -36,6 +36,7 @@ pub mod mailer;
 pub mod registry;
 pub mod reply_table;
 pub mod scheduler;
+pub mod wait;
 
 pub use boot::{ChassisHandlerContext, SubstrateBoot, SubstrateBootBuilder};
 pub use chassis::{Chassis, ChassisCapabilities};
