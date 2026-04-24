@@ -219,6 +219,17 @@ fn main() -> wasmtime::Result<()> {
         }
     }
 
+    // `aether.net.fetch`: ADR-0043 substrate HTTP egress. Headless
+    // runs the asset pipeline, so net is first-class here — same
+    // shape as desktop. Deny-by-default via `AETHER_NET_ALLOWLIST`;
+    // `AETHER_NET_DISABLE=1` swaps to a nop adapter that replies
+    // `Disabled`.
+    let net_adapter = aether_substrate_core::net::build_default_adapter();
+    boot.registry.register_sink(
+        "net",
+        aether_substrate_core::net::net_sink_handler(net_adapter, Arc::clone(&boot.queue)),
+    );
+
     let tick_hz = parse_tick_hz_env();
     let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));
     tracing::info!(

@@ -33,6 +33,7 @@ pub mod kind_manifest;
 pub mod log_capture;
 pub mod mail;
 pub mod mailer;
+pub mod net;
 pub mod registry;
 pub mod reply_table;
 pub mod scheduler;
