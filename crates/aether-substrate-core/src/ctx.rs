@@ -17,6 +17,7 @@ use crate::mail::{Mail, MailKind, MailboxId, ReplyTo};
 use crate::mailer::Mailer;
 use crate::registry::{MailboxEntry, Registry};
 use crate::reply_table::ReplyTable;
+use crate::wait::FilterSlot;
 
 /// ADR-0016 §3: opt-in state migration payload. The substrate owns the
 /// buffer from the moment `save_state` is called on the old instance
@@ -67,6 +68,13 @@ pub struct SubstrateCtx {
     /// the replace; the substrate checks this after `on_replace` and
     /// surfaces the message back up the control plane.
     pub save_state_error: Option<String>,
+    /// ADR-0042 per-component sync-wait filter slot, shared by-Arc
+    /// with `ComponentEntry` so the mailer's send path can divert
+    /// matching mail to a parked waiter's oneshot before touching the
+    /// mpsc inbox. PR-1 only installs the plumbing; the
+    /// `wait_reply_p32` host fn that populates the slot lands in a
+    /// follow-up PR.
+    pub filter_slot: Arc<FilterSlot>,
 }
 
 impl SubstrateCtx {
@@ -91,7 +99,19 @@ impl SubstrateCtx {
             reply_table: ReplyTable::new(),
             saved_state: None,
             save_state_error: None,
+            filter_slot: Arc::new(FilterSlot::new()),
         }
+    }
+
+    /// Replace the ADR-0042 filter slot with one inherited from an
+    /// existing `ComponentEntry`. `handle_replace` calls this so the
+    /// incoming instance shares the mailbox's slot — the same `Arc`
+    /// that `ComponentEntry::send` consults — rather than booting with
+    /// a fresh one the entry would never see. Fresh loads leave the
+    /// default slot created by `new`.
+    pub fn with_filter_slot(mut self, slot: Arc<FilterSlot>) -> Self {
+        self.filter_slot = slot;
+        self
     }
 
     /// Dispatch mail. If the recipient is a sink, the handler runs inline

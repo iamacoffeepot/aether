@@ -3,11 +3,14 @@
 // written to the guest at a static `MAIL_OFFSET`; a guest-side
 // allocator is parked until an actual use case forces the question.
 
+use std::sync::Arc;
+
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
 use crate::mail::{Mail, ReplyTo};
 use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
+use crate::wait::FilterSlot;
 
 const MAIL_OFFSET: u32 = 1024;
 
@@ -204,6 +207,16 @@ impl Component {
             (bundle.version, STATE_OFFSET, bundle.bytes.len() as u32),
         )?;
         Ok(())
+    }
+
+    /// Share the ADR-0042 sync-wait filter slot with the per-mailbox
+    /// scheduler entry. The slot is created by `SubstrateCtx::new`;
+    /// this method hands out a cloned `Arc` so the mailer's send path
+    /// (running on the pushing thread) and the host fn populating
+    /// the slot (running on the component's dispatcher thread) route
+    /// through the same instance.
+    pub fn filter_slot(&self) -> Arc<FilterSlot> {
+        Arc::clone(&self.store.data().filter_slot)
     }
 
     /// Read a `u32` from guest linear memory at `offset`. Test-only
