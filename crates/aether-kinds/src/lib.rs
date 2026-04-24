@@ -1205,6 +1205,106 @@ mod control_plane {
             error: IoError,
         },
     }
+
+    // ADR-0043 substrate HTTP egress. One request kind + one reply
+    // kind on the `"net"` sink, plus supporting `HttpMethod`,
+    // `HttpHeader`, and `NetError` shapes. All postcard-shaped
+    // (Strings, Vecs, Option<u32>).
+    //
+    // Reply correlation follows the ADR-0041 pattern: the reply
+    // echoes the originating `url` so callers match reply-to-request
+    // without threading a pending-op queue. Request `body` is not
+    // echoed — correlation needs the identity of the request, not
+    // its contents, and a multi-MB upload should not round-trip its
+    // bytes. Components needing strict per-op correlation (same URL
+    // fired back-to-back, non-idempotent POST) lean on ADR-0042's
+    // per-ReplyTo correlation ids via `prev_correlation_p32` rather
+    // than a per-kind field.
+
+    /// HTTP method carried on `Fetch`. Enumerating at the schema
+    /// layer keeps `"get"` / `"GET"` / `"Get"` from disagreeing
+    /// across guests; the substrate maps each variant to its
+    /// canonical uppercase name when calling the HTTP backend.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum HttpMethod {
+        Get,
+        Post,
+        Put,
+        Delete,
+        Patch,
+        Head,
+        Options,
+    }
+
+    /// One HTTP header on a `Fetch` request or `FetchResult`
+    /// response. Expressed as a named-field struct because
+    /// `aether_mail::Schema` has no blanket impl for tuples — if
+    /// that lands later the wire shape here is source-compatible
+    /// (same two fields in the same order).
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub struct HttpHeader {
+        pub name: String,
+        pub value: String,
+    }
+
+    /// Structured failure reason for a net request (ADR-0043 §1).
+    /// Typed variants cover the branches agents routinely need to
+    /// match on — `Timeout` → retry, `AllowlistDenied` → config
+    /// issue, `BodyTooLarge` → chunk the response, `Disabled` →
+    /// surface to the operator. `InvalidUrl` carries the offending
+    /// URL text; `AdapterError` is the catchall preserving backend-
+    /// specific detail (DNS failure, TLS handshake, connection
+    /// refused, etc.) as free-form text.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum NetError {
+        InvalidUrl(String),
+        Timeout,
+        BodyTooLarge,
+        AllowlistDenied,
+        Disabled,
+        AdapterError(String),
+    }
+
+    /// `aether.net.fetch` — request the substrate perform an HTTP
+    /// request and reply with the response. Mailed to the `"net"`
+    /// sink; reply lands via `reply_mail` as `FetchResult`.
+    /// `timeout_ms` overrides the chassis default
+    /// (`AETHER_NET_TIMEOUT_MS`, default 30000) when set; `None`
+    /// uses the default.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.net.fetch")]
+    pub struct Fetch {
+        pub url: String,
+        pub method: HttpMethod,
+        pub headers: Vec<HttpHeader>,
+        pub body: Vec<u8>,
+        pub timeout_ms: Option<u32>,
+    }
+
+    /// Reply to `Fetch`. Both arms echo the originating `url` so the
+    /// caller correlates reply-to-request without threading a
+    /// pending-op queue — operation identity comes from the reply
+    /// kind itself (`aether.net.fetch_result`). Request `body` is
+    /// deliberately not echoed: correlation needs the identity of
+    /// the request, not its contents, and a multi-MB upload should
+    /// not round-trip. `Ok` carries the HTTP status, response
+    /// headers, and response body (bounded by
+    /// `AETHER_NET_MAX_BODY_BYTES`, default 16MB); `Err` carries a
+    /// `NetError` variant.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.net.fetch_result")]
+    pub enum FetchResult {
+        Ok {
+            url: String,
+            status: u16,
+            headers: Vec<HttpHeader>,
+            body: Vec<u8>,
+        },
+        Err {
+            url: String,
+            error: NetError,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -1567,6 +1667,162 @@ mod tests {
                     assert_eq!(error, IoError::NotFound);
                 }
                 DeleteResult::Ok { .. } => panic!("expected Err"),
+            }
+        }
+    }
+
+    // ADR-0043 net kind roundtrips. `Fetch` carries String + typed
+    // method + Vec<HttpHeader> + Vec<u8> body + Option<u32>;
+    // `FetchResult` mirrors `ReadResult`'s Ok/Err split with a
+    // typed error arm wrapping `NetError`. Tests prove the derived
+    // Serialize/Deserialize agree on the wire for each shape, with
+    // special attention to the `body`-not-echoed invariant and the
+    // payload-carrying `NetError` variants.
+    mod net_roundtrips {
+        use super::*;
+        use alloc::string::ToString;
+        use alloc::vec;
+        use alloc::vec::Vec;
+
+        fn sample_headers() -> Vec<HttpHeader> {
+            vec![
+                HttpHeader {
+                    name: "content-type".to_string(),
+                    value: "application/json".to_string(),
+                },
+                HttpHeader {
+                    name: "user-agent".to_string(),
+                    value: "aether/0.2".to_string(),
+                },
+            ]
+        }
+
+        #[test]
+        fn fetch_request_roundtrip() {
+            let f = Fetch {
+                url: "https://api.example.com/v1/resource".to_string(),
+                method: HttpMethod::Post,
+                headers: sample_headers(),
+                body: vec![b'{', b'}'],
+                timeout_ms: Some(5000),
+            };
+            let bytes = postcard::to_allocvec(&f).unwrap();
+            let back: Fetch = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(back.url, f.url);
+            assert_eq!(back.method, HttpMethod::Post);
+            assert_eq!(back.headers, f.headers);
+            assert_eq!(back.body, vec![b'{', b'}']);
+            assert_eq!(back.timeout_ms, Some(5000));
+        }
+
+        #[test]
+        fn fetch_request_roundtrip_no_timeout() {
+            let f = Fetch {
+                url: "https://api.example.com/".to_string(),
+                method: HttpMethod::Get,
+                headers: vec![],
+                body: vec![],
+                timeout_ms: None,
+            };
+            let bytes = postcard::to_allocvec(&f).unwrap();
+            let back: Fetch = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(back.timeout_ms, None);
+            assert_eq!(back.method, HttpMethod::Get);
+        }
+
+        #[test]
+        fn fetch_result_ok_roundtrip_echoes_url() {
+            let r = FetchResult::Ok {
+                url: "https://api.example.com/v1/resource".to_string(),
+                status: 200,
+                headers: sample_headers(),
+                body: vec![0xde, 0xad, 0xbe, 0xef],
+            };
+            let bytes = postcard::to_allocvec(&r).unwrap();
+            let back: FetchResult = postcard::from_bytes(&bytes).unwrap();
+            match back {
+                FetchResult::Ok {
+                    url,
+                    status,
+                    headers,
+                    body,
+                } => {
+                    assert_eq!(url, "https://api.example.com/v1/resource");
+                    assert_eq!(status, 200);
+                    assert_eq!(headers.len(), 2);
+                    assert_eq!(body, vec![0xde, 0xad, 0xbe, 0xef]);
+                }
+                FetchResult::Err { .. } => panic!("expected Ok"),
+            }
+        }
+
+        #[test]
+        fn fetch_result_err_roundtrip_echoes_url_and_net_error() {
+            let r = FetchResult::Err {
+                url: "https://api.example.com/gone".to_string(),
+                error: NetError::Timeout,
+            };
+            let bytes = postcard::to_allocvec(&r).unwrap();
+            let back: FetchResult = postcard::from_bytes(&bytes).unwrap();
+            match back {
+                FetchResult::Err { url, error } => {
+                    assert_eq!(url, "https://api.example.com/gone");
+                    assert_eq!(error, NetError::Timeout);
+                }
+                FetchResult::Ok { .. } => panic!("expected Err"),
+            }
+        }
+
+        #[test]
+        fn net_error_invalid_url_carries_payload() {
+            let e = NetError::InvalidUrl("not a url".to_string());
+            let bytes = postcard::to_allocvec(&e).unwrap();
+            let back: NetError = postcard::from_bytes(&bytes).unwrap();
+            match back {
+                NetError::InvalidUrl(s) => assert_eq!(s, "not a url"),
+                other => panic!("expected InvalidUrl, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn net_error_adapter_carries_detail() {
+            let e = NetError::AdapterError("dns lookup failed".to_string());
+            let bytes = postcard::to_allocvec(&e).unwrap();
+            let back: NetError = postcard::from_bytes(&bytes).unwrap();
+            match back {
+                NetError::AdapterError(s) => assert_eq!(s, "dns lookup failed"),
+                other => panic!("expected AdapterError, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn net_error_unit_variants_roundtrip() {
+            for e in [
+                NetError::Timeout,
+                NetError::BodyTooLarge,
+                NetError::AllowlistDenied,
+                NetError::Disabled,
+            ] {
+                let bytes = postcard::to_allocvec(&e).unwrap();
+                let back: NetError = postcard::from_bytes(&bytes).unwrap();
+                assert_eq!(back, e);
+            }
+        }
+
+        #[test]
+        fn http_method_roundtrip_all_variants() {
+            for m in [
+                HttpMethod::Get,
+                HttpMethod::Post,
+                HttpMethod::Put,
+                HttpMethod::Delete,
+                HttpMethod::Patch,
+                HttpMethod::Head,
+                HttpMethod::Options,
+            ] {
+                let bytes = postcard::to_allocvec(&m).unwrap();
+                let back: HttpMethod = postcard::from_bytes(&bytes).unwrap();
+                assert_eq!(back, m);
             }
         }
     }
