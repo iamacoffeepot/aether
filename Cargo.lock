@@ -148,6 +148,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-save-counter-component"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-component",
+ "aether-kinds",
+ "aether-mail",
+ "postcard",
+ "serde",
+]
+
+[[package]]
 name = "aether-substrate-core"
 version = "0.2.0-alpha"
 dependencies = [

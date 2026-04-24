@@ -38,10 +38,12 @@
 //! painful, ADR-0041's parked sync-mail primitive removes the
 //! state-machine bookkeeping; not v1.
 
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use aether_kinds::{Delete, List, Read, Write};
+use aether_kinds::{
+    Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
+};
 use aether_mail::{Kind, mailbox_id_from_name};
 use serde::Serialize;
 
@@ -122,6 +124,140 @@ fn encode_postcard<K: Serialize>(value: &K) -> Vec<u8> {
     // `#[derive(Serialize)]`, so the `expect` is a "this can't
     // fail" guard, not a recoverable branch.
     postcard::to_allocvec(value).expect("postcard encode to Vec is infallible")
+}
+
+/// ADR-0042: errors surfaced by the `*_sync` wrappers. The first three
+/// map 1:1 onto the host fn's return sentinels (`-1` / `-2` / `-3`);
+/// `Io` carries an I/O-layer failure (ADR-0041's `IoError` taxonomy);
+/// `Decode` covers the unlikely case where the reply bytes don't
+/// postcard-decode — a substrate/guest schema divergence rather than
+/// a usage error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncIoError {
+    Timeout,
+    BufferTooSmall,
+    Cancelled,
+    Io(IoError),
+    Decode(String),
+}
+
+/// Default reply-buffer capacity for `read_sync`. Sized for save
+/// and config files; streaming-asset workloads should not ride this
+/// path (ADR-0041 flags a zero-copy host fn as the future answer).
+/// Oversized replies return `SyncIoError::BufferTooSmall` and stay
+/// parked on overflow so a caller can retry with a bigger buffer
+/// via the raw host fn.
+const READ_REPLY_CAP: usize = 8 * 1024 * 1024;
+/// Reply capacity for `write_sync` / `delete_sync`. The reply is
+/// `{Write,Delete}Result::Ok{namespace,path}` or `Err{error}` — a
+/// few hundred bytes at most even with long paths.
+const SMALL_REPLY_CAP: usize = 4 * 1024;
+/// Reply capacity for `list_sync`. Entry lists can grow; default
+/// is generous without being wasteful.
+const LIST_REPLY_CAP: usize = 256 * 1024;
+
+/// Synchronous counterpart to [`read`]. Sends the request, parks the
+/// component thread until the reply arrives or `timeout_ms` elapses,
+/// decodes `ReadResult`, and returns the bytes. Blocks only the
+/// calling component; other components on the same substrate are
+/// unaffected.
+///
+/// Use for multi-step I/O where the state-machine cost of the
+/// async [`read`] + `#[handler] fn on_read_result` shape outweighs
+/// the single-tracked-component cost of a sync wait. ADR-0042.
+pub fn read_sync(namespace: &str, path: &str, timeout_ms: u32) -> Result<Vec<u8>, SyncIoError> {
+    send(&Read {
+        namespace: namespace.to_string(),
+        path: path.to_string(),
+    });
+    let reply: ReadResult = wait::<ReadResult>(timeout_ms, READ_REPLY_CAP)?;
+    match reply {
+        ReadResult::Ok { bytes, .. } => Ok(bytes),
+        ReadResult::Err { error, .. } => Err(SyncIoError::Io(error)),
+    }
+}
+
+/// Synchronous counterpart to [`write`]. Returns `Ok(())` when the
+/// adapter persisted the bytes (tmp+rename atomically under the
+/// local-file adapter); `Err` carries the reason.
+pub fn write_sync(
+    namespace: &str,
+    path: &str,
+    bytes: &[u8],
+    timeout_ms: u32,
+) -> Result<(), SyncIoError> {
+    send(&Write {
+        namespace: namespace.to_string(),
+        path: path.to_string(),
+        bytes: bytes.to_vec(),
+    });
+    match wait::<WriteResult>(timeout_ms, SMALL_REPLY_CAP)? {
+        WriteResult::Ok { .. } => Ok(()),
+        WriteResult::Err { error, .. } => Err(SyncIoError::Io(error)),
+    }
+}
+
+/// Synchronous counterpart to [`delete`]. Missing files surface as
+/// `Err(SyncIoError::Io(IoError::NotFound))` — callers that don't
+/// care about the distinction can `.ok()` and discard.
+pub fn delete_sync(namespace: &str, path: &str, timeout_ms: u32) -> Result<(), SyncIoError> {
+    send(&Delete {
+        namespace: namespace.to_string(),
+        path: path.to_string(),
+    });
+    match wait::<DeleteResult>(timeout_ms, SMALL_REPLY_CAP)? {
+        DeleteResult::Ok { .. } => Ok(()),
+        DeleteResult::Err { error, .. } => Err(SyncIoError::Io(error)),
+    }
+}
+
+/// Synchronous counterpart to [`list`]. Returns the bare entry
+/// names under `prefix` in `namespace` — compose
+/// `{prefix}{entry}` to turn one back into a readable path.
+pub fn list_sync(
+    namespace: &str,
+    prefix: &str,
+    timeout_ms: u32,
+) -> Result<Vec<String>, SyncIoError> {
+    send(&List {
+        namespace: namespace.to_string(),
+        prefix: prefix.to_string(),
+    });
+    match wait::<ListResult>(timeout_ms, LIST_REPLY_CAP)? {
+        ListResult::Ok { entries, .. } => Ok(entries),
+        ListResult::Err { error, .. } => Err(SyncIoError::Io(error)),
+    }
+}
+
+/// Allocate a `capacity`-sized scratch buffer in guest memory, park
+/// on `raw::wait_reply` for a mail of kind `K`, and postcard-decode
+/// the written bytes. Shared by every `*_sync` wrapper.
+fn wait<K>(timeout_ms: u32, capacity: usize) -> Result<K, SyncIoError>
+where
+    K: Kind + serde::de::DeserializeOwned,
+{
+    let mut buf: Vec<u8> = alloc::vec![0u8; capacity];
+    let rc = unsafe {
+        raw::wait_reply(
+            K::ID,
+            buf.as_mut_ptr().addr() as u32,
+            buf.len() as u32,
+            timeout_ms,
+        )
+    };
+    match rc {
+        -1 => Err(SyncIoError::Timeout),
+        -2 => Err(SyncIoError::BufferTooSmall),
+        -3 => Err(SyncIoError::Cancelled),
+        n if n >= 0 => {
+            let len = n as usize;
+            postcard::from_bytes(&buf[..len])
+                .map_err(|e| SyncIoError::Decode(alloc::format!("{e}")))
+        }
+        _ => Err(SyncIoError::Decode(alloc::format!(
+            "unexpected wait_reply return: {rc}"
+        ))),
+    }
 }
 
 #[cfg(test)]

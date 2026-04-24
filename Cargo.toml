@@ -11,6 +11,7 @@ members = [
     "crates/aether-camera-component",
     "crates/aether-hello-component",
     "crates/aether-player-component",
+    "crates/aether-save-counter-component",
     "crates/aether-hub-protocol",
     "crates/aether-mail",
     "crates/aether-mail-derive",
