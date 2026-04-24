@@ -1152,7 +1152,7 @@ fn main() -> wasmtime::Result<()> {
             );
             boot.registry.register_sink(
                 "io",
-                aether_substrate_desktop::io::io_sink_handler(registry, Arc::clone(&boot.outbound)),
+                aether_substrate_desktop::io::io_sink_handler(registry, Arc::clone(&boot.queue)),
             );
         }
         Err(e) => {

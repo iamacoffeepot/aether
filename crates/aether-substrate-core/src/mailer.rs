@@ -18,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 use aether_hub_protocol::{EngineMailToHubSubstrateFrame, EngineToHub};
 
 use crate::hub_client::HubOutbound;
-use crate::mail::Mail;
+use crate::mail::{Mail, ReplyTo};
 use crate::registry::{MailboxEntry, Registry};
 use crate::scheduler::ComponentTable;
 
@@ -86,6 +86,46 @@ impl Mailer {
             self.components.get().expect("Mailer not wired"),
             self.outbound.get(),
         );
+    }
+
+    /// Route a sink's `*Result` reply to `sender` with a single
+    /// encode. `Session` / `EngineMailbox` hand off to the hub
+    /// outbound (unchanged hub-wire format); `Component` pushes a
+    /// fresh `Mail` into the target component's inbox so the guest's
+    /// normal dispatch path delivers the reply. `None` is a silent
+    /// drop — nobody asked for a reply.
+    ///
+    /// The reply mail carries `reply_to = None` and no origin: the
+    /// receiver isn't expected to reply to a reply, and decorating
+    /// with the sink's mailbox would produce a `ReplyEntry::Component`
+    /// pointing at a sink that can't itself receive mail.
+    pub fn send_reply<K>(&self, sender: ReplyTo, result: &K) -> bool
+    where
+        K: aether_mail::Kind + serde::Serialize,
+    {
+        match sender {
+            ReplyTo::None => false,
+            ReplyTo::Session(_) | ReplyTo::EngineMailbox { .. } => match self.outbound.get() {
+                Some(outbound) => outbound.send_reply(sender, result),
+                None => false,
+            },
+            ReplyTo::Component(mailbox) => {
+                let payload = match postcard::to_allocvec(result) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!(
+                            target: "aether_substrate::mailer",
+                            kind = K::NAME,
+                            error = %e,
+                            "reply encode failed",
+                        );
+                        return false;
+                    }
+                };
+                self.push(Mail::new(mailbox, K::ID, payload, 1));
+                true
+            }
+        }
     }
 
     /// Block until every live component's inbox is empty and no

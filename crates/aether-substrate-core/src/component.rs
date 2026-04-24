@@ -132,7 +132,13 @@ impl Component {
                 engine_id: *engine_id,
                 mailbox_id: *mailbox_id,
             }),
-            ReplyTo::None => mail.from_component.map(ReplyEntry::Component),
+            // Component-variant reply_to reaches a real component's
+            // `deliver` only via the mailer-routed reply path (the
+            // sink replied to a local component): the reply itself
+            // has no one to reply back to, so the guest sees no
+            // `reply_to`. Falls through to the `from_component`
+            // check, matching the None path.
+            ReplyTo::None | ReplyTo::Component(_) => mail.from_component.map(ReplyEntry::Component),
         };
         let handle = match entry {
             Some(e) => self.store.data_mut().reply_table.allocate(e),
