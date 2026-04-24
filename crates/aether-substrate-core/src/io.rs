@@ -328,6 +328,11 @@ fn dispatch_io_mail(
     sender: ReplyTo,
     bytes: &[u8],
 ) {
+    // Decode-failure helper: the request couldn't be parsed, so we
+    // have no namespace/path to echo. Send the reply with empty
+    // strings in the echo fields — the `AdapterError` text carries
+    // the decode diagnostic, and empty-string echo is a loud signal
+    // that the request itself was malformed.
     if kind_id == <Read as Kind>::ID {
         let req: Read = match postcard::from_bytes(bytes) {
             Ok(r) => r,
@@ -340,6 +345,8 @@ fn dispatch_io_mail(
                 outbound.send_reply(
                     sender,
                     &ReadResult::Err {
+                        namespace: String::new(),
+                        path: String::new(),
                         error: IoError::AdapterError(format!("decode failed: {e}")),
                     },
                 );
@@ -350,14 +357,30 @@ fn dispatch_io_mail(
             outbound.send_reply(
                 sender,
                 &ReadResult::Err {
+                    namespace: req.namespace.clone(),
+                    path: req.path.clone(),
                     error: IoError::UnknownNamespace,
                 },
             );
             return;
         };
         let _ = match adapter.read(&req.path) {
-            Ok(bytes) => outbound.send_reply(sender, &ReadResult::Ok { bytes }),
-            Err(error) => outbound.send_reply(sender, &ReadResult::Err { error }),
+            Ok(bytes) => outbound.send_reply(
+                sender,
+                &ReadResult::Ok {
+                    namespace: req.namespace.clone(),
+                    path: req.path.clone(),
+                    bytes,
+                },
+            ),
+            Err(error) => outbound.send_reply(
+                sender,
+                &ReadResult::Err {
+                    namespace: req.namespace,
+                    path: req.path,
+                    error,
+                },
+            ),
         };
     } else if kind_id == <Write as Kind>::ID {
         let req: Write = match postcard::from_bytes(bytes) {
@@ -371,6 +394,8 @@ fn dispatch_io_mail(
                 outbound.send_reply(
                     sender,
                     &WriteResult::Err {
+                        namespace: String::new(),
+                        path: String::new(),
                         error: IoError::AdapterError(format!("decode failed: {e}")),
                     },
                 );
@@ -381,14 +406,29 @@ fn dispatch_io_mail(
             outbound.send_reply(
                 sender,
                 &WriteResult::Err {
+                    namespace: req.namespace.clone(),
+                    path: req.path.clone(),
                     error: IoError::UnknownNamespace,
                 },
             );
             return;
         };
         let _ = match adapter.write(&req.path, &req.bytes) {
-            Ok(()) => outbound.send_reply(sender, &WriteResult::Ok),
-            Err(error) => outbound.send_reply(sender, &WriteResult::Err { error }),
+            Ok(()) => outbound.send_reply(
+                sender,
+                &WriteResult::Ok {
+                    namespace: req.namespace.clone(),
+                    path: req.path.clone(),
+                },
+            ),
+            Err(error) => outbound.send_reply(
+                sender,
+                &WriteResult::Err {
+                    namespace: req.namespace,
+                    path: req.path,
+                    error,
+                },
+            ),
         };
     } else if kind_id == <Delete as Kind>::ID {
         let req: Delete = match postcard::from_bytes(bytes) {
@@ -402,6 +442,8 @@ fn dispatch_io_mail(
                 outbound.send_reply(
                     sender,
                     &DeleteResult::Err {
+                        namespace: String::new(),
+                        path: String::new(),
                         error: IoError::AdapterError(format!("decode failed: {e}")),
                     },
                 );
@@ -412,14 +454,29 @@ fn dispatch_io_mail(
             outbound.send_reply(
                 sender,
                 &DeleteResult::Err {
+                    namespace: req.namespace.clone(),
+                    path: req.path.clone(),
                     error: IoError::UnknownNamespace,
                 },
             );
             return;
         };
         let _ = match adapter.delete(&req.path) {
-            Ok(()) => outbound.send_reply(sender, &DeleteResult::Ok),
-            Err(error) => outbound.send_reply(sender, &DeleteResult::Err { error }),
+            Ok(()) => outbound.send_reply(
+                sender,
+                &DeleteResult::Ok {
+                    namespace: req.namespace.clone(),
+                    path: req.path.clone(),
+                },
+            ),
+            Err(error) => outbound.send_reply(
+                sender,
+                &DeleteResult::Err {
+                    namespace: req.namespace,
+                    path: req.path,
+                    error,
+                },
+            ),
         };
     } else if kind_id == <List as Kind>::ID {
         let req: List = match postcard::from_bytes(bytes) {
@@ -433,6 +490,8 @@ fn dispatch_io_mail(
                 outbound.send_reply(
                     sender,
                     &ListResult::Err {
+                        namespace: String::new(),
+                        prefix: String::new(),
                         error: IoError::AdapterError(format!("decode failed: {e}")),
                     },
                 );
@@ -443,14 +502,30 @@ fn dispatch_io_mail(
             outbound.send_reply(
                 sender,
                 &ListResult::Err {
+                    namespace: req.namespace.clone(),
+                    prefix: req.prefix.clone(),
                     error: IoError::UnknownNamespace,
                 },
             );
             return;
         };
         let _ = match adapter.list(&req.prefix) {
-            Ok(entries) => outbound.send_reply(sender, &ListResult::Ok { entries }),
-            Err(error) => outbound.send_reply(sender, &ListResult::Err { error }),
+            Ok(entries) => outbound.send_reply(
+                sender,
+                &ListResult::Ok {
+                    namespace: req.namespace.clone(),
+                    prefix: req.prefix.clone(),
+                    entries,
+                },
+            ),
+            Err(error) => outbound.send_reply(
+                sender,
+                &ListResult::Err {
+                    namespace: req.namespace,
+                    prefix: req.prefix,
+                    error,
+                },
+            ),
         };
     } else {
         tracing::warn!(
@@ -708,8 +783,16 @@ mod tests {
             1,
         );
         match decode_reply::<ReadResult>(&rx) {
-            ReadResult::Ok { bytes } => assert_eq!(bytes, vec![9, 9, 9]),
-            ReadResult::Err { error } => panic!("expected Ok, got Err({error:?})"),
+            ReadResult::Ok {
+                namespace,
+                path,
+                bytes,
+            } => {
+                assert_eq!(namespace, "save");
+                assert_eq!(path, "slot.bin");
+                assert_eq!(bytes, vec![9, 9, 9]);
+            }
+            ReadResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
         }
         cleanup(&root);
     }
@@ -733,12 +816,20 @@ mod tests {
             &req,
             1,
         );
-        assert!(matches!(
-            decode_reply::<ReadResult>(&rx),
+        match decode_reply::<ReadResult>(&rx) {
             ReadResult::Err {
-                error: IoError::UnknownNamespace
+                namespace,
+                path,
+                error: IoError::UnknownNamespace,
+            } => {
+                // Echoed fields survive the unknown-namespace path —
+                // the dispatcher pulls them from the decoded request
+                // before looking up the adapter.
+                assert_eq!(namespace, "nope");
+                assert_eq!(path, "x.bin");
             }
-        ));
+            other => panic!("expected Err UnknownNamespace echoing request, got {other:?}"),
+        }
         cleanup(&root);
     }
 
@@ -764,7 +855,8 @@ mod tests {
         assert!(matches!(
             decode_reply::<ReadResult>(&rx),
             ReadResult::Err {
-                error: IoError::NotFound
+                error: IoError::NotFound,
+                ..
             }
         ));
         cleanup(&root);
@@ -790,7 +882,13 @@ mod tests {
             &req,
             1,
         );
-        assert!(matches!(decode_reply::<WriteResult>(&rx), WriteResult::Ok));
+        match decode_reply::<WriteResult>(&rx) {
+            WriteResult::Ok { namespace, path } => {
+                assert_eq!(namespace, "save");
+                assert_eq!(path, "slot.bin");
+            }
+            WriteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+        }
         assert_eq!(
             reg.get("save").unwrap().read("slot.bin").unwrap(),
             vec![1, 2, 3]
@@ -821,7 +919,8 @@ mod tests {
         assert!(matches!(
             decode_reply::<WriteResult>(&rx),
             WriteResult::Err {
-                error: IoError::Forbidden
+                error: IoError::Forbidden,
+                ..
             }
         ));
         cleanup(&root);
@@ -847,10 +946,13 @@ mod tests {
             &req,
             1,
         );
-        assert!(matches!(
-            decode_reply::<DeleteResult>(&rx),
-            DeleteResult::Ok
-        ));
+        match decode_reply::<DeleteResult>(&rx) {
+            DeleteResult::Ok { namespace, path } => {
+                assert_eq!(namespace, "save");
+                assert_eq!(path, "x.bin");
+            }
+            DeleteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+        }
         assert!(matches!(
             reg.get("save").unwrap().read("x.bin"),
             Err(IoError::NotFound)
@@ -880,10 +982,16 @@ mod tests {
             1,
         );
         match decode_reply::<ListResult>(&rx) {
-            ListResult::Ok { entries } => {
+            ListResult::Ok {
+                namespace,
+                prefix,
+                entries,
+            } => {
+                assert_eq!(namespace, "save");
+                assert_eq!(prefix, "");
                 assert_eq!(entries, vec!["a.bin".to_string(), "b.bin".to_string()]);
             }
-            ListResult::Err { error } => panic!("expected Ok, got Err({error:?})"),
+            ListResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
         }
         cleanup(&root);
     }
@@ -903,10 +1011,13 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_malformed_payload_replies_adapter_error() {
+    fn dispatch_malformed_payload_replies_adapter_error_with_empty_echo() {
         // Bytes that don't postcard-decode as `Read`. Dispatcher
         // must fall through to the decode-error branch and reply
-        // with `IoError::AdapterError` rather than hang.
+        // with `IoError::AdapterError` rather than hang. Echo
+        // fields are empty strings because the dispatcher has no
+        // parsed request to pull them from — loud signal that the
+        // request itself was malformed.
         let root = scratch_root("dispatch-mal");
         let reg = build_registry(&root, true);
         let (outbound, rx) = HubOutbound::test_channel();
@@ -919,12 +1030,17 @@ mod tests {
             &[0xffu8; 4],
             1,
         );
-        assert!(matches!(
-            decode_reply::<ReadResult>(&rx),
+        match decode_reply::<ReadResult>(&rx) {
             ReadResult::Err {
-                error: IoError::AdapterError(_)
+                namespace,
+                path,
+                error: IoError::AdapterError(_),
+            } => {
+                assert_eq!(namespace, "");
+                assert_eq!(path, "");
             }
-        ));
+            other => panic!("expected Err AdapterError with empty echo, got {other:?}"),
+        }
         cleanup(&root);
     }
 }
