@@ -28,6 +28,7 @@ pub mod ctx;
 pub mod host_fns;
 pub mod hub_client;
 pub mod input;
+pub mod io;
 pub mod kind_manifest;
 pub mod log_capture;
 pub mod mail;

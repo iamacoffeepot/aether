@@ -191,6 +191,34 @@ fn main() -> wasmtime::Result<()> {
         ),
     );
 
+    // `aether.io.*` per ADR-0041. Headless gets the same sink as
+    // desktop — the io path is purely I/O, no GPU or window surface,
+    // so there's nothing chassis-specific to diverge on. Boot-time
+    // filesystem failure logs loud and skips the sink (same policy
+    // as desktop) rather than failing the whole chassis.
+    match aether_substrate_core::io::build_default_registry() {
+        Ok((registry, roots)) => {
+            tracing::info!(
+                target: "aether_substrate::io",
+                save = %roots.save.display(),
+                assets = %roots.assets.display(),
+                config = %roots.config.display(),
+                "io adapters registered",
+            );
+            boot.registry.register_sink(
+                "io",
+                aether_substrate_core::io::io_sink_handler(registry, Arc::clone(&boot.outbound)),
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                target: "aether_substrate::io",
+                error = %e,
+                "io adapter init failed — `io` sink not registered",
+            );
+        }
+    }
+
     let tick_hz = parse_tick_hz_env();
     let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));
     tracing::info!(
