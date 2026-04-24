@@ -20,8 +20,8 @@ use aether_kinds::{
 };
 use aether_mail::Kind;
 
-use crate::hub_client::HubOutbound;
 use crate::mail::ReplyTo;
+use crate::mailer::Mailer;
 use crate::registry::SinkHandler;
 
 /// Result shape used throughout the adapter layer. The variants of
@@ -302,13 +302,20 @@ pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, Namesp
 /// to `registry.register_sink("io", handler)`. The returned closure
 /// demultiplexes by `kind_id` (Read / Write / Delete / List, all
 /// postcard-decoded), drives the adapter, and replies with the
-/// paired `*Result` kind via `outbound.send_reply`.
+/// paired `*Result` kind via `mailer.send_reply`.
+///
+/// The reply router is `Mailer::send_reply`, not
+/// `HubOutbound::send_reply`, so session / engine-mailbox /
+/// local-component replies all funnel through one path. Component-
+/// originated mail (`ReplyTo::Component`) pushes the reply back
+/// into the requesting component's inbox; session / engine mail
+/// hands off to the hub outbound as before.
 ///
 /// Adapter calls run synchronously on the sink dispatch thread —
 /// fine for save/config (KB-MB files). Asset-sized workloads
 /// should not ride this path; ADR-0041 flags a future host-fn fast
 /// path for zero-copy streaming reads.
-pub fn io_sink_handler(registry: Arc<AdapterRegistry>, outbound: Arc<HubOutbound>) -> SinkHandler {
+pub fn io_sink_handler(registry: Arc<AdapterRegistry>, mailer: Arc<Mailer>) -> SinkHandler {
     Arc::new(
         move |kind_id: u64,
               _kind_name: &str,
@@ -316,14 +323,14 @@ pub fn io_sink_handler(registry: Arc<AdapterRegistry>, outbound: Arc<HubOutbound
               sender: ReplyTo,
               bytes: &[u8],
               _count: u32| {
-            dispatch_io_mail(&registry, &outbound, kind_id, sender, bytes);
+            dispatch_io_mail(&registry, &mailer, kind_id, sender, bytes);
         },
     )
 }
 
 fn dispatch_io_mail(
     registry: &AdapterRegistry,
-    outbound: &HubOutbound,
+    mailer: &Mailer,
     kind_id: u64,
     sender: ReplyTo,
     bytes: &[u8],
@@ -342,7 +349,7 @@ fn dispatch_io_mail(
                     error = %e,
                     "read: decode failed, replying Err",
                 );
-                outbound.send_reply(
+                mailer.send_reply(
                     sender,
                     &ReadResult::Err {
                         namespace: String::new(),
@@ -354,7 +361,7 @@ fn dispatch_io_mail(
             }
         };
         let Some(adapter) = registry.get(&req.namespace) else {
-            outbound.send_reply(
+            mailer.send_reply(
                 sender,
                 &ReadResult::Err {
                     namespace: req.namespace.clone(),
@@ -365,7 +372,7 @@ fn dispatch_io_mail(
             return;
         };
         let _ = match adapter.read(&req.path) {
-            Ok(bytes) => outbound.send_reply(
+            Ok(bytes) => mailer.send_reply(
                 sender,
                 &ReadResult::Ok {
                     namespace: req.namespace.clone(),
@@ -373,7 +380,7 @@ fn dispatch_io_mail(
                     bytes,
                 },
             ),
-            Err(error) => outbound.send_reply(
+            Err(error) => mailer.send_reply(
                 sender,
                 &ReadResult::Err {
                     namespace: req.namespace,
@@ -391,7 +398,7 @@ fn dispatch_io_mail(
                     error = %e,
                     "write: decode failed, replying Err",
                 );
-                outbound.send_reply(
+                mailer.send_reply(
                     sender,
                     &WriteResult::Err {
                         namespace: String::new(),
@@ -403,7 +410,7 @@ fn dispatch_io_mail(
             }
         };
         let Some(adapter) = registry.get(&req.namespace) else {
-            outbound.send_reply(
+            mailer.send_reply(
                 sender,
                 &WriteResult::Err {
                     namespace: req.namespace.clone(),
@@ -414,14 +421,14 @@ fn dispatch_io_mail(
             return;
         };
         let _ = match adapter.write(&req.path, &req.bytes) {
-            Ok(()) => outbound.send_reply(
+            Ok(()) => mailer.send_reply(
                 sender,
                 &WriteResult::Ok {
                     namespace: req.namespace.clone(),
                     path: req.path.clone(),
                 },
             ),
-            Err(error) => outbound.send_reply(
+            Err(error) => mailer.send_reply(
                 sender,
                 &WriteResult::Err {
                     namespace: req.namespace,
@@ -439,7 +446,7 @@ fn dispatch_io_mail(
                     error = %e,
                     "delete: decode failed, replying Err",
                 );
-                outbound.send_reply(
+                mailer.send_reply(
                     sender,
                     &DeleteResult::Err {
                         namespace: String::new(),
@@ -451,7 +458,7 @@ fn dispatch_io_mail(
             }
         };
         let Some(adapter) = registry.get(&req.namespace) else {
-            outbound.send_reply(
+            mailer.send_reply(
                 sender,
                 &DeleteResult::Err {
                     namespace: req.namespace.clone(),
@@ -462,14 +469,14 @@ fn dispatch_io_mail(
             return;
         };
         let _ = match adapter.delete(&req.path) {
-            Ok(()) => outbound.send_reply(
+            Ok(()) => mailer.send_reply(
                 sender,
                 &DeleteResult::Ok {
                     namespace: req.namespace.clone(),
                     path: req.path.clone(),
                 },
             ),
-            Err(error) => outbound.send_reply(
+            Err(error) => mailer.send_reply(
                 sender,
                 &DeleteResult::Err {
                     namespace: req.namespace,
@@ -487,7 +494,7 @@ fn dispatch_io_mail(
                     error = %e,
                     "list: decode failed, replying Err",
                 );
-                outbound.send_reply(
+                mailer.send_reply(
                     sender,
                     &ListResult::Err {
                         namespace: String::new(),
@@ -499,7 +506,7 @@ fn dispatch_io_mail(
             }
         };
         let Some(adapter) = registry.get(&req.namespace) else {
-            outbound.send_reply(
+            mailer.send_reply(
                 sender,
                 &ListResult::Err {
                     namespace: req.namespace.clone(),
@@ -510,7 +517,7 @@ fn dispatch_io_mail(
             return;
         };
         let _ = match adapter.list(&req.prefix) {
-            Ok(entries) => outbound.send_reply(
+            Ok(entries) => mailer.send_reply(
                 sender,
                 &ListResult::Ok {
                     namespace: req.namespace.clone(),
@@ -518,7 +525,7 @@ fn dispatch_io_mail(
                     entries,
                 },
             ),
-            Err(error) => outbound.send_reply(
+            Err(error) => mailer.send_reply(
                 sender,
                 &ListResult::Err {
                     namespace: req.namespace,
@@ -746,6 +753,25 @@ mod tests {
         ReplyTo::Session(SessionToken(Uuid::nil()))
     }
 
+    /// Build a fully-wired `Mailer` connected to a fresh test
+    /// outbound channel. Sessions/engine replies land on `rx`;
+    /// component replies push into the mailer's component table,
+    /// which is pre-wired with an empty registry + empty components
+    /// table so `push` can route without panicking.
+    fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EngineToHub>) {
+        use std::collections::HashMap;
+        use std::sync::RwLock;
+
+        let (outbound, rx) = HubOutbound::test_channel();
+        let mailer = Arc::new(Mailer::new());
+        mailer.wire(
+            Arc::new(crate::registry::Registry::new()),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
+        mailer.wire_outbound(outbound);
+        (mailer, rx)
+    }
+
     fn decode_reply<K: aether_mail::Kind + serde::de::DeserializeOwned>(
         rx: &std::sync::mpsc::Receiver<EngineToHub>,
     ) -> K {
@@ -763,12 +789,12 @@ mod tests {
     fn dispatch_read_ok_replies_with_bytes() {
         let root = scratch_root("dispatch-read");
         let reg = build_registry(&root, true);
-        let (outbound, rx) = HubOutbound::test_channel();
+        let (mailer, rx) = test_mailer_and_rx();
         reg.get("save")
             .unwrap()
             .write("slot.bin", &[9, 9, 9])
             .unwrap();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&outbound));
+        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Read {
             namespace: "save".to_string(),
             path: "slot.bin".to_string(),
@@ -801,8 +827,8 @@ mod tests {
     fn dispatch_read_unknown_namespace_replies_err() {
         let root = scratch_root("dispatch-ns");
         let reg = build_registry(&root, true);
-        let (outbound, rx) = HubOutbound::test_channel();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&outbound));
+        let (mailer, rx) = test_mailer_and_rx();
+        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Read {
             namespace: "nope".to_string(),
             path: "x.bin".to_string(),
@@ -837,8 +863,8 @@ mod tests {
     fn dispatch_read_not_found_replies_err() {
         let root = scratch_root("dispatch-nf");
         let reg = build_registry(&root, true);
-        let (outbound, rx) = HubOutbound::test_channel();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&outbound));
+        let (mailer, rx) = test_mailer_and_rx();
+        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Read {
             namespace: "save".to_string(),
             path: "ghost.bin".to_string(),
@@ -866,8 +892,8 @@ mod tests {
     fn dispatch_write_ok_persists_bytes() {
         let root = scratch_root("dispatch-write");
         let reg = build_registry(&root, true);
-        let (outbound, rx) = HubOutbound::test_channel();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&outbound));
+        let (mailer, rx) = test_mailer_and_rx();
+        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Write {
             namespace: "save".to_string(),
             path: "slot.bin".to_string(),
@@ -900,8 +926,8 @@ mod tests {
     fn dispatch_write_read_only_namespace_replies_forbidden() {
         let root = scratch_root("dispatch-ro");
         let reg = build_registry(&root, false);
-        let (outbound, rx) = HubOutbound::test_channel();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&outbound));
+        let (mailer, rx) = test_mailer_and_rx();
+        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Write {
             namespace: "save".to_string(),
             path: "slot.bin".to_string(),
@@ -930,9 +956,9 @@ mod tests {
     fn dispatch_delete_then_read_surfaces_not_found() {
         let root = scratch_root("dispatch-del");
         let reg = build_registry(&root, true);
-        let (outbound, rx) = HubOutbound::test_channel();
+        let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("x.bin", b"x").unwrap();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&outbound));
+        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Delete {
             namespace: "save".to_string(),
             path: "x.bin".to_string(),
@@ -964,10 +990,10 @@ mod tests {
     fn dispatch_list_returns_sorted_entries() {
         let root = scratch_root("dispatch-list");
         let reg = build_registry(&root, true);
-        let (outbound, rx) = HubOutbound::test_channel();
+        let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("b.bin", b"").unwrap();
         reg.get("save").unwrap().write("a.bin", b"").unwrap();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&outbound));
+        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&List {
             namespace: "save".to_string(),
             prefix: "".to_string(),
@@ -1003,10 +1029,121 @@ mod tests {
         // sender to be waiting on).
         let root = scratch_root("dispatch-unknown");
         let reg = build_registry(&root, true);
-        let (outbound, rx) = HubOutbound::test_channel();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&outbound));
+        let (mailer, rx) = test_mailer_and_rx();
+        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         handler(0xdead_beef, "some.other", None, session_sender(), &[], 1);
         assert!(rx.try_recv().is_err(), "unexpected reply on unknown kind");
+        cleanup(&root);
+    }
+
+    /// End-to-end: a component pushes a `Read` at the io sink and
+    /// receives the `ReadResult` via `Mailer::send_reply` →
+    /// `Mailer::push` → its own dispatcher's `deliver`. The WAT
+    /// guest records the inbound kind id at a known offset so the
+    /// test can confirm the reply actually reached receive. Prior
+    /// to the `ReplyTo::Component` plumbing this path silently
+    /// dropped the reply at `HubOutbound::send_reply(None, ..)`.
+    #[test]
+    fn component_reply_roundtrip_delivers_readresult_to_originator() {
+        use std::collections::HashMap;
+        use std::sync::RwLock;
+
+        use wasmtime::{Engine, Linker, Module};
+
+        use crate::component::Component;
+        use crate::ctx::SubstrateCtx;
+        use crate::registry::Registry;
+        use crate::scheduler::{ComponentEntry, close_and_join};
+
+        // WAT: store the inbound `kind` (param 0) lower+upper u32
+        // halves at offsets 200 and 204 so the test can read back
+        // the full u64 kind id after delivery.
+        const WAT_RECORDS_KIND: &str = r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+                    i32.const 200
+                    local.get 0
+                    i32.wrap_i64
+                    i32.store
+                    i32.const 204
+                    local.get 0
+                    i64.const 32
+                    i64.shr_u
+                    i32.wrap_i64
+                    i32.store
+                    i32.const 0))
+        "#;
+
+        let root = scratch_root("dispatch-component-reply");
+        let reg = build_registry(&root, true);
+        reg.get("save")
+            .unwrap()
+            .write("slot.bin", &[1, 2, 3])
+            .unwrap();
+
+        // Full mailer wiring: a real `Registry` + `ComponentTable`
+        // so the reply push routes into the test component's inbox.
+        let registry = Arc::new(Registry::new());
+        let caller_mailbox = registry.register_component("test_caller");
+        let components: crate::scheduler::ComponentTable = Arc::new(RwLock::new(HashMap::new()));
+        let (outbound, _outbound_rx) = HubOutbound::test_channel();
+        let mailer = Arc::new(Mailer::new());
+        mailer.wire(Arc::clone(&registry), Arc::clone(&components));
+        mailer.wire_outbound(Arc::clone(&outbound));
+
+        // Instantiate the component. Its ctx gets the same mailer /
+        // registry / outbound the sink will dispatch through.
+        let engine = Engine::default();
+        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        crate::host_fns::register(&mut linker).expect("register host fns");
+        let wasm = wat::parse_str(WAT_RECORDS_KIND).expect("compile WAT");
+        let module = Module::new(&engine, &wasm).expect("compile module");
+        let ctx = SubstrateCtx::new(
+            caller_mailbox,
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            Arc::clone(&outbound),
+            crate::input::new_subscribers(),
+        );
+        let component =
+            Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
+        let entry = Arc::new(ComponentEntry::spawn(component, Arc::clone(&registry)));
+        components
+            .write()
+            .unwrap()
+            .insert(caller_mailbox, Arc::clone(&entry));
+
+        // Dispatch a Read with sender = Component(caller_mailbox).
+        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
+        let req = postcard::to_allocvec(&Read {
+            namespace: "save".to_string(),
+            path: "slot.bin".to_string(),
+        })
+        .unwrap();
+        handler(
+            <Read as Kind>::ID,
+            Read::NAME,
+            Some("test_caller"),
+            ReplyTo::Component(caller_mailbox),
+            &req,
+            1,
+        );
+
+        // Wait for the reply to reach receive.
+        mailer.drain_all();
+
+        // Recover the component and check it observed ReadResult.
+        let mut component = close_and_join(entry);
+        let lo = component.read_u32(200) as u64;
+        let hi = component.read_u32(204) as u64;
+        let observed_kind = lo | (hi << 32);
+        assert_eq!(
+            observed_kind,
+            <ReadResult as Kind>::ID,
+            "component received a kind id different from ReadResult",
+        );
+
         cleanup(&root);
     }
 
@@ -1020,8 +1157,8 @@ mod tests {
         // request itself was malformed.
         let root = scratch_root("dispatch-mal");
         let reg = build_registry(&root, true);
-        let (outbound, rx) = HubOutbound::test_channel();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&outbound));
+        let (mailer, rx) = test_mailer_and_rx();
+        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         handler(
             <Read as Kind>::ID,
             Read::NAME,

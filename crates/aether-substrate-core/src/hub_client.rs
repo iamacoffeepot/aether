@@ -125,7 +125,11 @@ impl HubOutbound {
                 payload,
                 count: 1,
             })),
-            ReplyTo::None => false,
+            // `Component` replies route through `Mailer::send_reply`,
+            // not the hub — silently drop if a caller misroutes one
+            // here rather than introduce a second truth for where
+            // local replies go.
+            ReplyTo::None | ReplyTo::Component(_) => false,
         }
     }
 

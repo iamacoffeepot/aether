@@ -124,15 +124,17 @@ impl SubstrateCtx {
             let kind_name = self.registry.kind_name(kind).unwrap_or_default();
             // Component-originated mail: the sender is this ctx's
             // mailbox, so its registry name is the `origin` any
-            // sink cares about (ADR-0011). No remote sender —
-            // component-originated sends never have a
-            // reply-over-hub-wire target.
+            // sink cares about (ADR-0011), and the same mailbox id
+            // rides on `ReplyTo::Component` so sink handlers that
+            // want to reply (ADR-0041's io sink is the motivating
+            // case) can route `*Result` back to this component via
+            // `Mailer::send_reply`.
             let origin = self.registry.mailbox_name(self.sender);
             handler(
                 kind,
                 &kind_name,
                 origin.as_deref(),
-                ReplyTo::None,
+                ReplyTo::Component(self.sender),
                 &payload,
                 count,
             );

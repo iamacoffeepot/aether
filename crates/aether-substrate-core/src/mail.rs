@@ -47,15 +47,18 @@ pub type MailKind = u64;
 /// originating engine's mailbox (ADR-0037 Phase 2). The hub-
 /// chassis fills in the engine id on `EngineMailToHubSubstrate`
 /// reception from the TCP connection it arrived on.
+/// `Component` tags sink-bound mail that a local component
+/// pushed through `SubstrateCtx::send`, carrying the sender's
+/// own mailbox so sink reply paths (ADR-0041's io sink is the
+/// motivating case) can route the `*Result` back to the component
+/// via the mailer rather than the hub.
 ///
-/// Local component-to-component reply routing lives in
-/// `Mail.from_component`, not here — that path is pure substrate-
-/// local and needs no hub-wire story. The two fields are
-/// complementary: broadcast mail from a local sink arrives with
-/// `reply_to = None` and `from_component = None`; session mail
-/// arrives with `reply_to = Session(token)` and `from_component =
-/// None`; a bubbled mail with an attributed source arrives with
-/// `reply_to = EngineMailbox { .. }` and `from_component = None`.
+/// `Mail.from_component` carries the same information for mail
+/// the mailer routed into a recipient's inbox (so
+/// `Component::deliver` can allocate a Component-variant reply
+/// handle), but sink dispatch skips the `Mail` struct entirely —
+/// the handler is called inline. For that path the reply target
+/// rides on this enum.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ReplyTo {
     None,
@@ -64,6 +67,7 @@ pub enum ReplyTo {
         engine_id: EngineId,
         mailbox_id: u64,
     },
+    Component(MailboxId),
 }
 
 impl ReplyTo {
