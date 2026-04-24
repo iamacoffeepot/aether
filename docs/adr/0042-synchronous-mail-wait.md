@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-04-23
+- **Amended:** 2026-04-24 — retired the filter-slot + oneshot mechanism in §1 / §4 / §6 in favour of a drain-and-buffer loop over the component's mpsc inbox. See _Amendment history_ below.
 
 ## Context
 
@@ -67,9 +68,16 @@ Return value encoding:
 - `-2` — reply matched but the payload exceeded `out_cap` (bytes were dropped; caller retries with a larger buffer).
 - `-3` — substrate tore the component down while it was waiting (drop/replace during a wait); the guest treats this as "abort whatever you were doing."
 
-Substrate side: the component's inbound mpsc grows a **filter slot** that's populated when the host fn is entered and cleared when it returns. While set, the substrate's normal deliver path checks each incoming mail's kind against the filter; matches are handed to a oneshot channel the blocked thread is reading; non-matches stay in the mpsc and get dispatched normally once the filter clears. The guest thread parks on `crossbeam_channel::recv_timeout` on the oneshot.
+Substrate side (**drain + buffer**): the component's mpsc Receiver moves onto `SubstrateCtx` so the host fn can drive it directly. `wait_reply_p32` loops:
 
-This means **no re-entrant deliver calls**. The component is one thread; that thread is parked; other mail queues up. When the wait returns, the queue drains through the normal `__aether_dispatch` path as if nothing happened.
+1. Pop a mail from the inbox mpsc (`recv_timeout(remaining)` or `try_recv` when `timeout_ms == 0`).
+2. If the mail's kind id matches `expected_kind`, decode the payload into the guest buffer and return the byte count.
+3. Otherwise, push the mail onto a per-component FIFO **overflow buffer** and loop again.
+4. On timeout, return `-1`. Buffered non-matching mail stays in overflow — the dispatcher drains it before pulling anything new from the mpsc on its next iteration.
+
+This means **no re-entrant deliver calls**. The component is one thread; that thread is parked inside the host fn's drain loop; non-match mail accumulates in the overflow buffer while the wait is live. When the wait returns (match, timeout, or disconnect), the dispatcher loop resumes, drains the overflow first (so FIFO order is preserved across the wait), and only then pulls new mail from the mpsc.
+
+Nothing new is needed on the send side: `SubstrateCtx::send` / `Mailer::push` / `ComponentEntry::send` all stay exactly as they were pre-wait. A reply to a sink-bound request arrives in the same mpsc that carries every other piece of mail; the host fn's drain loop picks it up. That removes the ordering trap an earlier version of this ADR introduced with a separate filter slot — a wait-bearing flow (`send` → sink replies synchronously → reply lands in mpsc → guest calls `wait_reply_p32`) works regardless of when the guest decides to park, because the mail is already sitting where the host fn reads from.
 
 ### 2. SDK surface: scoped to substrate sinks
 
@@ -107,25 +115,27 @@ Callers that genuinely want "wait forever" pass the clamp value; they've made th
 
 ### 4. Mail backlog during wait
 
-While a component is parked in `wait_reply_p32`, other mail pushed at its mpsc **stays in the queue** and drains in FIFO order through the normal `__aether_dispatch` path once the wait returns. Specifically:
+While a component is parked in `wait_reply_p32`, every mail pushed at its mpsc gets consumed by the drain loop. Matches become the return value; non-matches land in the overflow buffer and feed the dispatcher ahead of the mpsc after the wait returns. Specifically:
 
-- **Tick mail** accumulates. A 500ms sync wait at 60Hz queues 30 Ticks. The component drains them one-by-one when it unparks. If the component cares about tick freshness it coalesces in its handler (`if self.last_tick_frame == tick.frame { return; }`). v1 does not add a substrate-side "transient kind" flag — components that need coalescing implement it themselves.
-- **Input mail** (key, mouse) accumulates in FIFO. Losing input during I/O is worse than replaying stale ticks; ordering is load-bearing.
-- **Replies addressed at the same component but not matching the filter** queue behind the waiter. If the component has two concurrent sync waits pending (which shouldn't happen — see below), only the first matches its filter; the second sits in the mpsc.
+- **Tick mail** lands in overflow during a wait. A 500ms sync wait at 60Hz buffers ~30 Ticks; the component drains them one-by-one from overflow after unparking. If the component cares about tick freshness it coalesces in its handler (`if self.last_tick_frame == tick.frame { return; }`). v1 does not add a substrate-side "transient kind" flag — components that need coalescing implement it themselves.
+- **Input mail** (key, mouse) buffers in FIFO order in overflow. Losing input during I/O is worse than replaying stale events; ordering is load-bearing, which is why overflow is a FIFO that dispatcher consults ahead of the mpsc.
+- **Replies addressed at the same component but not matching `expected_kind`** go to overflow like any other non-match. They dispatch through `deliver` when the wait returns.
 
-**Only one sync wait in flight per component.** The filter slot is a single slot, not a set. Calling `wait_reply_p32` while already waiting is undefined behavior on the host side — the SDK wrappers are synchronous function calls so this can't happen by accident; a component author who builds a nested wait pattern gets what they deserve.
+**Only one sync wait in flight per component.** The component is single-threaded (ADR-0038); a second wait would require a second thread making a host call, which can't happen. Re-entrant calls from the same thread (a handler invoked during overflow drain that itself calls `wait_reply_p32`) are theoretically legal but out of scope — the drain loop is serial; nested waits compose without deadlock as long as the inner wait's match actually exists in mpsc or arrives during its own timeout window.
 
 ### 5. Interaction with `replace_component`
 
-ADR-0022's freeze-drain-swap: the substrate freezes the target mailbox, waits for in-flight `deliver` calls to complete, then swaps. A sync wait is "in flight" — the thread is parked inside a host fn called from inside `deliver`. The drain blocks until the wait returns (reply arrives, times out, or the substrate cancels — see next paragraph). That's the existing drain semantics applied correctly, not new behavior.
+ADR-0022's freeze-drain-swap: the substrate freezes the target mailbox, waits for in-flight `deliver` calls to complete, then swaps. A sync wait is "in flight" — the thread is parked inside a host fn called from inside `deliver`. The drain blocks until the wait returns (reply arrives, times out, or the substrate cancels — see next paragraph).
 
-**Drop/replace cancellation.** When the substrate tears down the component (drop or replace), the parked wait needs to unpark promptly rather than hang the drain out to the timeout. The substrate closes the oneshot channel's sender on teardown; `recv_timeout` wakes with a disconnect error; the host fn returns `-3`. The guest sees "your wait was cancelled, abort." SDK wrappers propagate this as `SyncIoError::Cancelled`.
+**Drop/replace cancellation.** When the substrate tears down the component, the parked wait needs to unpark promptly rather than hang the drain out to the timeout. `splice_inbox` / `close_and_join` already drop the old mpsc `Sender`. The host fn's `recv_timeout` on the `Receiver` wakes with `RecvTimeoutError::Disconnected`; the host fn returns `-3`. The guest sees "your wait was cancelled, abort." SDK wrappers propagate this as `SyncIoError::Cancelled`. No separate signaling channel is needed — the mpsc's existing disconnect semantics carry the teardown notification.
+
+The overflow buffer is dropped with the `SubstrateCtx` at teardown, so any mail that accumulated during the aborted wait goes away with the instance. That's the right behavior: the new instance (under `replace_component`) starts fresh; the old instance isn't going to get a chance to drain.
 
 ### 6. Parking implementation
 
-One `crossbeam_channel::bounded(1)` oneshot per filter slot, allocated when the host fn is entered and dropped when it returns. The substrate's deliver path, seeing the filter slot populated, does a `try_send` on the oneshot for matching mail; the guest thread's `recv_timeout` wakes. Non-blocking for the deliver caller (important — deliver runs on the scheduler's dispatch thread, not the component's).
+The host fn borrows the `Receiver<Mail>` out of `SubstrateCtx` through a `Mutex` (required because `std::sync::mpsc::Receiver` isn't `Sync`; the lock is uncontended because the component is single-threaded). It calls `recv_timeout(remaining)` in a loop, where `remaining` is re-computed from a deadline so non-matching mail consumes the same budget.
 
-On `timeout_ms = 0`, the guest uses `try_recv` instead of `recv_timeout` — semantically "poll once and return." Useful for checking-without-blocking patterns.
+On `timeout_ms = 0`, the guest uses `try_recv` instead of `recv_timeout` — semantically "drain whatever's already queued, match if anything fits, else return." Useful for checking-without-blocking patterns.
 
 ## Consequences
 
@@ -141,13 +151,14 @@ On `timeout_ms = 0`, the guest uses `try_recv` instead of `recv_timeout` — sem
 
 - **Component is single-tracked during the wait.** While parked in `read_sync`, the component can't process `Tick` or input. For an asset-loader this is fine (that's what it's doing); for a component that also needs to render during a read, use the handler-based path. Both stay available — this ADR doesn't retire the async path.
 - **Tick backlog drains all at once.** After a 500ms wait, the component may see 30 `Tick`s in quick succession. Components that care about tick freshness need to coalesce themselves. Acceptable v1 policy; a substrate-side `IS_TRANSIENT` kind flag is the natural follow-up if this pattern hurts in practice.
-- **Only one sync-wait in flight per component.** Filter slot is single-valued. Components that want to fan out N reads and wait for the first to complete need the async path (or the future `wait_any` primitive, not in this ADR).
+- **Only one sync-wait in flight per component.** The component is single-threaded, so this is structural rather than enforced. A second wait would need a second thread making host calls.
 - **Raw host fn is a footgun for non-substrate-sink callers.** A component author can call `raw::wait_reply_p32` against a reply kind another component sends — and if that component also sync-waits on this one, both threads deadlock. SDK guidance is the mitigation; the raw fn stays available because locking it down would also block legitimate uses (a component built against known-non-circular sibling sinks).
 - **New wasm import name.** `wait_reply_p32` joins `send_mail_p32` / `reply_mail_p32` / `save_state_p32` on the `aether` module — one more thing every component build has to link against. Marginal, but worth naming.
+- **Overflow buffer grows with traffic during the wait.** A 1s wait on a component receiving 10k mails/s builds a 10k-mail buffer in `VecDeque`. Each entry is a `Mail` struct (payload Vec plus a few u64s), so tens of MB on extreme traffic. Acceptable — components that need to survive storms either shorten their waits or use the async path; no backpressure mechanism is added in v1.
 
 ### Neutral
 
-- **Wire unchanged.** No new kind, no schema change, no sink registration. The substrate internally adds a filter slot to each component's dispatch state; the FFI grows by one import; mail bytes on the wire look identical to today.
+- **Wire unchanged.** No new kind, no schema change, no sink registration. The substrate internally moves the per-component `Receiver<Mail>` into `SubstrateCtx` so the host fn can drain it, and adds a `VecDeque<Mail>` overflow buffer; the FFI grows by one import; mail bytes on the wire look identical to today.
 - **Existing SDK surface preserved.** `io::read` / `io::write` / `Ctx::send` / `Sink::send` all keep their current semantics. Sync variants are additive.
 - **`_p32` suffix.** ADR-0024's wasm32/wasm64 naming convention applies: `wait_reply_p32` because `out_ptr` is pointer-typed. Non-pointer args (kind, cap, timeout) don't contribute to the suffix.
 
@@ -159,12 +170,24 @@ On `timeout_ms = 0`, the guest uses `try_recv` instead of `recv_timeout` — sem
 - **Per-kind sync-wait only.** A different host fn per reply kind (e.g. `wait_read_result_p32`). Rejected as gratuitous surface area — the one `wait_reply_p32` with a kind filter argument covers every substrate sink without wire-specific code in the substrate.
 - **Global sync-wait ceiling instead of per-call.** Every wait uses the substrate's clamp default, no caller `timeout_ms` arg. Rejected — callers have real information about how long their I/O should take (a config file read is 10ms; a cloud fetch is 10s), and one ceiling doesn't cover both without wasting every caller's time in the short-timeout case.
 - **Allow arbitrary component-to-component sync-wait in the SDK.** Rejected for deadlock surface. Pairs of components can recover the pattern via substrate-owned sinks as intermediaries (component A mails a sink; sink handler synthesizes a reply from B's observations; A sync-waits on the sink), which keeps the cycle-free invariant the scope restriction encodes.
+- **Filter slot + oneshot channel (retired in the 2026-04-24 amendment).** The original §1 of this ADR proposed a per-component filter slot (`FilterSlot`): `wait_reply_p32` would install a sender keyed on `expected_kind` onto the slot, `ComponentEntry::send` would consult the slot at send-time and hand matching mail to a oneshot channel instead of the mpsc, non-matches would queue in the mpsc as normal. Shipped as PR #218 / PR #219 then retired when the SDK ran into an ordering trap: the io sink dispatches synchronously on the same thread as the guest's `send_mail`, so a request's reply lands in the mpsc *before* `send_mail` returns — and the filter slot hasn't been installed yet. Splitting install and wait into two host fns would work but expanded the surface; draining the mpsc from the host fn is both simpler (no separate oneshot, no install-before-send ordering) and robust to that timing (the reply is already sitting where the host fn reads from by the time the drain loop starts).
 
 ## Follow-up work
 
-- **PR**: substrate runtime — add the per-component filter slot + oneshot, thread it into the dispatch path so matching mail lands on the oneshot and everything else queues normally.
-- **PR**: host-fn import — add `wait_reply_p32` to the `aether` module in `aether-substrate-core::host_fns`, unit-test the filter/oneshot mechanism against a synthetic inbound.
+- **PR (shipped 2026-04-23, superseded 2026-04-24 amendment)**: substrate runtime — per-component `FilterSlot` + oneshot, dispatch-path diversion. Retired with the amendment; see _Amendment history_.
+- **PR (shipped 2026-04-23, rewritten by the 2026-04-24 amendment)**: `wait_reply_p32` on the `aether` module. Now backed by the drain+buffer implementation.
+- **PR**: refactor — move `Receiver<Mail>` into `SubstrateCtx`, add the overflow `VecDeque`, rewrite `wait_reply_p32` as a drain loop, retire `FilterSlot`.
 - **PR**: guest SDK — `aether-component::raw::wait_reply_p32`, plus typed wrappers for each substrate-owned sink: `io::{read,write,delete,list}_sync`, `audio::set_master_gain_sync`, etc.
-- **Parked, not committed**: `IS_TRANSIENT` kind flag that lets the substrate coalesce backlog during a sync wait. Pulled in if the 30-tick-replay pattern actually hurts a real component.
-- **Parked, not committed**: `wait_any` primitive for fanning out N requests and returning on the first reply. The filter slot shape generalizes (set of expected kinds, return the first match), but no component has asked for it yet.
+- **Parked, not committed**: `IS_TRANSIENT` kind flag that lets the substrate coalesce overflow during a sync wait. Pulled in if the tick-replay pattern actually hurts a real component.
+- **Parked, not committed**: `wait_any` primitive for fanning out N requests and returning on the first reply. The drain loop shape generalizes (set of expected kinds, return the first match), but no component has asked for it yet.
 - **Parked, not committed**: lift the "only substrate-owned sinks" SDK scope once ADR-0043-ish work (cached byte handles, or more generally a clear dependency graph for non-circular component sinks) gives us a way to prove a sink can't cycle.
+
+## Amendment history
+
+### 2026-04-24 — drain+buffer replaces filter slot + oneshot
+
+**What changed.** §1 rewritten. §4 rewritten. §5's cancellation paragraph simplified (uses existing mpsc `Sender` disconnect; no separate signaling channel). §6 rewritten. Consequences (Neutral) updated. A new Negative-consequences bullet added for overflow buffer growth. A new Alternatives bullet captures the retired filter-slot design and the reason for the switch.
+
+**Why.** The filter-slot design's ordering invariant — filter must be installed before the mail it's meant to match arrives — didn't survive contact with ADR-0041's synchronous sink dispatch. A component calling `io::read` via `send_mail` dispatches the io sink inline on the dispatcher thread; the sink replies before `send_mail` returns, landing the reply in the mpsc. Any subsequent `wait_reply_p32` that both installs the filter and waits is too late — the match is already past. The clean fixes were (a) split install and wait into two host fns, or (b) drain the mpsc from the host fn. (b) is simpler and has no ordering trap: the host fn reads exactly where mail lives, so there's no "install before the race starts" step to get wrong.
+
+**Backward compatibility.** No guest SDK had shipped a `wait_reply` caller yet; no components were using the FFI. The retired `FilterSlot` type, `ComponentEntry.filter_slot` field, and `SubstrateCtx::with_filter_slot` builder are removed. `wait_reply_p32`'s wasm import name and return encoding are unchanged — guest code compiled against its signature still links correctly, only the body changed.

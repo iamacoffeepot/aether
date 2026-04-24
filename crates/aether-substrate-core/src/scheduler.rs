@@ -33,7 +33,6 @@ use crate::component::{Component, DISPATCH_UNKNOWN_KIND};
 use crate::mail::{Mail, MailboxId};
 use crate::mailer::Mailer;
 use crate::registry::Registry;
-use crate::wait::FilterSlot;
 
 /// Per-entry quiescence counter + condvar, shared with the dispatcher
 /// thread. `send` increments `pending` before forwarding to the inbox;
@@ -67,34 +66,29 @@ pub struct ComponentEntry {
     /// to the whole entry (which would create a cycle through the
     /// `JoinHandle`).
     gate: Arc<PendingGate>,
-    /// ADR-0042 sync-wait filter slot, shared by-Arc with the
-    /// component's `SubstrateCtx`. `send` consults it on the
-    /// pushing thread so matching mail lands directly on the
-    /// waiter's oneshot instead of the mpsc — the dispatcher
-    /// thread is already parked inside `deliver` while a wait is
-    /// in flight, so a check at the dispatcher's `rx.recv()` could
-    /// never run.
-    filter_slot: Arc<FilterSlot>,
 }
 
 impl ComponentEntry {
     /// Spawn a dispatcher thread for `component`, wire it to a fresh
-    /// mpsc inbox, and return the entry. The `Arc<Registry>` is used
-    /// by the dispatcher to format warn-logs for unknown kinds.
-    pub fn spawn(component: Component, registry: Arc<Registry>) -> Self {
+    /// mpsc inbox, and return the entry. The mpsc `Receiver` is
+    /// installed onto the component's `SubstrateCtx` (ADR-0042) so
+    /// that both the dispatcher and the `wait_reply_p32` host fn —
+    /// which runs on the same dispatcher thread, nested under
+    /// `deliver` — can drain the same inbox. The `Arc<Registry>` is
+    /// used by the dispatcher to format warn-logs for unknown kinds.
+    pub fn spawn(mut component: Component, registry: Arc<Registry>) -> Self {
         let (tx, rx) = mpsc::channel();
+        component.install_inbox_rx(rx);
         let gate: Arc<PendingGate> = Arc::new(PendingGate::default());
         let gate_for_thread = Arc::clone(&gate);
-        let filter_slot = component.filter_slot();
         let handle = thread::Builder::new()
             .name("aether-component-dispatch".into())
-            .spawn(move || dispatcher_loop(component, rx, registry, gate_for_thread))
+            .spawn(move || dispatcher_loop(component, registry, gate_for_thread))
             .expect("spawn component dispatcher");
         Self {
             sender: Mutex::new(Some(tx)),
             handle: Mutex::new(Some(handle)),
             gate,
-            filter_slot,
         }
     }
 
@@ -105,15 +99,6 @@ impl ComponentEntry {
     /// the counter is left untouched (nothing to deliver, nothing to
     /// drain).
     pub fn send(&self, mail: Mail) -> bool {
-        // ADR-0042: if a `wait_reply_p32` host fn is parked on the
-        // dispatcher thread and has registered a matching kind, hand
-        // the mail straight to its oneshot and skip the inbox. No
-        // `deliver` call is owed, so the pending counter stays
-        // untouched on this branch.
-        let mail = match self.filter_slot.try_match(mail) {
-            Ok(()) => return true,
-            Err(mail) => mail,
-        };
         let guard = self.sender.lock().unwrap();
         let Some(tx) = guard.as_ref() else {
             return false;
@@ -127,14 +112,6 @@ impl ComponentEntry {
             decrement_and_notify(&self.gate);
             false
         }
-    }
-
-    /// Expose the filter slot so the `wait_reply_p32` host fn (landing
-    /// in a follow-up PR) can install filters without reaching back
-    /// through the scheduler. Cheap `Arc::clone` — callers keep the
-    /// handle for the duration of a single wait.
-    pub fn filter_slot(&self) -> Arc<FilterSlot> {
-        Arc::clone(&self.filter_slot)
     }
 
     /// Block until every mail ever sent to this entry has been
@@ -168,14 +145,11 @@ fn decrement_and_notify(gate: &PendingGate) {
 /// Panics if the handle / sender have already been taken (a prior
 /// `close_and_join` or `splice_inbox` consumed them).
 pub fn close_and_join(entry: Arc<ComponentEntry>) -> Component {
-    // ADR-0042 §5: any in-flight sync wait must unpark before we try
-    // to join. Clearing the filter drops the oneshot sender; the
-    // dispatcher's parked `recv_timeout` wakes with `Disconnected` and
-    // the host fn returns the cancellation code, letting `deliver`
-    // return so the dispatcher can observe the closed inbox.
-    entry.filter_slot.clear();
     // Drop the Sender so the dispatcher sees recv() == None after it
-    // drains any queued mail.
+    // drains any queued mail. ADR-0042 §5: a parked `wait_reply_p32`
+    // reading the same receiver wakes with `Disconnected` on that
+    // close and returns the guest's cancellation code, so the
+    // dispatcher unwinds naturally.
     let _ = entry
         .sender
         .lock()
@@ -203,12 +177,10 @@ pub fn close_and_join(entry: Arc<ComponentEntry>) -> Component {
 /// between the `splice_inbox` return and the new dispatcher's spawn
 /// buffers in the new `Receiver`, preserving FIFO across the swap.
 pub fn splice_inbox(entry: &Arc<ComponentEntry>) -> (Component, Receiver<Mail>) {
-    // ADR-0042 §5: cancel any in-flight wait on the outgoing
-    // instance. Same invariant as `close_and_join`: the old
-    // dispatcher can't hit its closed-inbox exit condition while
-    // parked inside `wait_reply_p32`, so the oneshot must disconnect
-    // first. The successor instance starts with an empty slot.
-    entry.filter_slot.clear();
+    // ADR-0042 §5: dropping the old Sender (below) is the cancel
+    // signal — a `wait_reply_p32` parked on the old inbox sees
+    // `Disconnected` and returns the guest's cancellation code, so
+    // the dispatcher can unwind and the join call completes.
     let (new_tx, new_rx) = mpsc::channel();
     let old_tx = entry
         .sender
@@ -227,22 +199,24 @@ pub fn splice_inbox(entry: &Arc<ComponentEntry>) -> (Component, Receiver<Mail>) 
     (old_component, new_rx)
 }
 
-/// Spawn a fresh dispatcher onto `entry`'s current inbox (`rx`) with
-/// `component`, and record the new `JoinHandle`. Pairs with
-/// `splice_inbox` to complete a replace (or, on replace failure, to
-/// restore the old `Component` onto the post-splice inbox). The new
-/// dispatcher shares the entry's existing `PendingGate` so drain
-/// counts stay consistent across the splice.
+/// Spawn a fresh dispatcher onto `entry`'s current inbox with
+/// `component`, after installing `rx` as the component's inbox
+/// receiver (ADR-0042). Pairs with `splice_inbox` to complete a
+/// replace (or, on replace failure, to restore the old `Component`
+/// onto the post-splice inbox). The new dispatcher shares the entry's
+/// existing `PendingGate` so drain counts stay consistent across the
+/// splice.
 pub fn spawn_dispatcher_on(
     entry: &Arc<ComponentEntry>,
-    component: Component,
+    mut component: Component,
     rx: Receiver<Mail>,
     registry: Arc<Registry>,
 ) {
+    component.install_inbox_rx(rx);
     let gate = Arc::clone(&entry.gate);
     let handle = thread::Builder::new()
         .name("aether-component-dispatch".into())
-        .spawn(move || dispatcher_loop(component, rx, registry, gate))
+        .spawn(move || dispatcher_loop(component, registry, gate))
         .expect("spawn component dispatcher");
     let prev = entry.handle.lock().unwrap().replace(handle);
     debug_assert!(prev.is_none(), "entry handle slot must be empty");
@@ -250,11 +224,14 @@ pub fn spawn_dispatcher_on(
 
 fn dispatcher_loop(
     mut component: Component,
-    rx: Receiver<Mail>,
     registry: Arc<Registry>,
     gate: Arc<PendingGate>,
 ) -> Component {
-    while let Ok(mail) = rx.recv() {
+    // ADR-0042: the receiver lives on `SubstrateCtx`; `next_mail`
+    // drains the overflow buffer (any non-match mail set aside by a
+    // completed `wait_reply_p32` call) ahead of the mpsc. `None`
+    // means both are empty and the inbox is closed — our exit.
+    while let Some(mail) = component.next_mail() {
         let rc = component.deliver(&mail).expect("component.deliver failed");
         if rc == DISPATCH_UNKNOWN_KIND {
             let kind_name = registry
@@ -369,9 +346,6 @@ pub fn drain_all(components: &ComponentTable) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::RecvTimeoutError;
-    use std::time::Duration;
-
     use wasmtime::{Engine, Linker, Module};
 
     use super::*;
@@ -412,79 +386,48 @@ mod tests {
         ))
     }
 
-    /// ADR-0042: matching mail on an installed filter bypasses the
-    /// mpsc and lands directly on the waiter's oneshot. The pending
-    /// counter is untouched — there's no `deliver` call owed.
+    /// Basic inbox: non-overflow mail dispatches through the
+    /// no-op WAT component and the pending counter balances.
     #[test]
-    fn send_matching_mail_hands_off_to_filter_and_skips_pending() {
+    fn send_delivers_through_dispatcher_and_drains_pending() {
         let entry = spawn_entry();
-        let slot = entry.filter_slot();
-        let rx = slot.install(0xAA);
-
-        assert!(entry.send(Mail::new(MailboxId(0), 0xAA, vec![7, 8, 9], 1)));
-
-        let delivered = rx
-            .recv_timeout(Duration::from_millis(100))
-            .expect("matched mail delivered on oneshot");
-        assert_eq!(delivered.kind, 0xAA);
-        assert_eq!(delivered.payload, vec![7, 8, 9]);
-        assert_eq!(
-            entry.gate.pending.load(Ordering::Acquire),
-            0,
-            "filter-match path must not touch pending",
-        );
-        // drain returns immediately because pending is zero.
-        entry.drain();
-    }
-
-    /// Non-matching mail falls through to the inbox even when a
-    /// filter is installed. The pending counter ticks up the normal
-    /// amount; the no-op dispatcher will drain it.
-    #[test]
-    fn send_non_matching_mail_falls_through_to_inbox() {
-        let entry = spawn_entry();
-        let slot = entry.filter_slot();
-        let _rx = slot.install(0xAA);
-
         assert!(entry.send(Mail::new(MailboxId(0), 0xBB, vec![1], 1)));
-
-        // Wait for the no-op dispatcher to consume the mail. drain
-        // blocks on the condvar until pending hits zero.
         entry.drain();
         assert_eq!(entry.gate.pending.load(Ordering::Acquire), 0);
     }
 
-    /// ADR-0042 §5: `close_and_join` must cancel any in-flight sync
-    /// wait before joining. The parked waiter's `recv_timeout` wakes
-    /// with `Disconnected`, which the host fn will surface to the
-    /// guest as the `-3` cancellation code.
+    /// ADR-0042: overflow-buffered mail (simulated by pushing
+    /// directly onto the ctx's overflow via the dispatcher
+    /// component's accessor) is drained by the dispatcher ahead of
+    /// any mpsc mail. Tests `Component::next_mail`'s FIFO overlay.
     #[test]
-    fn close_and_join_cancels_in_flight_wait() {
-        let entry = spawn_entry();
-        let rx = entry.filter_slot().install(0xAA);
+    fn overflow_buffer_drains_before_mpsc() {
+        // Build a component directly so we can seed its overflow
+        // before handing it to a dispatcher.
+        let mut component = minimal_component();
+        component.push_overflow_for_test(Mail::new(MailboxId(0), 0xCC, vec![9], 1));
+        // next_mail should pop from overflow without touching mpsc.
+        let mail = component.next_mail().expect("overflow pops first");
+        assert_eq!(mail.kind, 0xCC);
+    }
 
+    /// ADR-0042 §5: `close_and_join` drops the mpsc Sender; a
+    /// dispatcher parked on the inbox unwinds because `next_mail`
+    /// sees the disconnected receiver and returns `None`.
+    #[test]
+    fn close_and_join_returns_component_cleanly() {
+        let entry = spawn_entry();
         let _component = close_and_join(entry);
-
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Err(RecvTimeoutError::Disconnected) => {}
-            other => panic!("expected Disconnected after close_and_join, got {other:?}"),
-        }
     }
 
-    /// ADR-0042 §5 applied to replace: `splice_inbox` clears the
-    /// filter before joining the old dispatcher. The successor
-    /// instance starts with an empty slot.
+    /// ADR-0042 §5 applied to replace: `splice_inbox` drops the old
+    /// Sender so the old dispatcher's inbox disconnects and the
+    /// thread joins cleanly. Retained as a smoke test that the
+    /// refactor didn't break the post-splice flow.
     #[test]
-    fn splice_inbox_cancels_in_flight_wait() {
+    fn splice_inbox_joins_old_dispatcher() {
         let entry = spawn_entry();
-        let slot = entry.filter_slot();
-        let rx = slot.install(0xAA);
-
         let (_old_component, _new_rx) = splice_inbox(&entry);
-
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Err(RecvTimeoutError::Disconnected) => {}
-            other => panic!("expected Disconnected after splice_inbox, got {other:?}"),
-        }
     }
+
 }
