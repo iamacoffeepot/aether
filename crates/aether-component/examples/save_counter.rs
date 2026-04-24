@@ -43,6 +43,10 @@ const SAVE_PATH: &str = "counter.bin";
 /// should complete in sub-ms; larger backends (future cloud adapter)
 /// would want a bigger budget.
 const IO_TIMEOUT_MS: u32 = 1_000;
+/// Broadcast sink — `hub.claude.broadcast` fans out to every
+/// attached Claude session. `Count` is postcard-shaped, so the send
+/// goes through `Sink::send_postcard`.
+const BROADCAST: Sink<Count> = resolve_sink::<Count>("hub.claude.broadcast");
 
 pub struct SaveCounter {
     initialized: bool,
@@ -75,8 +79,13 @@ impl Component for SaveCounter {
 
         let current = read_counter_or_zero();
         let next = current.saturating_add(1);
-        write_counter(next);
-        broadcast_count(next);
+        let _ = io::write_sync(
+            SAVE_NAMESPACE,
+            SAVE_PATH,
+            &next.to_le_bytes(),
+            IO_TIMEOUT_MS,
+        );
+        BROADCAST.send_postcard(&Count { count: next });
     }
 }
 
@@ -98,18 +107,4 @@ fn read_counter_or_zero() -> u64 {
         Err(io::SyncIoError::Io(IoError::NotFound)) => 0,
         Err(_) => 0,
     }
-}
-
-fn write_counter(value: u64) {
-    let bytes = value.to_le_bytes();
-    let _ = io::write_sync(SAVE_NAMESPACE, SAVE_PATH, &bytes, IO_TIMEOUT_MS);
-}
-
-/// Emit `Count { count }` to `hub.claude.broadcast` so every
-/// attached Claude session observes the new value. `Count` is
-/// schema-shaped (postcard), so the send goes through
-/// `Sink::send_postcard` rather than `Sink::send`.
-fn broadcast_count(count: u64) {
-    const BROADCAST: Sink<Count> = resolve_sink::<Count>("hub.claude.broadcast");
-    BROADCAST.send_postcard(&Count { count });
 }
