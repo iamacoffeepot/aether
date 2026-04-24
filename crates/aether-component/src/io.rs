@@ -44,10 +44,10 @@ use alloc::vec::Vec;
 use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
-use aether_mail::{Kind, mailbox_id_from_name};
+use aether_mail::Kind;
 use serde::Serialize;
 
-use crate::raw;
+use crate::{raw, resolve_sink};
 
 /// Short mailbox name the substrate registers its I/O sink under
 /// (ADR-0041). Exposed so components that want to bypass the
@@ -106,29 +106,12 @@ pub fn list(namespace: &str, prefix: &str) {
 }
 
 fn send<K: Kind + Serialize>(value: &K) -> u64 {
-    let bytes = encode_postcard(value);
-    unsafe {
-        raw::send_mail(
-            mailbox_id_from_name(IO_MAILBOX_NAME),
-            K::ID,
-            bytes.as_ptr().addr() as u32,
-            bytes.len() as u32,
-            1,
-        );
-        // ADR-0042: capture the correlation the substrate just
-        // minted so the sync wrappers can filter on it. For the
-        // async helpers (`read` / `write` / `delete` / `list`),
-        // this is harmless noise — they don't wait.
-        raw::prev_correlation()
-    }
-}
-
-fn encode_postcard<K: Serialize>(value: &K) -> Vec<u8> {
-    // postcard encode to Vec is infallible for well-formed serde
-    // impls — the kinds here all derive Serialize via
-    // `#[derive(Serialize)]`, so the `expect` is a "this can't
-    // fail" guard, not a recoverable branch.
-    postcard::to_allocvec(value).expect("postcard encode to Vec is infallible")
+    resolve_sink::<K>(IO_MAILBOX_NAME).send_postcard(value);
+    // ADR-0042: capture the correlation the substrate just minted so
+    // the sync wrappers can filter on it. For the async helpers
+    // (`read` / `write` / `delete` / `list`), this is harmless noise —
+    // they don't wait.
+    unsafe { raw::prev_correlation() }
 }
 
 /// ADR-0042: errors surfaced by the `*_sync` wrappers. The first three
@@ -284,9 +267,20 @@ mod tests {
     // That proves the wire shape stays identical to what the ADR-0041
     // substrate dispatcher decodes.
 
+    // The request kinds derive `Serialize`/`Deserialize`, so postcard
+    // roundtrip is what the substrate dispatcher observes on the wire.
+    // Off-wasm we can't exercise the host fn, but we can prove the
+    // encode shape survives a decode — a canary against an accidental
+    // schema drift between what the guest builds and what the adapter
+    // parses in `SinkHandler::handle`.
+
+    fn postcard_bytes<T: Serialize>(value: &T) -> Vec<u8> {
+        postcard::to_allocvec(value).unwrap()
+    }
+
     #[test]
     fn read_encodes_to_postcard_read() {
-        let encoded = encode_postcard(&ReadKind {
+        let encoded = postcard_bytes(&ReadKind {
             namespace: "save".to_string(),
             path: "slot.bin".to_string(),
         });
@@ -297,7 +291,7 @@ mod tests {
 
     #[test]
     fn write_encodes_to_postcard_write() {
-        let encoded = encode_postcard(&WriteKind {
+        let encoded = postcard_bytes(&WriteKind {
             namespace: "save".to_string(),
             path: "state.bin".to_string(),
             bytes: alloc::vec![1, 2, 3, 4],
@@ -308,7 +302,7 @@ mod tests {
 
     #[test]
     fn delete_encodes_to_postcard_delete() {
-        let encoded = encode_postcard(&DeleteKind {
+        let encoded = postcard_bytes(&DeleteKind {
             namespace: "save".to_string(),
             path: "ghost.bin".to_string(),
         });
@@ -318,7 +312,7 @@ mod tests {
 
     #[test]
     fn list_encodes_to_postcard_list() {
-        let encoded = encode_postcard(&ListKind {
+        let encoded = postcard_bytes(&ListKind {
             namespace: "save".to_string(),
             prefix: "".to_string(),
         });

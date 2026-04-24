@@ -21,9 +21,8 @@
 //! 3. `terminate_substrate`, spawn another, observe the count
 //!    bumped by one.
 
-use aether_component::{Component, Ctx, InitCtx, handlers, io, raw};
+use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io, resolve_sink};
 use aether_kinds::{IoError, Tick};
-use aether_mail::{Kind, mailbox_id_from_name};
 
 /// Broadcast payload the Claude session (or any component listening
 /// on `hub.claude.broadcast`) reads to track counter progress. The
@@ -107,19 +106,10 @@ fn write_counter(value: u64) {
 }
 
 /// Emit `Count { count }` to `hub.claude.broadcast` so every
-/// attached Claude session observes the new value. Goes through
-/// `raw::send_mail` rather than `Sink::send` because the `Count`
-/// schema is postcard-shaped, not bytemuck-castable.
+/// attached Claude session observes the new value. `Count` is
+/// schema-shaped (postcard), so the send goes through
+/// `Sink::send_postcard` rather than `Sink::send`.
 fn broadcast_count(count: u64) {
-    let payload =
-        postcard::to_allocvec(&Count { count }).expect("postcard encode Count is infallible");
-    unsafe {
-        raw::send_mail(
-            mailbox_id_from_name("hub.claude.broadcast"),
-            <Count as Kind>::ID,
-            payload.as_ptr().addr() as u32,
-            payload.len() as u32,
-            1,
-        );
-    }
+    const BROADCAST: Sink<Count> = resolve_sink::<Count>("hub.claude.broadcast");
+    BROADCAST.send_postcard(&Count { count });
 }
