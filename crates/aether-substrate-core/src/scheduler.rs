@@ -429,5 +429,4 @@ mod tests {
         let entry = spawn_entry();
         let (_old_component, _new_rx) = splice_inbox(&entry);
     }
-
 }
