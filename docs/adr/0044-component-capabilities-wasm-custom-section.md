@@ -1,7 +1,8 @@
 # ADR-0044: Component capabilities via wasm custom section
 
-- **Status:** Proposed
+- **Status:** Proposed (parked)
 - **Date:** 2026-04-24
+- **Parked:** 2026-04-24 — the design is useful framework for a future revisit, not active near-term work. The ADR-0043 net sink keeps `AETHER_NET_ALLOWLIST` as its permissioning layer in the interim; this ADR is what we pick back up when a concrete forcing function shows up (multi-component chassis with mixed-trust wasm, third-party component loading, a loud-enough threat model, or the second sink that wants per-component scoping).
 
 ## Context
 
@@ -17,6 +18,19 @@ The same pattern will recur as soon as a second sink wants scoped permissioning 
 The aether codebase already uses wasm custom sections for per-component metadata the substrate and hub read at load without executing the wasm: `aether.kinds` (ADR-0028, ADR-0032) for the kind manifest, `aether.kinds.labels` (ADR-0032) for canonical-bytes labels, `aether.kinds.inputs` (ADR-0033) for the handler-driven inputs manifest. The pattern is mature — emit a `#[used] #[link_section = "aether.<name>"]` static from an SDK macro, hub parses at `load_component`, MCP surfaces it, the substrate enforces. Capabilities slot in cleanly alongside these.
 
 This ADR decides: wire format (`aether.caps` custom section, postcard-encoded manifest), capability shape (per-sink typed scopes), enforcement point (substrate checks at mail dispatch), load-time surface (hub reads and grants; MCP exposes via `describe_component`), guest SDK (`capabilities!` macro), error propagation (new `CapabilityDenied` variants on sink error enums), and the migration path from `AETHER_NET_ALLOWLIST`.
+
+### Framing: mail-layer packet firewall
+
+The enforcement model is a firewall applied to mail frames. The standard L3/L4 vs L7 split maps cleanly onto our phasing:
+
+- **L3/L4-style (routing-only).** Gate on the tuple `(sender_mailbox, recipient_mailbox, kind_id)`. Answers "who is allowed to send what kind to which recipient." Ignores payload.
+- **L7-style (content-scoped).** Decode the kind's payload, inspect specific fields, match against grant scope. Answers "what is actually in the message." Per-sink checker logic — net reads the URL host; io reads the namespace + operation flag.
+
+L7 is a superset of L3/L4: a `CapScope::All` entry in the manifest is the routing-only grant inside the content-scoped framework, and an author who wants per-host gating declares `CapScope::NetHost(...)` instead. The same wire format carries both, so phasing enforcement — L3/L4 first, L7 later — moves no bytes on the wire.
+
+The mail layer is a cleaner DPI surface than TCP because the payload schema is known at decode time (no parsing ambiguity), there's no fragmentation to reassemble, and there's no encryption to MITM. The "cost" DPI typically carries (CPU per packet, false positives on fragmented/encrypted streams) doesn't apply here. The substrate already decodes the incoming kind on the dispatch path to hand fields to the adapter — net decodes `Fetch` to pull the URL for ureq, io decodes `Read`/`Write`/`Delete`/`List` to pull the namespace for adapter lookup — so the cap check is one more field read in an already-live decode, not a new parse.
+
+This framing also makes the audit follow-up obvious: denied mail gets logged the same way `iptables -j LOG` records dropped packets, feeding forensic review and policy refinement.
 
 ## Decision
 
@@ -160,25 +174,34 @@ Phased to avoid breaking any shipped component in one go:
 
 The phase timing is loose — Phase B follows once every shipped component (reference + demos) carries `capabilities!` declarations; Phase C follows once the guest SDK migration has soaked for a release cycle.
 
-### 8. Scope and deferrals
+### 8. Phasing
 
-**In scope for v1:**
-- Wire format (`aether.caps` section, postcard manifest, versioned).
-- `Capability` / `CapScope` in `aether-kinds` or a new `aether-caps` crate.
-- Per-sink cap checkers for `net` and `io`.
-- Substrate-side storage (per-mailbox grant map in the registry).
-- `CapabilityDenied` variants on `NetError` and `IoError`.
-- `capabilities!` macro in `aether-component`.
-- `describe_component` extension in the hub.
-- Phase A migration — coexist with `AETHER_NET_ALLOWLIST`.
+Enforcement splits into two phases; the wire format, macro surface, hub-side parse, and MCP exposure all ship complete in Phase 1 so component authors can write precise `capabilities!` declarations from day one. Only the substrate's enforcement depth changes between phases, which means a component author's declaration tightens enforcement around itself automatically as Phase 2 lands — no wire migration, no SDK re-release, no author churn.
 
-**Deferred:**
-- Operator grant/deny/narrow flow at `load_component`. V1 grants all declared. The MCP surface to "load but only grant a subset" is a follow-up once we know what shape the operator workflow wants.
+**Phase 1 — routing-only enforcement (L3/L4).**
+- Wire format: `aether.caps` section, postcard manifest, versioned. Full `CapScope` enum defined on the wire.
+- `Capability` / `CapScope` in `aether-kinds` (or a new `aether-caps` crate).
+- Substrate-side storage: per-mailbox grant map in the registry.
+- Enforcement: substrate checks that the sender has *any* `Capability` entry naming the target sink. Scope field is parsed and surfaced but not matched against the request.
+- `CapabilityDenied` variants on `NetError` and `IoError` — triggered by "no cap for this sink," not yet by scope mismatch.
+- `capabilities!` macro in `aether-component` — full surface, components declare scopes precisely even though they aren't yet enforced.
+- `describe_component` extension in the hub — scopes surface to MCP immediately (visibility is part of the value).
+- Migration Phase A — coexist with `AETHER_NET_ALLOWLIST`. Host scoping continues to flow through the env var during this phase.
+
+**Phase 2 — content-scoped enforcement (L7).**
+- Per-sink cap checkers for `net` (URL host extraction + match) and `io` (namespace match + read/write flag check against operation).
+- Scope field is now authoritative: `NetHost("api.openai.com")` rejects fetches to other hosts; `IoNamespace { save, read: true, write: false }` rejects writes to `save://`.
+- Migration Phase B — `AETHER_NET_ALLOWLIST` stops granting by default; per-component declarations are authoritative. `AETHER_NET_LEGACY_ALLOWLIST=1` is the dev/test opt-in.
+- Migration Phase C — `AETHER_NET_ALLOWLIST` retired entirely; `AETHER_CAPS_GRANT_ALL=1` is the dev/test escape hatch for "no enforcement."
+
+Audit-log hookup for denied mail (L3/L4 and L7) rides alongside Phase 2 as the natural forensic layer — parked until Phase 2 itself is in flight.
+
+**Deferred beyond both phases:**
+- Operator grant/deny/narrow flow at `load_component`. Both phases grant exactly what the wasm declared. The MCP surface to "load but only grant a subset" is a follow-up once we know what shape the operator workflow wants.
 - Wildcard matching (`*.github.com`, `https://api.*/v1/...`).
 - Sub-scoping on `aether.control` (e.g. cap for `subscribe_input` but not `load_component`).
 - Dynamic cap changes (a component requesting additional caps at runtime).
-- Cross-component mail gating (component A mails component B's mailbox — currently unrestricted).
-- Audit log of cap-denied attempts for forensics.
+- Cross-component mail gating (component A mails component B's mailbox — currently unrestricted in both phases).
 - Capability revocation mid-session.
 
 ## Consequences
@@ -217,16 +240,25 @@ The phase timing is loose — Phase B follows once every shipped component (refe
 
 ## Follow-up work
 
-- **PR**: define `aether-caps` crate with `CapsManifest`, `Capability`, `CapScope`, and wire-format roundtrip tests.
-- **PR**: hub-side parser — read `aether.caps` during `load_component`, reject unknown versions / sinks, include in `LoadComponent` mail to the substrate.
-- **PR**: substrate-side — store granted caps per mailbox; extend the sink handler trait (or add per-sink cap-check helpers) so net and io dispatchers consult the cap set before calling the adapter.
-- **PR**: `NetError::CapabilityDenied` + `IoError::CapabilityDenied` + Phase A coexist logic (env allowlist OR cap check grants access).
-- **PR**: `capabilities!` macro in `aether-component`, with proc-macro validation (unknown sink name → compile error, duplicate invocation → compile error).
-- **PR**: `describe_component` extension in `aether-substrate-hub` — surface parsed caps to MCP.
-- **PR**: migrate existing components (camera, player, hello, save_counter, demos/sokoban, demos/tic-tac-toe) to declare `capabilities!`.
-- **ADR / parked**: operator grant/deny/narrow flow at `load_component`. Shape TBD — probably an optional `granted_caps` override on the load tool, with the hub surfacing declared-vs-granted diff.
-- **ADR / parked**: wildcard scoping (`*.github.com`, method-scoping for net). Needs a concrete forcing function before designing the matcher.
-- **Parked, not committed**: Phase B migration (default `AETHER_NET_ALLOWLIST` off). Timing: once every shipped component has declarations.
-- **Parked, not committed**: Phase C migration (retire `AETHER_NET_ALLOWLIST` entirely, add `AETHER_CAPS_GRANT_ALL` dev escape). Timing: one release cycle after Phase B.
-- **Parked, not committed**: audit log of cap-denied attempts. Useful for security review; not needed by any current workflow.
-- **Parked, not committed**: cross-component cap gating. Needs a threat model for component-attacks-component that doesn't exist yet.
+Parked as of 2026-04-24 — nothing below is actively scheduled. Listed in the rough order they'd be picked up once the ADR unparks.
+
+**Phase 1 (routing-only enforcement):**
+- Define `aether-caps` crate with `CapsManifest`, `Capability`, `CapScope`, and wire-format roundtrip tests.
+- Hub-side parser — read `aether.caps` during `load_component`, reject unknown versions / sinks, include in `LoadComponent` mail to the substrate.
+- Substrate-side storage — per-mailbox grant map; routing check at mail dispatch for substrate-owned sinks.
+- `NetError::CapabilityDenied` + `IoError::CapabilityDenied`. Phase A migration: env allowlist OR cap check grants access.
+- `capabilities!` macro in `aether-component`, with proc-macro validation (unknown sink name → compile error, duplicate invocation → compile error). Full scope surface — authors declare `NetHost(...)` / `IoNamespace { .. }` even though Phase 1 enforcement ignores it.
+- `describe_component` extension in `aether-substrate-hub` — surface parsed caps (including scopes) to MCP for operator visibility.
+- Migrate existing components (camera, player, hello, save_counter, demos/sokoban, demos/tic-tac-toe) to declare `capabilities!`.
+
+**Phase 2 (content-scoped enforcement):**
+- Per-sink cap checkers: net (`url::Url` host extraction + match), io (namespace match + read/write flag check against operation). Checkers live in the sink module next to the adapter they gate.
+- Migration Phase B — `AETHER_NET_ALLOWLIST` off by default; `AETHER_NET_LEGACY_ALLOWLIST=1` opts a chassis into env-driven behaviour for dev.
+- Migration Phase C — `AETHER_NET_ALLOWLIST` removed entirely; `AETHER_CAPS_GRANT_ALL=1` is the dev/test escape.
+- Audit log of cap-denied attempts (mail-layer equivalent of `iptables -j LOG`). Feeds security review and policy refinement.
+
+**Deferred beyond Phase 2:**
+- Operator grant/deny/narrow flow at `load_component`. Optional `granted_caps` override on the load tool; hub surfaces declared-vs-granted diff.
+- Wildcard scoping (`*.github.com`, method-scoping for net). Needs a concrete forcing function before designing the matcher.
+- Cross-component cap gating. Needs a threat model for component-attacks-component that doesn't exist yet.
+- Capability revocation mid-session.
