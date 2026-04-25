@@ -127,8 +127,10 @@ version = "0.2.0-alpha"
 dependencies = [
  "aether-hub-protocol",
  "aether-mail",
+ "bytemuck",
  "proc-macro2",
  "quote",
+ "serde",
  "syn",
 ]
 

@@ -11,7 +11,7 @@ After ADR-0027, ADR-0028, and ADR-0030 the per-component shape is:
 - **Received kinds** are declared twice: once in `type Kinds = (Tick, Key, ...)` (ADR-0027) which the SDK walks at init to populate a runtime `KindTable`, and a second time inside `fn receive` as a chain of `mail.is::<K>()` / `mail.decode_typed::<K>()` checks.
 - **Introduced kinds** (everything `#[derive(Kind)]` reaches) ride in the `aether.kinds` wasm custom section (ADR-0028) and are visible to the substrate and hub at load time without executing the component.
 - **Kind identity** is compile-time: `K::ID = fnv1a_64(KIND_DOMAIN ++ canonical(name, schema))` (ADR-0030, ADR-0032; domain prefix added in issue #186). The substrate trusts these ids once registered.
-- **FFI dispatch** is a single generic `receive_p32(kind_id, ptr, len, sender) -> u32` export per component; the SDK's per-component runtime consults the `KindTable` and routes.
+- **FFI dispatch** is a single generic `receive_p32(kind_id, ptr, byte_len, count, sender) -> u32` export per component; the SDK's per-component runtime consults the `KindTable` and routes. (At the time this ADR shipped the ABI was `(kind, ptr, count, sender)` — `byte_len` was added later when wiring the postcard receive path; see *Wire-shape selection* in §Decision.)
 
 Three problems compound under this shape:
 
@@ -69,7 +69,18 @@ impl Component for InputLogger {
 }
 ```
 
-`#[handler]` takes no arguments. The handled kind is inferred from the method's third parameter type (after `&mut self` and `&mut Ctx<'_>`) — the parameter is the decoded `K`, same shape as `Mail::decode_typed::<K>()` today. `#[fallback]` takes no arguments either; its third parameter must be `Mail<'_>`. Components that omit `#[fallback]` are strict receivers.
+`#[handler]` takes no arguments. The handled kind is inferred from the method's third parameter type (after `&mut self` and `&mut Ctx<'_>`) — the parameter is the decoded `K`. `#[fallback]` takes no arguments either; its third parameter must be `Mail<'_>`. Components that omit `#[fallback]` are strict receivers.
+
+#### Wire-shape selection
+
+Receive-side decode is uniform: the dispatcher always emits `mail.decode_kind::<K>()`, which calls `Kind::decode_from_bytes(bytes)`. Wire shape (cast vs postcard) is picked once at the kind's `Kind` derive site, not at every handler:
+
+- A type with `#[repr(C)]` (and the user's existing `#[derive(Pod, Zeroable)]`) gets a cast-shape body that calls `bytemuck::pod_read_unaligned`.
+- Anything else (the user's `#[derive(Serialize, Deserialize)]` already in place) gets a postcard-shape body that calls `postcard::from_bytes`.
+
+`Kind::decode_from_bytes` carries no trait bounds — the per-K body uses whichever crate the type's existing derives satisfy, so cast and postcard kinds can share one trait method even though their decode bounds (`AnyBitPattern` vs `DeserializeOwned`) are disjoint. Hand-rolled `Kind` impls inherit a default body that returns `None`; if such a kind needs `#[handlers]` dispatch, the impl overrides `decode_from_bytes` directly.
+
+The receive ABI is `receive_p32(kind, ptr, byte_len, count, sender)`. `byte_len` is the substrate-supplied total payload size (sourced from `mail.payload.len()`); `decode_kind` hands `K::decode_from_bytes` exactly that slice so postcard parsing is bounded by the actual frame and can't read past it into adjacent linear memory. The cast helper (`__derive_runtime::decode_cast`) cross-checks the slice length against `size_of::<K>()` for free.
 
 ### Agent documentation extraction
 

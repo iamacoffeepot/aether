@@ -40,6 +40,26 @@ pub trait Kind {
     const NAME: &'static str;
     const ID: u64;
     const IS_INPUT: bool = false;
+
+    /// Decode a single instance from substrate-supplied bytes. The
+    /// `Kind` derive auto-implements this with the right body for the
+    /// type's wire shape (cast for `#[repr(C)]` + `Pod`, postcard
+    /// otherwise). Hand-rolled `Kind` impls that don't participate in
+    /// `#[handlers]` receive dispatch can leave the default — it
+    /// returns `None`, which the SDK surfaces as a strict-receiver
+    /// miss (`DISPATCH_UNKNOWN_KIND`).
+    ///
+    /// The dispatcher synthesised by `#[handlers]` calls this through
+    /// `Mail::decode_kind::<K>()`, which hands `bytes` already sliced
+    /// to the substrate-supplied `byte_len` so the decoder is bounded
+    /// by the actual frame and can't read past the substrate-written
+    /// payload into adjacent linear memory.
+    fn decode_from_bytes(_bytes: &[u8]) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
 
 /// Compile-time predicate: can this type's payload travel across the
@@ -266,6 +286,29 @@ pub mod __derive_runtime {
         canonical,
     };
     pub use alloc::borrow::Cow;
+
+    /// Cast-shape decode helper. Routes through `bytemuck::pod_read_unaligned`
+    /// after a length check so the Kind derive can emit a uniform call
+    /// without the user crate needing `bytemuck` in scope. `T` satisfies
+    /// `AnyBitPattern` via the user's `#[derive(Pod)]`; the bound is
+    /// enforced at the impl site rather than on `Kind` itself so non-
+    /// cast kinds aren't poisoned by a trait they can't satisfy.
+    pub fn decode_cast<T: bytemuck::AnyBitPattern>(bytes: &[u8]) -> Option<T> {
+        if bytes.len() != core::mem::size_of::<T>() {
+            return None;
+        }
+        Some(bytemuck::pod_read_unaligned(bytes))
+    }
+
+    /// Postcard-shape decode helper. Sibling of `decode_cast` for
+    /// schema-shaped kinds (anything carrying `Vec` / `String` /
+    /// `Option` / a tagged enum). `T` satisfies `DeserializeOwned`
+    /// via the user's `#[derive(Deserialize)]`; the bound lives on
+    /// this helper rather than on `Kind` so cast kinds stay
+    /// independent of `serde`.
+    pub fn decode_postcard<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+        postcard::from_bytes(bytes).ok()
+    }
 }
 
 mod schema {

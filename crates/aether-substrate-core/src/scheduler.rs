@@ -359,7 +359,7 @@ mod tests {
     const WAT_NOOP: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0))
     "#;
 

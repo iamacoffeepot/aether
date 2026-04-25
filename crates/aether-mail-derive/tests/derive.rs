@@ -15,20 +15,23 @@
 
 use aether_hub_protocol::{EnumVariant, NamedField, Primitive, SchemaCell, SchemaType};
 use aether_mail::{CastEligible, Kind, Ref, Schema};
+use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
 
-#[derive(aether_mail::Kind, aether_mail::Schema)]
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema)]
 #[kind(name = "test.tick")]
 struct Tick;
 
 #[repr(C)]
-#[derive(aether_mail::Kind, aether_mail::Schema)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema)]
 #[kind(name = "test.key")]
 struct Key {
     code: u32,
 }
 
 #[repr(C)]
-#[derive(aether_mail::Kind, aether_mail::Schema)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema)]
 #[kind(name = "test.vertex")]
 struct Vertex {
     x: f32,
@@ -36,13 +39,13 @@ struct Vertex {
 }
 
 #[repr(C)]
-#[derive(aether_mail::Kind, aether_mail::Schema)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema)]
 #[kind(name = "test.triangle")]
 struct Triangle {
     verts: [Vertex; 3],
 }
 
-#[derive(aether_mail::Kind, aether_mail::Schema)]
+#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
 #[kind(name = "test.note")]
 #[allow(dead_code)]
 struct Note {
@@ -52,12 +55,12 @@ struct Note {
     blob: Vec<u8>,
 }
 
-#[derive(aether_mail::Kind, aether_mail::Schema)]
+#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
 #[kind(name = "test.tuple")]
 #[allow(dead_code)]
 struct TupleStruct(u32, bool);
 
-#[derive(aether_mail::Kind, aether_mail::Schema)]
+#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
 #[kind(name = "test.result")]
 #[allow(dead_code)]
 enum Outcome {
@@ -199,7 +202,7 @@ fn enum_emits_each_variant_shape_with_sequential_discriminants() {
 // flips to false (refs force postcard), and the wire roundtrips
 // for both Inline and Handle variants.
 
-#[derive(aether_mail::Kind, aether_mail::Schema)]
+#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
 #[kind(name = "test.held_note")]
 #[allow(dead_code)]
 struct HeldNote {
@@ -267,7 +270,7 @@ fn ref_kind_id_differs_from_inline_kind_id() {
     // a kind boundary change), but pin it explicitly so a refactor
     // can't silently align the two ids and let mismatched
     // recipients silently consume each other's mail.
-    #[derive(aether_mail::Kind, aether_mail::Schema)]
+    #[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
     #[kind(name = "test.inline_note_field")]
     #[allow(dead_code)]
     struct Inlined {
@@ -295,9 +298,14 @@ fn cast_eligible_blocked_by_non_pod_field_even_with_repr_c() {
     // A struct with `#[repr(C)]` but a non-eligible field type must
     // still report `ELIGIBLE = false`. Catching this is what stops
     // the substrate from misclassifying a postcard kind as cast-able.
+    //
+    // Kind derive is intentionally omitted here — the autodetect rule
+    // (cast iff `#[repr(C)]`) would emit a `decode_cast` body that
+    // can't satisfy `AnyBitPattern` against a `String` field, and that
+    // user-side compile error is the correct outcome. This fixture
+    // exercises Schema's AND-fold in isolation.
     #[repr(C)]
-    #[derive(aether_mail::Kind, aether_mail::Schema)]
-    #[kind(name = "test.repr_c_with_string")]
+    #[derive(aether_mail::Schema)]
     #[allow(dead_code)]
     struct ReprCButStrung {
         seq: u32,

@@ -79,6 +79,21 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         quote! {}
     };
 
+    // ADR-0033 wire-shape autodetect: `#[repr(C)]` on the type means
+    // the substrate carried it as raw cast bytes (and the user has
+    // `#[derive(Pod, Zeroable)]`); anything else is postcard-shaped
+    // (and the user has `#[derive(Serialize, Deserialize)]`). The
+    // dispatcher in `#[handlers]` calls `Kind::decode_from_bytes` via
+    // `Mail::decode_kind::<K>()`; emitting the body per-impl here is
+    // what lets that one call site compile against types whose Pod /
+    // Deserialize bounds are disjoint.
+    let has_repr_c = struct_has_repr_c(&input.attrs);
+    let decode_body = if has_repr_c {
+        quote! { ::aether_mail::__derive_runtime::decode_cast::<Self>(bytes) }
+    } else {
+        quote! { ::aether_mail::__derive_runtime::decode_postcard::<Self>(bytes) }
+    };
+
     // ADR-0032 section emission goes through trait dispatch, not a
     // syntactic walker. `<Self as Schema>::SCHEMA` / `::LABEL_NODE`
     // resolve at const-eval after every consumer-side impl is in
@@ -109,6 +124,10 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 &#canonical_bytes_ident,
             );
             #is_input_item
+
+            fn decode_from_bytes(bytes: &[u8]) -> ::core::option::Option<Self> {
+                #decode_body
+            }
         }
 
         // Intermediate `static` holds the schema value — reading
@@ -847,12 +866,13 @@ fn validate_fallback_sig(sig: &Signature) -> syn::Result<()> {
 
 /// Synthesized body of `__aether_dispatch`. Compares `mail.kind()`
 /// against each `<K as Kind>::ID` const (ADR-0030 Phase 2); on match,
-/// decodes via `Mail::decode_typed::<K>()` (now a pure `K::ID`
-/// compare + byte read, no `KindTable`) and calls the inherent-impl
-/// handler method. Returns `DISPATCH_HANDLED` on a match or when the
-/// `#[fallback]` ran; returns `DISPATCH_UNKNOWN_KIND` on strict-
-/// receiver miss so the substrate's scheduler logs the drop (issue
-/// #142).
+/// decodes via `Mail::decode_kind::<K>()` and calls the inherent-impl
+/// handler method. Wire shape (cast vs postcard) is picked at K's
+/// `Kind` derive site, not here — `Kind::decode_from_bytes` carries
+/// the per-K body — so this dispatcher never sees the wire choice.
+/// Returns `DISPATCH_HANDLED` on a match or when the `#[fallback]`
+/// ran; returns `DISPATCH_UNKNOWN_KIND` on strict-receiver miss so
+/// the substrate's scheduler logs the drop (issue #142).
 fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) -> TokenStream2 {
     let arms = handlers.iter().map(|h| {
         let k = &h.kind_ty;
@@ -860,7 +880,7 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
         quote! {
             if __aether_kind == <#k as ::aether_component::__macro_internals::Kind>::ID {
                 if let ::core::option::Option::Some(__aether_decoded) =
-                    __aether_mail.decode_typed::<#k>()
+                    __aether_mail.decode_kind::<#k>()
                 {
                     self.#method(__aether_ctx, __aether_decoded);
                 }
