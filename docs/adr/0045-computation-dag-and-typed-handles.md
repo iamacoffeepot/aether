@@ -257,8 +257,9 @@ DAG-level failures (validation rejection, cancellation, transform panic) surface
 - **PR**: kinds + schema-derive — `Ref<K>` wire type, `#[schema(ref)]` field attribute (or equivalent codegen path), one demonstrative new kind that uses it.
 - **PR**: SDK + handle sink — `aether.handle.{publish,release,pin,unpin}` kinds + paired `*Result` replies registered in `aether-kinds`, the substrate's `"handle"` sink owning `Arc<HandleStore>`, and the guest-side `Handle<K>` newtype whose `Drop` mails `release` fire-and-forget while explicit `release()` / `pin()` / `unpin()` round-trip via `send_postcard` + `wait_reply`. No new host fns — same shape as ADR-0041 io and ADR-0043 net.
 - **PR**: hub MCP surface — `describe_handles(engine_id)` exposing the substrate's handle store for debugging.
-- **Parked, not committed**: ADR-0046 — DAG submit/cancel/status mail, descriptor validation, executor for sources + observers (Phase 2). Probably its own ADR because the descriptor wire is enough surface to deserve focused review.
-- **Parked, not committed**: ADR-0047 — `#[transform]` macro, `aether.dag.transforms` custom section, wasmtime `Func::call` integration, content-addressed transform ids (Phase 3).
+- **Drafted (proposed)**: ADR-0047 — DAG submit/cancel/status mail, descriptor validation, executor for sources + observers (Phase 2). Took its own ADR because the descriptor wire is enough surface to deserve focused review.
+- **Drafted (proposed)**: ADR-0048 — `#[transform]` macro, `aether.dag.transforms` custom section, wasmtime `Func::call` integration, content-addressed transform handle ids (Phase 3 narrow).
+- **Drafted (proposed)**: ADR-0049 — persistent handle store across substrate restart (Phase 4 lifted from "deferred" because ADR-0046 needs it). Depends on ADR-0048's content-addressed transform handle ids.
 - **Parked, future ADR**: incremental recompute / salsa-style invalidation when a source changes upstream of cached transforms.
 - **Parked, future ADR**: handle persistence across substrate restart and DAG resume after `replace_component`.
 - **Parked, future ADR**: distributed handle stores for multi-substrate clusters (motivating use case TBD; not on the near-term roadmap).
