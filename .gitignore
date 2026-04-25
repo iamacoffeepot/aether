@@ -2,5 +2,9 @@
 # Spike crates under spikes/ are standalone Cargo workspaces with
 # their own target dirs (per ADR-0003 §Consequences).
 spikes/*/target/
-# Claude Code session-local state (scheduled tasks, etc.).
-.claude/
+# Claude Code session-local state. The base `settings.json` and
+# `hooks/` are shippable (project-wide permissions + pre-flight
+# checks); everything else is per-user / runtime.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/skills/
