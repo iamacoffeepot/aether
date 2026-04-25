@@ -25,6 +25,7 @@ pub mod chassis;
 pub mod component;
 pub mod control;
 pub mod ctx;
+pub mod handle_store;
 pub mod host_fns;
 pub mod hub_client;
 pub mod input;

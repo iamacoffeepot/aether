@@ -25,8 +25,8 @@ use wasmtime::{Engine, Linker};
 
 use crate::{
     AETHER_CONTROL, AETHER_DIAGNOSTICS, ChassisControlHandler, ControlPlane, HUB_CLAUDE_BROADCAST,
-    HubClient, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx, host_fns,
-    input::new_subscribers, log_capture, mail::MailboxId,
+    HubClient, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
+    handle_store::HandleStore, host_fns, input::new_subscribers, log_capture, mail::MailboxId,
 };
 
 /// Everything a chassis needs after shared boot setup. Fields are
@@ -44,6 +44,12 @@ pub struct SubstrateBoot {
     pub input_subscribers: InputSubscribers,
     pub broadcast_mbox: MailboxId,
     pub scheduler: Scheduler,
+    /// ADR-0045 typed-handle store. Sized from
+    /// `AETHER_HANDLE_STORE_MAX_BYTES` (default 256 MB). Wired into
+    /// `Mailer` so dispatch resolves `Ref::Handle` payloads on the
+    /// way through; chassis-level handlers (PR 3 host-fn shims)
+    /// will publish into it via `Mailer::handle_store()`.
+    pub handle_store: Arc<HandleStore>,
     /// Retained so the caller can hand the descriptor list to a late
     /// hub connect, log the count, etc. Same `Vec` that was
     /// registered with the `Registry`.
@@ -226,6 +232,8 @@ impl<'a> SubstrateBootBuilder<'a> {
 
         let queue = Arc::new(Mailer::new());
         queue.wire_outbound(Arc::clone(&outbound));
+        let handle_store = Arc::new(HandleStore::from_env());
+        queue.wire_handle_store(Arc::clone(&handle_store));
 
         let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
         host_fns::register(&mut linker)?;
@@ -294,6 +302,7 @@ impl<'a> SubstrateBootBuilder<'a> {
             input_subscribers,
             broadcast_mbox,
             scheduler,
+            handle_store,
             boot_descriptors,
             hub,
         })
