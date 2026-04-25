@@ -47,6 +47,29 @@ unsafe extern "C" {
     /// of this kind."
     #[link_name = "prev_correlation_p32"]
     pub fn prev_correlation() -> u64;
+    /// ADR-0045: copy `len` bytes at `ptr` (in the guest's linear
+    /// memory) into the substrate's handle store under `kind_id` and
+    /// return a fresh ephemeral handle id. Returns `0` on failure
+    /// (out-of-bounds pointer, no store wired, eviction-failed).
+    /// The publishing component holds an initial refcount on the
+    /// returned handle — call `handle_release` to drop it.
+    #[link_name = "handle_publish_p32"]
+    pub fn handle_publish(kind_id: u64, ptr: u32, len: u32) -> u64;
+    /// ADR-0045: drop one reference on `id`. Returns `0` on success,
+    /// non-zero status codes for unknown handle (`1`) or no store
+    /// wired (`2`). `dec_ref` saturates at zero so calling release
+    /// on an already-released handle is a no-op success.
+    #[link_name = "handle_release_p32"]
+    pub fn handle_release(id: u64) -> u32;
+    /// ADR-0045: pin `id` against LRU eviction. Pinned entries stay
+    /// in the store regardless of refcount. Same return codes as
+    /// `handle_release`.
+    #[link_name = "handle_pin_p32"]
+    pub fn handle_pin(id: u64) -> u32;
+    /// ADR-0045: clear the pinned flag on `id`. Same return codes
+    /// as `handle_release`.
+    #[link_name = "handle_unpin_p32"]
+    pub fn handle_unpin(id: u64) -> u32;
 }
 
 /// # Safety
@@ -93,4 +116,36 @@ pub unsafe fn wait_reply(
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn prev_correlation() -> u64 {
     panic!("aether-component: prev_correlation called on non-wasm target");
+}
+
+/// # Safety
+/// Host-target stub for the wasm `aether::handle_publish` import.
+/// Always panics — callers on non-wasm targets are misusing the SDK.
+#[cfg(not(target_arch = "wasm32"))]
+pub unsafe fn handle_publish(_kind_id: u64, _ptr: u32, _len: u32) -> u64 {
+    panic!("aether-component: handle_publish called on non-wasm target");
+}
+
+/// # Safety
+/// Host-target stub for the wasm `aether::handle_release` import.
+/// Always panics — callers on non-wasm targets are misusing the SDK.
+#[cfg(not(target_arch = "wasm32"))]
+pub unsafe fn handle_release(_id: u64) -> u32 {
+    panic!("aether-component: handle_release called on non-wasm target");
+}
+
+/// # Safety
+/// Host-target stub for the wasm `aether::handle_pin` import.
+/// Always panics — callers on non-wasm targets are misusing the SDK.
+#[cfg(not(target_arch = "wasm32"))]
+pub unsafe fn handle_pin(_id: u64) -> u32 {
+    panic!("aether-component: handle_pin called on non-wasm target");
+}
+
+/// # Safety
+/// Host-target stub for the wasm `aether::handle_unpin` import.
+/// Always panics — callers on non-wasm targets are misusing the SDK.
+#[cfg(not(target_arch = "wasm32"))]
+pub unsafe fn handle_unpin(_id: u64) -> u32 {
+    panic!("aether-component: handle_unpin called on non-wasm target");
 }

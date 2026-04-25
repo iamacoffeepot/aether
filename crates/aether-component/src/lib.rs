@@ -65,7 +65,7 @@ extern crate alloc;
 use core::any::TypeId;
 use core::marker::PhantomData;
 
-use aether_mail::{Kind, Schema, mailbox_id_from_name};
+use aether_mail::{Kind, Ref, Schema, mailbox_id_from_name};
 
 pub mod io;
 pub mod net;
@@ -232,6 +232,112 @@ impl<K: Kind + serde::Serialize> Sink<K> {
     }
 }
 
+/// ADR-0045 typed-handle wrapper around a substrate-side handle id.
+/// Created by [`Ctx::publish`] and friends; carries an RAII drop-
+/// release to drop the publisher's refcount when the handle goes out
+/// of scope. `K` is phantom — the id-as-bytes representation is
+/// type-agnostic, but `as_ref` pulls `K::ID` to construct a
+/// type-aligned `Ref::Handle`.
+///
+/// Not `Copy`. Cloning a refcounted handle without inc-ref'ing
+/// would cause a double-release on drop; if a component genuinely
+/// needs multiple references it pins the handle and reads the raw
+/// id.
+///
+/// Sending: build the wire-shaped value with [`Handle::as_ref`] in
+/// the `Ref<K>` field of an outgoing kind, then send the parent
+/// kind through any existing `Sink<_>::send_postcard`. The handle
+/// itself stays in the sender's hands until drop / explicit
+/// release; the substrate's dispatch path resolves the wire ref
+/// against the cached bytes before delivery.
+pub struct Handle<K> {
+    id: u64,
+    _k: PhantomData<fn() -> K>,
+}
+
+impl<K> Handle<K> {
+    /// Raw handle id. Exposed for hand-rolled callers that need to
+    /// pass the id to a host fn the SDK doesn't yet wrap, or to
+    /// detach it from the RAII guard via [`core::mem::forget`].
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Pin against LRU eviction. Useful when the publisher wants to
+    /// release its local guard (drop the `Handle`) without losing
+    /// the cached bytes — pin first, then drop.
+    pub fn pin(&self) {
+        unsafe {
+            raw::handle_pin(self.id);
+        }
+    }
+
+    /// Clear the pinned flag.
+    pub fn unpin(&self) {
+        unsafe {
+            raw::handle_unpin(self.id);
+        }
+    }
+
+    /// Drop the publisher's reference and consume the handle.
+    /// Equivalent to `drop(handle)` but explicit. Returns the
+    /// underlying id so callers that pinned first can keep using
+    /// it after release.
+    pub fn release(self) -> u64 {
+        let id = self.id;
+        // Capture the id, suppress the Drop impl, call release
+        // once. The Drop impl would otherwise double-release.
+        core::mem::forget(self);
+        unsafe {
+            raw::handle_release(id);
+        }
+        id
+    }
+}
+
+impl<K: Kind> Handle<K> {
+    /// Wire-shaped reference to this handle. Embed in a `Ref<K>`
+    /// field on an outgoing kind so the substrate's dispatch path
+    /// resolves the inline bytes before delivery. The handle keeps
+    /// its refcount on the publisher side — `as_ref` is a borrow,
+    /// not a transfer.
+    pub fn as_ref(&self) -> Ref<K> {
+        Ref::Handle {
+            id: self.id,
+            kind_id: K::ID,
+        }
+    }
+}
+
+impl<K> Drop for Handle<K> {
+    fn drop(&mut self) {
+        // dec_ref saturates at zero on the substrate side — calling
+        // release on an already-released handle is a no-op success.
+        // Failures (no store wired, unknown id) are silent because a
+        // panicking Drop is poison for ADR-0015 trap containment.
+        unsafe {
+            raw::handle_release(self.id);
+        }
+    }
+}
+
+/// Postcard-encode `value` and call the `handle_publish` host fn.
+/// Shared by `InitCtx::publish` / `Ctx::publish` / `DropCtx::publish`.
+/// Returns `None` when the substrate signals failure via the `0`
+/// sentinel (no store wired, OOB pointer, eviction-failed).
+fn publish_value<K: Kind + serde::Serialize>(value: &K) -> Option<Handle<K>> {
+    let bytes = postcard::to_allocvec(value).expect("postcard encode to Vec is infallible");
+    let id =
+        unsafe { raw::handle_publish(K::ID, bytes.as_ptr().addr() as u32, bytes.len() as u32) };
+    if id == 0 {
+        return None;
+    }
+    Some(Handle {
+        id,
+        _k: PhantomData,
+    })
+}
+
 /// Resolve a kind, producing a typed id from the `const ID` the derive
 /// emits on the `Kind` impl. ADR-0030 Phase 2 made kind ids a pure
 /// function of `(name, schema)` at compile time — no host-fn round
@@ -355,6 +461,12 @@ impl InitCtx<'_> {
         resolve_sink::<K>(name)
     }
 
+    /// Publish `value` into the substrate's handle store at init.
+    /// See [`Ctx::publish`] for semantics.
+    pub fn publish<K: Kind + serde::Serialize>(&self, value: &K) -> Option<Handle<K>> {
+        publish_value::<K>(value)
+    }
+
     /// Send `aether.control.subscribe_input` with this component's
     /// mailbox as the subscriber for `K`'s stream. Called by
     /// `KindList::resolve_all` for every `K::IS_INPUT` kind — ADR-0030
@@ -455,6 +567,15 @@ impl Ctx<'_> {
     /// capability), different wire shape.
     pub fn send_postcard<K: Kind + serde::Serialize>(&self, sink: &Sink<K>, payload: &K) {
         sink.send_postcard(payload);
+    }
+
+    /// Publish `value` into the substrate's handle store and return
+    /// a typed [`Handle<K>`]. The publisher holds an initial
+    /// refcount; dropping the handle releases it. Returns `None` on
+    /// substrate-side failure (no store wired, OOB pointer,
+    /// eviction-failed).
+    pub fn publish<K: Kind + serde::Serialize>(&self, value: &K) -> Option<Handle<K>> {
+        publish_value::<K>(value)
     }
 
     /// Reply to the Claude session that originated the inbound mail
@@ -559,6 +680,16 @@ impl DropCtx<'_> {
     /// of [`DropCtx::send`] for schema-shaped kinds.
     pub fn send_postcard<K: Kind + serde::Serialize>(&self, sink: &Sink<K>, payload: &K) {
         sink.send_postcard(payload);
+    }
+
+    /// Publish `value` into the substrate's handle store during a
+    /// shutdown hook. See [`Ctx::publish`] for semantics — the
+    /// returned handle's RAII drop releases the publisher refcount,
+    /// which on `on_replace` typically means "pin first, then drop"
+    /// so the cached entry survives the hand-off to the next
+    /// instance.
+    pub fn publish<K: Kind + serde::Serialize>(&self, value: &K) -> Option<Handle<K>> {
+        publish_value::<K>(value)
     }
 
     /// Deposit a migration bundle for the substrate to hand to the

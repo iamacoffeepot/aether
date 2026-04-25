@@ -57,3 +57,11 @@ crate-type = ["cdylib"]
 [[example]]
 name = "save_counter"
 crate-type = ["cdylib"]
+
+# ADR-0045 typed-handle SDK demo. Publishes a `Note`, sends a
+# `HeldNote` whose `held: Ref<Note>` field carries the handle's
+# wire reference; the substrate's dispatch path resolves the
+# handle to its inline form before broadcast.
+[[example]]
+name = "handle_demo"
+crate-type = ["cdylib"]

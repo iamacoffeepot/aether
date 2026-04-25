@@ -55,6 +55,21 @@ pub const WAIT_CANCELLED: i32 = -3;
 /// `WAIT_TIMEOUT`.
 pub const MAX_WAIT_TIMEOUT_MS: u32 = 30_000;
 
+/// Status codes returned by `handle_release_p32`, `handle_pin_p32`,
+/// `handle_unpin_p32` (ADR-0045). `handle_publish_p32` returns the
+/// minted handle id directly — `0` is the sentinel for failure (no
+/// memory exported, OOB pointer, no store wired, eviction-failed).
+pub const HANDLE_OK: u32 = 0;
+pub const HANDLE_UNKNOWN: u32 = 1;
+pub const HANDLE_NO_STORE: u32 = 2;
+
+/// Sentinel return value from `handle_publish_p32` indicating the
+/// publish failed. Matches `0` because the store's `next_ephemeral`
+/// counter starts at `1`, so `0` cannot collide with a real handle
+/// id. The SDK wraps this in `Option<Handle<K>>` so callers see the
+/// failure as `None` rather than a magic-zero handle.
+pub const HANDLE_PUBLISH_FAILED: u64 = 0;
+
 /// Register the substrate host functions on `linker`. Components that
 /// want these capabilities must be instantiated via a linker that this
 /// function has been called on.
@@ -390,5 +405,346 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
         |caller: Caller<'_, SubstrateCtx>| -> u64 { caller.data().prev_correlation() },
     )?;
 
+    // ADR-0045 typed-handle SDK: `publish` copies guest bytes into
+    // the substrate-side handle store and returns a fresh ephemeral
+    // id. The publisher's initial reference is recorded immediately
+    // (refcount=1 after put), so a subsequent `release` from the
+    // same component dec-refs it back to 0 and the entry becomes
+    // LRU-eligible. `0` is the failure sentinel (matches the
+    // store's `next_ephemeral` reservation of `0` as the no-handle
+    // id).
+    linker.func_wrap(
+        "aether",
+        "handle_publish_p32",
+        |mut caller: Caller<'_, SubstrateCtx>, kind_id: u64, ptr: u32, len: u32| -> u64 {
+            let memory = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return HANDLE_PUBLISH_FAILED,
+            };
+            let data = memory.data(&caller);
+            let start = ptr as usize;
+            let end = match start.checked_add(len as usize) {
+                Some(e) if e <= data.len() => e,
+                _ => return HANDLE_PUBLISH_FAILED,
+            };
+            let bytes = data[start..end].to_vec();
+
+            let ctx = caller.data();
+            let Some(store) = ctx.queue.handle_store() else {
+                return HANDLE_PUBLISH_FAILED;
+            };
+            let id = store.next_ephemeral();
+            if let Err(e) = store.put(id, kind_id, bytes) {
+                tracing::warn!(
+                    target: "aether_substrate::handle_store",
+                    kind_id = format_args!("{kind_id:#x}"),
+                    error = ?e,
+                    "handle_publish failed",
+                );
+                return HANDLE_PUBLISH_FAILED;
+            }
+            // Hold a reference on behalf of the publishing
+            // component. Drop / explicit `release` decrements; on
+            // zero the entry stays in the store (subject to LRU
+            // eviction under pressure).
+            store.inc_ref(id);
+            id
+        },
+    )?;
+
+    // ADR-0045: drop the publisher's reference. `dec_ref` saturates
+    // at zero so calling release on an already-released handle is
+    // a no-op success rather than a panic.
+    linker.func_wrap(
+        "aether",
+        "handle_release_p32",
+        |caller: Caller<'_, SubstrateCtx>, id: u64| -> u32 {
+            let ctx = caller.data();
+            let Some(store) = ctx.queue.handle_store() else {
+                return HANDLE_NO_STORE;
+            };
+            if store.dec_ref(id) {
+                HANDLE_OK
+            } else {
+                HANDLE_UNKNOWN
+            }
+        },
+    )?;
+
+    // ADR-0045: pin / unpin let a component shield a handle from
+    // LRU eviction even when its refcount drops to zero. Useful for
+    // cross-frame caching where the publisher wants to release the
+    // local guard without losing the entry.
+    linker.func_wrap(
+        "aether",
+        "handle_pin_p32",
+        |caller: Caller<'_, SubstrateCtx>, id: u64| -> u32 {
+            let ctx = caller.data();
+            let Some(store) = ctx.queue.handle_store() else {
+                return HANDLE_NO_STORE;
+            };
+            if store.pin(id) {
+                HANDLE_OK
+            } else {
+                HANDLE_UNKNOWN
+            }
+        },
+    )?;
+
+    linker.func_wrap(
+        "aether",
+        "handle_unpin_p32",
+        |caller: Caller<'_, SubstrateCtx>, id: u64| -> u32 {
+            let ctx = caller.data();
+            let Some(store) = ctx.queue.handle_store() else {
+                return HANDLE_NO_STORE;
+            };
+            if store.unpin(id) {
+                HANDLE_OK
+            } else {
+                HANDLE_UNKNOWN
+            }
+        },
+    )?;
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use wasmtime::{Engine, Linker, Module, Store, TypedFunc};
+
+    use super::*;
+    use crate::handle_store::HandleStore;
+    use crate::hub_client::HubOutbound;
+    use crate::input::new_subscribers;
+    use crate::mail::MailboxId;
+    use crate::mailer::Mailer;
+    use crate::registry::Registry;
+
+    /// WAT module exposing thin wrappers over the four ADR-0045
+    /// host fns. Each `(func (export ...))` matches the host-fn
+    /// signature so the tests can call them through `TypedFunc`
+    /// without indirection.
+    const WAT_HANDLE_HOST_FNS: &str = r#"
+        (module
+          (import "aether" "handle_publish_p32"
+            (func $publish (param i64 i32 i32) (result i64)))
+          (import "aether" "handle_release_p32"
+            (func $release (param i64) (result i32)))
+          (import "aether" "handle_pin_p32"
+            (func $pin (param i64) (result i32)))
+          (import "aether" "handle_unpin_p32"
+            (func $unpin (param i64) (result i32)))
+          (memory (export "memory") 1)
+          ;; 5 bytes at offset 100, used as the `publish` payload.
+          (data (i32.const 100) "\01\02\03\04\05")
+
+          (func (export "publish") (param i64) (result i64)
+            (call $publish (local.get 0) (i32.const 100) (i32.const 5)))
+          (func (export "publish_oob") (param i64) (result i64)
+            (call $publish (local.get 0) (i32.const 99999999) (i32.const 5)))
+          (func (export "release") (param i64) (result i32)
+            (call $release (local.get 0)))
+          (func (export "pin") (param i64) (result i32)
+            (call $pin (local.get 0)))
+          (func (export "unpin") (param i64) (result i32)
+            (call $unpin (local.get 0)))
+        )
+    "#;
+
+    struct Harness {
+        store: Store<SubstrateCtx>,
+        publish: TypedFunc<i64, i64>,
+        publish_oob: TypedFunc<i64, i64>,
+        release: TypedFunc<i64, i32>,
+        pin_fn: TypedFunc<i64, i32>,
+        unpin: TypedFunc<i64, i32>,
+        handle_store: Arc<HandleStore>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            Self::with_store(Arc::new(HandleStore::new(4096)))
+        }
+
+        fn with_store(handle_store: Arc<HandleStore>) -> Self {
+            let registry = Arc::new(Registry::new());
+            let queue = Arc::new(Mailer::new());
+            queue.wire_handle_store(Arc::clone(&handle_store));
+            // Wire registry+components so `Mailer::push` doesn't
+            // panic; route_mail isn't called in these tests but
+            // accessing `Mailer::handle_store` via the ctx still
+            // wants the rest of the wiring sane.
+            queue.wire(
+                Arc::clone(&registry),
+                Arc::new(std::sync::RwLock::new(Default::default())),
+            );
+            let outbound = HubOutbound::disconnected();
+
+            let ctx = SubstrateCtx::new(
+                MailboxId(0),
+                registry,
+                Arc::clone(&queue),
+                outbound,
+                new_subscribers(),
+            );
+
+            let engine = Engine::default();
+            let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+            register(&mut linker).expect("register host fns");
+            let wasm = wat::parse_str(WAT_HANDLE_HOST_FNS).expect("compile WAT");
+            let module = Module::new(&engine, &wasm).expect("compile module");
+            let mut store = Store::new(&engine, ctx);
+            let instance = linker
+                .instantiate(&mut store, &module)
+                .expect("instantiate");
+
+            let publish = instance
+                .get_typed_func::<i64, i64>(&mut store, "publish")
+                .unwrap();
+            let publish_oob = instance
+                .get_typed_func::<i64, i64>(&mut store, "publish_oob")
+                .unwrap();
+            let release = instance
+                .get_typed_func::<i64, i32>(&mut store, "release")
+                .unwrap();
+            let pin_fn = instance
+                .get_typed_func::<i64, i32>(&mut store, "pin")
+                .unwrap();
+            let unpin = instance
+                .get_typed_func::<i64, i32>(&mut store, "unpin")
+                .unwrap();
+
+            Harness {
+                store,
+                publish,
+                publish_oob,
+                release,
+                pin_fn,
+                unpin,
+                handle_store,
+            }
+        }
+    }
+
+    #[test]
+    fn handle_publish_copies_guest_bytes_into_store_with_initial_refcount() {
+        let mut h = Harness::new();
+        let id = h
+            .publish
+            .call(&mut h.store, 0xCAFE_u64 as i64)
+            .expect("publish call");
+        assert_ne!(
+            id, 0,
+            "publish must mint a real id, not the failure sentinel"
+        );
+        let id = id as u64;
+        // The handle store should now hold the bytes we baked into
+        // the WAT data segment.
+        let (kind, bytes) = h.handle_store.get(id).expect("entry present");
+        assert_eq!(kind, 0xCAFE);
+        assert_eq!(bytes, vec![1, 2, 3, 4, 5]);
+        // Initial refcount is 1 — release once must drop it to 0
+        // and clear the saturating floor without surfacing
+        // UNKNOWN.
+        let status = h
+            .release
+            .call(&mut h.store, id as i64)
+            .expect("release call");
+        assert_eq!(status, HANDLE_OK as i32);
+    }
+
+    #[test]
+    fn handle_publish_oob_returns_failure_sentinel() {
+        let mut h = Harness::new();
+        let id = h
+            .publish_oob
+            .call(&mut h.store, 0xCAFE_u64 as i64)
+            .expect("publish_oob call");
+        assert_eq!(id, HANDLE_PUBLISH_FAILED as i64);
+        // Nothing landed in the store.
+        assert_eq!(h.handle_store.entry_count(), 0);
+    }
+
+    #[test]
+    fn handle_release_unknown_id_returns_unknown_status() {
+        let mut h = Harness::new();
+        let status = h
+            .release
+            .call(&mut h.store, 0x1234_u64 as i64)
+            .expect("release call");
+        assert_eq!(status, HANDLE_UNKNOWN as i32);
+    }
+
+    #[test]
+    fn handle_pin_then_unpin_round_trips() {
+        let mut h = Harness::new();
+        let id = h
+            .publish
+            .call(&mut h.store, 0xCAFE_u64 as i64)
+            .expect("publish");
+
+        let pin_status = h.pin_fn.call(&mut h.store, id).expect("pin");
+        assert_eq!(pin_status, HANDLE_OK as i32);
+        let unpin_status = h.unpin.call(&mut h.store, id).expect("unpin");
+        assert_eq!(unpin_status, HANDLE_OK as i32);
+
+        // Pinning an unknown id must surface as UNKNOWN — pin/unpin
+        // shouldn't quietly succeed against a missing entry.
+        let bad = h
+            .pin_fn
+            .call(&mut h.store, 0xBADBAD_u64 as i64)
+            .expect("pin");
+        assert_eq!(bad, HANDLE_UNKNOWN as i32);
+    }
+
+    #[test]
+    fn handle_publish_with_unwired_store_returns_failure_sentinel() {
+        // Set up a Mailer with no handle store wired. Every host
+        // fn that needs the store should surface NO_STORE / the
+        // failure sentinel and leave guest memory alone.
+        let registry = Arc::new(Registry::new());
+        let queue = Arc::new(Mailer::new());
+        queue.wire(
+            Arc::clone(&registry),
+            Arc::new(std::sync::RwLock::new(Default::default())),
+        );
+        // No wire_handle_store call.
+        let outbound = HubOutbound::disconnected();
+        let ctx = SubstrateCtx::new(
+            MailboxId(0),
+            registry,
+            Arc::clone(&queue),
+            outbound,
+            new_subscribers(),
+        );
+
+        let engine = Engine::default();
+        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        register(&mut linker).expect("register");
+        let wasm = wat::parse_str(WAT_HANDLE_HOST_FNS).unwrap();
+        let module = Module::new(&engine, &wasm).unwrap();
+        let mut store = Store::new(&engine, ctx);
+        let instance = linker.instantiate(&mut store, &module).unwrap();
+
+        let publish = instance
+            .get_typed_func::<i64, i64>(&mut store, "publish")
+            .unwrap();
+        let release = instance
+            .get_typed_func::<i64, i32>(&mut store, "release")
+            .unwrap();
+        let pin_fn = instance
+            .get_typed_func::<i64, i32>(&mut store, "pin")
+            .unwrap();
+
+        assert_eq!(
+            publish.call(&mut store, 0xCAFE_u64 as i64).unwrap(),
+            HANDLE_PUBLISH_FAILED as i64,
+        );
+        assert_eq!(release.call(&mut store, 1).unwrap(), HANDLE_NO_STORE as i32,);
+        assert_eq!(pin_fn.call(&mut store, 1).unwrap(), HANDLE_NO_STORE as i32);
+    }
 }
