@@ -1,0 +1,37 @@
+[recipe]
+name = "teapot-on-table-window-morning-brief"
+aspect_ratio = "1:1"
+camera = "eye level, slight three-quarter, medium close-up"
+
+[environmentals]
+lighting = "lighting.window-morning"
+condition = "condition.flawless"
+
+[observer]
+id = "observer.quiet-domestic"
+
+# LOD-slider variant: distill perception blocks to 2-3 sentences each.
+# Identical to teapot-on-table.toml; named symmetrically with the other
+# LOD-slider recipes (terse / brief / full) for matrix-runner ergonomics.
+
+[[facts]]
+fact = "object.teapot"
+lens = "object.rendering-instruction"
+order = 1
+
+[[facts]]
+fact = "material.glazed-ceramic"
+lens = "material.feeling"
+lod = "brief"
+order = 2
+
+[[facts]]
+fact = "surface.wooden-table"
+lens = "surface.feeling"
+lod = "brief"
+order = 3
+
+[generate]
+# Nano Banana 2 — placeholder model id; user will confirm/correct.
+model = "gemini-3.1-flash-image-preview"
+output_path = "out/teapot-on-table-brief.png"

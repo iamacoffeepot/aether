@@ -1,0 +1,5 @@
+name: controlled-distill-sonnet
+models:
+  by_stage:
+    frame: sonnet
+    distill: sonnet

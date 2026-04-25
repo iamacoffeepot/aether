@@ -1,0 +1,8 @@
+name: mixed-haiku-sonnet
+# Haiku for declarative (object/rendering-instruction), Sonnet for perception.
+# Matches what the lens defaults declare today; included as an explicit profile
+# for matrix runs where every variant should resolve via the same code path.
+models:
+  default: sonnet
+  by_lens:
+    object.rendering-instruction: haiku

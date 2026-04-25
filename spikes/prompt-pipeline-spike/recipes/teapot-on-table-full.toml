@@ -1,0 +1,32 @@
+[recipe]
+name = "teapot-on-table-window-morning-full"
+aspect_ratio = "1:1"
+camera = "eye level, slight three-quarter, medium close-up"
+
+[environmentals]
+lighting = "lighting.window-morning"
+condition = "condition.flawless"
+
+[observer]
+id = "observer.quiet-domestic"
+
+# LOD-slider variant: distill perception blocks lightly (4-5 sentences each).
+# Frame inputs are identical to the brief recipe; only the distill template
+# differs.
+
+[[facts]]
+fact = "object.teapot"
+lens = "object.rendering-instruction"
+order = 1
+
+[[facts]]
+fact = "material.glazed-ceramic"
+lens = "material.feeling"
+lod = "full"
+order = 2
+
+[[facts]]
+fact = "surface.wooden-table"
+lens = "surface.feeling"
+lod = "full"
+order = 3
