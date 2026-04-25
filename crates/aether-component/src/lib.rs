@@ -67,9 +67,12 @@ use core::marker::PhantomData;
 
 use aether_mail::{Kind, Schema, mailbox_id_from_name};
 
+pub mod handle;
 pub mod io;
 pub mod net;
 pub mod raw;
+
+pub use handle::{Handle, SyncHandleError};
 
 /// ADR-0033 attribute macros. Applied to `impl Component for C`
 /// blocks: `#[handlers]` at the impl level; `#[handler]` on each
@@ -355,6 +358,16 @@ impl InitCtx<'_> {
         resolve_sink::<K>(name)
     }
 
+    /// Publish `value` into the substrate's handle store at init.
+    /// See [`handle::publish`] for full semantics — this is the
+    /// init-time twin of [`Ctx::publish`] / [`DropCtx::publish`].
+    pub fn publish<K: Kind + serde::Serialize>(
+        &self,
+        value: &K,
+    ) -> Result<Handle<K>, SyncHandleError> {
+        handle::publish(value)
+    }
+
     /// Send `aether.control.subscribe_input` with this component's
     /// mailbox as the subscriber for `K`'s stream. Called by
     /// `KindList::resolve_all` for every `K::IS_INPUT` kind — ADR-0030
@@ -455,6 +468,18 @@ impl Ctx<'_> {
     /// capability), different wire shape.
     pub fn send_postcard<K: Kind + serde::Serialize>(&self, sink: &Sink<K>, payload: &K) {
         sink.send_postcard(payload);
+    }
+
+    /// Publish `value` into the substrate's handle store. Returns
+    /// the typed [`Handle<K>`] — its RAII drop fires
+    /// `HandleRelease` so the publisher's refcount goes back to
+    /// zero when the handle leaves scope. See [`handle::publish`]
+    /// for the synchronous round-trip semantics.
+    pub fn publish<K: Kind + serde::Serialize>(
+        &self,
+        value: &K,
+    ) -> Result<Handle<K>, SyncHandleError> {
+        handle::publish(value)
     }
 
     /// Reply to the Claude session that originated the inbound mail
@@ -559,6 +584,18 @@ impl DropCtx<'_> {
     /// of [`DropCtx::send`] for schema-shaped kinds.
     pub fn send_postcard<K: Kind + serde::Serialize>(&self, sink: &Sink<K>, payload: &K) {
         sink.send_postcard(payload);
+    }
+
+    /// Publish `value` into the substrate's handle store during a
+    /// shutdown hook. Common pattern at `on_replace`: pin the
+    /// returned handle so the cached bytes survive the hand-off
+    /// to the next instance, then drop it (`Handle::pin` followed
+    /// by drop releases the local guard but keeps the entry).
+    pub fn publish<K: Kind + serde::Serialize>(
+        &self,
+        value: &K,
+    ) -> Result<Handle<K>, SyncHandleError> {
+        handle::publish(value)
     }
 
     /// Deposit a migration bundle for the substrate to hand to the

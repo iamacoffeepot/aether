@@ -19,13 +19,15 @@ use aether_mail::{Kind, Schema};
 
 use crate::{
     Camera, CaptureFrame, CaptureFrameResult, Delete, DeleteResult, DrawTriangle, DropComponent,
-    DropResult, Fetch, FetchResult, FrameStats, Key, KeyRelease, List, ListResult, LoadComponent,
-    LoadResult, MouseButton, MouseMove, NoteOff, NoteOn, OrbitSetDistance, OrbitSetFov,
-    OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo,
-    PlatformInfoResult, PlayerRequestStep, PlayerSetMode, PlayerSetPosition, PlayerSetVelocity,
-    PlayerStepResult, Pong, Read, ReadResult, ReplaceComponent, ReplaceResult, SetMasterGain,
-    SetMasterGainResult, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
-    SubscribeInput, SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
+    DropResult, Fetch, FetchResult, FrameStats, HandlePin, HandlePinResult, HandlePublish,
+    HandlePublishResult, HandleRelease, HandleReleaseResult, HandleUnpin, HandleUnpinResult, Key,
+    KeyRelease, List, ListResult, LoadComponent, LoadResult, MouseButton, MouseMove, NoteOff,
+    NoteOn, OrbitSetDistance, OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget,
+    OrbitSetYaw, Ping, PlatformInfo, PlatformInfoResult, PlayerRequestStep, PlayerSetMode,
+    PlayerSetPosition, PlayerSetVelocity, PlayerStepResult, Pong, Read, ReadResult,
+    ReplaceComponent, ReplaceResult, SetMasterGain, SetMasterGainResult, SetWindowMode,
+    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeInput,
+    SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
     UnsubscribeInput, WindowSize, Write, WriteResult,
 };
 
@@ -141,6 +143,18 @@ pub fn all() -> Vec<KindDescriptor> {
         // variants carry a structured `NetError`.
         schema::<Fetch>(),
         schema::<FetchResult>(),
+        // ADR-0045 typed-handle store. Four request kinds on the
+        // `"handle"` sink — publish a value and get a fresh
+        // ephemeral id back, then release / pin / unpin against
+        // the id. Failure variants carry `HandleError`.
+        schema::<HandlePublish>(),
+        schema::<HandlePublishResult>(),
+        schema::<HandleRelease>(),
+        schema::<HandleReleaseResult>(),
+        schema::<HandlePin>(),
+        schema::<HandlePinResult>(),
+        schema::<HandleUnpin>(),
+        schema::<HandleUnpinResult>(),
     ]
 }
 

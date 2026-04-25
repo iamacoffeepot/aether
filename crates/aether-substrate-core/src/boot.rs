@@ -26,8 +26,18 @@ use wasmtime::{Engine, Linker};
 use crate::{
     AETHER_CONTROL, AETHER_DIAGNOSTICS, ChassisControlHandler, ControlPlane, HUB_CLAUDE_BROADCAST,
     HubClient, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
-    handle_store::HandleStore, host_fns, input::new_subscribers, log_capture, mail::MailboxId,
+    handle_sink::handle_sink_handler, handle_store::HandleStore, host_fns, input::new_subscribers,
+    log_capture, mail::MailboxId,
 };
+
+/// Well-known mailbox name for the ADR-0045 typed-handle sink. The
+/// SDK's `Ctx::publish` mails `aether.handle.publish` to this name;
+/// the substrate's `handle_sink_handler` decodes the request,
+/// drives the `HandleStore`, and replies with the paired `*Result`
+/// kind via `Mailer::send_reply`. Short name (not the kind's
+/// `aether.handle.*` namespace) — same convention as `"io"`,
+/// `"net"`, `"audio"`.
+pub const HANDLE_SINK_NAME: &str = "handle";
 
 /// Everything a chassis needs after shared boot setup. Fields are
 /// `pub` so chassis code destructures and takes ownership of the
@@ -234,6 +244,16 @@ impl<'a> SubstrateBootBuilder<'a> {
         queue.wire_outbound(Arc::clone(&outbound));
         let handle_store = Arc::new(HandleStore::from_env());
         queue.wire_handle_store(Arc::clone(&handle_store));
+        // ADR-0045 handle sink: components mail
+        // `aether.handle.{publish,release,pin,unpin}` to this
+        // well-known name, the sink drives `HandleStore` and replies
+        // via `Mailer::send_reply`. Registered before the control
+        // plane so any control-side code that wants to publish at
+        // load can reach it.
+        registry.register_sink(
+            HANDLE_SINK_NAME,
+            handle_sink_handler(Arc::clone(&handle_store), Arc::clone(&queue)),
+        );
 
         let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
         host_fns::register(&mut linker)?;
