@@ -183,7 +183,8 @@ fn decode_cast_field(
         | SchemaType::Option(_)
         | SchemaType::Vec(_)
         | SchemaType::Enum { .. }
-        | SchemaType::Unit => Err(DecodeError::UnsupportedSchema(
+        | SchemaType::Unit
+        | SchemaType::Ref(_) => Err(DecodeError::UnsupportedSchema(
             "non-cast field inside cast-shaped struct",
         )),
     }
@@ -321,6 +322,36 @@ fn decode_postcard(
                     discriminant: disc,
                 })?;
             decode_enum_body(cur, variant, path)
+        }
+        SchemaType::Ref(inner) => {
+            // ADR-0045 typed handle. Wire matches the postcard
+            // enum encoding: discriminant varint, then either the
+            // inner-kind body (Inline = 0) or two varints id +
+            // kind_id (Handle = 1). Render as externally-tagged
+            // JSON to match the encoder's input shape.
+            let disc = read_varint_u64(cur, path)? as u32;
+            match disc {
+                0 => {
+                    let inner_value = decode_postcard(cur, inner, path)?;
+                    let mut obj = Map::with_capacity(1);
+                    obj.insert("Inline".into(), inner_value);
+                    Ok(Value::Object(obj))
+                }
+                1 => {
+                    let id = read_varint_u64(cur, &format!("{path}.id"))?;
+                    let kind_id = read_varint_u64(cur, &format!("{path}.kind_id"))?;
+                    let mut handle_obj = Map::with_capacity(2);
+                    handle_obj.insert("id".into(), Value::from(id));
+                    handle_obj.insert("kind_id".into(), Value::from(kind_id));
+                    let mut obj = Map::with_capacity(1);
+                    obj.insert("Handle".into(), Value::Object(handle_obj));
+                    Ok(Value::Object(obj))
+                }
+                _ => Err(DecodeError::UnknownEnumDiscriminant {
+                    path: path.into(),
+                    discriminant: disc,
+                }),
+            }
         }
     }
 }

@@ -84,6 +84,9 @@ impl<T> CastEligible for alloc::vec::Vec<T> {
 impl<T> CastEligible for Option<T> {
     const ELIGIBLE: bool = false;
 }
+impl<K> CastEligible for Ref<K> {
+    const ELIGIBLE: bool = false;
+}
 
 /// Deterministic 64-bit hash of a mailbox name (ADR-0029). Both the
 /// substrate registry and the guest SDK compute mailbox ids from names
@@ -148,6 +151,83 @@ pub const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
         i += 1;
     }
     hash
+}
+
+/// ADR-0045 typed handle reference — wire form for fields that
+/// accept either an inline kind value or a handle pointing into the
+/// substrate's handle store.
+///
+/// `Ref<K>` lets a field carry one of two payloads on the wire:
+///
+/// - `Ref::Inline(K)` — the entire `K` value travels inline. The
+///   substrate dispatches identically to a non-`Ref` field after
+///   the field-walk step substitutes the inline value.
+/// - `Ref::Handle { id, kind_id }` — a reference into the
+///   substrate's handle store. On dispatch the substrate looks up
+///   `id` and either substitutes the resolved value or parks the
+///   mail until the handle resolves (ADR-0045 §4).
+///
+/// `kind_id` on the `Handle` arm MUST equal `<K as Kind>::ID`. The
+/// substrate validates this against the field's expected type
+/// before substitution; a mismatched id is a wire-corruption-class
+/// error, not a recoverable one. Use [`Ref::handle`] instead of
+/// constructing `Handle` directly to pull the id from the kind
+/// system rather than passing it by hand.
+///
+/// Phase 1 (this PR) ships the wire type and Schema integration
+/// only. The substrate-side dispatcher, handle store, and SDK
+/// `Handle<K>` newtype follow in subsequent PRs per the ADR's
+/// follow-up work plan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Ref<K> {
+    /// Inline value — the whole `K` payload is on the wire.
+    Inline(K),
+    /// Handle reference into the substrate's handle store. `id`
+    /// addresses the entry; `kind_id` carries `<K as Kind>::ID` so
+    /// the substrate validates type compatibility before
+    /// substituting the resolved value.
+    Handle { id: u64, kind_id: u64 },
+}
+
+impl<K: Kind> Ref<K> {
+    /// Construct a `Ref::Handle` with `kind_id` pulled from
+    /// `K::ID`. Preferred over hand-constructing the variant —
+    /// callers can't pass a kind id that disagrees with the type
+    /// parameter.
+    pub const fn handle(id: u64) -> Self {
+        Ref::Handle { id, kind_id: K::ID }
+    }
+}
+
+impl<K> Ref<K> {
+    /// Wrap an owned value as `Ref::Inline`. Convenience for call
+    /// sites that have the value but want the field shape.
+    pub const fn inline(value: K) -> Self {
+        Ref::Inline(value)
+    }
+
+    /// Returns `true` for `Ref::Inline`, `false` for
+    /// `Ref::Handle`. Cheap predicate for call sites that branch
+    /// on resolution state.
+    pub const fn is_inline(&self) -> bool {
+        matches!(self, Ref::Inline(_))
+    }
+
+    /// Returns `true` for `Ref::Handle`, `false` for
+    /// `Ref::Inline`.
+    pub const fn is_handle(&self) -> bool {
+        matches!(self, Ref::Handle { .. })
+    }
+
+    /// The wire `id` if this is a `Ref::Handle`, `None` for
+    /// inline. `kind_id` is recoverable via `<K as Kind>::ID` so
+    /// no separate accessor is provided.
+    pub const fn handle_id(&self) -> Option<u64> {
+        match self {
+            Ref::Handle { id, .. } => Some(*id),
+            Ref::Inline(_) => None,
+        }
+    }
 }
 
 /// Re-exported derive macros from `aether-mail-derive`. Behind the
@@ -281,6 +361,20 @@ mod schema {
         };
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode = LabelNode::Array(LabelCell::Static(&T::LABEL_NODE));
+    }
+
+    // ADR-0045 typed handle reference. `Ref<K>` exposes both the
+    // inline-value path and the handle-id path through one schema
+    // tag — recipients walk fields and dispatch identically once
+    // the substrate has substituted the resolved value. The bound
+    // is `Schema + 'static` (matching `Vec<T>` etc.) rather than
+    // `Kind` because the schema impl only needs the inner
+    // `K::SCHEMA` and `K::LABEL_NODE`; the `Kind` bound on `Ref<K>`
+    // helpers in lib.rs is for `K::ID` access at construction time.
+    impl<K: Schema + 'static> Schema for super::Ref<K> {
+        const SCHEMA: SchemaType = SchemaType::Ref(SchemaCell::Static(&K::SCHEMA));
+        const LABEL: Option<&'static str> = None;
+        const LABEL_NODE: LabelNode = LabelNode::Ref(LabelCell::Static(&K::LABEL_NODE));
     }
 }
 
@@ -504,6 +598,96 @@ mod tests {
             fnv1a_64_prefixed(MAILBOX_DOMAIN, &[]),
         );
         assert_ne!(mailbox_id_from_name(""), 0xcbf29ce484222325);
+    }
+
+    #[test]
+    fn ref_handle_pulls_kind_id_from_type_param() {
+        let r: Ref<TestStruct> = Ref::handle(42);
+        match r {
+            Ref::Handle { id, kind_id } => {
+                assert_eq!(id, 42);
+                assert_eq!(kind_id, TestStruct::ID);
+            }
+            _ => panic!("expected Handle variant"),
+        }
+    }
+
+    #[test]
+    fn ref_inline_wraps_value() {
+        let v = TestStruct {
+            tag: 7,
+            label: alloc::string::String::from("hi"),
+        };
+        let r = Ref::inline(v.clone());
+        match r {
+            Ref::Inline(inner) => assert_eq!(inner, v),
+            _ => panic!("expected Inline variant"),
+        }
+    }
+
+    #[test]
+    fn ref_predicates_and_handle_id() {
+        let inline: Ref<TestStruct> = Ref::Inline(TestStruct {
+            tag: 1,
+            label: alloc::string::String::from("a"),
+        });
+        let handle: Ref<TestStruct> = Ref::handle(99);
+        assert!(inline.is_inline());
+        assert!(!inline.is_handle());
+        assert_eq!(inline.handle_id(), None);
+        assert!(!handle.is_inline());
+        assert!(handle.is_handle());
+        assert_eq!(handle.handle_id(), Some(99));
+    }
+
+    #[test]
+    fn ref_inline_postcard_roundtrip() {
+        let v = TestStruct {
+            tag: 42,
+            label: alloc::string::String::from("hello"),
+        };
+        let r = Ref::Inline(v);
+        let bytes = postcard::to_allocvec(&r).unwrap();
+        let back: Ref<TestStruct> = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn ref_handle_postcard_roundtrip() {
+        let r: Ref<TestStruct> = Ref::Handle {
+            id: 0xdead_beef_cafe_babe,
+            kind_id: 0x1234_5678_9abc_def0,
+        };
+        let bytes = postcard::to_allocvec(&r).unwrap();
+        let back: Ref<TestStruct> = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn ref_inline_and_handle_have_distinct_wire_discriminants() {
+        // Pins the externally-tagged enum encoding: postcard writes
+        // a varint discriminant before the body, so Inline and
+        // Handle differ in their first byte. A regression that
+        // re-orders the Ref variants would silently flip what
+        // existing handle wires decode to.
+        let inline: Ref<TestStruct> = Ref::Inline(TestStruct {
+            tag: 1,
+            label: alloc::string::String::from("x"),
+        });
+        let handle: Ref<TestStruct> = Ref::Handle { id: 1, kind_id: 1 };
+        let inline_bytes = postcard::to_allocvec(&inline).unwrap();
+        let handle_bytes = postcard::to_allocvec(&handle).unwrap();
+        assert_eq!(inline_bytes[0], 0, "Inline discriminant must be 0");
+        assert_eq!(handle_bytes[0], 1, "Handle discriminant must be 1");
+    }
+
+    #[test]
+    fn ref_is_cast_ineligible() {
+        // A field typed `Ref<K>` forces postcard wire — cast-shaped
+        // structs can't contain refs because the Inline arm's
+        // payload size isn't fixed. The CastEligible impl encodes
+        // this so the derive emits `repr_c: false` for parents.
+        const { assert!(!<Ref<TestStruct> as CastEligible>::ELIGIBLE) };
     }
 
     #[test]

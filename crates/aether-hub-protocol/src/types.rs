@@ -94,6 +94,14 @@ pub enum SchemaType {
     Enum {
         variants: Cow<'static, [EnumVariant]>,
     },
+    /// ADR-0045 typed handle reference. A field whose type is
+    /// `Ref<K>` accepts either an inline `K` value or a
+    /// `Handle { id, kind_id }` pointing into the substrate's
+    /// handle store. The cell wraps the inner kind's schema —
+    /// recipients dispatch identically against the resolved
+    /// inline value, so existing decoders only need to learn
+    /// the new tag at the field-walk step.
+    Ref(SchemaCell),
 }
 
 /// Recursion-breaking indirection for nested `SchemaType` fields
@@ -273,6 +281,7 @@ pub enum SchemaShape {
     Enum {
         variants: Vec<VariantShape>,
     },
+    Ref(Box<SchemaShape>),
 }
 
 /// Positional enum variant — `VariantShape::Tuple { discriminant, fields }`
@@ -336,6 +345,7 @@ pub enum LabelNode {
         type_label: Option<Cow<'static, str>>,
         variants: Cow<'static, [VariantLabel]>,
     },
+    Ref(LabelCell),
 }
 
 /// Per-variant nominal info for `LabelNode::Enum`. `name` is the Rust
@@ -439,6 +449,7 @@ impl Clone for LabelNode {
                 type_label: type_label.clone(),
                 variants: variants.clone(),
             },
+            LabelNode::Ref(c) => LabelNode::Ref(c.clone()),
         }
     }
 }
@@ -472,6 +483,7 @@ impl PartialEq for LabelNode {
                     variants: vb,
                 },
             ) => la == lb && va == vb,
+            (LabelNode::Ref(a), LabelNode::Ref(b)) => a == b,
             _ => false,
         }
     }
@@ -523,6 +535,11 @@ impl Serialize for LabelNode {
                 s.serialize_field("variants", variants)?;
                 s.end()
             }
+            LabelNode::Ref(cell) => {
+                let mut s = serializer.serialize_tuple_variant("LabelNode", 6, "Ref", 1)?;
+                s.serialize_field(cell)?;
+                s.end()
+            }
         }
     }
 }
@@ -546,6 +563,7 @@ impl<'de> Deserialize<'de> for LabelNode {
                 type_label: Option<Cow<'static, str>>,
                 variants: Vec<VariantLabel>,
             },
+            Ref(LabelCell),
         }
         match LabelNodeDe::deserialize(deserializer)? {
             LabelNodeDe::Anonymous => Ok(LabelNode::Anonymous),
@@ -568,6 +586,7 @@ impl<'de> Deserialize<'de> for LabelNode {
                 type_label,
                 variants: Cow::Owned(variants),
             }),
+            LabelNodeDe::Ref(c) => Ok(LabelNode::Ref(c)),
         }
     }
 }
