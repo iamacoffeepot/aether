@@ -1,0 +1,50 @@
+[recipe]
+name = "teapot-with-cup-window-morning"
+aspect_ratio = "1:1"
+camera = "eye level, slight three-quarter, medium shot wider than the teapot-alone reference (room for both objects)"
+
+[environmentals]
+lighting = "lighting.window-morning"
+condition = "condition.flawless"
+
+[observer]
+id = "observer.quiet-domestic"
+
+# Same teapot + same surface as the reference recipe, plus a teacup to
+# the teapot's left. The teapot reference image is fed alongside the
+# composed prompt to preserve its specific identity (color, form,
+# silhouette) across the new render.
+
+[[facts]]
+fact = "object.teapot"
+lens = "object.rendering-instruction"
+order = 1
+
+[[facts]]
+fact = "object.teacup"
+lens = "object.rendering-instruction"
+order = 2
+
+[[facts]]
+fact = "material.glazed-ceramic"
+lens = "material.feeling"
+lod = "brief"
+order = 3
+
+[[facts]]
+fact = "surface.wooden-table"
+lens = "surface.feeling"
+lod = "brief"
+order = 4
+
+[generate]
+model = "gemini-3.1-flash-image-preview"
+output_path = "out/teapot-with-cup.png"
+
+# Reference: the teapot-alone image rendered earlier. Feeding it
+# alongside the composed prompt asks Gemini to preserve the teapot's
+# specific identity (celadon-green glaze, exact silhouette) across the
+# new render with the cup added.
+[[generate.references]]
+path = "out/teapot-on-table-brief.png"
+label = "celadon teapot reference (from teapot-on-table-brief recipe)"

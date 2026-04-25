@@ -1,0 +1,29 @@
+[recipe]
+name = "teapot-on-table-young-observer"
+aspect_ratio = "1:1"
+camera = "eye level, slight three-quarter, medium close-up"
+
+[environmentals]
+lighting = "lighting.window-morning"
+
+[observer]
+id = "observer.young-fascinated"
+
+# Same recipe shape as teapot-on-table.toml — only the observer differs.
+# Teapot block (declarative, no observer in cache key) should hit cache;
+# material + surface blocks should miss and regenerate.
+
+[[facts]]
+fact = "object.teapot"
+lens = "object.rendering-instruction"
+order = 1
+
+[[facts]]
+fact = "material.glazed-ceramic"
+lens = "material.feeling"
+order = 2
+
+[[facts]]
+fact = "surface.wooden-table"
+lens = "surface.feeling"
+order = 3

@@ -1,0 +1,39 @@
+[recipe]
+name = "teapot-on-table-window-morning-cobalt"
+aspect_ratio = "1:1"
+camera = "eye level, slight three-quarter, medium close-up"
+
+[environmentals]
+lighting = "lighting.window-morning"
+condition = "condition.flawless"
+glaze_color = "aesthetic.glaze-cobalt-blue"
+
+[observer]
+id = "observer.quiet-domestic"
+
+# Phase 4 fact-coverage workflow validation: identical to
+# teapot-on-table-brief.toml except the recipe pins `glaze_color` to
+# the new cobalt-blue fact, and there's no reference image. If the
+# resulting render is cobalt blue (not the model's celadon prior),
+# the fact-coverage workflow is validated end-to-end.
+
+[[facts]]
+fact = "object.teapot"
+lens = "object.rendering-instruction"
+order = 1
+
+[[facts]]
+fact = "material.glazed-ceramic"
+lens = "material.feeling"
+lod = "brief"
+order = 2
+
+[[facts]]
+fact = "surface.wooden-table"
+lens = "surface.feeling"
+lod = "brief"
+order = 3
+
+[generate]
+model = "gemini-3.1-flash-image-preview"
+output_path = "out/teapot-on-table-cobalt.png"

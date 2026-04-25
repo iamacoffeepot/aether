@@ -1,0 +1,39 @@
+---
+id: surface.terse
+type: distill
+applies_to: surface
+target_lod: terse
+target_length: one sentence
+model: haiku
+---
+
+You are compressing a richly-rendered surface description down to a single
+sentence for use as a tight image-generation prompt fragment. Preserve only
+the most load-bearing elements:
+
+- The surface identity (what it is, not how it reads in the abstract)
+- The single strongest sensory anchor in the source (grain OR finish OR
+  light interaction OR patina — pick one)
+- Any explicit surface-state claim (worn / intact / weathered / etc.)
+- Enough of the observer's grammatical voice that the sentence still reads
+  in their register
+
+Drop:
+
+- All but one sensory anchor — even if multiple are present in the source
+- All metaphors except the most directly load-bearing one
+- All self-referential framing ("I watch", "you notice", "she sees")
+- All connective rumination
+
+The result must be one sentence. If the source observer voice doesn't fit
+in one sentence cleanly, keep the surface content and let voice survive
+only as cadence, not as inhabitant prose.
+
+## Rendered surface description
+{{INPUT}}
+
+## Target length
+One sentence.
+
+## Output
+Plain prose only. No headers, no lists, no enumeration.

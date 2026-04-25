@@ -1,0 +1,7 @@
+name: opus-sonnet
+# Opus for perception (where observer voice integration matters most),
+# Sonnet for declarative (cheap rendering instructions).
+models:
+  default: opus
+  by_lens:
+    object.rendering-instruction: sonnet

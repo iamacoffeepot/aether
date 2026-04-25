@@ -1,0 +1,7 @@
+name: controlled-distill-haiku
+# Holds frame model constant at sonnet so the distill input bytes are
+# identical across the controlled trio; varies only the distill model.
+models:
+  by_stage:
+    frame: sonnet
+    distill: haiku
