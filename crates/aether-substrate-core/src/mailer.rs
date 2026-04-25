@@ -13,10 +13,12 @@
 // `Registry` + `ComponentTable` handles, wired once by
 // `Scheduler::new`.
 
+use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
 use aether_hub_protocol::{EngineMailToHubSubstrateFrame, EngineToHub};
 
+use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::hub_client::HubOutbound;
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use crate::registry::{MailboxEntry, Registry};
@@ -40,6 +42,14 @@ pub struct Mailer {
     /// semantics intact — the hub is the end of the bubbles-up
     /// line.
     outbound: OnceLock<Arc<HubOutbound>>,
+    /// ADR-0045 typed-handle resolver. When wired, `route_mail`
+    /// runs each mail through the ref-walker before dispatching;
+    /// missing handles park the mail in the store. Optional so
+    /// pre-PR-2 test paths (and any chassis that opts out by not
+    /// calling `wire_handle_store`) keep the original verbatim-
+    /// dispatch behaviour. `SubstrateBoot::build` wires this with
+    /// `HandleStore::from_env()` for every chassis.
+    handle_store: OnceLock<Arc<HandleStore>>,
 }
 
 impl Mailer {
@@ -48,6 +58,7 @@ impl Mailer {
             registry: OnceLock::new(),
             components: OnceLock::new(),
             outbound: OnceLock::new(),
+            handle_store: OnceLock::new(),
         }
     }
 
@@ -74,6 +85,25 @@ impl Mailer {
             .unwrap_or_else(|_| panic!("Mailer::wire_outbound called twice"));
     }
 
+    /// Wire the ADR-0045 handle store. With a store wired, every
+    /// mail's payload walks through the ref-resolver before dispatch
+    /// (kinds whose schema contains no `Ref` nodes hit the no-op
+    /// fast path). Without a store, dispatch behaves exactly like
+    /// the pre-PR-2 path. Called by `SubstrateBoot::build`.
+    pub fn wire_handle_store(&self, store: Arc<HandleStore>) {
+        self.handle_store
+            .set(store)
+            .unwrap_or_else(|_| panic!("Mailer::wire_handle_store called twice"));
+    }
+
+    /// Borrow the wired `HandleStore`, or `None` if no store was
+    /// wired (pre-boot / test path). Read-only handle exposed so
+    /// chassis-side handlers (PR 3 host-fn shims) can publish into
+    /// the same store the dispatch path resolves against.
+    pub fn handle_store(&self) -> Option<&Arc<HandleStore>> {
+        self.handle_store.get()
+    }
+
     /// Hand `mail` to the substrate for dispatch. Sinks run on the
     /// caller thread; component mail forwards into the recipient's
     /// inbox (which bumps the per-entry drain counter); dropped /
@@ -85,7 +115,42 @@ impl Mailer {
             self.registry.get().expect("Mailer not wired"),
             self.components.get().expect("Mailer not wired"),
             self.outbound.get(),
+            self.handle_store.get(),
         );
+    }
+
+    /// Publish a resolved handle and re-route every mail that was
+    /// parked on it. Each parked mail re-walks against its kind
+    /// schema; if the same payload still references a *different*
+    /// missing handle, the re-walk parks it on that id, otherwise
+    /// dispatch proceeds normally with the spliced-inline payload.
+    ///
+    /// Used by future host-fn shims (PR 3) and by chassis-level code
+    /// that resolves handles synchronously. Returns the `PutError`
+    /// from the underlying store on byte-budget / kind-id conflicts;
+    /// in those cases parked mail stays parked and the caller decides
+    /// how to recover.
+    ///
+    /// Without a wired store this is a no-op success: chassis that
+    /// don't expose handles never park mail in the first place.
+    pub fn resolve_handle(
+        &self,
+        handle_id: u64,
+        kind_id: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), PutError> {
+        let Some(store) = self.handle_store.get() else {
+            return Ok(());
+        };
+        store.put(handle_id, kind_id, bytes)?;
+        let parked = store.take_parked(handle_id);
+        let registry = self.registry.get().expect("Mailer not wired");
+        let components = self.components.get().expect("Mailer not wired");
+        let outbound = self.outbound.get();
+        for mail in parked {
+            route_mail(mail, registry, components, outbound, Some(store));
+        }
+        Ok(())
     }
 
     /// Route a sink's `*Result` reply to `sender` with a single
@@ -158,12 +223,56 @@ impl Default for Mailer {
 /// forwards into the per-component dispatcher inbox (which bumps the
 /// entry's drain counter). Dropped / unknown recipients and closed
 /// inboxes warn-log and drop the mail.
+///
+/// Mail with a wired `HandleStore` walks through the ADR-0045
+/// ref-resolver before recipient dispatch. Schemas with no `Ref`
+/// nodes hit the no-op fast path; refs with all handles present
+/// splice inline-form bytes into a fresh payload; mail that hits a
+/// missing handle parks in the store and returns immediately
+/// without dispatch.
 fn route_mail(
-    mail: Mail,
+    mut mail: Mail,
     registry: &Registry,
     components: &ComponentTable,
     outbound: Option<&Arc<HubOutbound>>,
+    store: Option<&Arc<HandleStore>>,
 ) {
+    if let Some(store) = store
+        && let Some(descriptor) = registry.kind_descriptor(mail.kind)
+        && handle_store::schema_contains_ref(&descriptor.schema)
+    {
+        match handle_store::walk_and_resolve(&descriptor.schema, &mail.payload, store) {
+            Ok(WalkOutcome::Resolved { payload }) => {
+                if let Cow::Owned(bytes) = payload {
+                    mail.payload = bytes;
+                }
+                // Cow::Borrowed: mail.payload already matches the
+                // resolved bytes (no substitutions happened).
+            }
+            Ok(WalkOutcome::Parked { handle_id, kind_id }) => {
+                tracing::debug!(
+                    target: "aether_substrate::handle_store",
+                    handle_id = format_args!("{handle_id:#x}"),
+                    kind_id = format_args!("{kind_id:#x}"),
+                    recipient = ?mail.recipient,
+                    "parking mail on missing handle",
+                );
+                store.park(handle_id, mail);
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "aether_substrate::handle_store",
+                    kind = format_args!("{:#x}", mail.kind),
+                    error = ?e,
+                    recipient = ?mail.recipient,
+                    "ref-walk failed against registered schema; mail dropped",
+                );
+                return;
+            }
+        }
+    }
+
     let recipient = mail.recipient;
     match registry.entry(recipient) {
         Some(MailboxEntry::Sink(handler)) => {
@@ -264,9 +373,15 @@ fn route_mail(
 mod tests {
     use std::collections::HashMap;
     use std::sync::RwLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
+    use aether_mail::{Kind, Ref, mailbox_id_from_name};
 
     use super::*;
+    use crate::handle_store::HandleStore;
     use crate::mail::MailboxId;
+    use crate::registry::SinkHandler;
 
     /// ADR-0037 Phase 1: a live outbound + unknown mailbox id
     /// forwards `MailToHubSubstrate` upstream instead of
@@ -315,5 +430,231 @@ mod tests {
         let unknown = MailboxId(0xDEADBEEF_u64);
         mailer.push(Mail::new(unknown, 0xABCD, vec![], 0));
         // No panic is the test; the warn path logs and returns.
+    }
+
+    // ------------------------------------------------------------
+    // ADR-0045 Ref-resolution integration
+    // ------------------------------------------------------------
+
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
+    struct Note {
+        body: String,
+        seq: u32,
+    }
+    impl Kind for Note {
+        const NAME: &'static str = "test.mailer_note";
+        const ID: u64 = mailbox_id_from_name(Self::NAME);
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
+    struct HeldNote {
+        held: Ref<Note>,
+        seq: u32,
+    }
+    impl Kind for HeldNote {
+        const NAME: &'static str = "test.mailer_held_note";
+        const ID: u64 = mailbox_id_from_name(Self::NAME);
+    }
+
+    fn note_schema() -> SchemaType {
+        SchemaType::Struct {
+            fields: std::borrow::Cow::Owned(vec![
+                NamedField {
+                    name: std::borrow::Cow::Borrowed("body"),
+                    ty: SchemaType::String,
+                },
+                NamedField {
+                    name: std::borrow::Cow::Borrowed("seq"),
+                    ty: SchemaType::Scalar(Primitive::U32),
+                },
+            ]),
+            repr_c: false,
+        }
+    }
+
+    fn held_note_schema() -> SchemaType {
+        SchemaType::Struct {
+            fields: std::borrow::Cow::Owned(vec![
+                NamedField {
+                    name: std::borrow::Cow::Borrowed("held"),
+                    ty: SchemaType::Ref(SchemaCell::owned(note_schema())),
+                },
+                NamedField {
+                    name: std::borrow::Cow::Borrowed("seq"),
+                    ty: SchemaType::Scalar(Primitive::U32),
+                },
+            ]),
+            repr_c: false,
+        }
+    }
+
+    /// Capture-bytes sink: records every payload it receives so a
+    /// test can assert what bytes the dispatcher delivered.
+    struct CapturingSink {
+        captured: Arc<RwLock<Vec<Vec<u8>>>>,
+        delivery_count: Arc<AtomicUsize>,
+    }
+    impl CapturingSink {
+        fn new() -> Self {
+            Self {
+                captured: Arc::new(RwLock::new(Vec::new())),
+                delivery_count: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+        fn handler(&self) -> SinkHandler {
+            let captured = Arc::clone(&self.captured);
+            let count = Arc::clone(&self.delivery_count);
+            Arc::new(
+                move |_kind_id: u64,
+                      _kind_name: &str,
+                      _origin: Option<&str>,
+                      _sender: ReplyTo,
+                      bytes: &[u8],
+                      _count: u32| {
+                    captured.write().unwrap().push(bytes.to_vec());
+                    count.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+        }
+    }
+
+    fn make_mailer() -> (Arc<Registry>, Arc<Mailer>, Arc<HandleStore>) {
+        let registry = Arc::new(Registry::new());
+        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
+        let store = Arc::new(HandleStore::new(64 * 1024));
+        let mailer = Arc::new(Mailer::new());
+        mailer.wire(Arc::clone(&registry), components);
+        mailer.wire_handle_store(Arc::clone(&store));
+        (registry, mailer, store)
+    }
+
+    /// Mail to a sink whose kind has no `Ref` fields takes the
+    /// fast path: no walker invocation, payload delivered verbatim.
+    #[test]
+    fn ref_free_kind_passes_through_mailer() {
+        let (registry, mailer, _store) = make_mailer();
+        let note_id = registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: Note::NAME.into(),
+                schema: note_schema(),
+            })
+            .unwrap();
+        let sink = CapturingSink::new();
+        let sink_id = registry.register_sink("test.sink", sink.handler());
+
+        let note = Note {
+            body: "verbatim".into(),
+            seq: 1,
+        };
+        let bytes = postcard::to_allocvec(&note).unwrap();
+        mailer.push(Mail::new(sink_id, note_id, bytes.clone(), 1));
+
+        let captured = sink.captured.read().unwrap().clone();
+        assert_eq!(captured, vec![bytes]);
+    }
+
+    /// Mail with a `Handle` ref whose handle is missing parks in the
+    /// store. The sink does not see it. After `resolve_handle` lands
+    /// the entry, the parked mail re-routes and the sink receives
+    /// the spliced payload.
+    #[test]
+    fn handle_ref_parks_then_resolves_through_mailer() {
+        let (registry, mailer, store) = make_mailer();
+        let outer_kind_id = registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: HeldNote::NAME.into(),
+                schema: held_note_schema(),
+            })
+            .unwrap();
+        let inner_kind_id = registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: Note::NAME.into(),
+                schema: note_schema(),
+            })
+            .unwrap();
+
+        let sink = CapturingSink::new();
+        let sink_id = registry.register_sink("test.sink", sink.handler());
+
+        // Push HeldNote mail with `held = Handle(7)`. Handle 7 is
+        // not in the store yet — the mail must park. We construct
+        // `Ref::Handle` directly with the registry-derived
+        // `inner_kind_id` so the walker's debug-assert (stored
+        // kind_id == wire kind_id) holds when the resolve fires.
+        let outer = HeldNote {
+            held: Ref::Handle {
+                id: 7,
+                kind_id: inner_kind_id,
+            },
+            seq: 11,
+        };
+        let outer_bytes = postcard::to_allocvec(&outer).unwrap();
+        mailer.push(Mail::new(sink_id, outer_kind_id, outer_bytes, 1));
+        assert_eq!(
+            sink.delivery_count.load(Ordering::SeqCst),
+            0,
+            "mail must not dispatch until handle resolves",
+        );
+        assert_eq!(store.parked_count(7), 1);
+
+        // Resolve handle 7. The mail should now flow to the sink
+        // with the inner Note bytes spliced inline.
+        let inner = Note {
+            body: "resolved".into(),
+            seq: 99,
+        };
+        let inner_bytes = postcard::to_allocvec(&inner).unwrap();
+        mailer
+            .resolve_handle(7, inner_kind_id, inner_bytes)
+            .unwrap();
+        assert_eq!(store.parked_count(7), 0);
+        assert_eq!(sink.delivery_count.load(Ordering::SeqCst), 1);
+
+        let captured = sink.captured.read().unwrap();
+        let delivered: HeldNote = postcard::from_bytes(&captured[0]).unwrap();
+        assert_eq!(delivered.seq, 11);
+        match delivered.held {
+            Ref::Inline(got) => {
+                assert_eq!(got.body, "resolved");
+                assert_eq!(got.seq, 99);
+            }
+            Ref::Handle { .. } => panic!("walker must replace Handle with Inline"),
+        }
+    }
+
+    /// `resolve_handle` with no `Mailer::wire_handle_store` is a
+    /// no-op success — the original pre-PR-2 mailer paths (no store
+    /// wired) keep working without panicking.
+    #[test]
+    fn resolve_handle_without_wired_store_is_noop() {
+        let registry = Arc::new(Registry::new());
+        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
+        let mailer = Mailer::new();
+        mailer.wire(Arc::clone(&registry), components);
+        // No wire_handle_store call.
+        mailer.resolve_handle(1, 2, vec![3]).unwrap();
+    }
+
+    /// Mail whose payload is malformed against the registered
+    /// schema (e.g. truncated bytes) gets dropped with a warn log,
+    /// not delivered to the sink. Pin the contract — without this
+    /// guard the sink would receive bytes that don't decode against
+    /// the schema it expects.
+    #[test]
+    fn malformed_ref_payload_drops_mail() {
+        let (registry, mailer, _store) = make_mailer();
+        let kind_id = registry
+            .register_kind_with_descriptor(KindDescriptor {
+                name: HeldNote::NAME.into(),
+                schema: held_note_schema(),
+            })
+            .unwrap();
+
+        let sink = CapturingSink::new();
+        let sink_id = registry.register_sink("test.sink", sink.handler());
+
+        // Truncated payload — the walker bails Truncated mid-walk.
+        mailer.push(Mail::new(sink_id, kind_id, vec![0u8; 1], 1));
+        assert_eq!(sink.delivery_count.load(Ordering::SeqCst), 0);
     }
 }
