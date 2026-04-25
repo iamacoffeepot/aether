@@ -1425,6 +1425,57 @@ mod control_plane {
     }
 }
 
+pub use mesh::*;
+
+/// Mesh editor component vocabulary (Spike C). Postcard-shaped because
+/// every kind here either carries a `Vec` of vertex ids or a tagged
+/// enum that bytemuck can't represent. The mesh editor component
+/// (`crates/aether-mesh-editor-component/`) is the sole receiver; mail
+/// is fire-and-forget for v1 — state changes become visible the next
+/// tick when the editor re-emits `DrawTriangle` for every face.
+mod mesh {
+    use alloc::vec::Vec;
+
+    use serde::{Deserialize, Serialize};
+
+    /// Built-in primitive families the mesh editor knows how to
+    /// generate. Each replaces the editor's current mesh wholesale.
+    /// `Cube` is the only family implemented in v1; the others reserve
+    /// names so adding them later is a no-rename change.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum MeshPrimitive {
+        Cube,
+        Sphere,
+        Cylinder,
+        Plane,
+    }
+
+    /// `aether.mesh.set_primitive` — replace the editor's mesh with a
+    /// procedurally generated primitive. Vertex and face ids are
+    /// reassigned from zero so callers can address them deterministically
+    /// by index after a known primitive (e.g. cube vertices 4–7 are the
+    /// `+y` face). Fire-and-forget; the next tick renders the new mesh.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.mesh.set_primitive")]
+    pub struct SetPrimitive {
+        pub primitive: MeshPrimitive,
+        pub center: [f32; 3],
+        pub size: f32,
+    }
+
+    /// `aether.mesh.translate_vertices` — shift the listed vertex ids
+    /// by `delta` in world space. Unknown ids are ignored (warned, not
+    /// rejected) so a partial-overlap selection still applies cleanly
+    /// to the ids that exist. Fire-and-forget; next tick reflects the
+    /// move.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.mesh.translate_vertices")]
+    pub struct TranslateVertices {
+        pub vertex_ids: Vec<u32>,
+        pub delta: [f32; 3],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
