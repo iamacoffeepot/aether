@@ -64,3 +64,12 @@ crate-type = ["cdylib"]
 [[example]]
 name = "handle_demo"
 crate-type = ["cdylib"]
+
+# Postcard receive smoke test (sibling of `echoer.rs`). Demonstrates
+# `#[handler(postcard)]` dispatching through `Mail::decode_postcard`
+# for kinds whose schema isn't bytemuck-castable (here: `String` +
+# `Vec<u8>` fields). Closes the gap in ADR-0033's design intent that
+# `#[handlers]` accepts any declared kind regardless of wire shape.
+[[example]]
+name = "postcard_echoer"
+crate-type = ["cdylib"]

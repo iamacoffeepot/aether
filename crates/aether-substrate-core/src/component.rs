@@ -31,11 +31,18 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 const STATE_OFFSET: u32 = 8192;
 
 /// Contract with the guest: it exports a
-/// `receive(kind, ptr, count, sender) -> u32` entrypoint and a `memory`
-/// named `memory`. ADR-0013 widened the receive ABI with a fourth
-/// `sender: u32` parameter — a per-instance handle the guest can pass
-/// back to `reply_mail`, or `NO_REPLY_HANDLE` for component-originated
-/// mail. ADR-0015 adds optional `on_replace`, `on_drop`, and
+/// `receive(kind, ptr, byte_len, count, sender) -> u32` entrypoint
+/// and a `memory` named `memory`. ADR-0013 widened the receive ABI
+/// with a `sender: u32` parameter — a per-instance handle the guest
+/// can pass back to `reply_mail`, or `NO_REPLY_HANDLE` for
+/// component-originated mail. The `byte_len: u32` parameter (added
+/// to support postcard-shaped receivers per ADR-0033's "any declared
+/// kind" intent) is the total payload size the substrate wrote at
+/// `ptr`, sourced from `mail.payload.len()`. Cast decoders sanity-
+/// check it against `size_of::<K>() * count`; postcard decoders use
+/// it as the exact slice length so a parser bug or a corrupted frame
+/// can't read past the substrate-written bytes into adjacent linear
+/// memory. ADR-0015 adds optional `on_replace`, `on_drop`, and
 /// `on_rehydrate` exports; the substrate calls them at the right
 /// lifecycle moments when present and silently skips when absent
 /// (no-op trait defaults compile down to no symbol under LTO, so
@@ -43,7 +50,7 @@ const STATE_OFFSET: u32 = 8192;
 pub struct Component {
     store: Store<SubstrateCtx>,
     memory: Memory,
-    receive: TypedFunc<(u64, u32, u32, u32), u32>,
+    receive: TypedFunc<(u64, u32, u32, u32, u32), u32>,
     on_replace: Option<TypedFunc<(), u32>>,
     on_drop: Option<TypedFunc<(), u32>>,
     on_rehydrate: Option<TypedFunc<(u32, u32, u32), u32>>,
@@ -65,7 +72,7 @@ impl Component {
             .get_memory(&mut store, "memory")
             .ok_or_else(|| wasmtime::Error::msg("guest exports no `memory`"))?;
         let receive =
-            instance.get_typed_func::<(u64, u32, u32, u32), u32>(&mut store, "receive_p32")?;
+            instance.get_typed_func::<(u64, u32, u32, u32, u32), u32>(&mut store, "receive_p32")?;
 
         // Optional `init(mailbox_id) -> u32` export: called once before
         // the first `receive`, handed the component's own mailbox id so
@@ -157,9 +164,10 @@ impl Component {
         };
         self.memory
             .write(&mut self.store, MAIL_OFFSET as usize, &mail.payload)?;
+        let byte_len = mail.payload.len() as u32;
         self.receive.call(
             &mut self.store,
-            (mail.kind, MAIL_OFFSET, mail.count, handle),
+            (mail.kind, MAIL_OFFSET, byte_len, mail.count, handle),
         )
     }
 
@@ -321,7 +329,7 @@ mod tests {
     const WAT_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 i32.const 200
@@ -338,14 +346,14 @@ mod tests {
     const WAT_NO_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0))
     "#;
 
     const WAT_TRAP_ON_DROP: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_drop") (result i32)
                 unreachable))
@@ -359,7 +367,7 @@ mod tests {
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 300) "\de\ad\be\ef")
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -377,7 +385,7 @@ mod tests {
             (import "aether" "save_state_p32"
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -394,7 +402,7 @@ mod tests {
     const WAT_REHYDRATES: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_rehydrate_p32") (param i32 i32 i32) (result i32)
                 ;; *(u32*)396 = version
@@ -414,9 +422,9 @@ mod tests {
     const WAT_STORES_SENDER: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 500
-                local.get 3
+                local.get 4
                 i32.store
                 i32.const 0))
     "#;
@@ -433,9 +441,9 @@ mod tests {
             (import "aether" "reply_mail_p32"
                 (func $reply_mail (param i32 i64 i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 (drop (call $reply_mail
-                    (local.get 3) ;; sender handle from receive param
+                    (local.get 4) ;; sender handle from receive param
                     (i64.const {kind_id}) ;; hashed kind id of "test.pong"
                     (i32.const 0) ;; ptr
                     (i32.const 0) ;; len
@@ -792,13 +800,13 @@ mod tests {
             (import "aether" "wait_reply_p32"
                 (func $wait (param i64 i32 i32 i32 i64) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 700
                 (call $wait
                     (i64.const -6148914691236517206) ;; 0xAAAA_AAAA_AAAA_AAAA reinterpreted as i64
                     (i32.const 600)                  ;; out_ptr
                     (i32.const 64)                   ;; out_cap
-                    (local.get 2)                    ;; timeout_ms = count
+                    (local.get 3)                    ;; timeout_ms = count (param 3 after byte_len shifted in at 2)
                     (i64.const 0))                   ;; expected_correlation = 0 (kind-only filter)
                 i32.store
                 i32.const 0))
@@ -979,7 +987,7 @@ mod tests {
                 (import "aether" "wait_reply_p32"
                     (func $wait (param i64 i32 i32 i32 i64) (result i32)))
                 (memory (export "memory") 1)
-                (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+                (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                     i32.const 700
                     (call $wait
                         (i64.const -6148914691236517206) ;; expected_kind = 0xAAAA...

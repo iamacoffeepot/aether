@@ -17,3 +17,10 @@ syn = { version = "2", features = ["full"] }
 # available now.
 aether-mail = { path = "../aether-mail", features = ["derive"] }
 aether-hub-protocol = { path = "../aether-hub-protocol" }
+# ADR-0033 wire-shape autodetect: the Kind derive emits
+# `decode_from_bytes` bodies that bound on either `bytemuck::AnyBitPattern`
+# (cast arm) or `serde::de::DeserializeOwned` (postcard arm). Test
+# fixtures here mirror real components by satisfying whichever bound
+# matches their wire shape.
+bytemuck = { version = "1.19", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }

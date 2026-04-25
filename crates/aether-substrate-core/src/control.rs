@@ -605,7 +605,7 @@ mod tests {
     const WAT: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0))
     "#;
 
@@ -616,7 +616,7 @@ mod tests {
     const WAT_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 i32.const 200
@@ -635,7 +635,7 @@ mod tests {
     const WAT_TRAPS_ON_DROP: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_drop") (result i32)
                 unreachable))
@@ -650,7 +650,7 @@ mod tests {
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (data (i32.const 300) "\de\ad\be\ef")
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -668,7 +668,7 @@ mod tests {
             (import "aether" "save_state_p32"
                 (func $save_state (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_replace") (result i32)
                 (drop (call $save_state
@@ -685,7 +685,7 @@ mod tests {
     const WAT_REHYDRATES: &str = r#"
         (module
             (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "on_rehydrate_p32") (param i32 i32 i32) (result i32)
                 i32.const 396
@@ -822,7 +822,7 @@ mod tests {
                 (@custom "aether.kinds" "{}")
                 (@custom "aether.kinds.labels" "{}")
                 (memory (export "memory") 1)
-                (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+                (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                     i32.const 0))"#,
             esc(&canonical),
             esc(&labels_bytes),
@@ -899,7 +899,7 @@ mod tests {
                 (@custom "aether.kinds" "{}")
                 (@custom "aether.kinds.labels" "{}")
                 (memory (export "memory") 1)
-                (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+                (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                     i32.const 0))"#,
             esc(&canonical),
             esc(&labels_bytes),
@@ -1253,7 +1253,7 @@ mod tests {
                 (func $send_mail (param i64 i64 i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (func (export "receive_p32")
-                (param $kind i64) (param $ptr i32) (param $count i32) (param $sender i32)
+                (param $kind i64) (param $ptr i32) (param $byte_len i32) (param $count i32) (param $sender i32)
                 (result i32)
                 ;; Payload: [sink_id:u64]. Forward memory[396..404] to it.
                 (drop (call $send_mail
@@ -1946,7 +1946,7 @@ mod tests {
                 (func $send_mail (param i64 i64 i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (func (export "receive_p32")
-                (param $kind i64) (param $ptr i32) (param $count i32) (param $sender i32)
+                (param $kind i64) (param $ptr i32) (param $byte_len i32) (param $count i32) (param $sender i32)
                 (result i32)
                 (drop (call $send_mail
                     (i64.load (local.get $ptr))

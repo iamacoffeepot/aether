@@ -1061,7 +1061,7 @@ mod tests {
         const WAT_RECORDS_KIND: &str = r#"
             (module
                 (memory (export "memory") 1)
-                (func (export "receive_p32") (param i64 i32 i32 i32) (result i32)
+                (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                     i32.const 200
                     local.get 0
                     i32.wrap_i64

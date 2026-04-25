@@ -34,7 +34,7 @@ fn forwards_to_sink_wat(sink_id: MailboxId) -> String {
     (func $send_mail (param i64 i64 i32 i32 i32) (result i32)))
   (memory (export "memory") 1)
   (func (export "receive_p32")
-    (param $kind i64) (param $ptr i32) (param $count i32) (param $sender i32)
+    (param $kind i64) (param $ptr i32) (param $byte_len i32) (param $count i32) (param $sender i32)
     (result i32)
     i64.const {sink_id}
     i64.const 99
