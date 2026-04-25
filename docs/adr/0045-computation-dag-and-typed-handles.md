@@ -191,7 +191,7 @@ DAG-level failures (validation rejection, cancellation, transform panic) surface
 
 ### 9. Handle lifecycle and refcounts
 
-- **Component-held handles.** A `Handle<K>` value in a guest is just an `(id, PhantomData<K>)`. Construction registers a refcount slot in the substrate via the SDK; `Drop` decrements. `Clone` increments. The SDK derives these automatically — components never call refcount host-fns directly.
+- **Component-held handles.** A `Handle<K>` value in a guest is just an `(id, PhantomData<K>)`. The SDK acquires the slot by mailing the substrate-owned `"handle"` sink (`aether.handle.publish` request → `aether.handle.publish_result { id }` reply, sync via `send_postcard` + `wait_reply` like the io / net sinks). Refcount adjustments and pin / unpin are paired sink kinds (`aether.handle.{release,pin,unpin}`). Auto-`Drop` mails `aether.handle.release` fire-and-forget so a panicking wait can't poison teardown. Mail rather than host-fn shims keeps the privileged FFI surface small (ADR-0002), gives Claude observability into handle traffic for free, and folds capability gating (ADR-0044) into the existing per-sink permission model.
 - **In-flight mail.** A `Ref::Handle` in unresolved (parked) mail counts toward refcount; once dispatched, the count moves to the consumed-by node (transform input, sink adapter call, …).
 - **Across `replace_component` (ADR-0022).** Freeze-drain-swap doesn't touch the handle store. Handles created by the old instance survive the swap and can be re-acquired by the new instance via DAG state restoration. Phase 1 doesn't ship DAG persistence — handles outlive the component instance, but a replaced component re-emits its DAG from scratch. Phase 4+ may add stable DAG identifiers that survive replacement.
 - **Across `drop_component`.** All handles owned by the dropping component decrement; entries with zero refs become evictable.
@@ -255,7 +255,7 @@ DAG-level failures (validation rejection, cancellation, transform panic) surface
 
 - **PR**: foundational substrate work — `HandleStore`, `HandleEntry`, refcount/LRU/pinned semantics, parked-mail dispatch in the sink dispatcher, `AETHER_HANDLE_STORE_MAX_BYTES` env var, integration tests covering source replies + parked mail + LRU eviction.
 - **PR**: kinds + schema-derive — `Ref<K>` wire type, `#[schema(ref)]` field attribute (or equivalent codegen path), one demonstrative new kind that uses it.
-- **PR**: SDK — `Handle<K>` newtype with `Drop`/`Clone`, `Ref<K>` enum, refcount host-fn shims, `ctx`-side helpers for emit-reply-as-handle.
+- **PR**: SDK + handle sink — `aether.handle.{publish,release,pin,unpin}` kinds + paired `*Result` replies registered in `aether-kinds`, the substrate's `"handle"` sink owning `Arc<HandleStore>`, and the guest-side `Handle<K>` newtype whose `Drop` mails `release` fire-and-forget while explicit `release()` / `pin()` / `unpin()` round-trip via `send_postcard` + `wait_reply`. No new host fns — same shape as ADR-0041 io and ADR-0043 net.
 - **PR**: hub MCP surface — `describe_handles(engine_id)` exposing the substrate's handle store for debugging.
 - **Parked, not committed**: ADR-0046 — DAG submit/cancel/status mail, descriptor validation, executor for sources + observers (Phase 2). Probably its own ADR because the descriptor wire is enough surface to deserve focused review.
 - **Parked, not committed**: ADR-0047 — `#[transform]` macro, `aether.dag.transforms` custom section, wasmtime `Func::call` integration, content-addressed transform ids (Phase 3).

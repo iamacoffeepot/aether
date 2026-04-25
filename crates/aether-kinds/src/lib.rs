@@ -1305,6 +1305,124 @@ mod control_plane {
             error: NetError,
         },
     }
+
+    // ADR-0045 typed-handle store. Four request kinds on the
+    // `"handle"` sink (`publish` / `release` / `pin` / `unpin`),
+    // paired 1:1 with reply kinds. Components mail `HandlePublish`
+    // with `kind_id` + payload bytes and receive a fresh ephemeral
+    // handle id back in `HandlePublishResult::Ok`; subsequent mail
+    // can carry the handle on the wire as `Ref::Handle { id,
+    // kind_id }`. The substrate's dispatch path resolves the handle
+    // to its `Ref::Inline` form before delivery.
+    //
+    // Mail rather than host fns: keeps the privileged FFI surface
+    // small (ADR-0002), folds capability gating (ADR-0044) into
+    // the existing per-sink permission model, gives Claude
+    // observability into handle traffic for free.
+    //
+    // Reply correlation echoes the operation's identity: `publish`
+    // echoes `kind_id`; `release` / `pin` / `unpin` echo `id`. v1
+    // semantics are mostly idempotent — `release` past zero
+    // saturates, `pin` of a pinned entry is a no-op — so the only
+    // real failure surface is `UnknownHandle` for ops on a missing
+    // id.
+
+    /// Structured failure reason for a handle operation. Mirrors
+    /// `IoError` / `NetError`'s tagged-enum shape so guests can
+    /// pattern-match on the variant rather than parsing strings.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    pub enum HandleError {
+        /// No handle entry under the requested id. Surfaces from
+        /// `release` / `pin` / `unpin` against an id the substrate
+        /// has never seen (or has already evicted).
+        UnknownHandle,
+        /// Eviction couldn't free enough room for the publish —
+        /// every existing entry is pinned or refcounted at the
+        /// store's byte cap.
+        EvictionFailed,
+        /// The substrate has no handle store wired (e.g. a
+        /// chassis without handle support). Treated as fatal by
+        /// the SDK; callers see `Ctx::publish` return `None`.
+        NoStore,
+        /// Free-form adapter detail — kind-id mismatch on
+        /// re-publish, internal state, etc. Free-form text for
+        /// the same reasons `IoError::AdapterError` is.
+        AdapterError(String),
+    }
+
+    /// `aether.handle.publish` — request the substrate stash
+    /// `bytes` in the handle store under `kind_id` and reply with
+    /// a fresh ephemeral id. Mailed to the `"handle"` sink; reply
+    /// lands as `HandlePublishResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.handle.publish")]
+    pub struct HandlePublish {
+        pub kind_id: u64,
+        pub bytes: Vec<u8>,
+    }
+
+    /// Reply to `HandlePublish`. Both arms echo the originating
+    /// `kind_id` for correlation; `Ok` carries the minted `id`.
+    /// The request's `bytes` aren't echoed — correlation needs the
+    /// identity of the publish, not its contents.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.handle.publish_result")]
+    pub enum HandlePublishResult {
+        Ok { kind_id: u64, id: u64 },
+        Err { kind_id: u64, error: HandleError },
+    }
+
+    /// `aether.handle.release` — drop one reference on `id`. Reply:
+    /// `HandleReleaseResult`. The substrate's `dec_ref` saturates
+    /// at zero, so calling release on an already-released handle
+    /// is a no-op success rather than `UnknownHandle`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.handle.release")]
+    pub struct HandleRelease {
+        pub id: u64,
+    }
+
+    /// Reply to `HandleRelease`. Both arms echo the originating
+    /// `id`. `Err` only fires when no entry exists at that id.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.handle.release_result")]
+    pub enum HandleReleaseResult {
+        Ok { id: u64 },
+        Err { id: u64, error: HandleError },
+    }
+
+    /// `aether.handle.pin` — protect `id` from LRU eviction even
+    /// when its refcount drops to zero. Reply: `HandlePinResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.handle.pin")]
+    pub struct HandlePin {
+        pub id: u64,
+    }
+
+    /// Reply to `HandlePin`. Both arms echo the originating `id`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.handle.pin_result")]
+    pub enum HandlePinResult {
+        Ok { id: u64 },
+        Err { id: u64, error: HandleError },
+    }
+
+    /// `aether.handle.unpin` — clear the pinned flag on `id`.
+    /// Doesn't drop the entry; only makes it eligible for LRU
+    /// eviction once `refcount == 0`. Reply: `HandleUnpinResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.handle.unpin")]
+    pub struct HandleUnpin {
+        pub id: u64,
+    }
+
+    /// Reply to `HandleUnpin`. Both arms echo the originating `id`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.handle.unpin_result")]
+    pub enum HandleUnpinResult {
+        Ok { id: u64 },
+        Err { id: u64, error: HandleError },
+    }
 }
 
 #[cfg(test)]
