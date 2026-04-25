@@ -13,8 +13,8 @@
 //   - The `Vec<u8>` field-level specialization lands as `Bytes`, not
 //     `Vec(Scalar(U8))`.
 
-use aether_hub_protocol::{EnumVariant, NamedField, Primitive, SchemaType};
-use aether_mail::{CastEligible, Kind, Schema};
+use aether_hub_protocol::{EnumVariant, NamedField, Primitive, SchemaCell, SchemaType};
+use aether_mail::{CastEligible, Kind, Ref, Schema};
 
 #[derive(aether_mail::Kind, aether_mail::Schema)]
 #[kind(name = "test.tick")]
@@ -189,6 +189,105 @@ fn enum_emits_each_variant_shape_with_sequential_discriminants() {
             ty: SchemaType::String,
         }]
     );
+}
+
+// ADR-0045 typed handle: the derive doesn't have to know about
+// `Ref<K>` syntactically — the hand-rolled `Schema` impl in
+// aether-mail dispatches through the existing trait. These tests
+// pin that integration: a struct with a `Ref<K>` field gets a
+// `SchemaType::Ref` arm in its layout, the parent's CastEligible
+// flips to false (refs force postcard), and the wire roundtrips
+// for both Inline and Handle variants.
+
+#[derive(aether_mail::Kind, aether_mail::Schema)]
+#[kind(name = "test.held_note")]
+#[allow(dead_code)]
+struct HeldNote {
+    body: Ref<Note>,
+    seq: u32,
+}
+
+#[test]
+fn ref_field_lands_as_schema_ref_pointing_at_inner_kind() {
+    let SchemaType::Struct { fields, repr_c } = &<HeldNote as Schema>::SCHEMA else {
+        panic!("expected Struct schema");
+    };
+    // Ref<K> forces postcard — a parent with a Ref field can't
+    // claim `repr_c: true` no matter how the rest of the fields
+    // look. ADR-0045 §1.
+    assert!(!*repr_c);
+    assert_eq!(fields.len(), 2);
+
+    let body = &fields[0];
+    assert_eq!(body.name, "body");
+    let SchemaType::Ref(inner_cell) = &body.ty else {
+        panic!("expected Ref schema for body field, got {:?}", body.ty);
+    };
+    let inner: &SchemaType = inner_cell;
+    // The cell points at <Note as Schema>::SCHEMA verbatim — same
+    // bytes the standalone Note would emit. Recipients dispatch
+    // against this after handle resolution lands inline.
+    assert_eq!(inner, &<Note as Schema>::SCHEMA);
+
+    // Sibling field unaffected.
+    let seq = &fields[1];
+    assert_eq!(seq.name, "seq");
+    assert_eq!(seq.ty, SchemaType::Scalar(Primitive::U32));
+}
+
+#[test]
+fn parent_with_ref_field_is_cast_ineligible() {
+    // Even though Ref<K>'s own ELIGIBLE is false, the AND-fold in
+    // the derive's emitted `ELIGIBLE` const propagates the false up
+    // to the parent. A future regression that forgets to mark
+    // Ref<K> ineligible would let parents claim repr_c, then break
+    // the cast-shaped wire encoder when it tries to emit a
+    // variable-length Inline body.
+    const { assert!(!<HeldNote as CastEligible>::ELIGIBLE) };
+}
+
+#[test]
+fn ref_inner_kind_id_is_carried_in_handle_arm() {
+    // `Ref::handle::<K>(id)` pulls `K::ID` automatically — pin the
+    // value so a future change to the kind's NAME or schema (which
+    // would reshuffle the FNV-derived id) is loud, not silent.
+    let r: Ref<Note> = Ref::handle(0xfeed_0000);
+    let Ref::Handle { id, kind_id } = r else {
+        panic!("expected Handle variant");
+    };
+    assert_eq!(id, 0xfeed_0000);
+    assert_eq!(kind_id, <Note as Kind>::ID);
+}
+
+#[test]
+fn ref_kind_id_differs_from_inline_kind_id() {
+    // The schema canonical bytes change when a field flips from
+    // `K` to `Ref<K>` — they pick up an extra `SCHEMA_REF` tag.
+    // This is intentional (a wire change at the kind boundary is
+    // a kind boundary change), but pin it explicitly so a refactor
+    // can't silently align the two ids and let mismatched
+    // recipients silently consume each other's mail.
+    #[derive(aether_mail::Kind, aether_mail::Schema)]
+    #[kind(name = "test.inline_note_field")]
+    #[allow(dead_code)]
+    struct Inlined {
+        body: Note,
+        seq: u32,
+    }
+    assert_ne!(<HeldNote as Kind>::ID, <Inlined as Kind>::ID);
+}
+
+#[test]
+fn ref_schema_cell_uses_static_pointer_for_const_construction() {
+    // ADR-0031: the Schema impl is a `const` so the derive can
+    // splat it as a literal. `SchemaType::Ref(SchemaCell::Static(_))`
+    // is what comes out of `<Ref<K> as Schema>::SCHEMA`; pin it
+    // here so a regression to `Owned` (which would force runtime
+    // allocation per-emit) is loud.
+    let SchemaType::Ref(cell) = &<Ref<Note> as Schema>::SCHEMA else {
+        panic!("expected Ref schema");
+    };
+    assert!(matches!(cell, SchemaCell::Static(_)));
 }
 
 #[test]

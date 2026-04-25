@@ -265,6 +265,43 @@ mod tests {
         assert_eq!(&B1[..], &B2[..]);
     }
 
+    // ADR-0045 typed handle reference. The new `SchemaType::Ref`
+    // variant gets wire tag 10 (after `SCHEMA_ENUM = 9`); these
+    // tests pin both the canonical bytes and the `SchemaShape`
+    // round-trip so a future re-numbering of the variants can't
+    // silently shift bytes underneath shipped components.
+
+    static REF_F32: SchemaType = SchemaType::Ref(SchemaCell::Static(&F32));
+
+    #[test]
+    fn canonical_schema_ref_round_trips_as_shape() {
+        const N: usize = canonical_len_schema(&REF_F32);
+        const BYTES: [u8; N] = canonical_serialize_schema::<N>(&REF_F32);
+        // Tag 10 (SCHEMA_REF) followed by the inner schema's tag
+        // (Scalar = 2, F32 = 8).
+        assert_eq!(BYTES[0], 10);
+        let shape: SchemaShape = postcard::from_bytes(&BYTES).expect("decode");
+        assert_eq!(
+            shape,
+            SchemaShape::Ref(Box::new(SchemaShape::Scalar(Primitive::F32)))
+        );
+    }
+
+    #[test]
+    fn canonical_schema_ref_differs_from_inline_kind() {
+        // A struct field flipping from `K` to `Ref<K>` MUST change
+        // the canonical bytes — that's how kind ids stay distinct
+        // for the inline-shaped and ref-shaped variants of an
+        // otherwise-equal kind. Pinned so a future bug that drops
+        // the SCHEMA_REF tag from the encoding would surface.
+        const INLINE_LEN: usize = canonical_len_schema(&F32);
+        const REF_LEN: usize = canonical_len_schema(&REF_F32);
+        const INLINE_BYTES: [u8; INLINE_LEN] = canonical_serialize_schema::<INLINE_LEN>(&F32);
+        const REF_BYTES: [u8; REF_LEN] = canonical_serialize_schema::<REF_LEN>(&REF_F32);
+        assert_ne!(&INLINE_BYTES[..], &REF_BYTES[..]);
+        assert_eq!(REF_BYTES.len(), INLINE_BYTES.len() + 1);
+    }
+
     // Labels tests — these exercise the full `KindLabels` round-trip.
 
     static VERTEX_LABELS: LabelNode = LabelNode::Struct {
@@ -319,6 +356,26 @@ mod tests {
         const BYTES: [u8; N] = canonical_serialize_labels::<N>(&RESULT_LABELS);
         let decoded: KindLabels = postcard::from_bytes(&BYTES).expect("decode");
         assert_eq!(decoded, RESULT_LABELS);
+    }
+
+    // ADR-0045: `LabelNode::Ref` mirrors `SchemaType::Ref` in the
+    // labels sidecar tree. The label's own variant tag is 6 (after
+    // Enum = 5); the inner cell carries the wrapped kind's labels
+    // verbatim. Hub walks both trees in lockstep, so a missing tag
+    // on either side breaks `describe_kinds`.
+
+    static REF_VERTEX_LABELS: KindLabels = KindLabels {
+        kind_id: 0,
+        kind_label: Cow::Borrowed("my_crate::HeldVertex"),
+        root: LabelNode::Ref(LabelCell::Static(&VERTEX_LABELS)),
+    };
+
+    #[test]
+    fn canonical_labels_ref_round_trips() {
+        const N: usize = canonical_len_labels(&REF_VERTEX_LABELS);
+        const BYTES: [u8; N] = canonical_serialize_labels::<N>(&REF_VERTEX_LABELS);
+        let decoded: KindLabels = postcard::from_bytes(&BYTES).expect("decode");
+        assert_eq!(decoded, REF_VERTEX_LABELS);
     }
 
     // ADR-0033: handler/fallback/component record encoders. Round-trip

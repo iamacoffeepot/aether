@@ -261,6 +261,51 @@ fn encode_postcard(
             encode_enum_body(body, variant, path, out)?;
             Ok(())
         }
+        SchemaType::Ref(inner) => {
+            // ADR-0045 typed handle. Externally-tagged JSON matches
+            // the Rust enum: `{"Inline": <inner-K>}` chooses the
+            // inline arm; `{"Handle": {"id": u64, "kind_id": u64}}`
+            // chooses the handle arm. Wire is the postcard enum
+            // encoding — discriminant varint + body, where body is
+            // either the inner kind's postcard bytes (Inline = 0)
+            // or two varints (Handle = 1).
+            let (tag, body) = decode_enum_tag(value, path)?;
+            match tag {
+                "Inline" => {
+                    write_varint_u64(out, 0);
+                    encode_postcard(body, inner, path, out)
+                }
+                "Handle" => {
+                    write_varint_u64(out, 1);
+                    let obj = body.as_object().ok_or_else(|| EncodeError::TypeMismatch {
+                        field: path.to_owned(),
+                        expected: "Handle object",
+                    })?;
+                    for key in obj.keys() {
+                        if key != "id" && key != "kind_id" {
+                            return Err(EncodeError::UnexpectedField(format!("{path}.{key}")));
+                        }
+                    }
+                    let id_path = format!("{path}.id");
+                    let kind_id_path = format!("{path}.kind_id");
+                    let id_v = obj
+                        .get("id")
+                        .ok_or_else(|| EncodeError::MissingField(id_path.clone()))?;
+                    let kind_id_v = obj
+                        .get("kind_id")
+                        .ok_or_else(|| EncodeError::MissingField(kind_id_path.clone()))?;
+                    let id = as_unsigned(id_v, &id_path, "u64")?;
+                    let kind_id = as_unsigned(kind_id_v, &kind_id_path, "u64")?;
+                    write_varint_u64(out, id);
+                    write_varint_u64(out, kind_id);
+                    Ok(())
+                }
+                _ => Err(EncodeError::TypeMismatch {
+                    field: path.to_owned(),
+                    expected: "Inline or Handle variant",
+                }),
+            }
+        }
     }
 }
 
@@ -524,7 +569,8 @@ fn encode_field_value(
         | SchemaType::Option(_)
         | SchemaType::Vec(_)
         | SchemaType::Enum { .. }
-        | SchemaType::Unit => Err(EncodeError::UnsupportedSchema(
+        | SchemaType::Unit
+        | SchemaType::Ref(_) => Err(EncodeError::UnsupportedSchema(
             "non-cast field inside cast-shaped struct",
         )),
     }
