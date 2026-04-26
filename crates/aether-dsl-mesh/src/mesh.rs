@@ -67,92 +67,56 @@ fn mesh_into_polygons(
     offset: [f32; 3],
 ) -> Result<(), MeshError> {
     match node {
-        Node::Box { x, y, z, color } => {
-            let mut tris = Vec::new();
-            mesh_box(&mut tris, *x, *y, *z, *color, offset);
-            wrap_triangles_into(out, &tris)
-        }
+        Node::Box { x, y, z, color } => mesh_box(out, *x, *y, *z, *color, offset),
         Node::Lathe {
             profile,
             segments,
             color,
-        } => {
-            let mut tris = Vec::new();
-            mesh_lathe(&mut tris, profile, *segments, *color, offset);
-            wrap_triangles_into(out, &tris)
-        }
+        } => mesh_lathe(out, profile, *segments, *color, offset),
         Node::Torus {
             major_radius,
             minor_radius,
             major_segments,
             minor_segments,
             color,
-        } => {
-            let mut tris = Vec::new();
-            mesh_torus(
-                &mut tris,
-                *major_radius,
-                *minor_radius,
-                *major_segments,
-                *minor_segments,
-                *color,
-                offset,
-            );
-            wrap_triangles_into(out, &tris)
-        }
+        } => mesh_torus(
+            out,
+            *major_radius,
+            *minor_radius,
+            *major_segments,
+            *minor_segments,
+            *color,
+            offset,
+        ),
         Node::Sweep {
             profile,
             path,
             scales,
             color,
-        } => {
-            let mut tris = Vec::new();
-            mesh_sweep(&mut tris, profile, path, scales.as_deref(), *color, offset);
-            wrap_triangles_into(out, &tris)
-        }
+        } => mesh_sweep(out, profile, path, scales.as_deref(), *color, offset),
         Node::Cylinder {
             radius,
             height,
             segments,
             color,
-        } => {
-            let mut tris = Vec::new();
-            mesh_cylinder(&mut tris, *radius, *height, *segments, *color, offset);
-            wrap_triangles_into(out, &tris)
-        }
+        } => mesh_cylinder(out, *radius, *height, *segments, *color, offset),
         Node::Cone {
             radius,
             height,
             segments,
             color,
-        } => {
-            let mut tris = Vec::new();
-            mesh_cone(&mut tris, *radius, *height, *segments, *color, offset);
-            wrap_triangles_into(out, &tris)
-        }
-        Node::Wedge { x, y, z, color } => {
-            let mut tris = Vec::new();
-            mesh_wedge(&mut tris, *x, *y, *z, *color, offset);
-            wrap_triangles_into(out, &tris)
-        }
+        } => mesh_cone(out, *radius, *height, *segments, *color, offset),
+        Node::Wedge { x, y, z, color } => mesh_wedge(out, *x, *y, *z, *color, offset),
         Node::Sphere {
             radius,
             subdivisions,
             color,
-        } => {
-            let mut tris = Vec::new();
-            mesh_sphere(&mut tris, *radius, *subdivisions, *color, offset);
-            wrap_triangles_into(out, &tris)
-        }
+        } => mesh_sphere(out, *radius, *subdivisions, *color, offset),
         Node::Extrude {
             profile,
             depth,
             color,
-        } => {
-            let mut tris = Vec::new();
-            mesh_extrude(&mut tris, profile, *depth, *color, offset);
-            wrap_triangles_into(out, &tris)
-        }
+        } => mesh_extrude(out, profile, *depth, *color, offset),
         Node::Composition(children) => {
             for child in children {
                 mesh_into_polygons(out, child, offset)?;
@@ -325,24 +289,48 @@ fn is_csg_leaf(node: &Node) -> bool {
     }
 }
 
-/// Wrap each triangle in `tris` as a single-triangle [`CsgPolygon`] and
-/// append to `out`. Out-of-range vertices surface as
-/// [`MeshError::Csg`] rather than silent drops, matching the historic
-/// behavior at the CSG-input boundary (ADR-0054 ±256 unit cap).
-fn wrap_triangles_into(out: &mut Vec<CsgPolygon>, tris: &[Triangle]) -> Result<(), MeshError> {
-    for t in tris {
-        let v0 = Point3::from_f32(t.vertices[0]).map_err(csg::CsgError::from)?;
-        let v1 = Point3::from_f32(t.vertices[1]).map_err(csg::CsgError::from)?;
-        let v2 = Point3::from_f32(t.vertices[2]).map_err(csg::CsgError::from)?;
-        if let Some(p) = CsgPolygon::from_triangle(v0, v1, v2, t.color) {
-            out.push(p);
-        }
-    }
-    Ok(())
-}
-
 fn point_from_f32(v: [f32; 3]) -> Result<Point3, MeshError> {
     Point3::from_f32(v).map_err(|e| csg::CsgError::from(e).into())
+}
+
+/// Build a [`CsgPolygon`] from an n-gon vertex list (n ≥ 3) and push it
+/// to `out`. Consecutive duplicate vertices are deduped (axis-collapse
+/// from primitives like lathe / sphere-pole rings collapses naturally
+/// — a quad band with one ring at the axis becomes a triangle, a
+/// fully-collapsed band drops out). Plane is re-derived via the robust
+/// non-collinear-triple search; degenerate polygons are silently
+/// skipped. Out-of-range vertices surface as [`MeshError::Csg`] —
+/// loud failure at the ±256 unit boundary (ADR-0054).
+fn push_polygon_from_f32(
+    out: &mut Vec<CsgPolygon>,
+    verts: &[[f32; 3]],
+    color: u32,
+) -> Result<(), MeshError> {
+    if verts.len() < 3 {
+        return Ok(());
+    }
+    let mut points: Vec<Point3> = Vec::with_capacity(verts.len());
+    for v in verts {
+        let p = point_from_f32(*v)?;
+        if points.last() != Some(&p) {
+            points.push(p);
+        }
+    }
+    if points.len() >= 2 && points.first() == points.last() {
+        points.pop();
+    }
+    if points.len() < 3 {
+        return Ok(());
+    }
+    let Some(plane) = derive_plane_robust(&points) else {
+        return Ok(());
+    };
+    out.push(CsgPolygon {
+        vertices: points,
+        plane,
+        color,
+    });
+    Ok(())
 }
 
 /// Apply `xform` to every vertex of `poly`, re-derive the plane from
@@ -431,11 +419,18 @@ fn mirror_polygon(
     }))
 }
 
-/// Emit 12 triangles (6 quad faces) for an axis-aligned box of size
-/// `(x, y, z)` centered at `(0, 0, 0)` then translated by `offset`.
+/// Emit 6 quad faces for an axis-aligned box of size `(x, y, z)`
+/// centered at `(0, 0, 0)` then translated by `offset`.
 ///
 /// Faces wound CCW from outside, so `(b - a) × (c - a)` points outward.
-fn mesh_box(out: &mut Vec<Triangle>, x: f32, y: f32, z: f32, color: u32, offset: [f32; 3]) {
+fn mesh_box(
+    out: &mut Vec<CsgPolygon>,
+    x: f32,
+    y: f32,
+    z: f32,
+    color: u32,
+    offset: [f32; 3],
+) -> Result<(), MeshError> {
     let hx = x * 0.5;
     let hy = y * 0.5;
     let hz = z * 0.5;
@@ -451,31 +446,13 @@ fn mesh_box(out: &mut Vec<Triangle>, x: f32, y: f32, z: f32, color: u32, offset:
     let npp = [ox - hx, oy + hy, oz + hz];
     let ppp = [ox + hx, oy + hy, oz + hz];
 
-    let push = |out: &mut Vec<Triangle>, a, b, c| {
-        out.push(Triangle {
-            vertices: [a, b, c],
-            color,
-        });
-    };
-
-    // -Z face (looking toward +z): nnn, npn, ppn, pnn — CCW from outside (-z side)
-    push(out, nnn, npn, ppn);
-    push(out, nnn, ppn, pnn);
-    // +Z face: nnp, pnp, ppp, npp — CCW from +z side
-    push(out, nnp, pnp, ppp);
-    push(out, nnp, ppp, npp);
-    // -X face: nnn, nnp, npp, npn
-    push(out, nnn, nnp, npp);
-    push(out, nnn, npp, npn);
-    // +X face: pnn, ppn, ppp, pnp
-    push(out, pnn, ppn, ppp);
-    push(out, pnn, ppp, pnp);
-    // -Y face: nnn, pnn, pnp, nnp
-    push(out, nnn, pnn, pnp);
-    push(out, nnn, pnp, nnp);
-    // +Y face: npn, npp, ppp, ppn
-    push(out, npn, npp, ppp);
-    push(out, npn, ppp, ppn);
+    push_polygon_from_f32(out, &[nnn, npn, ppn, pnn], color)?; // -Z face
+    push_polygon_from_f32(out, &[nnp, pnp, ppp, npp], color)?; // +Z face
+    push_polygon_from_f32(out, &[nnn, nnp, npp, npn], color)?; // -X face
+    push_polygon_from_f32(out, &[pnn, ppn, ppp, pnp], color)?; // +X face
+    push_polygon_from_f32(out, &[nnn, pnn, pnp, nnp], color)?; // -Y face
+    push_polygon_from_f32(out, &[npn, npp, ppp, ppn], color)?; // +Y face
+    Ok(())
 }
 
 /// Revolve `profile` (list of `(x, y)` points, x = radius, y = height)
@@ -488,14 +465,14 @@ fn mesh_box(out: &mut Vec<Triangle>, x: f32, y: f32, z: f32, color: u32, offset:
 /// away from the Y axis), matching the box mesher's convention so the
 /// substrate's render pipeline shows them right-side-out.
 fn mesh_lathe(
-    out: &mut Vec<Triangle>,
+    out: &mut Vec<CsgPolygon>,
     profile: &[[f32; 2]],
     segments: u32,
     color: u32,
     offset: [f32; 3],
-) {
+) -> Result<(), MeshError> {
     if profile.len() < 2 || segments < 3 {
-        return;
+        return Ok(());
     }
     let segments = segments as usize;
     let two_pi = std::f32::consts::TAU;
@@ -506,11 +483,17 @@ fn mesh_lathe(
         })
         .collect();
 
-    // For each profile-edge band (k → k+1) and each angular slice (i → i+1):
+    // For each profile-edge band (k → k+1) and each angular slice
+    // (i → i+1) we emit one quad with corners CCW from outside:
     //   a = P[k]_i, b = P[k+1]_i, c = P[k]_(i+1), d = P[k+1]_(i+1)
-    // Triangulate as (a, b, c) + (c, b, d). Verified outward-facing by
-    // expanding (b - a) × (c - a); for a cylinder the normal collapses
-    // to the radial direction at θ_i.
+    //   quad order = (a, b, d, c) — radial-outward normal verified by
+    //   the existing lathe_face_normals_point_outward test.
+    //
+    // Profile vertices with `x == 0` collapse the corresponding ring
+    // to a single axis point; the quad degenerates to a triangle (or
+    // drops out entirely if both endpoints are axial).
+    // `push_polygon_from_f32` dedupes consecutive coincident vertices,
+    // so the cap fans collapse cleanly without a separate pass.
     let revolve = |radius: f32, height: f32, i: usize| -> [f32; 3] {
         let (cos, sin) = cos_sin[i % segments];
         [
@@ -531,34 +514,10 @@ fn mesh_lathe(
             let b = revolve(r1, y1, i);
             let c = revolve(r0, y0, j);
             let d = revolve(r1, y1, j);
-            push_unless_degenerate(out, a, b, c, color);
-            push_unless_degenerate(out, c, b, d, color);
+            push_polygon_from_f32(out, &[a, b, d, c], color)?;
         }
     }
-}
-
-fn push_unless_degenerate(
-    out: &mut Vec<Triangle>,
-    a: [f32; 3],
-    b: [f32; 3],
-    c: [f32; 3],
-    color: u32,
-) {
-    // Skip triangles with two coincident vertices — happens when a
-    // profile point sits on the rotation axis (x=0) and adjacent
-    // angular samples collapse to the same point.
-    if approx_eq(a, b) || approx_eq(b, c) || approx_eq(a, c) {
-        return;
-    }
-    out.push(Triangle {
-        vertices: [a, b, c],
-        color,
-    });
-}
-
-fn approx_eq(a: [f32; 3], b: [f32; 3]) -> bool {
-    const EPS: f32 = 1e-6;
-    (a[0] - b[0]).abs() < EPS && (a[1] - b[1]).abs() < EPS && (a[2] - b[2]).abs() < EPS
+    Ok(())
 }
 
 /// Donut around the Y axis. Generates `major_segments × minor_segments`
@@ -567,16 +526,16 @@ fn approx_eq(a: [f32; 3], b: [f32; 3]) -> bool {
 /// cross-section. Triangles wound CCW from outside (radial-outward
 /// normal verified by the standard cross-product test).
 fn mesh_torus(
-    out: &mut Vec<Triangle>,
+    out: &mut Vec<CsgPolygon>,
     major_radius: f32,
     minor_radius: f32,
     major_segments: u32,
     minor_segments: u32,
     color: u32,
     offset: [f32; 3],
-) {
+) -> Result<(), MeshError> {
     if major_segments < 3 || minor_segments < 3 {
-        return;
+        return Ok(());
     }
     let m = major_segments as usize;
     let n = minor_segments as usize;
@@ -601,24 +560,17 @@ fn mesh_torus(
         for j in 0..n {
             let j_next = (j + 1) % n;
             // a = P(i, j), b = P(i+1, j), c = P(i, j+1), d = P(i+1, j+1).
-            // Both i and j are angular here (unlike lathe where k was a
-            // profile-height index), so the natural (a, b, c) winding
-            // gives an inward normal. Flip to (a, c, b) + (c, d, b) for
-            // outward-facing.
+            // Both i and j are angular; outward-facing quad order is
+            // (a, c, d, b) — same diagonal split as the previous
+            // (a, c, b) + (c, d, b) triangulation.
             let a = position(i, j);
             let b = position(i_next, j);
             let c = position(i, j_next);
             let d = position(i_next, j_next);
-            out.push(Triangle {
-                vertices: [a, c, b],
-                color,
-            });
-            out.push(Triangle {
-                vertices: [c, d, b],
-                color,
-            });
+            push_polygon_from_f32(out, &[a, c, d, b], color)?;
         }
     }
+    Ok(())
 }
 
 /// Sweep a 2D `profile` polygon along a 3D `path`. At each path
@@ -643,15 +595,15 @@ fn mesh_torus(
 /// For closed tubes, end the path on a small profile (or composition
 /// with a separate cap primitive).
 fn mesh_sweep(
-    out: &mut Vec<Triangle>,
+    out: &mut Vec<CsgPolygon>,
     profile: &[[f32; 2]],
     path: &[[f32; 3]],
     scales: Option<&[f32]>,
     color: u32,
     offset: [f32; 3],
-) {
+) -> Result<(), MeshError> {
     if profile.len() < 3 || path.len() < 2 {
-        return;
+        return Ok(());
     }
     // ADR-0051 requires `:scales` length to equal `path` length; the
     // parser enforces it (`SweepScalesLengthMismatch`). The defensive
@@ -726,7 +678,9 @@ fn mesh_sweep(
         rings.push(ring);
     }
 
-    // Stitch adjacent rings.
+    // Stitch adjacent rings as quads — same diagonal split as the
+    // previous (a, b, c) + (c, b, d) triangulation, ordered (a, b, d, c)
+    // for CCW-from-outside winding.
     for k in 0..rings.len() - 1 {
         let r0 = &rings[k];
         let r1 = &rings[k + 1];
@@ -736,10 +690,10 @@ fn mesh_sweep(
             let b = r1[i];
             let c = r0[j];
             let d = r1[j];
-            push_unless_degenerate(out, a, b, c, color);
-            push_unless_degenerate(out, c, b, d, color);
+            push_polygon_from_f32(out, &[a, b, d, c], color)?;
         }
     }
+    Ok(())
 }
 
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -777,31 +731,31 @@ fn rotate_axis_angle(v: [f32; 3], n: [f32; 3], angle: f32) -> [f32; 3] {
 /// `offset`. Implemented as a lathe of a 4-point profile so the side
 /// + cap winding matches the rest of the lathed primitives.
 fn mesh_cylinder(
-    out: &mut Vec<Triangle>,
+    out: &mut Vec<CsgPolygon>,
     radius: f32,
     height: f32,
     segments: u32,
     color: u32,
     offset: [f32; 3],
-) {
+) -> Result<(), MeshError> {
     let h = height * 0.5;
     let profile = [[0.0, -h], [radius, -h], [radius, h], [0.0, h]];
-    mesh_lathe(out, &profile, segments, color, offset);
+    mesh_lathe(out, &profile, segments, color, offset)
 }
 
 /// Cone of `radius` and total `height`, base on the -Y side and apex
 /// on the +Y side, centered at `offset`. Implemented as a lathe.
 fn mesh_cone(
-    out: &mut Vec<Triangle>,
+    out: &mut Vec<CsgPolygon>,
     radius: f32,
     height: f32,
     segments: u32,
     color: u32,
     offset: [f32; 3],
-) {
+) -> Result<(), MeshError> {
     let h = height * 0.5;
     let profile = [[0.0, -h], [radius, -h], [0.0, h]];
-    mesh_lathe(out, &profile, segments, color, offset);
+    mesh_lathe(out, &profile, segments, color, offset)
 }
 
 /// UV sphere of `radius`, centered at `offset`. `subdivisions` controls
@@ -809,14 +763,14 @@ fn mesh_cone(
 /// number of longitude segments. Implemented as a lathe of a half-circle
 /// profile from south pole to north pole; pole quads degenerate naturally.
 fn mesh_sphere(
-    out: &mut Vec<Triangle>,
+    out: &mut Vec<CsgPolygon>,
     radius: f32,
     subdivisions: u32,
     color: u32,
     offset: [f32; 3],
-) {
+) -> Result<(), MeshError> {
     if subdivisions < 3 {
-        return;
+        return Ok(());
     }
     let n = subdivisions as usize;
     let mut profile: Vec<[f32; 2]> = Vec::with_capacity(n + 1);
@@ -824,7 +778,7 @@ fn mesh_sphere(
         let theta = -std::f32::consts::FRAC_PI_2 + (i as f32) * std::f32::consts::PI / (n as f32);
         profile.push([radius * theta.cos(), radius * theta.sin()]);
     }
-    mesh_lathe(out, &profile, subdivisions, color, offset);
+    mesh_lathe(out, &profile, subdivisions, color, offset)
 }
 
 /// Right-triangular prism (ramp) with extents `(x, y, z)` centered at
@@ -832,7 +786,14 @@ fn mesh_sphere(
 /// (`+z/2, -y/2`) up to the back-top edge (`-z/2, +y/2`). Six vertices,
 /// five faces (bottom quad, back quad, hypotenuse quad, two triangular
 /// sides). Faces wound CCW from outside.
-fn mesh_wedge(out: &mut Vec<Triangle>, x: f32, y: f32, z: f32, color: u32, offset: [f32; 3]) {
+fn mesh_wedge(
+    out: &mut Vec<CsgPolygon>,
+    x: f32,
+    y: f32,
+    z: f32,
+    color: u32,
+    offset: [f32; 3],
+) -> Result<(), MeshError> {
     let hx = x * 0.5;
     let hy = y * 0.5;
     let hz = z * 0.5;
@@ -844,26 +805,12 @@ fn mesh_wedge(out: &mut Vec<Triangle>, x: f32, y: f32, z: f32, color: u32, offse
     let e = [ox - hx, oy + hy, oz - hz]; // back-top-left
     let f = [ox + hx, oy + hy, oz - hz]; // back-top-right
 
-    let push = |out: &mut Vec<Triangle>, p, q, r| {
-        out.push(Triangle {
-            vertices: [p, q, r],
-            color,
-        });
-    };
-
-    // Bottom (-Y): a, b, d, c going CCW viewed from -Y
-    push(out, a, b, d);
-    push(out, a, d, c);
-    // Back (-Z): a, e, f, b going CCW viewed from -Z
-    push(out, a, e, f);
-    push(out, a, f, b);
-    // Left side (-X): a, c, e
-    push(out, a, c, e);
-    // Right side (+X): b, f, d
-    push(out, b, f, d);
-    // Hypotenuse (+Y/+Z): c, d, f, e
-    push(out, c, d, f);
-    push(out, c, f, e);
+    push_polygon_from_f32(out, &[a, b, d, c], color)?; // Bottom (-Y) quad
+    push_polygon_from_f32(out, &[a, e, f, b], color)?; // Back (-Z) quad
+    push_polygon_from_f32(out, &[a, c, e], color)?; // Left side (-X) tri
+    push_polygon_from_f32(out, &[b, f, d], color)?; // Right side (+X) tri
+    push_polygon_from_f32(out, &[c, d, f, e], color)?; // Hypotenuse (+Y/+Z) quad
+    Ok(())
 }
 
 /// Extrude a 2D `profile` polygon along Z by `depth`. Generates side-wall
@@ -880,14 +827,14 @@ fn mesh_wedge(out: &mut Vec<Triangle>, x: f32, y: f32, z: f32, color: u32, offse
 /// would lift this restriction. The v1 vocabulary is convex-only by
 /// convention (per ADR-0026's primitive set).
 fn mesh_extrude(
-    out: &mut Vec<Triangle>,
+    out: &mut Vec<CsgPolygon>,
     profile: &[[f32; 2]],
     depth: f32,
     color: u32,
     offset: [f32; 3],
-) {
+) -> Result<(), MeshError> {
     if profile.len() < 3 || depth <= 0.0 {
-        return;
+        return Ok(());
     }
     let n = profile.len();
     let [ox, oy, oz] = offset;
@@ -895,27 +842,20 @@ fn mesh_extrude(
     let top = |i: usize| -> [f32; 3] { [ox + profile[i][0], oy + profile[i][1], oz + depth] };
 
     // Side walls. For edge p_i → p_{i+1}, the quad corners CCW from
-    // outside are (base i, base i+1, top i+1, top i). Triangulate as
-    // (a, b, c) + (a, c, d) — outward normal verified for CCW profiles.
+    // outside are (base i, base i+1, top i+1, top i).
     for i in 0..n {
         let j = (i + 1) % n;
-        let a = base(i);
-        let b = base(j);
-        let c = top(j);
-        let d = top(i);
-        push_unless_degenerate(out, a, b, c, color);
-        push_unless_degenerate(out, a, c, d, color);
+        push_polygon_from_f32(out, &[base(i), base(j), top(j), top(i)], color)?;
     }
 
-    // Back cap (z = depth, normal +Z): fan from vertex 0 in original
-    // winding.
-    for i in 1..n - 1 {
-        push_unless_degenerate(out, top(0), top(i), top(i + 1), color);
-    }
-    // Front cap (z = 0, normal -Z): reverse winding.
-    for i in 1..n - 1 {
-        push_unless_degenerate(out, base(0), base(i + 1), base(i), color);
-    }
+    // Back cap (z = depth, normal +Z): the profile in original CCW
+    // winding becomes one n-gon. Front cap (z = 0, normal -Z) is the
+    // same loop reversed.
+    let back_cap: Vec<[f32; 3]> = (0..n).map(top).collect();
+    push_polygon_from_f32(out, &back_cap, color)?;
+    let front_cap: Vec<[f32; 3]> = (0..n).rev().map(base).collect();
+    push_polygon_from_f32(out, &front_cap, color)?;
+    Ok(())
 }
 
 #[cfg(test)]
