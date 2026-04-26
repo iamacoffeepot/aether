@@ -159,6 +159,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-static-mesh-component"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-component",
+ "aether-kinds",
+]
+
+[[package]]
 name = "aether-substrate-core"
 version = "0.2.0-alpha"
 dependencies = [

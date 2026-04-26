@@ -12,6 +12,7 @@ members = [
     "crates/aether-hello-component",
     "crates/aether-mesh-editor-component",
     "crates/aether-player-component",
+    "crates/aether-static-mesh-component",
     "crates/aether-hub-protocol",
     "crates/aether-mail",
     "crates/aether-mail-derive",
