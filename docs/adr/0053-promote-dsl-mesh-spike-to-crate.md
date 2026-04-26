@@ -1,6 +1,6 @@
 # ADR-0053: Promote `dsl-mesh-spike` to `aether-dsl-mesh` library crate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-26
 - **Implements:** ADR-0026, ADR-0051, ADR-0052
 

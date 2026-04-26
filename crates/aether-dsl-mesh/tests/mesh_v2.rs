@@ -1,6 +1,6 @@
 //! Tests for the v2 vocabulary additions: torus + sweep-along-path.
 
-use aether_dsl_mesh::{mesh, parse};
+use aether_dsl_mesh::{ParseError, mesh, parse};
 
 #[test]
 fn torus_triangle_count_is_two_per_quad() {
@@ -130,6 +130,26 @@ fn sweep_with_short_path_emits_nothing() {
 fn sweep_with_under_three_profile_points_emits_nothing() {
     let ast = parse("(sweep ((-0.1 0) (0.1 0)) ((0 0 0) (1 0 0)) :color 0)").unwrap();
     assert_eq!(mesh(&ast).unwrap().len(), 0);
+}
+
+#[test]
+fn sweep_scales_length_must_equal_path_length() {
+    // ADR-0051 normative: scales-length-mismatched sweeps are a parse-time error.
+    let text = "(sweep ((-0.1 -0.1) (0.1 -0.1) (0.1 0.1) (-0.1 0.1))
+                       ((0 0 0) (1 0 0) (2 0 0))
+                       :scales (1.0 0.5)
+                       :color 0)";
+    let err = parse(text).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParseError::SweepScalesLengthMismatch {
+                scales_len: 2,
+                path_len: 3
+            }
+        ),
+        "expected SweepScalesLengthMismatch, got {err:?}"
+    );
 }
 
 #[test]

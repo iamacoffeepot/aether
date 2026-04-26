@@ -433,9 +433,10 @@ fn mesh_sweep(
     if profile.len() < 3 || path.len() < 2 {
         return;
     }
-    // If `scales` was supplied with the wrong length, treat as
-    // unspecified rather than panic — the spike's job is to be lenient
-    // while the syntax matures. Real ADR enforcement comes at promotion.
+    // ADR-0051 requires `:scales` length to equal `path` length; the
+    // parser enforces it (`SweepScalesLengthMismatch`). The defensive
+    // length check here is a backstop in case a caller constructs the
+    // `Node::Sweep` AST directly.
     let scales = match scales {
         Some(s) if s.len() == path.len() => Some(s),
         _ => None,

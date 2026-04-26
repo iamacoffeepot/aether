@@ -1,6 +1,6 @@
 # ADR-0026: Primitive-composition DSL as native mesh representation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-19
 
 ## Context

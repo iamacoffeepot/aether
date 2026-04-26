@@ -50,6 +50,8 @@ pub enum ParseError {
     InvalidAxis(String),
     #[error("profile point must be (x y), got list of length {0}")]
     InvalidProfilePoint(usize),
+    #[error("sweep: :scales length ({scales_len}) must equal path length ({path_len})")]
+    SweepScalesLengthMismatch { scales_len: usize, path_len: usize },
 }
 
 pub fn parse(text: &str) -> Result<Node, ParseError> {
@@ -314,9 +316,18 @@ fn parse_sweep(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
         .find(|(k, _)| k == "scales")
         .map(|(_, v)| as_scalar_list(v))
         .transpose()?;
+    let path = as_path(positional[1])?;
+    if let Some(s) = scales.as_ref()
+        && s.len() != path.len()
+    {
+        return Err(ParseError::SweepScalesLengthMismatch {
+            scales_len: s.len(),
+            path_len: path.len(),
+        });
+    }
     Ok(Node::Sweep {
         profile: as_profile(positional[0])?,
-        path: as_path(positional[1])?,
+        path,
         scales,
         color: require_color("sweep", keywords)?,
     })
