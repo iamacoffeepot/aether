@@ -30,10 +30,19 @@ pub(super) struct IndexedPolygon {
     pub(super) color: u32,
 }
 
-type PlaneKey = (i64, i64, i64, i128);
+/// Plane + color — `cdt_triangulate` groups by this so the CDT
+/// produces one color-consistent batch of triangles per group. Two
+/// disjoint same-plane polygons with different colors (e.g. a plain
+/// `(composition (box) (translate (3 0 0) (box)))` where both boxes'
+/// `+Z` faces share the `z = 0.5` plane signature) must triangulate
+/// independently or the second box's color gets steamrolled by the
+/// first. Within a single CSG result the same-plane polygons all share
+/// a color (annular faces inherit the carving cube's color from
+/// `merge_coplanar`), so this stays correct for the CSG case too.
+type PlaneColorKey = (i64, i64, i64, i128, u32);
 
-fn plane_key(p: &Plane3) -> PlaneKey {
-    (p.n_x, p.n_y, p.n_z, p.d)
+fn plane_color_key(p: &Plane3, color: u32) -> PlaneColorKey {
+    (p.n_x, p.n_y, p.n_z, p.d, color)
 }
 
 impl IndexedMesh {
@@ -63,16 +72,19 @@ impl IndexedMesh {
     /// marking selecting the correct triangles.
     ///
     /// Output is one `Polygon` per triangle (3 vertices each), color
-    /// inherited from the first polygon in each plane group.
+    /// inherited from the first polygon in each (plane, color) group.
     pub(super) fn cdt_triangulate(self) -> Vec<Polygon> {
         let IndexedMesh { vertices, polygons } = self;
 
-        // Group polygon indices by their plane signature.
-        let mut groups: HashMap<PlaneKey, Vec<usize>> = HashMap::new();
+        // Group polygon indices by (plane, color). See `PlaneColorKey`.
+        let mut groups: HashMap<PlaneColorKey, Vec<usize>> = HashMap::new();
         for (i, poly) in polygons.iter().enumerate() {
-            groups.entry(plane_key(&poly.plane)).or_default().push(i);
+            groups
+                .entry(plane_color_key(&poly.plane, poly.color))
+                .or_default()
+                .push(i);
         }
-        let mut sorted_keys: Vec<&PlaneKey> = groups.keys().collect();
+        let mut sorted_keys: Vec<&PlaneColorKey> = groups.keys().collect();
         sorted_keys.sort();
 
         let mut out: Vec<Polygon> = Vec::with_capacity(polygons.len());
