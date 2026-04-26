@@ -24,6 +24,7 @@
 //! boolean operation's result so callers see cleaned polygons
 //! unconditionally.
 
+mod cdt;
 mod merge;
 mod mesh;
 mod tjunctions;
