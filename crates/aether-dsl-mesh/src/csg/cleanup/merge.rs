@@ -3,27 +3,23 @@
 //! Groups polygons by exact `Plane3` signature, finds connected
 //! components within each group via shared edges, extracts each
 //! component's boundary loop(s), and re-triangulates merged regions
-//! via ear clipping in 2D.
+//! via constrained Delaunay triangulation (ADR-0056).
 //!
-//! Scope:
+//! Each component goes through:
 //!
-//! - Single-loop components are merged: their boundary is walked, the
-//!   loop is projected to 2D using the plane's dominant axis, and ear
-//!   clipping produces a triangulation. Output triangles inherit the
-//!   first input polygon's color (per ADR-0055 — color across merge
-//!   boundaries is the "first polygon wins" tradeoff).
-//! - Multi-loop components (faces with holes) are merged via hole
-//!   bridging: the outer loop (positive 2D signed area) is identified,
-//!   each hole (negative area) is bridged into the outer with a
-//!   shortest-segment edge, and the resulting slit polygon is
-//!   ear-clipped. Degenerate triangles emitted along the slit (two
-//!   `VertexId`s equal) are filtered before output. The bridge picks
-//!   the closest vertex pair by squared 2D distance — this can fail
-//!   for pathological hole arrangements where the bridge crosses
-//!   another edge; failure falls back to passing the original polygons
-//!   through unchanged.
-//! - Singletons (no shared edges with any group neighbor) pass through
-//!   as-is.
+//! 1. Boundary edge collection (directed edges with no reverse twin).
+//! 2. Loop extraction (walk directed boundary into closed loops).
+//! 3. CDT (`cdt::triangulate_loops`) — single algorithm path for both
+//!    single-loop and multi-loop (face-with-holes) cases. The CDT
+//!    enforces every loop edge as a constraint and discards triangles
+//!    outside the polygon, so there is no slit, no slivers, and no
+//!    bridge-endpoint duplication. Output triangles inherit the first
+//!    input polygon's color (per ADR-0055 — color across merge
+//!    boundaries is the "first polygon wins" tradeoff).
+//! 4. Singletons (no shared edges with any group neighbor) pass through
+//!    as fans, since CDT would just re-emit them after one vertex.
+//! 5. CDT failure (rare — pathological boundary topology) falls back
+//!    to passing the original polygons through as fans.
 //!
 //! Plane-equality limitation: the grouping key is the exact `Plane3`
 //! tuple `(n_x, n_y, n_z, d)`. Polygons that are coplanar in the
@@ -36,9 +32,10 @@
 //!
 //! Determinism: HashMap iteration order doesn't leak — plane keys are
 //! sorted before grouping, components are sorted by their first input
-//! polygon id, and ear-clipping picks the first valid ear in vertex
-//! order.
+//! polygon id, and CDT inherits its determinism from sorted insertion
+//! and integer-exact predicates.
 
+use super::cdt;
 use super::mesh::{IndexedMesh, IndexedPolygon, VertexId};
 use crate::csg::plane::Plane3;
 use crate::csg::point::Point3;
@@ -176,19 +173,9 @@ fn process_component(
 
     let plane = polygons[component[0]].plane;
     let color = polygons[component[0]].color;
-    let triangulation = if loops.len() == 1 {
-        ear_clip_loop(vertices, &loops[0], &plane)
-    } else {
-        ear_clip_with_holes(vertices, &loops, &plane)
-    };
-    match triangulation {
+    match cdt::triangulate_loops(vertices, &loops, &plane) {
         Some(triangles) => {
             for tri in triangles {
-                // Skip degenerate triangles emitted along bridge slits
-                // (two vertex ids equal means zero-area triangle).
-                if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
-                    continue;
-                }
                 out.push(IndexedPolygon {
                     vertices: tri.to_vec(),
                     plane,
@@ -197,6 +184,9 @@ fn process_component(
             }
         }
         None => {
+            // CDT couldn't enforce a constraint or hit a degenerate
+            // configuration. Keep the geometry by emitting the original
+            // polygons as fans rather than producing nothing.
             for &pid in component {
                 emit_fan(&polygons[pid], out);
             }
@@ -269,258 +259,6 @@ fn extract_loops(boundary: &[(VertexId, VertexId)]) -> Option<Vec<Vec<VertexId>>
         loops.push(loop_verts);
     }
     Some(loops)
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Axis {
-    X,
-    Y,
-    Z,
-}
-
-/// Pick the 2D projection axes for a plane such that a 3D loop walked CCW
-/// around the plane normal projects to a CCW loop in 2D.
-///
-/// Drop the axis with the largest `|n_i|`; the remaining two axes go in
-/// cyclic order for positive `n_i`, reversed for negative.
-fn projection_axes(plane: &Plane3) -> (Axis, Axis) {
-    let ax = plane.n_x.unsigned_abs();
-    let ay = plane.n_y.unsigned_abs();
-    let az = plane.n_z.unsigned_abs();
-    if ax >= ay && ax >= az {
-        if plane.n_x >= 0 {
-            (Axis::Y, Axis::Z)
-        } else {
-            (Axis::Z, Axis::Y)
-        }
-    } else if ay >= az {
-        if plane.n_y >= 0 {
-            (Axis::Z, Axis::X)
-        } else {
-            (Axis::X, Axis::Z)
-        }
-    } else if plane.n_z >= 0 {
-        (Axis::X, Axis::Y)
-    } else {
-        (Axis::Y, Axis::X)
-    }
-}
-
-fn project(p: Point3, axis_a: Axis, axis_b: Axis) -> (i64, i64) {
-    let pick = |a: Axis| -> i64 {
-        match a {
-            Axis::X => p.x as i64,
-            Axis::Y => p.y as i64,
-            Axis::Z => p.z as i64,
-        }
-    };
-    (pick(axis_a), pick(axis_b))
-}
-
-/// Signed 2D area times 2 (shoelace). Positive for CCW, negative for CW.
-fn signed_area2_2d(loop2d: &[(VertexId, i64, i64)]) -> i128 {
-    let mut sum: i128 = 0;
-    let n = loop2d.len();
-    for i in 0..n {
-        let j = (i + 1) % n;
-        sum += (loop2d[i].1 as i128) * (loop2d[j].2 as i128)
-            - (loop2d[j].1 as i128) * (loop2d[i].2 as i128);
-    }
-    sum
-}
-
-/// 2D cross product `(b - a) × (c - a)` as i128.
-fn cross2d(a: (i64, i64), b: (i64, i64), c: (i64, i64)) -> i128 {
-    let abx = (b.0 - a.0) as i128;
-    let aby = (b.1 - a.1) as i128;
-    let acx = (c.0 - a.0) as i128;
-    let acy = (c.1 - a.1) as i128;
-    abx * acy - aby * acx
-}
-
-fn point_in_triangle(p: (i64, i64), a: (i64, i64), b: (i64, i64), c: (i64, i64)) -> bool {
-    // Strict interior test: point inside iff all three sub-cross-products
-    // share the strict sign of the triangle's area. Vertices on the
-    // triangle's edges are NOT considered "inside" — they are the
-    // shared corners of adjacent ears and would otherwise block valid
-    // ear extraction.
-    let abc = cross2d(a, b, c);
-    if abc == 0 {
-        return false;
-    }
-    let pab = cross2d(a, b, p);
-    let pbc = cross2d(b, c, p);
-    let pca = cross2d(c, a, p);
-    if abc > 0 {
-        pab > 0 && pbc > 0 && pca > 0
-    } else {
-        pab < 0 && pbc < 0 && pca < 0
-    }
-}
-
-fn project_loop(
-    vertices: &[Point3],
-    loop_verts: &[VertexId],
-    plane: &Plane3,
-) -> Vec<(VertexId, i64, i64)> {
-    let (axis_a, axis_b) = projection_axes(plane);
-    loop_verts
-        .iter()
-        .map(|&id| {
-            let (a, b) = project(vertices[id], axis_a, axis_b);
-            (id, a, b)
-        })
-        .collect()
-}
-
-/// Ear-clip a 3D loop projected to 2D. Returns `None` if the loop is not
-/// simple (no progress can be made on a malformed input).
-fn ear_clip_loop(
-    vertices: &[Point3],
-    loop_verts: &[VertexId],
-    plane: &Plane3,
-) -> Option<Vec<[VertexId; 3]>> {
-    if loop_verts.len() < 3 {
-        return None;
-    }
-    let mut loop2d = project_loop(vertices, loop_verts, plane);
-    // Boundary walking inherits the polygons' CCW-around-normal
-    // orientation, and `projection_axes` is set up so CCW-around-normal
-    // maps to CCW in 2D — but defensively flip if signed area is
-    // negative.
-    if signed_area2_2d(&loop2d) < 0 {
-        loop2d.reverse();
-    }
-    ear_clip_2d(loop2d)
-}
-
-/// Ear-clip a face-with-holes by bridging each hole into the outer loop
-/// with a shortest-segment edge, then ear-clipping the resulting non-simple
-/// (slit) polygon. Returns `None` if no clean outer loop can be found.
-fn ear_clip_with_holes(
-    vertices: &[Point3],
-    loops: &[Vec<VertexId>],
-    plane: &Plane3,
-) -> Option<Vec<[VertexId; 3]>> {
-    let mut projected: Vec<Vec<(VertexId, i64, i64)>> = loops
-        .iter()
-        .map(|l| project_loop(vertices, l, plane))
-        .collect();
-
-    // Outer loop = the one with the largest positive signed area. The rest
-    // must have negative area (CW around the hole, which is the direction
-    // boundary edges from CCW-around-normal polygons walk a hole).
-    let mut outer_idx = None;
-    let mut max_area: i128 = 0;
-    for (i, l) in projected.iter().enumerate() {
-        let a = signed_area2_2d(l);
-        if a > max_area {
-            max_area = a;
-            outer_idx = Some(i);
-        }
-    }
-    let outer_idx = outer_idx?;
-    let outer = projected.remove(outer_idx);
-    let mut holes = projected;
-    for h in &holes {
-        if signed_area2_2d(h) >= 0 {
-            return None;
-        }
-    }
-    // Sort holes by their first VertexId for determinism (ordering of
-    // bridges affects which outer-vertex each hole snaps to in degenerate
-    // ties, even though the geometry is the same).
-    holes.sort_by_key(|h| h[0].0);
-
-    let mut spliced = outer;
-    for hole in &holes {
-        spliced = splice_hole_into_outer(&spliced, hole);
-    }
-    ear_clip_2d(spliced)
-}
-
-/// Splice a hole loop into an outer loop by bridging the closest
-/// vertex pair. The hole is rotated to start at its bridge vertex and
-/// duplicated at its bridge endpoints, producing a slit that ear
-/// clipping treats as a degenerate edge.
-fn splice_hole_into_outer(
-    outer: &[(VertexId, i64, i64)],
-    hole: &[(VertexId, i64, i64)],
-) -> Vec<(VertexId, i64, i64)> {
-    let mut best: Option<(usize, usize, i128)> = None;
-    for (i, &(_, ox, oy)) in outer.iter().enumerate() {
-        for (j, &(_, hx, hy)) in hole.iter().enumerate() {
-            let dx = (ox - hx) as i128;
-            let dy = (oy - hy) as i128;
-            let d2 = dx * dx + dy * dy;
-            match best {
-                None => best = Some((i, j, d2)),
-                Some((_, _, bd2)) if d2 < bd2 => best = Some((i, j, d2)),
-                _ => {}
-            }
-        }
-    }
-    let (i_out, j_hole, _) = best.expect("splice_hole_into_outer called with empty loops");
-    let n_hole = hole.len();
-    let mut spliced = Vec::with_capacity(outer.len() + n_hole + 2);
-    spliced.extend_from_slice(&outer[..=i_out]);
-    for k in 0..n_hole {
-        spliced.push(hole[(j_hole + k) % n_hole]);
-    }
-    spliced.push(hole[j_hole]);
-    spliced.push(outer[i_out]);
-    spliced.extend_from_slice(&outer[i_out + 1..]);
-    spliced
-}
-
-fn ear_clip_2d(mut loop2d: Vec<(VertexId, i64, i64)>) -> Option<Vec<[VertexId; 3]>> {
-    if loop2d.len() < 3 {
-        return None;
-    }
-    let mut output = Vec::with_capacity(loop2d.len().saturating_sub(2));
-    let mut guard = loop2d.len() * loop2d.len();
-    while loop2d.len() > 3 {
-        if guard == 0 {
-            return None;
-        }
-        guard -= 1;
-        let n = loop2d.len();
-        let mut found_ear: Option<usize> = None;
-        for i in 0..n {
-            let prev = (i + n - 1) % n;
-            let next = (i + 1) % n;
-            let vp = (loop2d[prev].1, loop2d[prev].2);
-            let vc = (loop2d[i].1, loop2d[i].2);
-            let vn = (loop2d[next].1, loop2d[next].2);
-            // Convex turn: cross > 0 since the loop is CCW. (For the
-            // bridge slit, the duplicate-vertex "ear" has cross == 0
-            // and is naturally skipped here.)
-            if cross2d(vp, vc, vn) <= 0 {
-                continue;
-            }
-            let mut clear = true;
-            for (j, &(_, jx, jy)) in loop2d.iter().enumerate() {
-                if j == prev || j == i || j == next {
-                    continue;
-                }
-                if point_in_triangle((jx, jy), vp, vc, vn) {
-                    clear = false;
-                    break;
-                }
-            }
-            if clear {
-                found_ear = Some(i);
-                break;
-            }
-        }
-        let ear = found_ear?;
-        let prev = (ear + loop2d.len() - 1) % loop2d.len();
-        let next = (ear + 1) % loop2d.len();
-        output.push([loop2d[prev].0, loop2d[ear].0, loop2d[next].0]);
-        loop2d.remove(ear);
-    }
-    output.push([loop2d[0].0, loop2d[1].0, loop2d[2].0]);
-    Some(output)
 }
 
 #[cfg(test)]
@@ -681,117 +419,6 @@ mod tests {
         for (a, b) in r1.iter().zip(r2.iter()) {
             assert_eq!(a.vertices, b.vertices);
             assert_eq!(a.color, b.color);
-        }
-    }
-
-    #[test]
-    fn projection_axes_are_set_up_for_ccw_in_2d() {
-        // For each cardinal plane normal, walk a CCW-around-normal loop
-        // and verify the projected signed area is positive.
-        struct Case {
-            n_x: i64,
-            n_y: i64,
-            n_z: i64,
-            loop3d: Vec<Point3>,
-        }
-        let cases = vec![
-            // +z normal: CCW in xy.
-            Case {
-                n_x: 0,
-                n_y: 0,
-                n_z: 1,
-                loop3d: vec![
-                    pt(1.0, 0.0, 0.0),
-                    pt(0.0, 1.0, 0.0),
-                    pt(-1.0, 0.0, 0.0),
-                    pt(0.0, -1.0, 0.0),
-                ],
-            },
-            // -z normal: CCW around -z.
-            Case {
-                n_x: 0,
-                n_y: 0,
-                n_z: -1,
-                loop3d: vec![
-                    pt(1.0, 0.0, 0.0),
-                    pt(0.0, -1.0, 0.0),
-                    pt(-1.0, 0.0, 0.0),
-                    pt(0.0, 1.0, 0.0),
-                ],
-            },
-            // +y normal: CCW around +y. Tangent at (1,0,0) is (0,0,-1).
-            Case {
-                n_x: 0,
-                n_y: 1,
-                n_z: 0,
-                loop3d: vec![
-                    pt(1.0, 0.0, 0.0),
-                    pt(0.0, 0.0, -1.0),
-                    pt(-1.0, 0.0, 0.0),
-                    pt(0.0, 0.0, 1.0),
-                ],
-            },
-            // -y normal.
-            Case {
-                n_x: 0,
-                n_y: -1,
-                n_z: 0,
-                loop3d: vec![
-                    pt(1.0, 0.0, 0.0),
-                    pt(0.0, 0.0, 1.0),
-                    pt(-1.0, 0.0, 0.0),
-                    pt(0.0, 0.0, -1.0),
-                ],
-            },
-            // +x normal. Tangent at (0,1,0) is (0,0,1).
-            Case {
-                n_x: 1,
-                n_y: 0,
-                n_z: 0,
-                loop3d: vec![
-                    pt(0.0, 1.0, 0.0),
-                    pt(0.0, 0.0, 1.0),
-                    pt(0.0, -1.0, 0.0),
-                    pt(0.0, 0.0, -1.0),
-                ],
-            },
-            // -x normal.
-            Case {
-                n_x: -1,
-                n_y: 0,
-                n_z: 0,
-                loop3d: vec![
-                    pt(0.0, 1.0, 0.0),
-                    pt(0.0, 0.0, -1.0),
-                    pt(0.0, -1.0, 0.0),
-                    pt(0.0, 0.0, 1.0),
-                ],
-            },
-        ];
-        for case in cases {
-            let plane = Plane3 {
-                n_x: case.n_x,
-                n_y: case.n_y,
-                n_z: case.n_z,
-                d: 0,
-            };
-            let (axis_a, axis_b) = projection_axes(&plane);
-            let loop2d: Vec<(VertexId, i64, i64)> = case
-                .loop3d
-                .iter()
-                .enumerate()
-                .map(|(i, &p)| {
-                    let (a, b) = project(p, axis_a, axis_b);
-                    (i, a, b)
-                })
-                .collect();
-            assert!(
-                signed_area2_2d(&loop2d) > 0,
-                "expected CCW signed area > 0 for normal ({}, {}, {})",
-                case.n_x,
-                case.n_y,
-                case.n_z
-            );
         }
     }
 

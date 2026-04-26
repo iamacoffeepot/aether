@@ -15,8 +15,8 @@
 //!   the public entry point that `merge::process_component` will call
 //!   (PR 3, not yet shipped).
 
-pub(super) mod predicates;
-// Foundation pass: bowyer_watson is wired in by PR 3. Suppress dead-code
-// noise until then.
-#[allow(dead_code)]
 pub(super) mod bowyer_watson;
+pub(super) mod predicates;
+pub(super) mod triangulate;
+
+pub(super) use triangulate::triangulate as triangulate_loops;
