@@ -185,4 +185,129 @@ mod tests {
             assert_eq!(p.vertices, q.vertices);
         }
     }
+
+    /// **Welding invariant**: two polygons that share a vertex by
+    /// coordinate equality must reference it via the same `VertexId`
+    /// in the indexed output. This is what `merge_coplanar`,
+    /// `repair_tjunctions`, and the manifold validator all assume —
+    /// without it, downstream edge-walking would treat geometrically-
+    /// shared edges as distinct and report phantom boundary edges.
+    #[test]
+    fn shared_vertex_has_identical_id_across_polygons() {
+        let shared0 = pt(1.0, 0.0, 0.0);
+        let shared1 = pt(1.0, 1.0, 0.0);
+        let t1 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), shared0, shared1, 0).unwrap();
+        let t2 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), shared1, pt(0.0, 1.0, 0.0), 0).unwrap();
+        let mesh = IndexedMesh::weld(vec![t1, t2]);
+
+        // Find each shared coordinate's VertexId in each polygon and
+        // assert they match.
+        let id_for = |poly_idx: usize, coord: Point3| -> super::VertexId {
+            let poly = &mesh.polygons[poly_idx];
+            for &id in &poly.vertices {
+                if mesh.vertices[id] == coord {
+                    return id;
+                }
+            }
+            panic!("polygon {poly_idx} missing shared vertex {coord:?}");
+        };
+        assert_eq!(
+            id_for(0, shared1),
+            id_for(1, shared1),
+            "shared vertex must have the same VertexId in both polygons \
+             — manifold validator depends on this"
+        );
+        assert_eq!(id_for(0, pt(0.0, 0.0, 0.0)), id_for(1, pt(0.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn ngon_welding_preserves_vertex_count() {
+        // A quad has 4 distinct vertices and should weld to a 4-id
+        // indexed polygon. Catches a refactor that special-cases the
+        // 3-vertex (triangle) path.
+        let bogus_plane = Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 1,
+            d: 0,
+        };
+        let quad = Polygon {
+            vertices: vec![
+                pt(0.0, 0.0, 0.0),
+                pt(1.0, 0.0, 0.0),
+                pt(1.0, 1.0, 0.0),
+                pt(0.0, 1.0, 0.0),
+            ],
+            plane: bogus_plane,
+            color: 0,
+        };
+        let mesh = IndexedMesh::weld(vec![quad]);
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.polygons[0].vertices.len(), 4);
+    }
+
+    #[test]
+    fn mid_loop_adjacent_duplicate_is_collapsed() {
+        // [A, A, B, C] should weld to [A, B, C]. The existing closed-
+        // loop test only covers the wraparound case [A, B, C, A].
+        let bogus_plane = Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 1,
+            d: 0,
+        };
+        let with_mid_dup = Polygon {
+            vertices: vec![
+                pt(0.0, 0.0, 0.0),
+                pt(0.0, 0.0, 0.0), // mid-loop adjacent duplicate
+                pt(1.0, 0.0, 0.0),
+                pt(0.0, 1.0, 0.0),
+            ],
+            plane: bogus_plane,
+            color: 0,
+        };
+        let mesh = IndexedMesh::weld(vec![with_mid_dup]);
+        assert_eq!(mesh.polygons.len(), 1);
+        assert_eq!(mesh.polygons[0].vertices.len(), 3);
+    }
+
+    #[test]
+    fn all_same_vertex_polygon_is_dropped() {
+        // [A, A, A] collapses to [A] which has <3 distinct → dropped.
+        let bogus_plane = Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 1,
+            d: 0,
+        };
+        let collapsed = Polygon {
+            vertices: vec![pt(0.0, 0.0, 0.0), pt(0.0, 0.0, 0.0), pt(0.0, 0.0, 0.0)],
+            plane: bogus_plane,
+            color: 0,
+        };
+        let mesh = IndexedMesh::weld(vec![collapsed]);
+        assert!(mesh.polygons.is_empty());
+        // Note: the lone vertex still ends up in the pool — weld doesn't
+        // garbage-collect orphan pool entries. That's documented behavior;
+        // pin it here so a future "cleanup" doesn't silently change it.
+        assert_eq!(mesh.vertices.len(), 1);
+    }
+
+    #[test]
+    fn vertex_pool_order_matches_first_occurrence() {
+        // Module-level claim: the pool is built in input traversal order.
+        // Pin it so a future "sort the pool for cache locality" refactor
+        // doesn't silently break determinism with downstream consumers.
+        let t1 = Polygon::from_triangle(
+            pt(2.0, 0.0, 0.0), // first encounter
+            pt(0.0, 0.0, 0.0), // second
+            pt(0.0, 2.0, 0.0), // third
+            0,
+        )
+        .unwrap();
+        let mesh = IndexedMesh::weld(vec![t1]);
+        assert_eq!(mesh.vertices[0], pt(2.0, 0.0, 0.0));
+        assert_eq!(mesh.vertices[1], pt(0.0, 0.0, 0.0));
+        assert_eq!(mesh.vertices[2], pt(0.0, 2.0, 0.0));
+    }
 }
