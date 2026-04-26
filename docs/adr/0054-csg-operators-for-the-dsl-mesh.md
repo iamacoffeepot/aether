@@ -1,0 +1,98 @@
+# ADR-0054: CSG operators for the DSL mesh
+
+- **Status:** Proposed
+- **Date:** 2026-04-26
+- **Amends:** ADR-0026, ADR-0051
+
+## Context
+
+ADR-0026 committed the engine to a primitive-composition DSL as the only mesh authoring path. It explicitly **deferred CSG boolean operators** to v2 vocabulary, with the reasoning that overlap-by-transform handles the common case for the chunky-low-poly aesthetic, CSG implementation cost is non-trivial, and demand wasn't established yet.
+
+That demand has now shown up. Authoring a chess rook from a reference image surfaced a class of geometry the current vocabulary cannot express cleanly: a continuous solid with material removed in regions. The rook's crenellations are the canonical example — four notches cut into the rim of a tower. Without subtraction:
+
+- Modeling them as four separate boxes glued onto the rim produces visible seams, mismatched geometry between the box faces and the cylindrical rim, and "stuck-on" reading rather than "carved-from-solid."
+- Modeling them via lathe profile bumps merges the slot floors with the rim but cannot produce the angular variation (a lathe is rotationally symmetric).
+- Modeling them via a partial-revolution lathe (an alternative "v3 vocabulary" addition) would work for this specific 4-fold-symmetric case but doesn't generalize. The next case — a window in a wall, a hole through a teapot spout, notches in a key — gets no help.
+
+Boolean subtraction is the general operation. The rook is the forcing function the original ADR was waiting for.
+
+## Decision
+
+Add three CSG operators to the DSL grammar, implemented as a BSP-CSG mesher inside the existing `aether-dsl-mesh` crate.
+
+### Grammar additions
+
+- `(union child1 child2 ...)` — N-ary; result is the union of all children's solid regions. Geometric coincidence at boundaries is resolved without producing internal duplicate faces.
+- `(intersection child1 child2 ...)` — N-ary; result is the intersection of all children's solid regions. Empty result is a valid empty mesh, not an error.
+- `(difference base subtract1 subtract2 ...)` — first child minus the union of all subsequent children. At least two children required; one-child `(difference x)` is a parse error.
+
+Each operator takes structural children (any DSL node — primitives or further structural nodes), so CSG composes with `translate`, `rotate`, `scale`, `mirror`, `array`, `composition`, and itself.
+
+Color is inherited from the contributing input mesh: a triangle in the output came from one input mesh and carries that mesh's color. Faces produced from cuts adopt the color of the mesh whose face was clipped. (Per-operator color override is *not* part of v1 — composition with `:color`-bearing children is sufficient.)
+
+### Algorithm: BSP CSG
+
+The implementation uses the BSP-tree CSG algorithm (Thibault & Naylor, 1980; popularized by csg.js). Each input mesh's polygons are organized into a binary space partition tree where each node is a supporting plane. Boolean operations are expressed as tree-against-tree clipping:
+
+- `union(A, B)`: `A.clip(B); B.clip(A); B.invert(); B.clip(A); B.invert(); A.merge(B)`
+- `intersection(A, B) = invert(union(invert(A), invert(B)))`
+- `difference(A, B) = invert(union(invert(A), B))`
+
+The classical recursion for clipping a polygon against a tree splits it on each plane it crosses, retaining or discarding each fragment based on the operation. N-ary operators reduce left-to-right: `union(A, B, C, D) = union(union(union(A, B), C), D)`.
+
+### Module layout
+
+A new module `aether_dsl_mesh::csg` holds the BSP tree, polygon clipping, classification, and the three operation implementations. The `Node::Union`, `Node::Intersection`, `Node::Difference` AST nodes are added to `ast.rs`. The mesher in `mesh.rs` recursively meshes children to triangle lists, hands them to `csg::union` / `intersection` / `difference`, and writes the output to the `Vec<Triangle>`.
+
+**No new crate.** The DSL is the only consumer in v1; if a future use case (e.g. a static-mesh component doing runtime booleans on imported geometry) needs the algorithm standalone, it extracts to `aether-csg` then. Splitting now is YAGNI.
+
+### Numerical robustness
+
+Robustness is normative, not best-effort. Three commitments:
+
+- **Adaptive-precision predicates.** Vertex/plane classification ("which side?") MUST use Shewchuk-style adaptive arithmetic — a fast `f64` path with an interval bound, escalating to extended precision only when the interval includes zero. The `robust` crate is the reference implementation; we may vendor or hand-roll. This eliminates the epsilon-creep failure mode where a vertex classifies inconsistently across operations.
+- **Deterministic execution.** The CSG core MUST be single-threaded and produce identical triangle lists for identical inputs across platforms, wasm runtimes, and threads. Polygon ordering inside the BSP build sorts by a stable derived ID (e.g., FNV1a of the polygon's plane equation + first vertex), not by `Vec` insertion order. No platform-dependent float intrinsics. This makes regression tests and golden-file snapshots actually meaningful.
+- **SoS-style tie-breaking.** When a vertex's classification is exactly zero (an unavoidable case even with adaptive-precision predicates — e.g., a vertex shared between two coplanar input meshes), it MUST be assigned to a side via lexicographic tie-breaking on a stable vertex identifier, consistently across the entire computation. This eliminates the inconsistent-topology failure mode where the same vertex goes to different sides at different points in the algorithm.
+
+The DSL grammar already guarantees inputs are well-behaved (primitive shapes composed via clean transforms — no random user-supplied meshes), so the worst-case degeneracies of arbitrary mesh boolean input are out of scope. Robustness for arbitrary mesh input (a hypothetical "import OBJ then subtract" path) is a separate problem deferred to that ADR.
+
+A future ADR may tighten the input contract further by quantizing all vertex coordinates to a fixed grid before they reach CSG. With grid-snapped input, predicates can be exact rather than adaptive (integer / fixed-point arithmetic), and the BSP CSG implementation here can be simplified accordingly. That decision is out of scope for this ADR — it touches asset storage, wire format, and animation precision well beyond CSG — and will be made separately.
+
+### Triangle budget
+
+CSG operations produce additional triangles around cut edges (the polygon clipping creates fan triangulation of split fragments). The DSL's vertex buffer cap is currently `64 * 1024` bytes (~910 triangles); a CSG-heavy composition can hit it faster than a transform-only one. Bumping the cap is a separate change tracked outside this ADR.
+
+## Consequences
+
+### Positive
+
+- **Rook-class geometry is now expressible.** Continuous-solid-with-material-removed becomes a single composition: `(difference (cylinder ...) (box ...) (box ...) ...)`.
+- **Generalizes beyond the rook.** Doors in walls, holes through pipes, notches in keys, slots in plates, mortise-and-tenon joints, gear teeth all use the same operator. No per-shape ad-hoc tricks.
+- **LLM emission is natural.** "Cylinder minus four boxes" is how you'd describe a rook in English. Despite ADR-0026's original conservatism on this point, the actual experience of LLMs (including this author) reasoning about CSG terms is clean — they are a natural mental model.
+- **Composes with existing structural operators.** A `(rotate ... (difference ...))` works; an `(array N ... (difference ...))` works; `(difference (composition ...) ...)` works. No special cases.
+
+### Negative
+
+- **Implementation cost is real.** Roughly 800–1200 lines of Rust including tests. BSP CSG is well-understood but numerical robustness is the perennial gotcha — even with epsilon-based classification, edge cases (face-face exactly coplanar, vertex landing within epsilon of multiple planes) need careful handling.
+- **Triangle count grows around cuts.** A `(difference cylinder box)` produces fan triangulation along the box's cut edges. Within reason for the chunky aesthetic but eats the vertex buffer cap faster than a transform-only composition.
+- **CSG output doesn't preserve LLM-readable structure.** A `(difference cylinder box)` produces triangles whose origin is opaque from the wire — there is no "this triangle came from the cylinder" annotation past the color-inheritance rule. For LLMs reading rendered output back, this is a downgrade from pure composition where every triangle is provenance-tagged by its source primitive.
+
+### Neutral
+
+- **Partial-revolution lathe is no longer needed for the rook.** It was the alternative considered. CSG subsumes its use case (rook crenellations) and many others. Partial-lathe remains a candidate v3 addition if a non-CSG-fixable case appears (e.g. a fan of arc segments where each wedge needs a different profile).
+- **Bezier/spline paths remain unspecified** (per ADR-0051). Polyline paths still suffice.
+- **The DSL stays Lisp-syntactic data**, not programmable Lisp. CSG operators are pure data — `(difference a b c)` is just an AST node, not a function call evaluated at parse time.
+
+## Alternatives considered
+
+- **Partial-revolution lathe instead of CSG.** A `lathe-arc` primitive that revolves a profile from angle α to angle β rather than full 2π. Composes naturally with `composition`. Solves the rook (4 tall arc-lathes for battlements + 4 short ones for slot floors) and similar rotationally-discrete cases. Rejected as the *only* fix because it doesn't generalize: doors, holes, notches, slots in non-rotational geometry get no help. May still ship later if an arc-of-revolution case appears that isn't naturally a CSG case.
+- **A new `aether-csg` crate.** Self-contained algorithm with mesh-in-mesh-out interface. Rejected for v1: the DSL is the only consumer; splitting now is structural speculation. If a non-DSL consumer materializes (runtime booleans on imported meshes), extract then.
+- **Vendor a Rust CSG library** (`csgrs`, `mesh-boolean`, etc). Rejected: the available options are either toy-sized or wrappers around C++ libraries (CGAL, libigl) that complicate the WASM-friendly build story. Hand-rolling matches the codebase's pattern (`aether-math` over `glam`, mail runtime over a vendored actor framework) and lets the implementation tune to our triangle layout, our `Vertex` type with embedded color, and our ADR-0030 schema constraints.
+- **SDF-based CSG (sample volumes, marching cubes the result).** Robust against arbitrary input. Rejected: the output is a tessellated isosurface that loses the input topology, shifting the aesthetic toward smooth/voxel rather than the chunky-low-poly target of ADR-0025/0026. Also expensive at runtime.
+- **Defer CSG further; ship a `lathe-arc` primitive only.** Rejected: punting again on the general operation produces another rook-shaped surprise the next time a "carved from solid" subject comes up. The cost was deferred at ADR-0026 because demand was unproven; demand is now proven.
+
+## Follow-up work
+
+- **Implementation.** `aether-dsl-mesh::csg` module: BSP tree, polygon clipping, three operation impls. New AST nodes `Node::Union`, `Node::Intersection`, `Node::Difference`. Parser support for the three operators with arity checks. Round-trip serialization. Tests: idempotence (`A ∪ A = A`, `A ∩ A = A`, `A − A = empty`), known geometric cases (cube minus inset cube = box-with-hole, cylinder minus 4 boxes = rook crenellations), regression set against a worked-example DSL. Estimate: 4–6 days for a working subset; numerical robustness eats additional time on edge cases.
+- **Re-mesh the chess rook example** as `(difference cylinder box × 4)` and add it to `crates/aether-dsl-mesh/examples/` as the canonical CSG example.
+- **Vertex buffer cap bump.** Tracked as a separate concern; not coupled to this ADR's acceptance.
