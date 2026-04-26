@@ -29,6 +29,7 @@
 //! mesher can stay agnostic of integer arithmetic.
 
 pub mod bsp;
+pub mod cleanup;
 pub mod fixed;
 pub mod ops;
 pub mod plane;
