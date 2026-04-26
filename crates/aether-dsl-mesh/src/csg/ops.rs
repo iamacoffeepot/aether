@@ -12,55 +12,56 @@
 //! no parsing, no rendering. The mesher in `crate::mesh` converts
 //! triangles ↔ polygons at the boundary.
 
-use super::bsp::Node;
+use super::CsgError;
+use super::bsp::BspTree;
 use super::polygon::Polygon;
 
-pub fn union(a: Vec<Polygon>, b: Vec<Polygon>) -> Vec<Polygon> {
-    let mut na = Node::new();
-    let mut nb = Node::new();
-    na.build(a);
-    nb.build(b);
-    na.clip_to(&nb);
-    nb.clip_to(&na);
+pub fn union(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
+    let mut na = BspTree::new();
+    let mut nb = BspTree::new();
+    na.build(a)?;
+    nb.build(b)?;
+    na.clip_to(&nb)?;
+    nb.clip_to(&na)?;
     nb.invert();
-    nb.clip_to(&na);
+    nb.clip_to(&na)?;
     nb.invert();
     let extra = nb.all_polygons();
-    na.build(extra);
-    na.all_polygons()
+    na.build(extra)?;
+    Ok(na.all_polygons())
 }
 
-pub fn intersection(a: Vec<Polygon>, b: Vec<Polygon>) -> Vec<Polygon> {
-    let mut na = Node::new();
-    let mut nb = Node::new();
-    na.build(a);
-    nb.build(b);
+pub fn intersection(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
+    let mut na = BspTree::new();
+    let mut nb = BspTree::new();
+    na.build(a)?;
+    nb.build(b)?;
     na.invert();
-    nb.clip_to(&na);
+    nb.clip_to(&na)?;
     nb.invert();
-    na.clip_to(&nb);
-    nb.clip_to(&na);
+    na.clip_to(&nb)?;
+    nb.clip_to(&na)?;
     let extra = nb.all_polygons();
-    na.build(extra);
+    na.build(extra)?;
     na.invert();
-    na.all_polygons()
+    Ok(na.all_polygons())
 }
 
-pub fn difference(a: Vec<Polygon>, b: Vec<Polygon>) -> Vec<Polygon> {
-    let mut na = Node::new();
-    let mut nb = Node::new();
-    na.build(a);
-    nb.build(b);
+pub fn difference(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
+    let mut na = BspTree::new();
+    let mut nb = BspTree::new();
+    na.build(a)?;
+    nb.build(b)?;
     na.invert();
-    na.clip_to(&nb);
-    nb.clip_to(&na);
+    na.clip_to(&nb)?;
+    nb.clip_to(&na)?;
     nb.invert();
-    nb.clip_to(&na);
+    nb.clip_to(&na)?;
     nb.invert();
     let extra = nb.all_polygons();
-    na.build(extra);
+    na.build(extra)?;
     na.invert();
-    na.all_polygons()
+    Ok(na.all_polygons())
 }
 
 #[cfg(test)]
@@ -163,7 +164,7 @@ mod tests {
     #[test]
     fn union_with_self_is_idempotent_in_topology() {
         let a = axis_aligned_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0);
-        let result = union(a.clone(), a);
+        let result = union(a.clone(), a).unwrap();
         // After union with itself, the surface count should match the
         // original (the union of identical solids has the same boundary).
         assert!(!result.is_empty());
@@ -172,7 +173,7 @@ mod tests {
     #[test]
     fn difference_with_self_collapses_to_empty() {
         let a = axis_aligned_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0);
-        let result = difference(a.clone(), a);
+        let result = difference(a.clone(), a).unwrap();
         assert!(
             result.is_empty(),
             "A − A should be empty; got {} polygons",
@@ -183,7 +184,7 @@ mod tests {
     #[test]
     fn intersection_with_self_preserves_volume() {
         let a = axis_aligned_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0);
-        let result = intersection(a.clone(), a);
+        let result = intersection(a.clone(), a).unwrap();
         assert!(!result.is_empty(), "A ∩ A should be non-empty");
     }
 
@@ -191,7 +192,7 @@ mod tests {
     fn intersection_of_disjoint_boxes_is_empty() {
         let a = axis_aligned_box(0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0);
         let b = axis_aligned_box(5.0, 5.0, 5.0, 0.5, 0.5, 0.5, 1);
-        let result = intersection(a, b);
+        let result = intersection(a, b).unwrap();
         assert!(
             result.is_empty(),
             "disjoint intersection should be empty; got {} polygons",
@@ -203,7 +204,7 @@ mod tests {
     fn difference_of_box_minus_disjoint_box_returns_box() {
         let a = axis_aligned_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0);
         let b = axis_aligned_box(10.0, 10.0, 10.0, 0.5, 0.5, 0.5, 1);
-        let result = difference(a.clone(), b);
+        let result = difference(a.clone(), b).unwrap();
         // Subtracting a disjoint box leaves the original surface intact.
         // The polygon count may differ slightly due to clip-and-rebuild
         // splitting, but must be non-empty.
@@ -218,7 +219,7 @@ mod tests {
         // 2x2x2 outer minus 1x1x1 inner — should leave a hollow box.
         let outer = axis_aligned_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0);
         let inner = axis_aligned_box(0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 1);
-        let result = difference(outer, inner);
+        let result = difference(outer, inner).unwrap();
         assert!(!result.is_empty(), "hollow box should have walls");
         // Both colors should appear: outer (0) for outside walls,
         // inner (1) for the cavity surfaces.
@@ -234,7 +235,7 @@ mod tests {
         // the subtractor's color, the remaining outer walls from the base.
         let base = axis_aligned_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 7);
         let cutter = axis_aligned_box(0.5, 0.0, 0.0, 1.0, 0.5, 0.5, 9);
-        let result = difference(base, cutter);
+        let result = difference(base, cutter).unwrap();
         let colors: std::collections::BTreeSet<u32> = result.iter().map(|p| p.color).collect();
         assert!(colors.contains(&7), "missing base polygons");
         assert!(colors.contains(&9), "missing cutter-walled cavity polygons");
@@ -247,8 +248,8 @@ mod tests {
         // reproducibility guarantee from ADR-0054.
         let a = axis_aligned_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0);
         let b = axis_aligned_box(0.5, 0.5, 0.5, 0.7, 0.7, 0.7, 1);
-        let r1 = difference(a.clone(), b.clone());
-        let r2 = difference(a, b);
+        let r1 = difference(a.clone(), b.clone()).unwrap();
+        let r2 = difference(a, b).unwrap();
         assert_eq!(r1.len(), r2.len());
         for (p, q) in r1.iter().zip(r2.iter()) {
             assert_eq!(p.vertices, q.vertices);

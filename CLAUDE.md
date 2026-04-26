@@ -15,6 +15,7 @@ Pre-1.0 Rust project (edition 2024). Vision: a game engine where Claude sits in 
 - **Commits and PR titles** follow Conventional Commits (`type(scope): subject`). Enforced in CI against PR titles. Main uses squash-merge with PR title as the commit subject, so PR title quality matters.
 - **Merging**: `main` is protected (PR required, all CI checks required, linear history, no force-push). Claude does not push to `main`, does not force-push reviewed branches, does not self-merge, and asks before destructive operations.
 - **PRs** should be small and focused — one concept per PR.
+- **Recursion in load-bearing code**: prefer iterative implementations (explicit work-stack/queue, arena-with-indices for tree data) over recursive ones in any algorithm whose depth could exceed a few hundred frames in practice. Recursion is OK for parse/AST walks where depth is structurally bounded by a small input file. Either way, recursive code on user-controlled or geometrically-derived data must enforce a depth/budget cap that returns an error rather than overflowing the stack. The BSP CSG core (`aether-dsl-mesh::csg::bsp`) is the canonical example of the iterative pattern.
 
 ## MCP harness
 

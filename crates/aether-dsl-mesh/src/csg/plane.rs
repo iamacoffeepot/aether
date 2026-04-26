@@ -56,6 +56,30 @@ impl Plane3 {
             - self.d
     }
 
+    /// Snap-tolerance threshold for classifying a vertex as coplanar.
+    ///
+    /// `compute_intersection` snaps each new vertex to the integer grid
+    /// via rounded division — the snap is up to 0.5 grid units off the
+    /// partitioner per axis, contributing at most `0.5 * (|n_x| + |n_y| + |n_z|)`
+    /// to `side()`. We use the full sum (a 2× margin) as the threshold
+    /// for "definitely on this plane"; vertices with `|side| <= threshold`
+    /// are classified as COPLANAR even though their integer side test is
+    /// non-zero.
+    ///
+    /// This is the integer-arithmetic equivalent of csg.js's `EPSILON`
+    /// constant — but unlike csg.js, the threshold is derived from the
+    /// plane's own normal magnitude rather than a global guess, so it
+    /// scales correctly across very small and very large meshes.
+    /// Without it, snap drift in fragments of non-axis-aligned facets
+    /// (cylinders, swept profiles, rotated boxes) makes the BSP
+    /// classify split fragments as SPANNING against their own parent
+    /// plane on subsequent passes, causing unbounded recursion.
+    pub fn coplanar_threshold(&self) -> i128 {
+        (self.n_x.unsigned_abs() as i128)
+            + (self.n_y.unsigned_abs() as i128)
+            + (self.n_z.unsigned_abs() as i128)
+    }
+
     pub fn invert(self) -> Self {
         Plane3 {
             n_x: -self.n_x,

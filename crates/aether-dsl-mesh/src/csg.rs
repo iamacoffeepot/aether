@@ -44,24 +44,33 @@ use crate::mesh::Triangle;
 pub enum CsgError {
     #[error("CSG fixed-point conversion: {0}")]
     Fixed(#[from] FixedError),
+    /// BSP recursion exceeded the safety depth limit. Indicates either
+    /// pathological input or a residual snap-drift cascade that the
+    /// per-plane tolerance in `Plane3::coplanar_threshold` didn't catch.
+    /// Loud failure — the caller gets an error rather than a stack
+    /// overflow.
+    #[error(
+        "CSG BSP recursion exceeded depth limit ({limit}); likely a snap-drift cascade not caught by the side-test tolerance"
+    )]
+    RecursionLimit { limit: usize },
 }
 
 pub fn union_triangles(a: &[Triangle], b: &[Triangle]) -> Result<Vec<Triangle>, CsgError> {
     let pa = triangles_to_polygons(a)?;
     let pb = triangles_to_polygons(b)?;
-    Ok(polygons_to_triangles(&ops::union(pa, pb)))
+    Ok(polygons_to_triangles(&ops::union(pa, pb)?))
 }
 
 pub fn intersection_triangles(a: &[Triangle], b: &[Triangle]) -> Result<Vec<Triangle>, CsgError> {
     let pa = triangles_to_polygons(a)?;
     let pb = triangles_to_polygons(b)?;
-    Ok(polygons_to_triangles(&ops::intersection(pa, pb)))
+    Ok(polygons_to_triangles(&ops::intersection(pa, pb)?))
 }
 
 pub fn difference_triangles(a: &[Triangle], b: &[Triangle]) -> Result<Vec<Triangle>, CsgError> {
     let pa = triangles_to_polygons(a)?;
     let pb = triangles_to_polygons(b)?;
-    Ok(polygons_to_triangles(&ops::difference(pa, pb)))
+    Ok(polygons_to_triangles(&ops::difference(pa, pb)?))
 }
 
 fn triangles_to_polygons(triangles: &[Triangle]) -> Result<Vec<Polygon>, CsgError> {
