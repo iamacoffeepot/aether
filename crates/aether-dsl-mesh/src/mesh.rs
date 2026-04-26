@@ -13,6 +13,7 @@
 //! face-normal-direction tests.
 
 use crate::ast::{Axis, Node};
+use crate::csg;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Triangle {
@@ -24,6 +25,8 @@ pub struct Triangle {
 pub enum MeshError {
     #[error("node kind not yet supported by mesher iteration 1: {0}")]
     NotYetImplemented(&'static str),
+    #[error("CSG operation failed: {0}")]
+    Csg(#[from] csg::CsgError),
 }
 
 pub fn mesh(node: &Node) -> Result<Vec<Triangle>, MeshError> {
@@ -184,16 +187,45 @@ fn mesh_into(out: &mut Vec<Triangle>, node: &Node, offset: [f32; 3]) -> Result<(
             }
             Ok(())
         }
-        Node::Union { children: _ }
-        | Node::Intersection { children: _ }
-        | Node::Difference {
-            base: _,
-            subtract: _,
-        } => {
-            // TODO(ADR-0054, PR 4): route through `crate::csg` once the
-            // BSP-CSG core lands. Until then these meshes silently emit
-            // an empty triangle list — the AST parses, round-trips, and
-            // composes structurally, but produces no geometry.
+        Node::Union { children } => {
+            let mut acc: Option<Vec<Triangle>> = None;
+            for child in children {
+                let mut child_tris = Vec::new();
+                mesh_into(&mut child_tris, child, offset)?;
+                acc = Some(match acc {
+                    Some(prev) => csg::union_triangles(&prev, &child_tris)?,
+                    None => child_tris,
+                });
+            }
+            if let Some(result) = acc {
+                out.extend(result);
+            }
+            Ok(())
+        }
+        Node::Intersection { children } => {
+            let mut acc: Option<Vec<Triangle>> = None;
+            for child in children {
+                let mut child_tris = Vec::new();
+                mesh_into(&mut child_tris, child, offset)?;
+                acc = Some(match acc {
+                    Some(prev) => csg::intersection_triangles(&prev, &child_tris)?,
+                    None => child_tris,
+                });
+            }
+            if let Some(result) = acc {
+                out.extend(result);
+            }
+            Ok(())
+        }
+        Node::Difference { base, subtract } => {
+            let mut acc = Vec::new();
+            mesh_into(&mut acc, base, offset)?;
+            for s in subtract {
+                let mut s_tris = Vec::new();
+                mesh_into(&mut s_tris, s, offset)?;
+                acc = csg::difference_triangles(&acc, &s_tris)?;
+            }
+            out.extend(acc);
             Ok(())
         }
         Node::Array {
