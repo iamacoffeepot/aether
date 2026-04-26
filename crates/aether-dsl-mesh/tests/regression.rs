@@ -62,14 +62,22 @@ fn box_minus_enclosed_sphere_is_watertight() {
     assert_watertight("(difference (box 1.5 1.5 1.5 :color 0) (sphere 0.5 12 :color 1))");
 }
 
-/// **Known-failing — different bug from snap drift**: the protruding
-/// sphere produces SingularEdges (forward=2, reverse=2) at cube
-/// corner regions where the sphere bulges past two cube faces
-/// simultaneously. The vertices are ~14 fixed units apart so it's
-/// not snap drift — looks like genuinely overlapping fragments from
-/// a CSG composition issue at corner-bulge geometry. Separate fix.
+/// **Known-failing — blocked on polygon-throughout migration.** The two
+/// SingularEdges (forward=2, reverse=2) on the cube's z=-0.75 face are
+/// caused by the triangle round-trip in `mesh_polygons`: BSP CSG output
+/// is correct (zero reversed-orientation cube fragments), but the wire
+/// `Vec<Triangle>` boundary fan-triangulates n-gons and `from_triangle`
+/// re-derives each plane from three vertices via cross product. For
+/// CDT-output sliver triangles (near-collinear vertices), the cross
+/// product is dominated by sub-fixed-point noise and `n_z` flips sign
+/// on ~20 cube-color triangles per protruding face. Those reversed
+/// triangles re-enter cleanup as a separate coplanar bucket and emit
+/// as a real second mesh layer — the visible singular edges. The fix
+/// is the polygon-throughout migration: skip the triangle round-trip
+/// entirely (n-gon loops travel from CSG cleanup straight into
+/// `mesh_polygons`, no plane re-derivation). Tracked separately.
 #[test]
-#[ignore = "BSP corner-bulge overlapping fragments — different bug from snap drift"]
+#[ignore = "blocked on polygon-throughout migration — triangle round-trip flips sliver normals"]
 fn box_minus_protruding_sphere_is_watertight() {
     assert_watertight("(difference (box 1.5 1.5 1.5 :color 0) (sphere 0.95 12 :color 1))");
 }
