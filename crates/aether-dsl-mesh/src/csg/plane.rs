@@ -253,7 +253,6 @@ mod tests {
         Point3 { x, y, z }
     }
 
-    // ── coplanar_threshold characterization ──────────────────────────
     //
     // The bug hypothesis (per regression.rs ignored tests) is that this
     // threshold is too generous for non-axis-aligned planes — sphere
@@ -347,8 +346,6 @@ mod tests {
         );
     }
 
-    // ── from_points coverage ──────────────────────────────────────────
-
     #[test]
     fn from_points_diagonal_normal() {
         // Triangle through (1,0,0), (0,1,0), (0,0,1). Normal points away
@@ -397,8 +394,6 @@ mod tests {
         assert_eq!(abc.d, cab.d);
     }
 
-    // ── is_degenerate coverage ────────────────────────────────────────
-
     #[test]
     fn three_identical_points_are_degenerate() {
         let q = p(1.0, 2.0, 3.0);
@@ -417,8 +412,6 @@ mod tests {
         let b2 = p(0.0, 0.0, 0.0);
         assert!(Plane3::from_points(a, b2, c2).is_degenerate());
     }
-
-    // ── side() linearity and magnitude ────────────────────────────────
 
     #[test]
     fn side_magnitude_scales_linearly_with_offset() {
@@ -449,8 +442,6 @@ mod tests {
         assert_eq!(observed, expected);
     }
 
-    // ── invert() ──────────────────────────────────────────────────────
-
     #[test]
     fn invert_is_involution() {
         // Double-invert restores all four fields exactly. Pinned via
@@ -462,8 +453,6 @@ mod tests {
         assert_eq!(plane.n_z, twice.n_z);
         assert_eq!(plane.d, twice.d);
     }
-
-    // ── canonical_key() ───────────────────────────────────────────────
 
     #[test]
     fn canonical_key_idempotent() {
@@ -494,8 +483,6 @@ mod tests {
         assert_eq!(small.canonical_key(), large.canonical_key());
     }
 
-    // ── normal_dot_sign() ─────────────────────────────────────────────
-
     #[test]
     fn normal_dot_sign_perpendicular_planes_returns_zero() {
         // xy-plane and yz-plane have perpendicular normals.
@@ -514,8 +501,6 @@ mod tests {
         // tilt has +z component; dot with (+z) normal of xy must be > 0.
         assert!(xy.normal_dot_sign(&tilt) > 0);
     }
-
-    // ── private gcd helpers ───────────────────────────────────────────
 
     #[test]
     fn gcd_u128_zero_identity() {
@@ -552,8 +537,6 @@ mod tests {
         assert_eq!(gcd_4(0, 0, 0, 7), 7);
         assert_eq!(gcd_4(0, 0, 0, 0), 0);
     }
-
-    // ── magnitude budget adversarial test ─────────────────────────────
 
     #[test]
     fn side_at_extreme_inputs_does_not_overflow() {

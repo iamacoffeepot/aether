@@ -352,8 +352,6 @@ mod tests {
         (cof, cob, f, b)
     }
 
-    // ── from_triangle coverage ────────────────────────────────────────
-
     #[test]
     fn from_triangle_preserves_color() {
         let poly =
@@ -373,8 +371,6 @@ mod tests {
         let poly = Polygon::from_triangle(v0, v1, v2, 0).unwrap();
         assert_eq!(poly.vertices, vec![v0, v1, v2]);
     }
-
-    // ── invert coverage ───────────────────────────────────────────────
 
     #[test]
     fn invert_is_involution_for_polygon() {
@@ -400,8 +396,6 @@ mod tests {
         poly.invert();
         assert_eq!(poly.color, 42);
     }
-
-    // ── split: threshold boundary behavior ────────────────────────────
 
     #[test]
     fn vertex_exactly_on_partitioner_classifies_coplanar() {
@@ -450,8 +444,6 @@ mod tests {
         assert_eq!(f.len(), 1, "should produce a front fragment");
         assert_eq!(b.len(), 1, "should produce a back fragment");
     }
-
-    // ── split: fragment invariants ────────────────────────────────────
 
     #[test]
     fn spanning_fragment_vertex_count_invariant() {
@@ -519,8 +511,6 @@ mod tests {
         assert_eq!(b.len(), 1);
     }
 
-    // ── split: smoking-gun bug at polygon level ───────────────────────
-
     /// **Bug-pinning**: a triangle with two vertices clearly outside
     /// snap-drift tolerance of a diagonal partitioner (one above, one
     /// below in perpendicular distance ~1.15) must classify as SPANNING
@@ -563,8 +553,6 @@ mod tests {
         );
         assert!(cof.is_empty() && cob.is_empty());
     }
-
-    // ── compute_intersection coverage ─────────────────────────────────
 
     #[test]
     fn compute_intersection_basic_axis_aligned() {
@@ -614,8 +602,6 @@ mod tests {
         let ba = compute_intersection(b, a, &partitioner);
         assert_eq!(ab, ba);
     }
-
-    // ── round_div extra coverage ──────────────────────────────────────
 
     #[test]
     fn round_div_zero_numerator() {

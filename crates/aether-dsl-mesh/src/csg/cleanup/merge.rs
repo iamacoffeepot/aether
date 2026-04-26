@@ -484,4 +484,324 @@ mod tests {
             assert_eq!(a.color, b.color);
         }
     }
+
+    /// Two coplanar polygons whose `Plane3` fields are *proportional*
+    /// (one is a positive scalar multiple of the other) get different
+    /// plane keys and don't merge. Pin this as a documented limitation
+    /// per the module-level comment — without the test, a future
+    /// "switch to canonical_key" change could silently merge these and
+    /// break callers that depend on the current grouping behavior.
+    ///
+    /// The reason this is acceptable in practice: BSP fragments inherit
+    /// their parent triangle's plane field-for-field, so all fragments
+    /// of one source share a key.
+    #[test]
+    fn proportional_planes_do_not_merge() {
+        let plane_small = Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 1 << 16,
+            d: 0,
+        };
+        let plane_large = Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 4 << 16,
+            d: 0,
+        };
+        let p1 = IndexedPolygon {
+            vertices: vec![0, 1, 2],
+            plane: plane_small,
+            color: 0,
+        };
+        let p2 = IndexedPolygon {
+            vertices: vec![0, 2, 3], // shares edge 0→2 (well, 2→0 from p1's POV)
+            plane: plane_large,
+            color: 0,
+        };
+        let mesh = IndexedMesh {
+            vertices: vec![
+                pt(0.0, 0.0, 0.0),
+                pt(1.0, 0.0, 0.0),
+                pt(1.0, 1.0, 0.0),
+                pt(0.0, 1.0, 0.0),
+            ],
+            polygons: vec![p1, p2],
+        };
+        let merged = mesh.merge_coplanar();
+        assert_eq!(
+            merged.polygons.len(),
+            2,
+            "proportional Plane3 fields must NOT merge — documented limitation"
+        );
+    }
+
+    /// When polygons of different colors merge into one component, the
+    /// emitted polygon takes the color of the lowest-index input
+    /// polygon ("first wins" per ADR-0055). Pinned because all existing
+    /// merge tests use uniform colors so the rule isn't exercised.
+    #[test]
+    fn merged_component_takes_first_polygons_color() {
+        let plane = Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 1 << 16,
+            d: 0,
+        };
+        let mesh = IndexedMesh {
+            vertices: vec![
+                pt(0.0, 0.0, 0.0),
+                pt(1.0, 0.0, 0.0),
+                pt(1.0, 1.0, 0.0),
+                pt(0.0, 1.0, 0.0),
+            ],
+            polygons: vec![
+                IndexedPolygon {
+                    vertices: vec![0, 1, 2],
+                    plane,
+                    color: 11,
+                },
+                IndexedPolygon {
+                    vertices: vec![0, 2, 3],
+                    plane,
+                    color: 22,
+                },
+            ],
+        };
+        let merged = mesh.merge_coplanar();
+        assert_eq!(merged.polygons.len(), 1, "should merge into one quad");
+        assert_eq!(
+            merged.polygons[0].color, 11,
+            "merged polygon must take color of lowest-index input polygon"
+        );
+    }
+
+    #[test]
+    fn two_disjoint_quads_on_same_plane_emit_separately() {
+        // Two completely disjoint quads at z=0 — same plane, no shared
+        // edge. Should produce 2 separate components, each emitted as
+        // its own quad.
+        let plane = Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 1 << 16,
+            d: 0,
+        };
+        let mesh = IndexedMesh {
+            vertices: vec![
+                // First quad (left)
+                pt(0.0, 0.0, 0.0),
+                pt(1.0, 0.0, 0.0),
+                pt(1.0, 1.0, 0.0),
+                pt(0.0, 1.0, 0.0),
+                // Second quad (right, separated by gap)
+                pt(3.0, 0.0, 0.0),
+                pt(4.0, 0.0, 0.0),
+                pt(4.0, 1.0, 0.0),
+                pt(3.0, 1.0, 0.0),
+            ],
+            polygons: vec![
+                // First quad as 2 triangles
+                IndexedPolygon {
+                    vertices: vec![0, 1, 2],
+                    plane,
+                    color: 0,
+                },
+                IndexedPolygon {
+                    vertices: vec![0, 2, 3],
+                    plane,
+                    color: 0,
+                },
+                // Second quad as 2 triangles
+                IndexedPolygon {
+                    vertices: vec![4, 5, 6],
+                    plane,
+                    color: 0,
+                },
+                IndexedPolygon {
+                    vertices: vec![4, 6, 7],
+                    plane,
+                    color: 0,
+                },
+            ],
+        };
+        let merged = mesh.merge_coplanar();
+        assert_eq!(
+            merged.polygons.len(),
+            2,
+            "two disjoint components must emit as 2 separate polygons"
+        );
+        for p in &merged.polygons {
+            assert_eq!(p.vertices.len(), 4);
+        }
+    }
+
+    /// **Bug-hunt-relevant.** Two polygons on DIFFERENT planes (say
+    /// xy-plane and xz-plane) that share an edge along their
+    /// intersection line must have matching VertexId at both edge
+    /// endpoints in the merged output. Merge groups by plane so they
+    /// don't combine — but both must preserve the shared VertexIds
+    /// because the manifold validator walks edges across all polygons
+    /// regardless of plane.
+    ///
+    /// If merge ever started rewriting vertex ids per-component, this
+    /// test would fail and force the audit.
+    #[test]
+    fn cross_plane_shared_edge_keeps_matching_vertex_ids() {
+        let xy = Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 1 << 16,
+            d: 0,
+        };
+        let xz = Plane3 {
+            n_x: 0,
+            n_y: -(1 << 16),
+            n_z: 0,
+            d: 0,
+        };
+        let mesh = IndexedMesh {
+            vertices: vec![
+                pt(0.0, 0.0, 0.0), // 0 — shared
+                pt(1.0, 0.0, 0.0), // 1 — shared
+                pt(0.0, 1.0, 0.0), // 2 — only on xy-plane polygon
+                pt(0.0, 0.0, 1.0), // 3 — only on xz-plane polygon
+            ],
+            polygons: vec![
+                IndexedPolygon {
+                    vertices: vec![0, 1, 2],
+                    plane: xy,
+                    color: 0,
+                },
+                IndexedPolygon {
+                    vertices: vec![0, 3, 1],
+                    plane: xz,
+                    color: 0,
+                },
+            ],
+        };
+        let merged = mesh.merge_coplanar();
+        assert_eq!(merged.polygons.len(), 2);
+        // Find the shared vertex ids in each output polygon.
+        let xy_poly = merged.polygons.iter().find(|p| p.plane.n_z != 0).unwrap();
+        let xz_poly = merged.polygons.iter().find(|p| p.plane.n_y != 0).unwrap();
+        // Both polygons contain VertexId 0 and 1 (the shared edge endpoints).
+        assert!(xy_poly.vertices.contains(&0));
+        assert!(xy_poly.vertices.contains(&1));
+        assert!(xz_poly.vertices.contains(&0));
+        assert!(xz_poly.vertices.contains(&1));
+    }
+
+    #[test]
+    fn extract_loops_open_boundary_returns_none() {
+        // A single edge with no continuation cannot form a closed loop.
+        let boundary = vec![(0_usize, 1_usize)];
+        assert!(extract_loops(&boundary).is_none());
+    }
+
+    #[test]
+    fn extract_loops_branching_boundary_returns_none() {
+        // Vertex 0 has two outgoing edges (0→1, 0→2). Walking from 0
+        // arbitrarily picks one; the other is left dangling. The walk
+        // continues 1→0 (or 2→0), then needs another outgoing from 0
+        // — finds the other one (sorted), proceeds 0→2→? where 2 has
+        // no outgoing → returns None. Pinning this surfaces a future
+        // refactor that silently accepts branching topology.
+        let boundary = vec![(0_usize, 1_usize), (1, 0), (0, 2)];
+        assert!(extract_loops(&boundary).is_none());
+    }
+
+    #[test]
+    fn extract_loops_two_disjoint_triangles() {
+        // Two triangle boundaries: 0→1→2→0 and 3→4→5→3. Both close.
+        let boundary = vec![(0_usize, 1_usize), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)];
+        let loops = extract_loops(&boundary).expect("two disjoint loops should extract");
+        assert_eq!(loops.len(), 2);
+        // Each loop has 3 vertices.
+        assert_eq!(loops[0].len(), 3);
+        assert_eq!(loops[1].len(), 3);
+    }
+
+    #[test]
+    fn extract_loops_empty_boundary_returns_some_empty() {
+        // No edges → no loops → vacuously Some(empty). Pinning so a
+        // future "treat empty as None" doesn't break the singleton-
+        // component fast path.
+        let boundary: Vec<(VertexId, VertexId)> = vec![];
+        let loops = extract_loops(&boundary).expect("empty boundary should be Some(empty)");
+        assert!(loops.is_empty());
+    }
+
+    #[test]
+    fn pathological_component_falls_back_to_originals() {
+        // Build a 2-polygon component whose combined boundary topology
+        // is non-extractable (two triangles that share an edge but the
+        // resulting boundary graph branches). The fallback path passes
+        // both originals through unchanged. Currently zero tests cover
+        // this code path — pin it.
+        //
+        // Construction: triangles (0,1,2) and (1,3,4). They share
+        // vertex 1 but no edge. So they're NOT in the same connected
+        // component (union-find by shared edge). To force them into
+        // one component, we add a bridging triangle (0,1,3).
+        //
+        // Then directed edges:
+        //   tri 0,1,2: (0,1) (1,2) (2,0)
+        //   tri 1,3,4: (1,3) (3,4) (4,1)
+        //   tri 0,1,3: (0,1) (1,3) (3,0)
+        // boundary = directed edges with no reverse twin in `directed`.
+        //   (0,1) appears 2x (no (1,0) ever) → still on boundary
+        //   (1,2) once, no (2,1) → boundary
+        //   (2,0) once, no (0,2) → boundary
+        //   (1,3) appears 2x (no (3,1) ever) → boundary
+        //   (3,4) once, no (4,3) → boundary
+        //   (4,1) once, no (1,4) → boundary
+        //   (3,0) once, no (0,3) → boundary
+        // Vertex 0 has outgoing (0,1) (and inc count is fine for graph but
+        // (0,1) appears twice so the boundary builder sees a duplicate
+        // outgoing edge → branching → extract_loops returns None →
+        // fallback fires.
+        let plane = Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 1 << 16,
+            d: 0,
+        };
+        let mesh = IndexedMesh {
+            vertices: vec![
+                pt(0.0, 0.0, 0.0),
+                pt(1.0, 0.0, 0.0),
+                pt(0.0, 1.0, 0.0),
+                pt(2.0, 0.0, 0.0),
+                pt(2.0, 1.0, 0.0),
+            ],
+            polygons: vec![
+                IndexedPolygon {
+                    vertices: vec![0, 1, 2],
+                    plane,
+                    color: 0,
+                },
+                IndexedPolygon {
+                    vertices: vec![1, 3, 4],
+                    plane,
+                    color: 0,
+                },
+                IndexedPolygon {
+                    vertices: vec![0, 1, 3],
+                    plane,
+                    color: 0,
+                },
+            ],
+        };
+        let merged = mesh.merge_coplanar();
+        // Fallback path emits original polygons unchanged. The test
+        // doesn't pin a specific count (the path could branch into a
+        // single-component fallback OR a happy-path merge depending on
+        // implementation) — just that we get *some* non-empty output
+        // and don't crash on pathological topology.
+        assert!(
+            !merged.polygons.is_empty(),
+            "pathological component must not crash; should pass through originals"
+        );
+    }
 }
