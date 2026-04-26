@@ -181,6 +181,40 @@ mod tests {
     }
 
     #[test]
+    fn in_circle_at_adr_0054_coord_cap_returns_correct_sign_no_overflow() {
+        // Worst-case input within the ADR-0054 contract: every input coord
+        // sits at the ±2^24 cap, so differences hit the 2^25 max in both
+        // axes simultaneously. Squared sums reach 2 · 2^50 = 2^51 (the
+        // budget's upper bound). With these inputs, the in-circle
+        // determinant's intermediates approach the proven 2^102 worst
+        // case — the test exists to verify we actually fit and to pin
+        // the contract boundary.
+        let cap: i64 = 1 << 24;
+        // Four corners of a square at ±cap; all four are equidistant from
+        // the origin, so they are *cocircular* — any three define the same
+        // circumcircle, and the fourth must read as on-circle (sign 0).
+        let a = (cap, cap);
+        let b = (-cap, cap);
+        let c = (-cap, -cap);
+        let d = (cap, -cap);
+        // Verify CCW winding so the predicate's sign convention applies.
+        assert_eq!(orient2d(a, b, c), 1);
+        // Cocircular: in_circle must be exactly 0. If we were silently
+        // wrapping, the determinant would land in some random nonzero
+        // residue and this would fail.
+        assert_eq!(in_circle(a, b, c, d), 0);
+        // Also probe a point strictly inside the circle (origin) and
+        // strictly outside (well beyond the cap, treating the test as a
+        // robustness check on differences > 2^25 — still within i128
+        // headroom).
+        assert_eq!(in_circle(a, b, c, (0, 0)), 1);
+        // Coord at -2*cap pushes ay = -2*cap - cap = -3*cap, exceeding
+        // the contract; confirms the predicate degrades gracefully (sign
+        // still correct) within remaining headroom rather than wrapping.
+        assert_eq!(in_circle(a, b, c, (0, -2 * cap)), -1);
+    }
+
+    #[test]
     fn predicates_are_deterministic() {
         // Same inputs must always produce the same output (no
         // dependency on hashmap order, float rounding, etc).
