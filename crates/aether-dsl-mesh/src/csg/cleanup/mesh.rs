@@ -81,18 +81,16 @@ impl IndexedMesh {
             let group = &groups[key];
             let plane = polygons[group[0]].plane;
             let color = polygons[group[0]].color;
-            let loops: Vec<Vec<VertexId>> =
-                group.iter().map(|&pid| polygons[pid].vertices.clone()).collect();
+            let loops: Vec<Vec<VertexId>> = group
+                .iter()
+                .map(|&pid| polygons[pid].vertices.clone())
+                .collect();
 
             match cdt::triangulate_loops(&vertices, &loops, &plane) {
                 Some(triangles) => {
                     for tri in triangles {
                         out.push(Polygon {
-                            vertices: vec![
-                                vertices[tri[0]],
-                                vertices[tri[1]],
-                                vertices[tri[2]],
-                            ],
+                            vertices: vec![vertices[tri[0]], vertices[tri[1]], vertices[tri[2]]],
                             plane,
                             color,
                         });
