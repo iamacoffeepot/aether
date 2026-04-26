@@ -1586,6 +1586,35 @@ mod mesh {
     }
 }
 
+pub use static_mesh::*;
+
+/// Static mesh viewer vocabulary. The static-mesh component
+/// (`crates/aether-static-mesh-component/`) loads a Wavefront OBJ file
+/// from the substrate's I/O surface (ADR-0041 namespace + path), parses
+/// it once, and replays the triangle list as `DrawTriangle` mail every
+/// tick. It exists as a developer aid for inspecting the output of the
+/// `dsl-mesh-spike` mesher in the substrate's render path; ADR-0026's
+/// rejection of conventional asset import targets *production* content,
+/// not dev-tooling viewers.
+mod static_mesh {
+    use alloc::string::String;
+    use serde::{Deserialize, Serialize};
+
+    /// `aether.static_mesh.load` — instruct the static-mesh component to
+    /// load and display an OBJ file. The component sends a corresponding
+    /// `aether.io.read` to the substrate's `"io"` sink and parses the
+    /// reply. Subsequent `Load` mails replace the cached mesh.
+    /// Fire-and-forget; errors surface in `engine_logs`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.static_mesh.load")]
+    pub struct LoadStaticMesh {
+        /// Short namespace prefix (no `://`), e.g. `"save"`, `"assets"`.
+        pub namespace: String,
+        /// Relative path within the namespace.
+        pub path: String,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

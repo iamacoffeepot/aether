@@ -22,7 +22,7 @@ use crate::{
     DrawTriangle, DropComponent, DropResult, ExtrudeFace, Fetch, FetchResult, FrameStats,
     HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
     HandleReleaseResult, HandleUnpin, HandleUnpinResult, Key, KeyRelease, List, ListResult,
-    LoadComponent, LoadResult, MeshState, MouseButton, MouseMove, NoteOff, NoteOn,
+    LoadComponent, LoadResult, LoadStaticMesh, MeshState, MouseButton, MouseMove, NoteOff, NoteOn,
     OrbitSetDistance, OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping,
     PlatformInfo, PlatformInfoResult, PlayerRequestStep, PlayerSetMode, PlayerSetPosition,
     PlayerSetVelocity, PlayerStepResult, Pong, Read, ReadResult, ReplaceComponent, ReplaceResult,
@@ -172,6 +172,11 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<DeleteFaces>(),
         schema::<Describe>(),
         schema::<MeshState>(),
+        // Static mesh viewer (developer tool). Loads an OBJ via the
+        // io sink and replays its triangle list as DrawTriangle each
+        // tick. ADR-0026's no-import-for-production-content rule does
+        // not apply — this is a dev viewer, not an asset path.
+        schema::<LoadStaticMesh>(),
     ]
 }
 
