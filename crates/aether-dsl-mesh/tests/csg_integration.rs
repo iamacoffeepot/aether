@@ -132,6 +132,44 @@ fn nary_difference_subtracts_each_in_turn() {
 }
 
 #[test]
+fn cylinder_with_two_box_cuts_does_not_overflow_stack() {
+    // Regression for the snap-drift cascade fixed by the side-test
+    // tolerance on Plane3. Pre-fix: this DSL stack-overflowed on the
+    // second cut because cylinder facet planes have non-axis-aligned
+    // normals; snap-drifted intersection vertices on split fragments
+    // re-classified as FRONT/BACK against their own parent plane on
+    // subsequent BSP passes, causing unbounded recursion. Box-only CSG
+    // never hit it because axis-aligned plane normals zero out drift
+    // in unrelated axes.
+    let ast = parse(
+        "(difference
+           (cylinder 0.5 1.0 12 :color 0)
+           (translate ( 0.4 0 0) (box 0.4 0.4 0.4 :color 1))
+           (translate (-0.4 0 0) (box 0.4 0.4 0.4 :color 1)))",
+    )
+    .unwrap();
+    let tris = mesh(&ast).expect("CSG mesh should succeed");
+    assert!(!tris.is_empty(), "cylinder + 2-cut produced no geometry");
+}
+
+#[test]
+fn rook_class_geometry_with_cylinder_meshes() {
+    // The motivating ADR-0054 case that wasn't reachable pre-fix:
+    // a cylinder rook with four crenellation cuts.
+    let ast = parse(
+        "(difference
+           (cylinder 0.5 1.0 12 :color 0)
+           (translate ( 0.5 0.4 0)    (box 0.4 0.3 0.2 :color 1))
+           (translate (-0.5 0.4 0)    (box 0.4 0.3 0.2 :color 1))
+           (translate ( 0.0 0.4  0.5) (box 0.2 0.3 0.4 :color 1))
+           (translate ( 0.0 0.4 -0.5) (box 0.2 0.3 0.4 :color 1)))",
+    )
+    .unwrap();
+    let tris = mesh(&ast).expect("4-cut cylinder rook should mesh");
+    assert!(!tris.is_empty());
+}
+
+#[test]
 fn determinism_end_to_end() {
     // The whole pipeline (parse → mesh → CSG → triangulate) must
     // produce bit-exactly identical output for identical input.

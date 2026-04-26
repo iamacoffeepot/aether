@@ -59,13 +59,20 @@ impl Polygon {
         front: &mut Vec<Polygon>,
         back: &mut Vec<Polygon>,
     ) {
+        // Snap-drift tolerance: a vertex within `coplanar_threshold()`
+        // of the plane is treated as on it. This is what stops the
+        // unbounded-recursion cascade where a split fragment's snapped
+        // intersection vertex would otherwise re-classify as FRONT/BACK
+        // against its own parent plane on subsequent BSP passes (see
+        // `Plane3::coplanar_threshold` for the derivation).
+        let threshold = partitioner.coplanar_threshold();
         let mut polygon_type = COPLANAR;
         let mut types: Vec<i32> = Vec::with_capacity(self.vertices.len());
         for v in &self.vertices {
             let s = partitioner.side(*v);
-            let t = if s > 0 {
+            let t = if s > threshold {
                 FRONT
-            } else if s < 0 {
+            } else if s < -threshold {
                 BACK
             } else {
                 COPLANAR
