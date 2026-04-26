@@ -1,6 +1,6 @@
 # ADR-0051: DSL mesh vocabulary v1 — pin syntax, promote torus + sweep
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-26
 - **Amends:** ADR-0026
 

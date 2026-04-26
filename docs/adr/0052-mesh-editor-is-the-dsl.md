@@ -1,6 +1,6 @@
 # ADR-0052: The mesh editor is the DSL — text + hot reload, not vertex/face state
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-26
 - **Supersedes mesh-editor abstraction in:** Spike C (`aether-mesh-editor-component` v0.1) — the cube/cylinder/extrude/translate-vertices stateful editor introduced in PR 235 / 250 / 252 / 253. The crate name stays; the abstraction inside it changes.
 
