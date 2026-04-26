@@ -411,4 +411,161 @@ mod tests {
         let cloned: Vec<u64> = polys.clone().iter().map(polygon_sort_key).collect();
         assert_eq!(original, cloned);
     }
+
+    #[test]
+    fn empty_input_build_returns_ok() {
+        let mut tree = BspTree::new();
+        assert!(tree.build(vec![]).is_ok());
+        assert!(tree.all_polygons().is_empty());
+    }
+
+    #[test]
+    fn single_polygon_lives_in_root() {
+        let tri =
+            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 0)
+                .unwrap();
+        let mut tree = BspTree::new();
+        tree.build(vec![tri.clone()]).unwrap();
+        let out = tree.all_polygons();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].vertices, tri.vertices);
+    }
+
+    #[test]
+    fn invert_preserves_polygon_count_and_node_count() {
+        let mut tree = BspTree::new();
+        tree.build(unit_box()).unwrap();
+        let nodes_before = tree.nodes.len();
+        let polys_before = tree.all_polygons().len();
+        tree.invert();
+        let nodes_after = tree.nodes.len();
+        let polys_after = tree.all_polygons().len();
+        // Single invert: orientation flip only — counts unchanged.
+        assert_eq!(nodes_before, nodes_after);
+        assert_eq!(polys_before, polys_after);
+    }
+
+    /// **Docstring claim test**: two cube triangles sharing both a
+    /// plane and a first vertex must produce distinct sort keys. The
+    /// "hash every vertex" comment in `polygon_sort_key` exists
+    /// specifically to prevent these collisions; pin the property so
+    /// a future "hash only the plane" optimization breaks loudly.
+    #[test]
+    fn polygon_sort_key_avoids_cube_face_twin_collision() {
+        // Two triangles of the +Z face of a unit cube — both at z=1,
+        // both wound CCW from above, both with first vertex
+        // (-1,-1,1). The plane match is guaranteed (cross products
+        // are equal in magnitude); the rest-of-vertex hashing is
+        // what keeps the keys distinct.
+        let v = |sx: f32, sy: f32, sz: f32| pt(sx, sy, sz);
+        let t1 = Polygon::from_triangle(v(-1.0, -1.0, 1.0), v(1.0, -1.0, 1.0), v(1.0, 1.0, 1.0), 0)
+            .unwrap();
+        let t2 = Polygon::from_triangle(v(-1.0, -1.0, 1.0), v(1.0, 1.0, 1.0), v(-1.0, 1.0, 1.0), 0)
+            .unwrap();
+        // Confirm plane equality + first-vertex equality (the collision
+        // setup the test is supposed to defeat).
+        assert_eq!(
+            (t1.plane.n_x, t1.plane.n_y, t1.plane.n_z, t1.plane.d),
+            (t2.plane.n_x, t2.plane.n_y, t2.plane.n_z, t2.plane.d)
+        );
+        assert_eq!(t1.vertices[0], t2.vertices[0]);
+        // Sort keys must differ.
+        assert_ne!(
+            polygon_sort_key(&t1),
+            polygon_sort_key(&t2),
+            "cube-face-twin triangles must hash to different sort keys"
+        );
+    }
+
+    #[test]
+    fn clip_polygons_outside_volume_passes_through() {
+        // Build a unit-box tree, clip a far-away triangle against it.
+        // The triangle is fully outside the cube so it's kept.
+        let mut tree = BspTree::new();
+        tree.build(unit_box()).unwrap();
+        let far = Polygon::from_triangle(
+            pt(10.0, 10.0, 10.0),
+            pt(11.0, 10.0, 10.0),
+            pt(10.0, 11.0, 10.0),
+            5,
+        )
+        .unwrap();
+        let result = tree.clip_polygons(vec![far]).unwrap();
+        assert_eq!(result.len(), 1, "polygon outside volume must pass through");
+    }
+
+    #[test]
+    fn clip_polygons_inside_volume_is_dropped() {
+        // Triangle fully inside the unit cube; clip_to drops anything
+        // routed into a missing-back subtree (= inside the volume).
+        let mut tree = BspTree::new();
+        tree.build(unit_box()).unwrap();
+        let inside = Polygon::from_triangle(
+            pt(-0.1, -0.1, -0.1),
+            pt(0.1, -0.1, -0.1),
+            pt(-0.1, 0.1, -0.1),
+            5,
+        )
+        .unwrap();
+        let result = tree.clip_polygons(vec![inside]).unwrap();
+        assert!(
+            result.is_empty(),
+            "polygon strictly inside volume must be dropped, got {} polys",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn clip_to_disjoint_box_keeps_everything() {
+        let mut a = BspTree::new();
+        a.build(unit_box()).unwrap();
+        // Far-away cube: make a translated copy at +10 in x.
+        let v = |sx: f32, sy: f32, sz: f32| pt(sx + 10.0, sy, sz);
+        let tri = |p0, p1, p2| Polygon::from_triangle(p0, p1, p2, 1).expect("non-degenerate");
+        let far = vec![
+            tri(v(1.0, -1.0, -1.0), v(1.0, 1.0, -1.0), v(1.0, 1.0, 1.0)),
+            tri(v(1.0, -1.0, -1.0), v(1.0, 1.0, 1.0), v(1.0, -1.0, 1.0)),
+            tri(v(-1.0, -1.0, -1.0), v(-1.0, -1.0, 1.0), v(-1.0, 1.0, 1.0)),
+            tri(v(-1.0, -1.0, -1.0), v(-1.0, 1.0, 1.0), v(-1.0, 1.0, -1.0)),
+            tri(v(-1.0, 1.0, -1.0), v(-1.0, 1.0, 1.0), v(1.0, 1.0, 1.0)),
+            tri(v(-1.0, 1.0, -1.0), v(1.0, 1.0, 1.0), v(1.0, 1.0, -1.0)),
+            tri(v(-1.0, -1.0, -1.0), v(1.0, -1.0, -1.0), v(1.0, -1.0, 1.0)),
+            tri(v(-1.0, -1.0, -1.0), v(1.0, -1.0, 1.0), v(-1.0, -1.0, 1.0)),
+            tri(v(-1.0, -1.0, 1.0), v(1.0, -1.0, 1.0), v(1.0, 1.0, 1.0)),
+            tri(v(-1.0, -1.0, 1.0), v(1.0, 1.0, 1.0), v(-1.0, 1.0, 1.0)),
+            tri(v(-1.0, -1.0, -1.0), v(-1.0, 1.0, -1.0), v(1.0, 1.0, -1.0)),
+            tri(v(-1.0, -1.0, -1.0), v(1.0, 1.0, -1.0), v(1.0, -1.0, -1.0)),
+        ];
+        let mut b = BspTree::new();
+        b.build(far).unwrap();
+        let polys_before = a.all_polygons().len();
+        a.clip_to(&b).unwrap();
+        let polys_after = a.all_polygons().len();
+        assert_eq!(
+            polys_before, polys_after,
+            "clip against disjoint volume must not drop any polygons"
+        );
+    }
+
+    #[test]
+    fn max_work_queue_constant_is_pinned() {
+        // Regression guard: an "innocuous tuning" change to this
+        // constant could silently affect CSG behavior at boundary
+        // cases (recursion-cap firing earlier or later).
+        assert_eq!(MAX_WORK_QUEUE, 65_536);
+    }
+
+    #[test]
+    fn all_polygons_returns_no_degenerate() {
+        // Build a non-trivial tree and verify every emitted polygon
+        // has >= 3 vertices and a non-zero normal. Pinning here makes
+        // downstream consumers' "polygons are non-degenerate" assumption
+        // load-bearing.
+        let mut tree = BspTree::new();
+        tree.build(unit_box()).unwrap();
+        for poly in tree.all_polygons() {
+            assert!(poly.vertices.len() >= 3);
+            assert!(!poly.plane.is_degenerate(), "degenerate polygon emitted");
+        }
+    }
 }
