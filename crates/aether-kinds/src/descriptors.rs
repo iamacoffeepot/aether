@@ -18,18 +18,17 @@ use aether_hub_protocol::KindDescriptor;
 use aether_mail::{Kind, Schema};
 
 use crate::{
-    Camera, CaptureFrame, CaptureFrameResult, Delete, DeleteFaces, DeleteResult, Describe,
-    DrawTriangle, DropComponent, DropResult, ExtrudeFace, Fetch, FetchResult, FrameStats,
-    HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
-    HandleReleaseResult, HandleUnpin, HandleUnpinResult, Key, KeyRelease, List, ListResult,
-    LoadComponent, LoadResult, LoadStaticMesh, MeshState, MouseButton, MouseMove, NoteOff, NoteOn,
-    OrbitSetDistance, OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping,
-    PlatformInfo, PlatformInfoResult, PlayerRequestStep, PlayerSetMode, PlayerSetPosition,
-    PlayerSetVelocity, PlayerStepResult, Pong, Read, ReadResult, ReplaceComponent, ReplaceResult,
-    RotateVertices, ScaleVertices, SetMasterGain, SetMasterGainResult, SetPrimitive, SetWindowMode,
-    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeInput,
-    SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, TranslateVertices,
-    UnresolvedMail, UnsubscribeInput, WindowSize, Write, WriteResult,
+    Camera, CaptureFrame, CaptureFrameResult, Delete, DeleteResult, DrawTriangle, DropComponent,
+    DropResult, Fetch, FetchResult, FrameStats, HandlePin, HandlePinResult, HandlePublish,
+    HandlePublishResult, HandleRelease, HandleReleaseResult, HandleUnpin, HandleUnpinResult, Key,
+    KeyRelease, List, ListResult, LoadComponent, LoadResult, LoadStaticMesh, MouseButton,
+    MouseMove, NoteOff, NoteOn, OrbitSetDistance, OrbitSetFov, OrbitSetPitch, OrbitSetSpeed,
+    OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo, PlatformInfoResult, PlayerRequestStep,
+    PlayerSetMode, PlayerSetPosition, PlayerSetVelocity, PlayerStepResult, Pong, Read, ReadResult,
+    ReplaceComponent, ReplaceResult, SetMasterGain, SetMasterGainResult, SetPath, SetText,
+    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeInput,
+    SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
+    UnsubscribeInput, WindowSize, Write, WriteResult,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -156,22 +155,13 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<HandlePinResult>(),
         schema::<HandleUnpin>(),
         schema::<HandleUnpinResult>(),
-        // Mesh editor component vocabulary (Spike C). Postcard
-        // structs — `SetPrimitive` carries a tagged `Primitive` enum
-        // with per-variant params, the others carry a `Vec` of vertex
-        // ids and per-op params. All fire-and-forget; the editor
-        // re-emits its mesh as `DrawTriangle` mail every tick. The
-        // `Describe` request is answered by broadcasting `MeshState`
-        // to `hub.claude.broadcast` so MCP harness consumers can see
-        // the editor's current vertex/face inventory.
-        schema::<SetPrimitive>(),
-        schema::<TranslateVertices>(),
-        schema::<ScaleVertices>(),
-        schema::<RotateVertices>(),
-        schema::<ExtrudeFace>(),
-        schema::<DeleteFaces>(),
-        schema::<Describe>(),
-        schema::<MeshState>(),
+        // DSL mesh editor component vocabulary (ADR-0052). The editor
+        // hot-loads DSL source (per ADR-0026 + ADR-0051) and replays
+        // the meshed triangles as `DrawTriangle` mail every tick. Two
+        // input kinds: `SetText` for inline DSL, `SetPath` for
+        // namespace+path-loaded DSL via the `"io"` sink.
+        schema::<SetText>(),
+        schema::<SetPath>(),
         // Static mesh viewer (developer tool). Loads an OBJ via the
         // io sink and replays its triangle list as DrawTriangle each
         // tick. ADR-0026's no-import-for-production-content rule does
