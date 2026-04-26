@@ -11,10 +11,12 @@ pub mod csg;
 pub mod mesh;
 pub mod obj;
 pub mod parse;
+pub mod polygon;
 pub mod serialize;
 
 pub use ast::{Axis, Node};
 pub use mesh::{MeshError, Triangle, mesh};
 pub use obj::to_obj;
 pub use parse::{ParseError, parse};
+pub use polygon::{Polygon, mesh_polygons, tessellate_polygon};
 pub use serialize::{node_to_value, serialize};

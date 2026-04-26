@@ -37,11 +37,10 @@ fn plane_key(p: &Plane3) -> PlaneKey {
 }
 
 impl IndexedMesh {
-    /// Convert back to the owned-vertex polygon form (n-gon). Used by
-    /// pipeline tests to inspect the post-merge / post-tjunction state;
-    /// will become the entry point for the polygon-domain public API
-    /// in a follow-on PR.
-    #[cfg(test)]
+    /// Convert back to the owned-vertex polygon form (n-gon). The entry
+    /// point for the polygon-domain public API per ADR-0057 — used by
+    /// `cleanup::run_to_loops` and by pipeline tests inspecting the
+    /// post-merge / post-tjunction state.
     pub(super) fn into_polygons(self) -> Vec<Polygon> {
         let IndexedMesh { vertices, polygons } = self;
         let mut out = Vec::with_capacity(polygons.len());
