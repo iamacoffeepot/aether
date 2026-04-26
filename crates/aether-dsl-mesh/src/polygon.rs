@@ -23,7 +23,7 @@
 
 use crate::csg;
 use crate::csg::point::Point3;
-use crate::mesh::{MeshError, Triangle};
+use crate::mesh::MeshError;
 use std::collections::HashMap;
 
 /// N-gon polygonal face — the canonical mesh form (ADR-0057).
@@ -40,30 +40,18 @@ pub struct Polygon {
 
 /// Mesh `node` and return the result as n-gon polygons.
 ///
-/// Internally calls [`crate::mesh::mesh`] to get triangles, then runs
-/// the cleanup pipeline's loop-extraction pass (skipping triangulation)
-/// to recover the boundary loops, then groups by plane + color into
-/// outer + holes via signed-area orientation. The triangle round-trip
-/// is wasteful but correct; ADR-0057 PR 3 will replace it with a
-/// polygon-domain CSG path.
+/// Goes directly through [`crate::mesh::mesh_polygons_internal`] —
+/// the polygon-domain mesh evaluator that operates polygon-in /
+/// polygon-out throughout (no triangle round-trip). This is the fix
+/// for the protruding_sphere SingularEdges: the previous path went
+/// `mesh → Vec<Triangle> → from_triangle (re-derives plane via cross
+/// product) → polygons`, and `from_triangle` flips `n_z` sign on
+/// CDT-output sliver triangles. Skipping the triangle hop avoids the
+/// re-derivation entirely — n-gon loops travel from CSG cleanup
+/// straight into [`group_loops`].
 pub fn mesh_polygons(node: &crate::ast::Node) -> Result<Vec<Polygon>, MeshError> {
-    let triangles = crate::mesh::mesh(node)?;
-    Ok(triangles_to_polygons(&triangles))
-}
-
-fn triangles_to_polygons(triangles: &[Triangle]) -> Vec<Polygon> {
-    let csg_polys: Vec<csg::polygon::Polygon> = triangles
-        .iter()
-        .filter_map(|t| {
-            let v0 = Point3::from_f32(t.vertices[0]).ok()?;
-            let v1 = Point3::from_f32(t.vertices[1]).ok()?;
-            let v2 = Point3::from_f32(t.vertices[2]).ok()?;
-            csg::polygon::Polygon::from_triangle(v0, v1, v2, t.color)
-        })
-        .collect();
-
-    let loops = csg::cleanup::run_to_loops(csg_polys);
-    group_loops(loops)
+    let loops = crate::mesh::mesh_polygons_internal(node)?;
+    Ok(group_loops(loops))
 }
 
 type GroupKey = (i64, i64, i64, i128, u32);
