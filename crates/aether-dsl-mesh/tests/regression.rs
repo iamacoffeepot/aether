@@ -82,17 +82,15 @@ fn box_minus_cylinder_is_watertight() {
     assert_watertight("(difference (box 1.5 1.5 1.5 :color 0) (cylinder 0.3 2.0 16 :color 1))");
 }
 
-/// **Partially fixed by difference-of-union AST rewrite, residual
-/// 6 violations.** The rewrite (this PR) reduced violations from 29
-/// (chained-pairwise BSP, accumulating snap drift on the cube face)
-/// to 6 (single BSP for difference, much less drift). Remaining
-/// violations are 3 BoundaryEdges × 2 (mirror on top + bottom face)
-/// forming a sliver triangle near the center box cutter's `z=-0.2`
-/// corner — looks like a CDT or merge_coplanar edge case for thin
-/// strips of material between adjacent cutters, not snap drift.
-/// Separate fix.
+/// **Regression**: 3-cutter difference passes after primitives
+/// emit n-gons natively. Pre-migration the box's 12 input triangles
+/// (6 quad faces split) fed BSP enough fragments per face that
+/// chained snap-drift left a residual sliver near the center
+/// cutter's `z=-0.2` corner. With native quads (PR D) the cube top
+/// face is one quad in, the box cutter's hole becomes a clean
+/// rectangular hole, and CDT triangulates the annular region without
+/// the sliver.
 #[test]
-#[ignore = "residual 6 boundary edges — sliver near center-box-cutter corner, not snap drift"]
 fn three_cut_box_is_watertight() {
     assert_watertight(
         "(difference \
