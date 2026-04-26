@@ -1,11 +1,6 @@
-//! Typed mesh AST for the v1 vocabulary committed by ADR-0026, plus
-//! the v2 additions the spike commits to ahead of an ADR amendment:
-//! `torus` (handles, rings) and `sweep` (curved tubes — spouts).
-//!
-//! Sweep-along-path is on ADR-0026's parked v2 list; torus is not in
-//! the ADR yet and would land as a v2 vocabulary extension. Both are
-//! gated behind the spike — promotion to a real crate should sync
-//! the ADR first.
+//! Typed mesh AST for the v1 vocabulary defined by ADR-0026 and
+//! formalized in ADR-0051. All variants here have a parser arm in
+//! `parse.rs` and a mesher arm in `mesh.rs`.
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
@@ -52,7 +47,6 @@ pub enum Node {
         color: u32,
     },
 
-    // v2 vocabulary (spike-committed; ADR amendment pending)
     /// Donut-shaped surface around the Y axis. `major_radius` is the
     /// distance from the torus center to the center of the tube;
     /// `minor_radius` is the tube's radius. `major_segments` divides

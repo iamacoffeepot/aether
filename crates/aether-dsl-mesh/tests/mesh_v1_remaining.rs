@@ -5,9 +5,9 @@
 //! Each mesher gets a triangle-count check + an outward-winding check
 //! (where the centroid-vs-normal test is well-defined for the shape).
 
-use dsl_mesh_spike::{mesh, parse};
+use aether_dsl_mesh::{mesh, parse};
 
-fn tri_normal(tri: &dsl_mesh_spike::Triangle) -> [f32; 3] {
+fn tri_normal(tri: &aether_dsl_mesh::Triangle) -> [f32; 3] {
     let a = tri.vertices[0];
     let b = tri.vertices[1];
     let c = tri.vertices[2];
@@ -20,7 +20,7 @@ fn tri_normal(tri: &dsl_mesh_spike::Triangle) -> [f32; 3] {
     ]
 }
 
-fn tri_centroid(tri: &dsl_mesh_spike::Triangle) -> [f32; 3] {
+fn tri_centroid(tri: &aether_dsl_mesh::Triangle) -> [f32; 3] {
     let a = tri.vertices[0];
     let b = tri.vertices[1];
     let c = tri.vertices[2];
@@ -324,7 +324,7 @@ fn round_trip_full_v1_vocab() {
         (mirror x (translate (2 0 0) (box 1 1 1 :color 5)))
         (array 3 (1.5 0 0) (box 0.5 0.5 0.5 :color 6)))";
     let ast1 = parse(text).unwrap();
-    let serialized = dsl_mesh_spike::serialize(&ast1);
+    let serialized = aether_dsl_mesh::serialize(&ast1);
     let ast2 = parse(&serialized).unwrap();
     assert_eq!(ast1, ast2);
     // And the whole composition meshes without error.

@@ -1,0 +1,11 @@
+[package]
+name = "aether-dsl-mesh"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lexpr = "0.2"
+thiserror = "2"
+
+[dev-dependencies]
+pretty_assertions = "1"

@@ -1,6 +1,6 @@
 //! Tests for the v2 vocabulary additions: torus + sweep-along-path.
 
-use dsl_mesh_spike::{mesh, parse};
+use aether_dsl_mesh::{mesh, parse};
 
 #[test]
 fn torus_triangle_count_is_two_per_quad() {
@@ -140,7 +140,7 @@ fn round_trip_torus_and_sweep() {
                ((0 0.5 0) (0.3 0.6 0) (0.5 0.8 0))
                :color 7))";
     let ast1 = parse(text).unwrap();
-    let serialized = dsl_mesh_spike::serialize(&ast1);
+    let serialized = aether_dsl_mesh::serialize(&ast1);
     let ast2 = parse(&serialized).unwrap();
     assert_eq!(ast1, ast2);
 }
