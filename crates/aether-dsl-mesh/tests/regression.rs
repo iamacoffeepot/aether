@@ -58,16 +58,18 @@ fn box_minus_enclosed_box_is_watertight() {
 /// partitioners). See csg::ops::tests::diagnostic_box_minus_sphere*
 /// for the localization. Follow-up PR un-ignores once fixed.
 #[test]
-#[ignore = "BSP fragmentation asymmetry — see csg::ops diagnostic_box_minus_sphere*"]
 fn box_minus_enclosed_sphere_is_watertight() {
     assert_watertight("(difference (box 1.5 1.5 1.5 :color 0) (sphere 0.5 12 :color 1))");
 }
 
-/// **Known-failing**: same root cause as enclosed_sphere — the
-/// protruding sphere case adds visible holes (pierced cube faces)
-/// on top of the underlying boundary-edge problem.
+/// **Known-failing — different bug from snap drift**: the protruding
+/// sphere produces SingularEdges (forward=2, reverse=2) at cube
+/// corner regions where the sphere bulges past two cube faces
+/// simultaneously. The vertices are ~14 fixed units apart so it's
+/// not snap drift — looks like genuinely overlapping fragments from
+/// a CSG composition issue at corner-bulge geometry. Separate fix.
 #[test]
-#[ignore = "BSP fragmentation asymmetry — see csg::ops diagnostic_box_minus_sphere*"]
+#[ignore = "BSP corner-bulge overlapping fragments — different bug from snap drift"]
 fn box_minus_protruding_sphere_is_watertight() {
     assert_watertight("(difference (box 1.5 1.5 1.5 :color 0) (sphere 0.95 12 :color 1))");
 }
@@ -76,7 +78,6 @@ fn box_minus_protruding_sphere_is_watertight() {
 /// near-cube-face planes trigger the same fragmentation asymmetry
 /// in BSP composition.
 #[test]
-#[ignore = "BSP fragmentation asymmetry — see csg::ops diagnostic_box_minus_sphere*"]
 fn box_minus_cylinder_is_watertight() {
     assert_watertight("(difference (box 1.5 1.5 1.5 :color 0) (cylinder 0.3 2.0 16 :color 1))");
 }
@@ -84,7 +85,6 @@ fn box_minus_cylinder_is_watertight() {
 /// **Known-failing**: the 3-cut box compounds two cylinder cuts —
 /// same BSP fragmentation issue as the single-cylinder case.
 #[test]
-#[ignore = "BSP fragmentation asymmetry — see csg::ops diagnostic_box_minus_sphere*"]
 fn three_cut_box_is_watertight() {
     assert_watertight(
         "(difference \

@@ -325,6 +325,528 @@ mod tests {
         );
     }
 
+    /// **Diagnostic step 9**: same as step 8 but for the
+    /// box-minus-protruding-sphere case (sphere of radius 0.95 actually
+    /// pokes through cube faces — genuine intersection geometry).
+    /// What perpendicular distance would catch the remaining 2
+    /// boundary edges?
+    #[test]
+    #[ignore = "diagnostic only — perp distance for protruding sphere"]
+    fn diagnostic_protruding_sphere_perp_distances() {
+        let box_polys = axis_aligned_box(0.0, 0.0, 0.0, 0.75, 0.75, 0.75, 0);
+        let sphere_polys = build_sphere(0.95, 12, 1);
+        let cleaned = difference(box_polys, sphere_polys).unwrap();
+
+        use std::collections::{HashMap, HashSet};
+        let mut directed: HashMap<(Point3, Point3), usize> = HashMap::new();
+        let mut all_vertices: HashSet<Point3> = HashSet::new();
+        for poly in &cleaned {
+            let n = poly.vertices.len();
+            for i in 0..n {
+                let a = poly.vertices[i];
+                let b = poly.vertices[(i + 1) % n];
+                if a == b {
+                    continue;
+                }
+                *directed.entry((a, b)).or_insert(0) += 1;
+                all_vertices.insert(a);
+            }
+        }
+        let unmatched: Vec<(Point3, Point3)> = directed
+            .iter()
+            .filter_map(|(&(a, b), _)| {
+                if !directed.contains_key(&(b, a)) {
+                    Some((a, b))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut report = String::new();
+        report.push_str(&format!("POST-CLEANUP unmatched: {}\n", unmatched.len()));
+        for &(a, b) in &unmatched {
+            let abx = (b.x - a.x) as i128;
+            let aby = (b.y - a.y) as i128;
+            let abz = (b.z - a.z) as i128;
+            let edge_len2 = abx * abx + aby * aby + abz * abz;
+            if edge_len2 == 0 {
+                continue;
+            }
+            // Find closest near-collinear candidate.
+            let mut best: Option<(f64, Point3)> = None;
+            for v in &all_vertices {
+                if *v == a || *v == b {
+                    continue;
+                }
+                let apx = (v.x - a.x) as i128;
+                let apy = (v.y - a.y) as i128;
+                let apz = (v.z - a.z) as i128;
+                let dot = apx * abx + apy * aby + apz * abz;
+                if dot <= 0 || dot >= edge_len2 {
+                    continue;
+                }
+                let cx = apy * abz - apz * aby;
+                let cy = apz * abx - apx * abz;
+                let cz = apx * aby - apy * abx;
+                let cross_mag2 = (cx * cx + cy * cy + cz * cz) as f64;
+                let perp = (cross_mag2 / edge_len2 as f64).sqrt();
+                if best.map(|(b, _)| perp < b).unwrap_or(true) {
+                    best = Some((perp, *v));
+                }
+            }
+            match best {
+                Some((perp, v)) => {
+                    report.push_str(&format!(
+                        "  edge {:?}→{:?}: closest candidate {:?} at perp={:.3}\n",
+                        a.to_f32(),
+                        b.to_f32(),
+                        v.to_f32(),
+                        perp
+                    ));
+                }
+                None => {
+                    report.push_str(&format!(
+                        "  edge {:?}→{:?}: NO collinear candidate found\n",
+                        a.to_f32(),
+                        b.to_f32()
+                    ));
+                }
+            }
+        }
+        panic!("{report}");
+    }
+
+    /// **Diagnostic step 8**: for each unmatched boundary edge in raw
+    /// BSP output, find candidate "would-be collinear" vertices from
+    /// other polygons (vertices that fall geometrically between the
+    /// edge's endpoints), and compute their perpendicular distance to
+    /// the edge's supposed line. Reports the distribution so we know
+    /// what tolerance value would catch them all.
+    #[test]
+    #[ignore = "diagnostic only — measures perpendicular distance of would-be collinear vertices"]
+    fn diagnostic_perpendicular_distance_distribution() {
+        let box_polys = axis_aligned_box(0.0, 0.0, 0.0, 0.75, 0.75, 0.75, 0);
+        let sphere_polys = build_sphere(0.5, 12, 1);
+        let raw = difference_raw(box_polys, sphere_polys).unwrap();
+
+        use std::collections::{HashMap, HashSet};
+        let mut directed: HashMap<(Point3, Point3), usize> = HashMap::new();
+        let mut all_vertices: HashSet<Point3> = HashSet::new();
+        for poly in &raw {
+            let n = poly.vertices.len();
+            for i in 0..n {
+                let a = poly.vertices[i];
+                let b = poly.vertices[(i + 1) % n];
+                if a == b {
+                    continue;
+                }
+                *directed.entry((a, b)).or_insert(0) += 1;
+                all_vertices.insert(a);
+            }
+        }
+        let unmatched: Vec<(Point3, Point3)> = directed
+            .iter()
+            .filter_map(|(&(a, b), _)| {
+                if !directed.contains_key(&(b, a)) {
+                    Some((a, b))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // For each unmatched edge, find vertices in the pool that fall
+        // strictly between its endpoints (parametric t in (0, 1) when
+        // projected onto edge direction). Compute perpendicular distance
+        // squared and edge length squared to derive perpendicular distance.
+        let mut perp_distances: Vec<f64> = Vec::new();
+        let mut samples_above_threshold: Vec<String> = Vec::new();
+        for &(a, b) in &unmatched {
+            let abx = (b.x - a.x) as i128;
+            let aby = (b.y - a.y) as i128;
+            let abz = (b.z - a.z) as i128;
+            let edge_len2 = abx * abx + aby * aby + abz * abz;
+            if edge_len2 == 0 {
+                continue;
+            }
+            for v in &all_vertices {
+                if *v == a || *v == b {
+                    continue;
+                }
+                let apx = (v.x - a.x) as i128;
+                let apy = (v.y - a.y) as i128;
+                let apz = (v.z - a.z) as i128;
+                // Parametric projection: t = (a→v · a→b) / |a→b|²
+                // Skip vertices outside the segment.
+                let dot = apx * abx + apy * aby + apz * abz;
+                if dot <= 0 || dot >= edge_len2 {
+                    continue;
+                }
+                // Perpendicular distance = |cross(a→b, a→v)| / |a→b|
+                let cx = apy * abz - apz * aby;
+                let cy = apz * abx - apx * abz;
+                let cz = apx * aby - apy * abx;
+                let cross_mag2 = cx * cx + cy * cy + cz * cz;
+                if cross_mag2 == 0 {
+                    continue; // exactly collinear; t-junction would catch
+                }
+                let perp_sq = cross_mag2 as f64 / edge_len2 as f64;
+                let perp = perp_sq.sqrt();
+                // Only include "near-collinear" candidates — within ~10
+                // fixed units perpendicular. Beyond that, they're not
+                // mistakes from snap drift, just unrelated vertices.
+                if perp < 10.0 {
+                    perp_distances.push(perp);
+                    if perp >= 1.0 && samples_above_threshold.len() < 5 {
+                        samples_above_threshold.push(format!(
+                            "  perp={perp:.3} fixed units; edge={:?}→{:?}, v={:?}",
+                            a.to_f32(),
+                            b.to_f32(),
+                            v.to_f32()
+                        ));
+                    }
+                }
+            }
+        }
+        perp_distances.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        let buckets = [
+            ("< 0.5", perp_distances.iter().filter(|&&p| p < 0.5).count()),
+            (
+                "0.5 - 1.0",
+                perp_distances
+                    .iter()
+                    .filter(|&&p| (0.5..1.0).contains(&p))
+                    .count(),
+            ),
+            (
+                "1.0 - 2.0",
+                perp_distances
+                    .iter()
+                    .filter(|&&p| (1.0..2.0).contains(&p))
+                    .count(),
+            ),
+            (
+                "2.0 - 5.0",
+                perp_distances
+                    .iter()
+                    .filter(|&&p| (2.0..5.0).contains(&p))
+                    .count(),
+            ),
+            (
+                "5.0 - 10.0",
+                perp_distances
+                    .iter()
+                    .filter(|&&p| (5.0..10.0).contains(&p))
+                    .count(),
+            ),
+        ];
+        let max = perp_distances.last().copied().unwrap_or(0.0);
+        let median = perp_distances
+            .get(perp_distances.len() / 2)
+            .copied()
+            .unwrap_or(0.0);
+        let mut report = String::new();
+        report.push_str(&format!(
+            "DIAGNOSTIC: {} unmatched edges, {} candidate (vertex, edge) pairs found within 10 fixed units perpendicular.\n",
+            unmatched.len(),
+            perp_distances.len()
+        ));
+        report.push_str("Distribution of perpendicular distances (in fixed units):\n");
+        for (label, count) in &buckets {
+            report.push_str(&format!("  {label}: {count}\n"));
+        }
+        report.push_str(&format!("Median: {median:.3}, Max: {max:.3}\n"));
+        report.push_str("Samples above 1.0 fixed unit:\n");
+        for s in &samples_above_threshold {
+            report.push_str(s);
+            report.push('\n');
+        }
+        panic!("{report}");
+    }
+
+    /// **Diagnostic step 7**: dump all raw-BSP polygons on the +Z cube
+    /// face plane to see exactly what fragments exist and what edges
+    /// they have. Each fragment should be a piece of the cube face,
+    /// and adjacent fragments should share edges. Unmatched edges
+    /// mean two fragments that should be neighbors don't have the
+    /// same vertex sequence on their shared boundary.
+    #[test]
+    #[ignore = "diagnostic only — dump +Z face fragments"]
+    fn diagnostic_plus_z_face_fragments() {
+        let box_polys = axis_aligned_box(0.0, 0.0, 0.0, 0.75, 0.75, 0.75, 0);
+        let sphere_polys = build_sphere(0.5, 12, 1);
+        let raw = difference_raw(box_polys, sphere_polys).unwrap();
+
+        let cap = (0.75_f64 * 65536.0).round() as i32;
+        let on_plus_z: Vec<&Polygon> = raw
+            .iter()
+            .filter(|p| p.vertices.iter().all(|v| v.z == cap))
+            .collect();
+
+        let mut report = String::new();
+        report.push_str(&format!(
+            "{} polygons on +Z (z=0.75) cube face. Fragment list:\n",
+            on_plus_z.len()
+        ));
+        for (i, poly) in on_plus_z.iter().enumerate() {
+            report.push_str(&format!("  [{i}] color={} verts:\n", poly.color));
+            for v in &poly.vertices {
+                let (x, y, z) = (v.to_f32()[0], v.to_f32()[1], v.to_f32()[2]);
+                report.push_str(&format!("      ({x:.6}, {y:.6}, {z:.6})\n"));
+            }
+        }
+        panic!("{report}");
+    }
+
+    /// **Diagnostic step 6**: re-run perimeter-vs-interior classification
+    /// on POST-CLEANUP output (36 boundary edges) to see what cleanup
+    /// fixed and what remains. If t-junction repair handles all
+    /// "interior" edges and the remaining 36 are all "perimeter", the
+    /// bug is at adjacent-face snap drift. If the remaining 36 still
+    /// include "interior" edges, t-junction repair has a coverage gap.
+    #[test]
+    #[ignore = "diagnostic only — classify post-cleanup boundary edges"]
+    fn diagnostic_post_cleanup_classification() {
+        let box_polys = axis_aligned_box(0.0, 0.0, 0.0, 0.75, 0.75, 0.75, 0);
+        let sphere_polys = build_sphere(0.5, 12, 1);
+        let cleaned = difference(box_polys, sphere_polys).unwrap();
+
+        use std::collections::HashMap;
+        let mut directed: HashMap<(Point3, Point3), usize> = HashMap::new();
+        for poly in &cleaned {
+            let n = poly.vertices.len();
+            for i in 0..n {
+                let a = poly.vertices[i];
+                let b = poly.vertices[(i + 1) % n];
+                if a == b {
+                    continue;
+                }
+                *directed.entry((a, b)).or_insert(0) += 1;
+            }
+        }
+        let unmatched: Vec<(Point3, Point3)> = directed
+            .iter()
+            .filter_map(|(&(a, b), _)| {
+                if !directed.contains_key(&(b, a)) {
+                    Some((a, b))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let cap_count = |p: Point3| -> usize {
+            let cap = (0.75_f64 * 65536.0).round() as i32;
+            let mut n = 0;
+            if p.x.abs() == cap {
+                n += 1;
+            }
+            if p.y.abs() == cap {
+                n += 1;
+            }
+            if p.z.abs() == cap {
+                n += 1;
+            }
+            n
+        };
+        let mut by_class: HashMap<&'static str, usize> = HashMap::new();
+        for &(a, b) in &unmatched {
+            let na = cap_count(a);
+            let nb = cap_count(b);
+            let class = match (na, nb) {
+                (3, _) | (_, 3) => "corner-touching",
+                (2, 2) => "perimeter (both on cube wireframe edge)",
+                (2, _) | (_, 2) => "perimeter-to-interior",
+                _ => "interior (within cube face)",
+            };
+            *by_class.entry(class).or_insert(0) += 1;
+        }
+        let mut report = String::new();
+        for (class, count) in &by_class {
+            report.push_str(&format!("  {class}: {count}\n"));
+        }
+        panic!(
+            "POST-CLEANUP: {} unmatched edges:\n{report}",
+            unmatched.len()
+        );
+    }
+
+    /// **Diagnostic step 5**: classify unmatched edges by location —
+    /// cube perimeter (along cube wireframe edge, where two cube faces
+    /// meet) vs interior (within one cube face). Perimeter mismatches
+    /// would mean adjacent cube face splits produce different snap
+    /// points; interior mismatches would mean within-face fragmentation
+    /// produces inconsistent splits.
+    #[test]
+    #[ignore = "diagnostic only — perimeter vs interior unmatched edges"]
+    fn diagnostic_perimeter_vs_interior_edges() {
+        let box_polys = axis_aligned_box(0.0, 0.0, 0.0, 0.75, 0.75, 0.75, 0);
+        let sphere_polys = build_sphere(0.5, 12, 1);
+        let raw = difference_raw(box_polys, sphere_polys).unwrap();
+
+        use std::collections::HashMap;
+        let mut directed: HashMap<(Point3, Point3), usize> = HashMap::new();
+        for poly in &raw {
+            let n = poly.vertices.len();
+            for i in 0..n {
+                let a = poly.vertices[i];
+                let b = poly.vertices[(i + 1) % n];
+                if a == b {
+                    continue;
+                }
+                *directed.entry((a, b)).or_insert(0) += 1;
+            }
+        }
+        let unmatched: Vec<(Point3, Point3)> = directed
+            .iter()
+            .filter_map(|(&(a, b), _)| {
+                if !directed.contains_key(&(b, a)) {
+                    Some((a, b))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Classify each unmatched edge.
+        // - "perimeter" if both endpoints have ≥2 of their coords at ±0.75 cap
+        //   (i.e., they sit on a cube wireframe edge).
+        // - "corner-to-edge" if one endpoint is a cube corner (3 coords at cap)
+        //   and the other has 2 coords at cap.
+        // - "interior" otherwise.
+        let cap_count = |p: Point3| -> usize {
+            let cap = (0.75_f64 * 65536.0).round() as i32;
+            let mut n = 0;
+            if p.x.abs() == cap {
+                n += 1;
+            }
+            if p.y.abs() == cap {
+                n += 1;
+            }
+            if p.z.abs() == cap {
+                n += 1;
+            }
+            n
+        };
+        let mut by_class: HashMap<&'static str, usize> = HashMap::new();
+        let mut samples: Vec<String> = Vec::new();
+        for &(a, b) in &unmatched {
+            let na = cap_count(a);
+            let nb = cap_count(b);
+            let class = match (na, nb) {
+                (3, _) | (_, 3) => "corner-touching",
+                (2, 2) => "perimeter (both on cube wireframe edge)",
+                (2, _) | (_, 2) => "perimeter-to-interior",
+                _ => "interior (within cube face)",
+            };
+            *by_class.entry(class).or_insert(0) += 1;
+            if samples.len() < 6 {
+                samples.push(format!("  {class}: ({:?}, {:?})", a.to_f32(), b.to_f32()));
+            }
+        }
+        let mut report = String::new();
+        for (class, count) in &by_class {
+            report.push_str(&format!("  {class}: {count}\n"));
+        }
+        let mut sample_lines = String::new();
+        for s in &samples {
+            sample_lines.push_str(s);
+            sample_lines.push('\n');
+        }
+        panic!(
+            "DIAGNOSTIC: classification of {} unmatched edges:\n{report}\nSamples:\n{sample_lines}",
+            unmatched.len()
+        );
+    }
+
+    /// **Diagnostic step 4**: classify unmatched boundary edges by
+    /// the color of the polygons containing them. Box - sphere with
+    /// the sphere fully inside the box should have ZERO sphere/cube
+    /// shared boundary geometrically (the sphere doesn't reach the
+    /// cube faces). So all unmatched edges should be cube↔cube (color
+    /// 0 ↔ 0) — meaning cube face fragments aren't pairing up.
+    #[test]
+    #[ignore = "diagnostic only — classifies boundary edges by polygon color"]
+    fn diagnostic_boundary_edge_colors() {
+        let box_polys = axis_aligned_box(0.0, 0.0, 0.0, 0.75, 0.75, 0.75, 0);
+        let sphere_polys = build_sphere(0.5, 12, 1);
+        let raw = difference_raw(box_polys, sphere_polys).unwrap();
+
+        use std::collections::HashMap;
+        let mut directed: HashMap<(Point3, Point3), Vec<u32>> = HashMap::new();
+        for poly in &raw {
+            let n = poly.vertices.len();
+            for i in 0..n {
+                let a = poly.vertices[i];
+                let b = poly.vertices[(i + 1) % n];
+                if a == b {
+                    continue;
+                }
+                directed.entry((a, b)).or_default().push(poly.color);
+            }
+        }
+        let mut color_pairs: HashMap<(u32, &'static str), usize> = HashMap::new();
+        let mut unmatched_count = 0;
+        for (&(a, b), forward_colors) in directed.iter() {
+            let reverse = directed.get(&(b, a));
+            if reverse.is_none() {
+                unmatched_count += 1;
+                for &fc in forward_colors {
+                    let key = (fc, "no-reverse");
+                    *color_pairs.entry(key).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut report = String::new();
+        for ((color, status), count) in &color_pairs {
+            report.push_str(&format!("  color={color} {status}: {count}\n"));
+        }
+        // Also count plane locations of unmatched edges.
+        let mut by_plane: HashMap<&'static str, usize> = HashMap::new();
+        for (&(a, b), _) in directed.iter() {
+            if directed.contains_key(&(b, a)) {
+                continue;
+            }
+            let p = |fixed: i32| (fixed as f64 / 65536.0 * 100.0).round() / 100.0;
+            let ax = p(a.x);
+            let ay = p(a.y);
+            let az = p(a.z);
+            let bx = p(b.x);
+            let by = p(b.y);
+            let bz = p(b.z);
+            let plane = if ax == bx && ax.abs() == 0.75 {
+                if ax > 0.0 {
+                    "+X (x=0.75)"
+                } else {
+                    "-X (x=-0.75)"
+                }
+            } else if ay == by && ay.abs() == 0.75 {
+                if ay > 0.0 {
+                    "+Y (y=0.75)"
+                } else {
+                    "-Y (y=-0.75)"
+                }
+            } else if az == bz && az.abs() == 0.75 {
+                if az > 0.0 {
+                    "+Z (z=0.75)"
+                } else {
+                    "-Z (z=-0.75)"
+                }
+            } else {
+                "OTHER (not on cube face)"
+            };
+            *by_plane.entry(plane).or_insert(0) += 1;
+        }
+        let mut plane_lines = String::new();
+        for (plane, count) in &by_plane {
+            plane_lines.push_str(&format!("  {plane}: {count}\n"));
+        }
+        panic!(
+            "DIAGNOSTIC: {unmatched_count} unmatched boundary edges. By color of containing polygon:\n{report}\nBy plane location:\n{plane_lines}"
+        );
+    }
+
     /// **Diagnostic step 3**: count dropped fragments. Replaces
     /// `Polygon::split`'s silent `if f.len() >= 3` / `if b.len() >= 3`
     /// with a counted version, then runs box - sphere through it. If

@@ -103,13 +103,32 @@ impl IndexedMesh {
     }
 }
 
-/// Strict between-ness test in 3D fixed-point: returns `true` iff `p`
-/// lies on the open segment from `a` to `b` (excluding endpoints). All
-/// arithmetic is exact in `i128`.
+/// Snap-drift bound for the collinearity check: a vertex within this
+/// many fixed units of perpendicular distance from the edge is treated
+/// as collinear. **This is not a magic number** — it's the
+/// mathematically derived bound from
+/// [`crate::csg::polygon`]'s `compute_intersection` rounding step.
+///
+/// Derivation: each `compute_intersection` snaps the result by up to
+/// 0.5 fixed units per axis. Two intersection points on the same true
+/// line, each independently snapped, can land up to 0.5 + 0.5 = 1
+/// fixed unit apart in perpendicular direction. Even with the
+/// per-line [`crate::csg::vertex_pool::SharedVertexPool`] catching
+/// near-duplicates, distinct points on the same line each accumulate
+/// up to 0.5 units of drift, so checking collinearity between two
+/// pool entries needs to allow up to 1 unit of perpendicular slack.
+const COLLINEAR_TOLERANCE_FIXED_UNITS: i128 = 1;
+
+/// Between-ness test in 3D fixed-point: returns `true` iff `p` lies
+/// on the open segment from `a` to `b`, within
+/// [`COLLINEAR_TOLERANCE_FIXED_UNITS`] of perpendicular distance.
+/// All arithmetic in i128.
 ///
 /// Magnitude budget: input coords ≤ ±2^24 (per ADR-0054 ±256-unit cap),
 /// so each i128 difference fits in i32 with margin, and the dot/cross
-/// products fit in 2^51 — well within i128.
+/// products fit in 2^51 — well within i128. Cross-magnitude squared
+/// fits in i128 (≤ 2^102), so the perpendicular distance comparison
+/// `cross² ≤ tolerance² · len²` stays in integer arithmetic.
 fn is_strictly_between(p: Point3, a: Point3, b: Point3) -> bool {
     let abx = (b.x - a.x) as i128;
     let aby = (b.y - a.y) as i128;
@@ -118,18 +137,23 @@ fn is_strictly_between(p: Point3, a: Point3, b: Point3) -> bool {
     let apy = (p.y - a.y) as i128;
     let apz = (p.z - a.z) as i128;
 
-    let cx = apy * abz - apz * aby;
-    let cy = apz * abx - apx * abz;
-    let cz = apx * aby - apy * abx;
-    if cx != 0 || cy != 0 || cz != 0 {
-        return false;
-    }
-
-    let dot = apx * abx + apy * aby + apz * abz;
     let len2 = abx * abx + aby * aby + abz * abz;
     if len2 == 0 {
         return false;
     }
+
+    // Collinearity within tolerance: |cross|² ≤ tolerance² · len²
+    // (the integer-safe form of "perpendicular distance ≤ tolerance").
+    let cx = apy * abz - apz * aby;
+    let cy = apz * abx - apx * abz;
+    let cz = apx * aby - apy * abx;
+    let cross_mag2 = cx * cx + cy * cy + cz * cz;
+    let tol2 = COLLINEAR_TOLERANCE_FIXED_UNITS * COLLINEAR_TOLERANCE_FIXED_UNITS;
+    if cross_mag2 > tol2 * len2 {
+        return false;
+    }
+
+    let dot = apx * abx + apy * aby + apz * abz;
     dot > 0 && dot < len2
 }
 
