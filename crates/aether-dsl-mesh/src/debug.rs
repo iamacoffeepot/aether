@@ -64,22 +64,21 @@ pub enum ManifoldViolation {
 pub fn validate_manifold(polygons: &[Polygon]) -> Vec<ManifoldViolation> {
     let mut directed: HashMap<(VertKey, VertKey), usize> = HashMap::new();
 
-    let record_loop =
-        |loop_: &[[f32; 3]], directed: &mut HashMap<(VertKey, VertKey), usize>| {
-            let n = loop_.len();
-            if n < 2 {
-                return;
+    let record_loop = |loop_: &[[f32; 3]], directed: &mut HashMap<(VertKey, VertKey), usize>| {
+        let n = loop_.len();
+        if n < 2 {
+            return;
+        }
+        for i in 0..n {
+            let a = vert_key(loop_[i]);
+            let b = vert_key(loop_[(i + 1) % n]);
+            if a == b {
+                // Degenerate edge (same vertex); skip.
+                continue;
             }
-            for i in 0..n {
-                let a = vert_key(loop_[i]);
-                let b = vert_key(loop_[(i + 1) % n]);
-                if a == b {
-                    // Degenerate edge (same vertex); skip.
-                    continue;
-                }
-                *directed.entry((a, b)).or_insert(0) += 1;
-            }
-        };
+            *directed.entry((a, b)).or_insert(0) += 1;
+        }
+    };
 
     for poly in polygons {
         record_loop(&poly.vertices, &mut directed);
