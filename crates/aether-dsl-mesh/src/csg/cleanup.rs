@@ -12,9 +12,9 @@
 //!    integer equality. Foundation for the other two passes.
 //! 2. **Coplanar polygon merging** — groups polygons by exact `Plane3`
 //!    signature, finds connected components by shared edges, and
-//!    re-triangulates each single-loop component via 2D ear clipping.
-//!    Multi-loop components (faces with holes) currently pass through
-//!    unmerged — hole bridging is a follow-up.
+//!    re-triangulates each component via 2D ear clipping. Multi-loop
+//!    components (faces with holes) are bridged into a single slit
+//!    polygon before clipping.
 //! 3. **T-junction removal** — *not yet implemented.*
 //!
 //! [`run`] is the single entry point — `csg::ops` calls it on every

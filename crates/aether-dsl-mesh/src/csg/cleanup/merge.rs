@@ -12,8 +12,16 @@
 //!   clipping produces a triangulation. Output triangles inherit the
 //!   first input polygon's color (per ADR-0055 — color across merge
 //!   boundaries is the "first polygon wins" tradeoff).
-//! - Multi-loop components (faces with holes) pass through unmerged in
-//!   this PR — hole bridging is a follow-up.
+//! - Multi-loop components (faces with holes) are merged via hole
+//!   bridging: the outer loop (positive 2D signed area) is identified,
+//!   each hole (negative area) is bridged into the outer with a
+//!   shortest-segment edge, and the resulting slit polygon is
+//!   ear-clipped. Degenerate triangles emitted along the slit (two
+//!   `VertexId`s equal) are filtered before output. The bridge picks
+//!   the closest vertex pair by squared 2D distance — this can fail
+//!   for pathological hole arrangements where the bridge crosses
+//!   another edge; failure falls back to passing the original polygons
+//!   through unchanged.
 //! - Singletons (no shared edges with any group neighbor) pass through
 //!   as-is.
 //!
@@ -166,19 +174,21 @@ fn process_component(
         }
     };
 
-    // Multi-loop (faces with holes) pass through unmerged in this PR.
-    if loops.len() != 1 {
-        for &pid in component {
-            emit_fan(&polygons[pid], out);
-        }
-        return;
-    }
-
     let plane = polygons[component[0]].plane;
     let color = polygons[component[0]].color;
-    match ear_clip(vertices, &loops[0], &plane) {
+    let triangulation = if loops.len() == 1 {
+        ear_clip_loop(vertices, &loops[0], &plane)
+    } else {
+        ear_clip_with_holes(vertices, &loops, &plane)
+    };
+    match triangulation {
         Some(triangles) => {
             for tri in triangles {
+                // Skip degenerate triangles emitted along bridge slits
+                // (two vertex ids equal means zero-area triangle).
+                if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
+                    continue;
+                }
                 out.push(IndexedPolygon {
                     vertices: tri.to_vec(),
                     plane,
@@ -186,8 +196,6 @@ fn process_component(
                 });
             }
         }
-        // Ear clipping failed (numeric / topology corner case) — fall back
-        // to passing the original polygons through.
         None => {
             for &pid in component {
                 emit_fan(&polygons[pid], out);
@@ -350,10 +358,24 @@ fn point_in_triangle(p: (i64, i64), a: (i64, i64), b: (i64, i64), c: (i64, i64))
     }
 }
 
-/// Ear-clip a 3D loop projected to 2D. Returns the triangulation as a Vec
-/// of `[VertexId; 3]`. Returns `None` if the loop is not simple or ear
-/// clipping cannot make progress.
-fn ear_clip(
+fn project_loop(
+    vertices: &[Point3],
+    loop_verts: &[VertexId],
+    plane: &Plane3,
+) -> Vec<(VertexId, i64, i64)> {
+    let (axis_a, axis_b) = projection_axes(plane);
+    loop_verts
+        .iter()
+        .map(|&id| {
+            let (a, b) = project(vertices[id], axis_a, axis_b);
+            (id, a, b)
+        })
+        .collect()
+}
+
+/// Ear-clip a 3D loop projected to 2D. Returns `None` if the loop is not
+/// simple (no progress can be made on a malformed input).
+fn ear_clip_loop(
     vertices: &[Point3],
     loop_verts: &[VertexId],
     plane: &Plane3,
@@ -361,16 +383,7 @@ fn ear_clip(
     if loop_verts.len() < 3 {
         return None;
     }
-
-    let (axis_a, axis_b) = projection_axes(plane);
-    let mut loop2d: Vec<(VertexId, i64, i64)> = loop_verts
-        .iter()
-        .map(|&id| {
-            let (a, b) = project(vertices[id], axis_a, axis_b);
-            (id, a, b)
-        })
-        .collect();
-
+    let mut loop2d = project_loop(vertices, loop_verts, plane);
     // Boundary walking inherits the polygons' CCW-around-normal
     // orientation, and `projection_axes` is set up so CCW-around-normal
     // maps to CCW in 2D — but defensively flip if signed area is
@@ -378,9 +391,94 @@ fn ear_clip(
     if signed_area2_2d(&loop2d) < 0 {
         loop2d.reverse();
     }
+    ear_clip_2d(loop2d)
+}
 
+/// Ear-clip a face-with-holes by bridging each hole into the outer loop
+/// with a shortest-segment edge, then ear-clipping the resulting non-simple
+/// (slit) polygon. Returns `None` if no clean outer loop can be found.
+fn ear_clip_with_holes(
+    vertices: &[Point3],
+    loops: &[Vec<VertexId>],
+    plane: &Plane3,
+) -> Option<Vec<[VertexId; 3]>> {
+    let mut projected: Vec<Vec<(VertexId, i64, i64)>> = loops
+        .iter()
+        .map(|l| project_loop(vertices, l, plane))
+        .collect();
+
+    // Outer loop = the one with the largest positive signed area. The rest
+    // must have negative area (CW around the hole, which is the direction
+    // boundary edges from CCW-around-normal polygons walk a hole).
+    let mut outer_idx = None;
+    let mut max_area: i128 = 0;
+    for (i, l) in projected.iter().enumerate() {
+        let a = signed_area2_2d(l);
+        if a > max_area {
+            max_area = a;
+            outer_idx = Some(i);
+        }
+    }
+    let outer_idx = outer_idx?;
+    let outer = projected.remove(outer_idx);
+    let mut holes = projected;
+    for h in &holes {
+        if signed_area2_2d(h) >= 0 {
+            return None;
+        }
+    }
+    // Sort holes by their first VertexId for determinism (ordering of
+    // bridges affects which outer-vertex each hole snaps to in degenerate
+    // ties, even though the geometry is the same).
+    holes.sort_by_key(|h| h[0].0);
+
+    let mut spliced = outer;
+    for hole in &holes {
+        spliced = splice_hole_into_outer(&spliced, hole);
+    }
+    ear_clip_2d(spliced)
+}
+
+/// Splice a hole loop into an outer loop by bridging the closest
+/// vertex pair. The hole is rotated to start at its bridge vertex and
+/// duplicated at its bridge endpoints, producing a slit that ear
+/// clipping treats as a degenerate edge.
+fn splice_hole_into_outer(
+    outer: &[(VertexId, i64, i64)],
+    hole: &[(VertexId, i64, i64)],
+) -> Vec<(VertexId, i64, i64)> {
+    let mut best: Option<(usize, usize, i128)> = None;
+    for (i, &(_, ox, oy)) in outer.iter().enumerate() {
+        for (j, &(_, hx, hy)) in hole.iter().enumerate() {
+            let dx = (ox - hx) as i128;
+            let dy = (oy - hy) as i128;
+            let d2 = dx * dx + dy * dy;
+            match best {
+                None => best = Some((i, j, d2)),
+                Some((_, _, bd2)) if d2 < bd2 => best = Some((i, j, d2)),
+                _ => {}
+            }
+        }
+    }
+    let (i_out, j_hole, _) = best.expect("splice_hole_into_outer called with empty loops");
+    let n_hole = hole.len();
+    let mut spliced = Vec::with_capacity(outer.len() + n_hole + 2);
+    spliced.extend_from_slice(&outer[..=i_out]);
+    for k in 0..n_hole {
+        spliced.push(hole[(j_hole + k) % n_hole]);
+    }
+    spliced.push(hole[j_hole]);
+    spliced.push(outer[i_out]);
+    spliced.extend_from_slice(&outer[i_out + 1..]);
+    spliced
+}
+
+fn ear_clip_2d(mut loop2d: Vec<(VertexId, i64, i64)>) -> Option<Vec<[VertexId; 3]>> {
+    if loop2d.len() < 3 {
+        return None;
+    }
     let mut output = Vec::with_capacity(loop2d.len().saturating_sub(2));
-    let mut guard = loop2d.len() * loop2d.len(); // strict upper bound on iterations
+    let mut guard = loop2d.len() * loop2d.len();
     while loop2d.len() > 3 {
         if guard == 0 {
             return None;
@@ -394,11 +492,12 @@ fn ear_clip(
             let vp = (loop2d[prev].1, loop2d[prev].2);
             let vc = (loop2d[i].1, loop2d[i].2);
             let vn = (loop2d[next].1, loop2d[next].2);
-            // Convex turn: cross > 0 since the loop is CCW.
+            // Convex turn: cross > 0 since the loop is CCW. (For the
+            // bridge slit, the duplicate-vertex "ear" has cross == 0
+            // and is naturally skipped here.)
             if cross2d(vp, vc, vn) <= 0 {
                 continue;
             }
-            // No other loop vertex strictly inside this triangle.
             let mut clear = true;
             for (j, &(_, jx, jy)) in loop2d.iter().enumerate() {
                 if j == prev || j == i || j == next {
@@ -693,6 +792,103 @@ mod tests {
                 case.n_y,
                 case.n_z
             );
+        }
+    }
+
+    /// Build an annular triangulation: a 2x2 outer square (corners A,B,C,D)
+    /// minus a 1x1 hole (corners E,F,G,H), 8 CCW triangles all on z=0 with
+    /// the same `Plane3` (normal magnitude is consistent because each
+    /// triangle has a unit edge along an outer side and an offset of the
+    /// same magnitude inward).
+    fn annular_indexed_mesh() -> IndexedMesh {
+        let plane = Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 1,
+            d: 0,
+        };
+        let color = 7;
+        let vertices = vec![
+            pt(0.0, 0.0, 0.0), // 0: A bottom-left
+            pt(2.0, 0.0, 0.0), // 1: B bottom-right
+            pt(2.0, 2.0, 0.0), // 2: C top-right
+            pt(0.0, 2.0, 0.0), // 3: D top-left
+            pt(0.5, 0.5, 0.0), // 4: E hole bottom-left
+            pt(1.5, 0.5, 0.0), // 5: F hole bottom-right
+            pt(1.5, 1.5, 0.0), // 6: G hole top-right
+            pt(0.5, 1.5, 0.0), // 7: H hole top-left
+        ];
+        let polygons = [
+            [0, 1, 4],
+            [1, 5, 4],
+            [1, 2, 5],
+            [2, 6, 5],
+            [2, 3, 6],
+            [3, 7, 6],
+            [3, 0, 7],
+            [0, 4, 7],
+        ]
+        .into_iter()
+        .map(|verts| IndexedPolygon {
+            vertices: verts.to_vec(),
+            plane,
+            color,
+        })
+        .collect();
+        IndexedMesh { vertices, polygons }
+    }
+
+    #[test]
+    fn square_with_square_hole_bridges_and_triangulates() {
+        let vertices = annular_indexed_mesh().vertices.clone();
+        let merged = annular_indexed_mesh().merge_coplanar();
+        // n outer (4) + n hole (4) + 2 bridge dups = 10 vertices in the
+        // spliced loop, ear-clipping yields n - 2 = 8 triangles. Filter
+        // for degenerates (none expected for axis-aligned bridge).
+        assert_eq!(
+            merged.polygons.len(),
+            8,
+            "expected 8 annular triangles, got {}",
+            merged.polygons.len()
+        );
+        // All output triangles are CCW around +z (positive 2D cross).
+        for poly in &merged.polygons {
+            let v0 = vertices[poly.vertices[0]];
+            let v1 = vertices[poly.vertices[1]];
+            let v2 = vertices[poly.vertices[2]];
+            let cross = (v1.x as i128 - v0.x as i128) * (v2.y as i128 - v0.y as i128)
+                - (v1.y as i128 - v0.y as i128) * (v2.x as i128 - v0.x as i128);
+            assert!(cross > 0, "expected CCW triangle, got cross = {}", cross);
+        }
+        // Total 2D area equals the annular area (outer 2*2=4 minus hole
+        // 1*1=1, so 3) — measured in fixed-point grid units.
+        let total_doubled_area: i128 = merged
+            .polygons
+            .iter()
+            .map(|poly| {
+                let v0 = vertices[poly.vertices[0]];
+                let v1 = vertices[poly.vertices[1]];
+                let v2 = vertices[poly.vertices[2]];
+                (v1.x as i128 - v0.x as i128) * (v2.y as i128 - v0.y as i128)
+                    - (v1.y as i128 - v0.y as i128) * (v2.x as i128 - v0.x as i128)
+            })
+            .sum();
+        let unit = 1_i128 << 16;
+        let expected_doubled_area = 3 * 2 * unit * unit;
+        assert_eq!(
+            total_doubled_area, expected_doubled_area,
+            "annular area mismatch — bridging or clipping likely lost or duplicated coverage"
+        );
+    }
+
+    #[test]
+    fn multi_loop_merging_is_deterministic() {
+        let r1 = annular_indexed_mesh().merge_coplanar();
+        let r2 = annular_indexed_mesh().merge_coplanar();
+        assert_eq!(r1.polygons.len(), r2.polygons.len());
+        for (a, b) in r1.polygons.iter().zip(r2.polygons.iter()) {
+            assert_eq!(a.vertices, b.vertices);
+            assert_eq!(a.color, b.color);
         }
     }
 }
