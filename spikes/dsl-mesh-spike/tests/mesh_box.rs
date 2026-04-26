@@ -94,13 +94,3 @@ fn box_face_normals_point_outward() {
         );
     }
 }
-
-#[test]
-fn unsupported_primitive_returns_error() {
-    let ast = parse("(sphere 1 2 :color 0)").unwrap();
-    let result = mesh(&ast);
-    assert!(
-        result.is_err(),
-        "sphere mesher not yet implemented should error"
-    );
-}

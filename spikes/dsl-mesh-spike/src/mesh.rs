@@ -1,17 +1,18 @@
 //! Mesh a typed AST into a triangle list.
 //!
-//! Implemented: `box`, `lathe`, `torus`, `sweep` (with optional
-//! per-waypoint `:scales` and parallel-transport framing),
-//! `composition`, `translate`, `rotate`, `scale`. Unsupported nodes
-//! return `MeshError::NotYetImplemented` so the DSL fails loudly
-//! rather than silently producing wrong geometry. `cylinder`, `cone`,
-//! `wedge`, `sphere`, `extrude`, `mirror`, `array` are still pending.
+//! Full v1 vocabulary per ADR-0026 + ADR-0051: primitives `box`,
+//! `cylinder`, `cone`, `wedge`, `sphere`, `lathe`, `extrude`, `torus`,
+//! `sweep` (with optional per-waypoint `:scales` and parallel-transport
+//! framing); structural ops `composition`, `translate`, `rotate`,
+//! `scale`, `mirror`, `array`. The `MeshError::NotYetImplemented`
+//! variant is retained as an escape hatch for future vocabulary
+//! additions but is unreachable from any v1 input.
 //!
 //! Convention: every primitive winds CCW from outside (normal =
-//! `(b - a) × (c - a)` points outward). Verified by the
-//! face-normal-direction test for each primitive.
+//! `(b - a) × (c - a)` points outward). Verified by per-primitive
+//! face-normal-direction tests.
 
-use crate::ast::Node;
+use crate::ast::{Axis, Node};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Triangle {
@@ -124,13 +125,89 @@ fn mesh_into(out: &mut Vec<Triangle>, node: &Node, offset: [f32; 3]) -> Result<(
             }
             Ok(())
         }
-        Node::Cylinder { .. } => Err(MeshError::NotYetImplemented("cylinder")),
-        Node::Cone { .. } => Err(MeshError::NotYetImplemented("cone")),
-        Node::Wedge { .. } => Err(MeshError::NotYetImplemented("wedge")),
-        Node::Sphere { .. } => Err(MeshError::NotYetImplemented("sphere")),
-        Node::Extrude { .. } => Err(MeshError::NotYetImplemented("extrude")),
-        Node::Mirror { .. } => Err(MeshError::NotYetImplemented("mirror")),
-        Node::Array { .. } => Err(MeshError::NotYetImplemented("array")),
+        Node::Cylinder {
+            radius,
+            height,
+            segments,
+            color,
+        } => {
+            mesh_cylinder(out, *radius, *height, *segments, *color, offset);
+            Ok(())
+        }
+        Node::Cone {
+            radius,
+            height,
+            segments,
+            color,
+        } => {
+            mesh_cone(out, *radius, *height, *segments, *color, offset);
+            Ok(())
+        }
+        Node::Wedge { x, y, z, color } => {
+            mesh_wedge(out, *x, *y, *z, *color, offset);
+            Ok(())
+        }
+        Node::Sphere {
+            radius,
+            subdivisions,
+            color,
+        } => {
+            mesh_sphere(out, *radius, *subdivisions, *color, offset);
+            Ok(())
+        }
+        Node::Extrude {
+            profile,
+            depth,
+            color,
+        } => {
+            mesh_extrude(out, profile, *depth, *color, offset);
+            Ok(())
+        }
+        Node::Mirror { axis, child } => {
+            let mut local = Vec::new();
+            mesh_into(&mut local, child, [0.0, 0.0, 0.0])?;
+            for mut tri in local {
+                for v in tri.vertices.iter_mut() {
+                    match axis {
+                        Axis::X => v[0] = -v[0],
+                        Axis::Y => v[1] = -v[1],
+                        Axis::Z => v[2] = -v[2],
+                    }
+                    v[0] += offset[0];
+                    v[1] += offset[1];
+                    v[2] += offset[2];
+                }
+                // Reflection inverts orientation — swap two vertices to
+                // restore CCW-from-outside winding.
+                tri.vertices.swap(1, 2);
+                out.push(tri);
+            }
+            Ok(())
+        }
+        Node::Array {
+            count,
+            spacing,
+            child,
+        } => {
+            let mut local = Vec::new();
+            mesh_into(&mut local, child, [0.0, 0.0, 0.0])?;
+            for i in 0..*count {
+                let f = i as f32;
+                let dx = offset[0] + spacing[0] * f;
+                let dy = offset[1] + spacing[1] * f;
+                let dz = offset[2] + spacing[2] * f;
+                for tri in &local {
+                    let mut copy = *tri;
+                    for v in copy.vertices.iter_mut() {
+                        v[0] += dx;
+                        v[1] += dy;
+                        v[2] += dz;
+                    }
+                    out.push(copy);
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -473,4 +550,149 @@ fn rotate_axis_angle(v: [f32; 3], n: [f32; 3], angle: f32) -> [f32; 3] {
         v[1] * c + kx[1] * s + n[1] * dot * (1.0 - c),
         v[2] * c + kx[2] * s + n[2] * dot * (1.0 - c),
     ]
+}
+
+/// Cylinder of `radius` and total `height`, centered on the Y axis at
+/// `offset`. Implemented as a lathe of a 4-point profile so the side
+/// + cap winding matches the rest of the lathed primitives.
+fn mesh_cylinder(
+    out: &mut Vec<Triangle>,
+    radius: f32,
+    height: f32,
+    segments: u32,
+    color: u32,
+    offset: [f32; 3],
+) {
+    let h = height * 0.5;
+    let profile = [[0.0, -h], [radius, -h], [radius, h], [0.0, h]];
+    mesh_lathe(out, &profile, segments, color, offset);
+}
+
+/// Cone of `radius` and total `height`, base on the -Y side and apex
+/// on the +Y side, centered at `offset`. Implemented as a lathe.
+fn mesh_cone(
+    out: &mut Vec<Triangle>,
+    radius: f32,
+    height: f32,
+    segments: u32,
+    color: u32,
+    offset: [f32; 3],
+) {
+    let h = height * 0.5;
+    let profile = [[0.0, -h], [radius, -h], [0.0, h]];
+    mesh_lathe(out, &profile, segments, color, offset);
+}
+
+/// UV sphere of `radius`, centered at `offset`. `subdivisions` controls
+/// both the number of latitude rings (between poles, exclusive) and the
+/// number of longitude segments. Implemented as a lathe of a half-circle
+/// profile from south pole to north pole; pole quads degenerate naturally.
+fn mesh_sphere(
+    out: &mut Vec<Triangle>,
+    radius: f32,
+    subdivisions: u32,
+    color: u32,
+    offset: [f32; 3],
+) {
+    if subdivisions < 3 {
+        return;
+    }
+    let n = subdivisions as usize;
+    let mut profile: Vec<[f32; 2]> = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let theta = -std::f32::consts::FRAC_PI_2 + (i as f32) * std::f32::consts::PI / (n as f32);
+        profile.push([radius * theta.cos(), radius * theta.sin()]);
+    }
+    mesh_lathe(out, &profile, subdivisions, color, offset);
+}
+
+/// Right-triangular prism (ramp) with extents `(x, y, z)` centered at
+/// `offset`. The hypotenuse face slopes from the front-bottom edge
+/// (`+z/2, -y/2`) up to the back-top edge (`-z/2, +y/2`). Six vertices,
+/// five faces (bottom quad, back quad, hypotenuse quad, two triangular
+/// sides). Faces wound CCW from outside.
+fn mesh_wedge(out: &mut Vec<Triangle>, x: f32, y: f32, z: f32, color: u32, offset: [f32; 3]) {
+    let hx = x * 0.5;
+    let hy = y * 0.5;
+    let hz = z * 0.5;
+    let [ox, oy, oz] = offset;
+    let a = [ox - hx, oy - hy, oz - hz]; // back-bottom-left
+    let b = [ox + hx, oy - hy, oz - hz]; // back-bottom-right
+    let c = [ox - hx, oy - hy, oz + hz]; // front-bottom-left
+    let d = [ox + hx, oy - hy, oz + hz]; // front-bottom-right
+    let e = [ox - hx, oy + hy, oz - hz]; // back-top-left
+    let f = [ox + hx, oy + hy, oz - hz]; // back-top-right
+
+    let push = |out: &mut Vec<Triangle>, p, q, r| {
+        out.push(Triangle {
+            vertices: [p, q, r],
+            color,
+        });
+    };
+
+    // Bottom (-Y): a, b, d, c going CCW viewed from -Y
+    push(out, a, b, d);
+    push(out, a, d, c);
+    // Back (-Z): a, e, f, b going CCW viewed from -Z
+    push(out, a, e, f);
+    push(out, a, f, b);
+    // Left side (-X): a, c, e
+    push(out, a, c, e);
+    // Right side (+X): b, f, d
+    push(out, b, f, d);
+    // Hypotenuse (+Y/+Z): c, d, f, e
+    push(out, c, d, f);
+    push(out, c, f, e);
+}
+
+/// Extrude a 2D `profile` polygon along Z by `depth`. Generates side-wall
+/// quads + two cap polygons triangulated by a fan from vertex 0.
+///
+/// The profile is interpreted as listed CCW when viewed from +Z. The back
+/// cap (at `z = depth`) keeps the original winding (normal +Z); the
+/// front cap (at `z = 0`) reverses the winding (normal -Z). Side walls
+/// stitch each profile edge `p_i → p_{i+1}` between the two cap planes.
+///
+/// **Caller's contract**: `profile` must be convex for the fan
+/// triangulation to produce a correct cap. Concave profiles will tile
+/// the cap with overlapping triangles — a future ear-clipping pass
+/// would lift this restriction. The v1 vocabulary is convex-only by
+/// convention (per ADR-0026's primitive set).
+fn mesh_extrude(
+    out: &mut Vec<Triangle>,
+    profile: &[[f32; 2]],
+    depth: f32,
+    color: u32,
+    offset: [f32; 3],
+) {
+    if profile.len() < 3 || depth <= 0.0 {
+        return;
+    }
+    let n = profile.len();
+    let [ox, oy, oz] = offset;
+    let base = |i: usize| -> [f32; 3] { [ox + profile[i][0], oy + profile[i][1], oz] };
+    let top = |i: usize| -> [f32; 3] { [ox + profile[i][0], oy + profile[i][1], oz + depth] };
+
+    // Side walls. For edge p_i → p_{i+1}, the quad corners CCW from
+    // outside are (base i, base i+1, top i+1, top i). Triangulate as
+    // (a, b, c) + (a, c, d) — outward normal verified for CCW profiles.
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let a = base(i);
+        let b = base(j);
+        let c = top(j);
+        let d = top(i);
+        push_unless_degenerate(out, a, b, c, color);
+        push_unless_degenerate(out, a, c, d, color);
+    }
+
+    // Back cap (z = depth, normal +Z): fan from vertex 0 in original
+    // winding.
+    for i in 1..n - 1 {
+        push_unless_degenerate(out, top(0), top(i), top(i + 1), color);
+    }
+    // Front cap (z = 0, normal -Z): reverse winding.
+    for i in 1..n - 1 {
+        push_unless_degenerate(out, base(0), base(i + 1), base(i), color);
+    }
 }
