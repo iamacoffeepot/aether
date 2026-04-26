@@ -44,19 +44,22 @@ use std::collections::HashMap;
 /// rounding step. Two same-true-point intersections each independently
 /// snapped can land up to 1 unit apart in Chebyshev distance.
 ///
-/// We use `2` (not `1`) to absorb the accumulated drift across BSP
-/// passes for compositions with deeply overlapping cuts (e.g.,
-/// `three_cut_box_is_watertight`). The per-line
-/// [`crate::csg::vertex_pool::SharedVertexPool`] catches all
-/// single-pass snap-drift duplicates that share a line key; the
-/// remaining ≤2-unit gaps come from cross-pass drift between
-/// non-line-key-sharing computations and need to be welded here.
+/// We use `4` (not `1`) to absorb accumulated drift across BSP passes
+/// for compositions with multi-facet cuts (sphere/cylinder vs cube).
+/// Under the polygon-throughout pipeline (PR 292) cleanup runs once at
+/// the end of an entire CSG composition, so the cleanup sees drift
+/// accumulated over every BSP partitioner the cube fragments survived
+/// — a 12-facet sphere on a cube face accumulates up to ~3 units in
+/// Chebyshev distance per face fragment. Tolerance `4` catches that
+/// without colliding distinct vertices: the next-nearest distinct-point
+/// spacing in practical CSG inputs (sphere/cylinder facet spacing,
+/// typically 0.05+ float = 3000+ fixed units) is well above the bound.
 ///
-/// The next-nearest distinct-point spacing in practical CSG inputs
-/// (sphere/cylinder facet vertex spacing on a cube face, typically
-/// 0.05+ float = 3000+ fixed units) is far above 2, so there are no
-/// false positives.
-const WELD_TOLERANCE_FIXED_UNITS: i32 = 2;
+/// Raised from `2` to `4` (2026-04-26) after un-ignoring
+/// `box_minus_protruding_sphere_is_watertight` exposed 3- and 4-unit
+/// duplicate vertex pairs on the x=-0.75 cube face that the previous
+/// tolerance missed.
+const WELD_TOLERANCE_FIXED_UNITS: i32 = 4;
 
 /// Spatial-bucket cell size: 2 × tolerance so any two points within
 /// tolerance land in the same or adjacent buckets.
