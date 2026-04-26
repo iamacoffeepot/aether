@@ -155,6 +155,21 @@ pub fn node_to_value(node: &Node) -> Value {
             vec3_to_value(*spacing),
             node_to_value(child),
         ]),
+        Node::Union { children } => {
+            let mut items = vec![sym("union")];
+            items.extend(children.iter().map(node_to_value));
+            list(items)
+        }
+        Node::Intersection { children } => {
+            let mut items = vec![sym("intersection")];
+            items.extend(children.iter().map(node_to_value));
+            list(items)
+        }
+        Node::Difference { base, subtract } => {
+            let mut items = vec![sym("difference"), node_to_value(base)];
+            items.extend(subtract.iter().map(node_to_value));
+            list(items)
+        }
     }
 }
 
