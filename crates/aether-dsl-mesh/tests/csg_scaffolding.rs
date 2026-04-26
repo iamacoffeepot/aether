@@ -167,20 +167,6 @@ fn round_trip_csg_inside_csg() {
 }
 
 #[test]
-fn mesher_stub_emits_empty_for_csg_nodes() {
-    // Until PR 4 lands, the CSG arms in mesh.rs return an empty Vec.
-    // This test pins that contract so PR 4 obviously breaks it (and the
-    // test then becomes a real geometric check).
-    let ast = parse("(union (box 1 1 1 :color 0) (box 1 1 1 :color 1))").unwrap();
-    let tris = mesh(&ast).expect("CSG mesher stub should not error");
-    assert!(
-        tris.is_empty(),
-        "CSG mesher stub must emit no triangles until PR 4; got {} tris",
-        tris.len()
-    );
-}
-
-#[test]
 fn mesher_traverses_into_csg_children_for_other_nodes() {
     // A composition wrapping a CSG node still meshes its non-CSG
     // siblings — verifying the dispatch doesn't shortcut the whole tree.
@@ -191,8 +177,5 @@ fn mesher_traverses_into_csg_children_for_other_nodes() {
     )
     .unwrap();
     let tris = mesh(&ast).expect("composition with CSG inside should not error");
-    assert!(
-        !tris.is_empty(),
-        "the box sibling should still emit triangles even though the union stub does not"
-    );
+    assert!(!tris.is_empty(), "the box sibling should emit triangles");
 }
