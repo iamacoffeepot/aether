@@ -25,10 +25,10 @@ use crate::{
     NoteOn, OrbitSetDistance, OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget,
     OrbitSetYaw, Ping, PlatformInfo, PlatformInfoResult, PlayerRequestStep, PlayerSetMode,
     PlayerSetPosition, PlayerSetVelocity, PlayerStepResult, Pong, Read, ReadResult,
-    ReplaceComponent, ReplaceResult, SetMasterGain, SetMasterGainResult, SetPrimitive,
-    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeInput,
-    SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, TranslateVertices,
-    UnresolvedMail, UnsubscribeInput, WindowSize, Write, WriteResult,
+    ReplaceComponent, ReplaceResult, ScaleVertices, SetMasterGain, SetMasterGainResult,
+    SetPrimitive, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
+    SubscribeInput, SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent,
+    TranslateVertices, UnresolvedMail, UnsubscribeInput, WindowSize, Write, WriteResult,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -156,12 +156,13 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<HandleUnpin>(),
         schema::<HandleUnpinResult>(),
         // Mesh editor component vocabulary (Spike C). Postcard
-        // structs — `SetPrimitive` carries a tagged enum, and
-        // `TranslateVertices` carries a Vec of vertex ids. Both
-        // fire-and-forget; the editor re-emits its mesh as
-        // `DrawTriangle` mail every tick.
+        // structs — `SetPrimitive` carries a tagged `Primitive` enum
+        // with per-variant params, the others carry a `Vec` of vertex
+        // ids and per-op params. All fire-and-forget; the editor
+        // re-emits its mesh as `DrawTriangle` mail every tick.
         schema::<SetPrimitive>(),
         schema::<TranslateVertices>(),
+        schema::<ScaleVertices>(),
     ]
 }
 

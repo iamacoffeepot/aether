@@ -1438,29 +1438,37 @@ mod mesh {
 
     use serde::{Deserialize, Serialize};
 
-    /// Built-in primitive families the mesh editor knows how to
-    /// generate. Each replaces the editor's current mesh wholesale.
-    /// `Cube` is the only family implemented in v1; the others reserve
-    /// names so adding them later is a no-rename change.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-    pub enum MeshPrimitive {
-        Cube,
-        Sphere,
-        Cylinder,
-        Plane,
+    /// Procedural primitive variants. Each variant carries the
+    /// parameters specific to its family — params don't share a
+    /// common shape across primitives, so a tagged enum keeps each
+    /// well-typed without optional-field weirdness.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub enum Primitive {
+        /// Axis-aligned cube centered at `center` with edge length
+        /// `size`. 8 vertices, 12 triangles.
+        Cube { center: [f32; 3], size: f32 },
+        /// Capped cylinder around the y axis with `segments` sides.
+        /// `2*segments + 2` vertices: bottom ring (0..N), top ring
+        /// (N..2N), bottom center (2N), top center (2N+1). `4*segments`
+        /// triangles: 2N for the side wall, N for each cap.
+        Cylinder {
+            center: [f32; 3],
+            radius: f32,
+            height: f32,
+            segments: u32,
+        },
     }
 
     /// `aether.mesh.set_primitive` — replace the editor's mesh with a
     /// procedurally generated primitive. Vertex and face ids are
     /// reassigned from zero so callers can address them deterministically
-    /// by index after a known primitive (e.g. cube vertices 4–7 are the
-    /// `+y` face). Fire-and-forget; the next tick renders the new mesh.
+    /// by index after a known primitive (see the mesh editor crate doc
+    /// for per-primitive layouts). Fire-and-forget; the next tick
+    /// renders the new mesh.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.mesh.set_primitive")]
     pub struct SetPrimitive {
-        pub primitive: MeshPrimitive,
-        pub center: [f32; 3],
-        pub size: f32,
+        pub primitive: Primitive,
     }
 
     /// `aether.mesh.translate_vertices` — shift the listed vertex ids
@@ -1473,6 +1481,18 @@ mod mesh {
     pub struct TranslateVertices {
         pub vertex_ids: Vec<u32>,
         pub delta: [f32; 3],
+    }
+
+    /// `aether.mesh.scale_vertices` — multiply each named vertex's
+    /// offset from `pivot` by `factor`, per axis. Non-uniform scale
+    /// (e.g., `[1.2, 1.0, 1.2]`) flares a horizontal ring without
+    /// changing its height. Unknown ids are ignored. Fire-and-forget.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.mesh.scale_vertices")]
+    pub struct ScaleVertices {
+        pub vertex_ids: Vec<u32>,
+        pub pivot: [f32; 3],
+        pub factor: [f32; 3],
     }
 }
 
