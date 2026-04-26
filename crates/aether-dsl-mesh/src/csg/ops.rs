@@ -9,8 +9,25 @@
 //! - `difference(A, B)   = invert(union(invert(A), B))`.
 //!
 //! Inputs and outputs are flat polygon lists — this module does no I/O,
-//! no parsing, no rendering. The mesher in `crate::mesh` converts
-//! triangles ↔ polygons at the boundary.
+//! no parsing, no rendering.
+//!
+//! ### Output shape: triangulated vs n-gon loops
+//!
+//! Each operation has two public entry points that differ only in the
+//! cleanup pass run after BSP composition:
+//!
+//! - [`union`] / [`intersection`] / [`difference`] — output is fully
+//!   triangulated (3-vertex polygons, CDT-routed). Suitable for the
+//!   wire `Vec<Triangle>` path.
+//! - [`union_polygons`] / [`intersection_polygons`] /
+//!   [`difference_polygons`] — output is n-gon boundary loops, no CDT.
+//!   Suitable for the polygon-domain path that triangulates only at
+//!   the wire/render boundary (avoids the `Polygon::from_triangle`
+//!   plane re-derivation step that flips sliver normals after f32
+//!   round-tripping).
+//!
+//! BSP composition is shared between the two via the `_raw` helpers
+//! ([`union_raw`], [`intersection_raw`], [`difference_raw`]).
 
 use super::CsgError;
 use super::bsp::BspTree;
@@ -18,21 +35,54 @@ use super::cleanup;
 use super::polygon::Polygon;
 
 pub fn union(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
-    let mut na = BspTree::new();
-    let mut nb = BspTree::new();
-    na.build(a)?;
-    nb.build(b)?;
-    na.clip_to(&nb)?;
-    nb.clip_to(&na)?;
-    nb.invert();
-    nb.clip_to(&na)?;
-    nb.invert();
-    let extra = nb.all_polygons();
-    na.build(extra)?;
-    Ok(cleanup::run(na.all_polygons()))
+    Ok(cleanup::run(union_raw(a, b)?))
 }
 
 pub fn intersection(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
+    Ok(cleanup::run(intersection_raw(a, b)?))
+}
+
+pub fn difference(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
+    Ok(cleanup::run(difference_raw(a, b)?))
+}
+
+/// Polygon-domain `union` — same BSP composition as [`union`], but
+/// cleanup stops at n-gon boundary loops instead of CDT-triangulating
+/// for the wire.
+pub fn union_polygons(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
+    Ok(cleanup::run_to_loops(union_raw(a, b)?))
+}
+
+/// Polygon-domain `intersection` — see [`union_polygons`].
+pub fn intersection_polygons(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
+    Ok(cleanup::run_to_loops(intersection_raw(a, b)?))
+}
+
+/// Polygon-domain `difference` — see [`union_polygons`].
+pub fn difference_polygons(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
+    Ok(cleanup::run_to_loops(difference_raw(a, b)?))
+}
+
+/// `union` minus the cleanup pass — the raw polygon stream coming
+/// out of the BSP composition. Used by diagnostic tests that want to
+/// compare BSP-only vs full-pipeline output to localize bugs.
+pub(crate) fn union_raw(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
+    let mut na = BspTree::new();
+    let mut nb = BspTree::new();
+    na.build(a)?;
+    nb.build(b)?;
+    na.clip_to(&nb)?;
+    nb.clip_to(&na)?;
+    nb.invert();
+    nb.clip_to(&na)?;
+    nb.invert();
+    let extra = nb.all_polygons();
+    na.build(extra)?;
+    Ok(na.all_polygons())
+}
+
+/// `intersection` minus the cleanup pass — see [`union_raw`].
+pub(crate) fn intersection_raw(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
     let mut na = BspTree::new();
     let mut nb = BspTree::new();
     na.build(a)?;
@@ -45,17 +95,10 @@ pub fn intersection(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, Cs
     let extra = nb.all_polygons();
     na.build(extra)?;
     na.invert();
-    Ok(cleanup::run(na.all_polygons()))
+    Ok(na.all_polygons())
 }
 
-pub fn difference(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
-    let raw = difference_raw(a, b)?;
-    Ok(cleanup::run(raw))
-}
-
-/// `difference` minus the cleanup pass — the raw polygon stream coming
-/// out of the BSP composition. Used by diagnostic tests that want to
-/// compare BSP-only vs full-pipeline output to localize bugs.
+/// `difference` minus the cleanup pass — see [`union_raw`].
 pub(crate) fn difference_raw(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
     let mut na = BspTree::new();
     let mut nb = BspTree::new();
@@ -987,5 +1030,82 @@ mod tests {
             assert_eq!(p.vertices, q.vertices);
             assert_eq!(p.color, q.color);
         }
+    }
+
+    /// `union_polygons` returns n-gon loops, not the per-triangle
+    /// polygons `union` returns. For a `2-box ∪ 2-box overlap` the loop
+    /// form has fewer polygons (one per face component) and at least
+    /// one polygon with >3 vertices (the merged face quads).
+    #[test]
+    fn union_polygons_returns_n_gon_loops() {
+        let a = axis_aligned_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0);
+        let b = axis_aligned_box(0.5, 0.0, 0.0, 1.0, 1.0, 1.0, 1);
+        let triangulated = union(a.clone(), b.clone()).unwrap();
+        let loops = union_polygons(a, b).unwrap();
+        assert!(
+            loops.len() < triangulated.len(),
+            "loops should aggregate triangles"
+        );
+        assert!(
+            loops.iter().any(|p| p.vertices.len() > 3),
+            "expected at least one n-gon loop with >3 vertices"
+        );
+        assert!(triangulated.iter().all(|p| p.vertices.len() == 3));
+    }
+
+    #[test]
+    fn intersection_polygons_returns_n_gon_loops() {
+        let a = axis_aligned_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0);
+        let b = axis_aligned_box(0.5, 0.5, 0.5, 0.7, 0.7, 0.7, 1);
+        let triangulated = intersection(a.clone(), b.clone()).unwrap();
+        let loops = intersection_polygons(a, b).unwrap();
+        assert!(
+            !loops.is_empty(),
+            "overlapping intersection must be non-empty"
+        );
+        assert!(loops.len() < triangulated.len());
+        assert!(triangulated.iter().all(|p| p.vertices.len() == 3));
+    }
+
+    #[test]
+    fn difference_polygons_returns_n_gon_loops() {
+        let outer = axis_aligned_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0);
+        let cutter = axis_aligned_box(0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 1);
+        let triangulated = difference(outer.clone(), cutter.clone()).unwrap();
+        let loops = difference_polygons(outer, cutter).unwrap();
+        assert!(!loops.is_empty());
+        assert!(loops.len() < triangulated.len());
+        assert!(triangulated.iter().all(|p| p.vertices.len() == 3));
+    }
+
+    /// The polygon-domain entry must agree with the triangulated entry
+    /// on the underlying surface — same colors present, same plane
+    /// directions. Verifies the cleanup-tail swap doesn't change what
+    /// BSP composed.
+    #[test]
+    fn polygon_and_triangulated_entries_agree_on_surface_topology() {
+        let a = axis_aligned_box(0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0);
+        let b = axis_aligned_box(0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 1);
+        let tris = difference(a.clone(), b.clone()).unwrap();
+        let loops = difference_polygons(a, b).unwrap();
+
+        let collect_colors = |polys: &[Polygon]| -> std::collections::BTreeSet<u32> {
+            polys.iter().map(|p| p.color).collect()
+        };
+        assert_eq!(collect_colors(&tris), collect_colors(&loops));
+
+        let collect_plane_signs = |polys: &[Polygon]| -> std::collections::BTreeSet<(i8, i8, i8)> {
+            polys
+                .iter()
+                .map(|p| {
+                    (
+                        p.plane.n_x.signum() as i8,
+                        p.plane.n_y.signum() as i8,
+                        p.plane.n_z.signum() as i8,
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(collect_plane_signs(&tris), collect_plane_signs(&loops));
     }
 }
