@@ -199,8 +199,14 @@ impl Mesh {
         // across the edge starting at <vertex> going CCW.
         let n_after_a_in_t1 = t1.neighbors[(edge_idx + 2) % 3]; // edge from v1 to a
         let n_after_b_in_t1 = t1.neighbors[(edge_idx + 1) % 3]; // edge from b to v1
-        let n_after_a_in_t2 = t2.neighbors[(edge_idx_a_in_t2(&t2, a))?]; // edge from a to v2
-        let n_after_b_in_t2 = t2.neighbors[(edge_idx_b_in_t2(&t2, b))?]; // edge from v2 to b
+        // T2's CCW order has b before a (opposite of T1) because adjacent
+        // triangles walk a shared edge in opposite directions. So:
+        //   - "edge from a to v2" in T2 LEAVES vertex a.
+        //   - "edge from v2 to b" in T2 ARRIVES AT vertex b.
+        // Different formulas — bug here would corrupt neighbor pointers
+        // silently across many flips.
+        let n_after_a_in_t2 = t2.neighbors[t2_neighbor_leaving(&t2, a)?];
+        let n_after_b_in_t2 = t2.neighbors[t2_neighbor_arriving(&t2, b)?];
 
         // New triangles share the new diagonal (v1, v2):
         //   T1' = [a, v2, v1]  edges: a→v2, v2→v1 (new diag), v1→a
@@ -235,6 +241,76 @@ impl Mesh {
         self.triangles[new_t1_id] = Some(new_t1);
         self.triangles[new_t2_id] = Some(new_t2);
         Some((new_t1_id, new_t2_id))
+    }
+
+    /// Restore the local Delaunay property after constraint enforcement.
+    /// Walks every non-constraint edge in the mesh; if its opposite vertex
+    /// is strictly inside the circumcircle of the triangle on the other
+    /// side, flips. Iterates until no flips occur (or the safety cap is
+    /// hit).
+    ///
+    /// Standard CDT post-pass: constraint enforcement flips diagonals to
+    /// thread the boundary through, but the new diagonals adjacent to
+    /// the constraint may not be locally Delaunay — leaving slivers in
+    /// the output even though the topology is correct. This pass cleans
+    /// them up.
+    pub(super) fn lawson_redelaunize(
+        &mut self,
+        constraints: &std::collections::HashSet<(VertId, VertId)>,
+    ) {
+        const MAX_LAWSON_ITERATIONS: usize = 4096;
+        for _ in 0..MAX_LAWSON_ITERATIONS {
+            let mut flipped = false;
+            // Snapshot triangle ids — flips invalidate the slot map's live
+            // set as we go, so we walk a captured list and skip any slot
+            // that was deleted by a previous flip in the same pass.
+            let snapshot: Vec<TriId> = self.alive_triangles().map(|(i, _)| i).collect();
+            for tid in snapshot {
+                let tri = match self.triangles[tid].as_ref() {
+                    Some(t) => t.clone(),
+                    None => continue,
+                };
+                for i in 0..3 {
+                    let Some(n_tid) = tri.neighbors[i] else {
+                        continue;
+                    };
+                    let a = tri.verts[(i + 1) % 3];
+                    let b = tri.verts[(i + 2) % 3];
+                    let canon = if a < b { (a, b) } else { (b, a) };
+                    if constraints.contains(&canon) {
+                        continue;
+                    }
+                    // Find the vertex of the neighbor that's not on the
+                    // shared edge — that's the candidate to flip toward.
+                    let n_tri = match self.triangles[n_tid].as_ref() {
+                        Some(t) => t.clone(),
+                        None => continue,
+                    };
+                    let opp = match n_tri.verts.iter().find(|&&v| v != a && v != b) {
+                        Some(&v) => v,
+                        None => continue,
+                    };
+                    // In-circle: triangle (tri.verts[i], a, b) is CCW
+                    // (inherited from the parent triangle's CCW winding,
+                    // since cyclic permutation preserves orientation).
+                    let v_self = tri.verts[i];
+                    if super::predicates::in_circle(
+                        self.vertices[v_self],
+                        self.vertices[a],
+                        self.vertices[b],
+                        self.vertices[opp],
+                    ) > 0
+                        && self.flip_edge(tid, i).is_some()
+                    {
+                        flipped = true;
+                        break;
+                    }
+                }
+            }
+            if !flipped {
+                break;
+            }
+        }
     }
 
     /// Force the constraint edge `(u, v)` to appear in the triangulation
@@ -312,24 +388,28 @@ fn segments_strictly_cross(p: Point2, q: Point2, r: Point2, s: Point2) -> bool {
     true
 }
 
-/// Find the index in `t2.neighbors` whose edge starts at vertex `a` —
-/// helper for unpacking T2's outside neighbors during a flip.
-fn edge_idx_a_in_t2(t2: &Triangle, a: VertId) -> Option<usize> {
-    // T2 = [v2, b, a] where shared edge is opposite v2 (idx 0). We want
-    // the edge index opposite vertex `a` (verts[2]) — that's the edge
-    // from verts[0]=v2 to verts[1]=b... wait, that's the edge opposite a,
-    // which runs from v2 to b — not what we want. Let's find by vertex.
-    // The "edge starting at a going CCW" is the edge from verts[i]=a to
-    // verts[i+1]; its opposite vertex is verts[i+2]; so the neighbor
-    // index is (i+2) mod 3.
-    let i = (0..3).find(|&i| t2.verts[i] == a)?;
+/// In `t2`, find the neighbor index for the edge that **leaves** vertex
+/// `vertex` (the edge for which `vertex` is the start in CCW order).
+/// During a flip we use this to grab T2's outside neighbor on the side
+/// going from `a` outward to `v2`.
+///
+/// For triangle `[X, Y, Z]` in CCW, the edge leaving `X` is `X→Y`,
+/// opposite vertex `Z` (slot 2). Slot of leaving-edge = `(slot_X + 2) % 3`.
+fn t2_neighbor_leaving(t2: &Triangle, vertex: VertId) -> Option<usize> {
+    let i = (0..3).find(|&i| t2.verts[i] == vertex)?;
     Some((i + 2) % 3)
 }
 
-/// Same idea, for vertex `b` in T2.
-fn edge_idx_b_in_t2(t2: &Triangle, b: VertId) -> Option<usize> {
-    let i = (0..3).find(|&i| t2.verts[i] == b)?;
-    Some((i + 2) % 3)
+/// In `t2`, find the neighbor index for the edge that **arrives at**
+/// vertex `vertex` (the edge for which `vertex` is the end in CCW order).
+/// During a flip we use this to grab T2's outside neighbor on the side
+/// going from `v2` to `b`.
+///
+/// For triangle `[X, Y, Z]` in CCW, the edge arriving at `Y` is `X→Y`,
+/// opposite vertex `Z` (slot 2). Slot of arriving-edge = `(slot_Y + 1) % 3`.
+fn t2_neighbor_arriving(t2: &Triangle, vertex: VertId) -> Option<usize> {
+    let i = (0..3).find(|&i| t2.verts[i] == vertex)?;
+    Some((i + 1) % 3)
 }
 
 /// Retarget `neighbor`'s back-pointer from `old` to `new` if it currently
@@ -760,5 +840,39 @@ mod tests {
         assert_all_ccw(&mesh);
         assert_neighbors_symmetric(&mesh);
         assert_delaunay(&mesh);
+    }
+
+    /// Stress test for `flip_edge` neighbor stitching. Flips every
+    /// flippable interior edge once and checks that neighbor symmetry
+    /// and CCW winding survive. This regression-tests the
+    /// `t2_neighbor_leaving` / `t2_neighbor_arriving` helpers — a bug
+    /// in either one corrupts back-pointers asymmetrically and trips
+    /// `assert_neighbors_symmetric` after a few flips even though the
+    /// mesh appears outwardly fine.
+    #[test]
+    fn flip_edge_preserves_neighbor_symmetry_and_winding() {
+        let pts: Vec<(i64, i64)> = (0..12)
+            .map(|i| {
+                let theta = i as f64 * std::f64::consts::TAU / 12.0;
+                ((1000.0 * theta.cos()) as i64, (1000.0 * theta.sin()) as i64)
+            })
+            .collect();
+        let mut mesh = Mesh::build(pts);
+        // Walk a snapshot of triangles and try a flip on every interior
+        // edge. Some flips will be rejected (non-convex quad / boundary);
+        // accept that. Survivors must keep the mesh consistent.
+        let snapshot: Vec<(TriId, [Option<TriId>; 3])> = mesh
+            .alive_triangles()
+            .map(|(i, t)| (i, t.neighbors))
+            .collect();
+        for (tid, neighbors) in snapshot {
+            for (i, n) in neighbors.iter().enumerate() {
+                if n.is_some() && mesh.triangles[tid].is_some() {
+                    let _ = mesh.flip_edge(tid, i);
+                }
+            }
+        }
+        assert_all_ccw(&mesh);
+        assert_neighbors_symmetric(&mesh);
     }
 }

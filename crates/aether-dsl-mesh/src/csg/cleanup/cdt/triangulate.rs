@@ -124,61 +124,129 @@ pub(in crate::csg::cleanup) fn triangulate(
         }
     }
 
-    // 4. Inside / outside flood fill. Triangles touching a super-triangle
-    // vertex are definitely outside. From there, BFS: cross a
-    // non-constraint edge → same side; cross a constraint edge → flip.
-    let n_tris = mesh.triangles.len();
-    let mut classification: Vec<Option<bool>> = vec![None; n_tris]; // Some(true) = inside, Some(false) = outside
-    let mut queue: std::collections::VecDeque<(usize, bool)> = std::collections::VecDeque::new();
+    // 3b. Lawson re-Delaunization. Constraint enforcement flips diagonals
+    // to thread the boundary through the mesh, but the new diagonals
+    // adjacent to the constraints are not necessarily locally Delaunay —
+    // which is what produces visible slivers in the merged regions even
+    // though the topology is correct. For each non-constraint edge, run
+    // the standard in-circle test against the opposite vertex; flip if
+    // it fails. Iterate to a fixed point.
+    mesh.lawson_redelaunize(&constraints);
 
-    for (tid, tri) in mesh.alive_triangles() {
-        if tri.verts.iter().any(|&v| v < super_count) {
-            classification[tid] = Some(false);
-            queue.push_back((tid, false));
-        }
-    }
+    // 4. Inside / outside via *geometric* test. The naive topological
+    // flood fill from super-vertex seeds is fragile: constraint
+    // enforcement flips can pull super-vertices into triangles that are
+    // geometrically inside the polygon, which then get marked outside
+    // and propagate the wrong state. Instead, for each candidate
+    // triangle (must have all constraint vertices, no super), compute
+    // its 2D centroid and apply the even-odd point-in-polygon rule
+    // against every input loop. A point is inside the polygon iff an
+    // odd number of loops contain it (outer = 1; outer + hole = 2;
+    // none = 0).
+    let projected_loops: Vec<Vec<Point2>> = loops
+        .iter()
+        .map(|loop_| {
+            loop_
+                .iter()
+                .map(|&v| project_point(vertices[v], axis_a, axis_b))
+                .collect()
+        })
+        .collect();
 
-    while let Some((tid, inside)) = queue.pop_front() {
-        let tri = match mesh.triangles[tid].as_ref() {
-            Some(t) => t.clone(),
-            None => continue,
-        };
-        for i in 0..3 {
-            let Some(n) = tri.neighbors[i] else { continue };
-            if classification[n].is_some() {
-                continue;
-            }
-            let a = tri.verts[(i + 1) % 3];
-            let b = tri.verts[(i + 2) % 3];
-            let canon = if a < b { (a, b) } else { (b, a) };
-            let crosses_boundary = constraints.contains(&canon);
-            let n_inside = if crosses_boundary { !inside } else { inside };
-            classification[n] = Some(n_inside);
-            queue.push_back((n, n_inside));
-        }
-    }
-
-    // 5. Collect alive inside triangles, drop super vertices, map back
-    // to the input `VertexId`s, and ensure CCW winding.
+    // 5. Collect alive triangles whose centroid is inside the polygon.
     let mut output = Vec::new();
-    for (tid, tri) in mesh.alive_triangles() {
-        if classification[tid] != Some(true) {
-            continue;
-        }
-        // Defensive: skip any triangle that still references a super vertex.
+    for (_tid, tri) in mesh.alive_triangles() {
         if tri.verts.iter().any(|&v| v < super_count) {
             continue;
         }
+        let p0 = projected_loops_lookup(
+            vertices,
+            input_ids[tri.verts[0] - super_count],
+            axis_a,
+            axis_b,
+        );
+        let p1 = projected_loops_lookup(
+            vertices,
+            input_ids[tri.verts[1] - super_count],
+            axis_a,
+            axis_b,
+        );
+        let p2 = projected_loops_lookup(
+            vertices,
+            input_ids[tri.verts[2] - super_count],
+            axis_a,
+            axis_b,
+        );
+        // Centroid = (p0 + p1 + p2) / 3. Avoid division by working with 3*centroid:
+        // shift the polygon-loop edges by 3x as well.
+        let cx3 = p0.0 as i128 + p1.0 as i128 + p2.0 as i128;
+        let cy3 = p0.1 as i128 + p1.1 as i128 + p2.1 as i128;
+
+        let mut inside_count = 0u32;
+        for ploop in &projected_loops {
+            if point_in_polygon_3x(cx3, cy3, ploop) {
+                inside_count += 1;
+            }
+        }
+        if inside_count % 2 != 1 {
+            continue;
+        }
+
         let v0 = input_ids[tri.verts[0] - super_count];
         let v1 = input_ids[tri.verts[1] - super_count];
         let v2 = input_ids[tri.verts[2] - super_count];
-        // Each Bowyer-Watson triangle is already CCW in 2D, but the
-        // 2D-CCW corresponds to 3D-CCW-around-normal only if the
-        // projection axes were chosen so. `projection_axes` is set up
-        // for that, so just re-emit.
         output.push([v0, v1, v2]);
     }
     Some(output)
+}
+
+fn projected_loops_lookup(
+    vertices: &[Point3],
+    vid: VertexId,
+    axis_a: Axis,
+    axis_b: Axis,
+) -> Point2 {
+    project_point(vertices[vid], axis_a, axis_b)
+}
+
+/// Even-odd point-in-polygon test, evaluated at point `(cx3 / 3, cy3 / 3)`
+/// without performing the division. The polygon edges are scaled by 3 so
+/// the rational inequality stays in integers.
+///
+/// Standard ray-casting: a horizontal ray from the test point to +x
+/// crosses an edge iff the edge straddles the test y AND the
+/// intersection x is to the right of the test x. We avoid division by
+/// cross-multiplying by `denom = pi.y - pj.y` and tracking its sign.
+fn point_in_polygon_3x(cx3: i128, cy3: i128, poly: &[Point2]) -> bool {
+    let mut inside = false;
+    let n = poly.len();
+    for i in 0..n {
+        let j = (i + n - 1) % n;
+        // Scale polygon coords by 3 so we can compare against (cx3, cy3).
+        let pix3 = (poly[i].0 as i128) * 3;
+        let piy3 = (poly[i].1 as i128) * 3;
+        let pjx3 = (poly[j].0 as i128) * 3;
+        let pjy3 = (poly[j].1 as i128) * 3;
+        // Does the edge from pj to pi straddle horizontal line y = cy3?
+        // Use strict on one side, non-strict on the other to avoid
+        // double-counting vertex grazes.
+        if (piy3 > cy3) == (pjy3 > cy3) {
+            continue;
+        }
+        // Intersection x with horizontal line y = cy3:
+        //   x_at = pjx3 + (pix3 - pjx3) * (cy3 - pjy3) / (piy3 - pjy3)
+        // We want: cx3 < x_at.
+        //   cx3 - pjx3 < (pix3 - pjx3) * (cy3 - pjy3) / (piy3 - pjy3)
+        // Multiply by (piy3 - pjy3); sign matters.
+        let denom = piy3 - pjy3;
+        let lhs = (cx3 - pjx3) * denom;
+        let rhs = (pix3 - pjx3) * (cy3 - pjy3);
+        let crosses = if denom > 0 { lhs < rhs } else { lhs > rhs };
+        if crosses {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 /// CCW signed area test for the projected outer loop, exposed because
