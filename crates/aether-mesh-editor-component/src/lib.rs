@@ -6,6 +6,12 @@
 //! new triangles atomically — partial parse or mesh failures keep the
 //! previous mesh visible.
 //!
+//! Per ADR-0057, the canonical mesh form returned by `aether-dsl-mesh`
+//! is now `Vec<Polygon>` (n-gons with holes); this component
+//! tessellates each polygon to triangles at emit time via
+//! `tessellate_polygon` so the upload path stays triangle-based but
+//! the source-of-truth is the n-gon.
+//!
 //! Supersedes the Spike C vertex/face stateful editor. The
 //! `aether.mesh.set_primitive` / `translate_vertices` / `scale_vertices`
 //! / `rotate_vertices` / `extrude_face` / `delete_faces` / `describe`
@@ -25,7 +31,7 @@
 //!    re-write the file and re-send `set_path`).
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io};
-use aether_dsl_mesh::Triangle;
+use aether_dsl_mesh::tessellate_polygon;
 use aether_kinds::{DrawTriangle, ReadResult, SetPath, SetText, Tick, Vertex};
 
 /// Built-in palette mapping DSL `:color N` indices to RGB. The DSL's
@@ -128,45 +134,52 @@ impl DslMeshEditor {
     /// Parse DSL text and (on success) replace the cached triangle
     /// list. Atomic: failures leave the prior cache untouched, so a
     /// bad reload doesn't blank the render.
+    ///
+    /// Per ADR-0057, the source mesh form is `Vec<Polygon>` (n-gons);
+    /// we tessellate each polygon to triangles here at cache time so
+    /// the per-tick render path stays cheap (one cached triangle list,
+    /// no re-tessellation per frame).
     fn try_replace(&mut self, dsl: &str) {
         let Ok(ast) = aether_dsl_mesh::parse(dsl) else {
             return;
         };
-        let Ok(triangles) = aether_dsl_mesh::mesh(&ast) else {
+        let Ok(polygons) = aether_dsl_mesh::mesh_polygons(&ast) else {
             return;
         };
-        let mut out = Vec::with_capacity(triangles.len());
-        for tri in &triangles {
-            out.push(to_draw_triangle(tri));
+        let mut out = Vec::new();
+        for polygon in &polygons {
+            for tri in tessellate_polygon(polygon) {
+                out.push(to_draw_triangle(tri, polygon.color));
+            }
         }
         self.triangles = out;
     }
 }
 
-fn to_draw_triangle(tri: &Triangle) -> DrawTriangle {
-    let (r, g, b) = PALETTE[(tri.color as usize) % PALETTE.len()];
+fn to_draw_triangle(tri: [[f32; 3]; 3], color: u32) -> DrawTriangle {
+    let (r, g, b) = PALETTE[(color as usize) % PALETTE.len()];
     DrawTriangle {
         verts: [
             Vertex {
-                x: tri.vertices[0][0],
-                y: tri.vertices[0][1],
-                z: tri.vertices[0][2],
+                x: tri[0][0],
+                y: tri[0][1],
+                z: tri[0][2],
                 r,
                 g,
                 b,
             },
             Vertex {
-                x: tri.vertices[1][0],
-                y: tri.vertices[1][1],
-                z: tri.vertices[1][2],
+                x: tri[1][0],
+                y: tri[1][1],
+                z: tri[1][2],
                 r,
                 g,
                 b,
             },
             Vertex {
-                x: tri.vertices[2][0],
-                y: tri.vertices[2][1],
-                z: tri.vertices[2][2],
+                x: tri[2][0],
+                y: tri[2][1],
+                z: tri[2][2],
                 r,
                 g,
                 b,
