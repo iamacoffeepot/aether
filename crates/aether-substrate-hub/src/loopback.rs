@@ -29,10 +29,10 @@
 //!     way `engine.rs::read_loop` handles frames arriving off a
 //!     remote engine's TCP socket.
 //!
-//! Self-dialling is explicitly avoided: the boot uses
-//! `SubstrateBootBuilder::skip_upstream_hub` so the substrate does
-//! not try to `HubClient::connect` to its own TCP listener (which
-//! wouldn't be bound yet at `new()` time anyway).
+//! Self-dialling is explicitly avoided: the boot is built and used
+//! without ever calling `connect_hub_from_env`, so the substrate
+//! does not try to `HubClient::connect` to its own TCP listener
+//! (which wouldn't be bound yet at `boot()` time anyway).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -223,9 +223,11 @@ impl LoopbackEngine {
     /// contains the hub-self entry by the time an MCP client
     /// connects.
     pub fn boot(engines: &EngineRegistry) -> wasmtime::Result<Self> {
-        let boot = SubstrateBoot::builder("aether-substrate-hub", env!("CARGO_PKG_VERSION"))
-            .skip_upstream_hub()
-            .build()?;
+        // The hub IS the hub — there's no upstream to dial, so we
+        // build the substrate but never call `connect_hub_from_env`.
+        // The in-process loopback is wired below.
+        let boot =
+            SubstrateBoot::builder("aether-substrate-hub", env!("CARGO_PKG_VERSION")).build()?;
 
         let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<EngineToHub>();
         boot.outbound.attach(outbound_tx);

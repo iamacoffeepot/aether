@@ -1206,6 +1206,14 @@ fn main() -> wasmtime::Result<()> {
     // but unset gives the generic substrate name rather than leaking
     // whatever demo-ish string last shipped in source.
     let boot_title = std::env::var("AETHER_WINDOW_TITLE").unwrap_or_else(|_| "aether".to_owned());
+
+    // Connect to the hub LAST, after every chassis sink is registered.
+    // Before this returns no hub-driven `load_component` can race
+    // ahead of the chassis's setup and bind a chassis sink name to a
+    // component (issue #262). Must happen before moving fields out of
+    // `boot` into `App` below — connect_hub_from_env borrows `&boot`.
+    let hub = boot.connect_hub_from_env()?;
+
     let app = App {
         queue: boot.queue,
         input_subscribers: boot.input_subscribers,
@@ -1239,7 +1247,7 @@ fn main() -> wasmtime::Result<()> {
         event_loop,
         app,
         triangles_rendered,
-        _hub: boot.hub,
+        _hub: hub,
     };
     tracing::info!(
         target: "aether_substrate::boot",
