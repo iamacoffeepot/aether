@@ -14,6 +14,21 @@
 
 use super::point::Point3;
 
+fn gcd_u128(a: u128, b: u128) -> u128 {
+    let mut a = a;
+    let mut b = b;
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+fn gcd_4(a: u128, b: u128, c: u128, d: u128) -> u128 {
+    gcd_u128(gcd_u128(gcd_u128(a, b), c), d)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Plane3 {
     pub n_x: i64,
@@ -89,6 +104,39 @@ impl Plane3 {
         }
     }
 
+    /// GCD-normalized canonical key for plane equality.
+    ///
+    /// Two coplanar polygons with parallel normals can have `Plane3`
+    /// fields differing by a positive scalar (e.g. two triangles on the
+    /// same face whose cross products differ in magnitude because the
+    /// triangles themselves have different shapes). The canonical key
+    /// divides `(n_x, n_y, n_z, d)` by their absolute GCD, collapsing
+    /// proportional planes to the same key while preserving sign
+    /// (so opposite-facing coplanar planes stay distinct).
+    ///
+    /// Used by the cleanup pipeline's coplanar grouping per ADR-0057
+    /// — without it, CDT-triangulated faces re-emerge with one plane
+    /// key per output triangle and never re-merge into n-gon faces.
+    pub fn canonical_key(&self) -> (i64, i64, i64, i128) {
+        let g = gcd_4(
+            self.n_x.unsigned_abs() as u128,
+            self.n_y.unsigned_abs() as u128,
+            self.n_z.unsigned_abs() as u128,
+            self.d.unsigned_abs(),
+        );
+        if g == 0 {
+            // Fully zero plane (degenerate); leave as-is.
+            return (self.n_x, self.n_y, self.n_z, self.d);
+        }
+        let g = g as i128;
+        (
+            (self.n_x as i128 / g) as i64,
+            (self.n_y as i128 / g) as i64,
+            (self.n_z as i128 / g) as i64,
+            self.d / g,
+        )
+    }
+
     /// Sign of `dot(self.normal, other.normal)`. Used to distinguish
     /// coplanar-front from coplanar-back when classifying a polygon
     /// against a partitioner whose plane it shares.
@@ -153,6 +201,26 @@ mod tests {
         let down = up.invert();
         assert!(up.normal_dot_sign(&up) > 0);
         assert!(up.normal_dot_sign(&down) < 0);
+    }
+
+    #[test]
+    fn canonical_key_collapses_proportional_planes() {
+        // Two triangles on the same physical plane (z = 0 in fixed
+        // point), with different cross-product magnitudes — different
+        // raw plane fields but the same canonical key.
+        let small = Plane3::from_points(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0));
+        let large = Plane3::from_points(p(0.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(0.0, 2.0, 0.0));
+        // Raw normals differ by factor 4 (cross product scales with edge length).
+        assert_ne!(small.n_z, large.n_z);
+        // But canonical keys match.
+        assert_eq!(small.canonical_key(), large.canonical_key());
+    }
+
+    #[test]
+    fn canonical_key_distinguishes_opposite_normals() {
+        let up = Plane3::from_points(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0));
+        let down = up.invert();
+        assert_ne!(up.canonical_key(), down.canonical_key());
     }
 
     #[test]

@@ -71,13 +71,10 @@ type GroupKey = (i64, i64, i64, i128, u32);
 fn group_loops(loops: Vec<csg::polygon::Polygon>) -> Vec<Polygon> {
     let mut groups: HashMap<GroupKey, Vec<csg::polygon::Polygon>> = HashMap::new();
     for poly in loops {
-        let key = (
-            poly.plane.n_x,
-            poly.plane.n_y,
-            poly.plane.n_z,
-            poly.plane.d,
-            poly.color,
-        );
+        // Use the GCD-canonical plane key so re-derived planes from
+        // CDT-output triangles match the original face plane.
+        let (kx, ky, kz, kd) = poly.plane.canonical_key();
+        let key = (kx, ky, kz, kd, poly.color);
         groups.entry(key).or_default().push(poly);
     }
 
