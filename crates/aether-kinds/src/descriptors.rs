@@ -18,18 +18,18 @@ use aether_hub_protocol::KindDescriptor;
 use aether_mail::{Kind, Schema};
 
 use crate::{
-    Camera, CaptureFrame, CaptureFrameResult, Delete, DeleteResult, Describe, DrawTriangle,
-    DropComponent, DropResult, Fetch, FetchResult, FrameStats, HandlePin, HandlePinResult,
-    HandlePublish, HandlePublishResult, HandleRelease, HandleReleaseResult, HandleUnpin,
-    HandleUnpinResult, Key, KeyRelease, List, ListResult, LoadComponent, LoadResult, MeshState,
-    MouseButton, MouseMove, NoteOff, NoteOn, OrbitSetDistance, OrbitSetFov, OrbitSetPitch,
-    OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo, PlatformInfoResult,
-    PlayerRequestStep, PlayerSetMode, PlayerSetPosition, PlayerSetVelocity, PlayerStepResult, Pong,
-    Read, ReadResult, ReplaceComponent, ReplaceResult, ScaleVertices, SetMasterGain,
-    SetMasterGainResult, SetPrimitive, SetWindowMode, SetWindowModeResult, SetWindowTitle,
-    SetWindowTitleResult, SubscribeInput, SubscribeInputResult, Tick, TopdownSetCenter,
-    TopdownSetExtent, TranslateVertices, UnresolvedMail, UnsubscribeInput, WindowSize, Write,
-    WriteResult,
+    Camera, CaptureFrame, CaptureFrameResult, Delete, DeleteFaces, DeleteResult, Describe,
+    DrawTriangle, DropComponent, DropResult, ExtrudeFace, Fetch, FetchResult, FrameStats,
+    HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
+    HandleReleaseResult, HandleUnpin, HandleUnpinResult, Key, KeyRelease, List, ListResult,
+    LoadComponent, LoadResult, MeshState, MouseButton, MouseMove, NoteOff, NoteOn,
+    OrbitSetDistance, OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping,
+    PlatformInfo, PlatformInfoResult, PlayerRequestStep, PlayerSetMode, PlayerSetPosition,
+    PlayerSetVelocity, PlayerStepResult, Pong, Read, ReadResult, ReplaceComponent, ReplaceResult,
+    RotateVertices, ScaleVertices, SetMasterGain, SetMasterGainResult, SetPrimitive, SetWindowMode,
+    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeInput,
+    SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, TranslateVertices,
+    UnresolvedMail, UnsubscribeInput, WindowSize, Write, WriteResult,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -167,6 +167,9 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<SetPrimitive>(),
         schema::<TranslateVertices>(),
         schema::<ScaleVertices>(),
+        schema::<RotateVertices>(),
+        schema::<ExtrudeFace>(),
+        schema::<DeleteFaces>(),
         schema::<Describe>(),
         schema::<MeshState>(),
     ]

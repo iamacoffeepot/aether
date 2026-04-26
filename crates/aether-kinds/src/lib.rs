@@ -1536,6 +1536,54 @@ mod mesh {
         pub vertex_ids: [u32; 3],
         pub color: [f32; 3],
     }
+
+    /// `aether.mesh.extrude_face` — region-extrude the listed faces
+    /// along their averaged normal by `distance`. Standard mesh-editor
+    /// semantics: the input faces become the bottom of the extrusion
+    /// (tombstoned), a new face is created at the offset position for
+    /// each input face (preserving original color), and side quads
+    /// stitch boundary edges (edges used by exactly one input face)
+    /// from old to new positions. Interior edges (shared between two
+    /// input faces) get no side quad.
+    ///
+    /// New ids are appended monotonically: vertices first (one new
+    /// vertex per unique input vertex, in ascending input-id order),
+    /// then top faces (one per input face, in input order), then side
+    /// quads (two triangles per boundary edge). Send `describe`
+    /// afterward to learn the new ids — this op produces enough new
+    /// geometry that mental tracking is fragile.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.mesh.extrude_face")]
+    pub struct ExtrudeFace {
+        pub face_ids: Vec<u32>,
+        pub distance: f32,
+    }
+
+    /// `aether.mesh.delete_faces` — tombstone the listed face ids.
+    /// Tombstoned faces never reappear in `describe` output, never
+    /// render, and their ids are never reused (per the editor's
+    /// monotonic-id rule). Vertices referenced only by deleted faces
+    /// are NOT cascaded — they stay live until explicitly translated,
+    /// scaled, or removed by a future `delete_vertices` op.
+    /// Out-of-range and already-tombstoned ids are silently skipped.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.mesh.delete_faces")]
+    pub struct DeleteFaces {
+        pub face_ids: Vec<u32>,
+    }
+
+    /// `aether.mesh.rotate_vertices` — rotate each named vertex
+    /// around the axis through `pivot` by `angle` radians. `axis`
+    /// is normalized internally; a zero-length axis is treated as
+    /// a no-op rotation. Out-of-range and tombstoned ids skipped.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.mesh.rotate_vertices")]
+    pub struct RotateVertices {
+        pub vertex_ids: Vec<u32>,
+        pub pivot: [f32; 3],
+        pub axis: [f32; 3],
+        pub angle: f32,
+    }
 }
 
 #[cfg(test)]
