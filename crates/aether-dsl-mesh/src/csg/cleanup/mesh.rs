@@ -123,3 +123,97 @@ impl IndexedMesh {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::csg::fixed::f32_to_fixed;
+
+    fn pt(x: f32, y: f32, z: f32) -> Point3 {
+        Point3 {
+            x: f32_to_fixed(x).unwrap(),
+            y: f32_to_fixed(y).unwrap(),
+            z: f32_to_fixed(z).unwrap(),
+        }
+    }
+
+    fn xy_plane() -> Plane3 {
+        Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 1,
+            d: 0,
+        }
+    }
+
+    #[test]
+    fn cdt_triangulate_quad_emits_two_triangles() {
+        let mesh = IndexedMesh {
+            vertices: vec![
+                pt(0.0, 0.0, 0.0),
+                pt(1.0, 0.0, 0.0),
+                pt(1.0, 1.0, 0.0),
+                pt(0.0, 1.0, 0.0),
+            ],
+            polygons: vec![IndexedPolygon {
+                vertices: vec![0, 1, 2, 3],
+                plane: xy_plane(),
+                color: 7,
+            }],
+        };
+        let triangles = mesh.cdt_triangulate();
+        assert_eq!(triangles.len(), 2);
+        for tri in &triangles {
+            assert_eq!(tri.vertices.len(), 3);
+            assert_eq!(tri.color, 7);
+        }
+    }
+
+    #[test]
+    fn cdt_triangulate_groups_polygons_by_plane_key() {
+        // Two polygons on the same plane (single CDT call) and one on
+        // a different plane (separate CDT call). Three quads → six
+        // triangles total.
+        let yz_plane = Plane3 {
+            n_x: 1,
+            n_y: 0,
+            n_z: 0,
+            d: 0,
+        };
+        let mesh = IndexedMesh {
+            vertices: vec![
+                pt(0.0, 0.0, 0.0),
+                pt(1.0, 0.0, 0.0),
+                pt(1.0, 1.0, 0.0),
+                pt(0.0, 1.0, 0.0),
+                pt(2.0, 0.0, 0.0),
+                pt(3.0, 0.0, 0.0),
+                pt(3.0, 1.0, 0.0),
+                pt(2.0, 1.0, 0.0),
+                pt(0.0, 0.0, 0.0),
+                pt(0.0, 1.0, 0.0),
+                pt(0.0, 1.0, 1.0),
+                pt(0.0, 0.0, 1.0),
+            ],
+            polygons: vec![
+                IndexedPolygon {
+                    vertices: vec![0, 1, 2, 3],
+                    plane: xy_plane(),
+                    color: 0,
+                },
+                IndexedPolygon {
+                    vertices: vec![4, 5, 6, 7],
+                    plane: xy_plane(),
+                    color: 0,
+                },
+                IndexedPolygon {
+                    vertices: vec![8, 9, 10, 11],
+                    plane: yz_plane,
+                    color: 0,
+                },
+            ],
+        };
+        let triangles = mesh.cdt_triangulate();
+        assert_eq!(triangles.len(), 6, "3 quads should triangulate to 6 tris");
+    }
+}

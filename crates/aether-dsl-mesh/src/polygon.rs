@@ -364,6 +364,94 @@ mod tests {
     }
 
     #[test]
+    fn empty_or_degenerate_polygon_yields_no_triangles() {
+        let empty = Polygon {
+            vertices: vec![],
+            holes: vec![],
+            plane_normal: [0.0, 0.0, 1.0],
+            color: 0,
+        };
+        assert!(tessellate_polygon(&empty).is_empty());
+        let two_vert = Polygon {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            holes: vec![],
+            plane_normal: [0.0, 0.0, 1.0],
+            color: 0,
+        };
+        assert!(tessellate_polygon(&two_vert).is_empty());
+    }
+
+    #[test]
+    fn fan_triangulate_n_gon_yields_n_minus_2_triangles() {
+        for n in 3..=8 {
+            let vertices: Vec<[f32; 3]> = (0..n)
+                .map(|i| {
+                    let theta = 2.0 * std::f32::consts::PI * (i as f32) / (n as f32);
+                    [theta.cos(), theta.sin(), 0.0]
+                })
+                .collect();
+            let tris = fan_triangulate(&vertices);
+            assert_eq!(
+                tris.len(),
+                n - 2,
+                "fan-triangulating an {n}-gon should yield {} triangles",
+                n - 2
+            );
+        }
+    }
+
+    #[test]
+    fn is_convex_accepts_convex_quad() {
+        let quad = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        assert!(is_convex(&quad));
+    }
+
+    #[test]
+    fn is_convex_rejects_concave_l_shape() {
+        // L-shaped polygon — concave at the inner corner.
+        let l_shape = vec![
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 2.0, 0.0],
+            [0.0, 2.0, 0.0],
+        ];
+        assert!(!is_convex(&l_shape));
+    }
+
+    #[test]
+    fn unit_normal_for_axis_aligned_planes() {
+        // Build planes from points and verify unit_normal direction.
+        let xy = csg::plane::Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 100, // any positive value
+            d: 0,
+        };
+        let n = unit_normal(&xy);
+        assert!((n[0]).abs() < 1e-6);
+        assert!((n[1]).abs() < 1e-6);
+        assert!((n[2] - 1.0).abs() < 1e-6, "expected +z, got {n:?}");
+    }
+
+    #[test]
+    fn unit_normal_for_degenerate_plane_returns_default() {
+        let degen = csg::plane::Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 0,
+            d: 0,
+        };
+        assert_eq!(unit_normal(&degen), [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
     fn tessellate_polygon_with_hole_uses_cdt() {
         // Outer 2x2 quad (CCW) with a 1x1 hole (CW).
         let p = Polygon {

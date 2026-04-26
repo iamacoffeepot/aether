@@ -312,6 +312,87 @@ mod tests {
     }
 
     #[test]
+    fn strict_between_is_symmetric_in_endpoints() {
+        // Pin endpoint symmetry: between(p, a, b) == between(p, b, a).
+        // The repair pass canonicalizes edges as (min, max) before
+        // looking up subdivisions, but the predicate itself is called
+        // on raw endpoints — if it ever stops being symmetric, edge
+        // canonicalization wouldn't save us.
+        let a = pt(0.0, 0.0, 0.0);
+        let b = pt(4.0, 0.0, 0.0);
+        let m = pt(1.0, 0.0, 0.0); // strictly between
+        let off = pt(1.0, 1.0, 0.0);
+        let beyond = pt(5.0, 0.0, 0.0);
+        assert_eq!(is_strictly_between(m, a, b), is_strictly_between(m, b, a));
+        assert_eq!(
+            is_strictly_between(off, a, b),
+            is_strictly_between(off, b, a)
+        );
+        assert_eq!(
+            is_strictly_between(beyond, a, b),
+            is_strictly_between(beyond, b, a)
+        );
+    }
+
+    #[test]
+    fn strict_between_degenerate_segment_returns_false() {
+        // a == b: zero-length segment, no point can be strictly between.
+        // Pinned because the `len2 == 0` guard is the only thing
+        // preventing a divide-by-zero-style logic error in the dot
+        // product comparison.
+        let a = pt(1.0, 2.0, 3.0);
+        let b = pt(1.0, 2.0, 3.0);
+        assert!(!is_strictly_between(a, a, b));
+        assert!(!is_strictly_between(pt(0.0, 0.0, 0.0), a, b));
+        assert!(!is_strictly_between(pt(2.0, 4.0, 6.0), a, b));
+    }
+
+    #[test]
+    fn cascading_tjunctions_converge() {
+        // Iter 1: edge A→B has two collinear pool vertices M (mid) and
+        //         Q (quarter). Code selects the smallest VertexId — M
+        //         (id 3) wins over Q (id 4). Polygon gets M inserted:
+        //         [A, B, C] → [A, M, B, C].
+        // Iter 2: new edge A→M now has Q collinear. Q gets inserted:
+        //         [A, M, B, C] → [A, Q, M, B, C].
+        // Iter 3: no more violations, loop terminates.
+        //
+        // Tests the fixed-point convergence — multiple existing tests
+        // exercise single-iteration repair, but none cross the
+        // iteration boundary.
+        let plane = xy_plane();
+        let vertices = vec![
+            pt(0.0, 0.0, 0.0), // 0: A
+            pt(4.0, 0.0, 0.0), // 1: B
+            pt(2.0, 1.0, 0.0), // 2: C
+            pt(2.0, 0.0, 0.0), // 3: M (midpoint AB)
+            pt(1.0, 0.0, 0.0), // 4: Q (midpoint AM)
+        ];
+        let polygons = vec![poly(vec![0, 1, 2], plane, 0)];
+        let mesh = IndexedMesh { vertices, polygons };
+        let repaired = mesh.repair_tjunctions();
+        assert_eq!(repaired.polygons[0].vertices, vec![0, 4, 3, 1, 2]);
+    }
+
+    #[test]
+    fn multiple_subdivisions_on_different_edges_of_one_polygon() {
+        // Triangle (A, B, C) with M on edge A→B and N on edge B→C.
+        // Both subdivisions happen in a single iteration.
+        let plane = xy_plane();
+        let vertices = vec![
+            pt(0.0, 0.0, 0.0), // 0: A
+            pt(2.0, 0.0, 0.0), // 1: B
+            pt(0.0, 2.0, 0.0), // 2: C
+            pt(1.0, 0.0, 0.0), // 3: M on A→B
+            pt(1.0, 1.0, 0.0), // 4: N on B→C (midpoint of (2,0)-(0,2))
+        ];
+        let polygons = vec![poly(vec![0, 1, 2], plane, 0)];
+        let mesh = IndexedMesh { vertices, polygons };
+        let repaired = mesh.repair_tjunctions();
+        assert_eq!(repaired.polygons[0].vertices, vec![0, 3, 1, 4, 2]);
+    }
+
+    #[test]
     fn unreferenced_pool_vertex_collinear_on_an_edge_is_still_inserted() {
         // The vertex pool may legitimately contain vertices that aren't
         // referenced by any polygon (e.g., dropped degenerate slivers from

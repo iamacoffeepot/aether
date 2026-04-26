@@ -299,6 +299,83 @@ mod tests {
     }
 
     #[test]
+    fn empty_input_has_no_violations() {
+        // Pin: zero polygons → zero violations (vacuously closed).
+        // Catches a future change that surfaces "empty mesh" as a
+        // distinct error condition.
+        assert!(validate_manifold(&[]).is_empty());
+    }
+
+    #[test]
+    fn singular_edge_three_polygons_share_one_directed_edge() {
+        // Three triangles all walking the edge (a → b) the same way.
+        // The validator's directed-edge counter sees forward_count=3
+        // and reverse_count=0 — should report SingularEdge with
+        // forward=3, reverse=0.
+        let a = [0.0, 0.0, 0.0];
+        let b = [1.0, 0.0, 0.0];
+        let c = [0.0, 1.0, 0.0];
+        let d = [0.0, -1.0, 0.0];
+        let e = [0.0, 0.5, 0.5];
+        let polys = vec![
+            quad([a, b, c, c], [0.0, 0.0, 1.0]),
+            quad([a, b, d, d], [0.0, 0.0, -1.0]),
+            quad([a, b, e, e], [0.0, 1.0, 1.0]),
+        ];
+        let violations = validate_manifold(&polys);
+        let singular = violations
+            .iter()
+            .filter(|v| matches!(v, ManifoldViolation::SingularEdge { .. }))
+            .count();
+        assert!(
+            singular >= 1,
+            "expected at least one SingularEdge, got {violations:#?}"
+        );
+    }
+
+    #[test]
+    fn inconsistent_winding_two_polygons_walk_edge_same_direction() {
+        // Two triangles that share an edge but walk it the same
+        // direction (both `a → b`) instead of opposing. Should report
+        // InconsistentWinding.
+        let a = [0.0, 0.0, 0.0];
+        let b = [1.0, 0.0, 0.0];
+        let c1 = [0.5, 1.0, 0.0];
+        let c2 = [0.5, -1.0, 0.0];
+        let polys = vec![
+            quad([a, b, c1, c1], [0.0, 0.0, 1.0]),
+            quad([a, b, c2, c2], [0.0, 0.0, -1.0]),
+        ];
+        let violations = validate_manifold(&polys);
+        let inconsistent = violations
+            .iter()
+            .filter(|v| matches!(v, ManifoldViolation::InconsistentWinding { .. }))
+            .count();
+        assert!(
+            inconsistent >= 1,
+            "expected at least one InconsistentWinding, got {violations:#?}"
+        );
+    }
+
+    #[test]
+    fn summary_polygon_and_triangle_counts_match_input() {
+        // Pin the per-summary numerics so a future refactor of the
+        // counting logic doesn't silently desync from input size.
+        let h = 0.5;
+        let polys = vec![quad(
+            [[-h, -h, -h], [h, -h, -h], [h, h, -h], [-h, h, -h]],
+            [0.0, 0.0, -1.0],
+        )];
+        let s = summary(&polys);
+        assert_eq!(s.polygon_count, 1);
+        // 4-vertex quad → 2 triangles after fan.
+        assert_eq!(s.triangle_count_after_fan, 2);
+        assert_eq!(s.hole_count_total, 0);
+        assert_eq!(s.vertex_count_min, 4);
+        assert_eq!(s.vertex_count_max, 4);
+    }
+
+    #[test]
     fn cube_with_one_face_missing_reports_boundary_edges() {
         let h = 0.5;
         // Same as above but drop the +Z face.

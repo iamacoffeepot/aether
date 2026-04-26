@@ -203,14 +203,155 @@ mod tests {
 
     #[test]
     fn snap_to_grid_rounds_to_nearest() {
-        // Halfway between two grid points should round to the even one
-        // (banker's rounding via f64::round semantics) — but more
-        // importantly, both nearby values must converge to a unique
-        // grid cell in the same direction every time across runs.
+        // Just-above-half rounds up, just-below-half rounds down. Both
+        // nearby values must converge to a unique grid cell in the same
+        // direction every time across runs.
         let just_above_half = (1.0 / SCALE as f32) * 0.51;
         let just_below_half = (1.0 / SCALE as f32) * 0.49;
         assert_eq!(f32_to_fixed(just_above_half).unwrap(), 1);
         assert_eq!(f32_to_fixed(just_below_half).unwrap(), 0);
+    }
+
+    #[test]
+    fn exact_halfway_rounds_away_from_zero() {
+        // Pin the actual rounding mode of `f64::round` (round-half-away-
+        // from-zero, *not* banker's rounding). If the implementation
+        // ever switches to `round_ties_even` this test fails loudly so
+        // we can audit BSP `side()` polarity stability rather than have
+        // a silent grid-shift cascade through the pipeline.
+        let half_lsb = 0.5 / SCALE;
+        // Build the f64s exactly so the half-LSB rounds aren't lost to
+        // f32 imprecision before reaching round().
+        assert_eq!(
+            f64_to_fixed_exact(half_lsb),
+            1,
+            "0.5 LSB should round away from zero"
+        );
+        assert_eq!(
+            f64_to_fixed_exact(1.5 * (1.0 / SCALE)),
+            2,
+            "1.5 LSB should round to 2 under away-from-zero"
+        );
+        assert_eq!(
+            f64_to_fixed_exact(2.5 * (1.0 / SCALE)),
+            3,
+            "2.5 LSB rounds to 3 under away-from-zero (banker's would yield 2)"
+        );
+        assert_eq!(
+            f64_to_fixed_exact(-0.5 * (1.0 / SCALE)),
+            -1,
+            "-0.5 LSB rounds to -1 under away-from-zero"
+        );
+    }
+
+    /// Mirrors `f32_to_fixed` against an exact f64 so halfway tests
+    /// aren't disturbed by f32 representation error.
+    fn f64_to_fixed_exact(value: f64) -> i32 {
+        (value * SCALE).round() as i32
+    }
+
+    #[test]
+    fn off_grid_round_trip_within_one_ulp() {
+        // Values that don't sit on a fixed-point grid line still must
+        // round-trip to within one fixed-point ULP (1/65536). Catches a
+        // future change that shifts the grid or alters rounding
+        // direction by even one bit.
+        let one_ulp = 1.0 / SCALE as f32;
+        let irrational = 0.123_456_79_f32;
+        for k in -1024..=1024 {
+            let value = (k as f32) * irrational;
+            if value.abs() > MAX_INPUT_MAGNITUDE {
+                continue;
+            }
+            let fx = f32_to_fixed(value).expect("in-range");
+            let back = fixed_to_f32(fx);
+            assert!(
+                (back - value).abs() <= one_ulp,
+                "off-grid round trip exceeded one ULP at value={value}: back={back}"
+            );
+        }
+    }
+
+    #[test]
+    fn smallest_f32_past_boundary_rejected() {
+        // The actual machine-epsilon boundary, not "+1.0 past". This is
+        // the value that BSP-side classification will see if upstream
+        // produces a marginally-too-large coordinate.
+        let just_above = f32::from_bits(MAX_INPUT_MAGNITUDE.to_bits() + 1);
+        assert!(
+            just_above > MAX_INPUT_MAGNITUDE,
+            "test setup: just_above must exceed boundary"
+        );
+        match f32_to_fixed(just_above).unwrap_err() {
+            FixedError::OutOfRange { value } => assert_eq!(value, just_above),
+            other => panic!("expected OutOfRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fixed_to_f32_total_for_extreme_inputs() {
+        // `f32_to_fixed` clamps to ±2^24, but `fixed_to_f32` accepts any
+        // i32 — assert it never panics and produces a finite f32 for the
+        // extreme bounds. Documents the function as total for callers
+        // that might hold an i32 from elsewhere.
+        let max = fixed_to_f32(i32::MAX);
+        let min = fixed_to_f32(i32::MIN);
+        assert!(max.is_finite(), "fixed_to_f32(i32::MAX) was non-finite");
+        assert!(min.is_finite(), "fixed_to_f32(i32::MIN) was non-finite");
+        assert!(max > 0.0);
+        assert!(min < 0.0);
+    }
+
+    #[test]
+    fn sign_is_preserved() {
+        // BSP `side()` polarity depends on this — `f32_to_fixed(-x)`
+        // must equal `-f32_to_fixed(x)` for every in-range non-zero x,
+        // otherwise asymmetric rounding could flip a polygon's side
+        // classification across an axis-aligned plane.
+        let mut x = 1.0 / SCALE as f32;
+        while x <= MAX_INPUT_MAGNITUDE {
+            let pos = f32_to_fixed(x).unwrap();
+            let neg = f32_to_fixed(-x).unwrap();
+            assert_eq!(pos, -neg, "sign mismatch at x={x}: pos={pos} neg={neg}");
+            x *= 2.0; // walk by powers of two — covers the full range fast
+        }
+    }
+
+    #[test]
+    fn determinism_across_calls() {
+        // Same input → same output across N calls. Guards against a
+        // future "clever" cache or thread-local state that breaks
+        // referential transparency at this layer.
+        let samples = [
+            -MAX_INPUT_MAGNITUDE,
+            -1.0,
+            -0.5,
+            0.0,
+            0.001,
+            0.123_456_7,
+            42.5,
+            MAX_INPUT_MAGNITUDE,
+        ];
+        for v in samples {
+            let first = f32_to_fixed(v).unwrap();
+            for _ in 0..16 {
+                assert_eq!(f32_to_fixed(v).unwrap(), first);
+            }
+        }
+    }
+
+    #[test]
+    fn idempotent_on_grid() {
+        // f32 → fixed → f32 → fixed must equal f32 → fixed for any
+        // grid-aligned input. (For off-grid the second snap can shift
+        // by one ULP because fixed_to_f32 may not reconstruct the exact
+        // input — we assert that case in `off_grid_round_trip_within_one_ulp`.)
+        for k in -1024..=1024 {
+            let value = (k as f32) * 0.25;
+            let once = f32_to_fixed(value).unwrap();
+            let twice = f32_to_fixed(fixed_to_f32(once)).unwrap();
+            assert_eq!(once, twice, "idempotence broke at value={value}");
+        }
     }
 
     #[test]
