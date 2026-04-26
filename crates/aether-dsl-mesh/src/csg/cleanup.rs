@@ -138,3 +138,71 @@ pub fn tessellate_polygon_f32(
             .collect(),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tessellate_polygon_f32_rejects_fewer_than_3_outer_vertices() {
+        let outer = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let result = tessellate_polygon_f32(&outer, &[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tessellate_polygon_f32_rejects_out_of_range_coordinates() {
+        // ADR-0054 caps fixed-point coordinates at ±256. Larger values
+        // must fail-fast at the f32→fixed conversion rather than silently
+        // truncate.
+        let outer = vec![
+            [0.0, 0.0, 0.0],
+            [300.0, 0.0, 0.0], // out of range
+            [0.0, 1.0, 0.0],
+        ];
+        let result = tessellate_polygon_f32(&outer, &[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tessellate_polygon_f32_rejects_degenerate_collinear_outer() {
+        // Three collinear points → degenerate plane → None.
+        let outer = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        let result = tessellate_polygon_f32(&outer, &[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tessellate_polygon_f32_happy_path_square_with_hole() {
+        let outer = vec![
+            [0.0, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+            [4.0, 4.0, 0.0],
+            [0.0, 4.0, 0.0],
+        ];
+        let hole = vec![
+            [1.0, 1.0, 0.0],
+            [1.0, 3.0, 0.0],
+            [3.0, 3.0, 0.0],
+            [3.0, 1.0, 0.0],
+        ];
+        let tris = tessellate_polygon_f32(&outer, &[hole]).expect("annular should triangulate");
+        // Topological minimum for 8-vertex annular = 8 triangles.
+        assert_eq!(tris.len(), 8);
+        // Total area = outer (16) - hole (4) = 12. Use shoelace on each
+        // triangle (signed) and sum.
+        let signed_double_area: f32 = tris
+            .iter()
+            .map(|tri| {
+                (tri[1][0] - tri[0][0]) * (tri[2][1] - tri[0][1])
+                    - (tri[1][1] - tri[0][1]) * (tri[2][0] - tri[0][0])
+            })
+            .sum();
+        // Doubled area of annular region = 24. Allow a small tolerance
+        // for f32 rounding through the integer fixed-point round trip.
+        assert!(
+            (signed_double_area - 24.0).abs() < 0.01,
+            "annular doubled area mismatch: {signed_double_area}"
+        );
+    }
+}
