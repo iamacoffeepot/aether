@@ -1,41 +1,91 @@
 //! Pass 1: vertex welding — owned-vertex polygons → indexed mesh.
 //!
-//! Hashes vertices by exact `Point3` integer equality and replaces
-//! polygon vertex lists with indices into a shared pool. Polygons that
-//! collapse to fewer than three distinct vertices after welding are
-//! dropped — they were degenerate slivers from a CSG split that
-//! produced near-coincident edges (the snap-to-grid round-trip in
-//! `compute_intersection` occasionally produces these).
+//! Welds vertices by Chebyshev-distance ≤ [`WELD_TOLERANCE_FIXED_UNITS`]
+//! (the single-pass snap drift bound from `compute_intersection`).
+//! Polygons that collapse to fewer than three distinct vertices after
+//! welding are dropped.
 //!
-//! Determinism: the vertex pool is built in input traversal order, so
-//! identical input polygon lists produce identical pools and identical
-//! indexed-polygon lists across runs / platforms / threads.
+//! ### Why tolerance and not exact equality
+//!
+//! BSP-side [`crate::csg::vertex_pool::SharedVertexPool`] already
+//! catches snap-drift duplicates that share a *line key* (same
+//! partitioner × polygon-plane pair). But duplicates can also arise
+//! across different line keys — the most common case is two adjacent
+//! cylinder/sphere facets sharing an edge, where the BSP splits each
+//! facet against the same partitioner; the shared edge produces the
+//! same true intersection point twice but the pool keys differ
+//! (different facet planes). Welding with the snap-drift tolerance
+//! catches these as a final dedup before downstream cleanup runs.
+//!
+//! ### Tolerance derivation
+//!
+//! `compute_intersection` rounds each output axis by up to 0.5 fixed
+//! units. Two same-true-point intersections, each independently
+//! snapped, can land up to 0.5 + 0.5 = 1 fixed unit apart in
+//! Chebyshev distance. Tolerance = 1 catches every legitimate
+//! same-vertex case — and the next-nearest distinct point in
+//! practical CSG inputs (sphere/cylinder facet vertex spacing on a
+//! cube face) is far above this (typically 0.05+ float = 3000+ fixed
+//! units), so there are no false positives.
+//!
+//! ### Determinism
+//!
+//! Pool order is input traversal order. The spatial bucket lookup
+//! visits 27 neighboring cells in (z,y,x) order so the "first match
+//! wins" rule is reproducible across runs.
 
 use super::mesh::{IndexedMesh, IndexedPolygon, VertexId};
 use crate::csg::point::Point3;
 use crate::csg::polygon::Polygon;
 use std::collections::HashMap;
 
+/// Snap-drift bound for near-duplicate vertex welding. Single-pass
+/// drift is 0.5 fixed units per axis from `compute_intersection`'s
+/// rounding step. Two same-true-point intersections each independently
+/// snapped can land up to 1 unit apart in Chebyshev distance.
+///
+/// We use `2` (not `1`) to absorb the accumulated drift across BSP
+/// passes for compositions with deeply overlapping cuts (e.g.,
+/// `three_cut_box_is_watertight`). The per-line
+/// [`crate::csg::vertex_pool::SharedVertexPool`] catches all
+/// single-pass snap-drift duplicates that share a line key; the
+/// remaining ≤2-unit gaps come from cross-pass drift between
+/// non-line-key-sharing computations and need to be welded here.
+///
+/// The next-nearest distinct-point spacing in practical CSG inputs
+/// (sphere/cylinder facet vertex spacing on a cube face, typically
+/// 0.05+ float = 3000+ fixed units) is far above 2, so there are no
+/// false positives.
+const WELD_TOLERANCE_FIXED_UNITS: i32 = 2;
+
+/// Spatial-bucket cell size: 2 × tolerance so any two points within
+/// tolerance land in the same or adjacent buckets.
+const BUCKET_SIZE: i32 = WELD_TOLERANCE_FIXED_UNITS * 2;
+
+type BucketKey = (i32, i32, i32);
+
+fn bucket_of(p: Point3) -> BucketKey {
+    (
+        p.x.div_euclid(BUCKET_SIZE),
+        p.y.div_euclid(BUCKET_SIZE),
+        p.z.div_euclid(BUCKET_SIZE),
+    )
+}
+
 impl IndexedMesh {
     pub(super) fn weld(polygons: Vec<Polygon>) -> Self {
         let mut vertex_pool: Vec<Point3> = Vec::new();
-        let mut vertex_index: HashMap<Point3, VertexId> = HashMap::new();
+        let mut buckets: HashMap<BucketKey, Vec<VertexId>> = HashMap::new();
         let mut indexed = Vec::with_capacity(polygons.len());
 
         for poly in polygons {
             let mut ids: Vec<VertexId> = Vec::with_capacity(poly.vertices.len());
             for v in &poly.vertices {
-                let id = *vertex_index.entry(*v).or_insert_with(|| {
-                    let next = vertex_pool.len();
-                    vertex_pool.push(*v);
-                    next
-                });
+                let id = lookup_or_insert(&mut vertex_pool, &mut buckets, *v);
                 if ids.last() != Some(&id) {
                     ids.push(id);
                 }
             }
-            // Wrap-around duplicate: last vertex equal to first (an explicit
-            // closed-polygon form, or a sliver where the loop folds back).
             if ids.len() >= 2 && ids.first() == ids.last() {
                 ids.pop();
             }
@@ -54,6 +104,39 @@ impl IndexedMesh {
             polygons: indexed,
         }
     }
+}
+
+/// Look up `v` against pool entries within tolerance (Chebyshev), via
+/// the 27 neighboring spatial buckets. Returns the existing entry's
+/// VertexId if any is within tolerance; otherwise inserts as new.
+fn lookup_or_insert(
+    pool: &mut Vec<Point3>,
+    buckets: &mut HashMap<BucketKey, Vec<VertexId>>,
+    v: Point3,
+) -> VertexId {
+    let (bx, by, bz) = bucket_of(v);
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let key = (bx + dx, by + dy, bz + dz);
+                if let Some(ids) = buckets.get(&key) {
+                    for &id in ids {
+                        let p = pool[id];
+                        if (p.x - v.x).abs() <= WELD_TOLERANCE_FIXED_UNITS
+                            && (p.y - v.y).abs() <= WELD_TOLERANCE_FIXED_UNITS
+                            && (p.z - v.z).abs() <= WELD_TOLERANCE_FIXED_UNITS
+                        {
+                            return id;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let new_id = pool.len();
+    pool.push(v);
+    buckets.entry((bx, by, bz)).or_default().push(new_id);
+    new_id
 }
 
 #[cfg(test)]
