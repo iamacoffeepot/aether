@@ -543,7 +543,6 @@ mod tests {
     /// the four ignored cases in `tests/regression.rs` should also start
     /// passing.
     #[test]
-    #[ignore = "BSP coplanar_threshold L1 vs L2 asymmetry — pinned in csg::plane tests; fix at the threshold formula"]
     fn diagonal_partitioner_misclassifies_spanning_polygon() {
         // Diagonal plane through (1,0,0)f, (0,1,0)f, (0,0,1)f:
         //   normal = (2^32, 2^32, 2^32), d = 2^48, threshold = 3·2^32.
