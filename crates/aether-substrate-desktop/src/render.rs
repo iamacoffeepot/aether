@@ -42,6 +42,33 @@ const VERTEX_BUFFER_BYTES: u64 = 64 * 1024;
 const CAMERA_UNIFORM_BYTES: u64 = 64; // 4x4 f32 column-major
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// Wireframe-overlay shader: same vertex layout as `shader.wgsl` so the
+/// pipeline shares the existing vertex buffer. The fragment stage emits
+/// a flat dark color so wires read against any filled-color underneath.
+const WIREFRAME_WGSL: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+}
+
+@group(0) @binding(0)
+var<uniform> camera: Camera;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) color: vec3<f32>,
+}
+
+@vertex
+fn vs_main(in: VertexInput) -> @builtin(position) vec4<f32> {
+    return camera.view_proj * vec4<f32>(in.position, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.05, 0.07, 0.12, 1.0);
+}
+"#;
+
 /// Identity matrix in column-major order — what the camera uniform
 /// holds before the first `aether.camera` mail arrives, so components
 /// that still emit clip-space-ish world coordinates keep rendering.
@@ -89,6 +116,37 @@ pub struct Gpu {
     /// to `padded_row_bytes * height`; reallocated on resize or first
     /// capture after a size change.
     readback: Option<Readback>,
+    /// Wireframe overlay pipeline. `Some` only when `AETHER_WIREFRAME`
+    /// is set to `1` / `overlay`. The main `pipeline` always draws
+    /// first; this one then redraws the same vertex buffer in
+    /// `PolygonMode::Line` over the top so geometry is legible.
+    wire_pipeline: Option<wgpu::RenderPipeline>,
+}
+
+/// Wireframe rendering mode, set at boot via `AETHER_WIREFRAME`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WireframeMode {
+    /// Filled faces only (default).
+    Off,
+    /// Lines only — the main pipeline runs in `PolygonMode::Line`.
+    /// Useful when you want to see triangulation without face shading.
+    Line,
+    /// Filled faces with a wireframe overlay drawn on top.
+    Overlay,
+}
+
+impl WireframeMode {
+    fn from_env() -> Self {
+        match std::env::var("AETHER_WIREFRAME").ok().as_deref() {
+            None | Some("") | Some("0") | Some("off") => WireframeMode::Off,
+            Some("line") => WireframeMode::Line,
+            Some(_) => WireframeMode::Overlay, // "1", "overlay", etc.
+        }
+    }
+
+    fn needs_polygon_mode_line(self) -> bool {
+        !matches!(self, WireframeMode::Off)
+    }
 }
 
 struct OffscreenTarget {
@@ -125,9 +183,36 @@ impl Gpu {
         .expect("no compatible wgpu adapter");
         let adapter_info = adapter.get_info();
         let limits = wgpu::Limits::default();
+
+        // Wireframe rendering is opt-in via `AETHER_WIREFRAME`:
+        //   unset / "0" / "off" → filled (default)
+        //   "line"              → wireframe only
+        //   "1" / "overlay"     → filled + wireframe overlay
+        // The line modes need the adapter's `POLYGON_MODE_LINE`
+        // feature (Metal supports it on modern macOS; some GLES-only
+        // adapters don't). If unsupported we fall back to filled with
+        // a warning rather than failing device creation.
+        let mut wireframe_mode = WireframeMode::from_env();
+        if wireframe_mode.needs_polygon_mode_line()
+            && !adapter
+                .features()
+                .contains(wgpu::Features::POLYGON_MODE_LINE)
+        {
+            tracing::warn!(
+                adapter = %adapter_info.name,
+                "AETHER_WIREFRAME requested but adapter lacks POLYGON_MODE_LINE; falling back to filled"
+            );
+            wireframe_mode = WireframeMode::Off;
+        }
+        let required_features = if wireframe_mode.needs_polygon_mode_line() {
+            wgpu::Features::POLYGON_MODE_LINE
+        } else {
+            wgpu::Features::empty()
+        };
+
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("aether-substrate device"),
-            required_features: wgpu::Features::empty(),
+            required_features,
             required_limits: limits.clone(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::default(),
@@ -229,7 +314,7 @@ impl Gpu {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[vertex_layout],
+                buffers: std::slice::from_ref(&vertex_layout),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -246,7 +331,11 @@ impl Gpu {
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
                 cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
+                polygon_mode: if wireframe_mode == WireframeMode::Line {
+                    wgpu::PolygonMode::Line
+                } else {
+                    wgpu::PolygonMode::Fill
+                },
                 unclipped_depth: false,
                 conservative: false,
             },
@@ -269,6 +358,65 @@ impl Gpu {
             mapped_at_creation: false,
         });
 
+        // Wireframe overlay pipeline: same vertex/uniform layout, but
+        // `PolygonMode::Line` and a flat dark fragment color so the
+        // wires read against any filled color underneath. A small
+        // negative depth bias lifts the lines toward the camera so
+        // they aren't z-fought by the filled triangles they trace.
+        let wire_pipeline = if wireframe_mode == WireframeMode::Overlay {
+            let wire_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("wireframe shader"),
+                source: wgpu::ShaderSource::Wgsl(WIREFRAME_WGSL.into()),
+            });
+            Some(
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("wireframe overlay pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &wire_shader,
+                        entry_point: Some("vs_main"),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        buffers: std::slice::from_ref(&vertex_layout),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &wire_shader,
+                        entry_point: Some("fs_main"),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: config.format,
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None,
+                        polygon_mode: wgpu::PolygonMode::Line,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: DEPTH_FORMAT,
+                        depth_write_enabled: Some(false),
+                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState {
+                            constant: -1,
+                            slope_scale: -1.0,
+                            clamp: 0.0,
+                        },
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                }),
+            )
+        } else {
+            None
+        };
+
         Self {
             surface,
             device,
@@ -283,6 +431,7 @@ impl Gpu {
             offscreen,
             depth,
             readback: None,
+            wire_pipeline,
         }
     }
 
@@ -394,6 +543,10 @@ impl Gpu {
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vertex_buffer.slice(..vertex_bytes));
                 pass.draw(0..vertex_count, 0..1);
+                if let Some(wire) = &self.wire_pipeline {
+                    pass.set_pipeline(wire);
+                    pass.draw(0..vertex_count, 0..1);
+                }
             }
         }
 
