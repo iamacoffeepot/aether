@@ -628,7 +628,8 @@ mod tests {
         // change silently drops triangles or routes them wrong, this
         // catches it across any of the test cases at once.
         let unit = 1_i128 << 16;
-        let cases: Vec<(&str, Vec<Point3>, Vec<Vec<VertexId>>, i128)> = vec![
+        type Case = (&'static str, Vec<Point3>, Vec<Vec<VertexId>>, i128);
+        let cases: Vec<Case> = vec![
             (
                 "triangle",
                 vec![pt(0.0, 0.0, 0.0), pt(2.0, 0.0, 0.0), pt(0.0, 2.0, 0.0)],
