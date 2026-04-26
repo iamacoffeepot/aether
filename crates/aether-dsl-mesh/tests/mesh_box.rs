@@ -1,6 +1,6 @@
 //! Verify the box mesher produces 12 triangles at the expected corners.
 
-use dsl_mesh_spike::{mesh, parse};
+use aether_dsl_mesh::{mesh, parse};
 
 #[test]
 fn unit_box_has_twelve_triangles() {

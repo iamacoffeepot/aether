@@ -1,7 +1,7 @@
 //! Verify the lathe mesher: triangle counts, axis-collapse handling,
 //! and outward-facing winding.
 
-use dsl_mesh_spike::{mesh, parse};
+use aether_dsl_mesh::{mesh, parse};
 
 #[test]
 fn straight_cylinder_via_lathe_has_expected_triangle_count() {

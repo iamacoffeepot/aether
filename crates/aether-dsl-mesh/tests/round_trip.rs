@@ -3,7 +3,7 @@
 //! Whitespace and exact formatting are not preserved across a round trip,
 //! but the AST must be structurally identical.
 
-use dsl_mesh_spike::{parse, serialize};
+use aether_dsl_mesh::{parse, serialize};
 use pretty_assertions::assert_eq;
 
 fn assert_round_trip(text: &str) {

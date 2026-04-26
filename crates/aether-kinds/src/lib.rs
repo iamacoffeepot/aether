@@ -1593,7 +1593,7 @@ pub use static_mesh::*;
 /// from the substrate's I/O surface (ADR-0041 namespace + path), parses
 /// it once, and replays the triangle list as `DrawTriangle` mail every
 /// tick. It exists as a developer aid for inspecting the output of the
-/// `dsl-mesh-spike` mesher in the substrate's render path; ADR-0026's
+/// `aether-dsl-mesh` mesher in the substrate's render path; ADR-0026's
 /// rejection of conventional asset import targets *production* content,
 /// not dev-tooling viewers.
 mod static_mesh {

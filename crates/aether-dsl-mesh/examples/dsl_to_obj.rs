@@ -1,6 +1,7 @@
 //! CLI: parse a .dsl file, mesh, emit OBJ to stdout.
 //!
-//! Usage: `cargo run -- examples/box.dsl > out.obj && open out.obj`
+//! Usage:
+//!   `cargo run --example dsl_to_obj -- examples/box.dsl > out.obj && open out.obj`
 
 use std::process::ExitCode;
 
@@ -22,7 +23,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let ast = match dsl_mesh_spike::parse(&text) {
+    let ast = match aether_dsl_mesh::parse(&text) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("parse: {e}");
@@ -30,7 +31,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let triangles = match dsl_mesh_spike::mesh(&ast) {
+    let triangles = match aether_dsl_mesh::mesh(&ast) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("mesh: {e}");
@@ -38,6 +39,6 @@ fn main() -> ExitCode {
         }
     };
 
-    print!("{}", dsl_mesh_spike::to_obj(&triangles));
+    print!("{}", aether_dsl_mesh::to_obj(&triangles));
     ExitCode::SUCCESS
 }
