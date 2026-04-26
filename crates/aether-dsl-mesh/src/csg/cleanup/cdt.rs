@@ -15,7 +15,8 @@
 //!   the public entry point that `merge::process_component` will call
 //!   (PR 3, not yet shipped).
 
-// Foundation pass: predicates are wired in by PR 2. Suppress dead-code
+pub(super) mod predicates;
+// Foundation pass: bowyer_watson is wired in by PR 3. Suppress dead-code
 // noise until then.
 #[allow(dead_code)]
-pub(super) mod predicates;
+pub(super) mod bowyer_watson;
