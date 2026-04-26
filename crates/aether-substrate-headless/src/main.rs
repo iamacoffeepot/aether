@@ -239,6 +239,13 @@ fn main() -> wasmtime::Result<()> {
         "componentless boot — load a component via aether.control.load_component",
     );
 
+    // Connect to the hub LAST, after every chassis sink is registered.
+    // Before this returns no hub-driven `load_component` can race
+    // ahead of the chassis setup and bind a chassis sink name to a
+    // component (issue #262). Must happen before moving fields out of
+    // `boot` below — connect_hub_from_env borrows `&boot`.
+    let hub = boot.connect_hub_from_env()?;
+
     let chassis = HeadlessChassis {
         queue: boot.queue,
         input_subscribers: boot.input_subscribers,
@@ -247,7 +254,7 @@ fn main() -> wasmtime::Result<()> {
         kind_frame_stats,
         tick_period,
         _scheduler: boot.scheduler,
-        _hub: boot.hub,
+        _hub: hub,
     };
     tracing::info!(
         target: "aether_substrate::boot",
