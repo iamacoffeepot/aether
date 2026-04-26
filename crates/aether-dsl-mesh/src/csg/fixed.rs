@@ -219,7 +219,7 @@ mod tests {
         // ever switches to `round_ties_even` this test fails loudly so
         // we can audit BSP `side()` polarity stability rather than have
         // a silent grid-shift cascade through the pipeline.
-        let half_lsb = 0.5 / SCALE as f64;
+        let half_lsb = 0.5 / SCALE;
         // Build the f64s exactly so the half-LSB rounds aren't lost to
         // f32 imprecision before reaching round().
         assert_eq!(
@@ -228,17 +228,17 @@ mod tests {
             "0.5 LSB should round away from zero"
         );
         assert_eq!(
-            f64_to_fixed_exact(1.5 * (1.0 / SCALE as f64)),
+            f64_to_fixed_exact(1.5 * (1.0 / SCALE)),
             2,
             "1.5 LSB should round to 2 under away-from-zero"
         );
         assert_eq!(
-            f64_to_fixed_exact(2.5 * (1.0 / SCALE as f64)),
+            f64_to_fixed_exact(2.5 * (1.0 / SCALE)),
             3,
             "2.5 LSB rounds to 3 under away-from-zero (banker's would yield 2)"
         );
         assert_eq!(
-            f64_to_fixed_exact(-0.5 * (1.0 / SCALE as f64)),
+            f64_to_fixed_exact(-0.5 * (1.0 / SCALE)),
             -1,
             "-0.5 LSB rounds to -1 under away-from-zero"
         );
@@ -257,7 +257,7 @@ mod tests {
         // future change that shifts the grid or alters rounding
         // direction by even one bit.
         let one_ulp = 1.0 / SCALE as f32;
-        let irrational = 0.123_456_789_f32;
+        let irrational = 0.123_456_79_f32;
         for k in -1024..=1024 {
             let value = (k as f32) * irrational;
             if value.abs() > MAX_INPUT_MAGNITUDE {
