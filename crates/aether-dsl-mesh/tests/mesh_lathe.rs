@@ -34,9 +34,13 @@ fn closed_disc_via_axis_to_rim_then_rim_to_axis() {
     let text = "(lathe ((0 0) (1 0) (0 0.01)) 6 :color 0)";
     let ast = parse(text).unwrap();
     let tris = mesh(&ast).unwrap();
-    // 6-segment lathe with two profile edges, both axis-collapsed
-    // on one side: 6 + 6 = 12 triangles (one per segment per edge).
-    assert_eq!(tris.len(), 12);
+    // 6-segment lathe with two profile edges, both axis-collapsed on
+    // one side. Bottom disc (y=0): 6 axis-fan triangles share a plane
+    // and color, merge_coplanar collapses them into a hexagon, CDT
+    // re-tessellates as a 4-triangle fan from one vertex (n−2). The
+    // inverted-cone side: 6 segments at distinct planes (different
+    // angular orientation), unaffected by merge. Total = 4 + 6 = 10.
+    assert_eq!(tris.len(), 10);
 }
 
 #[test]

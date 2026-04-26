@@ -90,7 +90,12 @@ fn triangles_to_polygons(triangles: &[Triangle]) -> Result<Vec<Polygon>, CsgErro
     Ok(polys)
 }
 
-fn polygons_to_triangles(polys: &[Polygon]) -> Vec<Triangle> {
+/// Fan-triangulate a polygon list back to wire `Triangle`s. Polygons
+/// emerging from BSP clipping are convex (each input is a triangle, and
+/// convex × half-space remains convex), so fan triangulation is
+/// well-defined. Cleanup-pass output (n-gon loops or CDT triangles)
+/// also satisfies convexity per loop.
+pub(crate) fn polygons_to_triangles(polys: &[Polygon]) -> Vec<Triangle> {
     let mut tris = Vec::new();
     for poly in polys {
         if poly.vertices.len() < 3 {

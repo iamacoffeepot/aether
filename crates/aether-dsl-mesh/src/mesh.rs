@@ -14,6 +14,9 @@
 
 use crate::ast::{Axis, Node};
 use crate::csg;
+use csg::plane::Plane3;
+use csg::point::Point3;
+use csg::polygon::Polygon as CsgPolygon;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Triangle {
@@ -29,25 +32,54 @@ pub enum MeshError {
     Csg(#[from] csg::CsgError),
 }
 
+/// Wire entry: evaluate `node` polygon-domain, run the cleanup pipeline
+/// (with CDT triangulation), then fan back to wire `Triangle`s.
+///
+/// Cleanup runs **once** at the root, not after every CSG op — chained
+/// `(difference A B C)` flows raw BSP polygons between steps and
+/// triangulates a single time at the very end. Skipping the per-op
+/// triangle round-trip is also what avoids the sliver-normal flip bug
+/// (`from_triangle` re-deriving the plane on a sliver triangle picks
+/// up the wrong sign for `n_z`).
 pub fn mesh(node: &Node) -> Result<Vec<Triangle>, MeshError> {
-    let mut tris = Vec::new();
-    mesh_into(&mut tris, node, [0.0, 0.0, 0.0])?;
-    Ok(tris)
+    let mut polys = Vec::new();
+    mesh_into_polygons(&mut polys, node, [0.0, 0.0, 0.0])?;
+    Ok(csg::polygons_to_triangles(&csg::cleanup::run(polys)))
 }
 
-fn mesh_into(out: &mut Vec<Triangle>, node: &Node, offset: [f32; 3]) -> Result<(), MeshError> {
+/// Polygon-domain entry: same composition as [`mesh`], but the cleanup
+/// tail returns n-gon boundary loops (`cleanup::run_to_loops`). The
+/// public polygon API in `crate::polygon` is the consumer.
+pub fn mesh_polygons_internal(node: &Node) -> Result<Vec<CsgPolygon>, MeshError> {
+    let mut polys = Vec::new();
+    mesh_into_polygons(&mut polys, node, [0.0, 0.0, 0.0])?;
+    Ok(csg::cleanup::run_to_loops(polys))
+}
+
+/// Recursive AST evaluator in polygon domain. Primitives still emit
+/// triangles internally; `wrap_triangles_into` lifts them into
+/// `CsgPolygon` once. Boolean ops use the `_raw` BSP entries — no
+/// cleanup runs between chained ops, so chained CSG composes a single
+/// polygon stream and only the root entry triggers the cleanup pass.
+fn mesh_into_polygons(
+    out: &mut Vec<CsgPolygon>,
+    node: &Node,
+    offset: [f32; 3],
+) -> Result<(), MeshError> {
     match node {
         Node::Box { x, y, z, color } => {
-            mesh_box(out, *x, *y, *z, *color, offset);
-            Ok(())
+            let mut tris = Vec::new();
+            mesh_box(&mut tris, *x, *y, *z, *color, offset);
+            wrap_triangles_into(out, &tris)
         }
         Node::Lathe {
             profile,
             segments,
             color,
         } => {
-            mesh_lathe(out, profile, *segments, *color, offset);
-            Ok(())
+            let mut tris = Vec::new();
+            mesh_lathe(&mut tris, profile, *segments, *color, offset);
+            wrap_triangles_into(out, &tris)
         }
         Node::Torus {
             major_radius,
@@ -56,8 +88,9 @@ fn mesh_into(out: &mut Vec<Triangle>, node: &Node, offset: [f32; 3]) -> Result<(
             minor_segments,
             color,
         } => {
+            let mut tris = Vec::new();
             mesh_torus(
-                out,
+                &mut tris,
                 *major_radius,
                 *minor_radius,
                 *major_segments,
@@ -65,7 +98,7 @@ fn mesh_into(out: &mut Vec<Triangle>, node: &Node, offset: [f32; 3]) -> Result<(
                 *color,
                 offset,
             );
-            Ok(())
+            wrap_triangles_into(out, &tris)
         }
         Node::Sweep {
             profile,
@@ -73,12 +106,56 @@ fn mesh_into(out: &mut Vec<Triangle>, node: &Node, offset: [f32; 3]) -> Result<(
             scales,
             color,
         } => {
-            mesh_sweep(out, profile, path, scales.as_deref(), *color, offset);
-            Ok(())
+            let mut tris = Vec::new();
+            mesh_sweep(&mut tris, profile, path, scales.as_deref(), *color, offset);
+            wrap_triangles_into(out, &tris)
+        }
+        Node::Cylinder {
+            radius,
+            height,
+            segments,
+            color,
+        } => {
+            let mut tris = Vec::new();
+            mesh_cylinder(&mut tris, *radius, *height, *segments, *color, offset);
+            wrap_triangles_into(out, &tris)
+        }
+        Node::Cone {
+            radius,
+            height,
+            segments,
+            color,
+        } => {
+            let mut tris = Vec::new();
+            mesh_cone(&mut tris, *radius, *height, *segments, *color, offset);
+            wrap_triangles_into(out, &tris)
+        }
+        Node::Wedge { x, y, z, color } => {
+            let mut tris = Vec::new();
+            mesh_wedge(&mut tris, *x, *y, *z, *color, offset);
+            wrap_triangles_into(out, &tris)
+        }
+        Node::Sphere {
+            radius,
+            subdivisions,
+            color,
+        } => {
+            let mut tris = Vec::new();
+            mesh_sphere(&mut tris, *radius, *subdivisions, *color, offset);
+            wrap_triangles_into(out, &tris)
+        }
+        Node::Extrude {
+            profile,
+            depth,
+            color,
+        } => {
+            let mut tris = Vec::new();
+            mesh_extrude(&mut tris, profile, *depth, *color, offset);
+            wrap_triangles_into(out, &tris)
         }
         Node::Composition(children) => {
             for child in children {
-                mesh_into(out, child, offset)?;
+                mesh_into_polygons(out, child, offset)?;
             }
             Ok(())
         }
@@ -91,110 +168,78 @@ fn mesh_into(out: &mut Vec<Triangle>, node: &Node, offset: [f32; 3]) -> Result<(
                 offset[1] + delta[1],
                 offset[2] + delta[2],
             ];
-            mesh_into(out, child, combined)
+            mesh_into_polygons(out, child, combined)
         }
         Node::Rotate { axis, angle, child } => {
-            // Mesh the child at origin, rotate every vertex around the
-            // axis (Rodrigues), then apply the inherited translation.
-            // This composes correctly for nested transforms because each
-            // recursive call freshly accumulates its own state.
             let mut local = Vec::new();
-            mesh_into(&mut local, child, [0.0, 0.0, 0.0])?;
+            mesh_into_polygons(&mut local, child, [0.0, 0.0, 0.0])?;
             let n = normalize_or_default(*axis, [0.0, 1.0, 0.0]);
-            for mut tri in local {
-                for v in tri.vertices.iter_mut() {
-                    let r = rotate_axis_angle(*v, n, *angle);
-                    *v = [r[0] + offset[0], r[1] + offset[1], r[2] + offset[2]];
+            for poly in &local {
+                if let Some(transformed) = transform_polygon(poly, |v| {
+                    let r = rotate_axis_angle(v, n, *angle);
+                    [r[0] + offset[0], r[1] + offset[1], r[2] + offset[2]]
+                })? {
+                    out.push(transformed);
                 }
-                out.push(tri);
             }
             Ok(())
         }
         Node::Scale { factor, child } => {
-            // Mesh the child at origin, scale per-axis, then translate.
-            // Combine with translate-to-pivot/translate-back for
-            // "scale around a pivot point" composition.
             let mut local = Vec::new();
-            mesh_into(&mut local, child, [0.0, 0.0, 0.0])?;
-            for mut tri in local {
-                for v in tri.vertices.iter_mut() {
-                    *v = [
+            mesh_into_polygons(&mut local, child, [0.0, 0.0, 0.0])?;
+            for poly in &local {
+                if let Some(transformed) = transform_polygon(poly, |v| {
+                    [
                         v[0] * factor[0] + offset[0],
                         v[1] * factor[1] + offset[1],
                         v[2] * factor[2] + offset[2],
-                    ];
+                    ]
+                })? {
+                    out.push(transformed);
                 }
-                out.push(tri);
             }
-            Ok(())
-        }
-        Node::Cylinder {
-            radius,
-            height,
-            segments,
-            color,
-        } => {
-            mesh_cylinder(out, *radius, *height, *segments, *color, offset);
-            Ok(())
-        }
-        Node::Cone {
-            radius,
-            height,
-            segments,
-            color,
-        } => {
-            mesh_cone(out, *radius, *height, *segments, *color, offset);
-            Ok(())
-        }
-        Node::Wedge { x, y, z, color } => {
-            mesh_wedge(out, *x, *y, *z, *color, offset);
-            Ok(())
-        }
-        Node::Sphere {
-            radius,
-            subdivisions,
-            color,
-        } => {
-            mesh_sphere(out, *radius, *subdivisions, *color, offset);
-            Ok(())
-        }
-        Node::Extrude {
-            profile,
-            depth,
-            color,
-        } => {
-            mesh_extrude(out, profile, *depth, *color, offset);
             Ok(())
         }
         Node::Mirror { axis, child } => {
             let mut local = Vec::new();
-            mesh_into(&mut local, child, [0.0, 0.0, 0.0])?;
-            for mut tri in local {
-                for v in tri.vertices.iter_mut() {
-                    match axis {
-                        Axis::X => v[0] = -v[0],
-                        Axis::Y => v[1] = -v[1],
-                        Axis::Z => v[2] = -v[2],
-                    }
-                    v[0] += offset[0];
-                    v[1] += offset[1];
-                    v[2] += offset[2];
+            mesh_into_polygons(&mut local, child, [0.0, 0.0, 0.0])?;
+            for poly in &local {
+                if let Some(mirrored) = mirror_polygon(poly, *axis, offset)? {
+                    out.push(mirrored);
                 }
-                // Reflection inverts orientation — swap two vertices to
-                // restore CCW-from-outside winding.
-                tri.vertices.swap(1, 2);
-                out.push(tri);
+            }
+            Ok(())
+        }
+        Node::Array {
+            count,
+            spacing,
+            child,
+        } => {
+            let mut local = Vec::new();
+            mesh_into_polygons(&mut local, child, [0.0, 0.0, 0.0])?;
+            for i in 0..*count {
+                let f = i as f32;
+                let dx = offset[0] + spacing[0] * f;
+                let dy = offset[1] + spacing[1] * f;
+                let dz = offset[2] + spacing[2] * f;
+                for poly in &local {
+                    if let Some(translated) =
+                        transform_polygon(poly, |v| [v[0] + dx, v[1] + dy, v[2] + dz])?
+                    {
+                        out.push(translated);
+                    }
+                }
             }
             Ok(())
         }
         Node::Union { children } => {
-            let mut acc: Option<Vec<Triangle>> = None;
+            let mut acc: Option<Vec<CsgPolygon>> = None;
             for child in children {
-                let mut child_tris = Vec::new();
-                mesh_into(&mut child_tris, child, offset)?;
+                let mut child_polys = Vec::new();
+                mesh_into_polygons(&mut child_polys, child, offset)?;
                 acc = Some(match acc {
-                    Some(prev) => csg::union_triangles(&prev, &child_tris)?,
-                    None => child_tris,
+                    Some(prev) => csg::ops::union_raw(prev, child_polys)?,
+                    None => child_polys,
                 });
             }
             if let Some(result) = acc {
@@ -203,13 +248,13 @@ fn mesh_into(out: &mut Vec<Triangle>, node: &Node, offset: [f32; 3]) -> Result<(
             Ok(())
         }
         Node::Intersection { children } => {
-            let mut acc: Option<Vec<Triangle>> = None;
+            let mut acc: Option<Vec<CsgPolygon>> = None;
             for child in children {
-                let mut child_tris = Vec::new();
-                mesh_into(&mut child_tris, child, offset)?;
+                let mut child_polys = Vec::new();
+                mesh_into_polygons(&mut child_polys, child, offset)?;
                 acc = Some(match acc {
-                    Some(prev) => csg::intersection_triangles(&prev, &child_tris)?,
-                    None => child_tris,
+                    Some(prev) => csg::ops::intersection_raw(prev, child_polys)?,
+                    None => child_polys,
                 });
             }
             if let Some(result) = acc {
@@ -219,40 +264,122 @@ fn mesh_into(out: &mut Vec<Triangle>, node: &Node, offset: [f32; 3]) -> Result<(
         }
         Node::Difference { base, subtract } => {
             let mut acc = Vec::new();
-            mesh_into(&mut acc, base, offset)?;
+            mesh_into_polygons(&mut acc, base, offset)?;
             for s in subtract {
-                let mut s_tris = Vec::new();
-                mesh_into(&mut s_tris, s, offset)?;
-                acc = csg::difference_triangles(&acc, &s_tris)?;
+                let mut s_polys = Vec::new();
+                mesh_into_polygons(&mut s_polys, s, offset)?;
+                acc = csg::ops::difference_raw(acc, s_polys)?;
             }
             out.extend(acc);
             Ok(())
         }
-        Node::Array {
-            count,
-            spacing,
-            child,
-        } => {
-            let mut local = Vec::new();
-            mesh_into(&mut local, child, [0.0, 0.0, 0.0])?;
-            for i in 0..*count {
-                let f = i as f32;
-                let dx = offset[0] + spacing[0] * f;
-                let dy = offset[1] + spacing[1] * f;
-                let dz = offset[2] + spacing[2] * f;
-                for tri in &local {
-                    let mut copy = *tri;
-                    for v in copy.vertices.iter_mut() {
-                        v[0] += dx;
-                        v[1] += dy;
-                        v[2] += dz;
-                    }
-                    out.push(copy);
-                }
-            }
-            Ok(())
+    }
+}
+
+/// Wrap each triangle in `tris` as a single-triangle [`CsgPolygon`] and
+/// append to `out`. Out-of-range vertices surface as
+/// [`MeshError::Csg`] rather than silent drops, matching the historic
+/// behavior at the CSG-input boundary (ADR-0054 ±256 unit cap).
+fn wrap_triangles_into(out: &mut Vec<CsgPolygon>, tris: &[Triangle]) -> Result<(), MeshError> {
+    for t in tris {
+        let v0 = Point3::from_f32(t.vertices[0]).map_err(csg::CsgError::from)?;
+        let v1 = Point3::from_f32(t.vertices[1]).map_err(csg::CsgError::from)?;
+        let v2 = Point3::from_f32(t.vertices[2]).map_err(csg::CsgError::from)?;
+        if let Some(p) = CsgPolygon::from_triangle(v0, v1, v2, t.color) {
+            out.push(p);
         }
     }
+    Ok(())
+}
+
+fn point_from_f32(v: [f32; 3]) -> Result<Point3, MeshError> {
+    Point3::from_f32(v).map_err(|e| csg::CsgError::from(e).into())
+}
+
+/// Apply `xform` to every vertex of `poly`, re-derive the plane from
+/// three non-collinear transformed vertices. Returns `None` if any
+/// vertex falls outside the fixed-point range *or* no non-degenerate
+/// triple exists in the transformed polygon (genuinely degenerate);
+/// errors out via [`MeshError::Csg`] only for the range case so the
+/// caller can distinguish.
+///
+/// The cleanup pipeline emits n-gon loops with T-junction repairs
+/// inserted as collinear interior vertices, so `from_points` on the
+/// first three vertices isn't enough — they may be collinear along an
+/// edge. [`derive_plane_robust`] walks the vertex ring until it finds
+/// a non-degenerate triple.
+fn transform_polygon<F>(poly: &CsgPolygon, xform: F) -> Result<Option<CsgPolygon>, MeshError>
+where
+    F: Fn([f32; 3]) -> [f32; 3],
+{
+    let mut new_verts = Vec::with_capacity(poly.vertices.len());
+    for v in &poly.vertices {
+        let f = v.to_f32();
+        let t = xform(f);
+        new_verts.push(point_from_f32(t)?);
+    }
+    if new_verts.len() < 3 {
+        return Ok(None);
+    }
+    let Some(plane) = derive_plane_robust(&new_verts) else {
+        return Ok(None);
+    };
+    Ok(Some(CsgPolygon {
+        vertices: new_verts,
+        plane,
+        color: poly.color,
+    }))
+}
+
+/// Find three non-collinear vertices in `verts` and return the plane
+/// they define, or `None` if the polygon is fully degenerate. Anchors
+/// on `verts[0]` and walks forward looking for a `(v0, vi, vi+1)`
+/// triple that gives a non-degenerate plane.
+fn derive_plane_robust(verts: &[Point3]) -> Option<Plane3> {
+    if verts.len() < 3 {
+        return None;
+    }
+    let v0 = verts[0];
+    for i in 1..verts.len() - 1 {
+        let plane = Plane3::from_points(v0, verts[i], verts[i + 1]);
+        if !plane.is_degenerate() {
+            return Some(plane);
+        }
+    }
+    None
+}
+
+/// Mirror `poly` across `axis`, then translate by `offset`. Reflection
+/// inverts winding; reverse the vertex list and re-derive the plane so
+/// downstream classification still treats the polygon as outward-CCW.
+fn mirror_polygon(
+    poly: &CsgPolygon,
+    axis: Axis,
+    offset: [f32; 3],
+) -> Result<Option<CsgPolygon>, MeshError> {
+    let mut new_verts = Vec::with_capacity(poly.vertices.len());
+    for v in &poly.vertices {
+        let f = v.to_f32();
+        let m = match axis {
+            Axis::X => [-f[0], f[1], f[2]],
+            Axis::Y => [f[0], -f[1], f[2]],
+            Axis::Z => [f[0], f[1], -f[2]],
+        };
+        let t = [m[0] + offset[0], m[1] + offset[1], m[2] + offset[2]];
+        new_verts.push(point_from_f32(t)?);
+    }
+    if new_verts.len() < 3 {
+        return Ok(None);
+    }
+    new_verts.reverse();
+    let Some(plane) = derive_plane_robust(&new_verts) else {
+        return Ok(None);
+    };
+    Ok(Some(CsgPolygon {
+        vertices: new_verts,
+        plane,
+        color: poly.color,
+    }))
 }
 
 /// Emit 12 triangles (6 quad faces) for an axis-aligned box of size

@@ -34,12 +34,16 @@ fn tri_centroid(tri: &aether_dsl_mesh::Triangle) -> [f32; 3] {
 // ---------- cylinder ----------
 
 #[test]
-fn cylinder_has_4n_triangles() {
+fn cylinder_has_28_triangles_after_cap_merge() {
     // Lathed from a 4-point profile with two pole edges + one side
-    // edge: each segment yields 1 (bottom cap) + 2 (side) + 1 (top
-    // cap) = 4 triangles.
+    // edge: raw fan emits 1 (bottom cap) + 2 (side) + 1 (top cap) = 4
+    // triangles per segment = 32 for n=8. The cleanup pass groups
+    // coplanar same-color fragments and CDT re-tessellates: each cap
+    // (8 axis-fan triangles, all coplanar same-color) collapses to an
+    // octagon and CDT emits n−2 = 6 triangles. Sides stay at 16.
+    // Total: 6 + 6 + 16 = 28.
     let ast = parse("(cylinder 1 2 8 :color 0)").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 4 * 8);
+    assert_eq!(mesh(&ast).unwrap().len(), 28);
 }
 
 #[test]
@@ -72,12 +76,15 @@ fn cylinder_outward_normals() {
 // ---------- cone ----------
 
 #[test]
-fn cone_has_2n_triangles() {
-    // 3-point profile, two pole edges (first edge from axis to base
-    // ring is the bottom cap; last edge from rim to apex is the
-    // sloped sides). 1 + 1 = 2 triangles per segment.
+fn cone_has_10_triangles_after_cap_merge() {
+    // 3-point profile, two pole edges (first edge: axis-to-base = bottom
+    // cap; last edge: rim-to-apex = sloped sides). Raw fan emits 2 tris
+    // per segment = 12 for n=6. Cleanup merges the bottom cap's 6
+    // coplanar same-color tris into a hexagon, CDT re-emits as n−2 = 4
+    // triangles. Sloped sides are at 6 distinct planes (different
+    // angular orientation), unaffected. Total: 4 + 6 = 10.
     let ast = parse("(cone 1 2 6 :color 0)").unwrap();
-    assert_eq!(mesh(&ast).unwrap().len(), 2 * 6);
+    assert_eq!(mesh(&ast).unwrap().len(), 10);
 }
 
 #[test]
