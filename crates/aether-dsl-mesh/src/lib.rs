@@ -8,6 +8,7 @@
 
 pub mod ast;
 pub mod csg;
+pub mod debug;
 pub mod mesh;
 pub mod obj;
 pub mod parse;

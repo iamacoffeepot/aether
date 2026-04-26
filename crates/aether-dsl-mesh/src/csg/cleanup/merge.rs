@@ -39,6 +39,10 @@ use std::collections::HashMap;
 
 type PlaneKey = (i64, i64, i64, i128);
 
+fn plane_key(p: &Plane3) -> PlaneKey {
+    (p.n_x, p.n_y, p.n_z, p.d)
+}
+
 impl IndexedMesh {
     pub(super) fn merge_coplanar(self) -> Self {
         let IndexedMesh { vertices, polygons } = self;
@@ -61,10 +65,6 @@ impl IndexedMesh {
             polygons: merged,
         }
     }
-}
-
-fn plane_key(p: &Plane3) -> PlaneKey {
-    (p.n_x, p.n_y, p.n_z, p.d)
 }
 
 fn group_by_plane(polygons: &[IndexedPolygon]) -> HashMap<PlaneKey, Vec<usize>> {
@@ -356,18 +356,13 @@ mod tests {
         ];
         // Plane keys differ across the fan because each triangle has its
         // own cross-product magnitude. The middle two share a plane key
-        // (both have the same edge magnitudes from bl) and a shared edge
-        // bl→mid, so they merge into one 4-vertex loop. The first and
-        // last stay as singletons. 4 in → 3 out.
+        // and a shared edge bl→mid, so they merge into one 4-vertex
+        // loop. The first and last stay as singletons. 4 in → 3 out.
         let out = weld_then_merge(polys);
         assert_eq!(out.len(), 3);
         let lens: std::collections::BTreeSet<usize> =
             out.iter().map(|p| p.vertices.len()).collect();
-        assert_eq!(
-            lens,
-            [3, 4].into_iter().collect(),
-            "expected two 3-vert singletons and one 4-vert merged loop"
-        );
+        assert_eq!(lens, [3, 4].into_iter().collect());
     }
 
     #[test]

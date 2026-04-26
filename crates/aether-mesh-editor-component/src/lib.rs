@@ -31,8 +31,22 @@
 //!    re-write the file and re-send `set_path`).
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io};
-use aether_dsl_mesh::tessellate_polygon;
+use aether_dsl_mesh::{Polygon, tessellate_polygon};
 use aether_kinds::{DrawTriangle, ReadResult, SetPath, SetText, Tick, Vertex};
+
+/// Outline edges are emitted as thin in-plane quads. Width is in world
+/// units; matches the box/sphere scale we typically demo against
+/// (~0.5 to 3 unit primitives).
+const OUTLINE_WIDTH: f32 = 0.012;
+
+/// Lift outlines slightly along the polygon's plane normal so they
+/// don't z-fight with the filled triangles underneath.
+const OUTLINE_LIFT: f32 = 0.002;
+
+/// Outline color. Hardcoded slate (matches PALETTE[7]) for "DCC mode"
+/// readability against any fill color. Not a DSL color — outlines are
+/// a render decoration, not part of the source mesh.
+const OUTLINE_RGB: (f32, f32, f32) = (0.12, 0.12, 0.16);
 
 /// Built-in palette mapping DSL `:color N` indices to RGB. The DSL's
 /// color is a `u32` palette reference; the substrate renderer needs
@@ -148,16 +162,95 @@ impl DslMeshEditor {
         };
         let mut out = Vec::new();
         for polygon in &polygons {
+            // Filled face triangles.
             for tri in tessellate_polygon(polygon) {
-                out.push(to_draw_triangle(tri, polygon.color));
+                out.push(to_draw_triangle_palette(tri, polygon.color));
+            }
+            // Polygon-edge outlines (per ADR-0057's "polygon-edge wireframe"
+            // — show the n-gon boundary, never the tessellator's diagonals).
+            for tri in polygon_outline_triangles(polygon) {
+                out.push(to_draw_triangle_rgb(tri, OUTLINE_RGB));
             }
         }
         self.triangles = out;
     }
 }
 
-fn to_draw_triangle(tri: [[f32; 3]; 3], color: u32) -> DrawTriangle {
-    let (r, g, b) = PALETTE[(color as usize) % PALETTE.len()];
+/// Generate thin in-plane outline quads for every outer + hole edge of
+/// a polygon. Each edge becomes a 2-triangle strip of width
+/// [`OUTLINE_WIDTH`], lifted [`OUTLINE_LIFT`] units along the plane
+/// normal so it sits cleanly above the filled face. Returns flat
+/// triangles (no internal grouping) ready for `DrawTriangle` emission.
+///
+/// World-space thickness — outlines stay the same size in world units
+/// regardless of camera distance. They look thinner edge-on, which is
+/// the right behavior for face boundaries (a face viewed edge-on is
+/// itself a line).
+fn polygon_outline_triangles(polygon: &Polygon) -> Vec<[[f32; 3]; 3]> {
+    let mut tris = Vec::new();
+    let n = polygon.plane_normal;
+    outline_loop(&polygon.vertices, n, &mut tris);
+    for hole in &polygon.holes {
+        outline_loop(hole, n, &mut tris);
+    }
+    tris
+}
+
+fn outline_loop(loop_: &[[f32; 3]], normal: [f32; 3], out: &mut Vec<[[f32; 3]; 3]>) {
+    let count = loop_.len();
+    if count < 2 {
+        return;
+    }
+    let lift = [
+        normal[0] * OUTLINE_LIFT,
+        normal[1] * OUTLINE_LIFT,
+        normal[2] * OUTLINE_LIFT,
+    ];
+    for i in 0..count {
+        let v0 = loop_[i];
+        let v1 = loop_[(i + 1) % count];
+        let edge = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
+        let perp = cross(normal, edge);
+        let perp_len = (perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]).sqrt();
+        if perp_len < 1e-6 {
+            continue;
+        }
+        let scale = OUTLINE_WIDTH * 0.5 / perp_len;
+        let off = [perp[0] * scale, perp[1] * scale, perp[2] * scale];
+        let v0_in = sub_lift_off(v0, lift, off, -1.0);
+        let v0_out = sub_lift_off(v0, lift, off, 1.0);
+        let v1_in = sub_lift_off(v1, lift, off, -1.0);
+        let v1_out = sub_lift_off(v1, lift, off, 1.0);
+        // CCW around the plane normal (matches face winding) so culling
+        // and lighting future-friendly.
+        out.push([v0_in, v1_in, v1_out]);
+        out.push([v0_in, v1_out, v0_out]);
+    }
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn sub_lift_off(base: [f32; 3], lift: [f32; 3], off: [f32; 3], sign: f32) -> [f32; 3] {
+    [
+        base[0] + lift[0] + off[0] * sign,
+        base[1] + lift[1] + off[1] * sign,
+        base[2] + lift[2] + off[2] * sign,
+    ]
+}
+
+fn to_draw_triangle_palette(tri: [[f32; 3]; 3], color: u32) -> DrawTriangle {
+    let rgb = PALETTE[(color as usize) % PALETTE.len()];
+    to_draw_triangle_rgb(tri, rgb)
+}
+
+fn to_draw_triangle_rgb(tri: [[f32; 3]; 3], rgb: (f32, f32, f32)) -> DrawTriangle {
+    let (r, g, b) = rgb;
     DrawTriangle {
         verts: [
             Vertex {
