@@ -9,15 +9,19 @@
 //!
 //! 1. **Vertex welding** — converts owned-vertex polygons into an
 //!    indexed-mesh representation, deduplicating vertices by exact
-//!    integer equality. Foundation for the other two passes; on its
-//!    own it is semantically a no-op for the wire output.
-//! 2. **Coplanar polygon merging** — *not yet implemented.*
+//!    integer equality. Foundation for the other two passes.
+//! 2. **Coplanar polygon merging** — groups polygons by exact `Plane3`
+//!    signature, finds connected components by shared edges, and
+//!    re-triangulates each single-loop component via 2D ear clipping.
+//!    Multi-loop components (faces with holes) currently pass through
+//!    unmerged — hole bridging is a follow-up.
 //! 3. **T-junction removal** — *not yet implemented.*
 //!
 //! [`run`] is the single entry point — `csg::ops` calls it on every
 //! boolean operation's result so callers see cleaned polygons
 //! unconditionally.
 
+mod merge;
 mod mesh;
 mod weld;
 
@@ -25,10 +29,10 @@ use crate::csg::polygon::Polygon;
 
 /// Run the cleanup pipeline on a polygon list.
 ///
-/// Currently only Pass 1 (vertex welding) is wired up; subsequent PRs
-/// extend this entry point with coplanar merging and T-junction repair.
-/// The wire-format output is unchanged in this PR — welding is an
-/// internal-representation pass.
+/// Currently runs Pass 1 (vertex welding) and Pass 2 (coplanar merging);
+/// T-junction repair lands under the same entry point in a follow-up PR.
 pub fn run(polygons: Vec<Polygon>) -> Vec<Polygon> {
-    mesh::IndexedMesh::weld(polygons).into_polygons()
+    mesh::IndexedMesh::weld(polygons)
+        .merge_coplanar()
+        .into_polygons()
 }
