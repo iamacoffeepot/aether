@@ -38,7 +38,7 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 const VERTEX_STRIDE: u64 = 24; // 3 * f32 position + 3 * f32 color
-const VERTEX_BUFFER_BYTES: u64 = 64 * 1024;
+const VERTEX_BUFFER_BYTES: u64 = 4 * 1024 * 1024;
 const CAMERA_UNIFORM_BYTES: u64 = 64; // 4x4 f32 column-major
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
