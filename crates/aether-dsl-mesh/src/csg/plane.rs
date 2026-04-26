@@ -73,26 +73,40 @@ impl Plane3 {
 
     /// Snap-tolerance threshold for classifying a vertex as coplanar.
     ///
-    /// `compute_intersection` snaps each new vertex to the integer grid
-    /// via rounded division — the snap is up to 0.5 grid units off the
-    /// partitioner per axis, contributing at most `0.5 * (|n_x| + |n_y| + |n_z|)`
-    /// to `side()`. We use the full sum (a 2× margin) as the threshold
-    /// for "definitely on this plane"; vertices with `|side| <= threshold`
-    /// are classified as COPLANAR even though their integer side test is
-    /// non-zero.
+    /// Returns `floor(L2(normal)) = floor(sqrt(n_x² + n_y² + n_z²))`.
+    /// Geometric meaning: `|side(p)| / L2(normal)` is the perpendicular
+    /// distance from `p` to the plane, so setting `threshold = L2(normal)`
+    /// classifies as COPLANAR every vertex within ≈1.0 fixed-point grid
+    /// unit perpendicular of the plane — *uniformly across orientations*.
     ///
-    /// This is the integer-arithmetic equivalent of csg.js's `EPSILON`
-    /// constant — but unlike csg.js, the threshold is derived from the
-    /// plane's own normal magnitude rather than a global guess, so it
-    /// scales correctly across very small and very large meshes.
-    /// Without it, snap drift in fragments of non-axis-aligned facets
-    /// (cylinders, swept profiles, rotated boxes) makes the BSP
-    /// classify split fragments as SPANNING against their own parent
-    /// plane on subsequent passes, causing unbounded recursion.
+    /// This was previously the L1 norm `|n_x| + |n_y| + |n_z|`. L1 over-
+    /// classifies non-axis-aligned cases by up to a factor of `√3`: a
+    /// diagonal plane with normal `(n,n,n)` has `L1 = 3n` but
+    /// `L2 = n√3`, so vertices up to `√3 ≈ 1.73` perpendicular grid
+    /// units off the plane were absorbed as COPLANAR. That's the root
+    /// cause of the sphere/cylinder boundary-edge regressions —
+    /// non-axis-aligned facets near a cube face were misclassified
+    /// instead of split, leaving the cleanup pipeline with non-manifold
+    /// input. See `polygon::tests::diagonal_partitioner_misclassifies_spanning_polygon`
+    /// and `regression::box_minus_*` for the failing cases L1 produced.
+    ///
+    /// Snap-drift safety margin: `compute_intersection` rounds each new
+    /// vertex by up to 0.5 fixed grid units per axis. Per-axis drift
+    /// contributes at most `0.5 * |n_axis|` to `|side|`, so total snap
+    /// drift is bounded by `0.5 * L1(n) ≤ 0.5 * √3 * L2(n) ≈ 0.866 *
+    /// threshold`. Snap-drifted intersection vertices stay safely under
+    /// the threshold, preserving the recursion-prevention property the
+    /// threshold exists for.
+    ///
+    /// Magnitude budget: `n_axis ≤ 2^51`, so `n_axis² ≤ 2^102`, the
+    /// sum of three squares fits in i128 (≤ 2^104), and `u128::isqrt`
+    /// returns a value ≤ 2^52 — well within i128 for downstream
+    /// comparisons against `side()`.
     pub fn coplanar_threshold(&self) -> i128 {
-        (self.n_x.unsigned_abs() as i128)
-            + (self.n_y.unsigned_abs() as i128)
-            + (self.n_z.unsigned_abs() as i128)
+        let nx = self.n_x.unsigned_abs() as u128;
+        let ny = self.n_y.unsigned_abs() as u128;
+        let nz = self.n_z.unsigned_abs() as u128;
+        (nx * nx + ny * ny + nz * nz).isqrt() as i128
     }
 
     pub fn invert(self) -> Self {
@@ -248,24 +262,27 @@ mod tests {
     // axis-aligned and diagonal planes.
 
     #[test]
-    fn coplanar_threshold_is_l1_norm_of_normal() {
-        // Pin the formula: threshold = |n_x| + |n_y| + |n_z|.
-        // If a future change switches to L2 norm or some other metric,
-        // this test fails loudly so we can audit the BSP classification
-        // boundary that follows.
+    fn coplanar_threshold_is_l2_norm_of_normal() {
+        // Pin the formula: threshold = floor(sqrt(n_x² + n_y² + n_z²)).
+        // L2 (not L1) is the geometrically correct quantity — see the
+        // doc comment on coplanar_threshold for the derivation. If a
+        // future change switches metrics, this test fails loudly so we
+        // audit the BSP classification boundary that follows.
         let xy_plane = Plane3::from_points(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0));
+        let nx = xy_plane.n_x.unsigned_abs() as u128;
+        let ny = xy_plane.n_y.unsigned_abs() as u128;
+        let nz = xy_plane.n_z.unsigned_abs() as u128;
         assert_eq!(
             xy_plane.coplanar_threshold(),
-            xy_plane.n_x.unsigned_abs() as i128
-                + xy_plane.n_y.unsigned_abs() as i128
-                + xy_plane.n_z.unsigned_abs() as i128
+            (nx * nx + ny * ny + nz * nz).isqrt() as i128
         );
         let diag = Plane3::from_points(p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0));
+        let nx = diag.n_x.unsigned_abs() as u128;
+        let ny = diag.n_y.unsigned_abs() as u128;
+        let nz = diag.n_z.unsigned_abs() as u128;
         assert_eq!(
             diag.coplanar_threshold(),
-            diag.n_x.unsigned_abs() as i128
-                + diag.n_y.unsigned_abs() as i128
-                + diag.n_z.unsigned_abs() as i128
+            (nx * nx + ny * ny + nz * nz).isqrt() as i128
         );
     }
 
@@ -288,33 +305,33 @@ mod tests {
     }
 
     #[test]
-    fn coplanar_threshold_diagonal_overestimates_perpendicular_distance() {
-        // **Bug-pinning test.** For a diagonal plane (normal = (n,n,n))
-        // the threshold is `3n` but the perpendicular distance per unit
-        // |side| is `1 / (n * sqrt(3))`. So a vertex with |side| = n
-        // (one-third of the threshold) is at perpendicular distance
-        // `1 / sqrt(3)` ≈ 0.577 fixed units from the plane — and the
-        // threshold catches vertices up to perpendicular distance
-        // `sqrt(3)` ≈ 1.732 fixed units away.
+    fn coplanar_threshold_diagonal_matches_perpendicular_unit_distance() {
+        // For the diagonal plane (normal = (n,n,n)), L2 = n·sqrt(3).
+        // A vertex with |side| = n (one ULP shift along an axis) has
+        // perpendicular distance 1/sqrt(3) ≈ 0.577 — well inside the
+        // threshold, as expected.
         //
-        // Compare to axis-aligned where the threshold catches up to
-        // 1.0 fixed unit perpendicular. The diagonal plane's threshold
-        // is `sqrt(3)` ≈ 1.73× too generous in perpendicular terms.
-        // This is the strongest candidate for the BSP misclassification
-        // observed in box - sphere and box - cylinder regressions.
+        // Pre-fix this test asserted the bug (|side| of 1-ULP-off was
+        // only 1/3 of the L1 threshold 3n, exposing 1.73× over-margin
+        // that misclassified sphere/cylinder facets near cube faces).
+        // Post-fix the threshold is L2 = n·sqrt(3) ≈ 1.73n instead of
+        // L1 = 3n — uniform 1.0 perp-grid-unit acceptance.
         let diag = Plane3::from_points(p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0));
         // a = (65536, 0, 0) fixed; one ULP off in +x direction.
         let one_ulp_off_in_x = pi(65537, 0, 0);
         let side_mag = diag.side(one_ulp_off_in_x).unsigned_abs();
         let threshold = diag.coplanar_threshold() as u128;
-        // Per the geometry above: |side| should be exactly threshold / 3.
-        assert_eq!(
-            side_mag * 3,
-            threshold,
-            "diagonal: |side| of 1-ULP-off-along-axis should be 1/3 of threshold"
-        );
-        // And it's well within the threshold — confirming the asymmetry.
+        // |side| of 1-ULP shift along x should be n_x = 2^32.
+        assert_eq!(side_mag, 1u128 << 32);
+        // Threshold is L2 of (2^32, 2^32, 2^32) = 2^32 * sqrt(3).
+        // floor(sqrt(3 * 2^64)) pinned so an isqrt regression is loud.
+        assert_eq!(threshold, (3u128 << 64).isqrt());
+        // The 1-ULP-off vertex sits well inside the threshold (still
+        // classified COPLANAR — snap drift absorbed correctly).
         assert!(side_mag < threshold);
+        // Specifically, |side| / threshold ≈ 1/sqrt(3) ≈ 0.577.
+        assert!(side_mag * 2 > threshold, "ratio should be > 0.5");
+        assert!(side_mag * 100 < threshold * 60, "ratio should be < 0.6");
     }
 
     #[test]

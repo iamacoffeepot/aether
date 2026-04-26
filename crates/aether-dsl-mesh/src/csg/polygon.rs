@@ -521,50 +521,45 @@ mod tests {
 
     // ── split: smoking-gun bug at polygon level ───────────────────────
 
-    /// **Bug-pinning**: a triangle that geometrically spans a diagonal
-    /// partitioner (one vertex on the +side, one on the -side in
-    /// perpendicular distance) gets misclassified as COPLANAR — *not*
-    /// split — because the L1-norm `coplanar_threshold` is too generous
-    /// for non-axis-aligned planes (see
-    /// `plane::tests::coplanar_threshold_diagonal_overestimates_perpendicular_distance`).
+    /// **Bug-pinning**: a triangle with two vertices clearly outside
+    /// snap-drift tolerance of a diagonal partitioner (one above, one
+    /// below in perpendicular distance ~1.15) must classify as SPANNING
+    /// and produce front+back fragments.
     ///
-    /// The diagonal partitioner has normal (n,n,n), threshold 3n. The
-    /// triangle's three vertices have |side| of 2n, n, and n
-    /// respectively (all under the 3n threshold). polygon_type collapses
-    /// to COPLANAR | COPLANAR | COPLANAR == COPLANAR, and the polygon
-    /// routes to coplanar_front (or back) instead of being split — even
-    /// though one vertex sits clearly on the +side of the partitioner
-    /// (perpendicular distance ~1.15 fixed units) and another on the
-    /// -side.
+    /// Pre-fix the L1-norm `coplanar_threshold` returned `3n` for a
+    /// diagonal plane with normal `(n,n,n)`, so vertices with `|side|`
+    /// up to `3n` (perpendicular distance up to `√3 ≈ 1.73`) absorbed
+    /// as COPLANAR — including this triangle's `±2n` sides (perp ~1.15).
+    /// The polygon routed to coplanar_front instead of being split,
+    /// dropping the back fragment and producing the boundary edges
+    /// observed in the box-minus-sphere/cylinder regressions.
     ///
-    /// Ignored because it asserts the *correct* behavior (SPANNING +
-    /// non-empty f and b). When the threshold formula is fixed (likely
-    /// L2-derived or L1 with 0.5× constant), this test should pass and
-    /// the four ignored cases in `tests/regression.rs` should also start
-    /// passing.
+    /// Post-fix the threshold is `floor(L2(n)) ≈ 1.73n`, so `±2n` sides
+    /// classify FRONT/BACK and the polygon splits cleanly. The middle
+    /// vertex at `|side| = n` (perp ~0.58) stays COPLANAR — that's the
+    /// correct snap-drift absorption behavior.
     #[test]
     fn diagonal_partitioner_misclassifies_spanning_polygon() {
         // Diagonal plane through (1,0,0)f, (0,1,0)f, (0,0,1)f:
-        //   normal = (2^32, 2^32, 2^32), d = 2^48, threshold = 3·2^32.
+        //   normal = (2^32, 2^32, 2^32), d = 2^48.
+        //   L1 threshold (pre-fix) = 3·2^32.
+        //   L2 threshold (post-fix) = floor(2^32 · sqrt(3)) ≈ 1.732·2^32.
         let partitioner =
             Plane3::from_points(pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0));
-        // Three non-collinear points engineered to straddle the plane.
-        // a=(65536,0,0) sits on the plane; we shift to construct sides
-        // +2·2^32 / +2^32 / -2^32 (all under threshold 3·2^32).
-        let v0 = pi(65538, 0, 0); // side = +2·2^32 (perp ~1.15)
-        let v1 = pi(65536, 1, 0); // side = +2^32   (perp ~0.58)
-        let v2 = pi(65534, 0, 1); // side = -2^32   (perp -0.58)
-        // Sanity: sides as expected, all within threshold magnitude.
+        // Three non-collinear points engineered so v0 and v2 sit in the
+        // window (L2 < |side| < L1) — pre-fix all three are COPLANAR
+        // (BUG), post-fix v0 is FRONT and v2 is BACK (correct SPANNING).
+        let v0 = pi(65538, 0, 0); // side = +2·2^32 (perp ~+1.15)
+        let v1 = pi(65536, 1, 0); // side = +2^32   (perp ~+0.58, snap drift)
+        let v2 = pi(65532, 1, 1); // side = -2·2^32 (perp ~-1.15)
         assert_eq!(partitioner.side(v0), 2 * (1i128 << 32));
         assert_eq!(partitioner.side(v1), 1i128 << 32);
-        assert_eq!(partitioner.side(v2), -(1i128 << 32));
+        assert_eq!(partitioner.side(v2), -2 * (1i128 << 32));
         let poly = Polygon::from_triangle(v0, v1, v2, 0).unwrap();
         let (cof, cob, f, b) = split_into_buckets(&poly, &partitioner);
-        // **Desired** (post-fix) behavior: the polygon spans and is split.
         assert!(
             !f.is_empty() && !b.is_empty(),
-            "spanning polygon must produce front AND back fragments \
-             (currently misclassified as COPLANAR — see ignore reason)"
+            "spanning polygon must produce front AND back fragments"
         );
         assert!(cof.is_empty() && cob.is_empty());
     }
