@@ -231,4 +231,331 @@ mod tests {
         let inside = p(100.0, 100.0, 100.0);
         let _ = plane.side(inside); // must not panic / overflow
     }
+
+    /// Construct a Point3 from raw fixed-point integer fields. Use this
+    /// for ULP-precision tests where the f32 → fixed snap would round
+    /// the test input away from the value we're trying to assert about.
+    fn pi(x: i32, y: i32, z: i32) -> Point3 {
+        Point3 { x, y, z }
+    }
+
+    // ── coplanar_threshold characterization ──────────────────────────
+    //
+    // The bug hypothesis (per regression.rs ignored tests) is that this
+    // threshold is too generous for non-axis-aligned planes — sphere
+    // and cylinder facets get classified COPLANAR when they shouldn't.
+    // These tests pin the formula and quantify the asymmetry between
+    // axis-aligned and diagonal planes.
+
+    #[test]
+    fn coplanar_threshold_is_l1_norm_of_normal() {
+        // Pin the formula: threshold = |n_x| + |n_y| + |n_z|.
+        // If a future change switches to L2 norm or some other metric,
+        // this test fails loudly so we can audit the BSP classification
+        // boundary that follows.
+        let xy_plane = Plane3::from_points(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0));
+        assert_eq!(
+            xy_plane.coplanar_threshold(),
+            xy_plane.n_x.unsigned_abs() as i128
+                + xy_plane.n_y.unsigned_abs() as i128
+                + xy_plane.n_z.unsigned_abs() as i128
+        );
+        let diag = Plane3::from_points(p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0));
+        assert_eq!(
+            diag.coplanar_threshold(),
+            diag.n_x.unsigned_abs() as i128
+                + diag.n_y.unsigned_abs() as i128
+                + diag.n_z.unsigned_abs() as i128
+        );
+    }
+
+    #[test]
+    fn coplanar_threshold_axis_aligned_one_ulp_off_is_at_threshold() {
+        // For an axis-aligned plane, a vertex one fixed-point ULP off
+        // the plane in the normal direction has |side| exactly equal to
+        // the threshold. With `<=` comparison in the BSP, that vertex is
+        // classified COPLANAR. This is the expected behavior — a 1-ULP
+        // snap drift after intersection should not re-trigger SPANNING
+        // classification on the next BSP pass.
+        let xy_plane = Plane3::from_points(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0));
+        // Point one fixed ULP above the plane in z.
+        let one_ulp_above = pi(0, 0, 1);
+        assert_eq!(
+            xy_plane.side(one_ulp_above).unsigned_abs(),
+            xy_plane.coplanar_threshold() as u128,
+            "axis-aligned: 1-ULP-off vertex must sit at threshold boundary"
+        );
+    }
+
+    #[test]
+    fn coplanar_threshold_diagonal_overestimates_perpendicular_distance() {
+        // **Bug-pinning test.** For a diagonal plane (normal = (n,n,n))
+        // the threshold is `3n` but the perpendicular distance per unit
+        // |side| is `1 / (n * sqrt(3))`. So a vertex with |side| = n
+        // (one-third of the threshold) is at perpendicular distance
+        // `1 / sqrt(3)` ≈ 0.577 fixed units from the plane — and the
+        // threshold catches vertices up to perpendicular distance
+        // `sqrt(3)` ≈ 1.732 fixed units away.
+        //
+        // Compare to axis-aligned where the threshold catches up to
+        // 1.0 fixed unit perpendicular. The diagonal plane's threshold
+        // is `sqrt(3)` ≈ 1.73× too generous in perpendicular terms.
+        // This is the strongest candidate for the BSP misclassification
+        // observed in box - sphere and box - cylinder regressions.
+        let diag = Plane3::from_points(p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0));
+        // a = (65536, 0, 0) fixed; one ULP off in +x direction.
+        let one_ulp_off_in_x = pi(65537, 0, 0);
+        let side_mag = diag.side(one_ulp_off_in_x).unsigned_abs();
+        let threshold = diag.coplanar_threshold() as u128;
+        // Per the geometry above: |side| should be exactly threshold / 3.
+        assert_eq!(
+            side_mag * 3,
+            threshold,
+            "diagonal: |side| of 1-ULP-off-along-axis should be 1/3 of threshold"
+        );
+        // And it's well within the threshold — confirming the asymmetry.
+        assert!(side_mag < threshold);
+    }
+
+    #[test]
+    fn coplanar_threshold_unchanged_by_invert() {
+        // Symmetric polarity — inverting the plane must leave the
+        // threshold magnitude untouched. If a future formula picks up
+        // a sign asymmetry, BSP classification stability across CSG
+        // operations (which heavily rely on plane inversion) breaks.
+        let plane = Plane3::from_points(p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0));
+        assert_eq!(
+            plane.coplanar_threshold(),
+            plane.invert().coplanar_threshold()
+        );
+    }
+
+    // ── from_points coverage ──────────────────────────────────────────
+
+    #[test]
+    fn from_points_diagonal_normal() {
+        // Triangle through (1,0,0), (0,1,0), (0,0,1). Normal points away
+        // from origin. Pin the structure of the diagonal plane case so a
+        // future change to the cross-product order is caught.
+        let plane = Plane3::from_points(p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0));
+        assert_eq!(plane.n_x, plane.n_y);
+        assert_eq!(plane.n_y, plane.n_z);
+        assert!(
+            plane.n_x > 0,
+            "winding-CCW from outside-origin gives outward normal"
+        );
+        // Origin is on the *negative* side of this plane.
+        assert!(plane.side(p(0.0, 0.0, 0.0)) < 0);
+        // Far-from-origin point along (+,+,+) is on the positive side.
+        assert!(plane.side(p(2.0, 2.0, 2.0)) > 0);
+    }
+
+    #[test]
+    fn winding_reversal_flips_normal() {
+        // Reversing two of the three points reverses the winding and
+        // flips the normal. BSP relies on this for orientation — if it
+        // ever breaks, every back-face polygon would re-classify as
+        // front-face on the next BSP pass.
+        let ccw = Plane3::from_points(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0));
+        let cw = Plane3::from_points(p(0.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(1.0, 0.0, 0.0));
+        assert_eq!(ccw.n_x, -cw.n_x);
+        assert_eq!(ccw.n_y, -cw.n_y);
+        assert_eq!(ccw.n_z, -cw.n_z);
+        assert_eq!(ccw.d, -cw.d);
+    }
+
+    #[test]
+    fn cyclic_permutation_preserves_plane() {
+        // (a, b, c), (b, c, a), (c, a, b) all give the same plane —
+        // CCW winding is preserved under cyclic shift. Without this,
+        // BSP would classify the same triangle differently depending on
+        // which vertex was "first," which would produce non-deterministic
+        // tree shapes across runs.
+        let abc = Plane3::from_points(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0));
+        let bca = Plane3::from_points(p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 0.0));
+        let cab = Plane3::from_points(p(0.0, 1.0, 0.0), p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0));
+        assert_eq!((abc.n_x, abc.n_y, abc.n_z), (bca.n_x, bca.n_y, bca.n_z));
+        assert_eq!((abc.n_x, abc.n_y, abc.n_z), (cab.n_x, cab.n_y, cab.n_z));
+        assert_eq!(abc.d, bca.d);
+        assert_eq!(abc.d, cab.d);
+    }
+
+    // ── is_degenerate coverage ────────────────────────────────────────
+
+    #[test]
+    fn three_identical_points_are_degenerate() {
+        let q = p(1.0, 2.0, 3.0);
+        assert!(Plane3::from_points(q, q, q).is_degenerate());
+    }
+
+    #[test]
+    fn two_identical_points_are_degenerate() {
+        // a == b: edge1 is zero, cross product is zero.
+        let a = p(1.0, 2.0, 3.0);
+        let b = p(1.0, 2.0, 3.0);
+        let c = p(0.0, 0.0, 0.0);
+        assert!(Plane3::from_points(a, b, c).is_degenerate());
+        // Also a == c.
+        let c2 = p(1.0, 2.0, 3.0);
+        let b2 = p(0.0, 0.0, 0.0);
+        assert!(Plane3::from_points(a, b2, c2).is_degenerate());
+    }
+
+    // ── side() linearity and magnitude ────────────────────────────────
+
+    #[test]
+    fn side_magnitude_scales_linearly_with_offset() {
+        // For plane z = 0 with normal (0, 0, n_z), side(point at z = k)
+        // must equal k * n_z. Catches any asymmetric implementation
+        // (e.g. a stray quadratic term picked up during a refactor).
+        let plane = Plane3::from_points(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0));
+        let n_z = plane.n_z as i128;
+        for k in [-3, -1, 1, 5, 17] {
+            let point = pi(0, 0, k);
+            assert_eq!(plane.side(point), n_z * k as i128, "non-linear at k={k}");
+        }
+    }
+
+    #[test]
+    fn side_is_affine_in_position() {
+        // The defining property of a plane's side function:
+        // side(p + Δ) - side(p) == n · Δ for any displacement Δ.
+        // Catches any future change that introduces non-affine terms.
+        let plane = Plane3::from_points(p(1.0, 2.0, 0.0), p(2.0, 0.0, 1.0), p(0.0, 1.0, 2.0));
+        let p0 = pi(100, 200, 300);
+        let delta = pi(7, -11, 13);
+        let p1 = pi(p0.x + delta.x, p0.y + delta.y, p0.z + delta.z);
+        let observed = plane.side(p1) - plane.side(p0);
+        let expected = (plane.n_x as i128) * (delta.x as i128)
+            + (plane.n_y as i128) * (delta.y as i128)
+            + (plane.n_z as i128) * (delta.z as i128);
+        assert_eq!(observed, expected);
+    }
+
+    // ── invert() ──────────────────────────────────────────────────────
+
+    #[test]
+    fn invert_is_involution() {
+        // Double-invert restores all four fields exactly. Pinned via
+        // field-by-field comparison since Plane3 doesn't derive Eq.
+        let plane = Plane3::from_points(p(1.0, 2.0, 3.0), p(4.0, -1.0, 0.5), p(-2.0, 0.0, 1.5));
+        let twice = plane.invert().invert();
+        assert_eq!(plane.n_x, twice.n_x);
+        assert_eq!(plane.n_y, twice.n_y);
+        assert_eq!(plane.n_z, twice.n_z);
+        assert_eq!(plane.d, twice.d);
+    }
+
+    // ── canonical_key() ───────────────────────────────────────────────
+
+    #[test]
+    fn canonical_key_idempotent() {
+        // A canonical key fed back through `from_points`-equivalent
+        // construction should produce a plane that already has the same
+        // key. We approximate this by reading the key, building a plane
+        // with those fields directly, and re-keying.
+        let plane = Plane3::from_points(p(0.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(0.0, 3.0, 0.0));
+        let key = plane.canonical_key();
+        let normalized = Plane3 {
+            n_x: key.0,
+            n_y: key.1,
+            n_z: key.2,
+            d: key.3,
+        };
+        assert_eq!(normalized.canonical_key(), key);
+    }
+
+    #[test]
+    fn canonical_key_collapses_large_scale_difference() {
+        // Two triangles on the same plane whose cross products differ
+        // by a large factor (100×) — both must produce the same key.
+        // Mirrors the case of CSG output where one face emits a tiny
+        // triangle alongside a large one.
+        let small = Plane3::from_points(p(0.0, 0.0, 0.0), p(0.5, 0.0, 0.0), p(0.0, 0.5, 0.0));
+        let large = Plane3::from_points(p(0.0, 0.0, 0.0), p(50.0, 0.0, 0.0), p(0.0, 50.0, 0.0));
+        // Raw normals differ by factor 100^2 = 10_000.
+        assert_eq!(small.canonical_key(), large.canonical_key());
+    }
+
+    // ── normal_dot_sign() ─────────────────────────────────────────────
+
+    #[test]
+    fn normal_dot_sign_perpendicular_planes_returns_zero() {
+        // xy-plane and yz-plane have perpendicular normals.
+        let xy = Plane3::from_points(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0));
+        let yz = Plane3::from_points(p(0.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0));
+        assert_eq!(xy.normal_dot_sign(&yz), 0);
+        assert_eq!(yz.normal_dot_sign(&xy), 0);
+    }
+
+    #[test]
+    fn normal_dot_sign_acute_angle_is_positive() {
+        // xy-plane (+z normal) vs a plane tilted slightly toward +z.
+        // Their normals form an acute angle so dot is positive.
+        let xy = Plane3::from_points(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0));
+        let tilt = Plane3::from_points(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.5), p(0.0, 1.0, 0.5));
+        // tilt has +z component; dot with (+z) normal of xy must be > 0.
+        assert!(xy.normal_dot_sign(&tilt) > 0);
+    }
+
+    // ── private gcd helpers ───────────────────────────────────────────
+
+    #[test]
+    fn gcd_u128_zero_identity() {
+        // gcd(0, x) == x and gcd(x, 0) == x — the additive identity
+        // of the gcd monoid. Important for canonical_key when one
+        // normal component is zero (axis-aligned planes).
+        assert_eq!(gcd_u128(0, 7), 7);
+        assert_eq!(gcd_u128(7, 0), 7);
+        assert_eq!(gcd_u128(0, 0), 0);
+    }
+
+    #[test]
+    fn gcd_u128_coprime_yields_one() {
+        assert_eq!(gcd_u128(3, 5), 1);
+        assert_eq!(gcd_u128(13, 17), 1);
+        assert_eq!(gcd_u128(9, 16), 1);
+    }
+
+    #[test]
+    fn gcd_u128_known_values() {
+        assert_eq!(gcd_u128(12, 18), 6);
+        assert_eq!(gcd_u128(100, 75), 25);
+        assert_eq!(gcd_u128(1024, 768), 256);
+    }
+
+    #[test]
+    fn gcd_4_with_zeros() {
+        // canonical_key uses gcd_4 across (n_x, n_y, n_z, d). For an
+        // axis-aligned plane through origin two of those are zero —
+        // gcd_4 must reduce to gcd of the non-zero terms.
+        assert_eq!(gcd_4(0, 0, 12, 18), 6);
+        assert_eq!(gcd_4(0, 18, 0, 12), 6);
+        assert_eq!(gcd_4(12, 0, 0, 18), 6);
+        assert_eq!(gcd_4(0, 0, 0, 7), 7);
+        assert_eq!(gcd_4(0, 0, 0, 0), 0);
+    }
+
+    // ── magnitude budget adversarial test ─────────────────────────────
+
+    #[test]
+    fn side_at_extreme_inputs_does_not_overflow() {
+        // Plane through three corners of the ±256 cube — the maximum-
+        // coefficient construction. Query side at the opposite corner.
+        // The doc claims i128 headroom; this test would panic on
+        // overflow under debug.
+        let plane = Plane3::from_points(
+            p(256.0, -256.0, -256.0),
+            p(-256.0, 256.0, -256.0),
+            p(-256.0, -256.0, 256.0),
+        );
+        let extreme_query = p(256.0, 256.0, 256.0);
+        let s = plane.side(extreme_query);
+        // The opposite corner from the plane's centroid must be on
+        // the positive side (the normal points outward).
+        assert!(
+            s != 0,
+            "extreme query should not coincidentally lie on plane"
+        );
+    }
 }
