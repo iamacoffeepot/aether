@@ -9,10 +9,12 @@ The substrate today ships five sinks: render, camera, audio, io (ADR-0041), and 
 
 `spikes/prompt-pipeline-spike/` validated the call shape against `claude -p` as a subprocess. Each call composes a prompt, dispatches via `Command::new("claude").arg("-p").arg(prompt).args(["--model", model])`, captures stdout, and content-addresses the cache by `(prompt, model, template-hash)`. The shape held across five experimental runs and worked uniformly across Haiku / Sonnet / Opus model variants. The data-flow shape — request with `(prompt, model)`, reply with `text`, optional cost / latency fields — is well-understood. What's open is the *substrate-side* engineering: mail kinds, adapter dispatch, credential management, capability gating, observability.
 
+The deployment context for v1 is **Claude via subscription, dispatched through the local `claude` CLI** — *not* direct Anthropic API access. Subscription billing means there is no API key budget for routine development workflows; every Claude call has to flow through the CLI. HTTP-based providers (Gemini for image generation, future API-budgeted Claude / OpenAI usage) coexist as separate adapter shapes, but the subprocess adapter is the load-bearing v1 path, not a peer of HTTP.
+
 Two design pressures:
 
-- **Adapter neutrality.** Different deployments will want different backends — the user's local Claude CLI, direct Anthropic API access, OpenAI, local model server (Ollama), enterprise gateway. Each has different auth, different rate limits, different streaming behavior. The sink contract should accept a `model` string the substrate dispatches against an adapter registry, parallel to ADR-0041's `AdapterRegistry` mapping namespaces to storage backends. v1 ships subprocess (matches spike) and HTTP (Anthropic API direct); other adapters slot in under the same trait.
-- **Cost observability.** LLM calls are the most expensive routine operation in any content pipeline. The substrate is the right place to log per-call cost — model, input tokens, output tokens, wall-clock — because the substrate sees every dispatch. Application-side cost tracking would have to instrument every component.
+- **Adapter neutrality across mechanism.** Different providers expose different surfaces. The user's Claude access is CLI-only (subscription, no API budget). Gemini is HTTP-only (no CLI). Future providers (OpenAI, Ollama, enterprise gateway) will be HTTP. The sink contract abstracts the mechanism behind a `model` string dispatched through an adapter registry, parallel to ADR-0041's `AdapterRegistry`. v1 ships subprocess as the default, HTTP-Gemini as a loadable adapter for image-gen workflows, and HTTP-Anthropic as an optional adapter for deployments that have configured API access.
+- **Cost observability.** LLM calls are the most expensive routine operation in any content pipeline. The substrate is the right place to log per-call cost — model, input tokens, output tokens, wall-clock — because the substrate sees every dispatch. Application-side cost tracking would have to instrument every component. Subscription-billed CLI calls can't surface per-call cost (the CLI doesn't know subscription pricing); HTTP adapters can, since the API responses include token counts.
 
 This ADR commits to the LLM sink mail surface, the adapter model, the v1 backends, credential and capability handling, and the observability surface. Streaming, vision/multimodal, and structured output are deferred to follow-up ADRs.
 
@@ -110,19 +112,21 @@ Per-call timeout: default 120s, overridable via `AETHER_LLM_TIMEOUT_MS`. Exceedi
 
 ### 3. v1 adapters
 
-**Subprocess adapter** (`subprocess`). Default. Runs `claude -p <prompt> --model <model> --max-turns 1 --output-format text` as a child process per request. Stdout is captured as the `text` field; stderr goes to engine_logs. The adapter expects `claude` on PATH; if absent, it fails to load at substrate startup and the sink rejects all `complete` requests with `LlmError::AdapterError("claude CLI not found on PATH")`.
+**Subprocess adapter for Claude** (`claude_cli`). Mandatory v1, default. Runs `claude -p <prompt> --model <model> --max-turns 1 --output-format text` as a child process per request. Stdout is captured as the `text` field; stderr goes to engine_logs. The adapter expects `claude` on PATH at substrate startup; if absent, the substrate logs a warn and the adapter is marked unavailable — `complete` requests routed to a Claude model return `LlmError::AdapterError("claude CLI not found on PATH")`. This is the load-bearing path: the user runs Claude via subscription, the subscription is exercised through the CLI, no API key is configured.
 
-Model names recognized by the subprocess adapter: `haiku`, `sonnet`, `opus`, plus passthrough of fully-qualified IDs (`claude-haiku-4-5`, etc.). The adapter passes the user-supplied `model` string to the CLI verbatim; routing happens in the CLI.
+Model names recognized: `haiku`, `sonnet`, `opus`, plus passthrough of fully-qualified IDs (`claude-haiku-4-5`, etc.). The adapter passes the user-supplied `model` string to the CLI verbatim; routing happens in the CLI.
 
 This adapter validated empirically in `spikes/prompt-pipeline-spike/` — five experiment runs across multiple model profiles, content-addressed caching, no failures. The spike's `src/claude.rs` is the reference implementation.
 
-`Usage` reporting from subprocess: `wall_clock_ms` measured by the substrate; `input_tokens` and `output_tokens` parsed from `claude` CLI output if present, otherwise `0` (the CLI's text-output mode doesn't include them; future versions may). `cost_micros` is `None` for the subprocess adapter (Claude CLI uses subscription billing, not per-call).
+`Usage` reporting from subprocess: `wall_clock_ms` measured by the substrate; `input_tokens` and `output_tokens` are `0` (the CLI's text-output mode doesn't surface them, and the subscription model means tokens aren't billed per-call anyway). `cost_micros` is `None` for the subprocess adapter — subscription billing isn't per-call. Operators wanting per-call cost data must use the HTTP-Anthropic adapter with API access.
 
-**HTTP adapter** (`http_anthropic`). Optional. Dispatches against the Anthropic API directly via the substrate's net sink (ADR-0043's `https_get`/`https_post`). Auth via API key in `AETHER_LLM_ANTHROPIC_API_KEY` env var or substrate config. Returns full `Usage` including token counts and computed `cost_micros` from the API's pricing-tier table. Useful when subprocess isn't viable (headless deployment without `claude` CLI installed) or for production workloads that need direct API guarantees.
+**HTTP adapter for Gemini** (`http_gemini`). Loaded when `AETHER_LLM_GEMINI_API_KEY` is set. Dispatches against `generativelanguage.googleapis.com` via the substrate's net sink (ADR-0043). Returns full `Usage` including token counts. The spike's `src/gemini.rs` validated this against `gemini-3.1-flash-image-preview` (image gen) and `gemini-3-pro-preview` (text + vision); both shapes are reusable by the adapter. This is the API path for providers that don't have a CLI option.
 
-Model names: `haiku`, `sonnet`, `opus`, plus passthrough of `claude-*-*` IDs.
+Model names: `gemini-3.1-flash-image-preview`, `gemini-3-pro-preview`, etc. — passthrough of Gemini model IDs.
 
-Both adapters honor `max_tokens`, `temperature`, `system`, `stop_sequences`. The HTTP adapter encodes them into the request body per Anthropic's API spec; the subprocess adapter passes them as CLI flags where the CLI supports them and ignores otherwise (with a warning to engine_logs on first ignore).
+**HTTP adapter for Anthropic** (`http_anthropic`). Loaded only when `AETHER_LLM_ANTHROPIC_API_KEY` is set, which the user does not currently set. Documented for completeness — same shape as `http_gemini` against the Anthropic API, returns full `Usage` with `cost_micros` computed from the API pricing table. Useful for future deployments with API budget (CI runners, headless production workloads, multi-tenant deployments). The default path remains `claude_cli`; routing only flips to `http_anthropic` if the operator explicitly sets `AETHER_LLM_ROUTE_<model>=http_anthropic`.
+
+All three adapters honor `max_tokens`, `temperature`, `system`, `stop_sequences`. HTTP adapters encode them into the request body per the provider's API spec; the subprocess adapter passes them as CLI flags where supported and warns to engine_logs on first ignore otherwise.
 
 OpenAI / local-model / enterprise-gateway adapters are deferred to follow-up ADRs. The trait is forward-compatible — adding adapters doesn't change the `aether.llm.complete` wire format.
 
@@ -130,12 +134,13 @@ OpenAI / local-model / enterprise-gateway adapters are deferred to follow-up ADR
 
 The substrate reads adapter and routing config from environment variables (v1 — same precedence-stack-deferred as ADR-0041's TOML/CLI):
 
-- **`AETHER_LLM_ADAPTERS`** — comma-separated adapter names to enable. Default: `subprocess`. Example: `subprocess,http_anthropic`.
+- **`AETHER_LLM_ADAPTERS`** — comma-separated adapter names to enable. Default: `claude_cli`. Adapters whose required env keys are unset are skipped (logged as a warn). Example: `claude_cli,http_gemini` enables Claude (subscription) + Gemini (API).
 - **`AETHER_LLM_DEFAULT_MODEL`** — fallback model when a request omits or names an unknown one. Default: `haiku`.
 - **`AETHER_LLM_CONCURRENCY`** — thread pool size for in-flight requests. Default: 4.
 - **`AETHER_LLM_TIMEOUT_MS`** — per-call timeout. Default: 120000.
-- **`AETHER_LLM_ANTHROPIC_API_KEY`** — auth for the http_anthropic adapter. Read once at startup.
-- **`AETHER_LLM_ROUTE_<MODEL>=<adapter>`** — explicit routing override (e.g., `AETHER_LLM_ROUTE_haiku=http_anthropic` to force HTTP for haiku even with subprocess available). Without overrides, the substrate uses the first-loaded adapter that claims a given model.
+- **`AETHER_LLM_GEMINI_API_KEY`** — auth for the `http_gemini` adapter. Read once at startup.
+- **`AETHER_LLM_ANTHROPIC_API_KEY`** — auth for the `http_anthropic` adapter. Optional; absent in the user's default workflow (subscription only).
+- **`AETHER_LLM_ROUTE_<MODEL>=<adapter>`** — explicit routing override (e.g., `AETHER_LLM_ROUTE_haiku=http_anthropic` to force the API path for haiku even with the CLI adapter loaded). Without overrides, the substrate uses the first-loaded adapter that claims a given model — `claude_cli` wins for Claude models in v1.
 
 Models that aren't claimed by any loaded adapter route to `LlmError::UnknownModel`. The startup log emits the resolved routing table at INFO level.
 
@@ -181,9 +186,13 @@ The following are intentionally not in v1; each is a future ADR:
 
 ### 9. Chassis coverage
 
-- **Desktop** — full LLM sink. Subprocess adapter loaded by default; HTTP adapter loadable.
-- **Headless** — full LLM sink. Identical semantics. Headless content-gen workloads are the primary target.
-- **Hub** — no LLM sink. Mail to `"llm"` warn-drops as unknown mailbox, identical to the io sink behaviour on hub chassis (ADR-0041). LLM dispatch is a substrate concern.
+The LLM sink is **chassis-owned**, like `io` (ADR-0041), `net` (ADR-0043), and `audio` (ADR-0039). Each chassis instance bootstraps its own adapter registry at startup; components on that chassis dispatch into the local sink. No cross-chassis routing in v1.
+
+- **Desktop** — full LLM sink. `claude_cli` adapter loaded by default; HTTP adapters loadable when API keys are set.
+- **Headless** — full LLM sink, identical semantics. Headless content-gen workloads (CI runners, batch sculpting) are a primary target.
+- **Hub** — no LLM sink. Mail to `"llm"` warn-drops as unknown mailbox, identical to the io sink behaviour on hub chassis. The hub coordinates substrate children; it does not host workload components in v1, so it has no consumer for the sink.
+
+Components needing LLM access live on a desktop or headless chassis. A component on one chassis cannot dispatch through another chassis's sink directly — that would require either explicit cross-substrate addressing or routing-by-bubbling (ADR-0037), neither of which are wired through the LLM sink in v1. If a deployment grows multiple substrate children that share a single Claude CLI subscription and concurrent calls hit subscription rate limits, the right answer is a **hub-routed adapter** (described under Alternatives) — wire-additive when needed, not v1 work.
 
 ### 10. Handle-store integration
 
@@ -198,14 +207,14 @@ ADR-0046's Frame and Distill stages naturally wrap the LLM call in a transform; 
 ### Positive
 
 - **Pipelines have a substrate-level LLM dispatch.** ADR-0046's Frame, Distill, Scrub, Translate, Compose stages all dispatch through one well-defined sink instead of bespoke per-pipeline subprocess management.
-- **Adapter neutrality.** v1 ships subprocess for the validated spike pattern and HTTP for production deployments. Future adapters (OpenAI, local Ollama, enterprise gateway) drop in under the same trait without wire churn.
-- **Substrate-level cost observability.** Per-call cost roll-up surfaces via engine_logs and broadcast observation. A long-running content-gen session can see "we spent $2.34 on Haiku and $0.78 on Sonnet today" without per-component instrumentation.
+- **Adapter neutrality across mechanism.** v1 ships `claude_cli` (subscription, no API budget) and `http_gemini` (image gen + multimodal) — the two providers the spike actually exercised. `http_anthropic` slots in for deployments that have API access. Future providers (OpenAI, local Ollama, enterprise gateway) drop in under the same trait without wire churn.
+- **Substrate-level observability.** Per-call wall-clock, model, prompt length, request id surface via engine_logs and broadcast observation. HTTP adapters add token-level usage and per-call cost in USD micros; subprocess (subscription) adds wall-clock only. A long-running content-gen session can see usage rolled up across all calls without per-component instrumentation.
 - **Capability-ready.** When ADR-0044 unparks, `llm` is a top-level cap. No retrofit required.
 - **Mail-shaped surface lets Claude harness submit LLM calls directly.** A harness session can mail `aether.llm.complete` via MCP `send_mail` and observe the reply in `receive_mail`. Useful for ad-hoc "what does Haiku say if I ask it X" without authoring a component.
 
 ### Negative
 
-- **Subprocess adapter has limited usage telemetry.** `claude -p` text mode doesn't report token counts; the HTTP adapter does. Pipelines that want fine-grained cost accounting use HTTP; subprocess users get wall-clock + (zero, zero) for tokens.
+- **Subprocess adapter has limited usage telemetry.** `claude -p` text mode doesn't report token counts and subscription billing isn't per-call, so the subprocess adapter reports `wall_clock_ms` only and `cost_micros: None`. HTTP adapters (when configured) report tokens + cost. Pipelines that want fine-grained cost accounting need API access; subscription users get latency only.
 - **Per-substrate adapter set, not per-component.** All components on a substrate share the same adapter registry and routing. A workflow that wants component-A on Haiku-via-subprocess and component-B on Opus-via-HTTP needs both adapters loaded and uses model-string routing per call. Acceptable; per-component adapter overrides are a future complication that doesn't pay off without a forcing function.
 - **No streaming in v1.** A 30-second completion holds an in-flight slot for 30 seconds; the consumer waits for the full response. Acceptable for content-gen workloads (Frame outputs are short, Distill outputs even shorter); a chat-shaped consumer would need streaming.
 - **No vision in v1 (but the design is unblocked).** ADR-0046's Spike B (image grading) needs vision inputs; it ran successfully against Gemini using the spike's own multimodal HTTP client. The follow-up ADR adding `complete_multimodal` to this sink can lift the validated shape directly. Spike B has unblocked the multimodal design rather than just forcing it.
@@ -226,11 +235,14 @@ ADR-0046's Frame and Distill stages naturally wrap the LLM call in a transform; 
 - **Streaming in v1.** Useful for chat-shaped consumers. Rejected for v1 because content-gen pipelines (the actual customer) don't need it; Frame/Distill/Compose outputs are short enough that buffering is fine. Follow-up ADR adds streaming when a forcing function emerges.
 - **Multimodal in v1.** Necessary for Spike B's grading workflow. Rejected for v1 timing — the multimodal surface is enough additional design to deserve its own ADR (image-input handle integration, vision model routing, response-shape differences). Spike B has now both forced and pre-validated the design; the follow-up ADR is near-term work, not deferred indefinitely.
 - **Caching at the sink level.** The substrate could content-address LLM replies by `(prompt, model, params)` automatically. Rejected: same-prompt-same-model intentionally repeated (variance sampling, A/B comparison) shouldn't dedup; the consumer expresses caching intent by wrapping the call in a transform. Sink-level caching would be opt-out, transform-level caching is opt-in — the latter matches the substrate's "explicit is better than implicit" defaults elsewhere.
+- **Hub-routed LLM dispatch (single coordinator).** Centralize all LLM calls at the hub: substrate-child components mail `aether.llm.complete`, which bubbles up via ADR-0037, the hub serves all completions from a single shared adapter registry. The pull is real — one Claude subscription is rate-limited as a unit, so multiple substrates each invoking `claude` concurrently can blow the limit; centralized dispatch can serialize / queue / throttle. Single CLI install, single credential surface, single observability stream. Rejected for v1 because (a) every LLM call would cost a hub round-trip even when the consumer is on the same machine, (b) headless-only deployments without a hub get nothing, and (c) the forcing function (multiple concurrent agent loops sharing one subscription) doesn't exist yet. The right shape when it does: a `bubble_to_hub` adapter loaded on the substrate-children, dispatched through ADR-0037's bubbling — wire-additive, the chassis-owned sink stays unchanged.
+- **Specialized LLM-only chassis.** A new chassis kind whose only job is to expose the LLM sink, with components needing LLM access living there and others mailing across. Rejected: components frequently want LLM access *and* other capabilities simultaneously (a sculptor wants LLM + mesh-editor mail dispatch + frame capture). Splitting capabilities across chassis costs a hop per call. Chassis-owned sink keeps composition local.
+- **LLM as a substrate-core capability.** Bake the sink directly into `aether-substrate-core` so it's not chassis-optional. Rejected: not all deployments want LLM (a CI test runner that just exercises mesh dispatch shouldn't load the adapter machinery). Same reason `io`, `net`, and `audio` are chassis-owned, not core.
 
 ## Follow-up work
 
 - **PR**: kinds + schema-derive — `CompleteRequest`, `CompleteResult`, `Usage`, `LlmError`, `ModelInfo`, `CancelRequest`/`Result`, `ListModelsRequest`/`Result` in `aether-kinds`.
-- **PR**: substrate sink — `LlmAdapter` trait, `LlmAdapterRegistry`, subprocess adapter (lifting from `spikes/prompt-pipeline-spike/src/claude.rs`), HTTP-Anthropic adapter (over the existing net sink), thread pool integration, env-var config, capability gate stub for ADR-0044.
+- **PR**: substrate sink — `LlmAdapter` trait, `LlmAdapterRegistry`, `claude_cli` subprocess adapter (lifting from `spikes/prompt-pipeline-spike/src/claude.rs`), `http_gemini` adapter (lifting from `spikes/prompt-pipeline-spike/src/gemini.rs`, dispatched through the net sink), thread pool integration, env-var config, capability gate stub for ADR-0044. `http_anthropic` adapter optional in this PR or follow-up; gated on operator API setup either way.
 - **PR**: hub MCP — `llm_status` tool surfacing per-adapter / per-model dispatch counts and cost.
 - **PR**: observation — `aether.observation.llm_cost` broadcast every 30s, on the same publisher as `frame_stats`.
 - **Parked, future ADR**: streaming completion (`aether.llm.stream`).
