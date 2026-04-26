@@ -1425,164 +1425,49 @@ mod control_plane {
     }
 }
 
-pub use mesh::*;
+pub use dsl_mesh::*;
 
-/// Mesh editor component vocabulary (Spike C). Postcard-shaped because
-/// every kind here either carries a `Vec` of vertex ids or a tagged
-/// enum that bytemuck can't represent. The mesh editor component
-/// (`crates/aether-mesh-editor-component/`) is the sole receiver; mail
-/// is fire-and-forget for v1 — state changes become visible the next
-/// tick when the editor re-emits `DrawTriangle` for every face.
-mod mesh {
-    use alloc::vec::Vec;
-
+/// DSL mesh editor component vocabulary (ADR-0052). The editor accepts
+/// a `.dsl` source (per ADR-0026 + ADR-0051), parses + meshes it, and
+/// replays the triangle list as `DrawTriangle` mail every tick. Hot
+/// reload is by-replacement: each `SetText` / successful `SetPath` reply
+/// drops the prior cache wholesale and installs the new triangles.
+///
+/// The editor that previously held a stateful vertex/face graph and
+/// accepted `aether.mesh.set_primitive` / `translate_vertices` /
+/// `scale_vertices` / `rotate_vertices` / `extrude_face` /
+/// `delete_faces` / `describe` was retired in ADR-0052. Edits happen
+/// by rewriting DSL text, not by mutating an off-screen state graph.
+mod dsl_mesh {
+    use alloc::string::String;
     use serde::{Deserialize, Serialize};
 
-    /// Procedural primitive variants. Each variant carries the
-    /// parameters specific to its family — params don't share a
-    /// common shape across primitives, so a tagged enum keeps each
-    /// well-typed without optional-field weirdness.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    pub enum Primitive {
-        /// Axis-aligned cube centered at `center` with edge length
-        /// `size`. 8 vertices, 12 triangles.
-        Cube { center: [f32; 3], size: f32 },
-        /// Capped cylinder around the y axis with `segments` sides.
-        /// `2*segments + 2` vertices: bottom ring (0..N), top ring
-        /// (N..2N), bottom center (2N), top center (2N+1). `4*segments`
-        /// triangles: 2N for the side wall, N for each cap.
-        Cylinder {
-            center: [f32; 3],
-            radius: f32,
-            height: f32,
-            segments: u32,
-        },
-    }
-
-    /// `aether.mesh.set_primitive` — replace the editor's mesh with a
-    /// procedurally generated primitive. Vertex and face ids are
-    /// reassigned from zero so callers can address them deterministically
-    /// by index after a known primitive (see the mesh editor crate doc
-    /// for per-primitive layouts). Fire-and-forget; the next tick
-    /// renders the new mesh.
+    /// `aether.dsl_mesh.set_text` — replace the editor's cached mesh
+    /// with the result of parsing + meshing the supplied DSL text.
+    /// Inline; no I/O. Fire-and-forget; the next tick renders the new
+    /// mesh. Parse or mesh failures silently keep the prior cache;
+    /// errors surface via `engine_logs`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.set_primitive")]
-    pub struct SetPrimitive {
-        pub primitive: Primitive,
+    #[kind(name = "aether.dsl_mesh.set_text")]
+    pub struct SetText {
+        /// The DSL source text. See `crates/aether-dsl-mesh/examples/`
+        /// for shipped examples (box, lamp_post, teapot).
+        pub dsl: String,
     }
 
-    /// `aether.mesh.translate_vertices` — shift the listed vertex ids
-    /// by `delta` in world space. Unknown ids are ignored (warned, not
-    /// rejected) so a partial-overlap selection still applies cleanly
-    /// to the ids that exist. Fire-and-forget; next tick reflects the
-    /// move.
+    /// `aether.dsl_mesh.set_path` — instruct the editor to load DSL
+    /// text from the substrate's I/O surface (ADR-0041 namespace +
+    /// path), then parse + mesh + replace the cached triangles. The
+    /// editor fires an `aether.io.read` to the `"io"` sink and
+    /// processes the reply when it arrives. Fire-and-forget on the
+    /// caller's side; the load is asynchronous.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.translate_vertices")]
-    pub struct TranslateVertices {
-        pub vertex_ids: Vec<u32>,
-        pub delta: [f32; 3],
-    }
-
-    /// `aether.mesh.scale_vertices` — multiply each named vertex's
-    /// offset from `pivot` by `factor`, per axis. Non-uniform scale
-    /// (e.g., `[1.2, 1.0, 1.2]`) flares a horizontal ring without
-    /// changing its height. Unknown ids are ignored. Fire-and-forget.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.scale_vertices")]
-    pub struct ScaleVertices {
-        pub vertex_ids: Vec<u32>,
-        pub pivot: [f32; 3],
-        pub factor: [f32; 3],
-    }
-
-    /// `aether.mesh.describe` — request a snapshot of the editor's
-    /// current mesh state. The editor responds by publishing
-    /// `MeshState` to the broadcast sink (`hub.claude.broadcast`),
-    /// from which MCP harness consumers read it via `receive_mail`.
-    /// Fire-and-forget; the snapshot flows on the broadcast path,
-    /// not as a typed reply (Ctx::reply is cast-only today, issue 240).
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.describe")]
-    pub struct Describe;
-
-    /// `aether.mesh.state` — snapshot of the editor's mesh, broadcast
-    /// in response to `Describe`. Tombstoned (deleted) vertex/face ids
-    /// are excluded; the agent sees only what's currently live. Ids
-    /// are monotonic and never reused — a missing id from a previous
-    /// snapshot means that vertex or face was deleted.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.state")]
-    pub struct MeshState {
-        pub vertices: Vec<VertexInfo>,
-        pub faces: Vec<FaceInfo>,
-    }
-
-    /// One live vertex in a `MeshState` snapshot.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    pub struct VertexInfo {
-        pub id: u32,
-        pub x: f32,
-        pub y: f32,
-        pub z: f32,
-    }
-
-    /// One live face in a `MeshState` snapshot. `vertex_ids` are
-    /// indices into the editor's vertex space (NOT positions in the
-    /// `MeshState.vertices` Vec, since the Vec excludes tombstones).
-    /// To resolve, look up each id in the vertex list by `id` field.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    pub struct FaceInfo {
-        pub id: u32,
-        pub vertex_ids: [u32; 3],
-        pub color: [f32; 3],
-    }
-
-    /// `aether.mesh.extrude_face` — region-extrude the listed faces
-    /// along their averaged normal by `distance`. Standard mesh-editor
-    /// semantics: the input faces become the bottom of the extrusion
-    /// (tombstoned), a new face is created at the offset position for
-    /// each input face (preserving original color), and side quads
-    /// stitch boundary edges (edges used by exactly one input face)
-    /// from old to new positions. Interior edges (shared between two
-    /// input faces) get no side quad.
-    ///
-    /// New ids are appended monotonically: vertices first (one new
-    /// vertex per unique input vertex, in ascending input-id order),
-    /// then top faces (one per input face, in input order), then side
-    /// quads (two triangles per boundary edge). Send `describe`
-    /// afterward to learn the new ids — this op produces enough new
-    /// geometry that mental tracking is fragile.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.extrude_face")]
-    pub struct ExtrudeFace {
-        pub face_ids: Vec<u32>,
-        pub distance: f32,
-    }
-
-    /// `aether.mesh.delete_faces` — tombstone the listed face ids.
-    /// Tombstoned faces never reappear in `describe` output, never
-    /// render, and their ids are never reused (per the editor's
-    /// monotonic-id rule). Vertices referenced only by deleted faces
-    /// are NOT cascaded — they stay live until explicitly translated,
-    /// scaled, or removed by a future `delete_vertices` op.
-    /// Out-of-range and already-tombstoned ids are silently skipped.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.delete_faces")]
-    pub struct DeleteFaces {
-        pub face_ids: Vec<u32>,
-    }
-
-    /// `aether.mesh.rotate_vertices` — rotate each named vertex
-    /// around the axis through `pivot` by `angle` radians. `axis`
-    /// is normalized internally; a zero-length axis is treated as
-    /// a no-op rotation. Out-of-range and tombstoned ids skipped.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.rotate_vertices")]
-    pub struct RotateVertices {
-        pub vertex_ids: Vec<u32>,
-        pub pivot: [f32; 3],
-        pub axis: [f32; 3],
-        pub angle: f32,
+    #[kind(name = "aether.dsl_mesh.set_path")]
+    pub struct SetPath {
+        /// Short namespace prefix (no `://`), e.g. `"save"`, `"assets"`.
+        pub namespace: String,
+        /// Relative path within the namespace.
+        pub path: String,
     }
 }
 
