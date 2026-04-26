@@ -405,6 +405,275 @@ mod tests {
     }
 
     #[test]
+    fn projection_axes_axis_aligned_cases() {
+        // Six axis-aligned planes, each picking the right (a, b) pair
+        // with the orientation that preserves CCW under projection.
+        let mut p = Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 0,
+            d: 0,
+        };
+        // +X dominant → (Y, Z)
+        p.n_x = 1;
+        p.n_y = 0;
+        p.n_z = 0;
+        let (a, b) = projection_axes(&p);
+        assert!(matches!(a, Axis::Y));
+        assert!(matches!(b, Axis::Z));
+        // -X dominant → (Z, Y)
+        p.n_x = -1;
+        let (a, b) = projection_axes(&p);
+        assert!(matches!(a, Axis::Z));
+        assert!(matches!(b, Axis::Y));
+        // +Y dominant → (Z, X)
+        p.n_x = 0;
+        p.n_y = 1;
+        let (a, b) = projection_axes(&p);
+        assert!(matches!(a, Axis::Z));
+        assert!(matches!(b, Axis::X));
+        // -Y dominant → (X, Z)
+        p.n_y = -1;
+        let (a, b) = projection_axes(&p);
+        assert!(matches!(a, Axis::X));
+        assert!(matches!(b, Axis::Z));
+        // +Z dominant → (X, Y)
+        p.n_y = 0;
+        p.n_z = 1;
+        let (a, b) = projection_axes(&p);
+        assert!(matches!(a, Axis::X));
+        assert!(matches!(b, Axis::Y));
+        // -Z dominant → (Y, X)
+        p.n_z = -1;
+        let (a, b) = projection_axes(&p);
+        assert!(matches!(a, Axis::Y));
+        assert!(matches!(b, Axis::X));
+    }
+
+    #[test]
+    fn projection_axes_diagonal_picks_dominant_x_on_tie() {
+        // (n_x, n_y, n_z) = (1, 1, 1): all magnitudes equal. The `>=`
+        // chain favors x first, so x is treated as dominant. Pin the
+        // tie-breaking so a future refactor doesn't silently change
+        // which two axes get projected.
+        let p = Plane3 {
+            n_x: 1,
+            n_y: 1,
+            n_z: 1,
+            d: 0,
+        };
+        let (a, b) = projection_axes(&p);
+        assert!(matches!(a, Axis::Y));
+        assert!(matches!(b, Axis::Z));
+    }
+
+    #[test]
+    fn project_point_extracts_correct_coordinates() {
+        // Catches a typo refactor (Axis::X→p.y, etc.) that wouldn't
+        // surface in axis-aligned tests because xy-plane projections
+        // pick (X, Y) and the test inputs happen to keep z=0.
+        let point = Point3 {
+            x: 100,
+            y: 200,
+            z: 300,
+        };
+        assert_eq!(project_point(point, Axis::X, Axis::Y), (100, 200));
+        assert_eq!(project_point(point, Axis::Y, Axis::Z), (200, 300));
+        assert_eq!(project_point(point, Axis::Z, Axis::X), (300, 100));
+        // Reversed orderings.
+        assert_eq!(project_point(point, Axis::Y, Axis::X), (200, 100));
+        assert_eq!(project_point(point, Axis::Z, Axis::Y), (300, 200));
+        assert_eq!(project_point(point, Axis::X, Axis::Z), (100, 300));
+    }
+
+    #[test]
+    fn point_in_polygon_inside_outside_basic() {
+        // Square (0,0)-(2,0)-(2,2)-(0,2); test (1,1) inside, (3,3) out.
+        let poly = vec![(0_i64, 0_i64), (2, 0), (2, 2), (0, 2)];
+        assert!(point_in_polygon_3x(3, 3, &poly), "(1,1) should be inside");
+        assert!(!point_in_polygon_3x(9, 9, &poly), "(3,3) should be outside");
+        assert!(
+            !point_in_polygon_3x(-3, -3, &poly),
+            "(-1,-1) should be outside"
+        );
+    }
+
+    #[test]
+    fn point_in_polygon_annular_even_odd_rule() {
+        // CDT uses the count-of-loops-containing-centroid % 2 == 1 rule.
+        // For an annular face: outer + hole. A point in the annulus is
+        // in 1 loop (the outer); a point in the hole is in 2 loops
+        // (outer + hole). Pin both directly against the predicate.
+        let outer = vec![(0_i64, 0_i64), (4, 0), (4, 4), (0, 4)];
+        let hole = vec![(1_i64, 1_i64), (3, 1), (3, 3), (1, 3)];
+        // Point (2, 0.5) is in the annulus (between hole and outer).
+        // Scaled: cx3=6, cy3 such that y=0.5 → cy3 = 1.5, but i128
+        // doesn't do half — use 3*y = 1, then cy3=1 means y=1/3. We
+        // need a clean test. Use cx3=6, cy3=2 (y = 2/3 < 1) so we're
+        // outside the hole.
+        let inside_outer_only =
+            (point_in_polygon_3x(6, 2, &outer) as u32) + (point_in_polygon_3x(6, 2, &hole) as u32);
+        assert_eq!(
+            inside_outer_only, 1,
+            "point in annulus must be inside exactly 1 loop (the outer)"
+        );
+        // Point (2, 2) (= scaled cx3=6, cy3=6) is inside both.
+        let inside_both =
+            (point_in_polygon_3x(6, 6, &outer) as u32) + (point_in_polygon_3x(6, 6, &hole) as u32);
+        assert_eq!(
+            inside_both, 2,
+            "point inside hole must be inside both outer and hole loops"
+        );
+        // Point (5, 2) (scaled cx3=15, cy3=6) is outside both.
+        let inside_neither = (point_in_polygon_3x(15, 6, &outer) as u32)
+            + (point_in_polygon_3x(15, 6, &hole) as u32);
+        assert_eq!(inside_neither, 0);
+    }
+
+    #[test]
+    fn point_in_polygon_horizontal_edge_convention() {
+        // Standard ray-casting convention: endpoints AT the ray are
+        // treated as "below" it. So a test point exactly on the bottom
+        // edge of a square classifies INSIDE (the right edge crosses);
+        // on the top edge classifies OUTSIDE (no edges cross). Pin
+        // this asymmetry so a future refactor of the comparison
+        // direction is loud — CDT triangle inclusion depends on it.
+        let square = vec![(0_i64, 0_i64), (2, 0), (2, 2), (0, 2)];
+        // Point (1, 0): scaled cx3=3, cy3=0 — on bottom edge.
+        assert!(
+            point_in_polygon_3x(3, 0, &square),
+            "point on bottom edge classified inside (convention: endpoints below ray)"
+        );
+        // Point (1, 2): scaled cx3=3, cy3=6 — on top edge.
+        assert!(
+            !point_in_polygon_3x(3, 6, &square),
+            "point on top edge classified outside (no edges cross — both endpoints below ray)"
+        );
+    }
+
+    #[test]
+    fn multiple_holes_in_one_polygon_triangulate() {
+        // Outer 4x4 square with two disjoint 1x1 holes.
+        let vertices = vec![
+            pt(0.0, 0.0, 0.0), // 0: outer BL
+            pt(4.0, 0.0, 0.0), // 1: outer BR
+            pt(4.0, 4.0, 0.0), // 2: outer TR
+            pt(0.0, 4.0, 0.0), // 3: outer TL
+            pt(0.5, 0.5, 0.0), // 4: hole 1 BL
+            pt(1.5, 0.5, 0.0), // 5: hole 1 BR
+            pt(1.5, 1.5, 0.0), // 6: hole 1 TR
+            pt(0.5, 1.5, 0.0), // 7: hole 1 TL
+            pt(2.5, 2.5, 0.0), // 8: hole 2 BL
+            pt(3.5, 2.5, 0.0), // 9: hole 2 BR
+            pt(3.5, 3.5, 0.0), // 10: hole 2 TR
+            pt(2.5, 3.5, 0.0), // 11: hole 2 TL
+        ];
+        let loops = vec![
+            vec![0, 1, 2, 3],   // outer CCW
+            vec![4, 7, 6, 5],   // hole 1 CW
+            vec![8, 11, 10, 9], // hole 2 CW
+        ];
+        let tris = triangulate(&vertices, &loops, &xy_plane()).unwrap();
+        // Total area = outer (16) - 2*hole (1 each) = 14.
+        let unit = 1_i128 << 16;
+        assert_eq!(
+            total_doubled_area(&tris, &vertices),
+            14 * 2 * unit * unit,
+            "multi-hole area mismatch — triangles dropped or duplicated"
+        );
+        assert_ccw_around_plane(&tris, &vertices, &xy_plane());
+    }
+
+    #[test]
+    fn hole_touching_outer_boundary_at_vertex() {
+        // Pinch-point degenerate: the hole loop shares vertex 0 with
+        // the outer loop. Common in CSG when an intersection grazes a
+        // corner. Either CDT triangulates it (asserting how, with area
+        // preservation), or returns None (graceful failure).
+        let vertices = vec![
+            pt(0.0, 0.0, 0.0), // 0: shared corner (outer BL == hole BL)
+            pt(4.0, 0.0, 0.0), // 1: outer BR
+            pt(4.0, 4.0, 0.0), // 2: outer TR
+            pt(0.0, 4.0, 0.0), // 3: outer TL
+            pt(2.0, 0.5, 0.0), // 4: hole BR
+            pt(2.0, 2.0, 0.0), // 5: hole TR
+            pt(0.5, 2.0, 0.0), // 6: hole TL
+        ];
+        let loops = vec![
+            vec![0, 1, 2, 3], // outer
+            vec![0, 6, 5, 4], // hole CW, sharing vertex 0
+        ];
+        // This is a degenerate input — the algorithm may return None
+        // (graceful failure) or produce a triangulation. Either is
+        // acceptable; what's NOT acceptable is panicking. Pin the
+        // no-panic behavior.
+        let _ = triangulate(&vertices, &loops, &xy_plane());
+    }
+
+    #[test]
+    fn fewer_than_three_unique_vertices_returns_none() {
+        // Single vertex repeated → input_ids.len() < 3 → None.
+        let vertices = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0)];
+        let loops = vec![vec![0, 1]];
+        assert_eq!(triangulate(&vertices, &loops, &xy_plane()), None);
+        // Two unique vertices → still None.
+        let loops_dup = vec![vec![0, 1, 0]];
+        assert_eq!(triangulate(&vertices, &loops_dup, &xy_plane()), None);
+    }
+
+    #[test]
+    fn total_area_is_preserved_across_inputs() {
+        // Property test: sum of triangle areas == outer area − sum(hole
+        // areas) for every input the triangulator handles. If a future
+        // change silently drops triangles or routes them wrong, this
+        // catches it across any of the test cases at once.
+        let unit = 1_i128 << 16;
+        let cases: Vec<(&str, Vec<Point3>, Vec<Vec<VertexId>>, i128)> = vec![
+            (
+                "triangle",
+                vec![pt(0.0, 0.0, 0.0), pt(2.0, 0.0, 0.0), pt(0.0, 2.0, 0.0)],
+                vec![vec![0, 1, 2]],
+                2 * 2 * unit * unit, // doubled area = 2 * triangle area = 4
+            ),
+            (
+                "quad",
+                vec![
+                    pt(0.0, 0.0, 0.0),
+                    pt(3.0, 0.0, 0.0),
+                    pt(3.0, 3.0, 0.0),
+                    pt(0.0, 3.0, 0.0),
+                ],
+                vec![vec![0, 1, 2, 3]],
+                9 * 2 * unit * unit,
+            ),
+            (
+                "annular",
+                vec![
+                    pt(0.0, 0.0, 0.0),
+                    pt(4.0, 0.0, 0.0),
+                    pt(4.0, 4.0, 0.0),
+                    pt(0.0, 4.0, 0.0),
+                    pt(1.0, 1.0, 0.0),
+                    pt(3.0, 1.0, 0.0),
+                    pt(3.0, 3.0, 0.0),
+                    pt(1.0, 3.0, 0.0),
+                ],
+                vec![vec![0, 1, 2, 3], vec![4, 7, 6, 5]],
+                12 * 2 * unit * unit, // 16 - 4 = 12
+            ),
+        ];
+        for (label, vertices, loops, expected_doubled_area) in cases {
+            let tris = triangulate(&vertices, &loops, &xy_plane())
+                .unwrap_or_else(|| panic!("{label}: triangulation returned None"));
+            assert_eq!(
+                total_doubled_area(&tris, &vertices),
+                expected_doubled_area,
+                "{label}: area not conserved"
+            );
+        }
+    }
+
+    #[test]
     fn l_shaped_outer_loop_triangulates() {
         // Non-convex L-shape boundary, CCW.
         //   (0,2)-(1,2)
