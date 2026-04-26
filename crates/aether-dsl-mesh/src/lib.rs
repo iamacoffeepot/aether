@@ -7,6 +7,7 @@
 //! Wavefront OBJ for inspection in any external viewer.
 
 pub mod ast;
+pub mod csg;
 pub mod mesh;
 pub mod obj;
 pub mod parse;

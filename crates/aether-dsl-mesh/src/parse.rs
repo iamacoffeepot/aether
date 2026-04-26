@@ -52,6 +52,12 @@ pub enum ParseError {
     InvalidProfilePoint(usize),
     #[error("sweep: :scales length ({scales_len}) must equal path length ({path_len})")]
     SweepScalesLengthMismatch { scales_len: usize, path_len: usize },
+    #[error("{node}: requires at least {min} children, got {got}")]
+    CsgArityTooFew {
+        node: &'static str,
+        min: usize,
+        got: usize,
+    },
 }
 
 pub fn parse(text: &str) -> Result<Node, ParseError> {
@@ -89,6 +95,9 @@ fn parse_node(value: &Value) -> Result<Node, ParseError> {
         "scale" => parse_scale(&positional, &keywords),
         "mirror" => parse_mirror(&positional, &keywords),
         "array" => parse_array(&positional, &keywords),
+        "union" => parse_union(&positional, &keywords),
+        "intersection" => parse_intersection(&positional, &keywords),
+        "difference" => parse_difference(&positional, &keywords),
         other => Err(ParseError::UnknownNode(other.to_string())),
     }
 }
@@ -411,5 +420,63 @@ fn parse_array(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
         count: as_u32(positional[0])?,
         spacing: as_vec3("array", positional[1])?,
         child: std::boxed::Box::new(parse_node(positional[2])?),
+    })
+}
+
+fn parse_union(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
+    check_no_extra_keywords("union", keywords, &[])?;
+    if positional.len() < 2 {
+        return Err(ParseError::CsgArityTooFew {
+            node: "union",
+            min: 2,
+            got: positional.len(),
+        });
+    }
+    let children = positional
+        .iter()
+        .map(|v| parse_node(v))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Node::Union { children })
+}
+
+fn parse_intersection(
+    positional: &[&Value],
+    keywords: &[(String, &Value)],
+) -> Result<Node, ParseError> {
+    check_no_extra_keywords("intersection", keywords, &[])?;
+    if positional.len() < 2 {
+        return Err(ParseError::CsgArityTooFew {
+            node: "intersection",
+            min: 2,
+            got: positional.len(),
+        });
+    }
+    let children = positional
+        .iter()
+        .map(|v| parse_node(v))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Node::Intersection { children })
+}
+
+fn parse_difference(
+    positional: &[&Value],
+    keywords: &[(String, &Value)],
+) -> Result<Node, ParseError> {
+    check_no_extra_keywords("difference", keywords, &[])?;
+    if positional.len() < 2 {
+        return Err(ParseError::CsgArityTooFew {
+            node: "difference",
+            min: 2,
+            got: positional.len(),
+        });
+    }
+    let base = parse_node(positional[0])?;
+    let subtract = positional[1..]
+        .iter()
+        .map(|v| parse_node(v))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Node::Difference {
+        base: std::boxed::Box::new(base),
+        subtract,
     })
 }

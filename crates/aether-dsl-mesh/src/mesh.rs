@@ -184,6 +184,18 @@ fn mesh_into(out: &mut Vec<Triangle>, node: &Node, offset: [f32; 3]) -> Result<(
             }
             Ok(())
         }
+        Node::Union { children: _ }
+        | Node::Intersection { children: _ }
+        | Node::Difference {
+            base: _,
+            subtract: _,
+        } => {
+            // TODO(ADR-0054, PR 4): route through `crate::csg` once the
+            // BSP-CSG core lands. Until then these meshes silently emit
+            // an empty triangle list — the AST parses, round-trips, and
+            // composes structurally, but produces no geometry.
+            Ok(())
+        }
         Node::Array {
             count,
             spacing,

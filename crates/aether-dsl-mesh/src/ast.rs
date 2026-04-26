@@ -98,6 +98,27 @@ pub enum Node {
         spacing: [f32; 3],
         child: std::boxed::Box<Node>,
     },
+
+    // Boolean (CSG) operators per ADR-0054. The mesher routes these
+    // through `crate::csg`; the v1 algorithm is BSP-CSG with internal
+    // fixed-point predicates.
+    /// N-ary union: result is the union of all children's solid regions.
+    /// Requires at least two children (one-child union is a parse error).
+    Union {
+        children: Vec<Node>,
+    },
+    /// N-ary intersection: result is the intersection of all children's
+    /// solid regions. Requires at least two children. Empty-result is a
+    /// valid empty mesh, not an error.
+    Intersection {
+        children: Vec<Node>,
+    },
+    /// First child minus the union of the remaining children. Requires
+    /// `base` plus at least one subtractor.
+    Difference {
+        base: std::boxed::Box<Node>,
+        subtract: Vec<Node>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
