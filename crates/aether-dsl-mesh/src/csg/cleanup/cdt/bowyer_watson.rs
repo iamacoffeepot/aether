@@ -114,6 +114,319 @@ impl Mesh {
             .filter_map(|(i, t)| t.as_ref().map(|t| (i, t)))
     }
 
+    /// True iff edge `(u, v)` exists in some alive triangle.
+    pub(super) fn has_edge(&self, u: VertId, v: VertId) -> bool {
+        self.alive_triangles().any(|(_, tri)| {
+            (0..3).any(|i| {
+                let a = tri.verts[i];
+                let b = tri.verts[(i + 1) % 3];
+                (a == u && b == v) || (a == v && b == u)
+            })
+        })
+    }
+
+    /// Find any alive edge that strictly crosses segment `(u, v)` — used
+    /// during constraint enforcement to locate a diagonal worth flipping.
+    /// Returns `(triangle id, edge index)` for the first crossing found.
+    /// Iteration is in slot-map order so the choice is deterministic.
+    pub(super) fn find_crossing_edge(&self, u: VertId, v: VertId) -> Option<(TriId, usize)> {
+        let pu = self.vertices[u];
+        let pv = self.vertices[v];
+        for (tid, tri) in self.alive_triangles() {
+            for i in 0..3 {
+                let a = tri.verts[(i + 1) % 3];
+                let b = tri.verts[(i + 2) % 3];
+                // Skip edges that share an endpoint with the constraint —
+                // we want strictly-crossing diagonals only.
+                if a == u || a == v || b == u || b == v {
+                    continue;
+                }
+                if segments_strictly_cross(pu, pv, self.vertices[a], self.vertices[b]) {
+                    return Some((tid, i));
+                }
+            }
+        }
+        None
+    }
+
+    /// Flip the diagonal of the quad formed by triangle `tid` and its
+    /// neighbor across edge `edge_idx`. Returns the new triangle ids
+    /// `(t1', t2')` on success, or `None` if the quad is non-convex /
+    /// the requested edge is on the convex hull.
+    ///
+    /// Stitches all neighbor pointers (the four outside neighbors get
+    /// their back-pointers redirected). The two original slots are
+    /// reused for the new triangles to keep `TriId`s compact in the
+    /// common flip-heavy case.
+    pub(super) fn flip_edge(&mut self, tid: TriId, edge_idx: usize) -> Option<(TriId, TriId)> {
+        let t1 = self.triangles[tid].clone()?;
+        let n_tid = t1.neighbors[edge_idx]?;
+        let t2 = self.triangles[n_tid].clone()?;
+        // Find which edge of T2 points back to T1 — that's the shared edge.
+        let n_edge_idx = (0..3).find(|&j| t2.neighbors[j] == Some(tid))?;
+
+        // Label vertices around the shared edge:
+        //   v1 = T1's vertex opposite the shared edge
+        //   v2 = T2's vertex opposite the shared edge
+        //   a, b = endpoints of the shared edge (T1 walks a→b, T2 walks b→a)
+        let v1 = t1.verts[edge_idx];
+        let v2 = t2.verts[n_edge_idx];
+        let a = t1.verts[(edge_idx + 1) % 3];
+        let b = t1.verts[(edge_idx + 2) % 3];
+
+        // Convexity test: v1 and v2 must lie on opposite sides of the
+        // line through (a, b), AND a and b must lie on opposite sides of
+        // the line through (v1, v2). The latter is implied by the former
+        // for a planar quad; checking both guards against degenerate
+        // cocircular configurations.
+        let pv1 = self.vertices[v1];
+        let pv2 = self.vertices[v2];
+        let pa = self.vertices[a];
+        let pb = self.vertices[b];
+        let s_ab_v1 = orient2d(pa, pb, pv1);
+        let s_ab_v2 = orient2d(pa, pb, pv2);
+        if s_ab_v1 == 0 || s_ab_v2 == 0 || s_ab_v1 == s_ab_v2 {
+            return None;
+        }
+        let s_v1v2_a = orient2d(pv1, pv2, pa);
+        let s_v1v2_b = orient2d(pv1, pv2, pb);
+        if s_v1v2_a == 0 || s_v1v2_b == 0 || s_v1v2_a == s_v1v2_b {
+            return None;
+        }
+
+        // Capture T1's and T2's outside neighbors (the four NOT each other).
+        // Naming follows the convention "n_after_<vertex>" = the neighbor
+        // across the edge starting at <vertex> going CCW.
+        let n_after_a_in_t1 = t1.neighbors[(edge_idx + 2) % 3]; // edge from v1 to a
+        let n_after_b_in_t1 = t1.neighbors[(edge_idx + 1) % 3]; // edge from b to v1
+        // T2's CCW order has b before a (opposite of T1) because adjacent
+        // triangles walk a shared edge in opposite directions. So:
+        //   - "edge from a to v2" in T2 LEAVES vertex a.
+        //   - "edge from v2 to b" in T2 ARRIVES AT vertex b.
+        // Different formulas — bug here would corrupt neighbor pointers
+        // silently across many flips.
+        let n_after_a_in_t2 = t2.neighbors[t2_neighbor_leaving(&t2, a)?];
+        let n_after_b_in_t2 = t2.neighbors[t2_neighbor_arriving(&t2, b)?];
+
+        // New triangles share the new diagonal (v1, v2):
+        //   T1' = [a, v2, v1]  edges: a→v2, v2→v1 (new diag), v1→a
+        //   T2' = [b, v1, v2]  edges: b→v1, v1→v2 (new diag), v2→b
+        let new_t1_id = tid;
+        let new_t2_id = n_tid;
+        let new_t1 = Triangle {
+            verts: [a, v2, v1],
+            neighbors: [
+                Some(new_t2_id), // opposite a (new diagonal v2→v1)
+                n_after_a_in_t1, // opposite v2 (edge v1→a) — was T1's neighbor across v1→a
+                n_after_a_in_t2, // opposite v1 (edge a→v2) — was T2's neighbor across a→v2
+            ],
+        };
+        let new_t2 = Triangle {
+            verts: [b, v1, v2],
+            neighbors: [
+                Some(new_t1_id), // opposite b (new diagonal v1→v2)
+                n_after_b_in_t2, // opposite v1 (edge v2→b) — was T2's neighbor across v2→b
+                n_after_b_in_t1, // opposite v2 (edge b→v1) — was T1's neighbor across b→v1
+            ],
+        };
+
+        // Redirect the four outside neighbors' back-pointers.
+        // Each Ni used to point to T1 or T2 across some edge; that edge
+        // still exists, but it now belongs to T1' or T2'.
+        retarget_back_pointer(self, n_after_a_in_t1, tid, new_t1_id);
+        retarget_back_pointer(self, n_after_b_in_t1, tid, new_t2_id);
+        retarget_back_pointer(self, n_after_a_in_t2, n_tid, new_t1_id);
+        retarget_back_pointer(self, n_after_b_in_t2, n_tid, new_t2_id);
+
+        self.triangles[new_t1_id] = Some(new_t1);
+        self.triangles[new_t2_id] = Some(new_t2);
+        Some((new_t1_id, new_t2_id))
+    }
+
+    /// Restore the local Delaunay property after constraint enforcement.
+    /// Walks every non-constraint edge in the mesh; if its opposite vertex
+    /// is strictly inside the circumcircle of the triangle on the other
+    /// side, flips. Iterates until no flips occur (or the safety cap is
+    /// hit).
+    ///
+    /// Standard CDT post-pass: constraint enforcement flips diagonals to
+    /// thread the boundary through, but the new diagonals adjacent to
+    /// the constraint may not be locally Delaunay — leaving slivers in
+    /// the output even though the topology is correct. This pass cleans
+    /// them up.
+    pub(super) fn lawson_redelaunize(
+        &mut self,
+        constraints: &std::collections::HashSet<(VertId, VertId)>,
+    ) {
+        const MAX_LAWSON_ITERATIONS: usize = 4096;
+        for _ in 0..MAX_LAWSON_ITERATIONS {
+            let mut flipped = false;
+            // Snapshot triangle ids — flips invalidate the slot map's live
+            // set as we go, so we walk a captured list and skip any slot
+            // that was deleted by a previous flip in the same pass.
+            let snapshot: Vec<TriId> = self.alive_triangles().map(|(i, _)| i).collect();
+            for tid in snapshot {
+                let tri = match self.triangles[tid].as_ref() {
+                    Some(t) => t.clone(),
+                    None => continue,
+                };
+                for i in 0..3 {
+                    let Some(n_tid) = tri.neighbors[i] else {
+                        continue;
+                    };
+                    let a = tri.verts[(i + 1) % 3];
+                    let b = tri.verts[(i + 2) % 3];
+                    let canon = if a < b { (a, b) } else { (b, a) };
+                    if constraints.contains(&canon) {
+                        continue;
+                    }
+                    // Find the vertex of the neighbor that's not on the
+                    // shared edge — that's the candidate to flip toward.
+                    let n_tri = match self.triangles[n_tid].as_ref() {
+                        Some(t) => t.clone(),
+                        None => continue,
+                    };
+                    let opp = match n_tri.verts.iter().find(|&&v| v != a && v != b) {
+                        Some(&v) => v,
+                        None => continue,
+                    };
+                    // In-circle: triangle (tri.verts[i], a, b) is CCW
+                    // (inherited from the parent triangle's CCW winding,
+                    // since cyclic permutation preserves orientation).
+                    let v_self = tri.verts[i];
+                    if super::predicates::in_circle(
+                        self.vertices[v_self],
+                        self.vertices[a],
+                        self.vertices[b],
+                        self.vertices[opp],
+                    ) > 0
+                        && self.flip_edge(tid, i).is_some()
+                    {
+                        flipped = true;
+                        break;
+                    }
+                }
+            }
+            if !flipped {
+                break;
+            }
+        }
+    }
+
+    /// Force the constraint edge `(u, v)` to appear in the triangulation
+    /// by repeatedly flipping diagonals that cross it. Returns `Ok(())`
+    /// once `(u, v)` is present (or was already), or `Err(())` if no
+    /// flippable crossing edge could be found before progress stalled.
+    ///
+    /// The algorithm is the standard Anglada-style approach reduced to
+    /// our small input sizes: while `(u, v)` is missing, find any edge
+    /// that strictly crosses the segment, flip it if its quad is convex,
+    /// and try again. Bounded by `MAX_ENFORCE_ITERATIONS` to guarantee
+    /// termination on pathological input (returning `Err` rather than
+    /// hanging).
+    pub(super) fn enforce_constraint(&mut self, u: VertId, v: VertId) -> Result<(), ()> {
+        const MAX_ENFORCE_ITERATIONS: usize = 4096;
+        for _ in 0..MAX_ENFORCE_ITERATIONS {
+            if self.has_edge(u, v) {
+                return Ok(());
+            }
+            let (tid, edge_idx) = match self.find_crossing_edge(u, v) {
+                Some(x) => x,
+                None => return Err(()), // no crossing but edge missing — topology bug
+            };
+            // Try to flip. If non-convex, scan for any other crossing
+            // edge that IS flippable.
+            if self.flip_edge(tid, edge_idx).is_some() {
+                continue;
+            }
+            // Walk all alive triangles, edge by edge, looking for any
+            // crossing diagonal whose quad is convex.
+            let mut flipped = false;
+            'outer: for (tid2, tri) in self
+                .alive_triangles()
+                .map(|(i, t)| (i, t.clone()))
+                .collect::<Vec<_>>()
+            {
+                for i in 0..3 {
+                    let a = tri.verts[(i + 1) % 3];
+                    let b = tri.verts[(i + 2) % 3];
+                    if a == u || a == v || b == u || b == v {
+                        continue;
+                    }
+                    let pu = self.vertices[u];
+                    let pv = self.vertices[v];
+                    if !segments_strictly_cross(pu, pv, self.vertices[a], self.vertices[b]) {
+                        continue;
+                    }
+                    if self.flip_edge(tid2, i).is_some() {
+                        flipped = true;
+                        break 'outer;
+                    }
+                }
+            }
+            if !flipped {
+                return Err(());
+            }
+        }
+        Err(())
+    }
+}
+
+/// True iff segments `p–q` and `r–s` strictly cross at a single interior
+/// point (no endpoint touches another segment, no collinearity).
+fn segments_strictly_cross(p: Point2, q: Point2, r: Point2, s: Point2) -> bool {
+    let o1 = orient2d(r, s, p);
+    let o2 = orient2d(r, s, q);
+    if o1 == 0 || o2 == 0 || o1 == o2 {
+        return false;
+    }
+    let o3 = orient2d(p, q, r);
+    let o4 = orient2d(p, q, s);
+    if o3 == 0 || o4 == 0 || o3 == o4 {
+        return false;
+    }
+    true
+}
+
+/// In `t2`, find the neighbor index for the edge that **leaves** vertex
+/// `vertex` (the edge for which `vertex` is the start in CCW order).
+/// During a flip we use this to grab T2's outside neighbor on the side
+/// going from `a` outward to `v2`.
+///
+/// For triangle `[X, Y, Z]` in CCW, the edge leaving `X` is `X→Y`,
+/// opposite vertex `Z` (slot 2). Slot of leaving-edge = `(slot_X + 2) % 3`.
+fn t2_neighbor_leaving(t2: &Triangle, vertex: VertId) -> Option<usize> {
+    let i = (0..3).find(|&i| t2.verts[i] == vertex)?;
+    Some((i + 2) % 3)
+}
+
+/// In `t2`, find the neighbor index for the edge that **arrives at**
+/// vertex `vertex` (the edge for which `vertex` is the end in CCW order).
+/// During a flip we use this to grab T2's outside neighbor on the side
+/// going from `v2` to `b`.
+///
+/// For triangle `[X, Y, Z]` in CCW, the edge arriving at `Y` is `X→Y`,
+/// opposite vertex `Z` (slot 2). Slot of arriving-edge = `(slot_Y + 1) % 3`.
+fn t2_neighbor_arriving(t2: &Triangle, vertex: VertId) -> Option<usize> {
+    let i = (0..3).find(|&i| t2.verts[i] == vertex)?;
+    Some((i + 1) % 3)
+}
+
+/// Retarget `neighbor`'s back-pointer from `old` to `new` if it currently
+/// points to `old`. No-op if `neighbor` is `None` or no slot matches.
+fn retarget_back_pointer(mesh: &mut Mesh, neighbor: Option<TriId>, old: TriId, new: TriId) {
+    let Some(n) = neighbor else { return };
+    if let Some(tri) = mesh.triangles[n].as_mut() {
+        for i in 0..3 {
+            if tri.neighbors[i] == Some(old) {
+                tri.neighbors[i] = Some(new);
+                return;
+            }
+        }
+    }
+}
+
+impl Mesh {
     fn add_super_triangle(&mut self, points: &[Point2]) {
         let mut min_x = i64::MAX;
         let mut max_x = i64::MIN;
@@ -527,5 +840,39 @@ mod tests {
         assert_all_ccw(&mesh);
         assert_neighbors_symmetric(&mesh);
         assert_delaunay(&mesh);
+    }
+
+    /// Stress test for `flip_edge` neighbor stitching. Flips every
+    /// flippable interior edge once and checks that neighbor symmetry
+    /// and CCW winding survive. This regression-tests the
+    /// `t2_neighbor_leaving` / `t2_neighbor_arriving` helpers — a bug
+    /// in either one corrupts back-pointers asymmetrically and trips
+    /// `assert_neighbors_symmetric` after a few flips even though the
+    /// mesh appears outwardly fine.
+    #[test]
+    fn flip_edge_preserves_neighbor_symmetry_and_winding() {
+        let pts: Vec<(i64, i64)> = (0..12)
+            .map(|i| {
+                let theta = i as f64 * std::f64::consts::TAU / 12.0;
+                ((1000.0 * theta.cos()) as i64, (1000.0 * theta.sin()) as i64)
+            })
+            .collect();
+        let mut mesh = Mesh::build(pts);
+        // Walk a snapshot of triangles and try a flip on every interior
+        // edge. Some flips will be rejected (non-convex quad / boundary);
+        // accept that. Survivors must keep the mesh consistent.
+        let snapshot: Vec<(TriId, [Option<TriId>; 3])> = mesh
+            .alive_triangles()
+            .map(|(i, t)| (i, t.neighbors))
+            .collect();
+        for (tid, neighbors) in snapshot {
+            for (i, n) in neighbors.iter().enumerate() {
+                if n.is_some() && mesh.triangles[tid].is_some() {
+                    let _ = mesh.flip_edge(tid, i);
+                }
+            }
+        }
+        assert_all_ccw(&mesh);
+        assert_neighbors_symmetric(&mesh);
     }
 }
