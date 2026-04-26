@@ -21,6 +21,7 @@ pub(super) struct IndexedMesh {
     pub(super) polygons: Vec<IndexedPolygon>,
 }
 
+#[derive(Clone)]
 pub(super) struct IndexedPolygon {
     pub(super) vertices: Vec<VertexId>,
     pub(super) plane: Plane3,
