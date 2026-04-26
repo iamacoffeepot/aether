@@ -3,9 +3,9 @@
 //! mesh as `DrawTriangle` to the `"render"` sink every tick.
 //!
 //! Current ops: `set_primitive` (Cube + Cylinder), `translate_vertices`,
-//! `scale_vertices`, `describe`. Extrude / face deletion / new-vertex
-//! / OBJ export are scoped for follow-up — issue 241 tracks the v3
-//! op set.
+//! `scale_vertices`, `rotate_vertices`, `extrude_face`, `delete_faces`,
+//! `describe`. New-vertex / new-face authoring and OBJ export are
+//! scoped for follow-up.
 //!
 //! # Identity rules — read first
 //!
@@ -59,12 +59,14 @@
 //! center), `N` for the bottom cap. Same caveat as cube: layout
 //! stable AT creation, prefer `describe` after edits.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
 use aether_kinds::{
-    Describe, DrawTriangle, FaceInfo, MeshState, Primitive, ScaleVertices, SetPrimitive, Tick,
-    TranslateVertices, Vertex, VertexInfo,
+    DeleteFaces, Describe, DrawTriangle, ExtrudeFace, FaceInfo, MeshState, Primitive,
+    RotateVertices, ScaleVertices, SetPrimitive, Tick, TranslateVertices, Vertex, VertexInfo,
 };
-use aether_math::Vec3;
+use aether_math::{Quat, Vec3};
 
 /// One face of the editor's mesh. Stored as the three vertex indices
 /// into `MeshEditor::vertices` plus an RGB color used for every vertex
@@ -94,6 +96,13 @@ struct Face {
 /// - `TranslateVertices { vertex_ids, delta }` — shift listed vertices
 /// - `ScaleVertices { vertex_ids, pivot, factor }` — scale listed
 ///   vertices around a pivot point, per axis
+/// - `RotateVertices { vertex_ids, pivot, axis, angle }` — rotate
+///   listed vertices around an axis through a pivot
+/// - `ExtrudeFace { face_ids, distance }` — region-extrude faces
+///   along their averaged normal; old faces tombstoned, new faces
+///   appended at the offset position with side quads on boundary edges
+/// - `DeleteFaces { face_ids }` — tombstone faces (vertices left
+///   live; lazy invalidation in render and describe)
 /// - `Describe { }` — request a mesh-state snapshot. Reply lands on
 ///   the broadcast channel as `MeshState`; consume via `receive_mail`.
 pub struct MeshEditor {
@@ -224,6 +233,80 @@ impl Component for MeshEditor {
         }
     }
 
+    /// Rotate each named vertex around the axis through `pivot` by
+    /// `angle` radians. `axis` is normalized internally; a zero-length
+    /// axis is a no-op. Out-of-range and tombstoned ids skipped.
+    ///
+    /// # Agent
+    /// To bend an extruded ring, rotate its vertices around an axis
+    /// perpendicular to both the ring's tangent and the bend
+    /// direction. Common case: bending around world `z` to curve
+    /// geometry along the y axis — `axis: [0, 0, 1]`, pivot at the
+    /// hinge point.
+    #[handler]
+    fn on_rotate_vertices(&mut self, _ctx: &mut Ctx<'_>, msg: RotateVertices) {
+        let axis = Vec3::new(msg.axis[0], msg.axis[1], msg.axis[2]).normalize();
+        if axis.length_squared() == 0.0 {
+            return;
+        }
+        let pivot = Vec3::new(msg.pivot[0], msg.pivot[1], msg.pivot[2]);
+        let q = Quat::from_axis_angle(axis, msg.angle);
+        let mut touched = false;
+        for id in &msg.vertex_ids {
+            if let Some(slot) = self.vertices.get_mut(*id as usize)
+                && let Some(v) = slot.as_mut()
+            {
+                *v = pivot + q.rotate_vec3(*v - pivot);
+                touched = true;
+            }
+        }
+        if touched {
+            self.rebuild_render_cache();
+        }
+    }
+
+    /// Region-extrude the listed faces along their averaged normal
+    /// by `distance`. The input faces become the bottom of the
+    /// extrusion (tombstoned), each input face gets a corresponding
+    /// new face at the offset position with the original color, and
+    /// boundary edges (edges in exactly one input face) get side
+    /// quads stitching old to new. Interior edges (shared between
+    /// two input faces) get no side quad.
+    ///
+    /// # Agent
+    /// Send `describe` afterward to learn the new vertex/face ids.
+    /// New ids are appended monotonically: vertices first (one per
+    /// unique input vertex, in ascending input id order), then top
+    /// faces (one per input face, in input order), then side-quad
+    /// pairs in input-face / edge-walk order.
+    #[handler]
+    fn on_extrude_face(&mut self, _ctx: &mut Ctx<'_>, msg: ExtrudeFace) {
+        self.extrude_faces(&msg.face_ids, msg.distance);
+    }
+
+    /// Tombstone the listed face ids. Vertices stay live (lazy
+    /// invalidation; the agent can clean up unused vertices later).
+    /// Out-of-range and already-tombstoned ids skipped.
+    ///
+    /// # Agent
+    /// Use to hollow a region — e.g., delete the top cap of a
+    /// cylinder before extruding the rim inward.
+    #[handler]
+    fn on_delete_faces(&mut self, _ctx: &mut Ctx<'_>, msg: DeleteFaces) {
+        let mut touched = false;
+        for id in &msg.face_ids {
+            if let Some(slot) = self.faces.get_mut(*id as usize)
+                && slot.is_some()
+            {
+                *slot = None;
+                touched = true;
+            }
+        }
+        if touched {
+            self.rebuild_render_cache();
+        }
+    }
+
     /// Publish the current mesh as `MeshState` to the broadcast sink.
     /// Tombstoned (deleted) ids are excluded; the snapshot only
     /// includes live vertices and faces. The MCP harness reads the
@@ -260,6 +343,139 @@ impl Component for MeshEditor {
 }
 
 impl MeshEditor {
+    /// Region-extrude implementation. See the `ExtrudeFace` kind doc
+    /// for semantics; see `on_extrude_face` for the handler that
+    /// dispatches into this.
+    fn extrude_faces(&mut self, face_ids: &[u32], distance: f32) {
+        // 1. Filter to live, in-range face ids; snapshot their data.
+        struct InputFace {
+            verts: [u32; 3],
+            color: [f32; 3],
+        }
+        let mut inputs: Vec<InputFace> = Vec::new();
+        for &fid in face_ids {
+            if let Some(Some(face)) = self.faces.get(fid as usize) {
+                inputs.push(InputFace {
+                    verts: face.vertices,
+                    color: face.color,
+                });
+            }
+        }
+        if inputs.is_empty() {
+            return;
+        }
+
+        // 2. Compute averaged normal across input faces. Skip faces
+        //    whose normal is degenerate (zero-area triangle).
+        let mut normal_sum = Vec3::ZERO;
+        for f in &inputs {
+            let (Some(Some(va)), Some(Some(vb)), Some(Some(vc))) = (
+                self.vertices.get(f.verts[0] as usize),
+                self.vertices.get(f.verts[1] as usize),
+                self.vertices.get(f.verts[2] as usize),
+            ) else {
+                continue;
+            };
+            let n = (*vb - *va).cross(*vc - *va).normalize();
+            normal_sum += n;
+        }
+        let avg = normal_sum.normalize();
+        if avg.length_squared() == 0.0 {
+            return;
+        }
+        let offset = avg * distance;
+
+        // 3. Collect unique input vertex ids; duplicate each at
+        //    `original + offset`, recording the old->new id map.
+        let mut input_vertex_ids: BTreeSet<u32> = BTreeSet::new();
+        for f in &inputs {
+            for &v in &f.verts {
+                input_vertex_ids.insert(v);
+            }
+        }
+        let mut old_to_new: BTreeMap<u32, u32> = BTreeMap::new();
+        for &vid in &input_vertex_ids {
+            let Some(Some(orig)) = self.vertices.get(vid as usize) else {
+                continue;
+            };
+            let new_pos = *orig + offset;
+            let new_id = self.vertices.len() as u32;
+            self.vertices.push(Some(new_pos));
+            old_to_new.insert(vid, new_id);
+        }
+
+        // 4. Count canonical edge appearances across input faces.
+        //    Boundary == count == 1.
+        let mut edge_count: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+        for f in &inputs {
+            for &(a, b) in &[
+                (f.verts[0], f.verts[1]),
+                (f.verts[1], f.verts[2]),
+                (f.verts[2], f.verts[0]),
+            ] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edge_count.entry(key).or_insert(0) += 1;
+            }
+        }
+
+        // 5. Tombstone the input faces in-place (preserves their ids
+        //    as permanently-gone) and emit one new top face per input
+        //    using the new (offset) vertex ids.
+        for &fid in face_ids {
+            if let Some(slot) = self.faces.get_mut(fid as usize)
+                && slot.is_some()
+            {
+                *slot = None;
+            }
+        }
+        for f in &inputs {
+            let Some(&a) = old_to_new.get(&f.verts[0]) else {
+                continue;
+            };
+            let Some(&b) = old_to_new.get(&f.verts[1]) else {
+                continue;
+            };
+            let Some(&c) = old_to_new.get(&f.verts[2]) else {
+                continue;
+            };
+            self.faces.push(Some(Face {
+                vertices: [a, b, c],
+                color: f.color,
+            }));
+        }
+
+        // 6. Side quads on boundary edges. Walk each input face's
+        //    edges in directed order; for each edge in the boundary
+        //    set, emit two triangles bridging the original edge to
+        //    its new copy, CCW from outside (consistent with the
+        //    host face's winding).
+        for f in &inputs {
+            for &(a, b) in &[
+                (f.verts[0], f.verts[1]),
+                (f.verts[1], f.verts[2]),
+                (f.verts[2], f.verts[0]),
+            ] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                if edge_count.get(&key).copied() != Some(1) {
+                    continue;
+                }
+                let (Some(&a_new), Some(&b_new)) = (old_to_new.get(&a), old_to_new.get(&b)) else {
+                    continue;
+                };
+                self.faces.push(Some(Face {
+                    vertices: [a, b, b_new],
+                    color: f.color,
+                }));
+                self.faces.push(Some(Face {
+                    vertices: [a, b_new, a_new],
+                    color: f.color,
+                }));
+            }
+        }
+
+        self.rebuild_render_cache();
+    }
+
     fn rebuild_render_cache(&mut self) {
         self.rendered.clear();
         self.rendered.reserve(self.faces.len());
@@ -338,54 +554,60 @@ fn build_cube(
     const LEFT: [f32; 3] = [0.20, 0.75, 0.30]; // green  (-x)
     const RIGHT: [f32; 3] = [0.95, 0.85, 0.20]; // yellow (+x)
 
+    // Faces wound CCW from outside, so each triangle's
+    // (b - a) × (c - a) cross product points outward. extrude_face
+    // depends on this convention to push faces away from the body
+    // when distance is positive. Render-side culling is off today
+    // (PR-A merged with culling-off intact), but the math here is
+    // what extrude / future culling work will rely on.
     faces.clear();
     faces.extend([
         Some(Face {
-            vertices: [0, 2, 1],
+            vertices: [0, 1, 2],
             color: BOTTOM,
         }),
         Some(Face {
-            vertices: [0, 3, 2],
+            vertices: [0, 2, 3],
             color: BOTTOM,
         }),
         Some(Face {
-            vertices: [4, 5, 6],
+            vertices: [4, 6, 5],
             color: TOP,
         }),
         Some(Face {
-            vertices: [4, 6, 7],
+            vertices: [4, 7, 6],
             color: TOP,
         }),
         Some(Face {
-            vertices: [3, 6, 2],
+            vertices: [3, 2, 6],
             color: FRONT,
         }),
         Some(Face {
-            vertices: [3, 7, 6],
+            vertices: [3, 6, 7],
             color: FRONT,
         }),
         Some(Face {
-            vertices: [0, 1, 5],
+            vertices: [0, 4, 5],
             color: BACK,
         }),
         Some(Face {
-            vertices: [0, 5, 4],
+            vertices: [0, 5, 1],
             color: BACK,
         }),
         Some(Face {
-            vertices: [0, 4, 7],
+            vertices: [0, 3, 7],
             color: LEFT,
         }),
         Some(Face {
-            vertices: [0, 7, 3],
+            vertices: [0, 7, 4],
             color: LEFT,
         }),
         Some(Face {
-            vertices: [1, 2, 6],
+            vertices: [1, 5, 6],
             color: RIGHT,
         }),
         Some(Face {
-            vertices: [1, 6, 5],
+            vertices: [1, 6, 2],
             color: RIGHT,
         }),
     ]);
@@ -440,6 +662,11 @@ fn build_cylinder(
     let bottom_center = 2 * n;
     let top_center = 2 * n + 1;
 
+    // All faces wound CCW from outside (radially outward for the
+    // side wall, +y for the top cap, -y for the bottom cap), so
+    // each triangle's (b - a) × (c - a) cross product points outward.
+    // Same convention as build_cube — extrude_face depends on it.
+
     // Side wall.
     for i in 0..n {
         let next = (i + 1) % n;
@@ -449,29 +676,29 @@ fn build_cylinder(
         let top_b = n + next;
         let color = if i % 2 == 0 { SIDE_A } else { SIDE_B };
         faces.push(Some(Face {
-            vertices: [bot_a, bot_b, top_b],
+            vertices: [bot_a, top_a, top_b],
             color,
         }));
         faces.push(Some(Face {
-            vertices: [bot_a, top_b, top_a],
+            vertices: [bot_a, top_b, bot_b],
             color,
         }));
     }
 
-    // Top cap.
+    // Top cap (fan from top_center, outward = +y).
     for i in 0..n {
         let next = (i + 1) % n;
         faces.push(Some(Face {
-            vertices: [top_center, n + i, n + next],
+            vertices: [top_center, n + next, n + i],
             color: TOP_CAP,
         }));
     }
 
-    // Bottom cap.
+    // Bottom cap (fan from bottom_center, outward = -y).
     for i in 0..n {
         let next = (i + 1) % n;
         faces.push(Some(Face {
-            vertices: [bottom_center, next, i],
+            vertices: [bottom_center, i, next],
             color: BOTTOM_CAP,
         }));
     }
