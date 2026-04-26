@@ -1494,6 +1494,48 @@ mod mesh {
         pub pivot: [f32; 3],
         pub factor: [f32; 3],
     }
+
+    /// `aether.mesh.describe` — request a snapshot of the editor's
+    /// current mesh state. The editor responds by publishing
+    /// `MeshState` to the broadcast sink (`hub.claude.broadcast`),
+    /// from which MCP harness consumers read it via `receive_mail`.
+    /// Fire-and-forget; the snapshot flows on the broadcast path,
+    /// not as a typed reply (Ctx::reply is cast-only today, issue 240).
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.mesh.describe")]
+    pub struct Describe;
+
+    /// `aether.mesh.state` — snapshot of the editor's mesh, broadcast
+    /// in response to `Describe`. Tombstoned (deleted) vertex/face ids
+    /// are excluded; the agent sees only what's currently live. Ids
+    /// are monotonic and never reused — a missing id from a previous
+    /// snapshot means that vertex or face was deleted.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.mesh.state")]
+    pub struct MeshState {
+        pub vertices: Vec<VertexInfo>,
+        pub faces: Vec<FaceInfo>,
+    }
+
+    /// One live vertex in a `MeshState` snapshot.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct VertexInfo {
+        pub id: u32,
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+    }
+
+    /// One live face in a `MeshState` snapshot. `vertex_ids` are
+    /// indices into the editor's vertex space (NOT positions in the
+    /// `MeshState.vertices` Vec, since the Vec excludes tombstones).
+    /// To resolve, look up each id in the vertex list by `id` field.
+    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct FaceInfo {
+        pub id: u32,
+        pub vertex_ids: [u32; 3],
+        pub color: [f32; 3],
+    }
 }
 
 #[cfg(test)]

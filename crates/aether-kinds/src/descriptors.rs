@@ -18,17 +18,18 @@ use aether_hub_protocol::KindDescriptor;
 use aether_mail::{Kind, Schema};
 
 use crate::{
-    Camera, CaptureFrame, CaptureFrameResult, Delete, DeleteResult, DrawTriangle, DropComponent,
-    DropResult, Fetch, FetchResult, FrameStats, HandlePin, HandlePinResult, HandlePublish,
-    HandlePublishResult, HandleRelease, HandleReleaseResult, HandleUnpin, HandleUnpinResult, Key,
-    KeyRelease, List, ListResult, LoadComponent, LoadResult, MouseButton, MouseMove, NoteOff,
-    NoteOn, OrbitSetDistance, OrbitSetFov, OrbitSetPitch, OrbitSetSpeed, OrbitSetTarget,
-    OrbitSetYaw, Ping, PlatformInfo, PlatformInfoResult, PlayerRequestStep, PlayerSetMode,
-    PlayerSetPosition, PlayerSetVelocity, PlayerStepResult, Pong, Read, ReadResult,
-    ReplaceComponent, ReplaceResult, ScaleVertices, SetMasterGain, SetMasterGainResult,
-    SetPrimitive, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
-    SubscribeInput, SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent,
-    TranslateVertices, UnresolvedMail, UnsubscribeInput, WindowSize, Write, WriteResult,
+    Camera, CaptureFrame, CaptureFrameResult, Delete, DeleteResult, Describe, DrawTriangle,
+    DropComponent, DropResult, Fetch, FetchResult, FrameStats, HandlePin, HandlePinResult,
+    HandlePublish, HandlePublishResult, HandleRelease, HandleReleaseResult, HandleUnpin,
+    HandleUnpinResult, Key, KeyRelease, List, ListResult, LoadComponent, LoadResult, MeshState,
+    MouseButton, MouseMove, NoteOff, NoteOn, OrbitSetDistance, OrbitSetFov, OrbitSetPitch,
+    OrbitSetSpeed, OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo, PlatformInfoResult,
+    PlayerRequestStep, PlayerSetMode, PlayerSetPosition, PlayerSetVelocity, PlayerStepResult, Pong,
+    Read, ReadResult, ReplaceComponent, ReplaceResult, ScaleVertices, SetMasterGain,
+    SetMasterGainResult, SetPrimitive, SetWindowMode, SetWindowModeResult, SetWindowTitle,
+    SetWindowTitleResult, SubscribeInput, SubscribeInputResult, Tick, TopdownSetCenter,
+    TopdownSetExtent, TranslateVertices, UnresolvedMail, UnsubscribeInput, WindowSize, Write,
+    WriteResult,
 };
 
 /// Every kind the substrate exposes, in the order the `Registry` will
@@ -159,10 +160,15 @@ pub fn all() -> Vec<KindDescriptor> {
         // structs — `SetPrimitive` carries a tagged `Primitive` enum
         // with per-variant params, the others carry a `Vec` of vertex
         // ids and per-op params. All fire-and-forget; the editor
-        // re-emits its mesh as `DrawTriangle` mail every tick.
+        // re-emits its mesh as `DrawTriangle` mail every tick. The
+        // `Describe` request is answered by broadcasting `MeshState`
+        // to `hub.claude.broadcast` so MCP harness consumers can see
+        // the editor's current vertex/face inventory.
         schema::<SetPrimitive>(),
         schema::<TranslateVertices>(),
         schema::<ScaleVertices>(),
+        schema::<Describe>(),
+        schema::<MeshState>(),
     ]
 }
 
