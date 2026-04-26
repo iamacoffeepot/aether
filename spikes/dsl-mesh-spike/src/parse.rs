@@ -79,6 +79,8 @@ fn parse_node(value: &Value) -> Result<Node, ParseError> {
         "sphere" => parse_sphere(&positional, &keywords),
         "lathe" => parse_lathe(&positional, &keywords),
         "extrude" => parse_extrude(&positional, &keywords),
+        "torus" => parse_torus(&positional, &keywords),
+        "sweep" => parse_sweep(&positional, &keywords),
         "composition" => parse_composition(&positional, &keywords),
         "translate" => parse_translate(&positional, &keywords),
         "rotate" => parse_rotate(&positional, &keywords),
@@ -290,6 +292,48 @@ fn parse_extrude(positional: &[&Value], keywords: &[(String, &Value)]) -> Result
         depth: as_f32(positional[1])?,
         color: require_color("extrude", keywords)?,
     })
+}
+
+fn parse_torus(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
+    expect_arity("torus", positional, 4)?;
+    check_no_extra_keywords("torus", keywords, &["color"])?;
+    Ok(Node::Torus {
+        major_radius: as_f32(positional[0])?,
+        minor_radius: as_f32(positional[1])?,
+        major_segments: as_u32(positional[2])?,
+        minor_segments: as_u32(positional[3])?,
+        color: require_color("torus", keywords)?,
+    })
+}
+
+fn parse_sweep(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
+    expect_arity("sweep", positional, 2)?;
+    check_no_extra_keywords("sweep", keywords, &["color", "scales"])?;
+    let scales = keywords
+        .iter()
+        .find(|(k, _)| k == "scales")
+        .map(|(_, v)| as_scalar_list(v))
+        .transpose()?;
+    Ok(Node::Sweep {
+        profile: as_profile(positional[0])?,
+        path: as_path(positional[1])?,
+        scales,
+        color: require_color("sweep", keywords)?,
+    })
+}
+
+fn as_scalar_list(value: &Value) -> Result<Vec<f32>, ParseError> {
+    let items = list_to_vec(value)?;
+    items.iter().map(|v| as_f32(v)).collect()
+}
+
+fn as_path(value: &Value) -> Result<Vec<[f32; 3]>, ParseError> {
+    let points = list_to_vec(value)?;
+    let mut out = Vec::with_capacity(points.len());
+    for p in points {
+        out.push(as_vec3("sweep path waypoint", p)?);
+    }
+    Ok(out)
 }
 
 fn parse_composition(

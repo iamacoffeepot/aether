@@ -93,6 +93,36 @@ pub fn node_to_value(node: &Node) -> Value {
             kw("color"),
             uint(*color),
         ]),
+        Node::Torus {
+            major_radius,
+            minor_radius,
+            major_segments,
+            minor_segments,
+            color,
+        } => list([
+            sym("torus"),
+            num(*major_radius),
+            num(*minor_radius),
+            uint(*major_segments),
+            uint(*minor_segments),
+            kw("color"),
+            uint(*color),
+        ]),
+        Node::Sweep {
+            profile,
+            path,
+            scales,
+            color,
+        } => {
+            let mut items = vec![sym("sweep"), profile_to_value(profile), path_to_value(path)];
+            if let Some(s) = scales {
+                items.push(kw("scales"));
+                items.push(list(s.iter().map(|x| num(*x))));
+            }
+            items.push(kw("color"));
+            items.push(uint(*color));
+            list(items)
+        }
         Node::Composition(children) => {
             let mut items = vec![sym("composition")];
             items.extend(children.iter().map(node_to_value));
@@ -159,4 +189,11 @@ fn vec3_to_value(v: [f32; 3]) -> Value {
 
 fn profile_to_value(p: &[[f32; 2]]) -> Value {
     list(p.iter().map(|pt| list([num(pt[0]), num(pt[1])])))
+}
+
+fn path_to_value(p: &[[f32; 3]]) -> Value {
+    list(
+        p.iter()
+            .map(|pt| list([num(pt[0]), num(pt[1]), num(pt[2])])),
+    )
 }
