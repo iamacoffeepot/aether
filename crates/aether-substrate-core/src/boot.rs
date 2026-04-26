@@ -361,9 +361,7 @@ mod tests {
         let boot = result.expect("build must succeed without dialling the hub");
         // The boot is alive; chassis sinks can be registered without
         // racing a hub-driven load.
-        boot.registry.register_sink(
-            "test_chassis_sink",
-            Arc::new(|_, _, _, _, _, _| {}),
-        );
+        boot.registry
+            .register_sink("test_chassis_sink", Arc::new(|_, _, _, _, _, _| {}));
     }
 }
