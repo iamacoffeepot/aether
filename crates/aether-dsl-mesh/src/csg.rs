@@ -23,3 +23,5 @@
 //! through the mesher silently produces an empty triangle list (the AST
 //! parses, round-trips, and composes structurally — there's just no
 //! geometry yet).
+
+pub mod fixed;
