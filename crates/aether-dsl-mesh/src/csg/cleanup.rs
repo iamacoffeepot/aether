@@ -15,7 +15,10 @@
 //!    re-triangulates each component via 2D ear clipping. Multi-loop
 //!    components (faces with holes) are bridged into a single slit
 //!    polygon before clipping.
-//! 3. **T-junction removal** — *not yet implemented.*
+//! 3. **T-junction removal** — finds vertices in the welded pool that
+//!    lie strictly on an edge of a polygon, and subdivides the edge
+//!    so the vertex becomes part of the polygon's vertex list. Loops
+//!    to fixed point.
 //!
 //! [`run`] is the single entry point — `csg::ops` calls it on every
 //! boolean operation's result so callers see cleaned polygons
@@ -23,16 +26,15 @@
 
 mod merge;
 mod mesh;
+mod tjunctions;
 mod weld;
 
 use crate::csg::polygon::Polygon;
 
 /// Run the cleanup pipeline on a polygon list.
-///
-/// Currently runs Pass 1 (vertex welding) and Pass 2 (coplanar merging);
-/// T-junction repair lands under the same entry point in a follow-up PR.
 pub fn run(polygons: Vec<Polygon>) -> Vec<Polygon> {
     mesh::IndexedMesh::weld(polygons)
         .merge_coplanar()
+        .repair_tjunctions()
         .into_polygons()
 }
