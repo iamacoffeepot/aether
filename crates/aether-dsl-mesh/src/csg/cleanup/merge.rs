@@ -1,25 +1,24 @@
-//! Pass 2: coplanar polygon merging.
+//! Pass 2: coplanar polygon merging — emits boundary loops as n-gons.
 //!
 //! Groups polygons by exact `Plane3` signature, finds connected
 //! components within each group via shared edges, extracts each
-//! component's boundary loop(s), and re-triangulates merged regions
-//! via constrained Delaunay triangulation (ADR-0056).
+//! component's boundary loop(s), and emits **one [`IndexedPolygon`]
+//! per loop** (per ADR-0057). No triangulation here — CDT runs in
+//! [`IndexedMesh::cdt_triangulate`] (pass 4) on the post-T-junction
+//! loops so T-junction repair operates on the n-gon edges rather
+//! than triangulator-chosen diagonals.
 //!
 //! Each component goes through:
 //!
 //! 1. Boundary edge collection (directed edges with no reverse twin).
 //! 2. Loop extraction (walk directed boundary into closed loops).
-//! 3. CDT (`cdt::triangulate_loops`) — single algorithm path for both
-//!    single-loop and multi-loop (face-with-holes) cases. The CDT
-//!    enforces every loop edge as a constraint and discards triangles
-//!    outside the polygon, so there is no slit, no slivers, and no
-//!    bridge-endpoint duplication. Output triangles inherit the first
-//!    input polygon's color (per ADR-0055 — color across merge
-//!    boundaries is the "first polygon wins" tradeoff).
-//! 4. Singletons (no shared edges with any group neighbor) pass through
-//!    as fans, since CDT would just re-emit them after one vertex.
-//! 5. CDT failure (rare — pathological boundary topology) falls back
-//!    to passing the original polygons through as fans.
+//! 3. Emit one `IndexedPolygon` per loop, sharing the component's
+//!    plane and the first input polygon's color (per ADR-0055 — color
+//!    across merge boundaries is the "first polygon wins" tradeoff).
+//! 4. Singletons pass through unchanged — they're already a single
+//!    loop, no extraction needed.
+//! 5. Loop extraction failure (pathological boundary topology) falls
+//!    back to passing the original polygons through unchanged.
 //!
 //! Plane-equality limitation: the grouping key is the exact `Plane3`
 //! tuple `(n_x, n_y, n_z, d)`. Polygons that are coplanar in the
@@ -32,13 +31,10 @@
 //!
 //! Determinism: HashMap iteration order doesn't leak — plane keys are
 //! sorted before grouping, components are sorted by their first input
-//! polygon id, and CDT inherits its determinism from sorted insertion
-//! and integer-exact predicates.
+//! polygon id, and loop extraction walks edges in deterministic order.
 
-use super::cdt;
 use super::mesh::{IndexedMesh, IndexedPolygon, VertexId};
 use crate::csg::plane::Plane3;
-use crate::csg::point::Point3;
 use std::collections::HashMap;
 
 type PlaneKey = (i64, i64, i64, i128);
@@ -56,7 +52,7 @@ impl IndexedMesh {
         for key in sorted_keys {
             let group_pids = &groups[key];
             for component in connected_components(&polygons, group_pids) {
-                process_component(&vertices, &polygons, &component, &mut merged);
+                process_component(&polygons, &component, &mut merged);
             }
         }
 
@@ -131,13 +127,13 @@ fn connected_components(polygons: &[IndexedPolygon], group: &[usize]) -> Vec<Vec
 }
 
 fn process_component(
-    vertices: &[Point3],
     polygons: &[IndexedPolygon],
     component: &[usize],
     out: &mut Vec<IndexedPolygon>,
 ) {
+    // Singletons are already a single loop — no boundary extraction needed.
     if component.len() == 1 {
-        emit_fan(&polygons[component[0]], out);
+        out.push(polygons[component[0]].clone());
         return;
     }
 
@@ -165,7 +161,7 @@ fn process_component(
         // Pathological boundary topology — pass through unchanged.
         None => {
             for &pid in component {
-                emit_fan(&polygons[pid], out);
+                out.push(polygons[pid].clone());
             }
             return;
         }
@@ -173,37 +169,11 @@ fn process_component(
 
     let plane = polygons[component[0]].plane;
     let color = polygons[component[0]].color;
-    match cdt::triangulate_loops(vertices, &loops, &plane) {
-        Some(triangles) => {
-            for tri in triangles {
-                out.push(IndexedPolygon {
-                    vertices: tri.to_vec(),
-                    plane,
-                    color,
-                });
-            }
-        }
-        None => {
-            // CDT couldn't enforce a constraint or hit a degenerate
-            // configuration. Keep the geometry by emitting the original
-            // polygons as fans rather than producing nothing.
-            for &pid in component {
-                emit_fan(&polygons[pid], out);
-            }
-        }
-    }
-}
-
-fn emit_fan(poly: &IndexedPolygon, out: &mut Vec<IndexedPolygon>) {
-    if poly.vertices.len() < 3 {
-        return;
-    }
-    let v0 = poly.vertices[0];
-    for i in 1..poly.vertices.len() - 1 {
+    for loop_verts in loops {
         out.push(IndexedPolygon {
-            vertices: vec![v0, poly.vertices[i], poly.vertices[i + 1]],
-            plane: poly.plane,
-            color: poly.color,
+            vertices: loop_verts,
+            plane,
+            color,
         });
     }
 }
@@ -265,6 +235,7 @@ fn extract_loops(boundary: &[(VertexId, VertexId)]) -> Option<Vec<Vec<VertexId>>
 mod tests {
     use super::*;
     use crate::csg::fixed::f32_to_fixed;
+    use crate::csg::point::Point3;
     use crate::csg::polygon::Polygon;
 
     fn pt(x: f32, y: f32, z: f32) -> Point3 {
@@ -291,20 +262,18 @@ mod tests {
     }
 
     #[test]
-    fn two_triangles_forming_a_quad_merge_to_two_triangles_covering_same_corners() {
+    fn two_triangles_forming_a_quad_merge_to_one_quad_polygon() {
         // Quad split into two triangles by the (0,0)-(1,1) diagonal. After
-        // merge they re-triangulate from the boundary loop — still 2
-        // triangles (a quad fan-clips to 2), covering the same 4 corners.
+        // merge they collapse into one 4-vertex polygon (the boundary
+        // loop) — the diagonal disappears.
         let t1 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), 0)
             .unwrap();
         let t2 = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0), 0)
             .unwrap();
         let out = weld_then_merge(vec![t1, t2]);
-        assert_eq!(out.len(), 2);
-        let covered: std::collections::BTreeSet<Point3> = out
-            .iter()
-            .flat_map(|p| p.vertices.iter().copied())
-            .collect();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].vertices.len(), 4);
+        let covered: std::collections::BTreeSet<Point3> = out[0].vertices.iter().copied().collect();
         let expect: std::collections::BTreeSet<Point3> = [
             pt(0.0, 0.0, 0.0),
             pt(1.0, 0.0, 0.0),
@@ -344,20 +313,15 @@ mod tests {
     }
 
     #[test]
-    fn shattered_quad_collapses_to_two_triangles() {
-        // Quad [(0,0)-(2,0)-(2,2)-(0,2)] split into 4 triangles meeting
-        // at the centre (1,1) plus 4 boundary triangles. Pretty common
-        // CSG-cut pattern.
-        // Simpler: just split into 2 triangles → merge → 2 triangles.
-        // For more realistic stress test, use 4 fan triangles from centre.
+    fn shattered_quad_collapses_to_one_quad_polygon() {
+        // Quad [(0,0)-(2,0)-(2,2)-(0,2)] covered by 4 fan triangles meeting
+        // at the centre (1,1). After merge: one 4-vertex outer-boundary
+        // polygon, dropping the central pivot vertex entirely.
         let c = pt(1.0, 1.0, 0.0);
         let nw = pt(0.0, 2.0, 0.0);
         let ne = pt(2.0, 2.0, 0.0);
         let se = pt(2.0, 0.0, 0.0);
         let sw = pt(0.0, 0.0, 0.0);
-        // Four triangles fan from the center, all on z=0 plane, all
-        // pointing +z (CCW winding). Each has the same plane:
-        // n=(cross-product of edges) — same magnitude for all four.
         let polys = vec![
             Polygon::from_triangle(c, nw, ne, 0).unwrap(),
             Polygon::from_triangle(c, ne, se, 0).unwrap(),
@@ -365,14 +329,8 @@ mod tests {
             Polygon::from_triangle(c, sw, nw, 0).unwrap(),
         ];
         let out = weld_then_merge(polys);
-        // After merge: 4-vertex quad → ear-clips to 2 triangles, dropping
-        // the central pivot vertex entirely.
-        assert_eq!(
-            out.len(),
-            2,
-            "expected 2 merged triangles, got {}",
-            out.len()
-        );
+        assert_eq!(out.len(), 1, "expected 1 merged polygon, got {}", out.len());
+        assert_eq!(out[0].vertices.len(), 4);
     }
 
     #[test]
@@ -396,15 +354,20 @@ mod tests {
             Polygon::from_triangle(bl, mid, top, 0).unwrap(),
             Polygon::from_triangle(bl, top, tl, 0).unwrap(),
         ];
-        // Note: this fan has different normal magnitudes per triangle,
-        // so the plane signatures will differ — the merge won't fire.
-        // To force a merge, all triangles must share `Plane3` exactly.
-        // Use triangles split off a single source instead: cover the L
-        // with two same-magnitude-plane triangles.
+        // Plane keys differ across the fan because each triangle has its
+        // own cross-product magnitude. The middle two share a plane key
+        // (both have the same edge magnitudes from bl) and a shared edge
+        // bl→mid, so they merge into one 4-vertex loop. The first and
+        // last stay as singletons. 4 in → 3 out.
         let out = weld_then_merge(polys);
-        // Without all triangles sharing a plane key, no merge happens —
-        // each triangle passes through. 4 triangles in, 4 triangles out.
-        assert_eq!(out.len(), 4);
+        assert_eq!(out.len(), 3);
+        let lens: std::collections::BTreeSet<usize> =
+            out.iter().map(|p| p.vertices.len()).collect();
+        assert_eq!(
+            lens,
+            [3, 4].into_iter().collect(),
+            "expected two 3-vert singletons and one 4-vert merged loop"
+        );
     }
 
     #[test]
@@ -465,46 +428,54 @@ mod tests {
         IndexedMesh { vertices, polygons }
     }
 
+    /// Shoelace (signed) doubled area for an XY-projected polygon.
+    /// Positive = CCW around +Z, negative = CW.
+    fn shoelace_2d(vertices: &[Point3], indices: &[VertexId]) -> i128 {
+        let mut sum: i128 = 0;
+        let n = indices.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let a = vertices[indices[i]];
+            let b = vertices[indices[j]];
+            sum += (a.x as i128) * (b.y as i128) - (b.x as i128) * (a.y as i128);
+        }
+        sum
+    }
+
     #[test]
-    fn square_with_square_hole_bridges_and_triangulates() {
+    fn square_with_square_hole_emits_outer_and_hole_loops() {
         let vertices = annular_indexed_mesh().vertices.clone();
         let merged = annular_indexed_mesh().merge_coplanar();
-        // n outer (4) + n hole (4) + 2 bridge dups = 10 vertices in the
-        // spliced loop, ear-clipping yields n - 2 = 8 triangles. Filter
-        // for degenerates (none expected for axis-aligned bridge).
+        // After ADR-0057: one polygon per boundary loop. Annular face has
+        // an outer loop (4 verts, CCW) and a hole loop (4 verts, CW) →
+        // 2 polygons.
         assert_eq!(
             merged.polygons.len(),
-            8,
-            "expected 8 annular triangles, got {}",
+            2,
+            "expected 2 boundary loops (outer + hole), got {}",
             merged.polygons.len()
         );
-        // All output triangles are CCW around +z (positive 2D cross).
+        // Every output loop has exactly 4 vertices.
         for poly in &merged.polygons {
-            let v0 = vertices[poly.vertices[0]];
-            let v1 = vertices[poly.vertices[1]];
-            let v2 = vertices[poly.vertices[2]];
-            let cross = (v1.x as i128 - v0.x as i128) * (v2.y as i128 - v0.y as i128)
-                - (v1.y as i128 - v0.y as i128) * (v2.x as i128 - v0.x as i128);
-            assert!(cross > 0, "expected CCW triangle, got cross = {}", cross);
+            assert_eq!(poly.vertices.len(), 4);
         }
-        // Total 2D area equals the annular area (outer 2*2=4 minus hole
-        // 1*1=1, so 3) — measured in fixed-point grid units.
-        let total_doubled_area: i128 = merged
+        // One loop is CCW (outer, positive area), the other CW (hole, negative).
+        let signed_areas: Vec<i128> = merged
             .polygons
             .iter()
-            .map(|poly| {
-                let v0 = vertices[poly.vertices[0]];
-                let v1 = vertices[poly.vertices[1]];
-                let v2 = vertices[poly.vertices[2]];
-                (v1.x as i128 - v0.x as i128) * (v2.y as i128 - v0.y as i128)
-                    - (v1.y as i128 - v0.y as i128) * (v2.x as i128 - v0.x as i128)
-            })
-            .sum();
+            .map(|p| shoelace_2d(&vertices, &p.vertices))
+            .collect();
+        let positive = signed_areas.iter().filter(|&&a| a > 0).count();
+        let negative = signed_areas.iter().filter(|&&a| a < 0).count();
+        assert_eq!(positive, 1, "expected one CCW outer loop");
+        assert_eq!(negative, 1, "expected one CW hole loop");
+        // Sum of signed areas = annular area (outer 2*2=4 minus hole 1*1=1, so 3).
+        let total: i128 = signed_areas.iter().sum();
         let unit = 1_i128 << 16;
-        let expected_doubled_area = 3 * 2 * unit * unit;
         assert_eq!(
-            total_doubled_area, expected_doubled_area,
-            "annular area mismatch — bridging or clipping likely lost or duplicated coverage"
+            total,
+            3 * 2 * unit * unit,
+            "annular area mismatch — outer + hole signed sum should equal the annular region"
         );
     }
 
