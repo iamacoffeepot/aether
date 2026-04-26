@@ -117,6 +117,28 @@ Same guarantee as ADR-0054: bit-exact reproducibility across platforms, runs, an
 
 Implementation in three PRs against this ADR, mirroring the ADR-0055 cascade:
 
-1. **i256 helper + exact predicates.** `cleanup::cdt::wide` with `mul_i128_i128`, `add_i256_i256`, `signum`, plus tests. `cleanup::cdt::predicates::{in_circle, orient2d}`. No integration yet — verifies the math in isolation.
+1. **Exact predicates.** `cleanup::cdt::predicates::{in_circle, orient2d}` in i128. No integration yet — verifies the math in isolation.
 2. **Bowyer-Watson incremental Delaunay.** Build the unconstrained triangulation of all loop vertices including the super-triangle setup. Tested against simple known cases (regular polygons, random points).
 3. **Constraint enforcement + inside/outside marking + wire into `process_component`.** This is where CDT actually replaces ear-clipping; old ear-clipping and bridging code is removed in this PR. Tests cover the previously-bridged cases (annular, anvil-class slab-with-holes) and confirm the sliver-free property.
+
+## Amendments
+
+### 2026-04-26: i128 suffices for the in-circle predicate; i256 helper not needed
+
+The "Numerical robustness" section originally claimed that the worst-case in-circle determinant overflows i128 by one bit and therefore required a hand-rolled i256 helper. That analysis was wrong. It implicitly assumed expansion along column 2 (where the multiplier outside the 2×2 sub-determinant is the squared-sum entry, magnitude ≤ 2^51), giving a worst-case product of ~2^128.
+
+Expanding along row 0 instead — which is what the implementation actually does — keeps every intermediate product bounded:
+
+```
+det = ax * (by*C - B*cy) - ay * (bx*C - B*cx) + A * (bx*cy - by*cx)
+```
+
+- `by*C - B*cy` ≤ 2 · 2^25 · 2^51 = 2^77; outer multiplier `ax` is ≤ 2^25 → term ≤ 2^102.
+- `bx*C - B*cx` ≤ 2^77 likewise → term ≤ 2^102.
+- `bx*cy - by*cx` ≤ 2 · 2^25 · 2^25 = 2^51; outer multiplier `A` is ≤ 2^51 → term ≤ 2^102.
+
+The sum of three terms is ≤ 3·2^102 < 2^104, well within i128's signed range of ±2^127 (~23 bits of headroom). The in-circle predicate computes correctly in i128 with no overflow.
+
+The follow-up plan is updated: PR 1 ships the predicates directly in i128, with no separate i256 / wide-arithmetic helper. The other two PRs (Bowyer-Watson, constraint enforcement) are unchanged.
+
+The corrected framing for future edits: integer-exact predicates for our coord cap fit in i128 *as long as the determinant expansion is chosen to keep the outer multiplier on the small (linear-difference) entry rather than the large (squared-sum) entry*. Any future predicate added to this module needs the same magnitude check before assuming i128 suffices.
