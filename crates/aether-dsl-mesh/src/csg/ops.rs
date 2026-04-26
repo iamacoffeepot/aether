@@ -14,6 +14,7 @@
 
 use super::CsgError;
 use super::bsp::BspTree;
+use super::cleanup;
 use super::polygon::Polygon;
 
 pub fn union(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
@@ -28,7 +29,7 @@ pub fn union(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError>
     nb.invert();
     let extra = nb.all_polygons();
     na.build(extra)?;
-    Ok(na.all_polygons())
+    Ok(cleanup::run(na.all_polygons()))
 }
 
 pub fn intersection(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
@@ -44,7 +45,7 @@ pub fn intersection(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, Cs
     let extra = nb.all_polygons();
     na.build(extra)?;
     na.invert();
-    Ok(na.all_polygons())
+    Ok(cleanup::run(na.all_polygons()))
 }
 
 pub fn difference(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
@@ -61,7 +62,7 @@ pub fn difference(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>, CsgE
     let extra = nb.all_polygons();
     na.build(extra)?;
     na.invert();
-    Ok(na.all_polygons())
+    Ok(cleanup::run(na.all_polygons()))
 }
 
 #[cfg(test)]
