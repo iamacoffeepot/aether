@@ -35,6 +35,12 @@ pub enum MeshError {
 /// Wire entry: evaluate `node` polygon-domain, run the cleanup +
 /// CDT-tessellation pipeline, then fan back to wire `Triangle`s.
 ///
+/// Runs [`crate::simplify::simplify`] as a pre-pass, so AABB-disjoint
+/// CSG subexpressions and identity transforms collapse before they
+/// reach the mesher. The simplified AST is semantically equivalent to
+/// the input — every active rewrite preserves the meshed output
+/// exactly — so callers see no behavior change beyond the speedup.
+///
 /// Cleanup runs **once** at the root, not after every CSG op — chained
 /// `(difference A B C)` flows raw BSP polygons between steps and
 /// triangulates a single time at the very end. Skipping the per-op
@@ -42,8 +48,9 @@ pub enum MeshError {
 /// (`from_triangle` re-deriving the plane on a sliver triangle picks
 /// up the wrong sign for `n_z`).
 pub fn mesh(node: &Node) -> Result<Vec<Triangle>, MeshError> {
+    let simplified = crate::simplify::simplify(node);
     let mut polys = Vec::new();
-    mesh_into_polygons(&mut polys, node, [0.0, 0.0, 0.0])?;
+    mesh_into_polygons(&mut polys, &simplified, [0.0, 0.0, 0.0])?;
     Ok(csg::polygons_to_triangles(&csg::tessellate::run(polys)))
 }
 
@@ -51,8 +58,9 @@ pub fn mesh(node: &Node) -> Result<Vec<Triangle>, MeshError> {
 /// the n-gon boundary loops cleanup produces (no triangulation). The
 /// public polygon API in `crate::polygon` is the consumer.
 pub fn mesh_polygons_internal(node: &Node) -> Result<Vec<CsgPolygon>, MeshError> {
+    let simplified = crate::simplify::simplify(node);
     let mut polys = Vec::new();
-    mesh_into_polygons(&mut polys, node, [0.0, 0.0, 0.0])?;
+    mesh_into_polygons(&mut polys, &simplified, [0.0, 0.0, 0.0])?;
     Ok(csg::cleanup::run_to_loops(polys))
 }
 
@@ -955,5 +963,80 @@ mod tests {
         .unwrap();
         let tris = mesh(&ast).expect("composite-subtractor difference must mesh");
         assert!(!tris.is_empty());
+    }
+
+    /// End-to-end equivalence for the disjoint-union rewrite: a union
+    /// of three spatially separate boxes meshes to *exactly* the same
+    /// triangle set as a hand-authored composition of the same three
+    /// boxes. Verifies that the rewrite doesn't drop, duplicate, or
+    /// reorder geometry on the disjoint path.
+    #[test]
+    fn disjoint_three_box_union_matches_composition() {
+        use crate::parse;
+        let union_ast = parse(
+            "(union \
+             (box 1 1 1 :color 0) \
+             (translate (10 0 0) (box 1 1 1 :color 1)) \
+             (translate (20 0 0) (box 1 1 1 :color 2)))",
+        )
+        .unwrap();
+        let comp_ast = parse(
+            "(composition \
+             (box 1 1 1 :color 0) \
+             (translate (10 0 0) (box 1 1 1 :color 1)) \
+             (translate (20 0 0) (box 1 1 1 :color 2)))",
+        )
+        .unwrap();
+        let mut from_union = mesh(&union_ast).unwrap();
+        let mut from_comp = mesh(&comp_ast).unwrap();
+        // Order may differ between paths; sort for comparison. The
+        // triangle bytes are bit-identical otherwise — both flow the
+        // same polygon list through the same root cleanup pass.
+        let key = |t: &Triangle| {
+            let mut buf: Vec<u8> = Vec::with_capacity(40);
+            for v in &t.vertices {
+                for c in v {
+                    buf.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+            buf.extend_from_slice(&t.color.to_le_bytes());
+            buf
+        };
+        from_union.sort_by_key(key);
+        from_comp.sort_by_key(key);
+        assert_eq!(from_union, from_comp);
+    }
+
+    /// Pin: an *overlapping* union still goes through the BSP path.
+    /// Two boxes that share volume must mesh to a smaller boundary
+    /// (the merged surface) than the same boxes composed flatly,
+    /// which would emit both their full surfaces with internal walls.
+    #[test]
+    fn overlapping_two_box_union_still_runs_csg() {
+        use crate::parse;
+        let union_ast = parse(
+            "(union \
+             (box 2 2 2 :color 0) \
+             (translate (1 0 0) (box 2 2 2 :color 1)))",
+        )
+        .unwrap();
+        let comp_ast = parse(
+            "(composition \
+             (box 2 2 2 :color 0) \
+             (translate (1 0 0) (box 2 2 2 :color 1)))",
+        )
+        .unwrap();
+        let from_union = mesh(&union_ast).unwrap();
+        let from_comp = mesh(&comp_ast).unwrap();
+        // CSG-merged surface is strictly smaller — the shared volume's
+        // internal walls don't survive. If this assertion ever fires,
+        // the disjoint-rewrite has misclassified an overlap as
+        // disjoint and degraded the output.
+        assert!(
+            from_union.len() < from_comp.len(),
+            "union ({}) should produce fewer triangles than composition ({}) when inputs overlap",
+            from_union.len(),
+            from_comp.len()
+        );
     }
 }
