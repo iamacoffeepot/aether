@@ -7,180 +7,84 @@
 // no `Opaque` kinds left in the substrate's descriptor list — every
 // kind is hub-encodable from agent params, and the `payload_bytes`
 // escape hatch has been removed from the MCP `send_mail` tool.
-// Adding or renaming a field on a kind is a one-place change (the
-// struct itself); the schema is whatever the derive emits.
+//
+// Issue #243: the descriptor list used to live as a manual
+// `vec![schema::<Tick>(), schema::<Key>(), ...]` here. Adding a
+// kind required a second touch to update this list, easy to forget
+// — the safety net was a runtime "unknown kind" error at first send.
+// Now the `Kind` derive macro emits a `cfg(not(target_arch = "wasm32"))`
+// -gated `inventory::submit!` per type (paired with the existing wasm
+// `aether.kinds` custom-section path); `all()` materializes the Hub-
+// shipped `KindDescriptor` list by iterating the inventory slot.
+// Adding a kind is one place — the struct definition with its derives.
+
+// `all()` and its tests are native-only — the function materializes a
+// Hub-shipped descriptor list from the inventory slot the Kind derive
+// populates on non-wasm builds. wasm guests don't call it (their kind
+// discovery rides the `aether.kinds` custom section, ADR-0032), and
+// the inventory crate doesn't link on wasm32-unknown-unknown anyway.
+#![cfg(not(target_arch = "wasm32"))]
 
 use alloc::string::ToString;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_hub_protocol::KindDescriptor;
-use aether_mail::{Kind, Schema};
 
-use crate::{
-    Camera, CaptureFrame, CaptureFrameResult, Delete, DeleteResult, DrawTriangle, DropComponent,
-    DropResult, Fetch, FetchResult, FrameStats, HandlePin, HandlePinResult, HandlePublish,
-    HandlePublishResult, HandleRelease, HandleReleaseResult, HandleUnpin, HandleUnpinResult, Key,
-    KeyRelease, List, ListResult, LoadComponent, LoadResult, LoadStaticMesh, MouseButton,
-    MouseMove, NoteOff, NoteOn, OrbitSetDistance, OrbitSetFov, OrbitSetPitch, OrbitSetSpeed,
-    OrbitSetTarget, OrbitSetYaw, Ping, PlatformInfo, PlatformInfoResult, PlayerRequestStep,
-    PlayerSetMode, PlayerSetPosition, PlayerSetVelocity, PlayerStepResult, Pong, Read, ReadResult,
-    ReplaceComponent, ReplaceResult, SetMasterGain, SetMasterGainResult, SetPath, SetText,
-    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, SubscribeInput,
-    SubscribeInputResult, Tick, TopdownSetCenter, TopdownSetExtent, UnresolvedMail,
-    UnsubscribeInput, WindowSize, Write, WriteResult,
-};
-
-/// Every kind the substrate exposes, in the order the `Registry` will
-/// register them. Caller ignores the order — names are the contract.
+/// Every kind the substrate exposes. Order is unspecified — names are
+/// the contract; downstream callers (`Registry::register_kind_with_descriptor`,
+/// hub `Hello` handshake) are order-independent.
 pub fn all() -> Vec<KindDescriptor> {
-    vec![
-        schema::<Tick>(),
-        schema::<Key>(),
-        schema::<KeyRelease>(),
-        schema::<MouseButton>(),
-        schema::<MouseMove>(),
-        schema::<WindowSize>(),
-        // DrawTriangle's schema recurses into Vertex; the cast wire
-        // format keeps today's bytes (the hub encoder treats the
-        // nested `Struct { repr_c: true }` exactly like a flat Pod).
-        schema::<DrawTriangle>(),
-        schema::<FrameStats>(),
-        // Hub → originating-engine diagnostic when a bubbled-up mail
-        // doesn't resolve at the hub either (ADR-0037 follow-up,
-        // issue #185). Delivered to the engine's `aether.diagnostics`
-        // sink, which re-warns locally.
-        schema::<UnresolvedMail>(),
-        // ADR-0013 smoke-test vocabulary.
-        schema::<Ping>(),
-        schema::<Pong>(),
-        // ADR-0010 control-plane vocabulary — now real schemas. The
-        // hub encodes LoadComponent / ReplaceComponent / etc. from
-        // agent params; the substrate decodes via postcard. No more
-        // `payload_bytes` workaround.
-        schema::<LoadComponent>(),
-        schema::<ReplaceComponent>(),
-        schema::<DropComponent>(),
-        schema::<LoadResult>(),
-        schema::<DropResult>(),
-        schema::<ReplaceResult>(),
-        // ADR-0021 publish/subscribe routing for input streams.
-        schema::<SubscribeInput>(),
-        schema::<UnsubscribeInput>(),
-        schema::<SubscribeInputResult>(),
-        // Substrate capture path — on-demand PNG readback of the
-        // current swapchain, replied-to-sender so an MCP session can
-        // see what the engine is rendering.
-        schema::<CaptureFrame>(),
-        schema::<CaptureFrameResult>(),
-        // Read-only snapshot of OS / engine / GPU / monitors / window.
-        // Empty request, fat reply — see `PlatformInfoResult`.
-        schema::<PlatformInfo>(),
-        schema::<PlatformInfoResult>(),
-        // Window-mode switch: agents flip between windowed /
-        // fullscreen-borderless / fullscreen-exclusive, reply carries
-        // the resolved state.
-        schema::<SetWindowMode>(),
-        schema::<SetWindowModeResult>(),
-        // Runtime window-title update. Desktop-only; headless/hub
-        // reply with an `unsupported` error.
-        schema::<SetWindowTitle>(),
-        schema::<SetWindowTitleResult>(),
-        // Per-frame camera state streamed into the desktop chassis's
-        // `camera` sink — latest value wins, uploaded to the GPU
-        // uniform before each draw. Fire-and-forget; no reply.
-        schema::<Camera>(),
-        // Orbit camera control surface. Each kind pokes one field of
-        // the camera component's state; no reply kinds — state
-        // changes become visible in the next frame's `Camera` mail.
-        schema::<OrbitSetDistance>(),
-        schema::<OrbitSetPitch>(),
-        schema::<OrbitSetYaw>(),
-        schema::<OrbitSetSpeed>(),
-        schema::<OrbitSetFov>(),
-        schema::<OrbitSetTarget>(),
-        // Top-down orthographic camera control surface. Same
-        // fire-and-forget shape as the orbit controls.
-        schema::<TopdownSetCenter>(),
-        schema::<TopdownSetExtent>(),
-        // Player component control surface. Fire-and-forget cast
-        // kinds; state changes become visible via the player's next
-        // tick (new `TopdownSetCenter` + `DrawTriangle` emissions).
-        schema::<PlayerSetPosition>(),
-        schema::<PlayerSetVelocity>(),
-        // Player ↔ world-authority tile-step protocol. The player
-        // emits `PlayerRequestStep` to the mailbox named `"world"`;
-        // the authority answers with `PlayerStepResult`. Mode is
-        // toggled by `PlayerSetMode`.
-        schema::<PlayerSetMode>(),
-        schema::<PlayerRequestStep>(),
-        schema::<PlayerStepResult>(),
-        // Desktop MIDI synth (ADR-0039). Components emit `NoteOn` /
-        // `NoteOff` to the `audio` sink on desktop; `SetMasterGain`
-        // controls the substrate-level output scalar. Headless / hub
-        // nop the hot-path kinds and reject `SetMasterGain` loudly.
-        schema::<NoteOn>(),
-        schema::<NoteOff>(),
-        schema::<SetMasterGain>(),
-        schema::<SetMasterGainResult>(),
-        // Substrate file I/O (ADR-0041). Components mail Read / Write
-        // / Delete / List to the `io` sink with a namespace + path
-        // pair; the substrate resolves the namespace to an adapter
-        // (local file in v1) and replies with the paired `*Result`
-        // kind. Failure variants carry a structured `IoError`.
-        schema::<Read>(),
-        schema::<ReadResult>(),
-        schema::<Write>(),
-        schema::<WriteResult>(),
-        schema::<Delete>(),
-        schema::<DeleteResult>(),
-        schema::<List>(),
-        schema::<ListResult>(),
-        // Substrate HTTP egress (ADR-0043). Components mail `Fetch`
-        // to the `net` sink with url + method + headers + body;
-        // the substrate resolves through a `NetAdapter` (ureq +
-        // rustls in v1) and replies with `FetchResult`. Failure
-        // variants carry a structured `NetError`.
-        schema::<Fetch>(),
-        schema::<FetchResult>(),
-        // ADR-0045 typed-handle store. Four request kinds on the
-        // `"aether.sink.handle"` sink — publish a value and get a fresh
-        // ephemeral id back, then release / pin / unpin against
-        // the id. Failure variants carry `HandleError`.
-        schema::<HandlePublish>(),
-        schema::<HandlePublishResult>(),
-        schema::<HandleRelease>(),
-        schema::<HandleReleaseResult>(),
-        schema::<HandlePin>(),
-        schema::<HandlePinResult>(),
-        schema::<HandleUnpin>(),
-        schema::<HandleUnpinResult>(),
-        // DSL mesh editor component vocabulary (ADR-0052). The editor
-        // hot-loads DSL source (per ADR-0026 + ADR-0051) and replays
-        // the meshed triangles as `DrawTriangle` mail every tick. Two
-        // input kinds: `SetText` for inline DSL, `SetPath` for
-        // namespace+path-loaded DSL via the `"aether.sink.io"` sink.
-        schema::<SetText>(),
-        schema::<SetPath>(),
-        // Static mesh viewer (developer tool). Loads an OBJ via the
-        // io sink and replays its triangle list as DrawTriangle each
-        // tick. ADR-0026's no-import-for-production-content rule does
-        // not apply — this is a dev viewer, not an asset path.
-        schema::<LoadStaticMesh>(),
-    ]
-}
-
-fn schema<K: Kind + Schema>() -> KindDescriptor {
-    KindDescriptor {
-        name: K::NAME.to_string(),
-        schema: K::SCHEMA.clone(),
-    }
+    inventory::iter::<aether_mail::__inventory::DescriptorEntry>()
+        .map(|e| KindDescriptor {
+            name: e.name.to_string(),
+            schema: e.schema.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use aether_hub_protocol::{Primitive, SchemaType};
+    use aether_mail::Kind;
+
+    use crate::{
+        Delete, DeleteResult, DrawTriangle, DropComponent, DropResult, Fetch, FetchResult,
+        FrameStats, Key, List, ListResult, LoadComponent, LoadResult, MouseButton, MouseMove,
+        NoteOff, NoteOn, Ping, Pong, Read, ReadResult, ReplaceComponent, ReplaceResult,
+        SetMasterGain, SubscribeInput, SubscribeInputResult, Tick, UnsubscribeInput, Write,
+        WriteResult,
+    };
+
+    #[test]
+    fn descriptor_list_is_non_empty() {
+        // Issue #243 regression guard: the inventory-driven `all()`
+        // depends on the linker not stripping the per-kind submission
+        // statics. If `--gc-sections` ever decides those are
+        // dead, the substrate boots with an empty kind vocabulary
+        // and silently wedges. Catch it here instead of in MCP.
+        assert!(
+            !all().is_empty(),
+            "descriptors::all() returned no kinds — inventory entries stripped at link?",
+        );
+    }
+
+    #[test]
+    fn descriptor_list_is_unique() {
+        // Inventory submission has no built-in dedup. Two declarations
+        // of the same kind name would land here as duplicate entries —
+        // probably a bug somewhere upstream of the registry.
+        let descs = all();
+        let names: Vec<&str> = descs.iter().map(|d| d.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            names.len(),
+            sorted.len(),
+            "duplicate kind names in descriptors::all(): {names:?}",
+        );
+    }
 
     #[test]
     fn covers_every_substrate_kind() {
