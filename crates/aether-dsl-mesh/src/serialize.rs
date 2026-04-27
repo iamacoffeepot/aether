@@ -82,6 +82,19 @@ pub fn node_to_value(node: &Node) -> Value {
             kw("color"),
             uint(*color),
         ]),
+        Node::LatheSegment {
+            profile,
+            segments,
+            segment_index,
+            color,
+        } => list([
+            sym("lathe-segment"),
+            profile_to_value(profile),
+            uint(*segments),
+            uint(*segment_index),
+            kw("color"),
+            uint(*color),
+        ]),
         Node::Extrude {
             profile,
             depth,

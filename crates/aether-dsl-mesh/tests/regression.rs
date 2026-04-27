@@ -284,16 +284,17 @@ fn lathe_minus_box_is_geometric() {
     );
 }
 
-/// **Hangs (BSP runaway)**: ignored because BSP recursion exceeds
-/// 2 minutes at 100% CPU on this composition. Two facetted curved
-/// primitives with no axis alignment fragment past any reasonable
-/// budget. Un-ignore once BSP performance is bounded for off-axis
-/// curved×curved input.
+/// **Was**: hung indefinitely on the whole-lathe BSP composition
+/// (issue 300). The lathe wedge-decomposition rewrite in
+/// [`aether_dsl_mesh::simplify`] now expands the lathe into a
+/// `Union<LatheSegment>`; PR 4's distribute-difference-over-union
+/// rule then turns the difference into 16 small per-segment
+/// differences against the cylinder, which run in milliseconds
+/// instead of minutes.
 ///
 /// Lathe minus a tilted cylinder. Two curved-facet primitives with
 /// distinct axes — the worst case for cocircular fragmentation.
 #[test]
-#[ignore]
 fn lathe_minus_tilted_cylinder_is_geometric() {
     assert_geometric(
         "(difference \

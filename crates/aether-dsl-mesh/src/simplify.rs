@@ -237,6 +237,20 @@ pub fn compute_aabb(node: &Node) -> Aabb {
         }
         Node::Wedge { x, y, z, .. } => Aabb::from_half_extents(*x * 0.5, *y * 0.5, *z * 0.5),
         Node::Sphere { radius, .. } => Aabb::from_half_extents(*radius, *radius, *radius),
+        Node::LatheSegment { profile, .. } => {
+            // Conservative: same bound as the parent lathe. A tighter
+            // per-wedge bound would let pairwise-disjoint segments
+            // route through the disjoint-union fast path, but adjacent
+            // segments share radial walls so they'd never partition
+            // out anyway. The win that matters — distribute-difference-
+            // over-union (PR 4) doing per-arm BSP on small inputs —
+            // doesn't depend on per-segment AABB tightness.
+            compute_aabb(&Node::Lathe {
+                profile: profile.clone(),
+                segments: 0,
+                color: 0,
+            })
+        }
         Node::Lathe { profile, .. } => {
             // Lathe revolves around Y axis. Radial extent is max |x| of
             // the profile; Y extent spans the profile's y range.
@@ -418,6 +432,17 @@ fn partition_disjoint_aabb(children: &[Node]) -> Vec<Vec<usize>> {
         .collect()
 }
 
+/// `true` when a lathe profile starts and ends at the axis (`r == 0`).
+/// Such profiles produce a closed solid when revolved, which is the
+/// precondition for wedge decomposition: each angular slice's radial
+/// walls collapse to single axis points at top and bottom, so the
+/// wall polygons close cleanly without an explicit cap.
+fn profile_axis_closed(profile: &[[f32; 2]]) -> bool {
+    profile.len() >= 2
+        && profile.first().unwrap()[0].abs() < f32::EPSILON
+        && profile.last().unwrap()[0].abs() < f32::EPSILON
+}
+
 /// `Some(+1.0)` when `a` and `b` point in the same direction,
 /// `Some(-1.0)` when opposite, `None` when skew (or either is the
 /// zero vector). Used to decide whether two `Rotate` nodes can fold:
@@ -501,6 +526,18 @@ fn parallel_axis_sign(a: [f32; 3], b: [f32; 3]) -> Option<f32> {
 ///   "bunch of parts minus one cutter" inputs to a flat composition
 ///   that skips BSP entirely.
 ///
+/// Wedge decomposition:
+/// - `(lathe profile segments color)` rewrites to
+///   `(union seg_0 seg_1 … seg_{n-1})` of [`Node::LatheSegment`]
+///   primitives when the profile is axis-closed (first and last
+///   profile points at `r == 0`). The decomposed lathe meshes
+///   identically to the original — adjacent segments share radial
+///   walls that the BSP-union (and root cleanup) merge — but each
+///   segment is a small convex-ish solid, so a CSG operation against
+///   the lathe distributes (via the rule above) into per-segment BSP
+///   work that's bounded per-pair instead of having one giant
+///   operation over all `segments × profile-edges` facets.
+///
 /// Identity rules for `Mirror` are intentionally absent — every mirror
 /// flips winding regardless of axis, so there's no zero-effect form.
 pub fn simplify(node: &Node) -> Node {
@@ -511,10 +548,36 @@ pub fn simplify(node: &Node) -> Node {
         | Node::Cone { .. }
         | Node::Wedge { .. }
         | Node::Sphere { .. }
-        | Node::Lathe { .. }
+        | Node::LatheSegment { .. }
         | Node::Extrude { .. }
         | Node::Torus { .. }
         | Node::Sweep { .. } => node.clone(),
+
+        Node::Lathe {
+            profile,
+            segments,
+            color,
+        } => {
+            // Wedge-decompose into a Union of LatheSegments when the
+            // profile is axis-closed and there's at least 3 segments.
+            // Non-axis-closed profiles can't form closed wedges (no
+            // radial-wall closure at the axis), so we leave them as a
+            // single Lathe and the caller's CSG ops bear the original
+            // fragmentation cost.
+            if *segments >= 3 && profile_axis_closed(profile) {
+                let children: Vec<Node> = (0..*segments)
+                    .map(|i| Node::LatheSegment {
+                        profile: profile.clone(),
+                        segments: *segments,
+                        segment_index: i,
+                        color: *color,
+                    })
+                    .collect();
+                Node::Union { children }
+            } else {
+                node.clone()
+            }
+        }
 
         Node::Composition(children) => {
             let simplified: Vec<Node> = children.iter().map(simplify).collect();
@@ -660,19 +723,50 @@ pub fn simplify(node: &Node) -> Node {
         },
         Node::Difference { base, subtract } => {
             let subtract: Vec<Node> = subtract.iter().map(simplify).collect();
+            let base = simplify(base);
 
-            // Distribution check happens on the *unsimplified* base —
-            // simplifying it first would convert a disjoint Union to a
-            // Composition, hiding the Union pattern from us.
-            if let Node::Union { children } = base.as_ref()
-                && children.iter().all(crate::mesh::is_csg_leaf)
-                && subtract.iter().all(crate::mesh::is_csg_leaf)
+            // Try distribution on the simplified base. Three eligible
+            // shapes — all preserve `(A ∪ B …) − Y = (A − Y) ∪ (B − Y) …`:
+            //
+            // 1. `Union { children }` with leaf children — the
+            //    set-algebra identity, restricted to leaves to avoid
+            //    amplifying composite-operand T-junctions/slivers.
+            // 2. `Composition(children)` with pairwise-disjoint leaf
+            //    children — Composition came from the disjoint-union
+            //    rewrite, so its children represent set-disjoint regions
+            //    and the same identity holds. Pairwise-disjoint check
+            //    via `partition_disjoint_aabb` returning N singleton
+            //    groups for N children.
+            //
+            // Subtractors must also be leaves (same safety guarantee).
+            //
+            // The Lathe wedge-decomposition rewrite makes this case
+            // load-bearing for issue 300: `(difference lathe cutter)`
+            // simplifies the Lathe into a Union of LatheSegments
+            // *during base simplification*, and distribution then turns
+            // it into N small per-segment differences instead of one
+            // catastrophically-fragmenting BSP composition.
+            let distributable_children: Option<&[Node]> = if subtract
+                .iter()
+                .all(crate::mesh::is_csg_leaf)
             {
-                // Each arm gets the full subtractor list (cloned) and
-                // is recursively simplified so per-arm AABB-prune and
-                // disjoint-union rewrites can fire on the smaller
-                // pieces. The wrapping Union is then simplified so
-                // disjoint arms collapse into a Composition.
+                match &base {
+                    Node::Union { children } if children.iter().all(crate::mesh::is_csg_leaf) => {
+                        Some(children.as_slice())
+                    }
+                    Node::Composition(children)
+                        if children.iter().all(crate::mesh::is_csg_leaf)
+                            && partition_disjoint_aabb(children).len() == children.len() =>
+                    {
+                        Some(children.as_slice())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            if let Some(children) = distributable_children {
                 let arms: Vec<Node> = children
                     .iter()
                     .map(|c| {
@@ -682,11 +776,20 @@ pub fn simplify(node: &Node) -> Node {
                         })
                     })
                     .collect();
-                return simplify(&Node::Union { children: arms });
+                // Composition base → arms stay disjoint (each arm is a
+                // Difference whose AABB is bounded by its leaf base,
+                // and the original leaves were pairwise disjoint), so
+                // wrap in Composition directly. Union base → wrap in
+                // Union and re-simplify; the disjoint-union rewrite
+                // may further collapse it if the arms turn out
+                // pairwise-disjoint.
+                return match &base {
+                    Node::Composition(_) => Node::Composition(arms),
+                    _ => simplify(&Node::Union { children: arms }),
+                };
             }
 
-            // No distribution — simplify base, AABB-prune subtractors.
-            let base = simplify(base);
+            // No distribution — AABB-prune subtractors against the base.
             let base_aabb = compute_aabb(&base);
             let pruned: Vec<Node> = subtract
                 .into_iter()
@@ -2366,6 +2469,184 @@ mod difference_rewrite_tests {
                 z: 1.0,
                 color: 9,
             }],
+        };
+        let once = simplify(&n);
+        let twice = simplify(&once);
+        assert_eq!(once, twice);
+    }
+}
+
+#[cfg(test)]
+mod profile_axis_closed_tests {
+    use super::*;
+
+    #[test]
+    fn profile_starting_and_ending_at_axis_is_closed() {
+        assert!(profile_axis_closed(&[
+            [0.0, -0.5],
+            [0.5, -0.5],
+            [0.5, 0.5],
+            [0.0, 0.5]
+        ]));
+    }
+
+    #[test]
+    fn profile_open_at_start_is_not_closed() {
+        assert!(!profile_axis_closed(&[[0.5, -0.5], [0.5, 0.5], [0.0, 0.5]]));
+    }
+
+    #[test]
+    fn profile_open_at_end_is_not_closed() {
+        assert!(!profile_axis_closed(&[
+            [0.0, -0.5],
+            [0.5, -0.5],
+            [0.5, 0.5]
+        ]));
+    }
+
+    #[test]
+    fn empty_or_single_vertex_profile_is_not_closed() {
+        assert!(!profile_axis_closed(&[]));
+        assert!(!profile_axis_closed(&[[0.0, 0.0]]));
+    }
+}
+
+#[cfg(test)]
+mod lathe_decomp_tests {
+    use super::*;
+
+    fn closed_profile() -> Vec<[f32; 2]> {
+        vec![[0.0, -0.5], [0.5, -0.5], [0.5, 0.5], [0.0, 0.5]]
+    }
+
+    #[test]
+    fn axis_closed_lathe_rewrites_to_union_of_segments() {
+        let n = Node::Lathe {
+            profile: closed_profile(),
+            segments: 8,
+            color: 5,
+        };
+        let s = simplify(&n);
+        match s {
+            Node::Union { children } => {
+                assert_eq!(children.len(), 8);
+                for (i, child) in children.iter().enumerate() {
+                    match child {
+                        Node::LatheSegment {
+                            segments,
+                            segment_index,
+                            color,
+                            ..
+                        } => {
+                            assert_eq!(*segments, 8);
+                            assert_eq!(*segment_index, i as u32);
+                            assert_eq!(*color, 5);
+                        }
+                        other => panic!("expected LatheSegment, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected Union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_profile_lathe_is_unchanged() {
+        let n = Node::Lathe {
+            profile: vec![[0.5, -0.5], [0.5, 0.5]],
+            segments: 8,
+            color: 0,
+        };
+        assert_eq!(simplify(&n), n);
+    }
+
+    #[test]
+    fn lathe_with_too_few_segments_is_unchanged() {
+        let n = Node::Lathe {
+            profile: closed_profile(),
+            segments: 2,
+            color: 0,
+        };
+        assert_eq!(simplify(&n), n);
+    }
+
+    #[test]
+    fn lathe_segment_passes_through_simplify_unchanged() {
+        let n = Node::LatheSegment {
+            profile: closed_profile(),
+            segments: 8,
+            segment_index: 3,
+            color: 0,
+        };
+        assert_eq!(simplify(&n), n);
+    }
+
+    #[test]
+    fn lathe_segment_aabb_matches_lathe_aabb() {
+        // Conservative bound — same as parent lathe per the v1 design.
+        // Pinning so a future tighter per-wedge bound is a deliberate
+        // change.
+        let lathe_bound = compute_aabb(&Node::Lathe {
+            profile: closed_profile(),
+            segments: 16,
+            color: 0,
+        });
+        let segment_bound = compute_aabb(&Node::LatheSegment {
+            profile: closed_profile(),
+            segments: 16,
+            segment_index: 0,
+            color: 0,
+        });
+        assert_eq!(lathe_bound, segment_bound);
+    }
+
+    #[test]
+    fn difference_of_decomposed_lathe_distributes_through_pipeline() {
+        // The full chain: Lathe → Union<LatheSegment> via wedge
+        // decomp; then `Difference(Union, leaf_cutter)` distributes
+        // → Union of per-segment differences. Pin the final shape so
+        // a regression in any step shows up loudly — issue 300's fix
+        // load-bearing.
+        let n = Node::Difference {
+            base: Box::new(Node::Lathe {
+                profile: closed_profile(),
+                segments: 4,
+                color: 0,
+            }),
+            subtract: vec![Node::Box {
+                x: 0.5,
+                y: 2.0,
+                z: 0.5,
+                color: 1,
+            }],
+        };
+        let s = simplify(&n);
+        match s {
+            Node::Union { children } => {
+                assert_eq!(children.len(), 4, "expected 4 per-segment arms");
+                for child in children {
+                    match child {
+                        Node::Difference { base, subtract } => {
+                            assert!(
+                                matches!(*base, Node::LatheSegment { .. }),
+                                "arm base should be LatheSegment, got {base:?}"
+                            );
+                            assert_eq!(subtract.len(), 1);
+                        }
+                        other => panic!("arm should be Difference, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected Union of per-segment differences, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lathe_decomp_is_idempotent() {
+        let n = Node::Lathe {
+            profile: closed_profile(),
+            segments: 8,
+            color: 0,
         };
         let once = simplify(&n);
         let twice = simplify(&once);

@@ -81,6 +81,12 @@ fn mesh_into_polygons(
             segments,
             color,
         } => mesh_lathe(out, profile, *segments, *color, offset),
+        Node::LatheSegment {
+            profile,
+            segments,
+            segment_index,
+            color,
+        } => mesh_lathe_segment(out, profile, *segments, *segment_index, *color, offset),
         Node::Torus {
             major_radius,
             minor_radius,
@@ -284,6 +290,7 @@ pub(crate) fn is_csg_leaf(node: &Node) -> bool {
         | Node::Wedge { .. }
         | Node::Sphere { .. }
         | Node::Lathe { .. }
+        | Node::LatheSegment { .. }
         | Node::Extrude { .. }
         | Node::Torus { .. }
         | Node::Sweep { .. } => true,
@@ -525,6 +532,78 @@ fn mesh_lathe(
             push_polygon_from_f32(out, &[a, b, d, c], color)?;
         }
     }
+    Ok(())
+}
+
+/// Mesh one angular slice of a lathe as a closed solid (per
+/// [`Node::LatheSegment`]). The slice has `(profile.len() - 1)` outer
+/// quads (matching the existing lathe convention) plus two radial
+/// walls — one at `θ_start`, one at `θ_end` — that close the wedge
+/// off against the lathe axis.
+///
+/// Caller's contract: `profile.first().x == 0` AND `profile.last().x ==
+/// 0` (axis-closed). The simplify rewrite that creates `LatheSegment`
+/// nodes enforces this; constructing one directly from a non-closed
+/// profile silently produces a non-watertight mesh because the radial
+/// walls won't close at the axis.
+fn mesh_lathe_segment(
+    out: &mut Vec<CsgPolygon>,
+    profile: &[[f32; 2]],
+    segments: u32,
+    segment_index: u32,
+    color: u32,
+    offset: [f32; 3],
+) -> Result<(), MeshError> {
+    if profile.len() < 2 || segments < 3 || segment_index >= segments {
+        return Ok(());
+    }
+    let two_pi = std::f32::consts::TAU;
+    let theta_start = two_pi * (segment_index as f32) / (segments as f32);
+    let theta_end = two_pi * ((segment_index + 1) as f32) / (segments as f32);
+    let cos_s = theta_start.cos();
+    let sin_s = theta_start.sin();
+    let cos_e = theta_end.cos();
+    let sin_e = theta_end.sin();
+
+    let revolve = |r: f32, y: f32, cos_t: f32, sin_t: f32| -> [f32; 3] {
+        [offset[0] + r * cos_t, offset[1] + y, offset[2] + r * sin_t]
+    };
+
+    // Outer surface: one quad per profile edge, restricted to the
+    // angular slice [θ_start, θ_end]. Same (a, b, d, c) winding as
+    // mesh_lathe so the radial-outward normal points away from the axis.
+    for k in 0..profile.len() - 1 {
+        let r0 = profile[k][0];
+        let y0 = profile[k][1];
+        let r1 = profile[k + 1][0];
+        let y1 = profile[k + 1][1];
+        let a = revolve(r0, y0, cos_s, sin_s);
+        let b = revolve(r1, y1, cos_s, sin_s);
+        let c = revolve(r0, y0, cos_e, sin_e);
+        let d = revolve(r1, y1, cos_e, sin_e);
+        push_polygon_from_f32(out, &[a, b, d, c], color)?;
+    }
+
+    // Radial wall at θ_start: the profile rotated to that plane,
+    // walked in REVERSED order so the polygon's normal points in the
+    // -θ direction (away from the wedge volume). For axis-closed
+    // profiles, the first and last vertices coincide at the axis;
+    // push_polygon_from_f32 dedupes consecutive identical vertices and
+    // drops a trailing duplicate, so the polygon naturally closes.
+    let wall_start: Vec<[f32; 3]> = profile
+        .iter()
+        .rev()
+        .map(|p| revolve(p[0], p[1], cos_s, sin_s))
+        .collect();
+    push_polygon_from_f32(out, &wall_start, color)?;
+
+    // Radial wall at θ_end: forward profile order, normal points in the
+    // +θ direction.
+    let wall_end: Vec<[f32; 3]> = profile
+        .iter()
+        .map(|p| revolve(p[0], p[1], cos_e, sin_e))
+        .collect();
+    push_polygon_from_f32(out, &wall_end, color)?;
     Ok(())
 }
 
@@ -1076,5 +1155,55 @@ mod tests {
             from_union.len(),
             from_comp.len()
         );
+    }
+
+    /// Pin: a single LatheSegment meshes to a non-empty closed solid
+    /// when the profile is axis-closed. Per-segment basic correctness
+    /// — the wedge has outer quads + two radial walls.
+    #[test]
+    fn lathe_segment_meshes_to_closed_solid() {
+        let n = Node::LatheSegment {
+            profile: vec![[0.0, -0.5], [0.5, -0.5], [0.5, 0.5], [0.0, 0.5]],
+            segments: 16,
+            segment_index: 3,
+            color: 7,
+        };
+        let tris = mesh(&n).expect("lathe segment must mesh");
+        assert!(!tris.is_empty(), "wedge produced no triangles");
+        // Color preserved through the whole chain.
+        assert!(tris.iter().all(|t| t.color == 7));
+    }
+
+    /// End-to-end equivalence: a wedge-decomposed lathe must produce
+    /// the same logical surface (watertight, identical color) as the
+    /// non-decomposed lathe. We compare polygon counts loosely (the
+    /// BSP-union of segments may produce a slightly different
+    /// triangulation than the direct lathe), but the geometric
+    /// validators in `regression.rs` are the load-bearing equivalence
+    /// guarantee — pinning here just catches regressions where the
+    /// decomposed lathe collapses to nothing or doubles up.
+    #[test]
+    fn decomposed_lathe_meshes_to_non_empty_solid() {
+        use crate::parse;
+        let ast = parse("(lathe ((0 -0.5) (0.5 -0.5) (0.5 0.5) (0 0.5)) 16 :color 3)").unwrap();
+        let tris = mesh(&ast).expect("lathe must mesh");
+        assert!(!tris.is_empty(), "lathe produced no triangles");
+        assert!(tris.iter().all(|t| t.color == 3));
+    }
+
+    /// Pin: a non-axis-closed lathe profile (open ends) is NOT
+    /// decomposed — the wedge rewrite requires both endpoints at
+    /// `r == 0` to close the radial walls without an explicit cap.
+    /// The rewrite skips this case; the lathe still meshes via the
+    /// original whole-lathe path.
+    #[test]
+    fn open_profile_lathe_skips_decomposition_and_meshes() {
+        use crate::parse;
+        // Profile starts at (0.5, ...) — not axis-closed.
+        let ast = parse("(lathe ((0.5 -0.5) (0.5 0.5)) 16 :color 5)").unwrap();
+        let tris = mesh(&ast).expect("open-profile lathe must mesh");
+        // Open profile produces an open surface (not watertight) but
+        // should still emit triangles for the cylindrical band.
+        assert!(!tris.is_empty(), "open lathe produced no triangles");
     }
 }
