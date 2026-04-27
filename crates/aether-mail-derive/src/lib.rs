@@ -93,6 +93,15 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     } else {
         quote! { ::aether_mail::__derive_runtime::decode_postcard::<Self>(bytes) }
     };
+    // Issue #240: encode mirror. Same `#[repr(C)]` autodetect as
+    // `decode_body` — a single `Sink::send` call site routes through
+    // `Kind::encode_into_bytes`, picking cast or postcard at the
+    // kind's derive instead of at every send site.
+    let encode_body = if has_repr_c {
+        quote! { ::aether_mail::__derive_runtime::encode_cast::<Self>(self) }
+    } else {
+        quote! { ::aether_mail::__derive_runtime::encode_postcard::<Self>(self) }
+    };
 
     // ADR-0032 section emission goes through trait dispatch, not a
     // syntactic walker. `<Self as Schema>::SCHEMA` / `::LABEL_NODE`
@@ -127,6 +136,10 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
             fn decode_from_bytes(bytes: &[u8]) -> ::core::option::Option<Self> {
                 #decode_body
+            }
+
+            fn encode_into_bytes(&self) -> ::aether_mail::__derive_runtime::Vec<u8> {
+                #encode_body
             }
         }
 

@@ -44,8 +44,9 @@ const SAVE_PATH: &str = "counter.bin";
 /// would want a bigger budget.
 const IO_TIMEOUT_MS: u32 = 1_000;
 /// Broadcast sink — `hub.claude.broadcast` fans out to every
-/// attached Claude session. `Count` is postcard-shaped, so the send
-/// goes through `Sink::send_postcard`.
+/// attached Claude session. `Count` is postcard-shaped; the unified
+/// `Sink::send` routes through `Kind::encode_into_bytes`, which the
+/// derive specializes to postcard here (issue #240).
 const BROADCAST: Sink<Count> = resolve_sink::<Count>("hub.claude.broadcast");
 
 pub struct SaveCounter {
@@ -85,7 +86,7 @@ impl Component for SaveCounter {
             &next.to_le_bytes(),
             IO_TIMEOUT_MS,
         );
-        BROADCAST.send_postcard(&Count { count: next });
+        BROADCAST.send(&Count { count: next });
     }
 }
 

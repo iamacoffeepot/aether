@@ -27,7 +27,7 @@
 //!             held: handle.as_ref(),
 //!             ...
 //!         };
-//!         BROADCAST.send_postcard(&outer);
+//!         BROADCAST.send(&outer);
 //!         // `handle` drops here → fire-and-forget HandleRelease,
 //!         // refcount goes to zero, entry stays in the substrate's
 //!         // store subject to LRU eviction. Pin if the cached bytes
@@ -155,7 +155,7 @@ impl<K> Drop for Handle<K> {
         // The substrate's release dispatch is idempotent — calling
         // it on an already-released id saturates harmlessly.
         let req = HandleRelease { id: self.id };
-        resolve_sink::<HandleRelease>(HANDLE_SINK_NAME).send_postcard(&req);
+        resolve_sink::<HandleRelease>(HANDLE_SINK_NAME).send(&req);
     }
 }
 
@@ -172,7 +172,7 @@ pub fn publish<K: Kind + Serialize>(value: &K) -> Result<Handle<K>, SyncHandleEr
         kind_id: K::ID,
         bytes,
     };
-    resolve_sink::<HandlePublish>(HANDLE_SINK_NAME).send_postcard(&req);
+    resolve_sink::<HandlePublish>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
     let result: HandlePublishResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
     match result {
@@ -186,7 +186,7 @@ pub fn publish<K: Kind + Serialize>(value: &K) -> Result<Handle<K>, SyncHandleEr
 
 fn sync_release(id: u64) -> Result<(), SyncHandleError> {
     let req = HandleRelease { id };
-    resolve_sink::<HandleRelease>(HANDLE_SINK_NAME).send_postcard(&req);
+    resolve_sink::<HandleRelease>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
     let result: HandleReleaseResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
     match result {
@@ -197,7 +197,7 @@ fn sync_release(id: u64) -> Result<(), SyncHandleError> {
 
 fn sync_pin(id: u64) -> Result<(), SyncHandleError> {
     let req = HandlePin { id };
-    resolve_sink::<HandlePin>(HANDLE_SINK_NAME).send_postcard(&req);
+    resolve_sink::<HandlePin>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
     let result: HandlePinResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
     match result {
@@ -208,7 +208,7 @@ fn sync_pin(id: u64) -> Result<(), SyncHandleError> {
 
 fn sync_unpin(id: u64) -> Result<(), SyncHandleError> {
     let req = HandleUnpin { id };
-    resolve_sink::<HandleUnpin>(HANDLE_SINK_NAME).send_postcard(&req);
+    resolve_sink::<HandleUnpin>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
     let result: HandleUnpinResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
     match result {

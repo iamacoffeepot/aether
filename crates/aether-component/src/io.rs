@@ -46,7 +46,6 @@ use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 use aether_mail::Kind;
-use serde::Serialize;
 
 use crate::{raw, resolve_sink};
 
@@ -106,8 +105,8 @@ pub fn list(namespace: &str, prefix: &str) {
     });
 }
 
-fn send<K: Kind + Serialize>(value: &K) -> u64 {
-    resolve_sink::<K>(IO_MAILBOX_NAME).send_postcard(value);
+fn send<K: Kind>(value: &K) -> u64 {
+    resolve_sink::<K>(IO_MAILBOX_NAME).send(value);
     // ADR-0042: capture the correlation the substrate just minted so
     // the sync wrappers can filter on it. For the async helpers
     // (`read` / `write` / `delete` / `list`), this is harmless noise —
@@ -260,6 +259,7 @@ mod tests {
     use aether_kinds::{
         Delete as DeleteKind, List as ListKind, Read as ReadKind, Write as WriteKind,
     };
+    use serde::Serialize;
 
     // The helpers' host-fn send path panics off-wasm (raw::send_mail
     // has a host-target stub). What we *can* test on host is the

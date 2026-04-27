@@ -60,6 +60,29 @@ pub trait Kind {
     {
         None
     }
+
+    /// Encode `self` into a fresh byte buffer in the wire shape this
+    /// kind was declared with. The `Kind` derive auto-implements this
+    /// using the same `#[repr(C)]` autodetect as `decode_from_bytes`
+    /// (cast for `#[repr(C)]` + `NoUninit`, postcard otherwise), so a
+    /// single `Sink::send` / `Ctx::reply` call site dispatches both
+    /// wire shapes without the caller picking the encoder.
+    ///
+    /// Default panics — sending a kind whose impl was hand-rolled
+    /// without an override is a contract violation, not "I have no
+    /// payload" (the symmetric `decode_from_bytes` default returns
+    /// `None`, which the dispatcher surfaces as `DISPATCH_UNKNOWN_KIND`;
+    /// silently shipping zero bytes here would write a garbled mail
+    /// rather than fail loud). Hand-rolled `Kind` impls that need to
+    /// send must override.
+    fn encode_into_bytes(&self) -> Vec<u8> {
+        panic!(
+            "aether-mail: Kind::encode_into_bytes called on `{}` whose impl does not override \
+             it. Use `#[derive(Kind)]` (which emits the body for cast or postcard kinds based \
+             on `#[repr(C)]`) or hand-roll an override before sending.",
+            Self::NAME,
+        );
+    }
 }
 
 /// Compile-time predicate: can this type's payload travel across the
@@ -321,6 +344,7 @@ pub mod __derive_runtime {
         canonical,
     };
     pub use alloc::borrow::Cow;
+    pub use alloc::vec::Vec;
 
     /// Cast-shape decode helper. Routes through `bytemuck::pod_read_unaligned`
     /// after a length check so the Kind derive can emit a uniform call
@@ -343,6 +367,22 @@ pub mod __derive_runtime {
     /// independent of `serde`.
     pub fn decode_postcard<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         postcard::from_bytes(bytes).ok()
+    }
+
+    /// Cast-shape encode helper. Mirror of `decode_cast`. Routes
+    /// through `bytemuck::bytes_of` so the Kind derive emits a uniform
+    /// call without the user crate needing `bytemuck` in scope. The
+    /// `NoUninit` bound lives on the helper so non-cast kinds aren't
+    /// poisoned by a trait their `#[repr(C)]`-less layout can't satisfy.
+    pub fn encode_cast<T: bytemuck::NoUninit>(value: &T) -> alloc::vec::Vec<u8> {
+        ::bytemuck::bytes_of(value).to_vec()
+    }
+
+    /// Postcard-shape encode helper. Mirror of `decode_postcard`. The
+    /// `Serialize` bound lives here, not on `Kind`, so cast kinds stay
+    /// independent of `serde`.
+    pub fn encode_postcard<T: serde::Serialize>(value: &T) -> alloc::vec::Vec<u8> {
+        ::postcard::to_allocvec(value).expect("postcard encode to Vec is infallible")
     }
 }
 
