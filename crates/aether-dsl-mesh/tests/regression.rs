@@ -222,20 +222,17 @@ fn sphere_or_box_and_cylinder_is_geometric() {
     );
 }
 
-/// **Ignored (sliver-edge class)**: the off-axis T-junction fix
-/// (issue #299) eliminated the boundary-edge cracks here, but the
-/// composition still produces 2 SliverEdges (~4e-4) and 2
-/// ExtremeAspectRatios (~2516:1) on a cylinder/cube near-coincident
-/// facet pair. The root cause is a different bug: BSP produces two
-/// distinct vertices ~9 fixed units apart in one axis (above the
-/// `WELD_TOLERANCE_FIXED_UNITS = 4` weld bound, so they survive
-/// cleanup as separate vertices that bound a sliver edge).
+/// **Regression**: pre-fix this composition produced 2 SliverEdges
+/// (~4e-4) and 2 ExtremeAspectRatios (~2516:1) from BSP placing
+/// near-coincident vertices above `WELD_TOLERANCE_FIXED_UNITS = 4`.
+/// Resolved by the cleanup pipeline's pass 4 (sliver removal): an
+/// edge-triggered merge that collapses near-duplicate vertex pairs
+/// only when they bound a polygon edge below `1e-3` world units.
 ///
 /// Multiple rotated cutters at distinct angles through one box. The
 /// closest analogue to the live-substrate three_cut_box but with each
 /// cutter coming in at its own off-axis orientation.
 #[test]
-#[ignore]
 fn box_minus_three_rotated_cutters_is_geometric() {
     assert_geometric(
         "(difference \
@@ -246,18 +243,16 @@ fn box_minus_three_rotated_cutters_is_geometric() {
     );
 }
 
-/// **Ignored (sliver-edge class)**: same root cause as
-/// `box_minus_three_rotated_cutters_is_geometric` — mesh is watertight
-/// (0 manifold violations) but BSP left a near-duplicate vertex pair
-/// that bounds a 2-SliverEdge sequence (~9e-4). Pre-existing before
-/// the issue #299 fix; un-ignore once near-duplicate elimination
-/// (separate issue) lands.
+/// **Regression**: same root cause as
+/// `box_minus_three_rotated_cutters_is_geometric` — pre-fix this
+/// composition was watertight but produced 2 SliverEdges (~9e-4) from
+/// a near-duplicate vertex pair. Resolved by the cleanup pipeline's
+/// pass 4 (sliver removal).
 ///
 /// Non-uniform scale on an otherwise axis-aligned scene. Scale changes
 /// edge lengths asymmetrically — a corner-case for the aspect-ratio
 /// validator and for any BSP code that assumes near-unit edges.
 #[test]
-#[ignore]
 fn nonuniform_scaled_box_minus_sphere_is_geometric() {
     assert_geometric(
         "(scale (2.5 0.6 1.0) \
@@ -307,21 +302,18 @@ fn lathe_minus_tilted_cylinder_is_geometric() {
     );
 }
 
-/// **Ignored (sliver-edge class, severe)**: the off-axis T-junction
-/// fix (issue #299) reduced manifold violations from 13 to 3, but the
-/// composition still produces a SingularEdge plus 2 BoundaryEdges
-/// rooted in the same near-duplicate-vertex bug as
-/// `box_minus_three_rotated_cutters_is_geometric` (BSP leaves vertices
-/// ~9 fixed units apart in one axis, above the weld bound). The
-/// remaining geometry violations (slivers, extreme aspect ratios) are
-/// downstream of the same near-duplicate pair. Useful as a stress
-/// oracle: any fix that reduces this count is a forward step.
+/// **Regression**: pre-fix this was the worst-case off-axis case —
+/// 13 BoundaryEdges, 6 TJunctions, 7 SliverEdges, and 2
+/// ExtremeAspectRatios. The off-axis T-junction fix (issue #299) cut
+/// manifold violations to 3 + 18 geometry; pass 4 sliver removal
+/// (issue #302) cleans up the remaining near-duplicate-vertex bug
+/// class that was producing the SingularEdge + boundary triangles +
+/// slivers.
 ///
 /// Two intersecting tilted cylinders. Pure curved-on-curved CSG,
 /// fully off-axis. The polygon-throughout migration's most demanding
 /// shape-quality test.
 #[test]
-#[ignore]
 fn two_tilted_cylinders_union_is_geometric() {
     assert_geometric(
         "(union \
