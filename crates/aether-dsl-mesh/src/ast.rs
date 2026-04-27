@@ -41,6 +41,22 @@ pub enum Node {
         segments: u32,
         color: u32,
     },
+    /// One angular slice of a [`Node::Lathe`] revolved into a closed
+    /// solid: a wedge bounded by two radial walls (at the slice's start
+    /// and end angles) and the lathe's outer surface restricted to the
+    /// slice's angular range. Internal-only — emitted by the wedge-
+    /// decomposition rewrite in [`crate::simplify`] when a lathe's
+    /// profile is axis-closed (first and last profile points have
+    /// `x == 0`). Not parseable from DSL source.
+    ///
+    /// `segment_index` ranges over `0..segments`; the slice covers
+    /// `[segment_index · 2π/segments, (segment_index+1) · 2π/segments]`.
+    LatheSegment {
+        profile: Vec<[f32; 2]>,
+        segments: u32,
+        segment_index: u32,
+        color: u32,
+    },
     Extrude {
         profile: Vec<[f32; 2]>,
         depth: f32,
