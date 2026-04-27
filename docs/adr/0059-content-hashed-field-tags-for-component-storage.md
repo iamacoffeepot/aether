@@ -96,6 +96,8 @@ field_hash = fnv1a_64_prefixed(FIELD_DOMAIN, canonical(field_name, field_type))
 
 Renames change the field hash (the name is in the canonical bytes). A remap dictionary — `[(old_field_hash, new_field_hash)]` per kind, declared by the kind's author at rename time — bridges the gap. The dict is small, rarely consulted, ships in a wasm custom section adjacent to the kinds manifest (ADR-0028 / ADR-0032).
 
+**Hash width: 64-bit.** All id spaces (`Kind::ID`, `MailboxId`, field hashes, variant hashes) use 64-bit FNV-1a. Per-kind cumulative collision probability stays below 10⁻¹⁰ at realistic ecosystem scope; the derive-time collision check (rule 2) catches the rare birthday strike as a compile error. 128-bit was considered and rejected on FFI grounds — wasm32 has no native 128-bit type, so every host fn carrying ids would split into pairs of i64. Issue [#320](https://github.com/iamacoffeepot/aether/issues/320) tracks the trigger conditions for revisiting if ecosystem growth or threat-model shifts (third-party kinds from untrusted sources, real observed collisions) ever justify the upgrade.
+
 ### Anonymous record names
 
 Nested record types (e.g., a `Vec3`-shaped triple used inside a kind without a top-level kind name) get a **synthesized name** content-derived from their field blob:
@@ -296,7 +298,7 @@ The Option-None and Option-version-skew cases both decode to `None` at the API �
 ### Discipline (the strict rules)
 
 1. Once shipped, a field's content hash is immutable. Changing the field's name or type produces a new hash.
-2. Removing a field reserves its hash forever — no silent semantic reuse. The kind's manifest carries an explicit reserved-hash set; the derive cross-checks new field hashes against this set at compile time and rejects collisions, so removal-then-re-add of a name+type that hashes to a retired slot is caught loudly rather than silently inheriting old wire data.
+2. Removing a field reserves its hash forever — no silent semantic reuse. The kind's manifest carries an explicit reserved-hash set; the derive cross-checks new field hashes against (a) other current fields in the same kind and (b) the kind's reserved-hash set at compile time, and rejects collisions in either direction. Removal-then-re-add of a name+type that hashes to a retired slot is caught loudly rather than silently inheriting old wire data, and the rare within-kind birthday strike between distinct fields fails compile rather than producing two fields with the same wire id.
 3. Type is part of the field hash. Type changes (`u32 → u64`, even a "widen") require a new field hash and a remap entry.
 4. Renames go through the remap dictionary, never silently.
 5. Reordering source code is free (sort order is canonical).
@@ -321,19 +323,19 @@ These were Open Questions in earlier drafts; resolutions are folded into the Dec
 - **Removal vs deprecation** → Hard removal allowed; rule 2 (reserved-hash manifest with derive-time collision check) handles the only real footgun. Deprecation period stays a CI-rule concern, not a wire-format requirement.
 - **Which kinds use TLV** → Opt-in per kind via `#[derive(Storage)]` (vs `#[derive(Mail)]` for the live wire). The trait split (`Storage: Kind`, `Mail: Kind`) makes the choice a type-system property and prevents cross-decoding.
 - **Cast + TLV interaction** → `Storage` is TLV-only; `#[repr(C)]` on a `Storage` type is a derive-time error. The trait fork makes the question moot at the type level.
+- **Field-hash collision policy** → Stay at 64-bit FNV-1a across all id spaces (`Kind::ID`, `MailboxId`, field hashes, variant hashes). Derive-time per-kind collision check on `(current fields ∪ reserved fields)` surfaces the rare birthday strike as a compile error rather than a runtime hope. At realistic ecosystem scope (10⁴–10⁵ cumulative ids), P(collision) stays below ~3 × 10⁻¹⁰; the 128-bit defense was rejected because the FFI cost (every wasm host fn carrying ids splits into pairs of i64; every wire structure widens) outweighs insurance against an event that effectively never happens. Issue [#320](https://github.com/iamacoffeepot/aether/issues/320) tracks the trigger conditions and migration shape if the ecosystem ever grows past ~10⁷ ids and a switch becomes warranted.
 
 ## Open questions
 
 These are the load-bearing things this draft does *not* answer. Each needs a decision before implementation:
 
-1. **Field-hash collision policy.** 64 bits gives ample headroom but isn't infinite. Do we cap field count per kind (collision-resistance practical), detect collisions at derive time (compile error if two field hashes collide within one kind), or just accept the birthday-bound argument as we do for kind ids?
-2. **Composition with the version-graph idea.** TLV makes most diffs transparent. Type changes and semantic renames are the residual; do those want explicit migration edges, or does the remap dictionary cover both? Probably remap covers renames; explicit migrations cover type changes.
-3. **Manifest format.** Where do TLV field hashes, variant hashes, reserved-hash sets, and remap dictionaries live in the wasm? New custom section (`aether.kinds.fields`?), or extension of `aether.kinds.labels`?
-4. **Migration of existing stored payloads.** When a component first opts into TLV storage, is there a one-time migration of old positional payloads, or do we accept that pre-TLV storage is read-only-incompatible?
-5. **Adding an enum variant.** A new writer emits a variant the reader doesn't know — `__variant` carries a hash that doesn't match any variant in the receiver's schema. Two options:
+1. **Composition with the version-graph idea.** TLV makes most diffs transparent. Type changes and semantic renames are the residual; do those want explicit migration edges, or does the remap dictionary cover both? Probably remap covers renames; explicit migrations cover type changes.
+2. **Manifest format.** Where do TLV field hashes, variant hashes, reserved-hash sets, and remap dictionaries live in the wasm? New custom section (`aether.kinds.fields`?), or extension of `aether.kinds.labels`?
+3. **Migration of existing stored payloads.** When a component first opts into TLV storage, is there a one-time migration of old positional payloads, or do we accept that pre-TLV storage is read-only-incompatible?
+4. **Adding an enum variant.** A new writer emits a variant the reader doesn't know — `__variant` carries a hash that doesn't match any variant in the receiver's schema. Two options:
    - Strict (probable v1 default): unknown variant hash → decode error. Adding a variant is a breaking change.
    - Tolerant: bucket the entire enum field's leaves as unknown bytes. The typed value can't represent the unknown variant (Rust enums lack a sentinel arm), so the API would have to surface "this enum had an unknown variant" — significant ergonomic cost. Probably defer until a forcing function appears.
-6. **Variant rename mechanics.** Same shape as field renames — `(old_variant_hash, new_variant_hash)` entries in the remap dict — but the variant's leaves under the old name (`<path>.<OldVariant>.*`) all need their leaf-path remappings too. Open question: do we synthesize per-leaf remap entries from a single variant-rename declaration, or require the author to enumerate every affected leaf? Auto-synthesis is more ergonomic; explicit enumeration is easier to audit.
+5. **Variant rename mechanics.** Same shape as field renames — `(old_variant_hash, new_variant_hash)` entries in the remap dict — but the variant's leaves under the old name (`<path>.<OldVariant>.*`) all need their leaf-path remappings too. Open question: do we synthesize per-leaf remap entries from a single variant-rename declaration, or require the author to enumerate every affected leaf? Auto-synthesis is more ergonomic; explicit enumeration is easier to audit.
 
 ## Alternatives considered
 
