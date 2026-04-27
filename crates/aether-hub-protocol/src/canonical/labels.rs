@@ -18,6 +18,7 @@ const LABEL_ARRAY: u8 = 3;
 const LABEL_STRUCT: u8 = 4;
 const LABEL_ENUM: u8 = 5;
 const LABEL_REF: u8 = 6;
+const LABEL_MAP: u8 = 7;
 
 const VARIANT_LABEL_UNIT: u8 = 0;
 const VARIANT_LABEL_TUPLE: u8 = 1;
@@ -73,6 +74,7 @@ const fn label_node_len(node: &LabelNode) -> usize {
             total
         }
         LabelNode::Ref(cell) => 1 + label_cell_len(cell),
+        LabelNode::Map { key, value } => 1 + label_cell_len(key) + label_cell_len(value),
     }
 }
 
@@ -199,6 +201,12 @@ const fn write_label_node(node: &LabelNode, out: &mut [u8], cursor: usize) -> us
             out[pos] = LABEL_REF;
             pos += 1;
             pos = write_label_cell(cell, out, pos);
+        }
+        LabelNode::Map { key, value } => {
+            out[pos] = LABEL_MAP;
+            pos += 1;
+            pos = write_label_cell(key, out, pos);
+            pos = write_label_cell(value, out, pos);
         }
     }
     pos

@@ -399,6 +399,11 @@ pub fn schema_contains_ref(schema: &SchemaType) -> bool {
             EnumVariant::Tuple { fields, .. } => fields.iter().any(schema_contains_ref),
             EnumVariant::Struct { fields, .. } => fields.iter().any(|f| schema_contains_ref(&f.ty)),
         }),
+        // Issue #232: keys are restricted to `String`/integer/`Bool`
+        // (none of which can carry a `Ref`), but the codec rejects
+        // those defensively rather than the type system, so be
+        // conservative and walk both sides.
+        SchemaType::Map { key, value } => schema_contains_ref(key) || schema_contains_ref(value),
     }
 }
 
@@ -596,6 +601,25 @@ fn walk(
                     Ok(None)
                 }
             }
+        }
+        SchemaType::Map { key, value } => {
+            // Wire is `varint(len) + (k, v)` pairs. Same descent
+            // pattern as `Vec<(K, V)>` — walk every key and every
+            // value; bail out on the first `Ref::Handle` that doesn't
+            // resolve. Keys can't carry `Ref`s under the v1 codec
+            // rules, but the walker treats them uniformly so a
+            // hand-rolled `Schema` impl that lands a `Ref` key here
+            // doesn't silently corrupt the wire.
+            let len = state.read_varint()? as usize;
+            for _ in 0..len {
+                if let Some(parked) = walk(key, state, store)? {
+                    return Ok(Some(parked));
+                }
+                if let Some(parked) = walk(value, state, store)? {
+                    return Ok(Some(parked));
+                }
+            }
+            Ok(None)
         }
         SchemaType::Ref(inner) => {
             let ref_disc_start = state.pos;

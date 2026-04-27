@@ -66,7 +66,8 @@ pub struct KindDescriptor {
 /// the wire format): only legal when every field is itself
 /// cast-eligible — `Scalar`, `Array` of cast-eligible elements, or a
 /// nested `Struct { repr_c: true, .. }`. `String`, `Bytes`, `Vec`,
-/// `Option`, and `Enum` fields disqualify a struct from `repr_c`.
+/// `Option`, `Map`, and `Enum` fields disqualify a struct from
+/// `repr_c`.
 ///
 /// ADR-0031: every recursive field uses `SchemaCell` (static-or-owned)
 /// and every collection/string uses `Cow<'static, _>` so the whole type
@@ -102,6 +103,19 @@ pub enum SchemaType {
     /// inline value, so existing decoders only need to learn
     /// the new tag at the field-walk step.
     Ref(SchemaCell),
+    /// Issue #232: keyed lookup table. Wire form is postcard's
+    /// `BTreeMap<K, V>` — `varint(len) + (k, v)` pairs in
+    /// key-sorted order. Key types are restricted to `String`,
+    /// integer `Scalar`s, and `Bool` (proto3-style stringify
+    /// rule); the Rust-level `BTreeMap<K: Ord, V>` bound makes
+    /// `f32`/`f64`/`Vec`/`Option` unreachable at the type level
+    /// and the codec rejects them defensively. Disqualifies a
+    /// parent struct from `repr_c` — variable-length data has
+    /// no fixed `#[repr(C)]` layout.
+    Map {
+        key: SchemaCell,
+        value: SchemaCell,
+    },
 }
 
 /// Recursion-breaking indirection for nested `SchemaType` fields
@@ -282,6 +296,10 @@ pub enum SchemaShape {
         variants: Vec<VariantShape>,
     },
     Ref(Box<SchemaShape>),
+    Map {
+        key: Box<SchemaShape>,
+        value: Box<SchemaShape>,
+    },
 }
 
 /// Positional enum variant — `VariantShape::Tuple { discriminant, fields }`
@@ -346,6 +364,14 @@ pub enum LabelNode {
         variants: Cow<'static, [VariantLabel]>,
     },
     Ref(LabelCell),
+    /// Issue #232: parallel labels for `SchemaType::Map`. Both
+    /// key and value carry their own cell because either side may
+    /// be a struct/enum whose nominal info needs preserving for
+    /// `describe_kinds` rendering.
+    Map {
+        key: LabelCell,
+        value: LabelCell,
+    },
 }
 
 /// Per-variant nominal info for `LabelNode::Enum`. `name` is the Rust
@@ -450,6 +476,10 @@ impl Clone for LabelNode {
                 variants: variants.clone(),
             },
             LabelNode::Ref(c) => LabelNode::Ref(c.clone()),
+            LabelNode::Map { key, value } => LabelNode::Map {
+                key: key.clone(),
+                value: value.clone(),
+            },
         }
     }
 }
@@ -484,6 +514,9 @@ impl PartialEq for LabelNode {
                 },
             ) => la == lb && va == vb,
             (LabelNode::Ref(a), LabelNode::Ref(b)) => a == b,
+            (LabelNode::Map { key: ka, value: va }, LabelNode::Map { key: kb, value: vb }) => {
+                ka == kb && va == vb
+            }
             _ => false,
         }
     }
@@ -540,6 +573,12 @@ impl Serialize for LabelNode {
                 s.serialize_field(cell)?;
                 s.end()
             }
+            LabelNode::Map { key, value } => {
+                let mut s = serializer.serialize_struct_variant("LabelNode", 7, "Map", 2)?;
+                s.serialize_field("key", key)?;
+                s.serialize_field("value", value)?;
+                s.end()
+            }
         }
     }
 }
@@ -564,6 +603,10 @@ impl<'de> Deserialize<'de> for LabelNode {
                 variants: Vec<VariantLabel>,
             },
             Ref(LabelCell),
+            Map {
+                key: LabelCell,
+                value: LabelCell,
+            },
         }
         match LabelNodeDe::deserialize(deserializer)? {
             LabelNodeDe::Anonymous => Ok(LabelNode::Anonymous),
@@ -587,6 +630,7 @@ impl<'de> Deserialize<'de> for LabelNode {
                 variants: Cow::Owned(variants),
             }),
             LabelNodeDe::Ref(c) => Ok(LabelNode::Ref(c)),
+            LabelNodeDe::Map { key, value } => Ok(LabelNode::Map { key, value }),
         }
     }
 }

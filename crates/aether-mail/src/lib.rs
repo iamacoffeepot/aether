@@ -130,6 +130,11 @@ impl<T> CastEligible for Option<T> {
 impl<K> CastEligible for Ref<K> {
     const ELIGIBLE: bool = false;
 }
+// Issue #232: `BTreeMap<K, V>` is variable-length and disqualifies a
+// parent struct from `repr_c`, same as `Vec`/`String`/`Option`.
+impl<K, V> CastEligible for alloc::collections::BTreeMap<K, V> {
+    const ELIGIBLE: bool = false;
+}
 
 /// Deterministic 64-bit hash of a mailbox name (ADR-0029). Both the
 /// substrate registry and the guest SDK compute mailbox ids from names
@@ -493,6 +498,26 @@ mod schema {
         const SCHEMA: SchemaType = SchemaType::Ref(SchemaCell::Static(&K::SCHEMA));
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode = LabelNode::Ref(LabelCell::Static(&K::LABEL_NODE));
+    }
+
+    // Issue #232: `BTreeMap<K, V>` lands as `SchemaType::Map`. The
+    // `Ord` bound is what proto3-style stringify-and-canonicalize
+    // relies on at the codec layer — sorted iteration makes the
+    // wire bytes deterministic without a runtime sort, and
+    // `Vec`/`Option`/`f32`/`f64` are unreachable as keys at the
+    // type level. `HashMap<K, V>` is rejected at the derive layer
+    // (mail-derive) because its iteration order is platform-
+    // dependent and would diverge canonical bytes across builds.
+    impl<K: Schema + Ord + 'static, V: Schema + 'static> Schema for alloc::collections::BTreeMap<K, V> {
+        const SCHEMA: SchemaType = SchemaType::Map {
+            key: SchemaCell::Static(&K::SCHEMA),
+            value: SchemaCell::Static(&V::SCHEMA),
+        };
+        const LABEL: Option<&'static str> = None;
+        const LABEL_NODE: LabelNode = LabelNode::Map {
+            key: LabelCell::Static(&K::LABEL_NODE),
+            value: LabelCell::Static(&V::LABEL_NODE),
+        };
     }
 }
 

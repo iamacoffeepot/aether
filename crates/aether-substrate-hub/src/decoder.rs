@@ -184,7 +184,8 @@ fn decode_cast_field(
         | SchemaType::Vec(_)
         | SchemaType::Enum { .. }
         | SchemaType::Unit
-        | SchemaType::Ref(_) => Err(DecodeError::UnsupportedSchema(
+        | SchemaType::Ref(_)
+        | SchemaType::Map { .. } => Err(DecodeError::UnsupportedSchema(
             "non-cast field inside cast-shaped struct",
         )),
     }
@@ -323,6 +324,28 @@ fn decode_postcard(
                 })?;
             decode_enum_body(cur, variant, path)
         }
+        SchemaType::Map {
+            key: key_schema,
+            value: value_schema,
+        } => {
+            // Issue #232 + proto3-style JSON mapping. Wire is
+            // postcard's `BTreeMap<K, V>` shape — varint(len) followed
+            // by `(k, v)` pairs in key-sorted order. We emit a JSON
+            // object with the proto3 stringify rule: integer keys as
+            // decimal-string keys, bool keys as `"true"`/`"false"`,
+            // string keys identity. Order in the emitted object isn't
+            // load-bearing for decoders that compare by value.
+            let len = read_varint_u64(cur, path)? as usize;
+            let mut obj = Map::with_capacity(len);
+            for i in 0..len {
+                let entry_path = format!("{path}[{i}]");
+                let key_value = decode_postcard(cur, key_schema, &entry_path)?;
+                let val_value = decode_postcard(cur, value_schema, &entry_path)?;
+                let key_string = render_map_key(&key_value, key_schema, &entry_path)?;
+                obj.insert(key_string, val_value);
+            }
+            Ok(Value::Object(obj))
+        }
         SchemaType::Ref(inner) => {
             // ADR-0045 typed handle. Wire matches the postcard
             // enum encoding: discriminant varint, then either the
@@ -431,6 +454,46 @@ fn decode_enum_body(
             let mut obj = Map::with_capacity(1);
             obj.insert(name, Value::Object(body));
             Ok(Value::Object(obj))
+        }
+    }
+}
+
+/// Stringify a decoded map key into its proto3-JSON form (issue #232).
+/// Mirrors the encoder's `parse_map_key`: string identity, integer
+/// scalars to decimal digits, bool to `"true"`/`"false"`. Anything else
+/// is `UnsupportedSchema` — the BTreeMap<K: Ord, V> bound at the Rust
+/// layer makes those unreachable, but the codec rejects them defensively
+/// in case a descriptor lands here from an external source.
+fn render_map_key(
+    key_value: &Value,
+    key_schema: &SchemaType,
+    path: &str,
+) -> Result<String, DecodeError> {
+    match (key_schema, key_value) {
+        (SchemaType::String, Value::String(s)) => Ok(s.clone()),
+        (SchemaType::Bool, Value::Bool(b)) => Ok(if *b { "true".into() } else { "false".into() }),
+        (SchemaType::Scalar(p), Value::Number(n)) => match p {
+            Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::U64 => Ok(n
+                .as_u64()
+                .ok_or(DecodeError::UnsupportedSchema(
+                    "decoded unsigned key value out of u64 range",
+                ))?
+                .to_string()),
+            Primitive::I8 | Primitive::I16 | Primitive::I32 | Primitive::I64 => Ok(n
+                .as_i64()
+                .ok_or(DecodeError::UnsupportedSchema(
+                    "decoded signed key value out of i64 range",
+                ))?
+                .to_string()),
+            Primitive::F32 | Primitive::F64 => {
+                Err(DecodeError::UnsupportedSchema("float as Map key (no Ord)"))
+            }
+        },
+        _ => {
+            let _ = path;
+            Err(DecodeError::UnsupportedSchema(
+                "Map key must be String, integer scalar, or Bool",
+            ))
         }
     }
 }
@@ -867,5 +930,83 @@ mod tests {
         for n in [0.0, 1.5, -123.456, f64::MIN_POSITIVE, f64::MAX] {
             roundtrip(json!({"x": n}), &schema);
         }
+    }
+
+    // Issue #232 — `SchemaType::Map` decode tests. Each pins JSON
+    // round-trip equivalence: encoder takes a JSON object, decoder
+    // produces the same shape (key strings stringified per proto3).
+
+    fn map_schema(key: SchemaType, value: SchemaType) -> SchemaType {
+        SchemaType::Map {
+            key: SchemaCell::owned(key),
+            value: SchemaCell::owned(value),
+        }
+    }
+
+    #[test]
+    fn map_string_keys_roundtrip() {
+        roundtrip(
+            json!({"content-type": "application/json", "x-trace": "abc123"}),
+            &map_schema(SchemaType::String, SchemaType::String),
+        );
+    }
+
+    #[test]
+    fn map_u32_keys_roundtrip() {
+        // Decoder emits integer keys as decimal-string JSON keys —
+        // matches the encoder's input shape, so round-trip is exact.
+        roundtrip(
+            json!({"1": "one", "42": "answer", "255": "max"}),
+            &map_schema(SchemaType::Scalar(Primitive::U32), SchemaType::String),
+        );
+    }
+
+    #[test]
+    fn map_i64_keys_roundtrip() {
+        roundtrip(
+            json!({"-1": "neg", "0": "zero", "9223372036854775807": "max"}),
+            &map_schema(SchemaType::Scalar(Primitive::I64), SchemaType::String),
+        );
+    }
+
+    #[test]
+    fn map_bool_keys_roundtrip() {
+        roundtrip(
+            json!({"false": 0u32, "true": 1u32}),
+            &map_schema(SchemaType::Bool, SchemaType::Scalar(Primitive::U32)),
+        );
+    }
+
+    #[test]
+    fn map_inside_struct_field_roundtrip() {
+        // The expected shape for the named v1 use case: a map field
+        // inside a postcard struct (HTTP-header-style descriptor).
+        let schema = pc_struct(vec![NamedField {
+            name: "headers".into(),
+            ty: map_schema(SchemaType::String, SchemaType::String),
+        }]);
+        roundtrip(
+            json!({"headers": {"x-foo": "bar", "x-baz": "qux"}}),
+            &schema,
+        );
+    }
+
+    #[test]
+    fn map_empty_roundtrip() {
+        roundtrip(
+            json!({}),
+            &map_schema(SchemaType::String, SchemaType::String),
+        );
+    }
+
+    #[test]
+    fn map_inside_cast_struct_rejected() {
+        let schema = cast_struct(vec![NamedField {
+            name: "headers".into(),
+            ty: map_schema(SchemaType::String, SchemaType::String),
+        }]);
+        // 1-byte payload is enough to fail at the field-walk step.
+        let err = decode_schema(&[0], &schema).unwrap_err();
+        assert!(matches!(err, DecodeError::UnsupportedSchema(_)));
     }
 }
