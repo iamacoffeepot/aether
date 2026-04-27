@@ -5,7 +5,7 @@
 //! format. The pipeline operates in the same fixed-point integer domain
 //! as the BSP CSG core; passes are pure and exact.
 //!
-//! Four passes (composed in order):
+//! Five passes (composed in order):
 //!
 //! 1. **Vertex welding** — converts owned-vertex polygons into an
 //!    indexed-mesh representation, deduplicating vertices by exact
@@ -19,19 +19,25 @@
 //!    lie strictly on an edge of a polygon, and subdivides the edge
 //!    so the vertex becomes part of the polygon's vertex list. Loops
 //!    to fixed point. Operates on n-gons.
-//! 4. **CDT triangulation for the wire** — groups loops by plane,
+//! 4. **Sliver removal** — collapses near-coincident vertex pairs that
+//!    bound a short edge in some polygon (the symptom of off-axis BSP
+//!    drifting beyond the welding tolerance). Edge-triggered, not
+//!    coordinate-triggered, so it doesn't risk colliding distinct
+//!    features.
+//! 5. **CDT triangulation for the wire** — groups loops by plane,
 //!    runs constrained Delaunay triangulation per group (ADR-0056),
 //!    and emits triangle polygons. Multi-loop groups (faces with
 //!    holes) are triangulated as a single CDT call so the hole is
 //!    cut out cleanly.
 //!
-//! Pass 4 is what makes [`run`] return the same `Vec<Polygon>` shape
-//! `csg::ops` expects today. ADR-0057 follow-on PRs will add a
-//! polygon-domain entry point that stops at pass 3 and returns n-gons.
+//! Pass 5 is what makes [`run`] return the same `Vec<Polygon>` shape
+//! `csg::ops` expects today. The polygon-domain entry point
+//! [`run_to_loops`] stops after pass 4 and returns n-gons.
 
 mod cdt;
 mod merge;
 mod mesh;
+mod slivers;
 mod tjunctions;
 mod weld;
 
@@ -45,6 +51,7 @@ pub fn run(polygons: Vec<Polygon>) -> Vec<Polygon> {
     mesh::IndexedMesh::weld(polygons)
         .merge_coplanar()
         .repair_tjunctions()
+        .remove_slivers()
         .cdt_triangulate()
 }
 
@@ -62,6 +69,7 @@ pub fn run_to_loops(polygons: Vec<Polygon>) -> Vec<Polygon> {
     mesh::IndexedMesh::weld(polygons)
         .merge_coplanar()
         .repair_tjunctions()
+        .remove_slivers()
         .into_polygons()
 }
 
