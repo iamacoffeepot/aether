@@ -6,6 +6,7 @@
 use lexpr::{Cons, Number, Value};
 
 use crate::ast::Node;
+use aether_math::Vec3;
 
 pub fn serialize(node: &Node) -> String {
     let value = node_to_value(node);
@@ -211,17 +212,14 @@ fn uint(n: u32) -> Value {
     Value::Number(Number::from(n))
 }
 
-fn vec3_to_value(v: [f32; 3]) -> Value {
-    list([num(v[0]), num(v[1]), num(v[2])])
+fn vec3_to_value(v: Vec3) -> Value {
+    list([num(v.x), num(v.y), num(v.z)])
 }
 
 fn profile_to_value(p: &[[f32; 2]]) -> Value {
     list(p.iter().map(|pt| list([num(pt[0]), num(pt[1])])))
 }
 
-fn path_to_value(p: &[[f32; 3]]) -> Value {
-    list(
-        p.iter()
-            .map(|pt| list([num(pt[0]), num(pt[1]), num(pt[2])])),
-    )
+fn path_to_value(p: &[Vec3]) -> Value {
+    list(p.iter().map(|pt| list([num(pt.x), num(pt.y), num(pt.z)])))
 }

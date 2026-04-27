@@ -6,6 +6,7 @@
 use lexpr::Value;
 
 use crate::ast::{Axis, Node};
+use aether_math::Vec3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
@@ -203,7 +204,7 @@ fn as_u32(value: &Value) -> Result<u32, ParseError> {
         .ok_or_else(|| ParseError::ExpectedInteger(format!("{value}")))
 }
 
-fn as_vec3(node: &'static str, value: &Value) -> Result<[f32; 3], ParseError> {
+fn as_vec3(node: &'static str, value: &Value) -> Result<Vec3, ParseError> {
     let items = list_to_vec(value)?;
     if items.len() != 3 {
         return Err(ParseError::WrongVectorLength {
@@ -212,7 +213,11 @@ fn as_vec3(node: &'static str, value: &Value) -> Result<[f32; 3], ParseError> {
             got: items.len(),
         });
     }
-    Ok([as_f32(items[0])?, as_f32(items[1])?, as_f32(items[2])?])
+    Ok(Vec3::new(
+        as_f32(items[0])?,
+        as_f32(items[1])?,
+        as_f32(items[2])?,
+    ))
 }
 
 fn as_profile(value: &Value) -> Result<Vec<[f32; 2]>, ParseError> {
@@ -347,7 +352,7 @@ fn as_scalar_list(value: &Value) -> Result<Vec<f32>, ParseError> {
     items.iter().map(|v| as_f32(v)).collect()
 }
 
-fn as_path(value: &Value) -> Result<Vec<[f32; 3]>, ParseError> {
+fn as_path(value: &Value) -> Result<Vec<Vec3>, ParseError> {
     let points = list_to_vec(value)?;
     let mut out = Vec::with_capacity(points.len());
     for p in points {

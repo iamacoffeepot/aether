@@ -1,6 +1,7 @@
 //! Tests for the v2 vocabulary additions: torus + sweep-along-path.
 
 use aether_dsl_mesh::{ParseError, mesh, parse};
+use aether_math::Vec3;
 
 #[test]
 fn torus_triangle_count_is_two_per_quad() {
@@ -24,37 +25,22 @@ fn torus_face_normals_point_outward() {
         let a = tri.vertices[0];
         let b = tri.vertices[1];
         let c = tri.vertices[2];
-        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-        let normal = [
-            ab[1] * ac[2] - ab[2] * ac[1],
-            ab[2] * ac[0] - ab[0] * ac[2],
-            ab[0] * ac[1] - ab[1] * ac[0],
-        ];
+        let normal = (b - a).cross(c - a);
         // Centroid in XZ; project onto the major circle.
-        let cent = [
-            (a[0] + b[0] + c[0]) / 3.0,
-            (a[1] + b[1] + c[1]) / 3.0,
-            (a[2] + b[2] + c[2]) / 3.0,
-        ];
-        let radial_xz = (cent[0] * cent[0] + cent[2] * cent[2]).sqrt();
+        let cent = (a + b + c) * (1.0 / 3.0);
+        let radial_xz = (cent.x * cent.x + cent.z * cent.z).sqrt();
         let tube_center = if radial_xz < 1e-6 {
-            [0.0, 0.0, 0.0]
+            Vec3::ZERO
         } else {
-            [
-                cent[0] / radial_xz * major_radius,
+            Vec3::new(
+                cent.x / radial_xz * major_radius,
                 0.0,
-                cent[2] / radial_xz * major_radius,
-            ]
+                cent.z / radial_xz * major_radius,
+            )
         };
-        let outward = [
-            cent[0] - tube_center[0],
-            cent[1] - tube_center[1],
-            cent[2] - tube_center[2],
-        ];
-        let dot = normal[0] * outward[0] + normal[1] * outward[1] + normal[2] * outward[2];
+        let outward = cent - tube_center;
         assert!(
-            dot > 0.0,
+            normal.dot(outward) > 0.0,
             "torus face normal points inward for triangle {tri:?}"
         );
     }
@@ -98,14 +84,18 @@ fn sweep_curved_path_keeps_profile_perpendicular() {
     assert_eq!(tris.len(), 16);
     // Sanity: every vertex should be within `radius * sqrt(2)` of a
     // waypoint (corners of the square profile). Conservative bound.
-    let path = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]];
+    let path = [
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(1.0, 1.0, 0.0),
+    ];
     for tri in &tris {
         for v in tri.vertices {
             let mut min_dist = f32::MAX;
             for p in &path {
-                let dx = v[0] - p[0];
-                let dy = v[1] - p[1];
-                let dz = v[2] - p[2];
+                let dx = v.x - p.x;
+                let dy = v.y - p.y;
+                let dz = v.z - p.z;
                 let d = (dx * dx + dy * dy + dz * dz).sqrt();
                 if d < min_dist {
                     min_dist = d;

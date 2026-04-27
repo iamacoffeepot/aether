@@ -16,6 +16,7 @@
 //! violation with concrete vertex coords pointing at the failure.
 
 use crate::polygon::Polygon;
+use aether_math::Vec3;
 use std::collections::{HashMap, HashSet};
 
 /// Default tolerances for geometric validators. All in world units.
@@ -59,18 +60,18 @@ pub mod tol {
 /// edge) hash to the same key even after f32 round-tripping.
 type VertKey = (i32, i32, i32);
 
-fn vert_key(v: [f32; 3]) -> VertKey {
+fn vert_key(v: Vec3) -> VertKey {
     use crate::csg::fixed::f32_to_fixed;
     (
-        f32_to_fixed(v[0]).unwrap_or(0),
-        f32_to_fixed(v[1]).unwrap_or(0),
-        f32_to_fixed(v[2]).unwrap_or(0),
+        f32_to_fixed(v.x).unwrap_or(0),
+        f32_to_fixed(v.y).unwrap_or(0),
+        f32_to_fixed(v.z).unwrap_or(0),
     )
 }
 
-fn from_key(k: VertKey) -> [f32; 3] {
+fn from_key(k: VertKey) -> Vec3 {
     use crate::csg::fixed::fixed_to_f32;
-    [fixed_to_f32(k.0), fixed_to_f32(k.1), fixed_to_f32(k.2)]
+    Vec3::new(fixed_to_f32(k.0), fixed_to_f32(k.1), fixed_to_f32(k.2))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,19 +79,19 @@ pub enum ManifoldViolation {
     /// Edge appears in only one direction with no reverse twin —
     /// the mesh has a hole (boundary) where this edge sits. For CSG
     /// output (which should be closed), this means a face is missing.
-    BoundaryEdge { v0: [f32; 3], v1: [f32; 3] },
+    BoundaryEdge { v0: Vec3, v1: Vec3 },
     /// Edge (or its reverse) appears more than 2 times total —
     /// non-manifold topology. Multiple faces share this edge.
     SingularEdge {
-        v0: [f32; 3],
-        v1: [f32; 3],
+        v0: Vec3,
+        v1: Vec3,
         forward_count: usize,
         reverse_count: usize,
     },
     /// Edge appears the right number of times (2 total) but both in
     /// the same direction — adjacent faces don't have opposite
     /// winding, so the surface orientation is inconsistent.
-    InconsistentWinding { v0: [f32; 3], v1: [f32; 3] },
+    InconsistentWinding { v0: Vec3, v1: Vec3 },
 }
 
 /// Walk every directed edge across every polygon (outer + holes) and
@@ -99,7 +100,7 @@ pub enum ManifoldViolation {
 pub fn validate_manifold(polygons: &[Polygon]) -> Vec<ManifoldViolation> {
     let mut directed: HashMap<(VertKey, VertKey), usize> = HashMap::new();
 
-    let record_loop = |loop_: &[[f32; 3]], directed: &mut HashMap<(VertKey, VertKey), usize>| {
+    let record_loop = |loop_: &[Vec3], directed: &mut HashMap<(VertKey, VertKey), usize>| {
         let n = loop_.len();
         if n < 2 {
             return;
@@ -165,7 +166,7 @@ pub enum GeometryViolation {
     /// re-derivation bug, or a genuinely non-planar n-gon).
     NonPlanar {
         polygon_index: usize,
-        vertex: [f32; 3],
+        vertex: Vec3,
         distance: f32,
     },
     /// A polygon's projected signed area is below `tol::DEGENERATE_AREA`
@@ -176,8 +177,8 @@ pub enum GeometryViolation {
     /// through CSG cleanup and trigger CDT pathologies.
     SliverEdge {
         polygon_index: usize,
-        v0: [f32; 3],
-        v1: [f32; 3],
+        v0: Vec3,
+        v1: Vec3,
         length: f32,
     },
     /// A polygon's longest:shortest edge ratio exceeds `tol::ASPECT_RATIO`.
@@ -185,71 +186,41 @@ pub enum GeometryViolation {
     /// Two polygons share an edge but their stored normals point nearly
     /// opposite (`dot < tol::FOLD_COS`) — a folded surface, almost
     /// always a CSG sign error.
-    FoldedNormals {
-        v0: [f32; 3],
-        v1: [f32; 3],
-        cos_angle: f32,
-    },
+    FoldedNormals { v0: Vec3, v1: Vec3, cos_angle: f32 },
     /// A vertex lies on the open interior of a non-incident edge — a
     /// T-junction. Cleanup should have inserted this vertex into the
     /// edge's owning loop; missing it produces render-visible cracks.
     TJunction {
-        vertex: [f32; 3],
-        edge_v0: [f32; 3],
-        edge_v1: [f32; 3],
+        vertex: Vec3,
+        edge_v0: Vec3,
+        edge_v1: Vec3,
         distance: f32,
     },
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn length(v: [f32; 3]) -> f32 {
-    dot(v, v).sqrt()
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
 }
 
 /// Build a 2D basis (u, v) on the plane normal to `n` so a polygon can
 /// be projected for shoelace area. Picks the world axis least aligned
 /// with `n` to avoid degenerate cross products.
-fn plane_basis(n: [f32; 3]) -> ([f32; 3], [f32; 3]) {
-    let abs = [n[0].abs(), n[1].abs(), n[2].abs()];
-    let helper = if abs[0] <= abs[1] && abs[0] <= abs[2] {
-        [1.0, 0.0, 0.0]
-    } else if abs[1] <= abs[2] {
-        [0.0, 1.0, 0.0]
+fn plane_basis(n: Vec3) -> (Vec3, Vec3) {
+    let abs = Vec3::new(n.x.abs(), n.y.abs(), n.z.abs());
+    let helper = if abs.x <= abs.y && abs.x <= abs.z {
+        Vec3::X
+    } else if abs.y <= abs.z {
+        Vec3::Y
     } else {
-        [0.0, 0.0, 1.0]
+        Vec3::Z
     };
-    let u_raw = cross(n, helper);
-    let u_len = length(u_raw);
-    let u = if u_len > 0.0 {
-        [u_raw[0] / u_len, u_raw[1] / u_len, u_raw[2] / u_len]
-    } else {
-        [1.0, 0.0, 0.0]
-    };
-    let v = cross(n, u);
+    let u = n.cross(helper).normalize_or(Vec3::X);
+    let v = n.cross(u);
     (u, v)
 }
 
-fn projected_area(verts: &[[f32; 3]], n: [f32; 3]) -> f32 {
+fn projected_area(verts: &[Vec3], n: Vec3) -> f32 {
     if verts.len() < 3 {
         return 0.0;
     }
     let (u, v) = plane_basis(n);
-    let projected: Vec<(f32, f32)> = verts.iter().map(|p| (dot(*p, u), dot(*p, v))).collect();
+    let projected: Vec<(f32, f32)> = verts.iter().map(|p| (p.dot(u), p.dot(v))).collect();
     let mut sum = 0.0;
     for i in 0..projected.len() {
         let (x0, y0) = projected[i];
@@ -274,8 +245,8 @@ pub fn validate_planarity(polygons: &[Polygon]) -> Vec<GeometryViolation> {
         // the polygon is genuinely planar; centroid would mask a single
         // out-of-plane vertex by averaging it in).
         let p0 = poly.vertices[0];
-        let check = |v: [f32; 3], out: &mut Vec<GeometryViolation>| {
-            let d = dot(sub(v, p0), n).abs();
+        let check = |v: Vec3, out: &mut Vec<GeometryViolation>| {
+            let d = ((v) - (p0)).dot(n).abs();
             if d > tol::PLANARITY {
                 out.push(GeometryViolation::NonPlanar {
                     polygon_index: i,
@@ -315,7 +286,7 @@ pub fn validate_polygon_quality(polygons: &[Polygon]) -> Vec<GeometryViolation> 
         for j in 0..n {
             let a = poly.vertices[j];
             let b = poly.vertices[(j + 1) % n];
-            let len = length(sub(b, a));
+            let len = ((b) - (a)).length();
             if len < tol::SLIVER_EDGE {
                 out.push(GeometryViolation::SliverEdge {
                     polygon_index: i,
@@ -353,10 +324,10 @@ pub fn validate_polygon_quality(polygons: &[Polygon]) -> Vec<GeometryViolation> 
 /// inside vs outside on one of the two faces.
 pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation> {
     // Map: canonical (snapped) edge → list of (polygon_index, normal).
-    type EdgeIncidents = HashMap<(VertKey, VertKey), Vec<(usize, [f32; 3])>>;
+    type EdgeIncidents = HashMap<(VertKey, VertKey), Vec<(usize, Vec3)>>;
     let mut edges: EdgeIncidents = HashMap::new();
     for (i, poly) in polygons.iter().enumerate() {
-        let walk = |loop_: &[[f32; 3]], edges: &mut EdgeIncidents| {
+        let walk = |loop_: &[Vec3], edges: &mut EdgeIncidents| {
             let n = loop_.len();
             for j in 0..n {
                 let a = vert_key(loop_[j]);
@@ -391,7 +362,7 @@ pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation>
         if !seen.insert(pair) {
             continue;
         }
-        let cos = dot(n0, n1);
+        let cos = (n0).dot(n1);
         if cos < tol::FOLD_COS {
             out.push(GeometryViolation::FoldedNormals {
                 v0: from_key(*a),
@@ -411,7 +382,7 @@ pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation>
 /// owning loop; missing it produces render-visible cracks.
 pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
     // Collect every distinct vertex (snap-key + f32 coords for reporting).
-    let mut all_verts: HashMap<VertKey, [f32; 3]> = HashMap::new();
+    let mut all_verts: HashMap<VertKey, Vec3> = HashMap::new();
     for poly in polygons {
         for &v in &poly.vertices {
             all_verts.insert(vert_key(v), v);
@@ -426,7 +397,7 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
     // Collect every directed edge once (canonicalized).
     let mut edges: HashSet<(VertKey, VertKey)> = HashSet::new();
     for poly in polygons {
-        let walk = |loop_: &[[f32; 3]], edges: &mut HashSet<(VertKey, VertKey)>| {
+        let walk = |loop_: &[Vec3], edges: &mut HashSet<(VertKey, VertKey)>| {
             let n = loop_.len();
             for j in 0..n {
                 let a = vert_key(loop_[j]);
@@ -449,8 +420,8 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
     for (a_key, b_key) in &edges {
         let a = from_key(*a_key);
         let b = from_key(*b_key);
-        let ab = sub(b, a);
-        let ab_len_sq = dot(ab, ab);
+        let ab = (b) - (a);
+        let ab_len_sq = (ab).dot(ab);
         if ab_len_sq <= 0.0 {
             continue;
         }
@@ -458,8 +429,8 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
             if *v_key == *a_key || *v_key == *b_key {
                 continue;
             }
-            let av = sub(*v, a);
-            let t = dot(av, ab) / ab_len_sq;
+            let av = (*v) - (a);
+            let t = (av).dot(ab) / ab_len_sq;
             // Open interior — exclude endpoints by a small parametric margin
             // proportional to the snap tolerance vs. edge length.
             let margin = (tol::T_JUNCTION / ab_len_sq.sqrt()).min(0.5);
@@ -467,9 +438,9 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
                 continue;
             }
             // Perpendicular distance from V to line AB.
-            let proj = [a[0] + t * ab[0], a[1] + t * ab[1], a[2] + t * ab[2]];
-            let d = sub(*v, proj);
-            let d_sq = dot(d, d);
+            let proj = a + ab * t;
+            let d = *v - proj;
+            let d_sq = d.dot(d);
             if d_sq <= tol_sq {
                 out.push(GeometryViolation::TJunction {
                     vertex: *v,
@@ -540,9 +511,9 @@ pub fn summary(polygons: &[Polygon]) -> Summary {
     let mut by_plane_direction: HashMap<(i8, i8, i8), usize> = HashMap::new();
     for p in polygons {
         let key = (
-            p.plane_normal[0].signum() as i8,
-            p.plane_normal[1].signum() as i8,
-            p.plane_normal[2].signum() as i8,
+            p.plane_normal.x.signum() as i8,
+            p.plane_normal.y.signum() as i8,
+            p.plane_normal.z.signum() as i8,
         );
         *by_plane_direction.entry(key).or_insert(0) += 1;
     }
@@ -562,13 +533,13 @@ pub fn summary(polygons: &[Polygon]) -> Summary {
 pub fn dump(polygons: &[Polygon]) -> String {
     let mut out = String::new();
     for (i, p) in polygons.iter().enumerate() {
-        let cx: f32 = p.vertices.iter().map(|v| v[0]).sum::<f32>() / p.vertices.len() as f32;
-        let cy: f32 = p.vertices.iter().map(|v| v[1]).sum::<f32>() / p.vertices.len() as f32;
-        let cz: f32 = p.vertices.iter().map(|v| v[2]).sum::<f32>() / p.vertices.len() as f32;
+        let cx: f32 = p.vertices.iter().map(|v| v.x).sum::<f32>() / p.vertices.len() as f32;
+        let cy: f32 = p.vertices.iter().map(|v| v.y).sum::<f32>() / p.vertices.len() as f32;
+        let cz: f32 = p.vertices.iter().map(|v| v.z).sum::<f32>() / p.vertices.len() as f32;
         out.push_str(&format!(
             "[{:>3}] color={} normal=({:+.3},{:+.3},{:+.3}) verts={:>2} holes={} centroid=({:+.3},{:+.3},{:+.3})\n",
             i, p.color,
-            p.plane_normal[0], p.plane_normal[1], p.plane_normal[2],
+            p.plane_normal.x, p.plane_normal.y, p.plane_normal.z,
             p.vertices.len(), p.holes.len(),
             cx, cy, cz,
         ));
@@ -642,7 +613,7 @@ mod tests {
     use super::*;
     use crate::Polygon;
 
-    fn quad(verts: [[f32; 3]; 4], normal: [f32; 3]) -> Polygon {
+    fn quad(verts: [Vec3; 4], normal: Vec3) -> Polygon {
         Polygon {
             vertices: verts.to_vec(),
             holes: vec![],
@@ -658,33 +629,63 @@ mod tests {
         let polys = vec![
             // -X
             quad(
-                [[-h, -h, -h], [-h, -h, h], [-h, h, h], [-h, h, -h]],
-                [-1.0, 0.0, 0.0],
+                [
+                    Vec3::new(-h, -h, -h),
+                    Vec3::new(-h, -h, h),
+                    Vec3::new(-h, h, h),
+                    Vec3::new(-h, h, -h),
+                ],
+                Vec3::new(-1.0, 0.0, 0.0),
             ),
             // +X
             quad(
-                [[h, -h, -h], [h, h, -h], [h, h, h], [h, -h, h]],
-                [1.0, 0.0, 0.0],
+                [
+                    Vec3::new(h, -h, -h),
+                    Vec3::new(h, h, -h),
+                    Vec3::new(h, h, h),
+                    Vec3::new(h, -h, h),
+                ],
+                Vec3::new(1.0, 0.0, 0.0),
             ),
             // -Y
             quad(
-                [[-h, -h, -h], [h, -h, -h], [h, -h, h], [-h, -h, h]],
-                [0.0, -1.0, 0.0],
+                [
+                    Vec3::new(-h, -h, -h),
+                    Vec3::new(h, -h, -h),
+                    Vec3::new(h, -h, h),
+                    Vec3::new(-h, -h, h),
+                ],
+                Vec3::new(0.0, -1.0, 0.0),
             ),
             // +Y
             quad(
-                [[-h, h, -h], [-h, h, h], [h, h, h], [h, h, -h]],
-                [0.0, 1.0, 0.0],
+                [
+                    Vec3::new(-h, h, -h),
+                    Vec3::new(-h, h, h),
+                    Vec3::new(h, h, h),
+                    Vec3::new(h, h, -h),
+                ],
+                Vec3::new(0.0, 1.0, 0.0),
             ),
             // -Z
             quad(
-                [[-h, -h, -h], [-h, h, -h], [h, h, -h], [h, -h, -h]],
-                [0.0, 0.0, -1.0],
+                [
+                    Vec3::new(-h, -h, -h),
+                    Vec3::new(-h, h, -h),
+                    Vec3::new(h, h, -h),
+                    Vec3::new(h, -h, -h),
+                ],
+                Vec3::new(0.0, 0.0, -1.0),
             ),
             // +Z
             quad(
-                [[-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h]],
-                [0.0, 0.0, 1.0],
+                [
+                    Vec3::new(-h, -h, h),
+                    Vec3::new(h, -h, h),
+                    Vec3::new(h, h, h),
+                    Vec3::new(-h, h, h),
+                ],
+                Vec3::new(0.0, 0.0, 1.0),
             ),
         ];
         let violations = validate_manifold(&polys);
@@ -709,15 +710,15 @@ mod tests {
         // The validator's directed-edge counter sees forward_count=3
         // and reverse_count=0 — should report SingularEdge with
         // forward=3, reverse=0.
-        let a = [0.0, 0.0, 0.0];
-        let b = [1.0, 0.0, 0.0];
-        let c = [0.0, 1.0, 0.0];
-        let d = [0.0, -1.0, 0.0];
-        let e = [0.0, 0.5, 0.5];
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let c = Vec3::new(0.0, 1.0, 0.0);
+        let d = Vec3::new(0.0, -1.0, 0.0);
+        let e = Vec3::new(0.0, 0.5, 0.5);
         let polys = vec![
-            quad([a, b, c, c], [0.0, 0.0, 1.0]),
-            quad([a, b, d, d], [0.0, 0.0, -1.0]),
-            quad([a, b, e, e], [0.0, 1.0, 1.0]),
+            quad([a, b, c, c], Vec3::new(0.0, 0.0, 1.0)),
+            quad([a, b, d, d], Vec3::new(0.0, 0.0, -1.0)),
+            quad([a, b, e, e], Vec3::new(0.0, 1.0, 1.0)),
         ];
         let violations = validate_manifold(&polys);
         let singular = violations
@@ -735,13 +736,13 @@ mod tests {
         // Two triangles that share an edge but walk it the same
         // direction (both `a → b`) instead of opposing. Should report
         // InconsistentWinding.
-        let a = [0.0, 0.0, 0.0];
-        let b = [1.0, 0.0, 0.0];
-        let c1 = [0.5, 1.0, 0.0];
-        let c2 = [0.5, -1.0, 0.0];
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let c1 = Vec3::new(0.5, 1.0, 0.0);
+        let c2 = Vec3::new(0.5, -1.0, 0.0);
         let polys = vec![
-            quad([a, b, c1, c1], [0.0, 0.0, 1.0]),
-            quad([a, b, c2, c2], [0.0, 0.0, -1.0]),
+            quad([a, b, c1, c1], Vec3::new(0.0, 0.0, 1.0)),
+            quad([a, b, c2, c2], Vec3::new(0.0, 0.0, -1.0)),
         ];
         let violations = validate_manifold(&polys);
         let inconsistent = violations
@@ -760,8 +761,13 @@ mod tests {
         // counting logic doesn't silently desync from input size.
         let h = 0.5;
         let polys = vec![quad(
-            [[-h, -h, -h], [h, -h, -h], [h, h, -h], [-h, h, -h]],
-            [0.0, 0.0, -1.0],
+            [
+                Vec3::new(-h, -h, -h),
+                Vec3::new(h, -h, -h),
+                Vec3::new(h, h, -h),
+                Vec3::new(-h, h, -h),
+            ],
+            Vec3::new(0.0, 0.0, -1.0),
         )];
         let s = summary(&polys);
         assert_eq!(s.polygon_count, 1);
@@ -779,13 +785,13 @@ mod tests {
         // +Z, so the lifted vertex's distance is exactly the lift.
         let polys = vec![Polygon {
             vertices: vec![
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [1.0, 1.0, 0.0],
-                [0.0, 1.0, 0.01],
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.01),
             ],
             holes: vec![],
-            plane_normal: [0.0, 0.0, 1.0],
+            plane_normal: Vec3::new(0.0, 0.0, 1.0),
             color: 0,
         }];
         let v = validate_planarity(&polys);
@@ -798,9 +804,13 @@ mod tests {
         // Triangle with one edge 1e-4 long — well below the 1e-3
         // SLIVER threshold.
         let polys = vec![Polygon {
-            vertices: vec![[0.0, 0.0, 0.0], [1e-4, 0.0, 0.0], [0.5, 1.0, 0.0]],
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1e-4, 0.0, 0.0),
+                Vec3::new(0.5, 1.0, 0.0),
+            ],
             holes: vec![],
-            plane_normal: [0.0, 0.0, 1.0],
+            plane_normal: Vec3::new(0.0, 0.0, 1.0),
             color: 0,
         }];
         let v = validate_polygon_quality(&polys);
@@ -817,23 +827,23 @@ mod tests {
         // stored normals (+Z and −Z). They wind opposing around the
         // shared edge so manifold check passes — only normal
         // coherence catches the fold.
-        let a = [0.0, 0.0, 0.0];
-        let b = [1.0, 0.0, 0.0];
-        let c = [1.0, 1.0, 0.0];
-        let d = [0.0, 1.0, 0.0];
-        let e = [1.0, -1.0, 0.0];
-        let f = [0.0, -1.0, 0.0];
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let c = Vec3::new(1.0, 1.0, 0.0);
+        let d = Vec3::new(0.0, 1.0, 0.0);
+        let e = Vec3::new(1.0, -1.0, 0.0);
+        let f = Vec3::new(0.0, -1.0, 0.0);
         let polys = vec![
             Polygon {
                 vertices: vec![a, b, c, d],
                 holes: vec![],
-                plane_normal: [0.0, 0.0, 1.0],
+                plane_normal: Vec3::new(0.0, 0.0, 1.0),
                 color: 0,
             },
             Polygon {
                 vertices: vec![b, a, f, e],
                 holes: vec![],
-                plane_normal: [0.0, 0.0, -1.0],
+                plane_normal: Vec3::new(0.0, 0.0, -1.0),
                 color: 0,
             },
         ];
@@ -850,16 +860,16 @@ mod tests {
         // Triangle (a,b,c) plus a smaller triangle whose vertex sits
         // exactly on edge (a,b) but is not in (a,b)'s loop. Classic
         // T-junction.
-        let a = [0.0, 0.0, 0.0];
-        let b = [1.0, 0.0, 0.0];
-        let c = [0.5, 1.0, 0.0];
-        let mid_ab = [0.5, 0.0, 0.0]; // on edge a→b interior
-        let d = [0.5, -1.0, 0.0];
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(1.0, 0.0, 0.0);
+        let c = Vec3::new(0.5, 1.0, 0.0);
+        let mid_ab = Vec3::new(0.5, 0.0, 0.0); // on edge a→b interior
+        let d = Vec3::new(0.5, -1.0, 0.0);
         let polys = vec![
             Polygon {
                 vertices: vec![a, b, c],
                 holes: vec![],
-                plane_normal: [0.0, 0.0, 1.0],
+                plane_normal: Vec3::new(0.0, 0.0, 1.0),
                 color: 0,
             },
             Polygon {
@@ -869,13 +879,13 @@ mod tests {
                 // polygon's loop.
                 vertices: vec![a, mid_ab, d],
                 holes: vec![],
-                plane_normal: [0.0, 0.0, -1.0],
+                plane_normal: Vec3::new(0.0, 0.0, -1.0),
                 color: 0,
             },
             Polygon {
                 vertices: vec![mid_ab, b, d],
                 holes: vec![],
-                plane_normal: [0.0, 0.0, -1.0],
+                plane_normal: Vec3::new(0.0, 0.0, -1.0),
                 color: 0,
             },
         ];
@@ -893,24 +903,49 @@ mod tests {
         // Same as above but drop the +Z face.
         let polys = vec![
             quad(
-                [[-h, -h, -h], [-h, -h, h], [-h, h, h], [-h, h, -h]],
-                [-1.0, 0.0, 0.0],
+                [
+                    Vec3::new(-h, -h, -h),
+                    Vec3::new(-h, -h, h),
+                    Vec3::new(-h, h, h),
+                    Vec3::new(-h, h, -h),
+                ],
+                Vec3::new(-1.0, 0.0, 0.0),
             ),
             quad(
-                [[h, -h, -h], [h, h, -h], [h, h, h], [h, -h, h]],
-                [1.0, 0.0, 0.0],
+                [
+                    Vec3::new(h, -h, -h),
+                    Vec3::new(h, h, -h),
+                    Vec3::new(h, h, h),
+                    Vec3::new(h, -h, h),
+                ],
+                Vec3::new(1.0, 0.0, 0.0),
             ),
             quad(
-                [[-h, -h, -h], [h, -h, -h], [h, -h, h], [-h, -h, h]],
-                [0.0, -1.0, 0.0],
+                [
+                    Vec3::new(-h, -h, -h),
+                    Vec3::new(h, -h, -h),
+                    Vec3::new(h, -h, h),
+                    Vec3::new(-h, -h, h),
+                ],
+                Vec3::new(0.0, -1.0, 0.0),
             ),
             quad(
-                [[-h, h, -h], [-h, h, h], [h, h, h], [h, h, -h]],
-                [0.0, 1.0, 0.0],
+                [
+                    Vec3::new(-h, h, -h),
+                    Vec3::new(-h, h, h),
+                    Vec3::new(h, h, h),
+                    Vec3::new(h, h, -h),
+                ],
+                Vec3::new(0.0, 1.0, 0.0),
             ),
             quad(
-                [[-h, -h, -h], [-h, h, -h], [h, h, -h], [h, -h, -h]],
-                [0.0, 0.0, -1.0],
+                [
+                    Vec3::new(-h, -h, -h),
+                    Vec3::new(-h, h, -h),
+                    Vec3::new(h, h, -h),
+                    Vec3::new(h, -h, -h),
+                ],
+                Vec3::new(0.0, 0.0, -1.0),
             ),
             // +Z face removed.
         ];

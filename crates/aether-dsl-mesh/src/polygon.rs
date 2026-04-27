@@ -24,6 +24,7 @@
 use crate::csg;
 use crate::csg::point::Point3;
 use crate::mesh::MeshError;
+use aether_math::Vec3;
 use std::collections::HashMap;
 
 /// N-gon polygonal face — the canonical mesh form (ADR-0057).
@@ -32,9 +33,9 @@ use std::collections::HashMap;
 /// `holes` lists inner boundaries, each wound CW.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Polygon {
-    pub vertices: Vec<[f32; 3]>,
-    pub holes: Vec<Vec<[f32; 3]>>,
-    pub plane_normal: [f32; 3],
+    pub vertices: Vec<Vec3>,
+    pub holes: Vec<Vec<Vec3>>,
+    pub plane_normal: Vec3,
     pub color: u32,
 }
 
@@ -80,19 +81,19 @@ fn group_loops(loops: Vec<csg::polygon::Polygon>) -> Vec<Polygon> {
         // Sort loops within the group by signed area (deterministic) and
         // partition into outer (positive area) vs hole (negative area).
         // For a typical CSG-cut face there's one outer and zero+ holes.
-        let mut classified: Vec<(i128, Vec<[f32; 3]>)> = group
+        let mut classified: Vec<(i128, Vec<Vec3>)> = group
             .into_iter()
             .map(|poly| {
                 let area = projected_signed_area(&poly.vertices, &plane);
-                let f32_verts: Vec<[f32; 3]> = poly.vertices.iter().map(|v| v.to_f32()).collect();
+                let f32_verts: Vec<Vec3> = poly.vertices.iter().map(|v| v.to_f32()).collect();
                 (area, f32_verts)
             })
             .filter(|(area, _)| *area != 0)
             .collect();
         classified.sort_by_key(|(area, _)| *area);
 
-        let mut outers: Vec<Vec<[f32; 3]>> = Vec::new();
-        let mut holes: Vec<Vec<[f32; 3]>> = Vec::new();
+        let mut outers: Vec<Vec<Vec3>> = Vec::new();
+        let mut holes: Vec<Vec<Vec3>> = Vec::new();
         for (area, verts) in classified {
             if area > 0 {
                 outers.push(verts);
@@ -128,15 +129,15 @@ fn group_loops(loops: Vec<csg::polygon::Polygon>) -> Vec<Polygon> {
     out
 }
 
-fn unit_normal(plane: &csg::plane::Plane3) -> [f32; 3] {
+fn unit_normal(plane: &csg::plane::Plane3) -> Vec3 {
     let nx = plane.n_x as f64;
     let ny = plane.n_y as f64;
     let nz = plane.n_z as f64;
     let len = (nx * nx + ny * ny + nz * nz).sqrt();
     if len == 0.0 {
-        return [0.0, 0.0, 1.0];
+        return Vec3::Z;
     }
-    [(nx / len) as f32, (ny / len) as f32, (nz / len) as f32]
+    Vec3::new((nx / len) as f32, (ny / len) as f32, (nz / len) as f32)
 }
 
 /// Signed doubled area of `vertices` projected onto the plane's
@@ -203,7 +204,7 @@ fn projection_axes(plane: &csg::plane::Plane3) -> (Axis, Axis) {
 /// Returns an empty Vec for degenerate input (fewer than 3 outer
 /// vertices, or polygon outside the integer fixed-point coordinate
 /// budget).
-pub fn tessellate_polygon(polygon: &Polygon) -> Vec<[[f32; 3]; 3]> {
+pub fn tessellate_polygon(polygon: &Polygon) -> Vec<[Vec3; 3]> {
     if polygon.vertices.len() < 3 {
         return Vec::new();
     }
@@ -230,7 +231,7 @@ pub fn tessellate_polygon(polygon: &Polygon) -> Vec<[[f32; 3]; 3]> {
     cdt_tessellate(polygon).unwrap_or_default()
 }
 
-fn is_convex(vertices: &[[f32; 3]], normal: &[f32; 3]) -> bool {
+fn is_convex(vertices: &[Vec3], normal: &Vec3) -> bool {
     // Convex iff all cross products around the loop have the same sign
     // when projected to 2D. We project to whichever pair of axes the
     // polygon's plane normal is most perpendicular to.
@@ -239,14 +240,21 @@ fn is_convex(vertices: &[[f32; 3]], normal: &[f32; 3]) -> bool {
         return true;
     }
     let (a_idx, b_idx) = dominant_axes(*normal);
+    let pick = |v: Vec3, axis: usize| -> f32 {
+        match axis {
+            0 => v.x,
+            1 => v.y,
+            _ => v.z,
+        }
+    };
     let mut sign: i32 = 0;
     for i in 0..n {
         let j = (i + 1) % n;
         let k = (i + 2) % n;
-        let ax = vertices[j][a_idx] - vertices[i][a_idx];
-        let ay = vertices[j][b_idx] - vertices[i][b_idx];
-        let bx = vertices[k][a_idx] - vertices[j][a_idx];
-        let by = vertices[k][b_idx] - vertices[j][b_idx];
+        let ax = pick(vertices[j], a_idx) - pick(vertices[i], a_idx);
+        let ay = pick(vertices[j], b_idx) - pick(vertices[i], b_idx);
+        let bx = pick(vertices[k], a_idx) - pick(vertices[j], a_idx);
+        let by = pick(vertices[k], b_idx) - pick(vertices[j], b_idx);
         let cross = ax * by - ay * bx;
         let s = if cross > 0.0 {
             1
@@ -267,10 +275,10 @@ fn is_convex(vertices: &[[f32; 3]], normal: &[f32; 3]) -> bool {
     true
 }
 
-fn dominant_axes(normal: [f32; 3]) -> (usize, usize) {
-    let ax = normal[0].abs();
-    let ay = normal[1].abs();
-    let az = normal[2].abs();
+fn dominant_axes(normal: Vec3) -> (usize, usize) {
+    let ax = normal.x.abs();
+    let ay = normal.y.abs();
+    let az = normal.z.abs();
     if ax >= ay && ax >= az {
         (1, 2)
     } else if ay >= az {
@@ -280,7 +288,7 @@ fn dominant_axes(normal: [f32; 3]) -> (usize, usize) {
     }
 }
 
-fn fan_triangulate(vertices: &[[f32; 3]]) -> Vec<[[f32; 3]; 3]> {
+fn fan_triangulate(vertices: &[Vec3]) -> Vec<[Vec3; 3]> {
     let mut out = Vec::with_capacity(vertices.len().saturating_sub(2));
     for i in 1..vertices.len() - 1 {
         out.push([vertices[0], vertices[i], vertices[i + 1]]);
@@ -288,7 +296,7 @@ fn fan_triangulate(vertices: &[[f32; 3]]) -> Vec<[[f32; 3]; 3]> {
     out
 }
 
-fn cdt_tessellate(polygon: &Polygon) -> Option<Vec<[[f32; 3]; 3]>> {
+fn cdt_tessellate(polygon: &Polygon) -> Option<Vec<[Vec3; 3]>> {
     csg::tessellate::tessellate_polygon_f32(&polygon.vertices, &polygon.holes)
 }
 
@@ -318,13 +326,13 @@ mod tests {
     fn fan_tessellate_quad_yields_two_triangles() {
         let p = Polygon {
             vertices: vec![
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [1.0, 1.0, 0.0],
-                [0.0, 1.0, 0.0],
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
             ],
             holes: vec![],
-            plane_normal: [0.0, 0.0, 1.0],
+            plane_normal: Vec3::new(0.0, 0.0, 1.0),
             color: 0,
         };
         let tris = tessellate_polygon(&p);
@@ -334,9 +342,13 @@ mod tests {
     #[test]
     fn tessellate_triangle_yields_one_triangle() {
         let p = Polygon {
-            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ],
             holes: vec![],
-            plane_normal: [0.0, 0.0, 1.0],
+            plane_normal: Vec3::new(0.0, 0.0, 1.0),
             color: 0,
         };
         let tris = tessellate_polygon(&p);
@@ -348,14 +360,14 @@ mod tests {
         let empty = Polygon {
             vertices: vec![],
             holes: vec![],
-            plane_normal: [0.0, 0.0, 1.0],
+            plane_normal: Vec3::new(0.0, 0.0, 1.0),
             color: 0,
         };
         assert!(tessellate_polygon(&empty).is_empty());
         let two_vert = Polygon {
-            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            vertices: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)],
             holes: vec![],
-            plane_normal: [0.0, 0.0, 1.0],
+            plane_normal: Vec3::new(0.0, 0.0, 1.0),
             color: 0,
         };
         assert!(tessellate_polygon(&two_vert).is_empty());
@@ -364,10 +376,10 @@ mod tests {
     #[test]
     fn fan_triangulate_n_gon_yields_n_minus_2_triangles() {
         for n in 3..=8 {
-            let vertices: Vec<[f32; 3]> = (0..n)
+            let vertices: Vec<Vec3> = (0..n)
                 .map(|i| {
                     let theta = 2.0 * std::f32::consts::PI * (i as f32) / (n as f32);
-                    [theta.cos(), theta.sin(), 0.0]
+                    Vec3::new(theta.cos(), theta.sin(), 0.0)
                 })
                 .collect();
             let tris = fan_triangulate(&vertices);
@@ -383,26 +395,26 @@ mod tests {
     #[test]
     fn is_convex_accepts_convex_quad() {
         let quad = vec![
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [1.0, 1.0, 0.0],
-            [0.0, 1.0, 0.0],
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
         ];
-        assert!(is_convex(&quad, &[0.0, 0.0, 1.0]));
+        assert!(is_convex(&quad, &Vec3::new(0.0, 0.0, 1.0)));
     }
 
     #[test]
     fn is_convex_rejects_concave_l_shape() {
         // L-shaped polygon — concave at the inner corner.
         let l_shape = vec![
-            [0.0, 0.0, 0.0],
-            [2.0, 0.0, 0.0],
-            [2.0, 1.0, 0.0],
-            [1.0, 1.0, 0.0],
-            [1.0, 2.0, 0.0],
-            [0.0, 2.0, 0.0],
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(2.0, 1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(1.0, 2.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
         ];
-        assert!(!is_convex(&l_shape, &[0.0, 0.0, 1.0]));
+        assert!(!is_convex(&l_shape, &Vec3::new(0.0, 0.0, 1.0)));
     }
 
     /// Pin the bug fix: a 6-vertex chord-rectangle (T-junction repair
@@ -418,14 +430,14 @@ mod tests {
         // polygon's true normal is in the XZ plane (cylinder side
         // facet).
         let chord_rect = vec![
-            [1.17717, 0.5, -0.114792],
-            [1.120239, 0.5, -0.199997],
-            [1.112137, 0.5, -0.212128],
-            [1.112137, -0.5, -0.212128],
-            [1.120239, -0.5, -0.199997],
-            [1.17717, -0.5, -0.114792],
+            Vec3::new(1.17717, 0.5, -0.114792),
+            Vec3::new(1.120239, 0.5, -0.199997),
+            Vec3::new(1.112137, 0.5, -0.212128),
+            Vec3::new(1.112137, -0.5, -0.212128),
+            Vec3::new(1.120239, -0.5, -0.199997),
+            Vec3::new(1.17717, -0.5, -0.114792),
         ];
-        let normal = [-0.831, 0.0, 0.556];
+        let normal = Vec3::new(-0.831, 0.0, 0.556);
         assert!(is_convex(&chord_rect, &normal));
     }
 
@@ -439,9 +451,9 @@ mod tests {
             d: 0,
         };
         let n = unit_normal(&xy);
-        assert!((n[0]).abs() < 1e-6);
-        assert!((n[1]).abs() < 1e-6);
-        assert!((n[2] - 1.0).abs() < 1e-6, "expected +z, got {n:?}");
+        assert!((n.x).abs() < 1e-6);
+        assert!((n.y).abs() < 1e-6);
+        assert!((n.z - 1.0).abs() < 1e-6, "expected +z, got {n:?}");
     }
 
     #[test]
@@ -452,7 +464,7 @@ mod tests {
             n_z: 0,
             d: 0,
         };
-        assert_eq!(unit_normal(&degen), [0.0, 0.0, 1.0]);
+        assert_eq!(unit_normal(&degen), Vec3::new(0.0, 0.0, 1.0));
     }
 
     #[test]
@@ -460,18 +472,18 @@ mod tests {
         // Outer 2x2 quad (CCW) with a 1x1 hole (CW).
         let p = Polygon {
             vertices: vec![
-                [0.0, 0.0, 0.0],
-                [2.0, 0.0, 0.0],
-                [2.0, 2.0, 0.0],
-                [0.0, 2.0, 0.0],
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(2.0, 2.0, 0.0),
+                Vec3::new(0.0, 2.0, 0.0),
             ],
             holes: vec![vec![
-                [0.5, 0.5, 0.0],
-                [0.5, 1.5, 0.0],
-                [1.5, 1.5, 0.0],
-                [1.5, 0.5, 0.0],
+                Vec3::new(0.5, 0.5, 0.0),
+                Vec3::new(0.5, 1.5, 0.0),
+                Vec3::new(1.5, 1.5, 0.0),
+                Vec3::new(1.5, 0.5, 0.0),
             ]],
-            plane_normal: [0.0, 0.0, 1.0],
+            plane_normal: Vec3::new(0.0, 0.0, 1.0),
             color: 0,
         };
         let tris = tessellate_polygon(&p);

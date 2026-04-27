@@ -2,6 +2,8 @@
 //! formalized in ADR-0051. All variants here have a parser arm in
 //! `parse.rs` and a mesher arm in `mesh.rs`.
 
+use aether_math::Vec3;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
     // Primitives
@@ -85,7 +87,7 @@ pub enum Node {
     /// to taper a swept tube toward its tip.
     Sweep {
         profile: Vec<[f32; 2]>,
-        path: Vec<[f32; 3]>,
+        path: Vec<Vec3>,
         scales: Option<Vec<f32>>,
         color: u32,
     },
@@ -93,16 +95,16 @@ pub enum Node {
     // Structural
     Composition(Vec<Node>),
     Translate {
-        offset: [f32; 3],
+        offset: Vec3,
         child: std::boxed::Box<Node>,
     },
     Rotate {
-        axis: [f32; 3],
+        axis: Vec3,
         angle: f32,
         child: std::boxed::Box<Node>,
     },
     Scale {
-        factor: [f32; 3],
+        factor: Vec3,
         child: std::boxed::Box<Node>,
     },
     Mirror {
@@ -111,7 +113,7 @@ pub enum Node {
     },
     Array {
         count: u32,
-        spacing: [f32; 3],
+        spacing: Vec3,
         child: std::boxed::Box<Node>,
     },
 

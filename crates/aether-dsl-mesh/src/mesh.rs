@@ -21,7 +21,7 @@ use csg::polygon::Polygon as CsgPolygon;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Triangle {
-    pub vertices: [[f32; 3]; 3],
+    pub vertices: [Vec3; 3],
     pub color: u32,
 }
 
@@ -51,7 +51,7 @@ pub enum MeshError {
 pub fn mesh(node: &Node) -> Result<Vec<Triangle>, MeshError> {
     let simplified = crate::simplify::simplify(node);
     let mut polys = Vec::new();
-    mesh_into_polygons(&mut polys, &simplified, [0.0, 0.0, 0.0])?;
+    mesh_into_polygons(&mut polys, &simplified, Vec3::ZERO)?;
     Ok(csg::polygons_to_triangles(&csg::tessellate::run(polys)))
 }
 
@@ -61,7 +61,7 @@ pub fn mesh(node: &Node) -> Result<Vec<Triangle>, MeshError> {
 pub fn mesh_polygons_internal(node: &Node) -> Result<Vec<CsgPolygon>, MeshError> {
     let simplified = crate::simplify::simplify(node);
     let mut polys = Vec::new();
-    mesh_into_polygons(&mut polys, &simplified, [0.0, 0.0, 0.0])?;
+    mesh_into_polygons(&mut polys, &simplified, Vec3::ZERO)?;
     Ok(csg::cleanup::run_to_loops(polys))
 }
 
@@ -73,7 +73,7 @@ pub fn mesh_polygons_internal(node: &Node) -> Result<Vec<CsgPolygon>, MeshError>
 fn mesh_into_polygons(
     out: &mut Vec<CsgPolygon>,
     node: &Node,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<(), MeshError> {
     match node {
         Node::Box { x, y, z, color } => mesh_box(out, *x, *y, *z, *color, offset),
@@ -141,23 +141,15 @@ fn mesh_into_polygons(
         Node::Translate {
             offset: delta,
             child,
-        } => {
-            let combined = [
-                offset[0] + delta[0],
-                offset[1] + delta[1],
-                offset[2] + delta[2],
-            ];
-            mesh_into_polygons(out, child, combined)
-        }
+        } => mesh_into_polygons(out, child, offset + *delta),
         Node::Rotate { axis, angle, child } => {
             let mut local = Vec::new();
-            mesh_into_polygons(&mut local, child, [0.0, 0.0, 0.0])?;
-            let n = Vec3::from_array(*axis).normalize_or(Vec3::Y);
-            let off = Vec3::from_array(offset);
+            mesh_into_polygons(&mut local, child, Vec3::ZERO)?;
+            let n = axis.normalize_or(Vec3::Y);
             for poly in &local {
-                if let Some(transformed) = transform_polygon(poly, |v| {
-                    (Vec3::from_array(v).rotate_axis_angle(n, *angle) + off).to_array()
-                })? {
+                if let Some(transformed) =
+                    transform_polygon(poly, |v| v.rotate_axis_angle(n, *angle) + offset)?
+                {
                     out.push(transformed);
                 }
             }
@@ -165,14 +157,14 @@ fn mesh_into_polygons(
         }
         Node::Scale { factor, child } => {
             let mut local = Vec::new();
-            mesh_into_polygons(&mut local, child, [0.0, 0.0, 0.0])?;
+            mesh_into_polygons(&mut local, child, Vec3::ZERO)?;
             for poly in &local {
                 if let Some(transformed) = transform_polygon(poly, |v| {
-                    [
-                        v[0] * factor[0] + offset[0],
-                        v[1] * factor[1] + offset[1],
-                        v[2] * factor[2] + offset[2],
-                    ]
+                    Vec3::new(
+                        v.x * factor.x + offset.x,
+                        v.y * factor.y + offset.y,
+                        v.z * factor.z + offset.z,
+                    )
                 })? {
                     out.push(transformed);
                 }
@@ -181,7 +173,7 @@ fn mesh_into_polygons(
         }
         Node::Mirror { axis, child } => {
             let mut local = Vec::new();
-            mesh_into_polygons(&mut local, child, [0.0, 0.0, 0.0])?;
+            mesh_into_polygons(&mut local, child, Vec3::ZERO)?;
             for poly in &local {
                 if let Some(mirrored) = mirror_polygon(poly, *axis, offset)? {
                     out.push(mirrored);
@@ -195,16 +187,11 @@ fn mesh_into_polygons(
             child,
         } => {
             let mut local = Vec::new();
-            mesh_into_polygons(&mut local, child, [0.0, 0.0, 0.0])?;
+            mesh_into_polygons(&mut local, child, Vec3::ZERO)?;
             for i in 0..*count {
-                let f = i as f32;
-                let dx = offset[0] + spacing[0] * f;
-                let dy = offset[1] + spacing[1] * f;
-                let dz = offset[2] + spacing[2] * f;
+                let delta = offset + *spacing * (i as f32);
                 for poly in &local {
-                    if let Some(translated) =
-                        transform_polygon(poly, |v| [v[0] + dx, v[1] + dy, v[2] + dz])?
-                    {
+                    if let Some(translated) = transform_polygon(poly, |v| v + delta)? {
                         out.push(translated);
                     }
                 }
@@ -305,7 +292,7 @@ pub(crate) fn is_csg_leaf(node: &Node) -> bool {
     }
 }
 
-fn point_from_f32(v: [f32; 3]) -> Result<Point3, MeshError> {
+fn point_from_f32(v: Vec3) -> Result<Point3, MeshError> {
     Point3::from_f32(v).map_err(|e| csg::CsgError::from(e).into())
 }
 
@@ -319,7 +306,7 @@ fn point_from_f32(v: [f32; 3]) -> Result<Point3, MeshError> {
 /// loud failure at the ±256 unit boundary (ADR-0054).
 fn push_polygon_from_f32(
     out: &mut Vec<CsgPolygon>,
-    verts: &[[f32; 3]],
+    verts: &[Vec3],
     color: u32,
 ) -> Result<(), MeshError> {
     if verts.len() < 3 {
@@ -363,7 +350,7 @@ fn push_polygon_from_f32(
 /// a non-degenerate triple.
 fn transform_polygon<F>(poly: &CsgPolygon, xform: F) -> Result<Option<CsgPolygon>, MeshError>
 where
-    F: Fn([f32; 3]) -> [f32; 3],
+    F: Fn(Vec3) -> Vec3,
 {
     let mut new_verts = Vec::with_capacity(poly.vertices.len());
     for v in &poly.vertices {
@@ -408,18 +395,17 @@ fn derive_plane_robust(verts: &[Point3]) -> Option<Plane3> {
 fn mirror_polygon(
     poly: &CsgPolygon,
     axis: Axis,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<Option<CsgPolygon>, MeshError> {
     let mut new_verts = Vec::with_capacity(poly.vertices.len());
     for v in &poly.vertices {
         let f = v.to_f32();
         let m = match axis {
-            Axis::X => [-f[0], f[1], f[2]],
-            Axis::Y => [f[0], -f[1], f[2]],
-            Axis::Z => [f[0], f[1], -f[2]],
+            Axis::X => Vec3::new(-f.x, f.y, f.z),
+            Axis::Y => Vec3::new(f.x, -f.y, f.z),
+            Axis::Z => Vec3::new(f.x, f.y, -f.z),
         };
-        let t = [m[0] + offset[0], m[1] + offset[1], m[2] + offset[2]];
-        new_verts.push(point_from_f32(t)?);
+        new_verts.push(point_from_f32(m + offset)?);
     }
     if new_verts.len() < 3 {
         return Ok(None);
@@ -445,22 +431,26 @@ fn mesh_box(
     y: f32,
     z: f32,
     color: u32,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<(), MeshError> {
     let hx = x * 0.5;
     let hy = y * 0.5;
     let hz = z * 0.5;
-    let [ox, oy, oz] = offset;
+    let Vec3 {
+        x: ox,
+        y: oy,
+        z: oz,
+    } = offset;
 
     // Eight corners, named by sign per axis.
-    let nnn = [ox - hx, oy - hy, oz - hz];
-    let pnn = [ox + hx, oy - hy, oz - hz];
-    let npn = [ox - hx, oy + hy, oz - hz];
-    let ppn = [ox + hx, oy + hy, oz - hz];
-    let nnp = [ox - hx, oy - hy, oz + hz];
-    let pnp = [ox + hx, oy - hy, oz + hz];
-    let npp = [ox - hx, oy + hy, oz + hz];
-    let ppp = [ox + hx, oy + hy, oz + hz];
+    let nnn = Vec3::new(ox - hx, oy - hy, oz - hz);
+    let pnn = Vec3::new(ox + hx, oy - hy, oz - hz);
+    let npn = Vec3::new(ox - hx, oy + hy, oz - hz);
+    let ppn = Vec3::new(ox + hx, oy + hy, oz - hz);
+    let nnp = Vec3::new(ox - hx, oy - hy, oz + hz);
+    let pnp = Vec3::new(ox + hx, oy - hy, oz + hz);
+    let npp = Vec3::new(ox - hx, oy + hy, oz + hz);
+    let ppp = Vec3::new(ox + hx, oy + hy, oz + hz);
 
     push_polygon_from_f32(out, &[nnn, npn, ppn, pnn], color)?; // -Z face
     push_polygon_from_f32(out, &[nnp, pnp, ppp, npp], color)?; // +Z face
@@ -485,7 +475,7 @@ fn mesh_lathe(
     profile: &[[f32; 2]],
     segments: u32,
     color: u32,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<(), MeshError> {
     if profile.len() < 2 || segments < 3 {
         return Ok(());
@@ -510,13 +500,13 @@ fn mesh_lathe(
     // drops out entirely if both endpoints are axial).
     // `push_polygon_from_f32` dedupes consecutive coincident vertices,
     // so the cap fans collapse cleanly without a separate pass.
-    let revolve = |radius: f32, height: f32, i: usize| -> [f32; 3] {
+    let revolve = |radius: f32, height: f32, i: usize| -> Vec3 {
         let (cos, sin) = cos_sin[i % segments];
-        [
-            offset[0] + radius * cos,
-            offset[1] + height,
-            offset[2] + radius * sin,
-        ]
+        Vec3::new(
+            offset.x + radius * cos,
+            offset.y + height,
+            offset.z + radius * sin,
+        )
     };
 
     for k in 0..profile.len() - 1 {
@@ -553,7 +543,7 @@ fn mesh_lathe_segment(
     segments: u32,
     segment_index: u32,
     color: u32,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<(), MeshError> {
     if profile.len() < 2 || segments < 3 || segment_index >= segments {
         return Ok(());
@@ -566,8 +556,8 @@ fn mesh_lathe_segment(
     let cos_e = theta_end.cos();
     let sin_e = theta_end.sin();
 
-    let revolve = |r: f32, y: f32, cos_t: f32, sin_t: f32| -> [f32; 3] {
-        [offset[0] + r * cos_t, offset[1] + y, offset[2] + r * sin_t]
+    let revolve = |r: f32, y: f32, cos_t: f32, sin_t: f32| -> Vec3 {
+        Vec3::new(offset.x + r * cos_t, offset.y + y, offset.z + r * sin_t)
     };
 
     // Outer surface: one quad per profile edge, restricted to the
@@ -591,7 +581,7 @@ fn mesh_lathe_segment(
     // profiles, the first and last vertices coincide at the axis;
     // push_polygon_from_f32 dedupes consecutive identical vertices and
     // drops a trailing duplicate, so the polygon naturally closes.
-    let wall_start: Vec<[f32; 3]> = profile
+    let wall_start: Vec<Vec3> = profile
         .iter()
         .rev()
         .map(|p| revolve(p[0], p[1], cos_s, sin_s))
@@ -600,7 +590,7 @@ fn mesh_lathe_segment(
 
     // Radial wall at θ_end: forward profile order, normal points in the
     // +θ direction.
-    let wall_end: Vec<[f32; 3]> = profile
+    let wall_end: Vec<Vec3> = profile
         .iter()
         .map(|p| revolve(p[0], p[1], cos_e, sin_e))
         .collect();
@@ -620,7 +610,7 @@ fn mesh_torus(
     major_segments: u32,
     minor_segments: u32,
     color: u32,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<(), MeshError> {
     if major_segments < 3 || minor_segments < 3 {
         return Ok(());
@@ -629,7 +619,7 @@ fn mesh_torus(
     let n = minor_segments as usize;
     let two_pi = std::f32::consts::TAU;
     // P(i, j) = vertex at major angle α_i, minor angle β_j.
-    let position = |i: usize, j: usize| -> [f32; 3] {
+    let position = |i: usize, j: usize| -> Vec3 {
         let alpha = two_pi * (i as f32) / (m as f32);
         let beta = two_pi * (j as f32) / (n as f32);
         let cos_a = alpha.cos();
@@ -637,11 +627,11 @@ fn mesh_torus(
         let cos_b = beta.cos();
         let sin_b = beta.sin();
         let r = major_radius + minor_radius * cos_b;
-        [
-            offset[0] + r * cos_a,
-            offset[1] + minor_radius * sin_b,
-            offset[2] + r * sin_a,
-        ]
+        Vec3::new(
+            offset.x + r * cos_a,
+            offset.y + minor_radius * sin_b,
+            offset.z + r * sin_a,
+        )
     };
     for i in 0..m {
         let i_next = (i + 1) % m;
@@ -685,10 +675,10 @@ fn mesh_torus(
 fn mesh_sweep(
     out: &mut Vec<CsgPolygon>,
     profile: &[[f32; 2]],
-    path: &[[f32; 3]],
+    path: &[Vec3],
     scales: Option<&[f32]>,
     color: u32,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<(), MeshError> {
     if profile.len() < 3 || path.len() < 2 {
         return Ok(());
@@ -706,12 +696,12 @@ fn mesh_sweep(
     // Compute a tangent at each waypoint.
     let mut tangents: Vec<Vec3> = Vec::with_capacity(path.len());
     for k in 0..path.len() {
-        let prev = Vec3::from_array(if k == 0 { path[k] } else { path[k - 1] });
-        let next = Vec3::from_array(if k == path.len() - 1 {
+        let prev = if k == 0 { path[k] } else { path[k - 1] };
+        let next = if k == path.len() - 1 {
             path[k]
         } else {
             path[k + 1]
-        });
+        };
         tangents.push((next - prev).normalize_or(Vec3::Z));
     }
 
@@ -724,12 +714,11 @@ fn mesh_sweep(
     // off a fixed reference. Without this, paths with tangents that
     // approach world-up flip the up reference between adjacent
     // waypoints and the tube reads as having varying diameter.
-    let mut rings: Vec<Vec<[f32; 3]>> = Vec::with_capacity(path.len());
+    let mut rings: Vec<Vec<Vec3>> = Vec::with_capacity(path.len());
     let t0 = tangents[0];
     let up_ref = if t0.y.abs() > 0.95 { Vec3::X } else { Vec3::Y };
     let mut r = up_ref.cross(t0).normalize_or(Vec3::X);
     let mut u = t0.cross(r);
-    let off = Vec3::from_array(offset);
     for (k, p) in path.iter().enumerate() {
         let t = tangents[k];
         if k > 0 {
@@ -743,11 +732,10 @@ fn mesh_sweep(
             }
         }
         let scale = scales.map(|s| s[k]).unwrap_or(1.0);
-        let p_world = off + Vec3::from_array(*p);
+        let p_world = offset + *p;
         let mut ring = Vec::with_capacity(n);
         for pt in profile {
-            let world = p_world + r * (pt[0] * scale) + u * (pt[1] * scale);
-            ring.push(world.to_array());
+            ring.push(p_world + r * (pt[0] * scale) + u * (pt[1] * scale));
         }
         rings.push(ring);
     }
@@ -779,7 +767,7 @@ fn mesh_cylinder(
     height: f32,
     segments: u32,
     color: u32,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<(), MeshError> {
     let h = height * 0.5;
     let profile = [[0.0, -h], [radius, -h], [radius, h], [0.0, h]];
@@ -794,7 +782,7 @@ fn mesh_cone(
     height: f32,
     segments: u32,
     color: u32,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<(), MeshError> {
     let h = height * 0.5;
     let profile = [[0.0, -h], [radius, -h], [0.0, h]];
@@ -810,7 +798,7 @@ fn mesh_sphere(
     radius: f32,
     subdivisions: u32,
     color: u32,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<(), MeshError> {
     if subdivisions < 3 {
         return Ok(());
@@ -835,18 +823,22 @@ fn mesh_wedge(
     y: f32,
     z: f32,
     color: u32,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<(), MeshError> {
     let hx = x * 0.5;
     let hy = y * 0.5;
     let hz = z * 0.5;
-    let [ox, oy, oz] = offset;
-    let a = [ox - hx, oy - hy, oz - hz]; // back-bottom-left
-    let b = [ox + hx, oy - hy, oz - hz]; // back-bottom-right
-    let c = [ox - hx, oy - hy, oz + hz]; // front-bottom-left
-    let d = [ox + hx, oy - hy, oz + hz]; // front-bottom-right
-    let e = [ox - hx, oy + hy, oz - hz]; // back-top-left
-    let f = [ox + hx, oy + hy, oz - hz]; // back-top-right
+    let Vec3 {
+        x: ox,
+        y: oy,
+        z: oz,
+    } = offset;
+    let a = Vec3::new(ox - hx, oy - hy, oz - hz); // back-bottom-left
+    let b = Vec3::new(ox + hx, oy - hy, oz - hz); // back-bottom-right
+    let c = Vec3::new(ox - hx, oy - hy, oz + hz); // front-bottom-left
+    let d = Vec3::new(ox + hx, oy - hy, oz + hz); // front-bottom-right
+    let e = Vec3::new(ox - hx, oy + hy, oz - hz); // back-top-left
+    let f = Vec3::new(ox + hx, oy + hy, oz - hz); // back-top-right
 
     push_polygon_from_f32(out, &[a, b, d, c], color)?; // Bottom (-Y) quad
     push_polygon_from_f32(out, &[a, e, f, b], color)?; // Back (-Z) quad
@@ -874,15 +866,19 @@ fn mesh_extrude(
     profile: &[[f32; 2]],
     depth: f32,
     color: u32,
-    offset: [f32; 3],
+    offset: Vec3,
 ) -> Result<(), MeshError> {
     if profile.len() < 3 || depth <= 0.0 {
         return Ok(());
     }
     let n = profile.len();
-    let [ox, oy, oz] = offset;
-    let base = |i: usize| -> [f32; 3] { [ox + profile[i][0], oy + profile[i][1], oz] };
-    let top = |i: usize| -> [f32; 3] { [ox + profile[i][0], oy + profile[i][1], oz + depth] };
+    let Vec3 {
+        x: ox,
+        y: oy,
+        z: oz,
+    } = offset;
+    let base = |i: usize| -> Vec3 { Vec3::new(ox + profile[i][0], oy + profile[i][1], oz) };
+    let top = |i: usize| -> Vec3 { Vec3::new(ox + profile[i][0], oy + profile[i][1], oz + depth) };
 
     // Side walls. For edge p_i → p_{i+1}, the quad corners CCW from
     // outside are (base i, base i+1, top i+1, top i).
@@ -894,9 +890,9 @@ fn mesh_extrude(
     // Back cap (z = depth, normal +Z): the profile in original CCW
     // winding becomes one n-gon. Front cap (z = 0, normal -Z) is the
     // same loop reversed.
-    let back_cap: Vec<[f32; 3]> = (0..n).map(top).collect();
+    let back_cap: Vec<Vec3> = (0..n).map(top).collect();
     push_polygon_from_f32(out, &back_cap, color)?;
-    let front_cap: Vec<[f32; 3]> = (0..n).rev().map(base).collect();
+    let front_cap: Vec<Vec3> = (0..n).rev().map(base).collect();
     push_polygon_from_f32(out, &front_cap, color)?;
     Ok(())
 }
@@ -927,7 +923,7 @@ mod tests {
     #[test]
     fn is_csg_leaf_descends_through_transforms_and_compositions() {
         let translated = Node::Translate {
-            offset: [1.0, 0.0, 0.0],
+            offset: Vec3::new(1.0, 0.0, 0.0),
             child: std::boxed::Box::new(box_node(1.0, 0)),
         };
         assert!(is_csg_leaf(&translated));
@@ -938,7 +934,7 @@ mod tests {
     #[test]
     fn is_csg_leaf_rejects_boolean_ops_at_any_depth() {
         let nested_union = Node::Translate {
-            offset: [0.0, 0.0, 0.0],
+            offset: Vec3::new(0.0, 0.0, 0.0),
             child: std::boxed::Box::new(Node::Union {
                 children: vec![box_node(1.0, 0), box_node(2.0, 1)],
             }),
@@ -1030,7 +1026,7 @@ mod tests {
         let key = |t: &Triangle| {
             let mut buf: Vec<u8> = Vec::with_capacity(40);
             for v in &t.vertices {
-                for c in v {
+                for c in [v.x, v.y, v.z] {
                     buf.extend_from_slice(&c.to_le_bytes());
                 }
             }
@@ -1068,7 +1064,7 @@ mod tests {
         let key = |t: &Triangle| {
             let mut buf: Vec<u8> = Vec::with_capacity(40);
             for v in &t.vertices {
-                for c in v {
+                for c in [v.x, v.y, v.z] {
                     buf.extend_from_slice(&c.to_le_bytes());
                 }
             }

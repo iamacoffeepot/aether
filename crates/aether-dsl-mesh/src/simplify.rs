@@ -133,10 +133,9 @@ pub fn compute_aabb(node: &Node) -> Aabb {
                     .copied()
                     .unwrap_or(1.0);
                 let r = max_profile_r * s.abs();
-                let center = Vec3::from_array(*p);
                 out = out.union(&Aabb::from_min_max(
-                    center - Vec3::splat(r),
-                    center + Vec3::splat(r),
+                    *p - Vec3::splat(r),
+                    *p + Vec3::splat(r),
                 ));
             }
             out
@@ -145,13 +144,9 @@ pub fn compute_aabb(node: &Node) -> Aabb {
             .iter()
             .map(compute_aabb)
             .fold(Aabb::EMPTY, |acc, b| acc.union(&b)),
-        Node::Translate { offset, child } => {
-            compute_aabb(child).translate(Vec3::from_array(*offset))
-        }
-        Node::Rotate { axis, angle, child } => {
-            compute_aabb(child).rotate(Vec3::from_array(*axis), *angle)
-        }
-        Node::Scale { factor, child } => compute_aabb(child).scale(Vec3::from_array(*factor)),
+        Node::Translate { offset, child } => compute_aabb(child).translate(*offset),
+        Node::Rotate { axis, angle, child } => compute_aabb(child).rotate(*axis, *angle),
+        Node::Scale { factor, child } => compute_aabb(child).scale(*factor),
         Node::Mirror { axis, child } => compute_aabb(child).mirror(axis.index()),
         Node::Array {
             count,
@@ -165,7 +160,7 @@ pub fn compute_aabb(node: &Node) -> Aabb {
             let mut out = Aabb::EMPTY;
             for i in 0..*count {
                 let f = i as f32;
-                out = out.union(&base.translate(Vec3::from_array(*spacing) * f));
+                out = out.union(&base.translate(*spacing * f));
             }
             out
         }
@@ -259,16 +254,6 @@ fn profile_axis_closed(profile: &[[f32; 2]]) -> bool {
     profile.len() >= 2
         && profile.first().unwrap()[0].abs() < f32::EPSILON
         && profile.last().unwrap()[0].abs() < f32::EPSILON
-}
-
-/// `Some(+1.0)` when `a` and `b` point in the same direction,
-/// `Some(-1.0)` when opposite, `None` when skew (or either is the
-/// zero vector). Used to decide whether two `Rotate` nodes can fold:
-/// rotating around `+v` by `θ` then around `-v` by `φ` is the same as
-/// rotating around `+v` by `θ - φ`. Thin wrapper over
-/// [`Vec3::parallel_sign`] — see that for the tolerance rationale.
-fn parallel_axis_sign(a: [f32; 3], b: [f32; 3]) -> Option<f32> {
-    Vec3::from_array(a).parallel_sign(Vec3::from_array(b))
 }
 
 /// Apply rewrites bottom-up. Each rewrite preserves the meshed output
@@ -391,18 +376,11 @@ pub fn simplify(node: &Node) -> Node {
                 child: inner_child,
             } = child
             {
-                (
-                    [
-                        offset[0] + inner_offset[0],
-                        offset[1] + inner_offset[1],
-                        offset[2] + inner_offset[2],
-                    ],
-                    *inner_child,
-                )
+                (*offset + inner_offset, *inner_child)
             } else {
                 (*offset, child)
             };
-            if offset == [0.0, 0.0, 0.0] {
+            if offset == Vec3::ZERO {
                 return child;
             }
             Node::Translate {
@@ -422,7 +400,7 @@ pub fn simplify(node: &Node) -> Node {
                 child: inner_child,
             } = &child
             {
-                match parallel_axis_sign(*axis, *inner_axis) {
+                match axis.parallel_sign(*inner_axis) {
                     Some(sign) => (*angle + sign * *inner_angle, (**inner_child).clone()),
                     None => (*angle, child),
                 }
@@ -448,17 +426,17 @@ pub fn simplify(node: &Node) -> Node {
             } = child
             {
                 (
-                    [
-                        factor[0] * inner_factor[0],
-                        factor[1] * inner_factor[1],
-                        factor[2] * inner_factor[2],
-                    ],
+                    Vec3::new(
+                        factor.x * inner_factor.x,
+                        factor.y * inner_factor.y,
+                        factor.z * inner_factor.z,
+                    ),
                     *inner_child,
                 )
             } else {
                 (*factor, child)
             };
-            if factor == [1.0, 1.0, 1.0] {
+            if factor == Vec3::ONE {
                 return child;
             }
             Node::Scale {
@@ -917,7 +895,7 @@ mod compute_aabb_tests {
     #[test]
     fn translate_offsets_child_bounds() {
         let b = compute_aabb(&Node::Translate {
-            offset: [10.0, 20.0, 30.0],
+            offset: Vec3::new(10.0, 20.0, 30.0),
             child: Box::new(Node::Box {
                 x: 2.0,
                 y: 2.0,
@@ -935,7 +913,7 @@ mod compute_aabb_tests {
         // becomes 4. Pin the conservative bound matches the rotated
         // shape.
         let b = compute_aabb(&Node::Rotate {
-            axis: [0.0, 0.0, 1.0],
+            axis: Vec3::new(0.0, 0.0, 1.0),
             angle: std::f32::consts::FRAC_PI_2,
             child: Box::new(Node::Box {
                 x: 4.0,
@@ -951,7 +929,7 @@ mod compute_aabb_tests {
     #[test]
     fn scale_multiplies_child_bound() {
         let b = compute_aabb(&Node::Scale {
-            factor: [2.0, 3.0, 4.0],
+            factor: Vec3::new(2.0, 3.0, 4.0),
             child: Box::new(Node::Box {
                 x: 1.0,
                 y: 1.0,
@@ -968,7 +946,7 @@ mod compute_aabb_tests {
         let b = compute_aabb(&Node::Mirror {
             axis: Axis::X,
             child: Box::new(Node::Translate {
-                offset: [5.0, 0.0, 0.0],
+                offset: Vec3::new(5.0, 0.0, 0.0),
                 child: Box::new(Node::Box {
                     x: 2.0,
                     y: 2.0,
@@ -987,7 +965,7 @@ mod compute_aabb_tests {
     fn array_unions_translated_child_bounds() {
         let b = compute_aabb(&Node::Array {
             count: 3,
-            spacing: [10.0, 0.0, 0.0],
+            spacing: Vec3::new(10.0, 0.0, 0.0),
             child: Box::new(Node::Box {
                 x: 2.0,
                 y: 2.0,
@@ -1004,7 +982,7 @@ mod compute_aabb_tests {
     fn array_count_zero_is_empty() {
         let b = compute_aabb(&Node::Array {
             count: 0,
-            spacing: [1.0, 0.0, 0.0],
+            spacing: Vec3::new(1.0, 0.0, 0.0),
             child: Box::new(Node::Box {
                 x: 1.0,
                 y: 1.0,
@@ -1025,7 +1003,7 @@ mod compute_aabb_tests {
                 color: 0,
             },
             Node::Translate {
-                offset: [10.0, 0.0, 0.0],
+                offset: Vec3::new(10.0, 0.0, 0.0),
                 child: Box::new(Node::Box {
                     x: 2.0,
                     y: 2.0,
@@ -1054,7 +1032,7 @@ mod compute_aabb_tests {
                     color: 0,
                 },
                 Node::Translate {
-                    offset: [10.0, 0.0, 0.0],
+                    offset: Vec3::new(10.0, 0.0, 0.0),
                     child: Box::new(Node::Box {
                         x: 2.0,
                         y: 2.0,
@@ -1079,7 +1057,7 @@ mod compute_aabb_tests {
                     color: 0,
                 },
                 Node::Translate {
-                    offset: [1.0, 0.0, 0.0],
+                    offset: Vec3::new(1.0, 0.0, 0.0),
                     child: Box::new(Node::Box {
                         x: 4.0,
                         y: 4.0,
@@ -1105,7 +1083,7 @@ mod compute_aabb_tests {
                     color: 0,
                 },
                 Node::Translate {
-                    offset: [10.0, 0.0, 0.0],
+                    offset: Vec3::new(10.0, 0.0, 0.0),
                     child: Box::new(Node::Box {
                         x: 1.0,
                         y: 1.0,
@@ -1145,7 +1123,7 @@ mod compute_aabb_tests {
     fn sweep_bound_covers_every_waypoint_with_max_profile_radius() {
         let b = compute_aabb(&Node::Sweep {
             profile: vec![[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]],
-            path: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+            path: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0)],
             scales: None,
             color: 0,
         });
@@ -1159,7 +1137,7 @@ mod compute_aabb_tests {
     fn sweep_with_scales_uses_per_waypoint_scale() {
         let b = compute_aabb(&Node::Sweep {
             profile: vec![[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]],
-            path: vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]],
+            path: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0)],
             scales: Some(vec![1.0, 3.0]),
             color: 0,
         });
@@ -1192,7 +1170,7 @@ mod simplify_tests {
     #[test]
     fn zero_translate_is_stripped() {
         let n = Node::Translate {
-            offset: [0.0, 0.0, 0.0],
+            offset: Vec3::new(0.0, 0.0, 0.0),
             child: Box::new(unit_box()),
         };
         assert_eq!(simplify(&n), unit_box());
@@ -1201,7 +1179,7 @@ mod simplify_tests {
     #[test]
     fn nonzero_translate_is_preserved() {
         let n = Node::Translate {
-            offset: [1.0, 0.0, 0.0],
+            offset: Vec3::new(1.0, 0.0, 0.0),
             child: Box::new(unit_box()),
         };
         assert_eq!(simplify(&n), n);
@@ -1212,7 +1190,7 @@ mod simplify_tests {
         // Pin: even a non-normalized axis is fine — angle=0 means no
         // rotation no matter what axis is named.
         let n = Node::Rotate {
-            axis: [1.0, 1.0, 1.0],
+            axis: Vec3::new(1.0, 1.0, 1.0),
             angle: 0.0,
             child: Box::new(unit_box()),
         };
@@ -1222,7 +1200,7 @@ mod simplify_tests {
     #[test]
     fn nonzero_rotate_is_preserved() {
         let n = Node::Rotate {
-            axis: [0.0, 1.0, 0.0],
+            axis: Vec3::new(0.0, 1.0, 0.0),
             angle: 0.5,
             child: Box::new(unit_box()),
         };
@@ -1232,7 +1210,7 @@ mod simplify_tests {
     #[test]
     fn unit_scale_is_stripped() {
         let n = Node::Scale {
-            factor: [1.0, 1.0, 1.0],
+            factor: Vec3::new(1.0, 1.0, 1.0),
             child: Box::new(unit_box()),
         };
         assert_eq!(simplify(&n), unit_box());
@@ -1241,7 +1219,7 @@ mod simplify_tests {
     #[test]
     fn non_unit_scale_is_preserved() {
         let n = Node::Scale {
-            factor: [2.0, 1.0, 1.0],
+            factor: Vec3::new(2.0, 1.0, 1.0),
             child: Box::new(unit_box()),
         };
         assert_eq!(simplify(&n), n);
@@ -1251,7 +1229,7 @@ mod simplify_tests {
     fn array_count_one_is_stripped() {
         let n = Node::Array {
             count: 1,
-            spacing: [10.0, 0.0, 0.0],
+            spacing: Vec3::new(10.0, 0.0, 0.0),
             child: Box::new(unit_box()),
         };
         assert_eq!(simplify(&n), unit_box());
@@ -1261,7 +1239,7 @@ mod simplify_tests {
     fn array_count_two_is_preserved() {
         let n = Node::Array {
             count: 2,
-            spacing: [10.0, 0.0, 0.0],
+            spacing: Vec3::new(10.0, 0.0, 0.0),
             child: Box::new(unit_box()),
         };
         assert_eq!(simplify(&n), n);
@@ -1283,12 +1261,12 @@ mod simplify_tests {
     fn nested_identities_collapse_through_recursion() {
         // (translate (0,0,0) (rotate any 0 (scale (1,1,1) box))) → box
         let n = Node::Translate {
-            offset: [0.0, 0.0, 0.0],
+            offset: Vec3::new(0.0, 0.0, 0.0),
             child: Box::new(Node::Rotate {
-                axis: [1.0, 0.0, 0.0],
+                axis: Vec3::new(1.0, 0.0, 0.0),
                 angle: 0.0,
                 child: Box::new(Node::Scale {
-                    factor: [1.0, 1.0, 1.0],
+                    factor: Vec3::new(1.0, 1.0, 1.0),
                     child: Box::new(unit_box()),
                 }),
             }),
@@ -1314,7 +1292,7 @@ mod simplify_tests {
         let n = Node::Composition(vec![
             unit_box(),
             Node::Scale {
-                factor: [1.0, 1.0, 1.0],
+                factor: Vec3::new(1.0, 1.0, 1.0),
                 child: Box::new(unit_box()),
             },
         ]);
@@ -1333,11 +1311,11 @@ mod simplify_tests {
     fn csg_recurses_into_operands() {
         let n = Node::Difference {
             base: Box::new(Node::Translate {
-                offset: [0.0, 0.0, 0.0],
+                offset: Vec3::new(0.0, 0.0, 0.0),
                 child: Box::new(unit_box()),
             }),
             subtract: vec![Node::Scale {
-                factor: [1.0, 1.0, 1.0],
+                factor: Vec3::new(1.0, 1.0, 1.0),
                 child: Box::new(unit_box()),
             }],
         };
@@ -1358,9 +1336,9 @@ mod simplify_tests {
         // a second pass would further reduce — at which point the rule
         // should be reapplied internally instead of leaking.
         let n = Node::Translate {
-            offset: [0.0, 0.0, 0.0],
+            offset: Vec3::new(0.0, 0.0, 0.0),
             child: Box::new(Node::Rotate {
-                axis: [0.0, 1.0, 0.0],
+                axis: Vec3::new(0.0, 1.0, 0.0),
                 angle: 0.0,
                 child: Box::new(Node::Composition(vec![unit_box()])),
             }),
@@ -1390,7 +1368,7 @@ mod partition_tests {
             unit
         } else {
             Node::Translate {
-                offset: [x, y, z],
+                offset: Vec3::new(x, y, z),
                 child: Box::new(unit),
             }
         }
@@ -1506,7 +1484,7 @@ mod disjoint_union_rewrite_tests {
             unit
         } else {
             Node::Translate {
-                offset: [x, y, z],
+                offset: Vec3::new(x, y, z),
                 child: Box::new(unit),
             }
         }
@@ -1671,7 +1649,7 @@ mod parallel_axis_tests {
     #[test]
     fn same_direction_returns_plus_one() {
         assert_eq!(
-            parallel_axis_sign([0.0, 1.0, 0.0], [0.0, 2.0, 0.0]),
+            Vec3::new(0.0, 1.0, 0.0).parallel_sign(Vec3::new(0.0, 2.0, 0.0)),
             Some(1.0)
         );
     }
@@ -1679,26 +1657,38 @@ mod parallel_axis_tests {
     #[test]
     fn opposite_direction_returns_minus_one() {
         assert_eq!(
-            parallel_axis_sign([1.0, 0.0, 0.0], [-3.0, 0.0, 0.0]),
+            Vec3::new(1.0, 0.0, 0.0).parallel_sign(Vec3::new(-3.0, 0.0, 0.0)),
             Some(-1.0)
         );
     }
 
     #[test]
     fn skew_axes_return_none() {
-        assert_eq!(parallel_axis_sign([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), None);
+        assert_eq!(
+            Vec3::new(1.0, 0.0, 0.0).parallel_sign(Vec3::new(0.0, 1.0, 0.0)),
+            None
+        );
     }
 
     #[test]
     fn diagonal_vs_axis_returns_none() {
         // (1,1,0) is at 45° to (1,0,0) — definitely not parallel.
-        assert_eq!(parallel_axis_sign([1.0, 1.0, 0.0], [1.0, 0.0, 0.0]), None);
+        assert_eq!(
+            Vec3::new(1.0, 1.0, 0.0).parallel_sign(Vec3::new(1.0, 0.0, 0.0)),
+            None
+        );
     }
 
     #[test]
     fn zero_vector_returns_none() {
-        assert_eq!(parallel_axis_sign([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]), None);
-        assert_eq!(parallel_axis_sign([1.0, 0.0, 0.0], [0.0, 0.0, 0.0]), None);
+        assert_eq!(
+            Vec3::new(0.0, 0.0, 0.0).parallel_sign(Vec3::new(1.0, 0.0, 0.0)),
+            None
+        );
+        assert_eq!(
+            Vec3::new(1.0, 0.0, 0.0).parallel_sign(Vec3::new(0.0, 0.0, 0.0)),
+            None
+        );
     }
 
     #[test]
@@ -1706,7 +1696,7 @@ mod parallel_axis_tests {
         // Tiny perturbation from a clean (0,1,0) — well within
         // the 1e-10 relative-cross-magnitude tolerance.
         assert_eq!(
-            parallel_axis_sign([1e-7, 1.0, 0.0], [0.0, 1.0, 0.0]),
+            Vec3::new(1e-7, 1.0, 0.0).parallel_sign(Vec3::new(0.0, 1.0, 0.0)),
             Some(1.0)
         );
     }
@@ -1715,7 +1705,7 @@ mod parallel_axis_tests {
     fn axes_with_different_magnitude_still_parallel() {
         // Direction is what matters, not magnitude.
         assert_eq!(
-            parallel_axis_sign([0.0, 100.0, 0.0], [0.0, 0.001, 0.0]),
+            Vec3::new(0.0, 100.0, 0.0).parallel_sign(Vec3::new(0.0, 0.001, 0.0)),
             Some(1.0)
         );
     }
@@ -1737,16 +1727,16 @@ mod fold_transform_tests {
     #[test]
     fn nested_translate_folds_to_one() {
         let n = Node::Translate {
-            offset: [1.0, 2.0, 3.0],
+            offset: Vec3::new(1.0, 2.0, 3.0),
             child: Box::new(Node::Translate {
-                offset: [4.0, 5.0, 6.0],
+                offset: Vec3::new(4.0, 5.0, 6.0),
                 child: Box::new(unit_box()),
             }),
         };
         assert_eq!(
             simplify(&n),
             Node::Translate {
-                offset: [5.0, 7.0, 9.0],
+                offset: Vec3::new(5.0, 7.0, 9.0),
                 child: Box::new(unit_box()),
             }
         );
@@ -1757,9 +1747,9 @@ mod fold_transform_tests {
         // Pin: the fold must produce the identity-then-strip behavior in
         // a single pass, not leave a `(translate (0 0 0) leaf)` behind.
         let n = Node::Translate {
-            offset: [1.0, 2.0, 3.0],
+            offset: Vec3::new(1.0, 2.0, 3.0),
             child: Box::new(Node::Translate {
-                offset: [-1.0, -2.0, -3.0],
+                offset: Vec3::new(-1.0, -2.0, -3.0),
                 child: Box::new(unit_box()),
             }),
         };
@@ -1769,11 +1759,11 @@ mod fold_transform_tests {
     #[test]
     fn three_deep_translate_chain_folds_to_one() {
         let n = Node::Translate {
-            offset: [1.0, 0.0, 0.0],
+            offset: Vec3::new(1.0, 0.0, 0.0),
             child: Box::new(Node::Translate {
-                offset: [2.0, 0.0, 0.0],
+                offset: Vec3::new(2.0, 0.0, 0.0),
                 child: Box::new(Node::Translate {
-                    offset: [3.0, 0.0, 0.0],
+                    offset: Vec3::new(3.0, 0.0, 0.0),
                     child: Box::new(unit_box()),
                 }),
             }),
@@ -1783,7 +1773,7 @@ mod fold_transform_tests {
         assert_eq!(
             simplify(&n),
             Node::Translate {
-                offset: [6.0, 0.0, 0.0],
+                offset: Vec3::new(6.0, 0.0, 0.0),
                 child: Box::new(unit_box()),
             }
         );
@@ -1794,9 +1784,9 @@ mod fold_transform_tests {
         // Pin: translate doesn't commute with rotate-of-non-translated-
         // child, so we leave the structure alone.
         let n = Node::Translate {
-            offset: [1.0, 0.0, 0.0],
+            offset: Vec3::new(1.0, 0.0, 0.0),
             child: Box::new(Node::Rotate {
-                axis: [0.0, 1.0, 0.0],
+                axis: Vec3::new(0.0, 1.0, 0.0),
                 angle: 0.5,
                 child: Box::new(unit_box()),
             }),
@@ -1807,16 +1797,16 @@ mod fold_transform_tests {
     #[test]
     fn nested_scale_folds_to_componentwise_product() {
         let n = Node::Scale {
-            factor: [2.0, 3.0, 4.0],
+            factor: Vec3::new(2.0, 3.0, 4.0),
             child: Box::new(Node::Scale {
-                factor: [5.0, 6.0, 7.0],
+                factor: Vec3::new(5.0, 6.0, 7.0),
                 child: Box::new(unit_box()),
             }),
         };
         assert_eq!(
             simplify(&n),
             Node::Scale {
-                factor: [10.0, 18.0, 28.0],
+                factor: Vec3::new(10.0, 18.0, 28.0),
                 child: Box::new(unit_box()),
             }
         );
@@ -1827,9 +1817,9 @@ mod fold_transform_tests {
         // Powers-of-two multiplied through give exact f32 products, so
         // the identity check fires and both Scale wrappers strip.
         let n = Node::Scale {
-            factor: [2.0, 4.0, 8.0],
+            factor: Vec3::new(2.0, 4.0, 8.0),
             child: Box::new(Node::Scale {
-                factor: [0.5, 0.25, 0.125],
+                factor: Vec3::new(0.5, 0.25, 0.125),
                 child: Box::new(unit_box()),
             }),
         };
@@ -1841,16 +1831,16 @@ mod fold_transform_tests {
         // Pin: a non-identity product collapses the two Scale wrappers
         // into one (no nesting), but the resulting Scale stays put.
         let n = Node::Scale {
-            factor: [2.0, 3.0, 4.0],
+            factor: Vec3::new(2.0, 3.0, 4.0),
             child: Box::new(Node::Scale {
-                factor: [3.0, 5.0, 7.0],
+                factor: Vec3::new(3.0, 5.0, 7.0),
                 child: Box::new(unit_box()),
             }),
         };
         assert_eq!(
             simplify(&n),
             Node::Scale {
-                factor: [6.0, 15.0, 28.0],
+                factor: Vec3::new(6.0, 15.0, 28.0),
                 child: Box::new(unit_box()),
             }
         );
@@ -1859,10 +1849,10 @@ mod fold_transform_tests {
     #[test]
     fn nested_rotate_same_axis_sums_angles() {
         let n = Node::Rotate {
-            axis: [0.0, 1.0, 0.0],
+            axis: Vec3::new(0.0, 1.0, 0.0),
             angle: 0.3,
             child: Box::new(Node::Rotate {
-                axis: [0.0, 1.0, 0.0],
+                axis: Vec3::new(0.0, 1.0, 0.0),
                 angle: 0.4,
                 child: Box::new(unit_box()),
             }),
@@ -1870,7 +1860,7 @@ mod fold_transform_tests {
         let s = simplify(&n);
         match s {
             Node::Rotate { axis, angle, child } => {
-                assert_eq!(axis, [0.0, 1.0, 0.0]);
+                assert_eq!(axis, Vec3::new(0.0, 1.0, 0.0));
                 assert!((angle - 0.7).abs() < 1e-6, "expected ~0.7, got {angle}");
                 assert_eq!(*child, unit_box());
             }
@@ -1882,10 +1872,10 @@ mod fold_transform_tests {
     fn nested_rotate_opposite_axis_subtracts_angles() {
         // (rotate +Y θa (rotate -Y θb X)) ≡ (rotate +Y θa-θb X).
         let n = Node::Rotate {
-            axis: [0.0, 1.0, 0.0],
+            axis: Vec3::new(0.0, 1.0, 0.0),
             angle: 0.7,
             child: Box::new(Node::Rotate {
-                axis: [0.0, -1.0, 0.0],
+                axis: Vec3::new(0.0, -1.0, 0.0),
                 angle: 0.3,
                 child: Box::new(unit_box()),
             }),
@@ -1893,7 +1883,7 @@ mod fold_transform_tests {
         let s = simplify(&n);
         match s {
             Node::Rotate { axis, angle, .. } => {
-                assert_eq!(axis, [0.0, 1.0, 0.0]);
+                assert_eq!(axis, Vec3::new(0.0, 1.0, 0.0));
                 assert!((angle - 0.4).abs() < 1e-6, "expected ~0.4, got {angle}");
             }
             other => panic!("expected Rotate, got {other:?}"),
@@ -1903,10 +1893,10 @@ mod fold_transform_tests {
     #[test]
     fn nested_rotate_opposing_full_cancellation_strips_both() {
         let n = Node::Rotate {
-            axis: [1.0, 0.0, 0.0],
+            axis: Vec3::new(1.0, 0.0, 0.0),
             angle: 0.5,
             child: Box::new(Node::Rotate {
-                axis: [-1.0, 0.0, 0.0],
+                axis: Vec3::new(-1.0, 0.0, 0.0),
                 angle: 0.5,
                 child: Box::new(unit_box()),
             }),
@@ -1922,10 +1912,10 @@ mod fold_transform_tests {
         // axis-angle rotation in general. We don't compose via
         // quaternions, so the structure stays.
         let n = Node::Rotate {
-            axis: [1.0, 0.0, 0.0],
+            axis: Vec3::new(1.0, 0.0, 0.0),
             angle: 0.5,
             child: Box::new(Node::Rotate {
-                axis: [0.0, 1.0, 0.0],
+                axis: Vec3::new(0.0, 1.0, 0.0),
                 angle: 0.3,
                 child: Box::new(unit_box()),
             }),
@@ -1939,10 +1929,10 @@ mod fold_transform_tests {
         // along +Y, just with different magnitudes. parallel_axis_sign
         // ignores magnitude, so the fold fires.
         let n = Node::Rotate {
-            axis: [0.0, 2.0, 0.0],
+            axis: Vec3::new(0.0, 2.0, 0.0),
             angle: 0.3,
             child: Box::new(Node::Rotate {
-                axis: [0.0, 5.0, 0.0],
+                axis: Vec3::new(0.0, 5.0, 0.0),
                 angle: 0.4,
                 child: Box::new(unit_box()),
             }),
@@ -1950,7 +1940,7 @@ mod fold_transform_tests {
         let s = simplify(&n);
         match s {
             Node::Rotate { axis, angle, .. } => {
-                assert_eq!(axis, [0.0, 2.0, 0.0]);
+                assert_eq!(axis, Vec3::new(0.0, 2.0, 0.0));
                 assert!((angle - 0.7).abs() < 1e-6);
             }
             other => panic!("expected Rotate, got {other:?}"),
@@ -1962,9 +1952,9 @@ mod fold_transform_tests {
         // (translate offset (scale s leaf)) cannot be expressed as
         // a single transform of either kind.
         let n = Node::Translate {
-            offset: [1.0, 0.0, 0.0],
+            offset: Vec3::new(1.0, 0.0, 0.0),
             child: Box::new(Node::Scale {
-                factor: [2.0, 1.0, 1.0],
+                factor: Vec3::new(2.0, 1.0, 1.0),
                 child: Box::new(unit_box()),
             }),
         };
@@ -1974,14 +1964,14 @@ mod fold_transform_tests {
     #[test]
     fn folding_is_idempotent() {
         let n = Node::Translate {
-            offset: [1.0, 1.0, 1.0],
+            offset: Vec3::new(1.0, 1.0, 1.0),
             child: Box::new(Node::Translate {
-                offset: [2.0, 2.0, 2.0],
+                offset: Vec3::new(2.0, 2.0, 2.0),
                 child: Box::new(Node::Rotate {
-                    axis: [0.0, 1.0, 0.0],
+                    axis: Vec3::new(0.0, 1.0, 0.0),
                     angle: 0.1,
                     child: Box::new(Node::Rotate {
-                        axis: [0.0, 1.0, 0.0],
+                        axis: Vec3::new(0.0, 1.0, 0.0),
                         angle: 0.2,
                         child: Box::new(unit_box()),
                     }),
@@ -2013,7 +2003,7 @@ mod difference_rewrite_tests {
             unit
         } else {
             Node::Translate {
-                offset: [x, y, z],
+                offset: Vec3::new(x, y, z),
                 child: Box::new(unit),
             }
         }
@@ -2089,7 +2079,7 @@ mod difference_rewrite_tests {
                 color: 0,
             }),
             subtract: vec![Node::Translate {
-                offset: [1.0, 0.0, 0.0],
+                offset: Vec3::new(1.0, 0.0, 0.0),
                 child: Box::new(Node::Box {
                     x: 1.0,
                     y: 1.0,
@@ -2114,7 +2104,7 @@ mod difference_rewrite_tests {
             color: 0,
         };
         let big_b = Node::Translate {
-            offset: [20.0, 0.0, 0.0],
+            offset: Vec3::new(20.0, 0.0, 0.0),
             child: Box::new(Node::Box {
                 x: 4.0,
                 y: 4.0,
@@ -2162,7 +2152,7 @@ mod difference_rewrite_tests {
                     color: 1,
                 },
                 Node::Translate {
-                    offset: [0.5, 0.0, 0.0],
+                    offset: Vec3::new(0.5, 0.0, 0.0),
                     child: Box::new(Node::Box {
                         x: 1.0,
                         y: 1.0,
@@ -2249,7 +2239,7 @@ mod difference_rewrite_tests {
                         color: 0,
                     },
                     Node::Translate {
-                        offset: [20.0, 0.0, 0.0],
+                        offset: Vec3::new(20.0, 0.0, 0.0),
                         child: Box::new(Node::Box {
                             x: 4.0,
                             y: 4.0,
