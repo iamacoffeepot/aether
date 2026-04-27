@@ -484,6 +484,22 @@ fn parallel_axis_sign(a: [f32; 3], b: [f32; 3]) -> Option<f32> {
 ///   BSP, which is exact when the inputs share zero volume — the
 ///   resulting boundary loops are identical, and the root cleanup pass
 ///   handles welding the same way for either path.
+/// - `(difference X [Y_1 … Y_n])` drops any subtractor `Y_i` whose
+///   AABB doesn't touch the base's AABB — subtracting something
+///   geometrically separate is a no-op. If every subtractor gets
+///   pruned, the rewrite returns the bare base.
+///
+/// Algebraic distribution:
+/// - `(difference (union A B …) Y_1 … Y_n)` distributes to
+///   `(union (difference A Y_1 … Y_n) (difference B Y_1 … Y_n) …)`
+///   when both the union's children and every subtractor are
+///   CSG-leaves (per [`crate::mesh::is_csg_leaf`]). The set-algebra
+///   identity is exact; we restrict to leaves to avoid amplifying
+///   T-junctions/slivers from a composite operand. Distribution
+///   unlocks per-arm AABB pruning of the inner differences and the
+///   subsequent disjoint-union rewrite, which together collapse most
+///   "bunch of parts minus one cutter" inputs to a flat composition
+///   that skips BSP entirely.
 ///
 /// Identity rules for `Mirror` are intentionally absent — every mirror
 /// flips winding regardless of axis, so there's no zero-effect form.
@@ -642,10 +658,48 @@ pub fn simplify(node: &Node) -> Node {
         Node::Intersection { children } => Node::Intersection {
             children: children.iter().map(simplify).collect(),
         },
-        Node::Difference { base, subtract } => Node::Difference {
-            base: Box::new(simplify(base)),
-            subtract: subtract.iter().map(simplify).collect(),
-        },
+        Node::Difference { base, subtract } => {
+            let subtract: Vec<Node> = subtract.iter().map(simplify).collect();
+
+            // Distribution check happens on the *unsimplified* base —
+            // simplifying it first would convert a disjoint Union to a
+            // Composition, hiding the Union pattern from us.
+            if let Node::Union { children } = base.as_ref()
+                && children.iter().all(crate::mesh::is_csg_leaf)
+                && subtract.iter().all(crate::mesh::is_csg_leaf)
+            {
+                // Each arm gets the full subtractor list (cloned) and
+                // is recursively simplified so per-arm AABB-prune and
+                // disjoint-union rewrites can fire on the smaller
+                // pieces. The wrapping Union is then simplified so
+                // disjoint arms collapse into a Composition.
+                let arms: Vec<Node> = children
+                    .iter()
+                    .map(|c| {
+                        simplify(&Node::Difference {
+                            base: Box::new(c.clone()),
+                            subtract: subtract.clone(),
+                        })
+                    })
+                    .collect();
+                return simplify(&Node::Union { children: arms });
+            }
+
+            // No distribution — simplify base, AABB-prune subtractors.
+            let base = simplify(base);
+            let base_aabb = compute_aabb(&base);
+            let pruned: Vec<Node> = subtract
+                .into_iter()
+                .filter(|s| compute_aabb(s).intersects(&base_aabb))
+                .collect();
+            if pruned.is_empty() {
+                return base;
+            }
+            Node::Difference {
+                base: Box::new(base),
+                subtract: pruned,
+            }
+        }
     }
 }
 
@@ -1781,8 +1835,6 @@ mod fold_transform_tests {
         }
     }
 
-    // ---- Translate folding ----
-
     #[test]
     fn nested_translate_folds_to_one() {
         let n = Node::Translate {
@@ -1853,8 +1905,6 @@ mod fold_transform_tests {
         assert_eq!(simplify(&n), n);
     }
 
-    // ---- Scale folding ----
-
     #[test]
     fn nested_scale_folds_to_componentwise_product() {
         let n = Node::Scale {
@@ -1906,8 +1956,6 @@ mod fold_transform_tests {
             }
         );
     }
-
-    // ---- Rotate folding ----
 
     #[test]
     fn nested_rotate_same_axis_sums_angles() {
@@ -2010,8 +2058,6 @@ mod fold_transform_tests {
         }
     }
 
-    // ---- Cross-shape ----
-
     #[test]
     fn translate_does_not_fold_into_scale_or_vice_versa() {
         // (translate offset (scale s leaf)) cannot be expressed as
@@ -2042,6 +2088,284 @@ mod fold_transform_tests {
                     }),
                 }),
             }),
+        };
+        let once = simplify(&n);
+        let twice = simplify(&once);
+        assert_eq!(once, twice);
+    }
+}
+
+#[cfg(test)]
+mod difference_rewrite_tests {
+    use super::*;
+
+    fn unit_box() -> Node {
+        Node::Box {
+            x: 1.0,
+            y: 1.0,
+            z: 1.0,
+            color: 0,
+        }
+    }
+
+    fn box_at(x: f32, y: f32, z: f32) -> Node {
+        let unit = unit_box();
+        if (x, y, z) == (0.0, 0.0, 0.0) {
+            unit
+        } else {
+            Node::Translate {
+                offset: [x, y, z],
+                child: Box::new(unit),
+            }
+        }
+    }
+
+    #[test]
+    fn single_disjoint_subtractor_drops_to_bare_base() {
+        let n = Node::Difference {
+            base: Box::new(unit_box()),
+            subtract: vec![box_at(10.0, 0.0, 0.0)],
+        };
+        assert_eq!(simplify(&n), unit_box());
+    }
+
+    #[test]
+    fn one_of_two_disjoint_subtractors_is_pruned() {
+        // First subtractor overlaps base, second doesn't — keep only first.
+        let n = Node::Difference {
+            base: Box::new(Node::Box {
+                x: 4.0,
+                y: 4.0,
+                z: 4.0,
+                color: 0,
+            }),
+            subtract: vec![box_at(0.0, 0.0, 0.0), box_at(20.0, 0.0, 0.0)],
+        };
+        let s = simplify(&n);
+        match s {
+            Node::Difference { subtract, .. } => {
+                assert_eq!(subtract.len(), 1);
+                assert_eq!(subtract[0], box_at(0.0, 0.0, 0.0));
+            }
+            other => panic!("expected Difference, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn all_disjoint_subtractors_collapse_to_base() {
+        let n = Node::Difference {
+            base: Box::new(unit_box()),
+            subtract: vec![box_at(10.0, 0.0, 0.0), box_at(0.0, 10.0, 0.0)],
+        };
+        assert_eq!(simplify(&n), unit_box());
+    }
+
+    #[test]
+    fn no_subtractors_are_pruned_when_all_overlap() {
+        let n = Node::Difference {
+            base: Box::new(Node::Box {
+                x: 4.0,
+                y: 4.0,
+                z: 4.0,
+                color: 0,
+            }),
+            subtract: vec![box_at(0.0, 0.0, 0.0), box_at(0.5, 0.0, 0.0)],
+        };
+        let s = simplify(&n);
+        match s {
+            Node::Difference { subtract, .. } => assert_eq!(subtract.len(), 2),
+            other => panic!("expected Difference, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn touching_face_subtractor_is_kept() {
+        // Pin: closed-set semantics from intersects mean shared-face
+        // counts as overlapping → don't prune.
+        let n = Node::Difference {
+            base: Box::new(Node::Box {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+                color: 0,
+            }),
+            subtract: vec![Node::Translate {
+                offset: [1.0, 0.0, 0.0],
+                child: Box::new(Node::Box {
+                    x: 1.0,
+                    y: 1.0,
+                    z: 1.0,
+                    color: 1,
+                }),
+            }],
+        };
+        let s = simplify(&n);
+        assert!(matches!(s, Node::Difference { .. }));
+    }
+
+    #[test]
+    fn difference_distributes_over_leaf_union_base() {
+        // (difference (union A B) Y) where A overlaps Y, B doesn't.
+        // Distribution + per-arm AABB-prune + disjoint-union rewrites
+        // collapse the whole thing to a composition.
+        let big_a = Node::Box {
+            x: 4.0,
+            y: 4.0,
+            z: 4.0,
+            color: 0,
+        };
+        let big_b = Node::Translate {
+            offset: [20.0, 0.0, 0.0],
+            child: Box::new(Node::Box {
+                x: 4.0,
+                y: 4.0,
+                z: 4.0,
+                color: 1,
+            }),
+        };
+        let cutter = Node::Box {
+            x: 1.0,
+            y: 1.0,
+            z: 1.0,
+            color: 9,
+        };
+        let n = Node::Difference {
+            base: Box::new(Node::Union {
+                children: vec![big_a.clone(), big_b.clone()],
+            }),
+            subtract: vec![cutter.clone()],
+        };
+        let s = simplify(&n);
+        match s {
+            Node::Composition(items) => {
+                assert_eq!(items.len(), 2);
+                assert!(
+                    matches!(&items[0], Node::Difference { .. }),
+                    "first arm should be Difference (A overlaps cutter), got {:?}",
+                    items[0]
+                );
+                assert_eq!(items[1], big_b);
+            }
+            other => panic!("expected Composition after full chain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distribution_blocked_by_composite_subtractor() {
+        // Subtractor contains a Union → not a CSG-leaf → distribution
+        // skipped, structure preserved.
+        let composite_subtractor = Node::Union {
+            children: vec![
+                Node::Box {
+                    x: 1.0,
+                    y: 1.0,
+                    z: 1.0,
+                    color: 1,
+                },
+                Node::Translate {
+                    offset: [0.5, 0.0, 0.0],
+                    child: Box::new(Node::Box {
+                        x: 1.0,
+                        y: 1.0,
+                        z: 1.0,
+                        color: 2,
+                    }),
+                },
+            ],
+        };
+        let n = Node::Difference {
+            base: Box::new(Node::Union {
+                children: vec![
+                    Node::Box {
+                        x: 4.0,
+                        y: 4.0,
+                        z: 4.0,
+                        color: 0,
+                    },
+                    Node::Box {
+                        x: 4.0,
+                        y: 4.0,
+                        z: 4.0,
+                        color: 1,
+                    },
+                ],
+            }),
+            subtract: vec![composite_subtractor],
+        };
+        let s = simplify(&n);
+        assert!(
+            matches!(s, Node::Difference { .. }),
+            "expected Difference (composite subtractor blocks distribution), got {s:?}"
+        );
+    }
+
+    #[test]
+    fn distribution_blocked_when_union_child_is_composite() {
+        let composite_child = Node::Difference {
+            base: Box::new(Node::Box {
+                x: 4.0,
+                y: 4.0,
+                z: 4.0,
+                color: 0,
+            }),
+            subtract: vec![Node::Box {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+                color: 9,
+            }],
+        };
+        let n = Node::Difference {
+            base: Box::new(Node::Union {
+                children: vec![
+                    composite_child,
+                    Node::Box {
+                        x: 4.0,
+                        y: 4.0,
+                        z: 4.0,
+                        color: 1,
+                    },
+                ],
+            }),
+            subtract: vec![Node::Box {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+                color: 2,
+            }],
+        };
+        let s = simplify(&n);
+        assert!(matches!(s, Node::Difference { .. }));
+    }
+
+    #[test]
+    fn rewrite_is_idempotent() {
+        let n = Node::Difference {
+            base: Box::new(Node::Union {
+                children: vec![
+                    Node::Box {
+                        x: 4.0,
+                        y: 4.0,
+                        z: 4.0,
+                        color: 0,
+                    },
+                    Node::Translate {
+                        offset: [20.0, 0.0, 0.0],
+                        child: Box::new(Node::Box {
+                            x: 4.0,
+                            y: 4.0,
+                            z: 4.0,
+                            color: 1,
+                        }),
+                    },
+                ],
+            }),
+            subtract: vec![Node::Box {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+                color: 9,
+            }],
         };
         let once = simplify(&n);
         let twice = simplify(&once);

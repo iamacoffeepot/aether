@@ -276,7 +276,7 @@ fn mesh_into_polygons(
 /// `true` when `node` is a CSG-leaf: contains no Union, Intersection,
 /// or Difference at any depth. Primitives, transforms of primitives,
 /// and compositions of leaves all qualify.
-fn is_csg_leaf(node: &Node) -> bool {
+pub(crate) fn is_csg_leaf(node: &Node) -> bool {
     match node {
         Node::Box { .. }
         | Node::Cylinder { .. }
@@ -1005,6 +1005,44 @@ mod tests {
         from_union.sort_by_key(key);
         from_comp.sort_by_key(key);
         assert_eq!(from_union, from_comp);
+    }
+
+    /// End-to-end equivalence for the difference-distribution rewrite:
+    /// a `(difference (union A B) Y)` where Y only touches A produces
+    /// the same triangle set as the hand-distributed
+    /// `(composition (difference A Y) B)`. Verifies the rewrite chain
+    /// (distribute → AABB-prune-arms → disjoint-union-to-composition)
+    /// preserves geometry.
+    #[test]
+    fn difference_over_disjoint_arm_union_matches_hand_distribution() {
+        use crate::parse;
+        let auto = parse(
+            "(difference \
+             (union (box 4 4 4 :color 0) (translate (20 0 0) (box 4 4 4 :color 1))) \
+             (box 1 1 1 :color 9))",
+        )
+        .unwrap();
+        let manual = parse(
+            "(composition \
+             (difference (box 4 4 4 :color 0) (box 1 1 1 :color 9)) \
+             (translate (20 0 0) (box 4 4 4 :color 1)))",
+        )
+        .unwrap();
+        let mut from_auto = mesh(&auto).unwrap();
+        let mut from_manual = mesh(&manual).unwrap();
+        let key = |t: &Triangle| {
+            let mut buf: Vec<u8> = Vec::with_capacity(40);
+            for v in &t.vertices {
+                for c in v {
+                    buf.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+            buf.extend_from_slice(&t.color.to_le_bytes());
+            buf
+        };
+        from_auto.sort_by_key(key);
+        from_manual.sort_by_key(key);
+        assert_eq!(from_auto, from_manual);
     }
 
     /// Pin: an *overlapping* union still goes through the BSP path.
