@@ -334,6 +334,21 @@ fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>) -> SchemaType {
             };
             SchemaType::Ref(SchemaCell::owned(merge_schema(inner, inner_label)))
         }
+        SchemaShape::Map { key, value } => {
+            // Issue #232: parallel-walk the labels Map arm so any
+            // nominal info inside key/value types (struct field
+            // names etc.) survives the shape→type rebuild. Mismatched
+            // labels (or no labels at all) collapse to anonymous on
+            // each side independently — the schema arm always wins.
+            let (key_label, value_label) = match label {
+                Some(LabelNode::Map { key: kc, value: vc }) => (Some(&**kc), Some(&**vc)),
+                _ => (None, None),
+            };
+            SchemaType::Map {
+                key: SchemaCell::owned(merge_schema(key, key_label)),
+                value: SchemaCell::owned(merge_schema(value, value_label)),
+            }
+        }
     }
 }
 

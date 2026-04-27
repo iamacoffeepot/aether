@@ -624,6 +624,71 @@ mod tests {
         assert_eq!(postcard::from_bytes::<InputsRecord>(&bytes).unwrap(), rec);
     }
 
+    // Issue #232 — `SchemaType::Map` wire-format tests. The Map arm
+    // describes `BTreeMap<K, V>` payloads; canonical bytes must be
+    // stable so `Kind::ID` doesn't drift across runs/builds.
+
+    #[test]
+    fn schema_map_string_keys_roundtrip() {
+        let desc = KindDescriptor {
+            name: "demo.headers".into(),
+            schema: SchemaType::Struct {
+                repr_c: false,
+                fields: vec![NamedField {
+                    name: "headers".into(),
+                    ty: SchemaType::Map {
+                        key: SchemaCell::owned(SchemaType::String),
+                        value: SchemaCell::owned(SchemaType::String),
+                    },
+                }]
+                .into(),
+            },
+        };
+        let bytes = postcard::to_allocvec(&desc).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
+            desc
+        );
+    }
+
+    #[test]
+    fn schema_map_integer_keys_roundtrip() {
+        // Integer-keyed map — Map<u32, String>. Wire shape unaffected
+        // by key type; only encoder/decoder JSON projection cares.
+        let desc = KindDescriptor {
+            name: "demo.lookup".into(),
+            schema: SchemaType::Map {
+                key: SchemaCell::owned(SchemaType::Scalar(Primitive::U32)),
+                value: SchemaCell::owned(SchemaType::String),
+            },
+        };
+        let bytes = postcard::to_allocvec(&desc).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
+            desc
+        );
+    }
+
+    #[test]
+    fn schema_map_canonical_bytes_deterministic() {
+        // `Kind::ID` derives from `fnv1a_64_prefixed(KIND_DOMAIN,
+        // canonical_kind_bytes(name, schema))`. Two calls with the same
+        // schema must produce byte-identical canonical bytes — otherwise
+        // the same kind would hash to different ids across builds. Pins
+        // the Map arm against the stability invariant ADR-0030 set up.
+        let schema = SchemaType::Map {
+            key: SchemaCell::owned(SchemaType::String),
+            value: SchemaCell::owned(SchemaType::Scalar(Primitive::U64)),
+        };
+        let bytes_a = canonical::canonical_kind_bytes("demo.counters", &schema);
+        let bytes_b = canonical::canonical_kind_bytes("demo.counters", &schema);
+        assert_eq!(bytes_a, bytes_b);
+        // Also pin the id derivation — it's the load-bearing call.
+        let id_a = canonical::kind_id_from_parts("demo.counters", &schema);
+        let id_b = canonical::kind_id_from_parts("demo.counters", &schema);
+        assert_eq!(id_a, id_b);
+    }
+
     #[test]
     fn inputs_section_concatenated_records_streaming_decode() {
         // Walk-the-section pattern the substrate reader will use:

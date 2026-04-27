@@ -261,6 +261,38 @@ fn encode_postcard(
             encode_enum_body(body, variant, path, out)?;
             Ok(())
         }
+        SchemaType::Map {
+            key: key_schema,
+            value: value_schema,
+        } => {
+            // Issue #232 + proto3-style JSON mapping. Input is a JSON
+            // object: keys live as strings on the wire-side regardless
+            // of declared key type. We parse each JSON-string key
+            // through the key schema, then sort by the parsed value
+            // so the wire bytes match what `postcard::to_allocvec`
+            // would produce on a `BTreeMap` with the same contents
+            // (sorted by key). Sender-order independence keeps two
+            // tools producing byte-identical payloads from
+            // semantically-equal inputs.
+            let json_map = value.as_object().ok_or_else(|| EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "object",
+            })?;
+            let mut entries: Vec<(ParsedMapKey, Value, &Value)> =
+                Vec::with_capacity(json_map.len());
+            for (k_str, v_json) in json_map {
+                let entry_path = format!("{path}.{k_str}");
+                let (parsed, key_json) = parse_map_key(k_str, key_schema, &entry_path)?;
+                entries.push((parsed, key_json, v_json));
+            }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            write_varint_u64(out, entries.len() as u64);
+            for (_pk, k_json, v_json) in &entries {
+                encode_postcard(k_json, key_schema, path, out)?;
+                encode_postcard(v_json, value_schema, path, out)?;
+            }
+            Ok(())
+        }
         SchemaType::Ref(inner) => {
             // ADR-0045 typed handle. Externally-tagged JSON matches
             // the Rust enum: `{"Inline": <inner-K>}` chooses the
@@ -306,6 +338,71 @@ fn encode_postcard(
                 }),
             }
         }
+    }
+}
+
+/// Normalized map-key form for sorting (issue #232). Cross-variant
+/// ordering is irrelevant — every key in a single map shares the
+/// declared key schema, so all `ParsedMapKey` values produced for one
+/// encode call land in the same arm. The derived `Ord` keeps the type
+/// total so callers don't need a custom comparator.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum ParsedMapKey<'a> {
+    Bool(bool),
+    UInt(u64),
+    SInt(i64),
+    Str(&'a str),
+}
+
+/// Parse a JSON-string map key per the declared key schema and produce
+/// (a) a sortable normalized form and (b) a `serde_json::Value` shaped
+/// for `encode_postcard` so the actual wire bytes flow through the
+/// existing scalar/string/bool encoders. Proto3 stringify rule —
+/// integer keys land as JSON-string digits, bool keys as `"true"` /
+/// `"false"`, string keys identity. Any other key shape is
+/// `UnsupportedSchema`; the `BTreeMap<K: Ord, V>` bound at the Rust
+/// layer makes most of these unreachable, but the codec rejects them
+/// defensively.
+fn parse_map_key<'a>(
+    k_str: &'a str,
+    schema: &SchemaType,
+    path: &str,
+) -> Result<(ParsedMapKey<'a>, Value), EncodeError> {
+    match schema {
+        SchemaType::String => Ok((ParsedMapKey::Str(k_str), Value::String(k_str.to_owned()))),
+        SchemaType::Bool => match k_str {
+            "true" => Ok((ParsedMapKey::Bool(true), Value::Bool(true))),
+            "false" => Ok((ParsedMapKey::Bool(false), Value::Bool(false))),
+            _ => Err(EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "\"true\" or \"false\" (bool map key)",
+            }),
+        },
+        SchemaType::Scalar(p) => match p {
+            Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::U64 => {
+                let n: u64 = k_str.parse().map_err(|_| EncodeError::TypeMismatch {
+                    field: path.to_owned(),
+                    expected: "unsigned integer (map key as decimal string)",
+                })?;
+                // Range-check happens at the scalar-write step via
+                // `as_unsigned`; storing as u64 here is lossless for
+                // every supported key width.
+                Ok((ParsedMapKey::UInt(n), Value::Number(n.into())))
+            }
+            Primitive::I8 | Primitive::I16 | Primitive::I32 | Primitive::I64 => {
+                let n: i64 = k_str.parse().map_err(|_| EncodeError::TypeMismatch {
+                    field: path.to_owned(),
+                    expected: "signed integer (map key as decimal string)",
+                })?;
+                Ok((ParsedMapKey::SInt(n), Value::Number(n.into())))
+            }
+            Primitive::F32 | Primitive::F64 => {
+                Err(EncodeError::UnsupportedSchema("float as Map key (no Ord)"))
+            }
+        },
+        _ => Err(EncodeError::UnsupportedSchema(
+            "Map key must be String, integer scalar, or Bool",
+        )),
     }
 }
 
@@ -570,7 +667,8 @@ fn encode_field_value(
         | SchemaType::Vec(_)
         | SchemaType::Enum { .. }
         | SchemaType::Unit
-        | SchemaType::Ref(_) => Err(EncodeError::UnsupportedSchema(
+        | SchemaType::Ref(_)
+        | SchemaType::Map { .. } => Err(EncodeError::UnsupportedSchema(
             "non-cast field inside cast-shaped struct",
         )),
     }
@@ -1164,5 +1262,125 @@ mod tests {
             let theirs = postcard::to_allocvec(&n).unwrap();
             assert_eq!(ours, theirs, "zigzag mismatch for {n}");
         }
+    }
+
+    // Issue #232 — `SchemaType::Map` encode tests. proto3-style JSON:
+    // object input always, integer/bool keys stringified.
+
+    fn map_schema(key: SchemaType, value: SchemaType) -> SchemaType {
+        SchemaType::Map {
+            key: SchemaCell::owned(key),
+            value: SchemaCell::owned(value),
+        }
+    }
+
+    #[test]
+    fn map_string_keys_matches_postcard_btreemap() {
+        // Reference value is a `BTreeMap<String, String>` postcarded by
+        // serde — that's the wire shape every receiving substrate will
+        // decode into. Sender input is unsorted to lock in the
+        // sort-after-parse step.
+        let schema = postcard_struct(vec![NamedField {
+            name: "headers".into(),
+            ty: map_schema(SchemaType::String, SchemaType::String),
+        }]);
+
+        let mut reference: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        reference.insert("content-type".into(), "application/json".into());
+        reference.insert("x-trace".into(), "abc123".into());
+
+        let expected = postcard::to_allocvec(&reference).unwrap();
+
+        let bytes = encode_schema(
+            &json!({"headers": {"x-trace": "abc123", "content-type": "application/json"}}),
+            &schema,
+        )
+        .unwrap();
+
+        // Strip the schema-struct field-prefix bytes — there are none
+        // here since the field's value is the whole map. The encoded
+        // payload is exactly the BTreeMap postcard bytes.
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn map_string_keys_sender_order_independent() {
+        // Two callers produce the same wire bytes regardless of JSON
+        // input order. Pins the sort-by-parsed-key step.
+        let schema = map_schema(SchemaType::String, SchemaType::Scalar(Primitive::U32));
+        let a = encode_schema(&json!({"alpha": 1, "beta": 2, "gamma": 3}), &schema).unwrap();
+        let b = encode_schema(&json!({"gamma": 3, "alpha": 1, "beta": 2}), &schema).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn map_u32_keys_match_postcard_btreemap() {
+        let schema = map_schema(SchemaType::Scalar(Primitive::U32), SchemaType::String);
+
+        let mut reference: std::collections::BTreeMap<u32, String> =
+            std::collections::BTreeMap::new();
+        reference.insert(1, "one".into());
+        reference.insert(42, "answer".into());
+        reference.insert(255, "max-u8".into());
+
+        let expected = postcard::to_allocvec(&reference).unwrap();
+
+        let bytes = encode_schema(
+            &json!({"42": "answer", "1": "one", "255": "max-u8"}),
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn map_bool_keys_match_postcard_btreemap() {
+        let schema = map_schema(SchemaType::Bool, SchemaType::Scalar(Primitive::U32));
+        let mut reference: std::collections::BTreeMap<bool, u32> =
+            std::collections::BTreeMap::new();
+        reference.insert(false, 0);
+        reference.insert(true, 1);
+        let expected = postcard::to_allocvec(&reference).unwrap();
+        let bytes = encode_schema(&json!({"true": 1, "false": 0}), &schema).unwrap();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn map_rejects_non_object_input() {
+        let schema = map_schema(SchemaType::String, SchemaType::String);
+        let err = encode_schema(&json!([["k", "v"]]), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn map_rejects_unparsable_integer_key() {
+        let schema = map_schema(SchemaType::Scalar(Primitive::U32), SchemaType::String);
+        let err = encode_schema(&json!({"not-a-number": "v"}), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn map_rejects_invalid_bool_key() {
+        let schema = map_schema(SchemaType::Bool, SchemaType::Scalar(Primitive::U32));
+        let err = encode_schema(&json!({"yes": 1}), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn map_inside_cast_struct_rejected() {
+        // A `Map` field inside a `repr_c: true` parent has no fixed
+        // layout — must surface as `UnsupportedSchema`, not silently
+        // produce garbled bytes.
+        let schema = SchemaType::Struct {
+            repr_c: true,
+            fields: vec![NamedField {
+                name: "headers".into(),
+                ty: map_schema(SchemaType::String, SchemaType::String),
+            }]
+            .into(),
+        };
+        let err = encode_schema(&json!({"headers": {"k": "v"}}), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::UnsupportedSchema(_)));
     }
 }

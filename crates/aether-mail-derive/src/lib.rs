@@ -386,6 +386,10 @@ fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
         return Ok(quote! { ::aether_mail::__derive_runtime::SchemaType::Unit });
     }
 
+    for f in fields {
+        reject_hashmap(&f.ty)?;
+    }
+
     let entries = fields.iter().enumerate().map(|(idx, f)| {
         let name = match &f.ident {
             Some(id) => id.to_string(),
@@ -412,6 +416,12 @@ fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
 }
 
 fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
+    for v in &data.variants {
+        for f in v.fields.iter() {
+            reject_hashmap(&f.ty)?;
+        }
+    }
+
     let variant_entries = data.variants.iter().enumerate().map(|(idx, v)| {
         let name = v.ident.to_string();
         let discriminant = idx as u32;
@@ -492,6 +502,45 @@ fn is_vec_u8(ty: &Type) -> bool {
         return false;
     };
     inner.path.is_ident("u8")
+}
+
+/// Walk a field-type syntactic tree and reject `HashMap` anywhere
+/// inside it (issue #232). `HashMap`'s iteration order is hash-state-
+/// dependent, which would let two builds of the same kind hash to
+/// different `Kind::ID`s — kind ids are derived from canonical schema
+/// bytes, so platform-dependent encoding is a wire-correctness bug.
+/// `BTreeMap` (sorted by key) is the deterministic alternative; the
+/// error message names it explicitly so the fix is one substitution.
+///
+/// Recurses through `AngleBracketed` generic args so nested forms like
+/// `Vec<HashMap<String, String>>` and `Option<HashMap<...>>` are
+/// caught too — the nested case would otherwise pass through trait
+/// dispatch and emit a less actionable "trait `Schema` not
+/// implemented" error pointing at the inner `HashMap`.
+fn reject_hashmap(ty: &Type) -> syn::Result<()> {
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last()
+            && seg.ident == "HashMap"
+        {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "HashMap is not allowed in derived kind schemas — its iteration order is \
+                 platform-dependent and would diverge canonical schema bytes (and Kind::ID) \
+                 across builds. Use `std::collections::BTreeMap` instead, which sorts by key. \
+                 See https://github.com/iamacoffeepot/aether/issues/232",
+            ));
+        }
+        for seg in &tp.path.segments {
+            if let PathArguments::AngleBracketed(args) = &seg.arguments {
+                for arg in &args.args {
+                    if let GenericArgument::Type(inner) = arg {
+                        reject_hashmap(inner)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 struct KindAttr {
@@ -1367,5 +1416,81 @@ fn extract_agent_doc(attrs: &[Attribute]) -> Option<String> {
         if s.is_empty() { None } else { Some(s) }
     } else {
         Some(full_trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reject_hashmap;
+    use syn::parse_str;
+
+    // Issue #232: pin the HashMap rejection so a future field-walker
+    // refactor can't silently drop the check (the user-visible
+    // failure mode would be a confusing "Schema not implemented"
+    // error pointing at HashMap rather than the actionable
+    // "use BTreeMap" message). Each fixture covers one shape we
+    // expect the rejection to catch — direct, nested in Vec, nested
+    // in Option, and inside a fully-qualified path.
+
+    fn err(ty: &str) -> String {
+        let parsed: syn::Type = parse_str(ty).expect("test fixture parses");
+        reject_hashmap(&parsed)
+            .err()
+            .unwrap_or_else(|| panic!("expected reject_hashmap to error on {ty}"))
+            .to_string()
+    }
+
+    #[test]
+    fn rejects_direct_hashmap_field() {
+        let msg = err("HashMap<String, String>");
+        assert!(
+            msg.contains("BTreeMap"),
+            "error must point to BTreeMap fix, got: {msg}"
+        );
+        assert!(
+            msg.contains("232"),
+            "error must reference issue 232, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_fully_qualified_hashmap() {
+        let msg = err("std::collections::HashMap<String, u32>");
+        assert!(msg.contains("BTreeMap"));
+    }
+
+    #[test]
+    fn rejects_hashmap_nested_in_vec() {
+        let msg = err("Vec<HashMap<String, String>>");
+        assert!(msg.contains("BTreeMap"));
+    }
+
+    #[test]
+    fn rejects_hashmap_nested_in_option() {
+        let msg = err("Option<HashMap<String, String>>");
+        assert!(msg.contains("BTreeMap"));
+    }
+
+    #[test]
+    fn allows_btreemap_field() {
+        let parsed: syn::Type = parse_str("BTreeMap<String, String>").unwrap();
+        assert!(reject_hashmap(&parsed).is_ok());
+    }
+
+    #[test]
+    fn allows_plain_types() {
+        for ty in [
+            "u32",
+            "String",
+            "Vec<u8>",
+            "Option<String>",
+            "BTreeSet<u64>",
+        ] {
+            let parsed: syn::Type = parse_str(ty).unwrap();
+            assert!(
+                reject_hashmap(&parsed).is_ok(),
+                "rejected {ty} unexpectedly"
+            );
+        }
     }
 }

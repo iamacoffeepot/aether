@@ -319,3 +319,71 @@ fn cast_eligible_blocked_by_non_pod_field_even_with_repr_c() {
     };
     assert!(!*repr_c);
 }
+
+// Issue #232 — `BTreeMap<K, V>` is the deterministic map type for
+// derived kind schemas. The Schema impl in `aether-mail` lands a
+// `SchemaType::Map`; the derive does no special-casing, so this is
+// trait-dispatch end-to-end.
+
+#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
+#[kind(name = "test.headers")]
+#[allow(dead_code)]
+struct Headers {
+    headers: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
+#[kind(name = "test.lookup")]
+#[allow(dead_code)]
+struct Lookup {
+    counters: std::collections::BTreeMap<u32, u64>,
+}
+
+#[test]
+fn btreemap_field_lands_as_schema_map() {
+    let SchemaType::Struct { fields, .. } = &<Headers as Schema>::SCHEMA else {
+        panic!("expected Struct schema");
+    };
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].name, "headers");
+    let SchemaType::Map { key, value } = &fields[0].ty else {
+        panic!("expected Map schema, got {:?}", fields[0].ty);
+    };
+    assert_eq!(&**key, &SchemaType::String);
+    assert_eq!(&**value, &SchemaType::String);
+}
+
+#[test]
+fn btreemap_with_integer_keys_lands_as_schema_map() {
+    let SchemaType::Struct { fields, .. } = &<Lookup as Schema>::SCHEMA else {
+        panic!("expected Struct schema");
+    };
+    let SchemaType::Map { key, value } = &fields[0].ty else {
+        panic!("expected Map schema");
+    };
+    assert_eq!(&**key, &SchemaType::Scalar(Primitive::U32));
+    assert_eq!(&**value, &SchemaType::Scalar(Primitive::U64));
+}
+
+#[test]
+fn btreemap_field_disqualifies_repr_c() {
+    // BTreeMap is variable-length — same constraint as Vec/String/
+    // Option. A `#[repr(C)]` struct with a BTreeMap field must report
+    // `ELIGIBLE = false` so the wire layer doesn't try to cast bytes.
+    const { assert!(!<Headers as CastEligible>::ELIGIBLE) };
+    const { assert!(!<Lookup as CastEligible>::ELIGIBLE) };
+}
+
+#[test]
+fn btreemap_kind_id_stable_across_invocations() {
+    // `Kind::ID` is `fnv1a_64_prefixed(KIND_DOMAIN, canonical_bytes)`.
+    // Two reads of the same const must agree byte-for-byte; this is
+    // the canonical-stability invariant ADR-0030 + ADR-0032 lock in
+    // for the new Map arm.
+    let id_a = <Headers as Kind>::ID;
+    let id_b = <Headers as Kind>::ID;
+    assert_eq!(id_a, id_b);
+    // And different schemas → different ids (collision-resistance
+    // sanity, not an exhaustive test of FNV-1a).
+    assert_ne!(<Headers as Kind>::ID, <Lookup as Kind>::ID);
+}
