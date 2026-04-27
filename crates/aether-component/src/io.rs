@@ -1,6 +1,7 @@
 //! ADR-0041 substrate file I/O, guest side. Thin helpers that build
 //! the typed request kinds (`Read` / `Write` / `Delete` / `List`),
-//! postcard-encode them, and send to the substrate's `"io"` sink —
+//! postcard-encode them, and send to the substrate's
+//! `"aether.sink.io"` sink (ADR-0058) —
 //! so component authors don't have to know the mailbox-name
 //! convention, import the kinds manually, or hand-roll the encode.
 //!
@@ -49,11 +50,11 @@ use serde::Serialize;
 
 use crate::{raw, resolve_sink};
 
-/// Short mailbox name the substrate registers its I/O sink under
-/// (ADR-0041). Exposed so components that want to bypass the
-/// typed helpers and build a `Sink<K>` directly can do so without
-/// duplicating the string literal.
-pub const IO_MAILBOX_NAME: &str = "io";
+/// Mailbox name the substrate registers its I/O sink under (ADR-0041,
+/// namespaced under `aether.sink.*` per ADR-0058). Exposed so
+/// components that want to bypass the typed helpers and build a
+/// `Sink<K>` directly can do so without duplicating the string literal.
+pub const IO_MAILBOX_NAME: &str = "aether.sink.io";
 
 /// Send an `aether.io.read` request to the substrate. The reply
 /// arrives as a `ReadResult` on the calling component's mailbox —
@@ -322,11 +323,12 @@ mod tests {
     }
 
     #[test]
-    fn io_mailbox_name_is_short() {
-        // Regression guard for the sink-names-vs-kind-prefixes
-        // footgun. The helper must address the sink by its short
-        // name, never by the kind namespace prefix.
-        assert_eq!(IO_MAILBOX_NAME, "io");
+    fn io_mailbox_name_is_namespaced() {
+        // ADR-0058: chassis sinks live under `aether.sink.*`. Regression
+        // guard so a future "simplification" that drops the prefix
+        // collides with the user-space `"io"` namespace.
+        assert_eq!(IO_MAILBOX_NAME, "aether.sink.io");
+        assert_ne!(IO_MAILBOX_NAME, "io");
         assert_ne!(IO_MAILBOX_NAME, "aether.io");
     }
 }

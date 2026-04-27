@@ -67,7 +67,7 @@ impl Component for Hello {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Hello {
             pong: ctx.resolve::<Pong>(),
-            render: ctx.resolve_sink::<DrawTriangle>("render"),
+            render: ctx.resolve_sink::<DrawTriangle>("aether.sink.render"),
         }
     }
 

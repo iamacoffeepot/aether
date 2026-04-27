@@ -43,10 +43,10 @@ use crate::{
 /// SDK's `Ctx::publish` mails `aether.handle.publish` to this name;
 /// the substrate's `handle_sink_handler` decodes the request,
 /// drives the `HandleStore`, and replies with the paired `*Result`
-/// kind via `Mailer::send_reply`. Short name (not the kind's
-/// `aether.handle.*` namespace) — same convention as `"io"`,
-/// `"net"`, `"audio"`.
-pub const HANDLE_SINK_NAME: &str = "handle";
+/// kind via `Mailer::send_reply`. Lives under `aether.sink.*` per
+/// ADR-0058 — same as `"aether.sink.io"`, `"aether.sink.net"`,
+/// `"aether.sink.audio"`, etc.
+pub const HANDLE_SINK_NAME: &str = "aether.sink.handle";
 
 /// Everything a chassis needs after shared boot setup. Fields are
 /// `pub` so chassis code destructures and takes ownership of the

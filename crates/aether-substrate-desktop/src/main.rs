@@ -1033,7 +1033,7 @@ fn main() -> wasmtime::Result<()> {
         let verts_for_sink = Arc::clone(&frame_vertices);
         let tris_for_sink = Arc::clone(&triangles_rendered);
         boot.registry.register_sink(
-            "render",
+            "aether.sink.render",
             Arc::new(
                 move |_kind_id: u64,
                       _kind_name: &str,
@@ -1072,7 +1072,7 @@ fn main() -> wasmtime::Result<()> {
         let outbound_for_sink = Arc::clone(&boot.outbound);
         let audio_sender = audio_pipeline.as_ref().map(|p| p.sender.clone());
         boot.registry.register_sink(
-            "audio",
+            "aether.sink.audio",
             Arc::new(
                 move |kind_id: u64,
                       _kind_name: &str,
@@ -1104,7 +1104,7 @@ fn main() -> wasmtime::Result<()> {
     {
         let cam_for_sink = Arc::clone(&camera_state);
         boot.registry.register_sink(
-            "camera",
+            "aether.sink.camera",
             Arc::new(
                 move |_kind_id: u64,
                       _kind_name: &str,
@@ -1136,11 +1136,11 @@ fn main() -> wasmtime::Result<()> {
 
     // `aether.io.*`: ADR-0041 substrate file I/O. Build the default
     // adapter registry (save/assets/config roots from env vars or
-    // dirs-crate defaults) and wire the `"io"` sink. If the boot-time
-    // filesystem setup fails (usually a perms issue on one of the
-    // root directories), log loud and skip the sink — components
-    // mailing `io` then warn-drop as "unknown mailbox" so failure is
-    // visible rather than silent.
+    // dirs-crate defaults) and wire the `"aether.sink.io"` sink. If the
+    // boot-time filesystem setup fails (usually a perms issue on one of
+    // the root directories), log loud and skip the sink — components
+    // mailing `aether.sink.io` then warn-drop as "unknown mailbox" so
+    // failure is visible rather than silent.
     match aether_substrate_desktop::io::build_default_registry() {
         Ok((registry, roots)) => {
             tracing::info!(
@@ -1151,7 +1151,7 @@ fn main() -> wasmtime::Result<()> {
                 "io adapters registered",
             );
             boot.registry.register_sink(
-                "io",
+                "aether.sink.io",
                 aether_substrate_desktop::io::io_sink_handler(registry, Arc::clone(&boot.queue)),
             );
         }
@@ -1172,7 +1172,7 @@ fn main() -> wasmtime::Result<()> {
     // adapter carries the gating.
     let net_adapter = aether_substrate_core::net::build_default_adapter();
     boot.registry.register_sink(
-        "net",
+        "aether.sink.net",
         aether_substrate_core::net::net_sink_handler(net_adapter, Arc::clone(&boot.queue)),
     );
 

@@ -129,12 +129,12 @@ fn main() -> wasmtime::Result<()> {
         .kind_id(FrameStats::NAME)
         .expect("FrameStats registered");
 
-    // Silent drop for `render` mail. A desktop-designed component
-    // loaded on a headless substrate will emit `DrawTriangle` every
-    // tick; without this sink, core's mailbox-resolution warn fires
-    // at the tick rate and buries every other engine_logs entry.
+    // Silent drop for `aether.sink.render` mail. A desktop-designed
+    // component loaded on a headless substrate will emit `DrawTriangle`
+    // every tick; without this sink, core's mailbox-resolution warn
+    // fires at the tick rate and buries every other engine_logs entry.
     boot.registry.register_sink(
-        "render",
+        "aether.sink.render",
         Arc::new(
             |_kind_id: u64,
              _kind_name: &str,
@@ -144,11 +144,11 @@ fn main() -> wasmtime::Result<()> {
              _count: u32| {},
         ),
     );
-    // Same deal for `aether.camera` — a desktop-designed camera
-    // component will emit it every tick. Headless has no GPU to
-    // upload to, so silently discard.
+    // Same deal for `aether.sink.camera` — a desktop-designed camera
+    // component will emit camera updates every tick. Headless has no
+    // GPU to upload to, so silently discard.
     boot.registry.register_sink(
-        "camera",
+        "aether.sink.camera",
         Arc::new(
             |_kind_id: u64,
              _kind_name: &str,
@@ -170,7 +170,7 @@ fn main() -> wasmtime::Result<()> {
         .expect("SetMasterGain registered");
     let outbound_for_audio_sink = Arc::clone(&boot.outbound);
     boot.registry.register_sink(
-        "audio",
+        "aether.sink.audio",
         Arc::new(
             move |kind_id: u64,
                   _kind_name: &str,
@@ -206,7 +206,7 @@ fn main() -> wasmtime::Result<()> {
                 "io adapters registered",
             );
             boot.registry.register_sink(
-                "io",
+                "aether.sink.io",
                 aether_substrate_core::io::io_sink_handler(registry, Arc::clone(&boot.queue)),
             );
         }
@@ -226,7 +226,7 @@ fn main() -> wasmtime::Result<()> {
     // `Disabled`.
     let net_adapter = aether_substrate_core::net::build_default_adapter();
     boot.registry.register_sink(
-        "net",
+        "aether.sink.net",
         aether_substrate_core::net::net_sink_handler(net_adapter, Arc::clone(&boot.queue)),
     );
 

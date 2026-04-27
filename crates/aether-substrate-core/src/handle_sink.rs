@@ -1,4 +1,4 @@
-//! ADR-0045 typed-handle sink. The `"handle"` sink owns
+//! ADR-0045 typed-handle sink. The `"aether.sink.handle"` sink owns
 //! `Arc<HandleStore>` and dispatches the four request kinds defined
 //! in `aether-kinds`:
 //!
@@ -33,9 +33,10 @@ use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
 use crate::registry::SinkHandler;
 
-/// Build the `"handle"` sink handler. Boot calls this after
-/// constructing the `HandleStore` and `Mailer`, and registers the
-/// returned closure under the `"handle"` mailbox name. The closure
+/// Build the `"aether.sink.handle"` sink handler. Boot calls this
+/// after constructing the `HandleStore` and `Mailer`, and registers
+/// the returned closure under the `"aether.sink.handle"` mailbox name.
+/// The closure
 /// demultiplexes incoming mail by kind id and replies via
 /// `mailer.send_reply` — see module docs for the per-kind contract.
 pub fn handle_sink_handler(store: Arc<HandleStore>, mailer: Arc<Mailer>) -> SinkHandler {

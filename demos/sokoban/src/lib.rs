@@ -151,7 +151,7 @@ impl Component for Sokoban {
             state: SokobanState::default(),
             state_kind: ctx.resolve::<SokobanState>(),
             step_result_kind: ctx.resolve::<PlayerStepResult>(),
-            render: ctx.resolve_sink::<DrawTriangle>("render"),
+            render: ctx.resolve_sink::<DrawTriangle>("aether.sink.render"),
             player: ctx.resolve_sink::<PlayerSetPosition>("player"),
         };
         me.load_level(0);

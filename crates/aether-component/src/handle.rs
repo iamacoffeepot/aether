@@ -1,5 +1,6 @@
-//! ADR-0045 typed-handle SDK, guest side. The substrate's `"handle"`
-//! sink owns a refcounted byte cache; components publish values into
+//! ADR-0045 typed-handle SDK, guest side. The substrate's
+//! `"aether.sink.handle"` sink (ADR-0058) owns a refcounted byte cache;
+//! components publish values into
 //! it (postcard-encoded) and receive a fresh ephemeral handle id back
 //! that they can embed in mail as `Ref::Handle { id, kind_id }`. The
 //! substrate's dispatch path resolves the handle to its `Ref::Inline`
@@ -50,11 +51,12 @@ use serde::Serialize;
 
 use crate::{raw, resolve_sink};
 
-/// Short mailbox name the substrate registers its handle sink under
-/// (ADR-0045). Exposed for components that want to bypass the typed
-/// helpers and build a `Sink<HandlePublish>` directly without
-/// duplicating the string literal.
-pub const HANDLE_SINK_NAME: &str = "handle";
+/// Mailbox name the substrate registers its handle sink under
+/// (ADR-0045, namespaced under `aether.sink.*` per ADR-0058). Exposed
+/// for components that want to bypass the typed helpers and build a
+/// `Sink<HandlePublish>` directly without duplicating the string
+/// literal.
+pub const HANDLE_SINK_NAME: &str = "aether.sink.handle";
 
 /// Wait-buffer capacity for the four reply kinds. Their `Ok` /
 /// `Err` payloads are at most a couple of u64s plus an `HandleError`
@@ -158,7 +160,7 @@ impl<K> Drop for Handle<K> {
 }
 
 /// Postcard-encode `value` and round-trip a `HandlePublish` request
-/// through the `"handle"` sink. Returns the typed `Handle<K>` on
+/// through the `"aether.sink.handle"` sink. Returns the typed `Handle<K>` on
 /// success or a `SyncHandleError` describing the failure (substrate
 /// timed out, eviction failed, kind id mismatch on a re-publish, …).
 ///
