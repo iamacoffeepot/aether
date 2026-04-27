@@ -68,6 +68,59 @@ Kind::ID = fnv1a_64_prefixed(KIND_DOMAIN, name ++ sorted_field_hash_blob)
 
 Where `sorted_field_hash_blob` is the canonical bytes of `field_hashes.sort().concat()`. Reorder-free at the source layer — moving a field's source position doesn't shift the kind id. Renames shift the kind id (since the field hash changes); the remap dict is what carries the equivalence.
 
+### Unknown fields
+
+On read, fields the receiver's schema doesn't bind are preserved verbatim in an unknown-fields bucket alongside the typed value. The bucket carries `(field_hash, raw_bytes)` per unknown field. On re-encode, unknowns merge back into field-hash sort order alongside known fields, so a payload round-trips exactly through a receiver that doesn't fully understand it — v1 reading v2's payload, then writing it back, doesn't lose v2's additions.
+
+```rust
+struct DecodedPayload<T> {
+    value: T,
+    unknown_fields: Vec<UnknownField>,
+}
+
+struct UnknownField {
+    hash: u64,
+    bytes: Vec<u8>,    // verbatim TLV body, ready to re-emit
+}
+```
+
+Strict mode: kinds where preserving unknown bytes is a security risk (capability-style payloads where an unknown field might be an authorization marker that v1 silently drops) opt out via `#[kind(strict)]`, which errors on unknown fields rather than bucketing. Default is bucket — forgiving for storage; strict is opt-in for the cases that need it.
+
+Memory cost is the bucket bytes per decoded payload. Typically zero (no version skew), occasionally small (a v2 added a few fields), pathologically larger (a v3 added a megabyte blob field; v1 holds it on round-trip). Worth noting; not a blocker.
+
+### Typed field access
+
+A name-based accessor that hashes `(name, type)` and looks the field up across known fields, the remap dict, and the unknown bucket in one call:
+
+```rust
+impl<T> DecodedPayload<T> {
+    /// Fetch a field by name and decode it as `U`. The lookup hash
+    /// is `field_hash(name, U::SCHEMA)`, so a name match with a
+    /// type mismatch returns None — there is no way to misdecode
+    /// bytes by asking for the wrong T.
+    fn get<U: Schema + Decode>(
+        &self,
+        name: &str,
+    ) -> Option<Result<U, DecodeError>>;
+
+    /// Loose lookup by name only — for tooling that knows the name
+    /// but wants raw bytes against an out-of-band schema.
+    fn get_raw(&self, name: &str) -> Option<(u64, &[u8])>;
+}
+```
+
+Because the field hash includes the field's type, asking for a name with the wrong type returns `None` rather than misdecoding bytes. Two flavors: typed (`get::<T>`) for the common case; raw (`get_raw`) for tooling that wants bytes against a schema it knows out-of-band (e.g., the labels manifest of a newer component version).
+
+The `T: Schema + Decode` bound is satisfied by primitives, `String`, `bool`, `Vec<T>`, `Option<T>`, `BTreeMap<K, V>`, and any user struct/enum carrying both derives. Open question whether to extend this to arbitrary user types via a separate `#[derive(FieldDecode)]` (out of v1; punted to a follow-up).
+
+### Missing-field defaults
+
+Missing fields fall back to **type-default** — `0` for integers, `false` for `bool`, empty for `String` / `Vec` / `BTreeMap`, `None` for `Option`, type-default recursively for nested structs. This matches proto3 and means **adding a field is wire-compatible by construction**: v1 readers seeing v2-written payloads with extra fields preserve them in the unknown bucket; v2 readers seeing v1-written payloads with new-field absent get the type-default, which is exactly what makes the upgrade-survives-storage promise hold.
+
+Authors who need "did the sender write this field" semantics use `Option<T>` as the field type — type-default is `None`, explicitly-sent `None` is also `None` (indistinguishable, which is fine — both mean "no value"). To distinguish absent from explicitly-zero, wrap further (`Option<u32>` for "u32 or unset"; `Option<Option<u32>>` for "u32, explicitly-none, or absent"); in practice the inner `Option` is enough.
+
+This avoids per-field default-value attributes in v1. `#[field(default = "...")]` is a possible v2 extension if a use case forces it (e.g., a non-zero numeric default that's semantically required).
+
 ### Discipline (the strict rules)
 
 1. Once shipped, a field's content hash is immutable. Changing the field's name or type produces a new hash.
@@ -93,17 +146,13 @@ These are the load-bearing things this draft does *not* answer. Each needs a dec
    - Use postcard's experimental schema features if they cover what we need.
    - Layer TLV on top of postcard bodies (envelope is hand-written, body is postcard).
    - Swap serializer for TLV-shape kinds (e.g., use a different crate or hand-roll). Bigger surface change.
-2. **Default values for missing fields.** Receiver expecting a field that isn't on the wire — what does it use? Three options:
-   - Type-default (`Default::default()`-like rule per type — `0` for ints, empty for collections, `None` for `Option`).
-   - Author-declared default (`#[field(default = "...")]` on the field).
-   - Error (strict mode — every field must be present, defaults ship as explicit `Option<T>`).
-3. **Removal vs deprecation.** Is hard removal allowed (a field's hash is permanently retired and no one needs it), or do we require fields to be marked deprecated for a period before removal?
-4. **Which kinds use TLV.** Opt-in per kind (`#[kind(storage)]` attribute), opt-out, or implicit by use case (any kind that's ever stored)? Probably opt-in to avoid forcing live-mail kinds onto a slower path.
-5. **Field-hash collision policy.** 64 bits gives ample headroom but isn't infinite. Do we cap field count per kind (collision-resistance practical), detect collisions at derive time (compile error if two field hashes collide within one kind), or just accept the birthday-bound argument as we do for kind ids?
-6. **Cast + TLV interaction.** A TLV-shape kind almost certainly excludes cast eligibility (no fixed `#[repr(C)]` layout). Same constraint as today's `Vec`/`Option`/`Map`. The derive should reject `#[repr(C)]` + `#[kind(storage)]` with a clear error.
-7. **Composition with the version-graph idea.** TLV makes most diffs transparent. Type changes and semantic renames are the residual; do those want explicit migration edges, or does the remap dictionary cover both? Probably remap covers renames; explicit migrations cover type changes.
-8. **Manifest format.** Where do TLV field hashes and remap dictionaries live in the wasm? New custom section (`aether.kinds.fields`?), or extension of `aether.kinds.labels`?
-9. **Migration of existing stored payloads.** When a component first opts into TLV storage, is there a one-time migration of old positional payloads, or do we accept that pre-TLV storage is read-only-incompatible?
+2. **Removal vs deprecation.** Is hard removal allowed (a field's hash is permanently retired and no one needs it), or do we require fields to be marked deprecated for a period before removal?
+3. **Which kinds use TLV.** Opt-in per kind (`#[kind(storage)]` attribute), opt-out, or implicit by use case (any kind that's ever stored)? Probably opt-in to avoid forcing live-mail kinds onto a slower path.
+4. **Field-hash collision policy.** 64 bits gives ample headroom but isn't infinite. Do we cap field count per kind (collision-resistance practical), detect collisions at derive time (compile error if two field hashes collide within one kind), or just accept the birthday-bound argument as we do for kind ids?
+5. **Cast + TLV interaction.** A TLV-shape kind almost certainly excludes cast eligibility (no fixed `#[repr(C)]` layout). Same constraint as today's `Vec`/`Option`/`Map`. The derive should reject `#[repr(C)]` + `#[kind(storage)]` with a clear error.
+6. **Composition with the version-graph idea.** TLV makes most diffs transparent. Type changes and semantic renames are the residual; do those want explicit migration edges, or does the remap dictionary cover both? Probably remap covers renames; explicit migrations cover type changes.
+7. **Manifest format.** Where do TLV field hashes and remap dictionaries live in the wasm? New custom section (`aether.kinds.fields`?), or extension of `aether.kinds.labels`?
+8. **Migration of existing stored payloads.** When a component first opts into TLV storage, is there a one-time migration of old positional payloads, or do we accept that pre-TLV storage is read-only-incompatible?
 
 ## Alternatives considered
 
