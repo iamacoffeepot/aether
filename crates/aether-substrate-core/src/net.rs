@@ -1,7 +1,7 @@
 //! Substrate HTTP egress (ADR-0043). The `NetAdapter` trait is the
 //! extension point for HTTP backends — `ureq` today, anything else
 //! that implements the trait later. The chassis that wires the
-//! `"net"` sink builds an adapter from env config, hands it to
+//! `"aether.sink.net"` sink builds an adapter from env config, hands it to
 //! `net_sink_handler`, and registers the result.
 //!
 //! v1 semantics:
@@ -315,9 +315,9 @@ fn parse_default_timeout() -> Duration {
     Duration::from_millis(ms as u64)
 }
 
-/// Build the `"net"` sink handler. The chassis calls this at boot
-/// after `build_default_adapter` and passes the result to
-/// `registry.register_sink("net", handler)`. The returned closure
+/// Build the `"aether.sink.net"` sink handler. The chassis calls this
+/// at boot after `build_default_adapter` and passes the result to
+/// `registry.register_sink("aether.sink.net", handler)`. The returned closure
 /// decodes incoming `Fetch` mail, hands it to the adapter, and
 /// replies with the paired `FetchResult` via `mailer.send_reply`.
 ///

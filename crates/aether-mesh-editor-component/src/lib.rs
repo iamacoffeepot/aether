@@ -1,6 +1,6 @@
 //! DSL mesh editor component (ADR-0052). Accepts a `.dsl` source per
 //! ADR-0026 + ADR-0051, parses + meshes it via `aether-dsl-mesh`, and
-//! replays the cached triangle list to the `"render"` sink every tick.
+//! replays the cached triangle list to the `"aether.sink.render"` sink every tick.
 //! Hot reload is by-replacement: each `SetText` (or successful
 //! `SetPath`-driven I/O reply) drops the prior cache and installs the
 //! new triangles atomically — partial parse or mesh failures keep the
@@ -26,7 +26,7 @@
 //!    - `aether.dsl_mesh.set_path { namespace, path }` to load from
 //!      the substrate's I/O surface (ADR-0041).
 //! 3. The editor parses, meshes, and caches the triangles. The next
-//!    tick (and every tick after) re-emits them to `"render"`.
+//!    tick (and every tick after) re-emits them to `"aether.sink.render"`.
 //! 4. To iterate, modify the DSL text and re-send `set_text` (or
 //!    re-write the file and re-send `set_path`).
 
@@ -84,7 +84,7 @@ impl Component for DslMeshEditor {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         DslMeshEditor {
             triangles: Vec::new(),
-            render: ctx.resolve_sink::<DrawTriangle>("render"),
+            render: ctx.resolve_sink::<DrawTriangle>("aether.sink.render"),
         }
     }
 

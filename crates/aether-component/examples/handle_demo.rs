@@ -16,7 +16,7 @@
 //!    handle on dispatch.
 //!
 //! Mechanism check: the publish + broadcast sequence runs entirely
-//! through mail (`aether.handle.publish` to the `"handle"` sink,
+//! through mail (`aether.handle.publish` to the `"aether.sink.handle"` sink,
 //! `wait_reply` for `HandlePublishResult`, then `send_postcard` to
 //! the broadcast sink). No host fns; the SDK's `Handle<K>` is a
 //! thin RAII wrapper over the same wire surface as `io::*` and

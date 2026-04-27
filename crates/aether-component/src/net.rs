@@ -40,11 +40,12 @@ use aether_mail::Kind;
 
 use crate::{raw, resolve_sink};
 
-/// Short mailbox name the substrate registers its net sink under
-/// (ADR-0043). Exposed so components that want to bypass
-/// [`fetch_blocking`] and use `ctx.send(&Sink::<Fetch>, ..)`
-/// directly don't have to duplicate the string literal.
-pub const NET_MAILBOX_NAME: &str = "net";
+/// Mailbox name the substrate registers its net sink under (ADR-0043,
+/// namespaced under `aether.sink.*` per ADR-0058). Exposed so
+/// components that want to bypass [`fetch_blocking`] and use
+/// `ctx.send(&Sink::<Fetch>, ..)` directly don't have to duplicate the
+/// string literal.
+pub const NET_MAILBOX_NAME: &str = "aether.sink.net";
 
 /// Default guest-side wait buffer for a `FetchResult`. 16MB matches
 /// the substrate's `AETHER_NET_MAX_BODY_BYTES` default (ADR-0043
@@ -235,10 +236,12 @@ mod tests {
     }
 
     #[test]
-    fn net_mailbox_name_is_short() {
-        // Regression guard for the sink-names-vs-kind-prefixes
-        // footgun. Net sink is addressed as "net", not "aether.net".
-        assert_eq!(NET_MAILBOX_NAME, "net");
+    fn net_mailbox_name_is_namespaced() {
+        // ADR-0058: chassis sinks live under `aether.sink.*`. Regression
+        // guard so a future "simplification" that drops the prefix
+        // collides with the user-space `"net"` namespace.
+        assert_eq!(NET_MAILBOX_NAME, "aether.sink.net");
+        assert_ne!(NET_MAILBOX_NAME, "net");
         assert_ne!(NET_MAILBOX_NAME, "aether.net");
     }
 }

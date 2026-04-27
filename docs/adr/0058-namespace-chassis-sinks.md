@@ -1,6 +1,6 @@
 # ADR-0058: Namespace chassis sinks under `aether.sink.*`
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-27
 
 ## Context

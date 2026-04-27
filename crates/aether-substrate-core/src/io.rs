@@ -3,7 +3,7 @@
 //! cloud / bundled archive / in-memory impls as they earn their
 //! place. `AdapterRegistry` maps a logical namespace (`"save"`,
 //! `"assets"`, `"config"`) to an adapter; the chassis that wires
-//! the `"io"` sink dispatches requests by namespace, calls the
+//! the `"aether.sink.io"` sink dispatches requests by namespace, calls the
 //! adapter, and sends the paired `*Result` reply.
 //!
 //! The trait deliberately stays small. Adding a backend is "impl
@@ -297,9 +297,10 @@ pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, Namesp
     Ok((Arc::new(registry), roots))
 }
 
-/// Build the `"io"` sink handler. The chassis calls this at boot
-/// after populating `registry` with adapters and passes the result
-/// to `registry.register_sink("io", handler)`. The returned closure
+/// Build the `"aether.sink.io"` sink handler. The chassis calls this
+/// at boot after populating `registry` with adapters and passes the
+/// result to `registry.register_sink("aether.sink.io", handler)`. The
+/// returned closure
 /// demultiplexes by `kind_id` (Read / Write / Delete / List, all
 /// postcard-decoded), drives the adapter, and replies with the
 /// paired `*Result` kind via `mailer.send_reply`.

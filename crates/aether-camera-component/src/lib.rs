@@ -76,7 +76,7 @@ pub struct Orbit {
 impl Component for Orbit {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Orbit {
-            camera: ctx.resolve_sink::<Camera>("camera"),
+            camera: ctx.resolve_sink::<Camera>("aether.sink.camera"),
             yaw: 0.0,
             pitch: DEFAULT_PITCH,
             distance: DEFAULT_DISTANCE,

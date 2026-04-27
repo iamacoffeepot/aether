@@ -55,7 +55,7 @@ pub struct Topdown {
 impl Component for Topdown {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Topdown {
-            camera: ctx.resolve_sink::<Camera>("camera"),
+            camera: ctx.resolve_sink::<Camera>("aether.sink.camera"),
             center: Vec2::ZERO,
             extent: DEFAULT_EXTENT,
             aspect: DEFAULT_ASPECT,

@@ -1,6 +1,6 @@
 //! Static mesh viewer. Loads a Wavefront OBJ file from the substrate's
 //! I/O surface (ADR-0041), parses it into `DrawTriangle`s, and replays
-//! the cached list to the `"render"` sink every tick.
+//! the cached list to the `"aether.sink.render"` sink every tick.
 //!
 //! Intended as a developer tool for inspecting `aether-dsl-mesh` output
 //! (or any other OBJ-producing tool) end-to-end through the substrate's
@@ -11,13 +11,13 @@
 //!
 //! 1. Send `aether.static_mesh.load { namespace, path }` to the
 //!    component. It fires an `aether.io.read` to the substrate's
-//!    `"io"` sink.
+//!    `"aether.sink.io"` sink.
 //! 2. The substrate's I/O adapter resolves `namespace://path`, reads
 //!    the bytes, and replies with `aether.io.read_result`.
 //! 3. The component parses the OBJ text and caches the resulting
 //!    triangle list. Any prior cache is dropped.
 //! 4. On every `aether.tick` the cached triangles are re-emitted to
-//!    `"render"` so the mesh stays visible.
+//!    `"aether.sink.render"` so the mesh stays visible.
 //!
 //! Errors (parse failures, missing files, adapter rejection) silently
 //! drop the load. Visible symptom: no triangles render. Substrate-side
@@ -51,7 +51,7 @@ impl Component for StaticMesh {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         StaticMesh {
             triangles: Vec::new(),
-            render: ctx.resolve_sink::<DrawTriangle>("render"),
+            render: ctx.resolve_sink::<DrawTriangle>("aether.sink.render"),
         }
     }
 

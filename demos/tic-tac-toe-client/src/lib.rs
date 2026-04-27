@@ -105,7 +105,7 @@ impl Default for TicTacToeClient {
             state: GameState::new_game(),
             mouse: None,
             window: None,
-            render: aether_component::resolve_sink::<DrawTriangle>("render"),
+            render: aether_component::resolve_sink::<DrawTriangle>("aether.sink.render"),
             server: aether_component::resolve_sink::<PlayMove>(SERVER),
         }
     }

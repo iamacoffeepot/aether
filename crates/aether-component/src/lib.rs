@@ -25,7 +25,7 @@
 //!   - ADR-0041: Guest helpers for the substrate's file I/O sink.
 //!     `io::read` / `io::write` / `io::delete` / `io::list` build
 //!     the typed request kinds, postcard-encode them, and send to
-//!     the substrate's `"io"` mailbox. Replies arrive as the paired
+//!     the substrate's `"aether.sink.io"` mailbox. Replies arrive as the paired
 //!     `*Result` kinds — declare `#[handler]` methods to consume
 //!     them. See `io` module rustdoc for the typical save-loader
 //!     shape.

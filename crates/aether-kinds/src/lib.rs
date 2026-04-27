@@ -1051,8 +1051,9 @@ mod control_plane {
         Err { error: String },
     }
 
-    // ADR-0041 substrate file I/O. Four request kinds on the `"io"`
-    // sink (read / write / delete / list), paired 1:1 with reply kinds
+    // ADR-0041 substrate file I/O. Four request kinds on the
+    // `"aether.sink.io"` sink (read / write / delete / list), paired
+    // 1:1 with reply kinds
     // that carry a structured `IoError` on failure. All postcard-
     // shaped because every request carries String namespace/path
     // fields and writes carry `Vec<u8>` bytes.
@@ -1079,8 +1080,8 @@ mod control_plane {
     }
 
     /// `aether.io.read` — request the substrate read a file and reply
-    /// with its bytes. Mailed to the `"io"` sink; reply lands via
-    /// `reply_mail` as `ReadResult`.
+    /// with its bytes. Mailed to the `"aether.sink.io"` sink; reply
+    /// lands via `reply_mail` as `ReadResult`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.io.read")]
     pub struct Read {
@@ -1207,7 +1208,7 @@ mod control_plane {
     }
 
     // ADR-0043 substrate HTTP egress. One request kind + one reply
-    // kind on the `"net"` sink, plus supporting `HttpMethod`,
+    // kind on the `"aether.sink.net"` sink, plus supporting `HttpMethod`,
     // `HttpHeader`, and `NetError` shapes. All postcard-shaped
     // (Strings, Vecs, Option<u32>).
     //
@@ -1266,8 +1267,9 @@ mod control_plane {
     }
 
     /// `aether.net.fetch` — request the substrate perform an HTTP
-    /// request and reply with the response. Mailed to the `"net"`
-    /// sink; reply lands via `reply_mail` as `FetchResult`.
+    /// request and reply with the response. Mailed to the
+    /// `"aether.sink.net"` sink; reply lands via `reply_mail` as
+    /// `FetchResult`.
     /// `timeout_ms` overrides the chassis default
     /// (`AETHER_NET_TIMEOUT_MS`, default 30000) when set; `None`
     /// uses the default.
@@ -1307,7 +1309,7 @@ mod control_plane {
     }
 
     // ADR-0045 typed-handle store. Four request kinds on the
-    // `"handle"` sink (`publish` / `release` / `pin` / `unpin`),
+    // `"aether.sink.handle"` sink (`publish` / `release` / `pin` / `unpin`),
     // paired 1:1 with reply kinds. Components mail `HandlePublish`
     // with `kind_id` + payload bytes and receive a fresh ephemeral
     // handle id back in `HandlePublishResult::Ok`; subsequent mail
@@ -1352,8 +1354,8 @@ mod control_plane {
 
     /// `aether.handle.publish` — request the substrate stash
     /// `bytes` in the handle store under `kind_id` and reply with
-    /// a fresh ephemeral id. Mailed to the `"handle"` sink; reply
-    /// lands as `HandlePublishResult`.
+    /// a fresh ephemeral id. Mailed to the `"aether.sink.handle"` sink;
+    /// reply lands as `HandlePublishResult`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.publish")]
     pub struct HandlePublish {
@@ -1458,7 +1460,7 @@ mod dsl_mesh {
     /// `aether.dsl_mesh.set_path` — instruct the editor to load DSL
     /// text from the substrate's I/O surface (ADR-0041 namespace +
     /// path), then parse + mesh + replace the cached triangles. The
-    /// editor fires an `aether.io.read` to the `"io"` sink and
+    /// editor fires an `aether.io.read` to the `"aether.sink.io"` sink and
     /// processes the reply when it arrives. Fire-and-forget on the
     /// caller's side; the load is asynchronous.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
@@ -1487,7 +1489,7 @@ mod static_mesh {
 
     /// `aether.static_mesh.load` — instruct the static-mesh component to
     /// load and display an OBJ file. The component sends a corresponding
-    /// `aether.io.read` to the substrate's `"io"` sink and parses the
+    /// `aether.io.read` to the substrate's `"aether.sink.io"` sink and parses the
     /// reply. Subsequent `Load` mails replace the cached mesh.
     /// Fire-and-forget; errors surface in `engine_logs`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]

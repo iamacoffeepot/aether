@@ -24,7 +24,7 @@
 //! In tile-step mode, `PlayerSetVelocity` has no visible effect
 //! because velocity is not applied.
 //!
-//! Sink dependencies: `"render"` (substrate), `"topdown"` (the top-down
+//! Sink dependencies: `"aether.sink.render"` (substrate), `"topdown"` (the top-down
 //! camera, if any), `"world"` (the world authority in tile-step mode).
 //! Missing sinks surface as `UnresolvedMail` diagnostics but don't
 //! crash the player — the corresponding emissions just go to the abyss.
@@ -128,7 +128,7 @@ impl Player {
 impl Component for Player {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Player {
-            render: ctx.resolve_sink::<DrawTriangle>("render"),
+            render: ctx.resolve_sink::<DrawTriangle>("aether.sink.render"),
             camera_follow: ctx.resolve_sink::<TopdownSetCenter>("topdown"),
             world: ctx.resolve_sink::<PlayerRequestStep>("world"),
             pos_x: 0.0,

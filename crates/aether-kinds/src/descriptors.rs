@@ -144,7 +144,7 @@ pub fn all() -> Vec<KindDescriptor> {
         schema::<Fetch>(),
         schema::<FetchResult>(),
         // ADR-0045 typed-handle store. Four request kinds on the
-        // `"handle"` sink — publish a value and get a fresh
+        // `"aether.sink.handle"` sink — publish a value and get a fresh
         // ephemeral id back, then release / pin / unpin against
         // the id. Failure variants carry `HandleError`.
         schema::<HandlePublish>(),
@@ -159,7 +159,7 @@ pub fn all() -> Vec<KindDescriptor> {
         // hot-loads DSL source (per ADR-0026 + ADR-0051) and replays
         // the meshed triangles as `DrawTriangle` mail every tick. Two
         // input kinds: `SetText` for inline DSL, `SetPath` for
-        // namespace+path-loaded DSL via the `"io"` sink.
+        // namespace+path-loaded DSL via the `"aether.sink.io"` sink.
         schema::<SetText>(),
         schema::<SetPath>(),
         // Static mesh viewer (developer tool). Loads an OBJ via the
