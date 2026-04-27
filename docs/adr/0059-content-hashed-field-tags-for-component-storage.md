@@ -20,9 +20,59 @@ This ADR captures the brainstorm of that wire format. It's deliberately under-sp
 
 ## Decision (sketch)
 
-Add a third wire shape, **TLV with content-hashed field tags**, alongside cast and positional-postcard. Scope: payloads written to durable backing stores (the handle store; possibly later, save files via ADR-0041's `save://` namespace). Live mail dispatch keeps the existing two shapes unchanged — speed and version-rigidity are the right tradeoff there.
+Add a third wire shape, **TLV with content-hashed field tags**, alongside cast and positional-postcard. The trait surface forks: `Mail` for kinds that ride the wire (cast or postcard, current behavior); `Storage` for kinds that live in durable backing stores via TLV. Both extend a bare `Kind` trait that carries only metadata (`NAME`, `ID`), so neither subtrait can decode the other's bytes — the type system enforces wire-shape correctness rather than relying on runtime checks. Scope: storage payloads written to the handle store (ADR-0049); possibly later, save files via ADR-0041's `save://` namespace.
+
+### Trait hierarchy
+
+Three traits, with `Kind` as the bare metadata supertrait:
+
+```rust
+pub trait Kind {
+    const NAME: &'static str;
+    const ID: u64;
+    const IS_INPUT: bool = false;
+    // No decode/encode methods on the bare trait — pure metadata.
+}
+
+pub trait Mail: Kind {
+    fn decode_from_bytes(bytes: &[u8]) -> Option<Self> where Self: Sized;
+    fn encode_into_bytes(&self) -> Vec<u8>;
+}
+
+pub trait Storage: Kind {
+    fn decode_storage(bytes: &[u8]) -> Option<StorageData<Self>> where Self: Sized;
+    fn encode_storage(data: &StorageData<Self>) -> Vec<u8>;
+}
+
+pub struct StorageData<T> {
+    pub value: T,
+    pub unknown_fields: Vec<UnknownField>,
+}
+
+pub struct UnknownField {
+    pub hash: u64,
+    pub bytes: Vec<u8>,
+}
+```
+
+A type implements either `Mail` or `Storage`, never both. Disjoint trait membership prevents wire-shape mistakes at the type level: trying to decode a `Storage` kind's TLV bytes as if they were postcard would require calling `decode_from_bytes`, which doesn't exist on `Storage` — the type system blocks the misuse.
+
+User-facing derive macros:
+
+- `#[derive(Mail)]` produces `impl Kind + impl Mail` — cast or postcard wire (autodetected from `#[repr(C)]`).
+- `#[derive(Storage)]` produces `impl Kind + impl Storage` — TLV wire.
+
+The existing `#[derive(Kind)]` becomes an alias for `#[derive(Mail)]` during migration; the substantive split is between `Mail` and `Storage`. Existing call sites that constrain `K: Kind` for decode/encode work migrate to `K: Mail`.
+
+**Runtime type rename.** The current `Mail<'a>` runtime type — passed to `#[fallback]` handlers — renames to `Envelope<'a>` to free up `Mail` as the trait name. The semantics are unchanged; the new name reflects the role (it's the carrier you open to find the typed value, not the content). Pre-1.0 so the rename is mechanical: `#[fallback]` signatures and `Mail::decode_kind::<K>()` calls update in lockstep.
+
+**Wire reachability.** Storage kinds cannot ride mail directly. Mail reaches them only through `Ref<S>` (handle indirection per ADR-0045): mail carries a handle id; the substrate's handle store holds the TLV bytes; the receiver resolves the handle and decodes via `Storage::decode_storage`. The bytes-format never crosses the trait boundary, so the wire-shape disjointness stays clean and there's no "wrap a Storage value as Bytes-on-mail" path needed for v1.
 
 ### Wire format
+
+The wire format described below applies to `Storage` kinds. `Mail` kinds use the existing cast or positional-postcard shape unchanged.
+
+
 
 A struct payload is a sequence of `[field_hash][length][bytes]` records, concatenated in field-hash sort order. Receivers walk the records, look each `field_hash` up in their local schema, dispatch the bytes against the matched field's type, skip unknown ids, and default missing ids.
 
@@ -225,6 +275,8 @@ Two rules fall out for evolving a kind across an upgrade boundary:
 
 Required fields define the irreducible identity of the kind; `Option<T>` fields are the evolving surface. Authoring rule of thumb: require what the kind cannot mean without; `Option` what comes and goes.
 
+**Sender discipline: always emit one TLV record per schema-declared field.** There is no "omit because the value is None/empty" mode. `None` for an `Option<T>` still emits the `__variant=None-hash` leaf; an empty `Vec` still emits a record with body `[varint(0)]`. The encoder walks every leaf in the kind's schema and emits a record, period. Wire-absence of a leaf is therefore unambiguously "the sender's schema didn't have this field" (version skew), never "sender chose not to emit." That's what makes the receiver-side absence rules unambiguous: required leaf absent → schema mismatch → error; optional leaf absent → schema mismatch → tolerated as `None`.
+
 Receiver-side semantics across the wire/schema product:
 
 | receiver's schema says | sender's wire | decoded value |
@@ -244,12 +296,13 @@ The Option-None and Option-version-skew cases both decode to `None` at the API �
 ### Discipline (the strict rules)
 
 1. Once shipped, a field's content hash is immutable. Changing the field's name or type produces a new hash.
-2. Removing a field reserves its hash forever — no silent semantic reuse.
+2. Removing a field reserves its hash forever — no silent semantic reuse. The kind's manifest carries an explicit reserved-hash set; the derive cross-checks new field hashes against this set at compile time and rejects collisions, so removal-then-re-add of a name+type that hashes to a retired slot is caught loudly rather than silently inheriting old wire data.
 3. Type is part of the field hash. Type changes (`u32 → u64`, even a "widen") require a new field hash and a remap entry.
 4. Renames go through the remap dictionary, never silently.
 5. Reordering source code is free (sort order is canonical).
 6. The `__` prefix is reserved for system-synthesized identifiers — anonymous record names, the `__variant` discriminant leaf, and any future synthesis patterns. User-supplied names — kind names, field names, variant names, explicit anonymous-record overrides — must not begin with `__`. The derive rejects offending names at compile time, so a future synthesis pattern can't silently collide with a user identifier already in the wild.
-7. Variant content hashes follow the same immutability rules as field hashes — once shipped, a variant's hash is fixed; renames or field-set changes inside a variant require a remap entry; removed variant hashes are reserved.
+7. Variant content hashes follow the same immutability rules as field hashes — once shipped, a variant's hash is fixed; renames or field-set changes inside a variant require a remap entry; removed variant hashes are reserved (same manifest set as field hashes, distinguished by domain prefix).
+8. Senders always emit one TLV record per schema-declared field. There is no "omit because empty" mode; wire-absence of a leaf is unambiguously version skew at the sender. The encoder is rule-bound to walk every leaf in the kind's schema.
 
 ## Consequences
 
@@ -258,26 +311,29 @@ The Option-None and Option-version-skew cases both decode to `None` at the API �
 - **Third wire shape to maintain.** Encoder, decoder, kind-manifest reader, handle-store walker all gain a TLV path alongside cast and positional. Bounded and parallel to the existing two paths, but real engineering surface.
 - **Hash semantics shift for TLV kinds.** Reorder no longer changes `Kind::ID`. Renames still do (handled by remap). Today's positional hash stays for cast and positional-postcard kinds.
 - **Storage compat across upgrades is now an authoring discipline, not a wire-correctness one.** Adding a field is safe; renaming requires a remap entry; type changes require a new hash + remap. Discipline can be derived from CI rules (compare manifests across builds, fail on undeclared field-hash changes).
+- **Trait hierarchy fork.** `Kind` becomes bare metadata (`NAME`, `ID`); existing `decode_from_bytes` / `encode_into_bytes` migrate to a new `Mail` subtrait. Existing call sites that constrain `K: Kind` for encode/decode work need to upgrade to `K: Mail`. The runtime `Mail<'a>` type renames to `Envelope<'a>`. Mechanical refactor across `aether-component`, `aether-mail`, `aether-mail-derive`, and the `#[fallback]` signatures; pre-1.0 so the rename is allowed.
+
+## Resolved in chat (2026-04-27)
+
+These were Open Questions in earlier drafts; resolutions are folded into the Decision section above. Listed here so the journey is recoverable.
+
+- **Postcard integration** → TLV envelope is hand-written; body reuses existing postcard rules per the field's declared type. No coupling to postcard's experimental schema features; no serializer swap.
+- **Removal vs deprecation** → Hard removal allowed; rule 2 (reserved-hash manifest with derive-time collision check) handles the only real footgun. Deprecation period stays a CI-rule concern, not a wire-format requirement.
+- **Which kinds use TLV** → Opt-in per kind via `#[derive(Storage)]` (vs `#[derive(Mail)]` for the live wire). The trait split (`Storage: Kind`, `Mail: Kind`) makes the choice a type-system property and prevents cross-decoding.
+- **Cast + TLV interaction** → `Storage` is TLV-only; `#[repr(C)]` on a `Storage` type is a derive-time error. The trait fork makes the question moot at the type level.
 
 ## Open questions
 
 These are the load-bearing things this draft does *not* answer. Each needs a decision before implementation:
 
-1. **Postcard integration.** Postcard 1.x has no native tagged mode. Three options:
-   - Use postcard's experimental schema features if they cover what we need.
-   - Layer TLV on top of postcard bodies (envelope is hand-written, body is postcard).
-   - Swap serializer for TLV-shape kinds (e.g., use a different crate or hand-roll). Bigger surface change.
-2. **Removal vs deprecation.** Is hard removal allowed (a field's hash is permanently retired and no one needs it), or do we require fields to be marked deprecated for a period before removal?
-3. **Which kinds use TLV.** Opt-in per kind (`#[kind(storage)]` attribute), opt-out, or implicit by use case (any kind that's ever stored)? Probably opt-in to avoid forcing live-mail kinds onto a slower path.
-4. **Field-hash collision policy.** 64 bits gives ample headroom but isn't infinite. Do we cap field count per kind (collision-resistance practical), detect collisions at derive time (compile error if two field hashes collide within one kind), or just accept the birthday-bound argument as we do for kind ids?
-5. **Cast + TLV interaction.** A TLV-shape kind almost certainly excludes cast eligibility (no fixed `#[repr(C)]` layout). Same constraint as today's `Vec`/`Option`/`Map`. The derive should reject `#[repr(C)]` + `#[kind(storage)]` with a clear error.
-6. **Composition with the version-graph idea.** TLV makes most diffs transparent. Type changes and semantic renames are the residual; do those want explicit migration edges, or does the remap dictionary cover both? Probably remap covers renames; explicit migrations cover type changes.
-7. **Manifest format.** Where do TLV field hashes, variant hashes, and remap dictionaries live in the wasm? New custom section (`aether.kinds.fields`?), or extension of `aether.kinds.labels`?
-8. **Migration of existing stored payloads.** When a component first opts into TLV storage, is there a one-time migration of old positional payloads, or do we accept that pre-TLV storage is read-only-incompatible?
-9. **Adding an enum variant.** A new writer emits a variant the reader doesn't know — `__variant` carries a hash that doesn't match any variant in the receiver's schema. Two options:
+1. **Field-hash collision policy.** 64 bits gives ample headroom but isn't infinite. Do we cap field count per kind (collision-resistance practical), detect collisions at derive time (compile error if two field hashes collide within one kind), or just accept the birthday-bound argument as we do for kind ids?
+2. **Composition with the version-graph idea.** TLV makes most diffs transparent. Type changes and semantic renames are the residual; do those want explicit migration edges, or does the remap dictionary cover both? Probably remap covers renames; explicit migrations cover type changes.
+3. **Manifest format.** Where do TLV field hashes, variant hashes, reserved-hash sets, and remap dictionaries live in the wasm? New custom section (`aether.kinds.fields`?), or extension of `aether.kinds.labels`?
+4. **Migration of existing stored payloads.** When a component first opts into TLV storage, is there a one-time migration of old positional payloads, or do we accept that pre-TLV storage is read-only-incompatible?
+5. **Adding an enum variant.** A new writer emits a variant the reader doesn't know — `__variant` carries a hash that doesn't match any variant in the receiver's schema. Two options:
    - Strict (probable v1 default): unknown variant hash → decode error. Adding a variant is a breaking change.
    - Tolerant: bucket the entire enum field's leaves as unknown bytes. The typed value can't represent the unknown variant (Rust enums lack a sentinel arm), so the API would have to surface "this enum had an unknown variant" — significant ergonomic cost. Probably defer until a forcing function appears.
-10. **Variant rename mechanics.** Same shape as field renames — `(old_variant_hash, new_variant_hash)` entries in the remap dict — but the variant's leaves under the old name (`<path>.<OldVariant>.*`) all need their leaf-path remappings too. Open question: do we synthesize per-leaf remap entries from a single variant-rename declaration, or require the author to enumerate every affected leaf? Auto-synthesis is more ergonomic; explicit enumeration is easier to audit.
+6. **Variant rename mechanics.** Same shape as field renames — `(old_variant_hash, new_variant_hash)` entries in the remap dict — but the variant's leaves under the old name (`<path>.<OldVariant>.*`) all need their leaf-path remappings too. Open question: do we synthesize per-leaf remap entries from a single variant-rename declaration, or require the author to enumerate every affected leaf? Auto-synthesis is more ergonomic; explicit enumeration is easier to audit.
 
 ## Alternatives considered
 
