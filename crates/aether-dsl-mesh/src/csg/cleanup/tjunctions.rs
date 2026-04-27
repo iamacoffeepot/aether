@@ -105,19 +105,25 @@ impl IndexedMesh {
 
 /// Snap-drift bound for the collinearity check: a vertex within this
 /// many fixed units of perpendicular distance from the edge is treated
-/// as collinear. **This is not a magic number** — it's the
-/// mathematically derived bound from
-/// [`crate::csg::polygon`]'s `compute_intersection` rounding step.
+/// as collinear.
 ///
-/// Derivation: each `compute_intersection` snaps the result by up to
-/// 0.5 fixed units per axis. Two intersection points on the same true
-/// line, each independently snapped, can land up to 0.5 + 0.5 = 1
-/// fixed unit apart in perpendicular direction. Even with the
-/// per-line [`crate::csg::vertex_pool::SharedVertexPool`] catching
-/// near-duplicates, distinct points on the same line each accumulate
-/// up to 0.5 units of drift, so checking collinearity between two
-/// pool entries needs to allow up to 1 unit of perpendicular slack.
-const COLLINEAR_TOLERANCE_FIXED_UNITS: i128 = 1;
+/// Derivation matches [`super::weld::WELD_TOLERANCE_FIXED_UNITS`] —
+/// each `compute_intersection` snaps by up to 0.5 fixed units per
+/// axis, and under the polygon-throughout pipeline (PR 292) cleanup
+/// runs once at the end of an entire CSG composition, so a single
+/// vertex can accumulate snap drift from every BSP partitioner the
+/// fragment survived. Empirically (off-axis CSG corpus, PR 298): a
+/// 16-facet tilted cylinder cut through a cube produces T-junction
+/// vertices up to ~3.5 fixed units perpendicular to the host edge.
+/// Tolerance `4` catches every observed case with margin and stays
+/// well below the next-nearest distinct-point spacing in practical
+/// CSG inputs (sphere/cylinder facet spacing ≥ 3000+ fixed units).
+///
+/// Raised from `1` to `4` (2026-04-26) after the geometric-validator
+/// corpus showed off-axis CSG produces T-junctions at perpendicular
+/// distances of 1.0 to 3.5 fixed units that the prior tolerance
+/// silently dropped, leaving render-visible cracks. See issue #299.
+const COLLINEAR_TOLERANCE_FIXED_UNITS: i128 = 4;
 
 /// Between-ness test in 3D fixed-point: returns `true` iff `p` lies
 /// on the open segment from `a` to `b`, within
@@ -414,6 +420,42 @@ mod tests {
         let mesh = IndexedMesh { vertices, polygons };
         let repaired = mesh.repair_tjunctions();
         assert_eq!(repaired.polygons[0].vertices, vec![0, 3, 1, 4, 2]);
+    }
+
+    /// Off-axis CSG accumulates snap drift across cascaded BSP cuts;
+    /// the failing T-junction from `box_minus_tilted_cylinder_is_geometric`
+    /// (PR 298) sits 2.05 fixed units perpendicular to its host edge.
+    /// Pinned with the actual fixed-point coords so a regression in
+    /// `COLLINEAR_TOLERANCE_FIXED_UNITS` re-exposes the bug at the unit
+    /// level rather than only via the integration corpus.
+    #[test]
+    fn off_axis_t_junction_within_cascaded_snap_drift_is_detected() {
+        // Coords lifted from validate_no_t_junctions on the failing
+        // case: vertex at (-0.0961, -0.75, -0.7010), edge endpoints
+        // (-0.1824, -0.75, -0.7009) → (0, -0.75, -0.7010). Snapped
+        // to 16:16 fixed:
+        let a = Point3 {
+            x: -11951,
+            y: -49152,
+            z: -45936,
+        };
+        let b = Point3 {
+            x: 0,
+            y: -49152,
+            z: -45938,
+        };
+        let v = Point3 {
+            x: -6299,
+            y: -49152,
+            z: -45939,
+        };
+        // Perpendicular distance: ~2.05 fixed units, within the
+        // post-fix collinearity tolerance.
+        assert!(
+            is_strictly_between(v, a, b),
+            "off-axis T-junction at ~2 fixed units perpendicular drift \
+             must be classified as collinear (issue #299)"
+        );
     }
 
     #[test]
