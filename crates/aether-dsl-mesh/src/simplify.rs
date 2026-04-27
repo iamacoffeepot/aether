@@ -418,6 +418,38 @@ fn partition_disjoint_aabb(children: &[Node]) -> Vec<Vec<usize>> {
         .collect()
 }
 
+/// `Some(+1.0)` when `a` and `b` point in the same direction,
+/// `Some(-1.0)` when opposite, `None` when skew (or either is the
+/// zero vector). Used to decide whether two `Rotate` nodes can fold:
+/// rotating around `+v` by `θ` then around `-v` by `φ` is the same as
+/// rotating around `+v` by `θ - φ`.
+///
+/// Tolerance: the cross product's magnitude squared is compared to a
+/// fraction of the input magnitudes squared. The threshold (`1e-10`
+/// relative) accepts axes that match to ~5 decimal digits and rejects
+/// anything noticeably skew. Looser would risk folding rotations
+/// around visibly-different axes (which is geometrically wrong);
+/// stricter would miss genuine duplicates that happen to differ by
+/// f32-rounding from a normalization step.
+fn parallel_axis_sign(a: [f32; 3], b: [f32; 3]) -> Option<f32> {
+    let mag_a_sq = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
+    let mag_b_sq = b[0] * b[0] + b[1] * b[1] + b[2] * b[2];
+    if mag_a_sq < 1e-12 || mag_b_sq < 1e-12 {
+        return None;
+    }
+    // Cross product magnitude squared: parallel ⟺ |a×b|² == 0.
+    let cx = a[1] * b[2] - a[2] * b[1];
+    let cy = a[2] * b[0] - a[0] * b[2];
+    let cz = a[0] * b[1] - a[1] * b[0];
+    let cross_mag_sq = cx * cx + cy * cy + cz * cz;
+    if cross_mag_sq > 1e-10 * mag_a_sq * mag_b_sq {
+        return None;
+    }
+    // Sign by dot product.
+    let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    Some(if dot >= 0.0 { 1.0 } else { -1.0 })
+}
+
 /// Apply rewrites bottom-up. Each rewrite preserves the meshed output
 /// exactly — a `mesh(simplify(n))` is `mesh(n)` for every input.
 ///
@@ -429,6 +461,21 @@ fn partition_disjoint_aabb(children: &[Node]) -> Vec<Vec<usize>> {
 ///   spacing; same as the bare child)
 /// - `(composition (single))` → `single` (when the composition has
 ///   exactly one child)
+///
+/// Transform composition (fold adjacent same-kind transforms):
+/// - `(translate a (translate b inner))` → `(translate a+b inner)`
+/// - `(scale a (scale b inner))` → `(scale a*b inner)` (component-wise)
+/// - `(rotate axis_a θa (rotate axis_b θb inner))` → `(rotate axis_a θa+θb inner)`
+///   when `axis_a` and `axis_b` are parallel (same direction up to
+///   sign — opposite-direction folds negate the inner angle). Skew
+///   axes don't compose into a single axis-angle without a quaternion
+///   intermediate; we leave those alone rather than introduce a
+///   normalization-pass that could subtly drift floating-point.
+///
+/// After folding, the resulting transform may itself be an identity —
+/// re-checking happens automatically via the rewrite's own identity
+/// guard (so `(translate +x (translate -x leaf))` collapses to `leaf`
+/// in one pass).
 ///
 /// AABB pruning:
 /// - `(union A B …)` partitioned into disjoint-AABB groups becomes
@@ -463,34 +510,84 @@ pub fn simplify(node: &Node) -> Node {
 
         Node::Translate { offset, child } => {
             let child = simplify(child);
-            if offset == &[0.0, 0.0, 0.0] {
+            // Fold (translate a (translate b X)) → (translate a+b X).
+            let (offset, child) = if let Node::Translate {
+                offset: inner_offset,
+                child: inner_child,
+            } = child
+            {
+                (
+                    [
+                        offset[0] + inner_offset[0],
+                        offset[1] + inner_offset[1],
+                        offset[2] + inner_offset[2],
+                    ],
+                    *inner_child,
+                )
+            } else {
+                (*offset, child)
+            };
+            if offset == [0.0, 0.0, 0.0] {
                 return child;
             }
             Node::Translate {
-                offset: *offset,
+                offset,
                 child: Box::new(child),
             }
         }
 
         Node::Rotate { axis, angle, child } => {
             let child = simplify(child);
-            if *angle == 0.0 {
+            // Fold (rotate ax θa (rotate ax_inner θb X)) → (rotate ax θa+θb X)
+            // when the inner axis is parallel to the outer (same direction
+            // up to sign). Opposite directions negate the inner angle.
+            let (angle, child) = if let Node::Rotate {
+                axis: inner_axis,
+                angle: inner_angle,
+                child: inner_child,
+            } = &child
+            {
+                match parallel_axis_sign(*axis, *inner_axis) {
+                    Some(sign) => (*angle + sign * *inner_angle, (**inner_child).clone()),
+                    None => (*angle, child),
+                }
+            } else {
+                (*angle, child)
+            };
+            if angle == 0.0 {
                 return child;
             }
             Node::Rotate {
                 axis: *axis,
-                angle: *angle,
+                angle,
                 child: Box::new(child),
             }
         }
 
         Node::Scale { factor, child } => {
             let child = simplify(child);
-            if factor == &[1.0, 1.0, 1.0] {
+            // Fold (scale a (scale b X)) → (scale a*b X) component-wise.
+            let (factor, child) = if let Node::Scale {
+                factor: inner_factor,
+                child: inner_child,
+            } = child
+            {
+                (
+                    [
+                        factor[0] * inner_factor[0],
+                        factor[1] * inner_factor[1],
+                        factor[2] * inner_factor[2],
+                    ],
+                    *inner_child,
+                )
+            } else {
+                (*factor, child)
+            };
+            if factor == [1.0, 1.0, 1.0] {
                 return child;
             }
             Node::Scale {
-                factor: *factor,
+                factor,
                 child: Box::new(child),
             }
         }
@@ -1611,5 +1708,343 @@ mod disjoint_union_rewrite_tests {
                 children: vec![box_at(0.0, 0.0, 0.0)]
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod parallel_axis_tests {
+    use super::*;
+
+    #[test]
+    fn same_direction_returns_plus_one() {
+        assert_eq!(
+            parallel_axis_sign([0.0, 1.0, 0.0], [0.0, 2.0, 0.0]),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn opposite_direction_returns_minus_one() {
+        assert_eq!(
+            parallel_axis_sign([1.0, 0.0, 0.0], [-3.0, 0.0, 0.0]),
+            Some(-1.0)
+        );
+    }
+
+    #[test]
+    fn skew_axes_return_none() {
+        assert_eq!(parallel_axis_sign([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), None);
+    }
+
+    #[test]
+    fn diagonal_vs_axis_returns_none() {
+        // (1,1,0) is at 45° to (1,0,0) — definitely not parallel.
+        assert_eq!(parallel_axis_sign([1.0, 1.0, 0.0], [1.0, 0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn zero_vector_returns_none() {
+        assert_eq!(parallel_axis_sign([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]), None);
+        assert_eq!(parallel_axis_sign([1.0, 0.0, 0.0], [0.0, 0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn near_parallel_within_tolerance_returns_sign() {
+        // Tiny perturbation from a clean (0,1,0) — well within
+        // the 1e-10 relative-cross-magnitude tolerance.
+        assert_eq!(
+            parallel_axis_sign([1e-7, 1.0, 0.0], [0.0, 1.0, 0.0]),
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn axes_with_different_magnitude_still_parallel() {
+        // Direction is what matters, not magnitude.
+        assert_eq!(
+            parallel_axis_sign([0.0, 100.0, 0.0], [0.0, 0.001, 0.0]),
+            Some(1.0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod fold_transform_tests {
+    use super::*;
+
+    fn unit_box() -> Node {
+        Node::Box {
+            x: 1.0,
+            y: 1.0,
+            z: 1.0,
+            color: 0,
+        }
+    }
+
+    // ---- Translate folding ----
+
+    #[test]
+    fn nested_translate_folds_to_one() {
+        let n = Node::Translate {
+            offset: [1.0, 2.0, 3.0],
+            child: Box::new(Node::Translate {
+                offset: [4.0, 5.0, 6.0],
+                child: Box::new(unit_box()),
+            }),
+        };
+        assert_eq!(
+            simplify(&n),
+            Node::Translate {
+                offset: [5.0, 7.0, 9.0],
+                child: Box::new(unit_box()),
+            }
+        );
+    }
+
+    #[test]
+    fn translate_pair_summing_to_zero_collapses_completely() {
+        // Pin: the fold must produce the identity-then-strip behavior in
+        // a single pass, not leave a `(translate (0 0 0) leaf)` behind.
+        let n = Node::Translate {
+            offset: [1.0, 2.0, 3.0],
+            child: Box::new(Node::Translate {
+                offset: [-1.0, -2.0, -3.0],
+                child: Box::new(unit_box()),
+            }),
+        };
+        assert_eq!(simplify(&n), unit_box());
+    }
+
+    #[test]
+    fn three_deep_translate_chain_folds_to_one() {
+        let n = Node::Translate {
+            offset: [1.0, 0.0, 0.0],
+            child: Box::new(Node::Translate {
+                offset: [2.0, 0.0, 0.0],
+                child: Box::new(Node::Translate {
+                    offset: [3.0, 0.0, 0.0],
+                    child: Box::new(unit_box()),
+                }),
+            }),
+        };
+        // Bottom-up: inner two fold → (translate 5 leaf); then outer
+        // folds against that → (translate 6 leaf).
+        assert_eq!(
+            simplify(&n),
+            Node::Translate {
+                offset: [6.0, 0.0, 0.0],
+                child: Box::new(unit_box()),
+            }
+        );
+    }
+
+    #[test]
+    fn translate_then_rotate_does_not_fold() {
+        // Pin: translate doesn't commute with rotate-of-non-translated-
+        // child, so we leave the structure alone.
+        let n = Node::Translate {
+            offset: [1.0, 0.0, 0.0],
+            child: Box::new(Node::Rotate {
+                axis: [0.0, 1.0, 0.0],
+                angle: 0.5,
+                child: Box::new(unit_box()),
+            }),
+        };
+        assert_eq!(simplify(&n), n);
+    }
+
+    // ---- Scale folding ----
+
+    #[test]
+    fn nested_scale_folds_to_componentwise_product() {
+        let n = Node::Scale {
+            factor: [2.0, 3.0, 4.0],
+            child: Box::new(Node::Scale {
+                factor: [5.0, 6.0, 7.0],
+                child: Box::new(unit_box()),
+            }),
+        };
+        assert_eq!(
+            simplify(&n),
+            Node::Scale {
+                factor: [10.0, 18.0, 28.0],
+                child: Box::new(unit_box()),
+            }
+        );
+    }
+
+    #[test]
+    fn scale_pair_with_exact_reciprocals_collapses_completely() {
+        // Powers-of-two multiplied through give exact f32 products, so
+        // the identity check fires and both Scale wrappers strip.
+        let n = Node::Scale {
+            factor: [2.0, 4.0, 8.0],
+            child: Box::new(Node::Scale {
+                factor: [0.5, 0.25, 0.125],
+                child: Box::new(unit_box()),
+            }),
+        };
+        assert_eq!(simplify(&n), unit_box());
+    }
+
+    #[test]
+    fn nested_scale_with_non_unity_product_keeps_one_scale() {
+        // Pin: a non-identity product collapses the two Scale wrappers
+        // into one (no nesting), but the resulting Scale stays put.
+        let n = Node::Scale {
+            factor: [2.0, 3.0, 4.0],
+            child: Box::new(Node::Scale {
+                factor: [3.0, 5.0, 7.0],
+                child: Box::new(unit_box()),
+            }),
+        };
+        assert_eq!(
+            simplify(&n),
+            Node::Scale {
+                factor: [6.0, 15.0, 28.0],
+                child: Box::new(unit_box()),
+            }
+        );
+    }
+
+    // ---- Rotate folding ----
+
+    #[test]
+    fn nested_rotate_same_axis_sums_angles() {
+        let n = Node::Rotate {
+            axis: [0.0, 1.0, 0.0],
+            angle: 0.3,
+            child: Box::new(Node::Rotate {
+                axis: [0.0, 1.0, 0.0],
+                angle: 0.4,
+                child: Box::new(unit_box()),
+            }),
+        };
+        let s = simplify(&n);
+        match s {
+            Node::Rotate { axis, angle, child } => {
+                assert_eq!(axis, [0.0, 1.0, 0.0]);
+                assert!((angle - 0.7).abs() < 1e-6, "expected ~0.7, got {angle}");
+                assert_eq!(*child, unit_box());
+            }
+            other => panic!("expected Rotate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_rotate_opposite_axis_subtracts_angles() {
+        // (rotate +Y θa (rotate -Y θb X)) ≡ (rotate +Y θa-θb X).
+        let n = Node::Rotate {
+            axis: [0.0, 1.0, 0.0],
+            angle: 0.7,
+            child: Box::new(Node::Rotate {
+                axis: [0.0, -1.0, 0.0],
+                angle: 0.3,
+                child: Box::new(unit_box()),
+            }),
+        };
+        let s = simplify(&n);
+        match s {
+            Node::Rotate { axis, angle, .. } => {
+                assert_eq!(axis, [0.0, 1.0, 0.0]);
+                assert!((angle - 0.4).abs() < 1e-6, "expected ~0.4, got {angle}");
+            }
+            other => panic!("expected Rotate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_rotate_opposing_full_cancellation_strips_both() {
+        let n = Node::Rotate {
+            axis: [1.0, 0.0, 0.0],
+            angle: 0.5,
+            child: Box::new(Node::Rotate {
+                axis: [-1.0, 0.0, 0.0],
+                angle: 0.5,
+                child: Box::new(unit_box()),
+            }),
+        };
+        // (axis_a · angle_a) + (axis_b · angle_b) = +0.5 + (-1)*0.5 = 0
+        // → identity → stripped.
+        assert_eq!(simplify(&n), unit_box());
+    }
+
+    #[test]
+    fn nested_rotate_skew_axes_does_not_fold() {
+        // Pin: rotation around X then around Y is NOT a single
+        // axis-angle rotation in general. We don't compose via
+        // quaternions, so the structure stays.
+        let n = Node::Rotate {
+            axis: [1.0, 0.0, 0.0],
+            angle: 0.5,
+            child: Box::new(Node::Rotate {
+                axis: [0.0, 1.0, 0.0],
+                angle: 0.3,
+                child: Box::new(unit_box()),
+            }),
+        };
+        assert_eq!(simplify(&n), n);
+    }
+
+    #[test]
+    fn rotate_with_unnormalized_parallel_axes_still_folds() {
+        // Outer axis (0, 2, 0), inner axis (0, 5, 0) — both point
+        // along +Y, just with different magnitudes. parallel_axis_sign
+        // ignores magnitude, so the fold fires.
+        let n = Node::Rotate {
+            axis: [0.0, 2.0, 0.0],
+            angle: 0.3,
+            child: Box::new(Node::Rotate {
+                axis: [0.0, 5.0, 0.0],
+                angle: 0.4,
+                child: Box::new(unit_box()),
+            }),
+        };
+        let s = simplify(&n);
+        match s {
+            Node::Rotate { axis, angle, .. } => {
+                assert_eq!(axis, [0.0, 2.0, 0.0]);
+                assert!((angle - 0.7).abs() < 1e-6);
+            }
+            other => panic!("expected Rotate, got {other:?}"),
+        }
+    }
+
+    // ---- Cross-shape ----
+
+    #[test]
+    fn translate_does_not_fold_into_scale_or_vice_versa() {
+        // (translate offset (scale s leaf)) cannot be expressed as
+        // a single transform of either kind.
+        let n = Node::Translate {
+            offset: [1.0, 0.0, 0.0],
+            child: Box::new(Node::Scale {
+                factor: [2.0, 1.0, 1.0],
+                child: Box::new(unit_box()),
+            }),
+        };
+        assert_eq!(simplify(&n), n);
+    }
+
+    #[test]
+    fn folding_is_idempotent() {
+        let n = Node::Translate {
+            offset: [1.0, 1.0, 1.0],
+            child: Box::new(Node::Translate {
+                offset: [2.0, 2.0, 2.0],
+                child: Box::new(Node::Rotate {
+                    axis: [0.0, 1.0, 0.0],
+                    angle: 0.1,
+                    child: Box::new(Node::Rotate {
+                        axis: [0.0, 1.0, 0.0],
+                        angle: 0.2,
+                        child: Box::new(unit_box()),
+                    }),
+                }),
+            }),
+        };
+        let once = simplify(&n);
+        let twice = simplify(&once);
+        assert_eq!(once, twice);
     }
 }
