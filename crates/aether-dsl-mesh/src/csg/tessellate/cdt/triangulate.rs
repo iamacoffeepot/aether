@@ -12,11 +12,11 @@
 //! breaks down, etc.) returns `None`. The caller falls back to emitting
 //! the input polygons as fans rather than producing broken geometry.
 
-use super::super::mesh::VertexId;
 use super::bowyer_watson::Mesh;
 use super::predicates::Point2;
 #[cfg(test)]
 use super::predicates::orient2d;
+use crate::csg::cleanup::mesh::VertexId;
 use crate::csg::plane::Plane3;
 use crate::csg::point::Point3;
 
@@ -68,7 +68,7 @@ fn project_point(p: Point3, axis_a: Axis, axis_b: Axis) -> Point2 {
 /// Returns the triangulation as `[VertexId; 3]` triples in the
 /// original vertex pool's indexing, or `None` if the algorithm could
 /// not produce a valid result.
-pub(in crate::csg::cleanup) fn triangulate(
+pub(in crate::csg::tessellate) fn triangulate(
     vertices: &[Point3],
     loops: &[Vec<VertexId>],
     plane: &Plane3,
@@ -254,7 +254,7 @@ fn point_in_polygon_3x(cx3: i128, cy3: i128, poly: &[Point2]) -> bool {
 /// normal before passing it in. (Currently unused — kept as part of the
 /// projection helper surface.)
 #[allow(dead_code)]
-pub(in crate::csg::cleanup) fn signed_area2_2d(loop2d: &[Point2]) -> i128 {
+pub(in crate::csg::tessellate) fn signed_area2_2d(loop2d: &[Point2]) -> i128 {
     let mut sum: i128 = 0;
     let n = loop2d.len();
     for i in 0..n {

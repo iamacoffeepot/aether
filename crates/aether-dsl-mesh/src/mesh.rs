@@ -32,8 +32,8 @@ pub enum MeshError {
     Csg(#[from] csg::CsgError),
 }
 
-/// Wire entry: evaluate `node` polygon-domain, run the cleanup pipeline
-/// (with CDT triangulation), then fan back to wire `Triangle`s.
+/// Wire entry: evaluate `node` polygon-domain, run the cleanup +
+/// CDT-tessellation pipeline, then fan back to wire `Triangle`s.
 ///
 /// Cleanup runs **once** at the root, not after every CSG op — chained
 /// `(difference A B C)` flows raw BSP polygons between steps and
@@ -44,11 +44,11 @@ pub enum MeshError {
 pub fn mesh(node: &Node) -> Result<Vec<Triangle>, MeshError> {
     let mut polys = Vec::new();
     mesh_into_polygons(&mut polys, node, [0.0, 0.0, 0.0])?;
-    Ok(csg::polygons_to_triangles(&csg::cleanup::run(polys)))
+    Ok(csg::polygons_to_triangles(&csg::tessellate::run(polys)))
 }
 
-/// Polygon-domain entry: same composition as [`mesh`], but the cleanup
-/// tail returns n-gon boundary loops (`cleanup::run_to_loops`). The
+/// Polygon-domain entry: same composition as [`mesh`], but stops at
+/// the n-gon boundary loops cleanup produces (no triangulation). The
 /// public polygon API in `crate::polygon` is the consumer.
 pub fn mesh_polygons_internal(node: &Node) -> Result<Vec<CsgPolygon>, MeshError> {
     let mut polys = Vec::new();
