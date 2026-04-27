@@ -14,6 +14,7 @@ pub mod obj;
 pub mod parse;
 pub mod polygon;
 pub mod serialize;
+pub mod simplify;
 
 pub use ast::{Axis, Node};
 pub use mesh::{MeshError, Triangle, mesh};
