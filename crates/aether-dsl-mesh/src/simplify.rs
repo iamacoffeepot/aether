@@ -22,200 +22,10 @@
 //!   streams, skipping BSP entirely. This is the big single-PR win for
 //!   "scene = bunch of separated parts" inputs.
 
-use crate::ast::{Axis, Node};
-use crate::mesh::{normalize_or_default, rotate_axis_angle};
-
-/// Axis-aligned bounding box in world coordinates.
-///
-/// `min[i] > max[i]` along any axis denotes the empty box (no points).
-/// [`Aabb::EMPTY`] uses `+∞` / `-∞` so unioning anything with it
-/// returns the other operand unchanged.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Aabb {
-    pub min: [f32; 3],
-    pub max: [f32; 3],
-}
-
-impl Aabb {
-    pub const EMPTY: Aabb = Aabb {
-        min: [f32::INFINITY; 3],
-        max: [f32::NEG_INFINITY; 3],
-    };
-
-    /// Construct an AABB centered at the origin with the given half-extents.
-    /// Half-extents may be zero (degenerate box) or negative (treated as
-    /// their absolute value).
-    pub fn from_half_extents(hx: f32, hy: f32, hz: f32) -> Aabb {
-        let hx = hx.abs();
-        let hy = hy.abs();
-        let hz = hz.abs();
-        Aabb {
-            min: [-hx, -hy, -hz],
-            max: [hx, hy, hz],
-        }
-    }
-
-    /// Construct an AABB from explicit bounds. Caller is responsible for
-    /// `min[i] <= max[i]`; passing inverted bounds yields an empty AABB.
-    pub fn from_min_max(min: [f32; 3], max: [f32; 3]) -> Aabb {
-        Aabb { min, max }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.min[0] > self.max[0] || self.min[1] > self.max[1] || self.min[2] > self.max[2]
-    }
-
-    /// Smallest AABB containing both `self` and `other`. Either being
-    /// empty returns the other unchanged.
-    pub fn union(&self, other: &Aabb) -> Aabb {
-        if self.is_empty() {
-            return *other;
-        }
-        if other.is_empty() {
-            return *self;
-        }
-        Aabb {
-            min: [
-                self.min[0].min(other.min[0]),
-                self.min[1].min(other.min[1]),
-                self.min[2].min(other.min[2]),
-            ],
-            max: [
-                self.max[0].max(other.max[0]),
-                self.max[1].max(other.max[1]),
-                self.max[2].max(other.max[2]),
-            ],
-        }
-    }
-
-    /// Largest AABB contained in both `self` and `other`. Returns an
-    /// empty AABB when the inputs don't overlap.
-    pub fn intersection(&self, other: &Aabb) -> Aabb {
-        let min = [
-            self.min[0].max(other.min[0]),
-            self.min[1].max(other.min[1]),
-            self.min[2].max(other.min[2]),
-        ];
-        let max = [
-            self.max[0].min(other.max[0]),
-            self.max[1].min(other.max[1]),
-            self.max[2].min(other.max[2]),
-        ];
-        Aabb { min, max }
-    }
-
-    /// `true` if `self` and `other` share at least one point. Touching
-    /// (a single shared face / edge / point) counts as intersecting —
-    /// callers that want strict separation should test `!intersects`
-    /// only when they're OK treating shared-face geometry as disjoint
-    /// (which is fine for CSG: zero shared volume = trivial result).
-    pub fn intersects(&self, other: &Aabb) -> bool {
-        if self.is_empty() || other.is_empty() {
-            return false;
-        }
-        self.min[0] <= other.max[0]
-            && self.max[0] >= other.min[0]
-            && self.min[1] <= other.max[1]
-            && self.max[1] >= other.min[1]
-            && self.min[2] <= other.max[2]
-            && self.max[2] >= other.min[2]
-    }
-
-    pub fn translate(&self, offset: [f32; 3]) -> Aabb {
-        if self.is_empty() {
-            return *self;
-        }
-        Aabb {
-            min: [
-                self.min[0] + offset[0],
-                self.min[1] + offset[1],
-                self.min[2] + offset[2],
-            ],
-            max: [
-                self.max[0] + offset[0],
-                self.max[1] + offset[1],
-                self.max[2] + offset[2],
-            ],
-        }
-    }
-
-    /// Component-wise scale. Negative factors swap min/max along their
-    /// axis so the result still satisfies `min <= max`.
-    pub fn scale(&self, factor: [f32; 3]) -> Aabb {
-        if self.is_empty() {
-            return *self;
-        }
-        let scaled_lo = [
-            self.min[0] * factor[0],
-            self.min[1] * factor[1],
-            self.min[2] * factor[2],
-        ];
-        let scaled_hi = [
-            self.max[0] * factor[0],
-            self.max[1] * factor[1],
-            self.max[2] * factor[2],
-        ];
-        Aabb {
-            min: [
-                scaled_lo[0].min(scaled_hi[0]),
-                scaled_lo[1].min(scaled_hi[1]),
-                scaled_lo[2].min(scaled_hi[2]),
-            ],
-            max: [
-                scaled_lo[0].max(scaled_hi[0]),
-                scaled_lo[1].max(scaled_hi[1]),
-                scaled_lo[2].max(scaled_hi[2]),
-            ],
-        }
-    }
-
-    /// Conservative AABB after rotating around a normalized `axis` by
-    /// `angle` radians: rotate the eight corners and take the new bound.
-    /// The result is rotation-invariant only for AABBs centered at the
-    /// origin or for axis-aligned rotations; off-center boxes get a
-    /// strictly larger AABB after rotation, as expected.
-    pub fn rotate(&self, axis: [f32; 3], angle: f32) -> Aabb {
-        if self.is_empty() {
-            return *self;
-        }
-        let n = normalize_or_default(axis, [0.0, 1.0, 0.0]);
-        let corners = [
-            [self.min[0], self.min[1], self.min[2]],
-            [self.max[0], self.min[1], self.min[2]],
-            [self.min[0], self.max[1], self.min[2]],
-            [self.max[0], self.max[1], self.min[2]],
-            [self.min[0], self.min[1], self.max[2]],
-            [self.max[0], self.min[1], self.max[2]],
-            [self.min[0], self.max[1], self.max[2]],
-            [self.max[0], self.max[1], self.max[2]],
-        ];
-        let mut out = Aabb::EMPTY;
-        for c in corners {
-            let r = rotate_axis_angle(c, n, angle);
-            out = out.union(&Aabb { min: r, max: r });
-        }
-        out
-    }
-
-    /// Mirror across the plane `axis = 0`. The bounds along `axis` flip
-    /// sign and swap; the other axes are unchanged.
-    pub fn mirror(&self, axis: Axis) -> Aabb {
-        if self.is_empty() {
-            return *self;
-        }
-        let i = match axis {
-            Axis::X => 0,
-            Axis::Y => 1,
-            Axis::Z => 2,
-        };
-        let mut out = *self;
-        let new_min = -self.max[i];
-        let new_max = -self.min[i];
-        out.min[i] = new_min;
-        out.max[i] = new_max;
-        out
-    }
-}
+#[cfg(test)]
+use crate::ast::Axis;
+use crate::ast::Node;
+use aether_math::{Aabb, Vec3};
 
 /// Conservative AABB enclosing the polygon stream `node` would emit
 /// when meshed at the origin (caller-supplied offsets aren't applied —
@@ -265,7 +75,10 @@ pub fn compute_aabb(node: &Node) -> Aabb {
             if !min_y.is_finite() {
                 return Aabb::EMPTY;
             }
-            Aabb::from_min_max([-max_r, min_y, -max_r], [max_r, max_y, max_r])
+            Aabb::from_min_max(
+                Vec3::new(-max_r, min_y, -max_r),
+                Vec3::new(max_r, max_y, max_r),
+            )
         }
         Node::Extrude { profile, depth, .. } => {
             let mut min_x = f32::INFINITY;
@@ -287,7 +100,7 @@ pub fn compute_aabb(node: &Node) -> Aabb {
             } else {
                 (*depth, 0.0)
             };
-            Aabb::from_min_max([min_x, min_y, z0], [max_x, max_y, z1])
+            Aabb::from_min_max(Vec3::new(min_x, min_y, z0), Vec3::new(max_x, max_y, z1))
         }
         Node::Torus {
             major_radius,
@@ -320,9 +133,10 @@ pub fn compute_aabb(node: &Node) -> Aabb {
                     .copied()
                     .unwrap_or(1.0);
                 let r = max_profile_r * s.abs();
+                let center = Vec3::from_array(*p);
                 out = out.union(&Aabb::from_min_max(
-                    [p[0] - r, p[1] - r, p[2] - r],
-                    [p[0] + r, p[1] + r, p[2] + r],
+                    center - Vec3::splat(r),
+                    center + Vec3::splat(r),
                 ));
             }
             out
@@ -331,10 +145,14 @@ pub fn compute_aabb(node: &Node) -> Aabb {
             .iter()
             .map(compute_aabb)
             .fold(Aabb::EMPTY, |acc, b| acc.union(&b)),
-        Node::Translate { offset, child } => compute_aabb(child).translate(*offset),
-        Node::Rotate { axis, angle, child } => compute_aabb(child).rotate(*axis, *angle),
-        Node::Scale { factor, child } => compute_aabb(child).scale(*factor),
-        Node::Mirror { axis, child } => compute_aabb(child).mirror(*axis),
+        Node::Translate { offset, child } => {
+            compute_aabb(child).translate(Vec3::from_array(*offset))
+        }
+        Node::Rotate { axis, angle, child } => {
+            compute_aabb(child).rotate(Vec3::from_array(*axis), *angle)
+        }
+        Node::Scale { factor, child } => compute_aabb(child).scale(Vec3::from_array(*factor)),
+        Node::Mirror { axis, child } => compute_aabb(child).mirror(axis.index()),
         Node::Array {
             count,
             spacing,
@@ -347,7 +165,7 @@ pub fn compute_aabb(node: &Node) -> Aabb {
             let mut out = Aabb::EMPTY;
             for i in 0..*count {
                 let f = i as f32;
-                out = out.union(&base.translate([spacing[0] * f, spacing[1] * f, spacing[2] * f]));
+                out = out.union(&base.translate(Vec3::from_array(*spacing) * f));
             }
             out
         }
@@ -447,32 +265,10 @@ fn profile_axis_closed(profile: &[[f32; 2]]) -> bool {
 /// `Some(-1.0)` when opposite, `None` when skew (or either is the
 /// zero vector). Used to decide whether two `Rotate` nodes can fold:
 /// rotating around `+v` by `θ` then around `-v` by `φ` is the same as
-/// rotating around `+v` by `θ - φ`.
-///
-/// Tolerance: the cross product's magnitude squared is compared to a
-/// fraction of the input magnitudes squared. The threshold (`1e-10`
-/// relative) accepts axes that match to ~5 decimal digits and rejects
-/// anything noticeably skew. Looser would risk folding rotations
-/// around visibly-different axes (which is geometrically wrong);
-/// stricter would miss genuine duplicates that happen to differ by
-/// f32-rounding from a normalization step.
+/// rotating around `+v` by `θ - φ`. Thin wrapper over
+/// [`Vec3::parallel_sign`] — see that for the tolerance rationale.
 fn parallel_axis_sign(a: [f32; 3], b: [f32; 3]) -> Option<f32> {
-    let mag_a_sq = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
-    let mag_b_sq = b[0] * b[0] + b[1] * b[1] + b[2] * b[2];
-    if mag_a_sq < 1e-12 || mag_b_sq < 1e-12 {
-        return None;
-    }
-    // Cross product magnitude squared: parallel ⟺ |a×b|² == 0.
-    let cx = a[1] * b[2] - a[2] * b[1];
-    let cy = a[2] * b[0] - a[0] * b[2];
-    let cz = a[0] * b[1] - a[1] * b[0];
-    let cross_mag_sq = cx * cx + cy * cy + cz * cz;
-    if cross_mag_sq > 1e-10 * mag_a_sq * mag_b_sq {
-        return None;
-    }
-    // Sign by dot product.
-    let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    Some(if dot >= 0.0 { 1.0 } else { -1.0 })
+    Vec3::from_array(a).parallel_sign(Vec3::from_array(b))
 }
 
 /// Apply rewrites bottom-up. Each rewrite preserves the meshed output
@@ -815,12 +611,12 @@ mod aabb_tests {
     }
 
     fn aabb_approx_eq(a: &Aabb, b: &Aabb) -> bool {
-        approx_eq(a.min[0], b.min[0])
-            && approx_eq(a.min[1], b.min[1])
-            && approx_eq(a.min[2], b.min[2])
-            && approx_eq(a.max[0], b.max[0])
-            && approx_eq(a.max[1], b.max[1])
-            && approx_eq(a.max[2], b.max[2])
+        approx_eq(a.min.x, b.min.x)
+            && approx_eq(a.min.y, b.min.y)
+            && approx_eq(a.min.z, b.min.z)
+            && approx_eq(a.max.x, b.max.x)
+            && approx_eq(a.max.y, b.max.y)
+            && approx_eq(a.max.z, b.max.z)
     }
 
     #[test]
@@ -831,8 +627,8 @@ mod aabb_tests {
     #[test]
     fn from_half_extents_is_centered() {
         let b = Aabb::from_half_extents(2.0, 3.0, 4.0);
-        assert_eq!(b.min, [-2.0, -3.0, -4.0]);
-        assert_eq!(b.max, [2.0, 3.0, 4.0]);
+        assert_eq!(b.min, Vec3::new(-2.0, -3.0, -4.0));
+        assert_eq!(b.max, Vec3::new(2.0, 3.0, 4.0));
     }
 
     #[test]
@@ -841,8 +637,8 @@ mod aabb_tests {
         // bounds. Take abs so callers can't accidentally produce empty
         // boxes from primitives with negative size.
         let b = Aabb::from_half_extents(-2.0, 3.0, -4.0);
-        assert_eq!(b.min, [-2.0, -3.0, -4.0]);
-        assert_eq!(b.max, [2.0, 3.0, 4.0]);
+        assert_eq!(b.min, Vec3::new(-2.0, -3.0, -4.0));
+        assert_eq!(b.max, Vec3::new(2.0, 3.0, 4.0));
     }
 
     #[test]
@@ -854,42 +650,42 @@ mod aabb_tests {
 
     #[test]
     fn union_of_two_disjoint_boxes_spans_both() {
-        let a = Aabb::from_min_max([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
-        let b = Aabb::from_min_max([10.0, 10.0, 10.0], [11.0, 11.0, 11.0]);
+        let a = Aabb::from_min_max(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
+        let b = Aabb::from_min_max(Vec3::new(10.0, 10.0, 10.0), Vec3::new(11.0, 11.0, 11.0));
         let u = a.union(&b);
-        assert_eq!(u.min, [0.0, 0.0, 0.0]);
-        assert_eq!(u.max, [11.0, 11.0, 11.0]);
+        assert_eq!(u.min, Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!(u.max, Vec3::new(11.0, 11.0, 11.0));
     }
 
     #[test]
     fn intersection_of_overlapping_boxes_is_overlap() {
-        let a = Aabb::from_min_max([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
-        let b = Aabb::from_min_max([1.0, 1.0, 1.0], [3.0, 3.0, 3.0]);
+        let a = Aabb::from_min_max(Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 2.0, 2.0));
+        let b = Aabb::from_min_max(Vec3::new(1.0, 1.0, 1.0), Vec3::new(3.0, 3.0, 3.0));
         let i = a.intersection(&b);
-        assert_eq!(i.min, [1.0, 1.0, 1.0]);
-        assert_eq!(i.max, [2.0, 2.0, 2.0]);
+        assert_eq!(i.min, Vec3::new(1.0, 1.0, 1.0));
+        assert_eq!(i.max, Vec3::new(2.0, 2.0, 2.0));
     }
 
     #[test]
     fn intersection_of_disjoint_boxes_is_empty() {
-        let a = Aabb::from_min_max([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
-        let b = Aabb::from_min_max([10.0, 10.0, 10.0], [11.0, 11.0, 11.0]);
+        let a = Aabb::from_min_max(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
+        let b = Aabb::from_min_max(Vec3::new(10.0, 10.0, 10.0), Vec3::new(11.0, 11.0, 11.0));
         let i = a.intersection(&b);
         assert!(i.is_empty());
     }
 
     #[test]
     fn intersects_overlapping_returns_true() {
-        let a = Aabb::from_min_max([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
-        let b = Aabb::from_min_max([1.0, 1.0, 1.0], [3.0, 3.0, 3.0]);
+        let a = Aabb::from_min_max(Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 2.0, 2.0));
+        let b = Aabb::from_min_max(Vec3::new(1.0, 1.0, 1.0), Vec3::new(3.0, 3.0, 3.0));
         assert!(a.intersects(&b));
         assert!(b.intersects(&a));
     }
 
     #[test]
     fn intersects_disjoint_returns_false() {
-        let a = Aabb::from_min_max([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
-        let b = Aabb::from_min_max([10.0, 10.0, 10.0], [11.0, 11.0, 11.0]);
+        let a = Aabb::from_min_max(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
+        let b = Aabb::from_min_max(Vec3::new(10.0, 10.0, 10.0), Vec3::new(11.0, 11.0, 11.0));
         assert!(!a.intersects(&b));
     }
 
@@ -899,14 +695,14 @@ mod aabb_tests {
         // treated as intersecting. CSG callers can still optimize this
         // case if they want to — the intersects API just gives the
         // closed-set answer.
-        let a = Aabb::from_min_max([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
-        let b = Aabb::from_min_max([1.0, 0.0, 0.0], [2.0, 1.0, 1.0]);
+        let a = Aabb::from_min_max(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
+        let b = Aabb::from_min_max(Vec3::new(1.0, 0.0, 0.0), Vec3::new(2.0, 1.0, 1.0));
         assert!(a.intersects(&b));
     }
 
     #[test]
     fn intersects_with_empty_is_false() {
-        let a = Aabb::from_min_max([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let a = Aabb::from_min_max(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
         assert!(!a.intersects(&Aabb::EMPTY));
         assert!(!Aabb::EMPTY.intersects(&a));
         assert!(!Aabb::EMPTY.intersects(&Aabb::EMPTY));
@@ -915,23 +711,23 @@ mod aabb_tests {
     #[test]
     fn translate_shifts_bounds() {
         let b = Aabb::from_half_extents(1.0, 1.0, 1.0);
-        let t = b.translate([5.0, -3.0, 2.0]);
-        assert_eq!(t.min, [4.0, -4.0, 1.0]);
-        assert_eq!(t.max, [6.0, -2.0, 3.0]);
+        let t = b.translate(Vec3::new(5.0, -3.0, 2.0));
+        assert_eq!(t.min, Vec3::new(4.0, -4.0, 1.0));
+        assert_eq!(t.max, Vec3::new(6.0, -2.0, 3.0));
     }
 
     #[test]
     fn translate_empty_is_empty() {
-        let t = Aabb::EMPTY.translate([5.0, 5.0, 5.0]);
+        let t = Aabb::EMPTY.translate(Vec3::new(5.0, 5.0, 5.0));
         assert!(t.is_empty());
     }
 
     #[test]
     fn scale_positive_factors_scales_in_place() {
         let b = Aabb::from_half_extents(1.0, 1.0, 1.0);
-        let s = b.scale([2.0, 3.0, 4.0]);
-        assert_eq!(s.min, [-2.0, -3.0, -4.0]);
-        assert_eq!(s.max, [2.0, 3.0, 4.0]);
+        let s = b.scale(Vec3::new(2.0, 3.0, 4.0));
+        assert_eq!(s.min, Vec3::new(-2.0, -3.0, -4.0));
+        assert_eq!(s.max, Vec3::new(2.0, 3.0, 4.0));
     }
 
     #[test]
@@ -939,21 +735,21 @@ mod aabb_tests {
         // Pin: a -1 scale on x flips a [0, 5] range to [-5, 0]. Without
         // swap-on-negative the result would be the inverted (empty)
         // [0, -5].
-        let b = Aabb::from_min_max([0.0, 0.0, 0.0], [5.0, 1.0, 1.0]);
-        let s = b.scale([-1.0, 1.0, 1.0]);
-        assert_eq!(s.min, [-5.0, 0.0, 0.0]);
-        assert_eq!(s.max, [0.0, 1.0, 1.0]);
+        let b = Aabb::from_min_max(Vec3::new(0.0, 0.0, 0.0), Vec3::new(5.0, 1.0, 1.0));
+        let s = b.scale(Vec3::new(-1.0, 1.0, 1.0));
+        assert_eq!(s.min, Vec3::new(-5.0, 0.0, 0.0));
+        assert_eq!(s.max, Vec3::new(0.0, 1.0, 1.0));
     }
 
     #[test]
     fn rotate_180_around_y_swaps_x_and_z_signs() {
         // Off-center box rotated 180° around Y: end up on the opposite
         // side along x and z, but still the same shape.
-        let b = Aabb::from_min_max([1.0, 0.0, 1.0], [3.0, 1.0, 3.0]);
-        let r = b.rotate([0.0, 1.0, 0.0], std::f32::consts::PI);
+        let b = Aabb::from_min_max(Vec3::new(1.0, 0.0, 1.0), Vec3::new(3.0, 1.0, 3.0));
+        let r = b.rotate(Vec3::new(0.0, 1.0, 0.0), std::f32::consts::PI);
         // Floating-point Rodrigues introduces small ULPs even for
         // exact 180° rotations; assert via approx.
-        let expected = Aabb::from_min_max([-3.0, 0.0, -3.0], [-1.0, 1.0, -1.0]);
+        let expected = Aabb::from_min_max(Vec3::new(-3.0, 0.0, -3.0), Vec3::new(-1.0, 1.0, -1.0));
         assert!(
             aabb_approx_eq(&r, &expected),
             "rotated bounds {:?} ≠ expected {:?}",
@@ -968,43 +764,43 @@ mod aabb_tests {
         // bound (the corner-to-corner diagonal). Pins the worst-case
         // conservative-bound behavior.
         let b = Aabb::from_half_extents(0.5, 0.5, 0.0);
-        let r = b.rotate([0.0, 0.0, 1.0], std::f32::consts::FRAC_PI_4);
+        let r = b.rotate(Vec3::new(0.0, 0.0, 1.0), std::f32::consts::FRAC_PI_4);
         // sqrt(0.5) ≈ 0.7071
         let half_diag = std::f32::consts::FRAC_1_SQRT_2;
         assert!(
-            (r.max[0] - half_diag).abs() < 1e-4,
+            (r.max.x - half_diag).abs() < 1e-4,
             "expected ~{half_diag} along x, got {}",
-            r.max[0]
+            r.max.x
         );
         assert!(
-            (r.max[1] - half_diag).abs() < 1e-4,
+            (r.max.y - half_diag).abs() < 1e-4,
             "expected ~{half_diag} along y, got {}",
-            r.max[1]
+            r.max.y
         );
     }
 
     #[test]
     fn mirror_x_flips_x_bounds() {
-        let b = Aabb::from_min_max([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]);
-        let m = b.mirror(Axis::X);
-        assert_eq!(m.min, [-4.0, 2.0, 3.0]);
-        assert_eq!(m.max, [-1.0, 5.0, 6.0]);
+        let b = Aabb::from_min_max(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0));
+        let m = b.mirror(Axis::X.index());
+        assert_eq!(m.min, Vec3::new(-4.0, 2.0, 3.0));
+        assert_eq!(m.max, Vec3::new(-1.0, 5.0, 6.0));
     }
 
     #[test]
     fn mirror_y_flips_y_bounds() {
-        let b = Aabb::from_min_max([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]);
-        let m = b.mirror(Axis::Y);
-        assert_eq!(m.min, [1.0, -5.0, 3.0]);
-        assert_eq!(m.max, [4.0, -2.0, 6.0]);
+        let b = Aabb::from_min_max(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0));
+        let m = b.mirror(Axis::Y.index());
+        assert_eq!(m.min, Vec3::new(1.0, -5.0, 3.0));
+        assert_eq!(m.max, Vec3::new(4.0, -2.0, 6.0));
     }
 
     #[test]
     fn mirror_z_flips_z_bounds() {
-        let b = Aabb::from_min_max([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]);
-        let m = b.mirror(Axis::Z);
-        assert_eq!(m.min, [1.0, 2.0, -6.0]);
-        assert_eq!(m.max, [4.0, 5.0, -3.0]);
+        let b = Aabb::from_min_max(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0));
+        let m = b.mirror(Axis::Z.index());
+        assert_eq!(m.min, Vec3::new(1.0, 2.0, -6.0));
+        assert_eq!(m.max, Vec3::new(4.0, 5.0, -3.0));
     }
 }
 
@@ -1020,8 +816,8 @@ mod compute_aabb_tests {
             z: 6.0,
             color: 0,
         });
-        assert_eq!(b.min, [-1.0, -2.0, -3.0]);
-        assert_eq!(b.max, [1.0, 2.0, 3.0]);
+        assert_eq!(b.min, Vec3::new(-1.0, -2.0, -3.0));
+        assert_eq!(b.max, Vec3::new(1.0, 2.0, 3.0));
     }
 
     #[test]
@@ -1032,8 +828,8 @@ mod compute_aabb_tests {
             segments: 16,
             color: 0,
         });
-        assert_eq!(b.min, [-2.5, -1.5, -2.5]);
-        assert_eq!(b.max, [2.5, 1.5, 2.5]);
+        assert_eq!(b.min, Vec3::new(-2.5, -1.5, -2.5));
+        assert_eq!(b.max, Vec3::new(2.5, 1.5, 2.5));
     }
 
     #[test]
@@ -1046,8 +842,8 @@ mod compute_aabb_tests {
             segments: 12,
             color: 0,
         });
-        assert_eq!(b.min, [-1.0, -1.0, -1.0]);
-        assert_eq!(b.max, [1.0, 1.0, 1.0]);
+        assert_eq!(b.min, Vec3::new(-1.0, -1.0, -1.0));
+        assert_eq!(b.max, Vec3::new(1.0, 1.0, 1.0));
     }
 
     #[test]
@@ -1057,8 +853,8 @@ mod compute_aabb_tests {
             subdivisions: 12,
             color: 0,
         });
-        assert_eq!(b.min, [-0.5, -0.5, -0.5]);
-        assert_eq!(b.max, [0.5, 0.5, 0.5]);
+        assert_eq!(b.min, Vec3::new(-0.5, -0.5, -0.5));
+        assert_eq!(b.max, Vec3::new(0.5, 0.5, 0.5));
     }
 
     #[test]
@@ -1068,8 +864,8 @@ mod compute_aabb_tests {
             segments: 16,
             color: 0,
         });
-        assert_eq!(b.min, [-0.7, -0.5, -0.7]);
-        assert_eq!(b.max, [0.7, 0.5, 0.7]);
+        assert_eq!(b.min, Vec3::new(-0.7, -0.5, -0.7));
+        assert_eq!(b.max, Vec3::new(0.7, 0.5, 0.7));
     }
 
     #[test]
@@ -1091,8 +887,8 @@ mod compute_aabb_tests {
             minor_segments: 8,
             color: 0,
         });
-        assert_eq!(b.min, [-2.3, -0.3, -2.3]);
-        assert_eq!(b.max, [2.3, 0.3, 2.3]);
+        assert_eq!(b.min, Vec3::new(-2.3, -0.3, -2.3));
+        assert_eq!(b.max, Vec3::new(2.3, 0.3, 2.3));
     }
 
     #[test]
@@ -1102,8 +898,8 @@ mod compute_aabb_tests {
             depth: 5.0,
             color: 0,
         });
-        assert_eq!(b.min, [0.0, 0.0, 0.0]);
-        assert_eq!(b.max, [1.0, 2.0, 5.0]);
+        assert_eq!(b.min, Vec3::new(0.0, 0.0, 0.0));
+        assert_eq!(b.max, Vec3::new(1.0, 2.0, 5.0));
     }
 
     #[test]
@@ -1114,8 +910,8 @@ mod compute_aabb_tests {
             depth: -3.0,
             color: 0,
         });
-        assert_eq!(b.min[2], -3.0);
-        assert_eq!(b.max[2], 0.0);
+        assert_eq!(b.min.z, -3.0);
+        assert_eq!(b.max.z, 0.0);
     }
 
     #[test]
@@ -1129,8 +925,8 @@ mod compute_aabb_tests {
                 color: 0,
             }),
         });
-        assert_eq!(b.min, [9.0, 19.0, 29.0]);
-        assert_eq!(b.max, [11.0, 21.0, 31.0]);
+        assert_eq!(b.min, Vec3::new(9.0, 19.0, 29.0));
+        assert_eq!(b.max, Vec3::new(11.0, 21.0, 31.0));
     }
 
     #[test]
@@ -1148,8 +944,8 @@ mod compute_aabb_tests {
                 color: 0,
             }),
         });
-        assert!((b.max[0] - 0.5).abs() < 1e-4, "x_max {}", b.max[0]);
-        assert!((b.max[1] - 2.0).abs() < 1e-4, "y_max {}", b.max[1]);
+        assert!((b.max.x - 0.5).abs() < 1e-4, "x_max {}", b.max.x);
+        assert!((b.max.y - 2.0).abs() < 1e-4, "y_max {}", b.max.y);
     }
 
     #[test]
@@ -1163,8 +959,8 @@ mod compute_aabb_tests {
                 color: 0,
             }),
         });
-        assert_eq!(b.min, [-1.0, -1.5, -2.0]);
-        assert_eq!(b.max, [1.0, 1.5, 2.0]);
+        assert_eq!(b.min, Vec3::new(-1.0, -1.5, -2.0));
+        assert_eq!(b.max, Vec3::new(1.0, 1.5, 2.0));
     }
 
     #[test]
@@ -1183,8 +979,8 @@ mod compute_aabb_tests {
         });
         // Box translated to (5,0,0), bounds [4..6]; mirror around x=0
         // gives [-6..-4].
-        assert_eq!(b.min[0], -6.0);
-        assert_eq!(b.max[0], -4.0);
+        assert_eq!(b.min.x, -6.0);
+        assert_eq!(b.max.x, -4.0);
     }
 
     #[test]
@@ -1200,8 +996,8 @@ mod compute_aabb_tests {
             }),
         });
         // i=0: [-1..1], i=1: [9..11], i=2: [19..21] → union [-1..21].
-        assert_eq!(b.min[0], -1.0);
-        assert_eq!(b.max[0], 21.0);
+        assert_eq!(b.min.x, -1.0);
+        assert_eq!(b.max.x, 21.0);
     }
 
     #[test]
@@ -1238,8 +1034,8 @@ mod compute_aabb_tests {
                 }),
             },
         ]));
-        assert_eq!(b.min[0], -1.0);
-        assert_eq!(b.max[0], 11.0);
+        assert_eq!(b.min.x, -1.0);
+        assert_eq!(b.max.x, 11.0);
     }
 
     #[test]
@@ -1268,8 +1064,8 @@ mod compute_aabb_tests {
                 },
             ],
         });
-        assert_eq!(b.min[0], -1.0);
-        assert_eq!(b.max[0], 11.0);
+        assert_eq!(b.min.x, -1.0);
+        assert_eq!(b.max.x, 11.0);
     }
 
     #[test]
@@ -1294,8 +1090,8 @@ mod compute_aabb_tests {
             ],
         });
         // Box[-2..2] ∩ Box[-1..3] = [-1..2]
-        assert_eq!(b.min[0], -1.0);
-        assert_eq!(b.max[0], 2.0);
+        assert_eq!(b.min.x, -1.0);
+        assert_eq!(b.max.x, 2.0);
     }
 
     #[test]
@@ -1341,8 +1137,8 @@ mod compute_aabb_tests {
                 color: 1,
             }],
         });
-        assert_eq!(b.min, [-1.0, -1.0, -1.0]);
-        assert_eq!(b.max, [1.0, 1.0, 1.0]);
+        assert_eq!(b.min, Vec3::new(-1.0, -1.0, -1.0));
+        assert_eq!(b.max, Vec3::new(1.0, 1.0, 1.0));
     }
 
     #[test]
@@ -1355,8 +1151,8 @@ mod compute_aabb_tests {
         });
         // Profile worst-case radius = 1; bound at each waypoint extends
         // ±1 in every direction → union [(-1, -1, -1), (11, 1, 1)].
-        assert_eq!(b.min, [-1.0, -1.0, -1.0]);
-        assert_eq!(b.max, [11.0, 1.0, 1.0]);
+        assert_eq!(b.min, Vec3::new(-1.0, -1.0, -1.0));
+        assert_eq!(b.max, Vec3::new(11.0, 1.0, 1.0));
     }
 
     #[test]
@@ -1369,8 +1165,8 @@ mod compute_aabb_tests {
         });
         // Waypoint 0: ±1; waypoint 1 (scaled 3x): ±3. y/z bounds come
         // from waypoint 1 alone (largest).
-        assert_eq!(b.min[1], -3.0);
-        assert_eq!(b.max[1], 3.0);
+        assert_eq!(b.min.y, -3.0);
+        assert_eq!(b.max.y, 3.0);
     }
 }
 

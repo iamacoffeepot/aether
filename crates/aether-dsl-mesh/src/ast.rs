@@ -161,4 +161,15 @@ impl Axis {
             _ => None,
         }
     }
+
+    /// Component index of this axis (`X = 0, Y = 1, Z = 2`). Useful as
+    /// the bridge between the typed enum and the index-keyed APIs in
+    /// `aether_math` (e.g. `Aabb::mirror`).
+    pub fn index(self) -> usize {
+        match self {
+            Axis::X => 0,
+            Axis::Y => 1,
+            Axis::Z => 2,
+        }
+    }
 }

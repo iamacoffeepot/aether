@@ -33,6 +33,7 @@
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io};
 use aether_dsl_mesh::{Polygon, tessellate_polygon};
 use aether_kinds::{DrawTriangle, ReadResult, SetPath, SetText, Tick, Vertex};
+use aether_math::Vec3;
 
 /// Outline edges are emitted as thin in-plane quads. Width is in world
 /// units; matches the box/sphere scale we typically demo against
@@ -201,47 +202,27 @@ fn outline_loop(loop_: &[[f32; 3]], normal: [f32; 3], out: &mut Vec<[[f32; 3]; 3
     if count < 2 {
         return;
     }
-    let lift = [
-        normal[0] * OUTLINE_LIFT,
-        normal[1] * OUTLINE_LIFT,
-        normal[2] * OUTLINE_LIFT,
-    ];
+    let n = Vec3::from_array(normal);
+    let lift = n * OUTLINE_LIFT;
     for i in 0..count {
-        let v0 = loop_[i];
-        let v1 = loop_[(i + 1) % count];
-        let edge = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
-        let perp = cross(normal, edge);
-        let perp_len = (perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]).sqrt();
+        let v0 = Vec3::from_array(loop_[i]);
+        let v1 = Vec3::from_array(loop_[(i + 1) % count]);
+        let edge = v1 - v0;
+        let perp = n.cross(edge);
+        let perp_len = perp.length();
         if perp_len < 1e-6 {
             continue;
         }
-        let scale = OUTLINE_WIDTH * 0.5 / perp_len;
-        let off = [perp[0] * scale, perp[1] * scale, perp[2] * scale];
-        let v0_in = sub_lift_off(v0, lift, off, -1.0);
-        let v0_out = sub_lift_off(v0, lift, off, 1.0);
-        let v1_in = sub_lift_off(v1, lift, off, -1.0);
-        let v1_out = sub_lift_off(v1, lift, off, 1.0);
+        let off = perp * (OUTLINE_WIDTH * 0.5 / perp_len);
+        let v0_in = (v0 + lift - off).to_array();
+        let v0_out = (v0 + lift + off).to_array();
+        let v1_in = (v1 + lift - off).to_array();
+        let v1_out = (v1 + lift + off).to_array();
         // CCW around the plane normal (matches face winding) so culling
         // and lighting future-friendly.
         out.push([v0_in, v1_in, v1_out]);
         out.push([v0_in, v1_out, v0_out]);
     }
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn sub_lift_off(base: [f32; 3], lift: [f32; 3], off: [f32; 3], sign: f32) -> [f32; 3] {
-    [
-        base[0] + lift[0] + off[0] * sign,
-        base[1] + lift[1] + off[1] * sign,
-        base[2] + lift[2] + off[2] * sign,
-    ]
 }
 
 fn to_draw_triangle_palette(tri: [[f32; 3]; 3], color: u32) -> DrawTriangle {

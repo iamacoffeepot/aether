@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+aether-math = { path = "../aether-math" }
 lexpr = "0.2"
 thiserror = "2"
 
