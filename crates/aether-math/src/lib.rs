@@ -31,10 +31,12 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+mod aabb;
 mod mat;
 mod quat;
 mod vec;
 
+pub use aabb::Aabb;
 pub use mat::Mat4;
 pub use quat::Quat;
 pub use vec::{Vec2, Vec3, Vec4};

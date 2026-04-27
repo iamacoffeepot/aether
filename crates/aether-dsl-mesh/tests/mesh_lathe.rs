@@ -56,16 +56,11 @@ fn lathe_face_normals_point_outward() {
         let a = tri.vertices[0];
         let b = tri.vertices[1];
         let c = tri.vertices[2];
-        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-        let normal = [
-            ab[1] * ac[2] - ab[2] * ac[1],
-            ab[2] * ac[0] - ab[0] * ac[2],
-            ab[0] * ac[1] - ab[1] * ac[0],
-        ];
+        let normal = (b - a).cross(c - a);
         // Radial vector from Y axis at the triangle's centroid (drop y).
-        let centroid = [(a[0] + b[0] + c[0]) / 3.0, (a[2] + b[2] + c[2]) / 3.0];
-        let radial_dot = normal[0] * centroid[0] + normal[2] * centroid[1];
+        let cent_x = (a.x + b.x + c.x) / 3.0;
+        let cent_z = (a.z + b.z + c.z) / 3.0;
+        let radial_dot = normal.x * cent_x + normal.z * cent_z;
         assert!(
             radial_dot > 0.0,
             "lathe face normal points inward for triangle {tri:?}"
@@ -81,7 +76,7 @@ fn lathe_with_translate_offsets_all_vertices() {
     for tri in &tris {
         for v in tri.vertices {
             assert!(
-                v[0] >= 4.0 && v[0] <= 6.0,
+                v.x >= 4.0 && v.x <= 6.0,
                 "translated cylinder x out of range: {v:?}"
             );
         }

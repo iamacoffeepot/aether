@@ -33,6 +33,7 @@
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io};
 use aether_dsl_mesh::{Polygon, tessellate_polygon};
 use aether_kinds::{DrawTriangle, ReadResult, SetPath, SetText, Tick, Vertex};
+use aether_math::Vec3;
 
 /// Outline edges are emitted as thin in-plane quads. Width is in world
 /// units; matches the box/sphere scale we typically demo against
@@ -186,7 +187,7 @@ impl DslMeshEditor {
 /// regardless of camera distance. They look thinner edge-on, which is
 /// the right behavior for face boundaries (a face viewed edge-on is
 /// itself a line).
-fn polygon_outline_triangles(polygon: &Polygon) -> Vec<[[f32; 3]; 3]> {
+fn polygon_outline_triangles(polygon: &Polygon) -> Vec<[Vec3; 3]> {
     let mut tris = Vec::new();
     let n = polygon.plane_normal;
     outline_loop(&polygon.vertices, n, &mut tris);
@@ -196,83 +197,58 @@ fn polygon_outline_triangles(polygon: &Polygon) -> Vec<[[f32; 3]; 3]> {
     tris
 }
 
-fn outline_loop(loop_: &[[f32; 3]], normal: [f32; 3], out: &mut Vec<[[f32; 3]; 3]>) {
+fn outline_loop(loop_: &[Vec3], n: Vec3, out: &mut Vec<[Vec3; 3]>) {
     let count = loop_.len();
     if count < 2 {
         return;
     }
-    let lift = [
-        normal[0] * OUTLINE_LIFT,
-        normal[1] * OUTLINE_LIFT,
-        normal[2] * OUTLINE_LIFT,
-    ];
+    let lift = n * OUTLINE_LIFT;
     for i in 0..count {
         let v0 = loop_[i];
         let v1 = loop_[(i + 1) % count];
-        let edge = [v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]];
-        let perp = cross(normal, edge);
-        let perp_len = (perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]).sqrt();
+        let edge = v1 - v0;
+        let perp = n.cross(edge);
+        let perp_len = perp.length();
         if perp_len < 1e-6 {
             continue;
         }
-        let scale = OUTLINE_WIDTH * 0.5 / perp_len;
-        let off = [perp[0] * scale, perp[1] * scale, perp[2] * scale];
-        let v0_in = sub_lift_off(v0, lift, off, -1.0);
-        let v0_out = sub_lift_off(v0, lift, off, 1.0);
-        let v1_in = sub_lift_off(v1, lift, off, -1.0);
-        let v1_out = sub_lift_off(v1, lift, off, 1.0);
+        let off = perp * (OUTLINE_WIDTH * 0.5 / perp_len);
         // CCW around the plane normal (matches face winding) so culling
         // and lighting future-friendly.
-        out.push([v0_in, v1_in, v1_out]);
-        out.push([v0_in, v1_out, v0_out]);
+        out.push([v0 + lift - off, v1 + lift - off, v1 + lift + off]);
+        out.push([v0 + lift - off, v1 + lift + off, v0 + lift + off]);
     }
 }
 
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn sub_lift_off(base: [f32; 3], lift: [f32; 3], off: [f32; 3], sign: f32) -> [f32; 3] {
-    [
-        base[0] + lift[0] + off[0] * sign,
-        base[1] + lift[1] + off[1] * sign,
-        base[2] + lift[2] + off[2] * sign,
-    ]
-}
-
-fn to_draw_triangle_palette(tri: [[f32; 3]; 3], color: u32) -> DrawTriangle {
+fn to_draw_triangle_palette(tri: [Vec3; 3], color: u32) -> DrawTriangle {
     let rgb = PALETTE[(color as usize) % PALETTE.len()];
     to_draw_triangle_rgb(tri, rgb)
 }
 
-fn to_draw_triangle_rgb(tri: [[f32; 3]; 3], rgb: (f32, f32, f32)) -> DrawTriangle {
+fn to_draw_triangle_rgb(tri: [Vec3; 3], rgb: (f32, f32, f32)) -> DrawTriangle {
     let (r, g, b) = rgb;
     DrawTriangle {
         verts: [
             Vertex {
-                x: tri[0][0],
-                y: tri[0][1],
-                z: tri[0][2],
+                x: tri[0].x,
+                y: tri[0].y,
+                z: tri[0].z,
                 r,
                 g,
                 b,
             },
             Vertex {
-                x: tri[1][0],
-                y: tri[1][1],
-                z: tri[1][2],
+                x: tri[1].x,
+                y: tri[1].y,
+                z: tri[1].z,
                 r,
                 g,
                 b,
             },
             Vertex {
-                x: tri[2][0],
-                y: tri[2][1],
-                z: tri[2][2],
+                x: tri[2].x,
+                y: tri[2].y,
+                z: tri[2].z,
                 r,
                 g,
                 b,

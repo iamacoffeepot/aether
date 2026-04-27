@@ -31,6 +31,7 @@ use super::cleanup::mesh::{IndexedMesh, VertexId};
 use crate::csg::plane::Plane3;
 use crate::csg::point::Point3;
 use crate::csg::polygon::Polygon;
+use aether_math::Vec3;
 use std::collections::HashMap;
 
 /// Plane + color — the CDT groups by this so each group produces one
@@ -63,10 +64,7 @@ pub fn run(polygons: Vec<Polygon>) -> Vec<Polygon> {
 ///
 /// Callers should fall back to fan triangulation on `None` so geometry
 /// isn't dropped silently.
-pub fn tessellate_polygon_f32(
-    outer: &[[f32; 3]],
-    holes: &[Vec<[f32; 3]>],
-) -> Option<Vec<[[f32; 3]; 3]>> {
+pub fn tessellate_polygon_f32(outer: &[Vec3], holes: &[Vec<Vec3>]) -> Option<Vec<[Vec3; 3]>> {
     if outer.len() < 3 {
         return None;
     }
@@ -286,7 +284,7 @@ mod tests {
 
     #[test]
     fn tessellate_polygon_f32_rejects_fewer_than_3_outer_vertices() {
-        let outer = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let outer = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)];
         let result = tessellate_polygon_f32(&outer, &[]);
         assert!(result.is_none());
     }
@@ -297,9 +295,9 @@ mod tests {
         // must fail-fast at the f32→fixed conversion rather than silently
         // truncate.
         let outer = vec![
-            [0.0, 0.0, 0.0],
-            [300.0, 0.0, 0.0], // out of range
-            [0.0, 1.0, 0.0],
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(300.0, 0.0, 0.0), // out of range
+            Vec3::new(0.0, 1.0, 0.0),
         ];
         let result = tessellate_polygon_f32(&outer, &[]);
         assert!(result.is_none());
@@ -308,7 +306,11 @@ mod tests {
     #[test]
     fn tessellate_polygon_f32_rejects_degenerate_collinear_outer() {
         // Three collinear points → degenerate plane → None.
-        let outer = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        let outer = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+        ];
         let result = tessellate_polygon_f32(&outer, &[]);
         assert!(result.is_none());
     }
@@ -316,16 +318,16 @@ mod tests {
     #[test]
     fn tessellate_polygon_f32_happy_path_square_with_hole() {
         let outer = vec![
-            [0.0, 0.0, 0.0],
-            [4.0, 0.0, 0.0],
-            [4.0, 4.0, 0.0],
-            [0.0, 4.0, 0.0],
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(4.0, 0.0, 0.0),
+            Vec3::new(4.0, 4.0, 0.0),
+            Vec3::new(0.0, 4.0, 0.0),
         ];
         let hole = vec![
-            [1.0, 1.0, 0.0],
-            [1.0, 3.0, 0.0],
-            [3.0, 3.0, 0.0],
-            [3.0, 1.0, 0.0],
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(1.0, 3.0, 0.0),
+            Vec3::new(3.0, 3.0, 0.0),
+            Vec3::new(3.0, 1.0, 0.0),
         ];
         let tris = tessellate_polygon_f32(&outer, &[hole]).expect("annular should triangulate");
         // Topological minimum for 8-vertex annular = 8 triangles.
@@ -335,8 +337,8 @@ mod tests {
         let signed_double_area: f32 = tris
             .iter()
             .map(|tri| {
-                (tri[1][0] - tri[0][0]) * (tri[2][1] - tri[0][1])
-                    - (tri[1][1] - tri[0][1]) * (tri[2][0] - tri[0][0])
+                (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y)
+                    - (tri[1].y - tri[0].y) * (tri[2].x - tri[0].x)
             })
             .sum();
         // Doubled area of annular region = 24. Allow a small tolerance

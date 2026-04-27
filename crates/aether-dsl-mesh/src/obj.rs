@@ -10,6 +10,7 @@
 use std::fmt::Write;
 
 use crate::mesh::Triangle;
+use aether_math::Vec3;
 
 pub fn to_obj(triangles: &[Triangle]) -> String {
     let mut out = String::new();
@@ -17,8 +18,8 @@ pub fn to_obj(triangles: &[Triangle]) -> String {
     writeln!(out, "# {} triangles", triangles.len()).unwrap();
 
     // Vertex deduplication keeps the file small and viewer-friendly.
-    let mut vertex_index: Vec<[f32; 3]> = Vec::new();
-    let lookup = |verts: &mut Vec<[f32; 3]>, v: [f32; 3]| -> usize {
+    let mut vertex_index: Vec<Vec3> = Vec::new();
+    let lookup = |verts: &mut Vec<Vec3>, v: Vec3| -> usize {
         if let Some(i) = verts.iter().position(|existing| approx_eq(*existing, v)) {
             return i + 1;
         }
@@ -35,7 +36,7 @@ pub fn to_obj(triangles: &[Triangle]) -> String {
     }
 
     for v in &vertex_index {
-        writeln!(out, "v {} {} {}", v[0], v[1], v[2]).unwrap();
+        writeln!(out, "v {} {} {}", v.x, v.y, v.z).unwrap();
     }
 
     let mut faces_by_color = std::collections::BTreeMap::<u32, Vec<[usize; 3]>>::new();
@@ -53,7 +54,7 @@ pub fn to_obj(triangles: &[Triangle]) -> String {
     out
 }
 
-fn approx_eq(a: [f32; 3], b: [f32; 3]) -> bool {
+fn approx_eq(a: Vec3, b: Vec3) -> bool {
     const EPS: f32 = 1e-6;
-    (a[0] - b[0]).abs() < EPS && (a[1] - b[1]).abs() < EPS && (a[2] - b[2]).abs() < EPS
+    (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS && (a.z - b.z).abs() < EPS
 }

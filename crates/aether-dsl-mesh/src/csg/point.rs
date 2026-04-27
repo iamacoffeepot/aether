@@ -2,6 +2,7 @@
 //! BSP CSG core operates on.
 
 use crate::csg::fixed::{FixedError, f32_to_fixed, fixed_to_f32};
+use aether_math::Vec3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Point3 {
@@ -11,20 +12,20 @@ pub struct Point3 {
 }
 
 impl Point3 {
-    pub fn from_f32(p: [f32; 3]) -> Result<Self, FixedError> {
+    pub fn from_f32(p: Vec3) -> Result<Self, FixedError> {
         Ok(Point3 {
-            x: f32_to_fixed(p[0])?,
-            y: f32_to_fixed(p[1])?,
-            z: f32_to_fixed(p[2])?,
+            x: f32_to_fixed(p.x)?,
+            y: f32_to_fixed(p.y)?,
+            z: f32_to_fixed(p.z)?,
         })
     }
 
-    pub fn to_f32(self) -> [f32; 3] {
-        [
+    pub fn to_f32(self) -> Vec3 {
+        Vec3::new(
             fixed_to_f32(self.x),
             fixed_to_f32(self.y),
             fixed_to_f32(self.z),
-        ]
+        )
     }
 }
 
@@ -48,10 +49,10 @@ mod tests {
         // fails it points at a regression in the per-component delegation
         // (e.g., axes silently swapped during refactor).
         let inputs = [
-            [0.0, 0.0, 0.0],
-            [1.0, -2.5, 0.25],
-            [MAX_INPUT_MAGNITUDE, -MAX_INPUT_MAGNITUDE, 0.0],
-            [0.5, 0.75, -0.125],
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, -2.5, 0.25),
+            Vec3::new(MAX_INPUT_MAGNITUDE, -MAX_INPUT_MAGNITUDE, 0.0),
+            Vec3::new(0.5, 0.75, -0.125),
         ];
         for input in inputs {
             let p = Point3::from_f32(input).unwrap();
@@ -62,11 +63,11 @@ mod tests {
     #[test]
     fn axes_are_not_swapped() {
         // Catches a refactor that crosses x/y/z wires: e.g., setting
-        // y from p[0]. Distinct values per axis would slip past tests
-        // that use [0,0,0]-style symmetric inputs.
-        let p = Point3::from_f32([1.0, 2.0, 3.0]).unwrap();
+        // y from p.x. Distinct values per axis would slip past tests
+        // that use Vec3::new(0, 0, 0)-style symmetric inputs.
+        let p = Point3::from_f32(Vec3::new(1.0, 2.0, 3.0)).unwrap();
         let back = p.to_f32();
-        assert_eq!(back, [1.0, 2.0, 3.0]);
+        assert_eq!(back, Vec3::new(1.0, 2.0, 3.0));
         // Also verify the underlying integer fields directly.
         assert_eq!(p.x, 1 << 16);
         assert_eq!(p.y, 2 << 16);
@@ -80,9 +81,12 @@ mod tests {
         // equal. If this breaks, weld silently produces duplicates and
         // we get phantom seams in the output mesh.
         let inputs = [
-            ([0.5, 0.0, 0.0], [0.5_f32, 0.0_f32, 0.0_f32]),
-            ([0.123, -0.456, 0.789], [0.123, -0.456, 0.789]),
-            ([1.0, 1.0, 1.0], [1.0, 1.0, 1.0]),
+            (Vec3::new(0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0)),
+            (
+                Vec3::new(0.123, -0.456, 0.789),
+                Vec3::new(0.123, -0.456, 0.789),
+            ),
+            (Vec3::new(1.0, 1.0, 1.0), Vec3::new(1.0, 1.0, 1.0)),
         ];
         for (a_in, b_in) in inputs {
             let a = Point3::from_f32(a_in).unwrap();
@@ -101,12 +105,12 @@ mod tests {
         // Pin the welding-relevant case from
         // `csg::fixed::negative_zero_collapses_to_zero` at the Point3
         // type — every component variant must collapse independently.
-        let canonical = Point3::from_f32([0.0, 0.0, 0.0]).unwrap();
+        let canonical = Point3::from_f32(Vec3::new(0.0, 0.0, 0.0)).unwrap();
         let variants = [
-            [-0.0, 0.0, 0.0],
-            [0.0, -0.0, 0.0],
-            [0.0, 0.0, -0.0],
-            [-0.0, -0.0, -0.0],
+            Vec3::new(-0.0, 0.0, 0.0),
+            Vec3::new(0.0, -0.0, 0.0),
+            Vec3::new(0.0, 0.0, -0.0),
+            Vec3::new(-0.0, -0.0, -0.0),
         ];
         for v in variants {
             let p = Point3::from_f32(v).unwrap();
@@ -125,11 +129,11 @@ mod tests {
         // distinct Point3. Documents that the grid resolution is
         // 1/SCALE = 1/65536 and points closer than that fold together.
         let one_ulp = 1.0 / SCALE as f32;
-        let origin = Point3::from_f32([0.0, 0.0, 0.0]).unwrap();
+        let origin = Point3::from_f32(Vec3::new(0.0, 0.0, 0.0)).unwrap();
         let nudges = [
-            [one_ulp, 0.0, 0.0],
-            [0.0, one_ulp, 0.0],
-            [0.0, 0.0, one_ulp],
+            Vec3::new(one_ulp, 0.0, 0.0),
+            Vec3::new(0.0, one_ulp, 0.0),
+            Vec3::new(0.0, 0.0, one_ulp),
         ];
         for n in nudges {
             let p = Point3::from_f32(n).unwrap();
@@ -145,7 +149,7 @@ mod tests {
         // to "whichever happens to win the race" — which is exactly the
         // kind of silent-but-confusing diagnostic regression we want to
         // catch.
-        let err = Point3::from_f32([f32::NAN, f32::INFINITY, 999.0]).unwrap_err();
+        let err = Point3::from_f32(Vec3::new(f32::NAN, f32::INFINITY, 999.0)).unwrap_err();
         match err {
             FixedError::NotFinite { value } => assert!(value.is_nan()),
             other => panic!("expected NotFinite for x=NaN, got {other:?}"),
@@ -154,19 +158,19 @@ mod tests {
 
     #[test]
     fn bad_x_is_reported() {
-        let err = Point3::from_f32([f32::NAN, 0.0, 0.0]).unwrap_err();
+        let err = Point3::from_f32(Vec3::new(f32::NAN, 0.0, 0.0)).unwrap_err();
         assert!(matches!(err, FixedError::NotFinite { .. }));
     }
 
     #[test]
     fn bad_y_is_reported() {
-        let err = Point3::from_f32([0.0, 1e9, 0.0]).unwrap_err();
+        let err = Point3::from_f32(Vec3::new(0.0, 1e9, 0.0)).unwrap_err();
         assert!(matches!(err, FixedError::OutOfRange { value } if value == 1e9));
     }
 
     #[test]
     fn bad_z_is_reported() {
-        let err = Point3::from_f32([0.0, 0.0, f32::INFINITY]).unwrap_err();
+        let err = Point3::from_f32(Vec3::new(0.0, 0.0, f32::INFINITY)).unwrap_err();
         match err {
             FixedError::NotFinite { value } => assert_eq!(value, f32::INFINITY),
             other => panic!("expected NotFinite for z=Inf, got {other:?}"),
@@ -178,20 +182,20 @@ mod tests {
         // x dominates y, y dominates z. Pinning this so a future spatial-
         // sort refactor (e.g., morton order) doesn't silently break code
         // that relies on x-major scan order.
-        let small_x = Point3::from_f32([0.0, 999.0, 999.0]).unwrap_or_else(|_| {
+        let small_x = Point3::from_f32(Vec3::new(0.0, 999.0, 999.0)).unwrap_or_else(|_| {
             // 999 > MAX; fall back to in-range stand-in for the asymmetry.
-            Point3::from_f32([0.0, 100.0, 100.0]).unwrap()
+            Point3::from_f32(Vec3::new(0.0, 100.0, 100.0)).unwrap()
         });
-        let big_x = Point3::from_f32([1.0, 0.0, 0.0]).unwrap();
+        let big_x = Point3::from_f32(Vec3::new(1.0, 0.0, 0.0)).unwrap();
         assert!(big_x > small_x, "x must dominate y/z in ordering");
 
-        let small_y = Point3::from_f32([5.0, 0.0, 999.0])
-            .unwrap_or_else(|_| Point3::from_f32([5.0, 0.0, 100.0]).unwrap());
-        let big_y = Point3::from_f32([5.0, 1.0, 0.0]).unwrap();
+        let small_y = Point3::from_f32(Vec3::new(5.0, 0.0, 999.0))
+            .unwrap_or_else(|_| Point3::from_f32(Vec3::new(5.0, 0.0, 100.0)).unwrap());
+        let big_y = Point3::from_f32(Vec3::new(5.0, 1.0, 0.0)).unwrap();
         assert!(big_y > small_y, "y must dominate z when x is equal");
 
-        let small_z = Point3::from_f32([5.0, 5.0, 0.0]).unwrap();
-        let big_z = Point3::from_f32([5.0, 5.0, 1.0]).unwrap();
+        let small_z = Point3::from_f32(Vec3::new(5.0, 5.0, 0.0)).unwrap();
+        let big_z = Point3::from_f32(Vec3::new(5.0, 5.0, 1.0)).unwrap();
         assert!(
             big_z > small_z,
             "z is the tiebreaker when x and y are equal"
@@ -202,7 +206,7 @@ mod tests {
     fn determinism() {
         // Same input → identical Point3 across N calls. Mirrors the
         // fixed-layer guarantee at this composition level.
-        let input = [0.123, -0.456, 0.789];
+        let input = Vec3::new(0.123, -0.456, 0.789);
         let first = Point3::from_f32(input).unwrap();
         for _ in 0..16 {
             assert_eq!(Point3::from_f32(input).unwrap(), first);

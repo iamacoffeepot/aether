@@ -610,7 +610,8 @@ mod tests {
         for (i, poly) in on_plus_z.iter().enumerate() {
             report.push_str(&format!("  [{i}] color={} verts:\n", poly.color));
             for v in &poly.vertices {
-                let (x, y, z) = (v.to_f32()[0], v.to_f32()[1], v.to_f32()[2]);
+                let f = v.to_f32();
+                let (x, y, z) = (f.x, f.y, f.z);
                 report.push_str(&format!("      ({x:.6}, {y:.6}, {z:.6})\n"));
             }
         }

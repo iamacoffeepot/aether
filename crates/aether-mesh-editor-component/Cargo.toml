@@ -10,3 +10,4 @@ crate-type = ["cdylib"]
 aether-component = { path = "../aether-component" }
 aether-dsl-mesh = { path = "../aether-dsl-mesh" }
 aether-kinds = { path = "../aether-kinds" }
+aether-math = { path = "../aether-math" }
