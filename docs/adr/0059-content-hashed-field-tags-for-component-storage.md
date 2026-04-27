@@ -58,6 +58,100 @@ Two crates declaring the same anonymous shape get the same synthesized name → 
 
 The `__` prefix is reserved for system-synthesized identifiers (see rule 6 below), so user-supplied names can never collide with a synthesis output.
 
+### Nested struct and enum flattening
+
+Plain nested structs and enums flatten into the top-level field set so recursive evolution gets the same version-tolerance properties as flat fields. There is no nested TLV envelope; only leaves emit TLV records.
+
+**What flattens, what stays opaque:**
+
+| shape | flattens? | rationale |
+|---|---|---|
+| Plain nested struct | yes | depth-recursive `path.field` leaves; recursive evolution survives the same rules |
+| Enum (incl. `Option<T>`) | yes | `__variant` discriminant leaf + variant-prefixed leaves (only the active variant emits) |
+| `Vec<T>`, `Map<K, V>`, fixed `Array` | no | dynamic cardinality; flattening to `path[i].*` would leak runtime counts into the field-hash space |
+
+Containers stay as a single TLV record with postcard-encoded body. To get version-tolerance for a container's element type, lift the element to its own TLV kind and reference via `Ref<K>` (handle indirection per ADR-0045).
+
+**Path delimiter.** `.` joins parent path to nested field name (`addr.street`, `result.Ok.profile.bio`). User-supplied identifiers cannot contain `.` — Rust idents already exclude it, so the reservation is free.
+
+**Plain struct flattening.**
+
+```rust
+struct Outer { addr: Address }
+struct Address { street: String, city: String }
+```
+
+emits leaves:
+```
+addr.street: String
+addr.city:   String
+```
+
+The `Address` type doesn't appear as its own TLV record; only its leaves do. Recurses through arbitrary depth.
+
+**Enum flattening.** Each enum field synthesizes a `<path>.__variant: u64` leaf carrying the active variant's content hash. The variant's body flattens under `<path>.<VariantName>.*`. Only the active variant's leaves appear on the wire; other variants emit nothing.
+
+```rust
+enum Action {
+    Idle,
+    Move(Vec3),
+    Attack { target: u64, damage: u32 },
+}
+struct Vec3 { x: f32, y: f32, z: f32 }
+field: Action
+```
+
+emits leaves:
+```
+field.__variant: u64                 (active variant's content hash)
+field.Move.x: f32                    (Vec3 flattened — single-field tuple variant
+field.Move.y: f32                     unwraps the inner struct's leaves)
+field.Move.z: f32
+field.Attack.target: u64             (named-field variant — leaves use field names)
+field.Attack.damage: u32
+                                     (Idle has no leaves; __variant alone signals it)
+```
+
+**Variant identity.** Variant discriminants are content-hashed alongside fields, with their own domain prefix:
+
+```
+variant_hash = fnv1a_64_prefixed(VARIANT_DOMAIN, canonical(variant_name, variant_fields))
+```
+
+`VARIANT_DOMAIN` is disjoint from `FIELD_DOMAIN`, `KIND_DOMAIN`, and `MAILBOX_DOMAIN`. Variant renames or field-set changes inside a variant produce a new variant hash; the remap dictionary that bridges field renames extends to variant renames the same way (`[(old_variant_hash, new_variant_hash)]`).
+
+**Tuple-variant rules:**
+
+- **Single struct field** (`Move(Vec3)`) — flattens the inner struct's leaves directly under the variant prefix.
+- **Single primitive field** (`Ok(u64)`) — single leaf at `<path>.<Variant>` of that primitive type.
+- **Multi-field tuple** (`Foo(u32, String)`) — leaves at `<path>.<Variant>.0`, `<path>.<Variant>.1`.
+- **Struct variant** (`Attack { target, damage }`) — leaves at `<path>.<Variant>.<field_name>`.
+- **Unit variant** (`Idle`) — no leaves; only `<path>.__variant` indicates it's active.
+
+**`Option<T>` is the 2-variant case** of the general rule — no special-case mechanism:
+
+```rust
+addr: Option<Address>
+```
+
+emits leaves:
+```
+addr.__variant: u64                  (variant hash for None or Some)
+addr.Some.street: String             (only when variant=Some)
+addr.Some.city: String
+```
+
+Version-skew of an `Option<T>`-typed field — receiver's schema has the field but sender omitted all leaves including `addr.__variant` — decodes to `None` per the existing Option-tolerates-absence rule. Sender that emits `__variant=None` omits the variant-prefixed leaves entirely.
+
+**Composition with what's already in this ADR:**
+
+- *Field hash*: leaf paths feed `fnv(FIELD_DOMAIN, canonical(path, type))` directly. The path string changes from `bio` to `addr.bio` to `result.Ok.profile.bio` as flattening descends; the hash function is unchanged.
+- *Anonymous record names*: an anonymously-named nested struct still gets its `__<hash>` synthesized name for *type identity* (when used as a field type elsewhere), but the flattening path uses the *field's* name from the parent, not the type name. `Outer { addr: __abcd { x, y } }` → leaves `addr.x`, `addr.y`.
+- *Kind ID*: now hashes the leaf-set, not the source-level field-set. Reorder-free at every nesting level, not just at the top.
+- *Unknown bucket*: a leaf path the receiver doesn't recognize gets bucketed verbatim. v1 reading v2's `addr.apartment` leaf → bucket → round-trips on re-emit.
+- *Typed field access*: `.get::<T>("addr.street")` — full path is the lookup key. Optional v2 ergonomic: `.get_at::<Address>("addr")` walks all `addr.*` leaves and assembles a sub-struct.
+- *`SchemaType` vocabulary*: unchanged. The existing `Option`/`Vec`/`Struct`/`Enum`/`Map`/`Ref` arms drive flattening logic at the derive and codec layer; no new schema variants.
+
 ### Kind ID
 
 For TLV-shape kinds:
@@ -115,45 +209,35 @@ The `T: Schema + Decode` bound is satisfied by primitives, `String`, `bool`, `Ve
 
 ### Required fields and `Option<T>`
 
-Every field declared on a TLV kind always emits a TLV record on the wire — there is no "skip this field" mode. What varies is the body:
-
-- **Required field**: body encodes `T` directly. The body is non-trivial; it must be present and well-formed.
-- **`Option<T>` field**: body starts with a 1-byte tag (`[0]` for `None`, `[1]` for `Some`); on `Some` the tag is followed by `T`'s encoding. The tag byte is effectively a truthy flag — `Option<T>` is "always encoded, just sometimes only as the tag."
-
-So `Option<T>` doesn't mean "may be absent on the wire" — it means "the value carries a 1-byte presence flag." Absence on the wire is a separate condition entirely: it happens only when the **sender's schema** doesn't know about the field (version skew). The receiver distinguishes the two cases:
-
-- **Sender emitted the field, body says None**: receiver decodes `None`.
-- **Sender omitted the field entirely** (version skew): receiver checks its own schema. If the field is required → decode error; if the field is `Option<T>` → tolerate as `None`.
-
-Required by default + `Option<T>` for evolving fields then drops out cleanly:
+Every field declared on a TLV kind is **required by default** — its absence on the wire is a decode error, not a silent fallback. Optionality is expressed in the type system: `Option<T>` fields tolerate version-skew absence and decode missing as `None`. Wire shape per type follows the flattening rule above (primitive/String → single leaf; nested struct → multiple leaves under a dotted path; enum including `Option<T>` → `__variant` + variant-prefixed leaves; container → single leaf with opaque postcard body).
 
 ```rust
 struct Record {
-    id: u64,                  // required — absence on the wire is a decode error
-    note: Option<String>,     // optional — version-skew absence decodes to None
+    id: u64,                  // required — version-skew absence is a decode error
+    note: Option<String>,     // optional (2-variant enum) — version-skew absence decodes to None
 }
 ```
 
 Two rules fall out for evolving a kind across an upgrade boundary:
 
-- **Adding a field**: the new field must be `Option<T>`. v1 readers seeing v2-written payloads bucket the new field as unknown; v2 readers seeing v1-written payloads (where the field is wire-absent because v1's schema lacked it) get `None`. A new required field would error on every v1 payload — which is the correct behavior, so the type signature is the discipline.
+- **Adding a field**: the new field must be `Option<T>`. v1 readers seeing v2-written payloads bucket the new field's leaves as unknown; v2 readers seeing v1-written payloads (where the field's leaves are wire-absent because v1's schema lacked it) get `None`. A new required field would error on every v1 payload — which is the correct behavior, so the type signature is the discipline.
 - **Removing a field**: only `Option<T>` fields can be removed safely. Required fields are wire-immutable for storage-compat purposes; removing one breaks readers compiled against the old schema.
 
 Required fields define the irreducible identity of the kind; `Option<T>` fields are the evolving surface. Authoring rule of thumb: require what the kind cannot mean without; `Option` what comes and goes.
 
-Composition with the unknown bucket and remap dict:
+Receiver-side semantics across the wire/schema product:
 
 | receiver's schema says | sender's wire | decoded value |
 |---|---|---|
-| required field | `[hash][len][bytes]` | `T` |
-| required field | — *(version skew)* | **error** |
-| `Option<T>` field | `[hash][len][1 ++ T_bytes]` *(Some)* | `Some(T)` |
-| `Option<T>` field | `[hash][len][0]` *(None)* | `None` |
-| `Option<T>` field | — *(version skew)* | `None` |
-| unknown to receiver | `[hash][len][bytes]` | bucketed verbatim |
-| renamed (old hash) | `[old_hash][len][bytes]` + remap entry | decoded as the renamed-to field |
+| required leaf field | leaf present | `T` |
+| required leaf field | leaf absent *(version skew)* | **error** |
+| `Option<T>` field, sender wrote `Some` | `__variant`=Some-hash + `Some.*` leaves | `Some(T)` |
+| `Option<T>` field, sender wrote `None` | `__variant`=None-hash, no Some leaves | `None` |
+| `Option<T>` field | all leaves absent *(version skew)* | `None` |
+| unknown leaf | leaf present | bucketed verbatim |
+| renamed (old leaf hash on wire) | leaf present + remap entry | decoded as the renamed-to leaf |
 
-The two `None` cases (Option-encoded-as-None and Option-version-skewed-absent) collapse at the API — sender intent between "explicit None" and "schema didn't have it" isn't observable. If an author needs that distinction, `Option<Option<T>>` works (`None` for skew, `Some(None)` for explicit None, `Some(Some(T))` for value); in practice the inner `Option` is sufficient.
+The Option-None and Option-version-skew cases both decode to `None` at the API — sender intent between "explicit None" and "schema didn't have the field" isn't observable. If an author needs that distinction, `Option<Option<T>>` works: `None` for skew, `Some(None)` for explicit None, `Some(Some(T))` for value.
 
 `#[field(default = "...")]` for non-`None` defaults on optional fields stays a v2 extension if a use case forces it.
 
@@ -164,7 +248,8 @@ The two `None` cases (Option-encoded-as-None and Option-version-skewed-absent) c
 3. Type is part of the field hash. Type changes (`u32 → u64`, even a "widen") require a new field hash and a remap entry.
 4. Renames go through the remap dictionary, never silently.
 5. Reordering source code is free (sort order is canonical).
-6. The `__` prefix is reserved for system-synthesized identifiers (anonymous record names today; possibly other synthesized forms in the future). User-supplied names — kind names, field names, explicit anonymous-record overrides — must not begin with `__`. The derive rejects offending names at compile time, so a future synthesis pattern can't silently collide with a user identifier already in the wild.
+6. The `__` prefix is reserved for system-synthesized identifiers — anonymous record names, the `__variant` discriminant leaf, and any future synthesis patterns. User-supplied names — kind names, field names, variant names, explicit anonymous-record overrides — must not begin with `__`. The derive rejects offending names at compile time, so a future synthesis pattern can't silently collide with a user identifier already in the wild.
+7. Variant content hashes follow the same immutability rules as field hashes — once shipped, a variant's hash is fixed; renames or field-set changes inside a variant require a remap entry; removed variant hashes are reserved.
 
 ## Consequences
 
@@ -187,8 +272,12 @@ These are the load-bearing things this draft does *not* answer. Each needs a dec
 4. **Field-hash collision policy.** 64 bits gives ample headroom but isn't infinite. Do we cap field count per kind (collision-resistance practical), detect collisions at derive time (compile error if two field hashes collide within one kind), or just accept the birthday-bound argument as we do for kind ids?
 5. **Cast + TLV interaction.** A TLV-shape kind almost certainly excludes cast eligibility (no fixed `#[repr(C)]` layout). Same constraint as today's `Vec`/`Option`/`Map`. The derive should reject `#[repr(C)]` + `#[kind(storage)]` with a clear error.
 6. **Composition with the version-graph idea.** TLV makes most diffs transparent. Type changes and semantic renames are the residual; do those want explicit migration edges, or does the remap dictionary cover both? Probably remap covers renames; explicit migrations cover type changes.
-7. **Manifest format.** Where do TLV field hashes and remap dictionaries live in the wasm? New custom section (`aether.kinds.fields`?), or extension of `aether.kinds.labels`?
+7. **Manifest format.** Where do TLV field hashes, variant hashes, and remap dictionaries live in the wasm? New custom section (`aether.kinds.fields`?), or extension of `aether.kinds.labels`?
 8. **Migration of existing stored payloads.** When a component first opts into TLV storage, is there a one-time migration of old positional payloads, or do we accept that pre-TLV storage is read-only-incompatible?
+9. **Adding an enum variant.** A new writer emits a variant the reader doesn't know — `__variant` carries a hash that doesn't match any variant in the receiver's schema. Two options:
+   - Strict (probable v1 default): unknown variant hash → decode error. Adding a variant is a breaking change.
+   - Tolerant: bucket the entire enum field's leaves as unknown bytes. The typed value can't represent the unknown variant (Rust enums lack a sentinel arm), so the API would have to surface "this enum had an unknown variant" — significant ergonomic cost. Probably defer until a forcing function appears.
+10. **Variant rename mechanics.** Same shape as field renames — `(old_variant_hash, new_variant_hash)` entries in the remap dict — but the variant's leaves under the old name (`<path>.<OldVariant>.*`) all need their leaf-path remappings too. Open question: do we synthesize per-leaf remap entries from a single variant-rename declaration, or require the author to enumerate every affected leaf? Auto-synthesis is more ergonomic; explicit enumeration is easier to audit.
 
 ## Alternatives considered
 
