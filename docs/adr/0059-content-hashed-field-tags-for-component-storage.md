@@ -115,35 +115,45 @@ The `T: Schema + Decode` bound is satisfied by primitives, `String`, `bool`, `Ve
 
 ### Required fields and `Option<T>`
 
-Every field declared on a TLV kind is **required by default** — its absence on the wire is a decode error, not a silent fallback. Optionality is expressed in the type system: `Option<T>` fields tolerate absence and decode missing as `None`.
+Every field declared on a TLV kind always emits a TLV record on the wire — there is no "skip this field" mode. What varies is the body:
+
+- **Required field**: body encodes `T` directly. The body is non-trivial; it must be present and well-formed.
+- **`Option<T>` field**: body starts with a 1-byte tag (`[0]` for `None`, `[1]` for `Some`); on `Some` the tag is followed by `T`'s encoding. The tag byte is effectively a truthy flag — `Option<T>` is "always encoded, just sometimes only as the tag."
+
+So `Option<T>` doesn't mean "may be absent on the wire" — it means "the value carries a 1-byte presence flag." Absence on the wire is a separate condition entirely: it happens only when the **sender's schema** doesn't know about the field (version skew). The receiver distinguishes the two cases:
+
+- **Sender emitted the field, body says None**: receiver decodes `None`.
+- **Sender omitted the field entirely** (version skew): receiver checks its own schema. If the field is required → decode error; if the field is `Option<T>` → tolerate as `None`.
+
+Required by default + `Option<T>` for evolving fields then drops out cleanly:
 
 ```rust
 struct Record {
-    id: u64,                  // required — absence is a decode error
-    note: Option<String>,     // optional — missing decodes to None
+    id: u64,                  // required — absence on the wire is a decode error
+    note: Option<String>,     // optional — version-skew absence decodes to None
 }
 ```
 
-This forces author intent at the type level. Two rules fall out for evolving a kind across an upgrade boundary:
+Two rules fall out for evolving a kind across an upgrade boundary:
 
-- **Adding a field**: the new field must be `Option<T>`. v1 readers seeing v2-written payloads with the new field preserve it in the unknown bucket; v2 readers seeing v1-written payloads with the new field absent get `None`. A new required field would error on every v1 payload — which is the correct behavior, so the type signature is the discipline.
+- **Adding a field**: the new field must be `Option<T>`. v1 readers seeing v2-written payloads bucket the new field as unknown; v2 readers seeing v1-written payloads (where the field is wire-absent because v1's schema lacked it) get `None`. A new required field would error on every v1 payload — which is the correct behavior, so the type signature is the discipline.
 - **Removing a field**: only `Option<T>` fields can be removed safely. Required fields are wire-immutable for storage-compat purposes; removing one breaks readers compiled against the old schema.
 
 Required fields define the irreducible identity of the kind; `Option<T>` fields are the evolving surface. Authoring rule of thumb: require what the kind cannot mean without; `Option` what comes and goes.
 
 Composition with the unknown bucket and remap dict:
 
-| field state | wire shape | decoded value |
+| receiver's schema says | sender's wire | decoded value |
 |---|---|---|
-| required, present | `[hash][len][bytes]` | `T` |
-| required, absent | — | **error** |
-| `Option<T>`, present (Some body) | `[hash][len][1 ++ T_bytes]` | `Some(T)` |
-| `Option<T>`, present (None body) | `[hash][len][0]` | `None` |
-| `Option<T>`, absent | — | `None` |
-| unknown to receiver, present | `[hash][len][bytes]` | bucketed |
-| renamed (old hash on wire) | `[old_hash][len][bytes]` + remap entry | decoded as the renamed-to field |
+| required field | `[hash][len][bytes]` | `T` |
+| required field | — *(version skew)* | **error** |
+| `Option<T>` field | `[hash][len][1 ++ T_bytes]` *(Some)* | `Some(T)` |
+| `Option<T>` field | `[hash][len][0]` *(None)* | `None` |
+| `Option<T>` field | — *(version skew)* | `None` |
+| unknown to receiver | `[hash][len][bytes]` | bucketed verbatim |
+| renamed (old hash) | `[old_hash][len][bytes]` + remap entry | decoded as the renamed-to field |
 
-The two `None` cases collapse at the API — sender choice between "absent" and "explicitly None" isn't observable. If an author needs that distinction, `Option<Option<T>>` works (`None` for absent, `Some(None)` for explicit None, `Some(Some(T))` for value); in practice the inner `Option` is sufficient.
+The two `None` cases (Option-encoded-as-None and Option-version-skewed-absent) collapse at the API — sender intent between "explicit None" and "schema didn't have it" isn't observable. If an author needs that distinction, `Option<Option<T>>` works (`None` for skew, `Some(None)` for explicit None, `Some(Some(T))` for value); in practice the inner `Option` is sufficient.
 
 `#[field(default = "...")]` for non-`None` defaults on optional fields stays a v2 extension if a use case forces it.
 
