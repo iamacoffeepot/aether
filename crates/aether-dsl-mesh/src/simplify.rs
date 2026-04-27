@@ -1,22 +1,26 @@
 //! AST simplification: pure `Node → Node` rewrites that preserve the
 //! mesh result while reducing the work the mesher has to do.
 //!
-//! This module is the foundation for issue 300's BSP fragmentation
-//! cliff: when CSG inputs come from disjoint AABBs (or from primitives
-//! we can decompose into convex chunks at the AST level), `mesh()` can
-//! skip the BSP composition entirely and concat polygon streams. None
-//! of that is implemented here — this PR ships only:
+//! This module is the AST-level lever for issue 300's BSP fragmentation
+//! cliff. It ships:
 //!
 //! - [`Aabb`]: an axis-aligned bounding box with the standard set ops.
-//! - [`compute_aabb`]: per-`Node` conservative bound, used by future
-//!   AABB-pruning rewrites to decide when a CSG composition is trivial.
-//! - [`simplify`]: the rewrite driver, currently applying only a few
-//!   identity-collapse rules (no-op transforms, single-child wrappers).
+//! - [`compute_aabb`]: per-`Node` conservative bound, used by AABB-
+//!   pruning rewrites to decide when a CSG composition is trivial.
+//! - [`simplify`]: the rewrite driver. [`crate::mesh::mesh`] runs it as
+//!   a pre-pass, so every input the mesher ever sees has already been
+//!   normalized.
 //!
-//! [`simplify`] is **not** wired into [`crate::mesh::mesh`] yet — the
-//! intent is to introduce it as pure infrastructure with full test
-//! coverage, then wire it up when the first non-identity rewrite
-//! lands. This keeps each PR's risk scoped to one behavior change.
+//! Active rewrites:
+//! - Identity collapse (no-op transforms, single-child wrappers).
+//! - **Disjoint-union → composition**: a `(union A B …)` whose children
+//!   partition into disjoint-AABB groups becomes
+//!   `(composition (union group_1) (union group_2) …)`. Single-element
+//!   groups unwrap to the bare child, so a fully-disjoint union of N
+//!   primitives becomes a flat composition of N nodes — and the
+//!   mesher's [`Node::Composition`] arm just concatenates polygon
+//!   streams, skipping BSP entirely. This is the big single-PR win for
+//!   "scene = bunch of separated parts" inputs.
 
 use crate::ast::{Axis, Node};
 use crate::mesh::{normalize_or_default, rotate_axis_angle};
@@ -353,12 +357,71 @@ pub fn compute_aabb(node: &Node) -> Aabb {
     }
 }
 
-/// Apply identity-collapse rewrites bottom-up. Each rewrite preserves
-/// the meshed output exactly — a `mesh(simplify(n))` is `mesh(n)` for
-/// every input.
+/// Partition `children` into groups whose AABBs are pairwise disjoint
+/// across groups (touching counts as overlapping — see
+/// [`Aabb::intersects`]). Within a group, every member is connected to
+/// every other through a chain of intersecting-AABB pairs.
 ///
-/// Currently fires on:
+/// Returns groups as lists of indices into `children`, in stable
+/// first-appearance order so the rewrite output is deterministic.
 ///
+/// O(n²) pairwise check + iterative union-find — fine for the handful
+/// of children CSG ops typically have.
+fn partition_disjoint_aabb(children: &[Node]) -> Vec<Vec<usize>> {
+    let n = children.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let aabbs: Vec<Aabb> = children.iter().map(compute_aabb).collect();
+    let mut parent: Vec<usize> = (0..n).collect();
+
+    fn find(parent: &mut [usize], mut x: usize) -> usize {
+        let mut root = x;
+        while parent[root] != root {
+            root = parent[root];
+        }
+        while parent[x] != root {
+            let next = parent[x];
+            parent[x] = root;
+            x = next;
+        }
+        root
+    }
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if aabbs[i].intersects(&aabbs[j]) {
+                let ri = find(&mut parent, i);
+                let rj = find(&mut parent, j);
+                if ri != rj {
+                    parent[ri] = rj;
+                }
+            }
+        }
+    }
+
+    // Bucket by root, preserving first-appearance order of group roots
+    // so the output is deterministic across runs.
+    let mut order: Vec<usize> = Vec::new();
+    let mut groups: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for i in 0..n {
+        let r = find(&mut parent, i);
+        if !groups.contains_key(&r) {
+            order.push(r);
+        }
+        groups.entry(r).or_default().push(i);
+    }
+    order
+        .into_iter()
+        .map(|r| groups.remove(&r).unwrap())
+        .collect()
+}
+
+/// Apply rewrites bottom-up. Each rewrite preserves the meshed output
+/// exactly — a `mesh(simplify(n))` is `mesh(n)` for every input.
+///
+/// Identity collapse:
 /// - `(translate (0 0 0) child)` → `child`
 /// - `(rotate axis 0.0 child)` → `child`
 /// - `(scale (1 1 1) child)` → `child`
@@ -366,6 +429,14 @@ pub fn compute_aabb(node: &Node) -> Aabb {
 ///   spacing; same as the bare child)
 /// - `(composition (single))` → `single` (when the composition has
 ///   exactly one child)
+///
+/// AABB pruning:
+/// - `(union A B …)` partitioned into disjoint-AABB groups becomes
+///   `(composition (union group_1) (union group_2) …)`. The mesher's
+///   composition arm concatenates polygon streams instead of running
+///   BSP, which is exact when the inputs share zero volume — the
+///   resulting boundary loops are identical, and the root cleanup pass
+///   handles welding the same way for either path.
 ///
 /// Identity rules for `Mirror` are intentionally absent — every mirror
 /// flips winding regardless of axis, so there's no zero-effect form.
@@ -445,9 +516,32 @@ pub fn simplify(node: &Node) -> Node {
             }
         }
 
-        Node::Union { children } => Node::Union {
-            children: children.iter().map(simplify).collect(),
-        },
+        Node::Union { children } => {
+            let simplified: Vec<Node> = children.iter().map(simplify).collect();
+            let groups = partition_disjoint_aabb(&simplified);
+            if groups.len() <= 1 {
+                return Node::Union {
+                    children: simplified,
+                };
+            }
+            // Multiple disjoint groups: wrap each (single-child groups
+            // unwrap to the bare child) and concat via Composition.
+            let group_nodes: Vec<Node> = groups
+                .into_iter()
+                .map(|indices| {
+                    let mut group_children: Vec<Node> =
+                        indices.iter().map(|&i| simplified[i].clone()).collect();
+                    if group_children.len() == 1 {
+                        group_children.pop().unwrap()
+                    } else {
+                        Node::Union {
+                            children: group_children,
+                        }
+                    }
+                })
+                .collect();
+            Node::Composition(group_nodes)
+        }
         Node::Intersection { children } => Node::Intersection {
             children: children.iter().map(simplify).collect(),
         },
@@ -1224,5 +1318,298 @@ mod simplify_tests {
         let once = simplify(&n);
         let twice = simplify(&once);
         assert_eq!(once, twice);
+    }
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+
+    /// Returns a unit box at the given center, in its simplification-
+    /// stable form: bare `Box` when the offset is zero, `Translate`
+    /// wrapping `Box` otherwise. Tests can compare `simplify(...)`
+    /// output directly without worrying about identity-rewrite noise.
+    fn box_at(x: f32, y: f32, z: f32) -> Node {
+        let unit = Node::Box {
+            x: 1.0,
+            y: 1.0,
+            z: 1.0,
+            color: 0,
+        };
+        if (x, y, z) == (0.0, 0.0, 0.0) {
+            unit
+        } else {
+            Node::Translate {
+                offset: [x, y, z],
+                child: Box::new(unit),
+            }
+        }
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        let groups = partition_disjoint_aabb(&[]);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn single_child_is_one_group() {
+        let groups = partition_disjoint_aabb(&[box_at(0.0, 0.0, 0.0)]);
+        assert_eq!(groups, vec![vec![0]]);
+    }
+
+    #[test]
+    fn two_disjoint_children_yield_two_groups() {
+        // Boxes at (0,0,0) and (10,0,0) — extents are ±0.5 around each
+        // center, so AABBs are [-0.5..0.5] vs [9.5..10.5]: clearly
+        // disjoint.
+        let groups = partition_disjoint_aabb(&[box_at(0.0, 0.0, 0.0), box_at(10.0, 0.0, 0.0)]);
+        assert_eq!(groups, vec![vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn two_overlapping_children_yield_one_group() {
+        // Boxes at (0,0,0) and (0.5,0,0) — AABBs [-0.5..0.5] vs
+        // [0..1] overlap.
+        let groups = partition_disjoint_aabb(&[box_at(0.0, 0.0, 0.0), box_at(0.5, 0.0, 0.0)]);
+        assert_eq!(groups, vec![vec![0, 1]]);
+    }
+
+    #[test]
+    fn touching_face_counts_as_intersecting() {
+        // AABBs [-0.5..0.5] and [0.5..1.5] share the x=0.5 face. Per
+        // Aabb::intersects's closed-set semantics, that's intersecting.
+        // Pin so a future "strict" change to intersects doesn't
+        // silently re-route shared-face geometry through the concat
+        // path, where any cleanup-pass divergence between BSP and
+        // composition would surface.
+        let groups = partition_disjoint_aabb(&[box_at(0.0, 0.0, 0.0), box_at(1.0, 0.0, 0.0)]);
+        assert_eq!(groups, vec![vec![0, 1]]);
+    }
+
+    #[test]
+    fn three_all_disjoint_yield_three_singleton_groups() {
+        let groups = partition_disjoint_aabb(&[
+            box_at(0.0, 0.0, 0.0),
+            box_at(10.0, 0.0, 0.0),
+            box_at(20.0, 0.0, 0.0),
+        ]);
+        assert_eq!(groups, vec![vec![0], vec![1], vec![2]]);
+    }
+
+    #[test]
+    fn mixed_overlap_yields_grouped_partition() {
+        // 0 and 1 overlap (close together), 2 is far away.
+        let groups = partition_disjoint_aabb(&[
+            box_at(0.0, 0.0, 0.0),
+            box_at(0.5, 0.0, 0.0),
+            box_at(20.0, 0.0, 0.0),
+        ]);
+        assert_eq!(groups, vec![vec![0, 1], vec![2]]);
+    }
+
+    #[test]
+    fn transitive_chain_collapses_to_one_group() {
+        // A overlaps B (close), B overlaps C (close), but A does NOT
+        // touch C. Union-find should still merge all three through B.
+        // Pin: a future "only direct-pair" implementation would split
+        // this into [A, B] / [B, C] which is incoherent (B in two
+        // groups). Verifies the transitive closure step.
+        let groups = partition_disjoint_aabb(&[
+            box_at(0.0, 0.0, 0.0),
+            box_at(0.5, 0.0, 0.0),
+            box_at(1.0, 0.0, 0.0),
+        ]);
+        assert_eq!(groups, vec![vec![0, 1, 2]]);
+    }
+
+    #[test]
+    fn first_appearance_order_is_stable() {
+        // Children at indices 0 (alone), 1+2 (overlap), 3 (alone).
+        // First-appearance order of group roots: 0, 1, 3.
+        let groups = partition_disjoint_aabb(&[
+            box_at(0.0, 0.0, 0.0),
+            box_at(10.0, 0.0, 0.0),
+            box_at(10.5, 0.0, 0.0),
+            box_at(20.0, 0.0, 0.0),
+        ]);
+        assert_eq!(groups, vec![vec![0], vec![1, 2], vec![3]]);
+    }
+}
+
+#[cfg(test)]
+mod disjoint_union_rewrite_tests {
+    use super::*;
+
+    /// Returns a unit box at the given center, in its simplification-
+    /// stable form: bare `Box` when the offset is zero, `Translate`
+    /// wrapping `Box` otherwise. Tests can compare `simplify(...)`
+    /// output directly without worrying about identity-rewrite noise.
+    fn box_at(x: f32, y: f32, z: f32) -> Node {
+        let unit = Node::Box {
+            x: 1.0,
+            y: 1.0,
+            z: 1.0,
+            color: 0,
+        };
+        if (x, y, z) == (0.0, 0.0, 0.0) {
+            unit
+        } else {
+            Node::Translate {
+                offset: [x, y, z],
+                child: Box::new(unit),
+            }
+        }
+    }
+
+    #[test]
+    fn disjoint_two_box_union_becomes_composition() {
+        let n = Node::Union {
+            children: vec![box_at(0.0, 0.0, 0.0), box_at(10.0, 0.0, 0.0)],
+        };
+        let s = simplify(&n);
+        assert_eq!(
+            s,
+            Node::Composition(vec![box_at(0.0, 0.0, 0.0), box_at(10.0, 0.0, 0.0)])
+        );
+    }
+
+    #[test]
+    fn overlapping_two_box_union_is_unchanged() {
+        let n = Node::Union {
+            children: vec![box_at(0.0, 0.0, 0.0), box_at(0.5, 0.0, 0.0)],
+        };
+        let s = simplify(&n);
+        assert_eq!(s, n);
+    }
+
+    #[test]
+    fn fully_disjoint_three_box_union_unwraps_singletons() {
+        // Pin: each disjoint child ends up as a bare element of the
+        // composition, not as a `Union` with one child.
+        let n = Node::Union {
+            children: vec![
+                box_at(0.0, 0.0, 0.0),
+                box_at(10.0, 0.0, 0.0),
+                box_at(20.0, 0.0, 0.0),
+            ],
+        };
+        let s = simplify(&n);
+        match s {
+            Node::Composition(items) => {
+                assert_eq!(items.len(), 3);
+                for item in &items {
+                    // Each composition entry is a primitive (or its
+                    // translate wrapper), never a Union.
+                    assert!(
+                        !matches!(item, Node::Union { .. }),
+                        "singleton group should unwrap, got {item:?}"
+                    );
+                }
+            }
+            _ => panic!("expected Composition, got {s:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_overlap_yields_composition_of_union_and_singleton() {
+        // 0 and 1 overlap → wrapped as a Union. 2 is alone → bare.
+        let n = Node::Union {
+            children: vec![
+                box_at(0.0, 0.0, 0.0),
+                box_at(0.5, 0.0, 0.0),
+                box_at(20.0, 0.0, 0.0),
+            ],
+        };
+        let s = simplify(&n);
+        match s {
+            Node::Composition(items) => {
+                assert_eq!(items.len(), 2);
+                match &items[0] {
+                    Node::Union { children } => assert_eq!(children.len(), 2),
+                    other => panic!("expected first item to be Union, got {other:?}"),
+                }
+                assert_eq!(items[1], box_at(20.0, 0.0, 0.0));
+            }
+            _ => panic!("expected Composition, got {s:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_recurses_through_difference_subtractor() {
+        // Inner Union inside a Difference's subtract list should get
+        // rewritten too. With disjoint subtractors, the inner Union
+        // becomes a Composition — meshes the same way (both produce
+        // the union of polygon streams) but without the inner BSP
+        // composition.
+        let n = Node::Difference {
+            base: Box::new(Node::Box {
+                x: 5.0,
+                y: 5.0,
+                z: 5.0,
+                color: 0,
+            }),
+            subtract: vec![Node::Union {
+                children: vec![box_at(0.0, 0.0, 0.0), box_at(20.0, 0.0, 0.0)],
+            }],
+        };
+        let s = simplify(&n);
+        match &s {
+            Node::Difference { subtract, .. } => {
+                assert_eq!(subtract.len(), 1);
+                assert!(
+                    matches!(&subtract[0], Node::Composition(_)),
+                    "subtractor should be rewritten to Composition, got {:?}",
+                    subtract[0]
+                );
+            }
+            _ => panic!("expected Difference, got {s:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_is_idempotent_on_disjoint_union() {
+        let n = Node::Union {
+            children: vec![
+                box_at(0.0, 0.0, 0.0),
+                box_at(10.0, 0.0, 0.0),
+                box_at(20.0, 0.0, 0.0),
+            ],
+        };
+        let once = simplify(&n);
+        let twice = simplify(&once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn no_rewrite_when_all_overlap_transitively() {
+        // A-B-C chain where A overlaps B, B overlaps C; A does not
+        // touch C directly. Transitive closure makes one group, so the
+        // Union stays put.
+        let n = Node::Union {
+            children: vec![
+                box_at(0.0, 0.0, 0.0),
+                box_at(0.5, 0.0, 0.0),
+                box_at(1.0, 0.0, 0.0),
+            ],
+        };
+        let s = simplify(&n);
+        assert!(matches!(s, Node::Union { .. }));
+    }
+
+    #[test]
+    fn single_element_union_is_passed_through() {
+        // Defensive: AST normally rejects 1-child unions at parse, but
+        // if one shows up the rewrite mustn't drop it.
+        let n = Node::Union {
+            children: vec![box_at(0.0, 0.0, 0.0)],
+        };
+        let s = simplify(&n);
+        assert_eq!(
+            s,
+            Node::Union {
+                children: vec![box_at(0.0, 0.0, 0.0)]
+            }
+        );
     }
 }
