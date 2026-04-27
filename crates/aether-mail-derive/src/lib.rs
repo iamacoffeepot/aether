@@ -197,6 +197,21 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
             out
         };
+
+        // Issue #243: native-side auto-collection. The wasm
+        // `aether.kinds` custom-section above carries the canonical
+        // bytes for guest-side discovery; on native, the substrate's
+        // `descriptors::all()` materializes the Hub-shipped
+        // `KindDescriptor` list by iterating these inventory entries.
+        // Cfg-gated to non-wasm targets because `inventory` doesn't
+        // link on `wasm32-unknown-unknown`.
+        #[cfg(not(target_arch = "wasm32"))]
+        ::aether_mail::__inventory::inventory::submit! {
+            ::aether_mail::__inventory::DescriptorEntry {
+                name: <#name as ::aether_mail::Kind>::NAME,
+                schema: &#schema_static_ident,
+            }
+        }
     })
 }
 

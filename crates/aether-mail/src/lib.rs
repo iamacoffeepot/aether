@@ -273,6 +273,41 @@ pub use aether_mail_derive::{Kind, Schema, fallback, handler, handlers};
 /// `#[derive(Schema)]`.
 pub use schema::Schema;
 
+/// Native-only auto-collection slot for `#[derive(Kind)]` types
+/// (issue #243). The Kind derive emits a `cfg(not(target_arch = "wasm32"))`-
+/// gated `inventory::submit! { DescriptorEntry { ... } }` against
+/// this module's slot; `aether-kinds::descriptors::all()` materializes
+/// the Hub-shipped `KindDescriptor` list by iterating the slot at
+/// boot. The wasm path (`aether.kinds` custom section, ADR-0032)
+/// is unchanged — wasm guests have no inventory dep at all (see
+/// the target-gated dependency in Cargo.toml).
+///
+/// `DescriptorEntry` carries `&'static str` + `&'static SchemaType`
+/// so `inventory::submit!` (which requires the value be const-
+/// constructible at compile time) accepts it. The derive points
+/// `schema` at the per-type `__AETHER_SCHEMA_<NAME>` static it
+/// already emits, so no extra storage is required.
+///
+/// Not part of the public API; the derive macro is the only
+/// intended caller.
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub mod __inventory {
+    pub use ::inventory;
+    use aether_hub_protocol::SchemaType;
+
+    /// Static-friendly mirror of `aether_hub_protocol::KindDescriptor`.
+    /// Owns nothing — both fields are `'static` so the value is const-
+    /// constructible from `inventory::submit!`. `descriptors::all()`
+    /// materializes the owned `KindDescriptor` form at iteration time.
+    pub struct DescriptorEntry {
+        pub name: &'static str,
+        pub schema: &'static SchemaType,
+    }
+
+    inventory::collect!(DescriptorEntry);
+}
+
 /// Internal re-exports the `#[derive(Schema)]` and `#[derive(Kind)]`
 /// macros point at so their output compiles in no_std + alloc
 /// consumer crates without those consumers needing `extern crate

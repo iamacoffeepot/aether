@@ -32,6 +32,11 @@ bytemuck = { version = "1", features = ["derive"] }
 # on fixture kinds; pull serde in as a dev-dep so tests don't rely on
 # the transitive re-export from aether-mail.
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+# Issue #243: `#[derive(Kind)]` test fixtures (in `#[cfg(test)]` modules
+# of `src/lib.rs` + `src/handle.rs`) emit `inventory::submit!` on
+# native targets. The macro path needs `::inventory` reachable. Tests
+# always run native, so a plain dev-dep with no target gating is right.
+inventory = "0.3"
 
 # ADR-0017 (component-to-component reply) smoke pair: caller sends
 # `demo.request` to "echoer" and observes the reply.

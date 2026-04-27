@@ -24,3 +24,8 @@ aether-hub-protocol = { path = "../aether-hub-protocol" }
 # matches their wire shape.
 bytemuck = { version = "1.19", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
+# Issue #243: derive(Kind) test fixtures emit `inventory::submit!` on
+# native targets; the macro needs `::inventory` reachable in this test
+# crate. Tests run native, so unconditional dev-dep is fine — no wasm
+# build to skip.
+inventory = "0.3"
