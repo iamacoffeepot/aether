@@ -51,10 +51,12 @@ Renames change the field hash (the name is in the canonical bytes). A remap dict
 Nested record types (e.g., a `Vec3`-shaped triple used inside a kind without a top-level kind name) get a **synthesized name** content-derived from their field blob:
 
 ```
-synthesized_name = "anon_" + hex(short_hash(field_blob))
+synthesized_name = "__" + hex(short_hash(field_blob))
 ```
 
 Two crates declaring the same anonymous shape get the same synthesized name → same field hash for any field of that type → **cross-crate structural identity for free**. Top-level kinds with explicit names (`#[kind(name = "...")]`) keep their nominal identity, so `Position { x, y, z }` and `Velocity { x, y, z }` stay distinct. The footgun (two genuinely different concepts both declared anonymously with identical shape) lives in a corner where you'd have to deliberately go nameless on both — convention says don't.
+
+The `__` prefix is reserved for system-synthesized identifiers (see rule 6 below), so user-supplied names can never collide with a synthesis output.
 
 ### Kind ID
 
@@ -73,6 +75,7 @@ Where `sorted_field_hash_blob` is the canonical bytes of `field_hashes.sort().co
 3. Type is part of the field hash. Type changes (`u32 → u64`, even a "widen") require a new field hash and a remap entry.
 4. Renames go through the remap dictionary, never silently.
 5. Reordering source code is free (sort order is canonical).
+6. The `__` prefix is reserved for system-synthesized identifiers (anonymous record names today; possibly other synthesized forms in the future). User-supplied names — kind names, field names, explicit anonymous-record overrides — must not begin with `__`. The derive rejects offending names at compile time, so a future synthesis pattern can't silently collide with a user identifier already in the wild.
 
 ## Consequences
 
