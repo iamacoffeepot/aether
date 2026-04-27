@@ -21,12 +21,11 @@
 //! - [`polygon`]: convex polygon over integer points + split-vs-plane.
 //! - [`bsp`]: BSP tree (build / invert / clip).
 //! - [`ops`]: union / intersection / difference as tree-clipping
-//!   compositions.
-//!
-//! The top-level entry points [`union_triangles`], [`intersection_triangles`],
-//! and [`difference_triangles`] take f32 [`Triangle`] lists and return
-//! f32 [`Triangle`] lists — they handle the snap-in / snap-out so the
-//! mesher can stay agnostic of integer arithmetic.
+//!   compositions; output is n-gon boundary loops.
+//! - [`cleanup`]: post-CSG mesh repair (welding, coplanar merge,
+//!   T-junction repair, sliver removal).
+//! - [`tessellate`]: CDT triangulation for the wire `Vec<Triangle>`
+//!   path. Skipped by the polygon-domain entry points.
 
 pub mod bsp;
 pub mod cleanup;
@@ -35,9 +34,9 @@ pub mod ops;
 pub mod plane;
 pub mod point;
 pub mod polygon;
+pub mod tessellate;
 
 use crate::csg::fixed::FixedError;
-use crate::csg::point::Point3;
 use crate::csg::polygon::Polygon;
 use crate::mesh::Triangle;
 
@@ -54,40 +53,6 @@ pub enum CsgError {
         "CSG BSP recursion exceeded depth limit ({limit}); likely a snap-drift cascade not caught by the side-test tolerance"
     )]
     RecursionLimit { limit: usize },
-}
-
-pub fn union_triangles(a: &[Triangle], b: &[Triangle]) -> Result<Vec<Triangle>, CsgError> {
-    let pa = triangles_to_polygons(a)?;
-    let pb = triangles_to_polygons(b)?;
-    Ok(polygons_to_triangles(&ops::union(pa, pb)?))
-}
-
-pub fn intersection_triangles(a: &[Triangle], b: &[Triangle]) -> Result<Vec<Triangle>, CsgError> {
-    let pa = triangles_to_polygons(a)?;
-    let pb = triangles_to_polygons(b)?;
-    Ok(polygons_to_triangles(&ops::intersection(pa, pb)?))
-}
-
-pub fn difference_triangles(a: &[Triangle], b: &[Triangle]) -> Result<Vec<Triangle>, CsgError> {
-    let pa = triangles_to_polygons(a)?;
-    let pb = triangles_to_polygons(b)?;
-    Ok(polygons_to_triangles(&ops::difference(pa, pb)?))
-}
-
-fn triangles_to_polygons(triangles: &[Triangle]) -> Result<Vec<Polygon>, CsgError> {
-    let mut polys = Vec::with_capacity(triangles.len());
-    for tri in triangles {
-        let v0 = Point3::from_f32(tri.vertices[0])?;
-        let v1 = Point3::from_f32(tri.vertices[1])?;
-        let v2 = Point3::from_f32(tri.vertices[2])?;
-        // Drop degenerate (zero-area) triangles silently — they carry
-        // no surface and would produce a zero-normal plane that breaks
-        // classification.
-        if let Some(p) = Polygon::from_triangle(v0, v1, v2, tri.color) {
-            polys.push(p);
-        }
-    }
-    Ok(polys)
 }
 
 /// Fan-triangulate a polygon list back to wire `Triangle`s. Polygons

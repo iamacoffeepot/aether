@@ -289,7 +289,7 @@ fn fan_triangulate(vertices: &[[f32; 3]]) -> Vec<[[f32; 3]; 3]> {
 }
 
 fn cdt_tessellate(polygon: &Polygon) -> Option<Vec<[[f32; 3]; 3]>> {
-    csg::cleanup::tessellate_polygon_f32(&polygon.vertices, &polygon.holes)
+    csg::tessellate::tessellate_polygon_f32(&polygon.vertices, &polygon.holes)
 }
 
 #[cfg(test)]
