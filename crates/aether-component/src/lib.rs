@@ -180,11 +180,16 @@ impl<K: Kind> Sink<K> {
     }
 }
 
-impl<K: Kind + bytemuck::NoUninit> Sink<K> {
+impl<K: Kind> Sink<K> {
     /// Send a single typed payload. The substrate's `count` field is 1.
-    /// Bytemuck handles the `&K → &[u8]` cast.
+    ///
+    /// Issue #240: routes through `Kind::encode_into_bytes`, which the
+    /// derive specializes to either a bytemuck cast or a postcard
+    /// encode based on whether the type carries `#[repr(C)]`. One call
+    /// site for both wire shapes — the wire choice is the kind's, not
+    /// the call's.
     pub fn send(self, payload: &K) {
-        let bytes = bytemuck::bytes_of(payload);
+        let bytes = payload.encode_into_bytes();
         unsafe {
             raw::send_mail(
                 self.mailbox,
@@ -195,9 +200,16 @@ impl<K: Kind + bytemuck::NoUninit> Sink<K> {
             );
         }
     }
+}
 
+impl<K: Kind + bytemuck::NoUninit> Sink<K> {
     /// Send a slice of typed payloads as a contiguous buffer. The
     /// substrate's `count` field is `payloads.len()`.
+    ///
+    /// Cast-only — postcard has no efficient contiguous-batch wire
+    /// shape (ADR-0019 §6 fixes the batch wire as raw bytes). A
+    /// component that wants to fan out N postcard payloads calls
+    /// `send` in a loop.
     pub fn send_many(self, payloads: &[K]) {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         unsafe {
@@ -207,29 +219,6 @@ impl<K: Kind + bytemuck::NoUninit> Sink<K> {
                 bytes.as_ptr().addr() as u32,
                 bytes.len() as u32,
                 payloads.len() as u32,
-            );
-        }
-    }
-}
-
-impl<K: Kind + serde::Serialize> Sink<K> {
-    /// Send a single postcard-encoded payload. Sibling of [`Sink::send`]
-    /// for schema-shaped kinds (`#[derive(Schema, Serialize)]` — e.g.
-    /// `Count`, `SubscribeInput`, the `io::*` request kinds) that
-    /// aren't bytemuck-castable. The substrate's `count` field is 1.
-    ///
-    /// No `send_postcard_many` — postcard has no efficient contiguous
-    /// batch shape, so batch sends stay bytemuck-only. A component
-    /// that wants to fan out N postcard payloads calls this in a loop.
-    pub fn send_postcard(self, payload: &K) {
-        let bytes = postcard::to_allocvec(payload).expect("postcard encode to Vec is infallible");
-        unsafe {
-            raw::send_mail(
-                self.mailbox,
-                self.kind,
-                bytes.as_ptr().addr() as u32,
-                bytes.len() as u32,
-                1,
             );
         }
     }
@@ -403,7 +392,7 @@ impl InitCtx<'_> {
             stream,
             mailbox: self.mailbox,
         };
-        resolve_sink::<SubscribeInput>("aether.control").send_postcard(&payload);
+        resolve_sink::<SubscribeInput>("aether.control").send(&payload);
     }
 }
 
@@ -453,21 +442,16 @@ impl Ctx<'_> {
     /// Send a single payload to `sink`. Typed wrapper around
     /// `Sink::send` — having the same entry point through both
     /// `Ctx` and `Sink` is deliberate: `Ctx` is the receive-time
-    /// vocabulary, `Sink::send` is the universal one.
-    pub fn send<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payload: &K) {
+    /// vocabulary, `Sink::send` is the universal one. Wire shape
+    /// (cast or postcard) is the kind's, not the call's (issue #240).
+    pub fn send<K: Kind>(&self, sink: &Sink<K>, payload: &K) {
         sink.send(payload);
     }
 
-    /// Send a slice of payloads as a contiguous batch.
+    /// Send a slice of payloads as a contiguous batch. Cast-only —
+    /// see [`Sink::send_many`] for the wire-shape rationale.
     pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payloads: &[K]) {
         sink.send_many(payloads);
-    }
-
-    /// Send a postcard-encoded payload. Sibling of [`Ctx::send`] for
-    /// schema-shaped kinds — same dispatch discipline (receive-time
-    /// capability), different wire shape.
-    pub fn send_postcard<K: Kind + serde::Serialize>(&self, sink: &Sink<K>, payload: &K) {
-        sink.send_postcard(payload);
     }
 
     /// Publish `value` into the substrate's handle store. Returns
@@ -490,14 +474,11 @@ impl Ctx<'_> {
     ///
     /// Status of the underlying host call is dropped; reply is
     /// fire-and-forget on the guest side. If the session is gone the
-    /// hub silently discards the frame.
-    pub fn reply<K: Kind + bytemuck::NoUninit>(
-        &self,
-        sender: ReplyTo,
-        kind: KindId<K>,
-        payload: &K,
-    ) {
-        let bytes = bytemuck::bytes_of(payload);
+    /// hub silently discards the frame. Issue #240: wire shape (cast
+    /// or postcard) follows `Kind::encode_into_bytes` — the same
+    /// derive-time autodetect as `Ctx::send`.
+    pub fn reply<K: Kind>(&self, sender: ReplyTo, kind: KindId<K>, payload: &K) {
+        let bytes = payload.encode_into_bytes();
         unsafe {
             raw::reply_mail(
                 sender.raw,
@@ -570,20 +551,16 @@ impl DropCtx<'_> {
         }
     }
 
-    /// Send a single payload during a shutdown hook.
-    pub fn send<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payload: &K) {
+    /// Send a single payload during a shutdown hook. Wire shape (cast
+    /// or postcard) follows `Kind::encode_into_bytes`.
+    pub fn send<K: Kind>(&self, sink: &Sink<K>, payload: &K) {
         sink.send(payload);
     }
 
-    /// Send a slice of payloads during a shutdown hook.
+    /// Send a slice of payloads during a shutdown hook. Cast-only —
+    /// see [`Sink::send_many`] for the wire-shape rationale.
     pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payloads: &[K]) {
         sink.send_many(payloads);
-    }
-
-    /// Send a postcard-encoded payload during a shutdown hook. Sibling
-    /// of [`DropCtx::send`] for schema-shaped kinds.
-    pub fn send_postcard<K: Kind + serde::Serialize>(&self, sink: &Sink<K>, payload: &K) {
-        sink.send_postcard(payload);
     }
 
     /// Publish `value` into the substrate's handle store during a
@@ -1397,6 +1374,54 @@ mod tests {
         };
         let out = mail.decode_kind::<FakeCastKind>().expect("decode");
         assert_eq!(out, value);
+    }
+
+    // Issue #240 encode-side mirror. `Kind::encode_into_bytes` is the
+    // send-side counterpart to `decode_from_bytes`; the derive picks
+    // cast vs postcard based on the same `#[repr(C)]` flag. These two
+    // tests pin the symmetry: the encode output for each wire shape
+    // round-trips through the decode it pairs with.
+
+    #[test]
+    fn kind_encode_into_bytes_postcard_roundtrip() {
+        let value = FakePostcard {
+            tag: alloc::string::String::from("hello"),
+            ids: alloc::vec![10, 20, 30],
+        };
+        let bytes = value.encode_into_bytes();
+        // Wire-shape contract: postcard encode matches what the
+        // pre-#240 `Sink::send_postcard` path would have written.
+        assert_eq!(bytes, postcard::to_allocvec(&value).unwrap());
+        let decoded = FakePostcard::decode_from_bytes(&bytes).expect("decode");
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn kind_encode_into_bytes_cast_roundtrip() {
+        #[repr(C)]
+        #[derive(
+            Copy,
+            Clone,
+            Debug,
+            PartialEq,
+            bytemuck::Pod,
+            bytemuck::Zeroable,
+            aether_mail::Kind,
+            aether_mail::Schema,
+        )]
+        #[kind(name = "test.encode_cast")]
+        struct EncodeCast {
+            a: u32,
+            b: u32,
+        }
+
+        let value = EncodeCast { a: 11, b: 22 };
+        let bytes = value.encode_into_bytes();
+        // Wire-shape contract: cast encode matches `bytemuck::bytes_of`
+        // — what the pre-#240 `Sink::send` path wrote zero-copy.
+        assert_eq!(bytes.as_slice(), bytemuck::bytes_of(&value));
+        let decoded = EncodeCast::decode_from_bytes(&bytes).expect("decode");
+        assert_eq!(decoded, value);
     }
 
     #[test]

@@ -17,8 +17,8 @@
 //!
 //! Mechanism check: the publish + broadcast sequence runs entirely
 //! through mail (`aether.handle.publish` to the `"aether.sink.handle"` sink,
-//! `wait_reply` for `HandlePublishResult`, then `send_postcard` to
-//! the broadcast sink). No host fns; the SDK's `Handle<K>` is a
+//! `wait_reply` for `HandlePublishResult`, then `send` to the
+//! broadcast sink). No host fns; the SDK's `Handle<K>` is a
 //! thin RAII wrapper over the same wire surface as `io::*` and
 //! `net::*`.
 
@@ -89,7 +89,7 @@ impl Component for HandleDemo {
         // been released and the entry could be evicted under
         // pressure — pin it so the cached bytes survive.
         let _ = handle.pin();
-        BROADCAST.send_postcard(&outer);
+        BROADCAST.send(&outer);
         // `handle` drops here → fire-and-forget HandleRelease;
         // the pin keeps the cached entry alive past release.
     }

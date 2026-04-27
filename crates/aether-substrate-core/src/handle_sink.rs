@@ -16,7 +16,7 @@
 //! The dispatcher runs synchronously on the sink dispatch thread —
 //! fine for handle ops, which are sub-microsecond `RwLock`
 //! acquisitions on the store. Components publish via the SDK's
-//! `Ctx::publish` (encode + `send_postcard` + `wait_reply`); the
+//! `Ctx::publish` (encode + `Sink::send` + `wait_reply`); the
 //! `Drop` impl on `Handle<K>` mails `HandleRelease` fire-and-forget
 //! to keep teardown safe.
 

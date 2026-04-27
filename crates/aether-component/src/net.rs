@@ -125,7 +125,7 @@ pub enum SyncNetError {
 /// assert_eq!(resp.status, 200);
 /// ```
 pub fn fetch_blocking(fetch: &Fetch, timeout_ms: u32) -> Result<FetchResponse, SyncNetError> {
-    resolve_sink::<Fetch>(NET_MAILBOX_NAME).send_postcard(fetch);
+    resolve_sink::<Fetch>(NET_MAILBOX_NAME).send(fetch);
     let correlation = unsafe { raw::prev_correlation() };
 
     let mut buf: Vec<u8> = alloc::vec![0u8; FETCH_REPLY_CAP];
@@ -171,7 +171,7 @@ pub fn fetch_blocking(fetch: &Fetch, timeout_ms: u32) -> Result<FetchResponse, S
 /// typed + named counterpart to [`fetch_blocking`]; `ctx.send` on a
 /// user-built `Sink<Fetch>` does the same thing.
 pub fn fetch(fetch: &Fetch) {
-    resolve_sink::<Fetch>(NET_MAILBOX_NAME).send_postcard(fetch);
+    resolve_sink::<Fetch>(NET_MAILBOX_NAME).send(fetch);
 }
 
 /// Tiny constructor for the common "GET with no headers or body"
