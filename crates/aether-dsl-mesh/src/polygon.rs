@@ -213,7 +213,14 @@ pub fn tessellate_polygon(polygon: &Polygon) -> Vec<[[f32; 3]; 3]> {
     // faces are convex (cleanup's coplanar merging produces convex
     // results when the inputs are convex), and skipping CDT keeps the
     // editor's per-frame cost low.
-    if polygon.holes.is_empty() && is_convex(&polygon.vertices) {
+    //
+    // Pass the polygon's stored plane_normal — the cleanup-emitted loops
+    // routinely have collinear consecutive vertices (T-junction repair
+    // adds them on shared edges), and re-deriving the normal from the
+    // first three vertices via cross product collapses to ~zero in that
+    // case, which sends `is_convex` into the wrong axis projection. The
+    // CDT slow path then panics on the collinear constraint vertices.
+    if polygon.holes.is_empty() && is_convex(&polygon.vertices, &polygon.plane_normal) {
         return fan_triangulate(&polygon.vertices);
     }
 
@@ -223,17 +230,15 @@ pub fn tessellate_polygon(polygon: &Polygon) -> Vec<[[f32; 3]; 3]> {
     cdt_tessellate(polygon).unwrap_or_default()
 }
 
-fn is_convex(vertices: &[[f32; 3]]) -> bool {
+fn is_convex(vertices: &[[f32; 3]], normal: &[f32; 3]) -> bool {
     // Convex iff all cross products around the loop have the same sign
     // when projected to 2D. We project to whichever pair of axes the
-    // polygon's plane normal is most perpendicular to (computed from
-    // the first three vertices).
+    // polygon's plane normal is most perpendicular to.
     let n = vertices.len();
     if n < 3 {
         return true;
     }
-    let normal = compute_normal(vertices);
-    let (a_idx, b_idx) = dominant_axes(normal);
+    let (a_idx, b_idx) = dominant_axes(*normal);
     let mut sign: i32 = 0;
     for i in 0..n {
         let j = (i + 1) % n;
@@ -260,19 +265,6 @@ fn is_convex(vertices: &[[f32; 3]]) -> bool {
         }
     }
     true
-}
-
-fn compute_normal(vertices: &[[f32; 3]]) -> [f32; 3] {
-    let a = vertices[0];
-    let b = vertices[1];
-    let c = vertices[2];
-    let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    [
-        e1[1] * e2[2] - e1[2] * e2[1],
-        e1[2] * e2[0] - e1[0] * e2[2],
-        e1[0] * e2[1] - e1[1] * e2[0],
-    ]
 }
 
 fn dominant_axes(normal: [f32; 3]) -> (usize, usize) {
@@ -396,7 +388,7 @@ mod tests {
             [1.0, 1.0, 0.0],
             [0.0, 1.0, 0.0],
         ];
-        assert!(is_convex(&quad));
+        assert!(is_convex(&quad, &[0.0, 0.0, 1.0]));
     }
 
     #[test]
@@ -410,7 +402,31 @@ mod tests {
             [1.0, 2.0, 0.0],
             [0.0, 2.0, 0.0],
         ];
-        assert!(!is_convex(&l_shape));
+        assert!(!is_convex(&l_shape, &[0.0, 0.0, 1.0]));
+    }
+
+    /// Pin the bug fix: a 6-vertex chord-rectangle (T-junction repair
+    /// added 2 collinear vertices on the top + bottom of a CSG-clipped
+    /// cylinder side facet) used to misroute through CDT because the
+    /// re-derived normal from the first three (collinear) vertices
+    /// degenerated to ~zero, causing `dominant_axes` to pick the
+    /// projection that collapses the polygon to a line. Passing the
+    /// stored `plane_normal` from the polygon avoids the re-derivation.
+    #[test]
+    fn is_convex_handles_collinear_first_three_vertices() {
+        // First three vertices collinear along the cube top face; the
+        // polygon's true normal is in the XZ plane (cylinder side
+        // facet).
+        let chord_rect = vec![
+            [1.17717, 0.5, -0.114792],
+            [1.120239, 0.5, -0.199997],
+            [1.112137, 0.5, -0.212128],
+            [1.112137, -0.5, -0.212128],
+            [1.120239, -0.5, -0.199997],
+            [1.17717, -0.5, -0.114792],
+        ];
+        let normal = [-0.831, 0.0, 0.556];
+        assert!(is_convex(&chord_rect, &normal));
     }
 
     #[test]
