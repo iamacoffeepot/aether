@@ -113,13 +113,39 @@ Because the field hash includes the field's type, asking for a name with the wro
 
 The `T: Schema + Decode` bound is satisfied by primitives, `String`, `bool`, `Vec<T>`, `Option<T>`, `BTreeMap<K, V>`, and any user struct/enum carrying both derives. Open question whether to extend this to arbitrary user types via a separate `#[derive(FieldDecode)]` (out of v1; punted to a follow-up).
 
-### Missing-field defaults
+### Required fields and `Option<T>`
 
-Missing fields fall back to **type-default** — `0` for integers, `false` for `bool`, empty for `String` / `Vec` / `BTreeMap`, `None` for `Option`, type-default recursively for nested structs. This matches proto3 and means **adding a field is wire-compatible by construction**: v1 readers seeing v2-written payloads with extra fields preserve them in the unknown bucket; v2 readers seeing v1-written payloads with new-field absent get the type-default, which is exactly what makes the upgrade-survives-storage promise hold.
+Every field declared on a TLV kind is **required by default** — its absence on the wire is a decode error, not a silent fallback. Optionality is expressed in the type system: `Option<T>` fields tolerate absence and decode missing as `None`.
 
-Authors who need "did the sender write this field" semantics use `Option<T>` as the field type — type-default is `None`, explicitly-sent `None` is also `None` (indistinguishable, which is fine — both mean "no value"). To distinguish absent from explicitly-zero, wrap further (`Option<u32>` for "u32 or unset"; `Option<Option<u32>>` for "u32, explicitly-none, or absent"); in practice the inner `Option` is enough.
+```rust
+struct Record {
+    id: u64,                  // required — absence is a decode error
+    note: Option<String>,     // optional — missing decodes to None
+}
+```
 
-This avoids per-field default-value attributes in v1. `#[field(default = "...")]` is a possible v2 extension if a use case forces it (e.g., a non-zero numeric default that's semantically required).
+This forces author intent at the type level. Two rules fall out for evolving a kind across an upgrade boundary:
+
+- **Adding a field**: the new field must be `Option<T>`. v1 readers seeing v2-written payloads with the new field preserve it in the unknown bucket; v2 readers seeing v1-written payloads with the new field absent get `None`. A new required field would error on every v1 payload — which is the correct behavior, so the type signature is the discipline.
+- **Removing a field**: only `Option<T>` fields can be removed safely. Required fields are wire-immutable for storage-compat purposes; removing one breaks readers compiled against the old schema.
+
+Required fields define the irreducible identity of the kind; `Option<T>` fields are the evolving surface. Authoring rule of thumb: require what the kind cannot mean without; `Option` what comes and goes.
+
+Composition with the unknown bucket and remap dict:
+
+| field state | wire shape | decoded value |
+|---|---|---|
+| required, present | `[hash][len][bytes]` | `T` |
+| required, absent | — | **error** |
+| `Option<T>`, present (Some body) | `[hash][len][1 ++ T_bytes]` | `Some(T)` |
+| `Option<T>`, present (None body) | `[hash][len][0]` | `None` |
+| `Option<T>`, absent | — | `None` |
+| unknown to receiver, present | `[hash][len][bytes]` | bucketed |
+| renamed (old hash on wire) | `[old_hash][len][bytes]` + remap entry | decoded as the renamed-to field |
+
+The two `None` cases collapse at the API — sender choice between "absent" and "explicitly None" isn't observable. If an author needs that distinction, `Option<Option<T>>` works (`None` for absent, `Some(None)` for explicit None, `Some(Some(T))` for value); in practice the inner `Option` is sufficient.
+
+`#[field(default = "...")]` for non-`None` defaults on optional fields stays a v2 extension if a use case forces it.
 
 ### Discipline (the strict rules)
 
@@ -132,7 +158,7 @@ This avoids per-field default-value attributes in v1. `#[field(default = "...")]
 
 ## Consequences
 
-- **Component upgrades survive add/remove/reorder.** Storing a payload against v1's schema and reading it after v2 upgrades works as long as the changes are field-set deltas. Pays off ADR-0049 directly.
+- **Component upgrades survive add/remove/reorder when the changing fields are `Option<T>`.** Reorder is unconditional. Adds and removes require the field to be optional at the type level; required fields are wire-immutable across compat boundaries by design. The compiler catches the discipline lapse: you can't add a required field and have v1 readers silently default it. Pays off ADR-0049 with author-intent visibility instead of silent type-default fallbacks.
 - **Cross-crate shared anonymous types.** Two components declaring the same `Vec3`-shaped record without coordination get the same identity. Useful as the component ecosystem grows.
 - **Third wire shape to maintain.** Encoder, decoder, kind-manifest reader, handle-store walker all gain a TLV path alongside cast and positional. Bounded and parallel to the existing two paths, but real engineering surface.
 - **Hash semantics shift for TLV kinds.** Reorder no longer changes `Kind::ID`. Renames still do (handled by remap). Today's positional hash stays for cast and positional-postcard kinds.
