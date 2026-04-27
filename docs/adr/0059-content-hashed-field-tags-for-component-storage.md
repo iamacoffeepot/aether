@@ -331,14 +331,11 @@ These were Open Questions in earlier drafts; resolutions are folded into the Dec
 - **Manifest format** → No new section. Field/variant hashes are derived at load time by walking the labeled schema in `aether.kinds` + `aether.kinds.labels`; reserved-hash sets and remap dictionaries were dropped (renames are breaking; reserved-hash tracking solves a non-problem). Strict mode rides on the trait as `Storage::STRICT: bool`, set by `#[storage(strict)]` — no wire-side surface for it.
 - **Variant rename mechanics** → Dropped along with field renames. Variant renames are breaking schema changes; old wire data buckets; typed access requires migration. No remap, no per-leaf synthesis question.
 - **Migration of existing stored payloads** → N/A. The handle store (ADR-0049) is itself unshipped — there are no existing stored payloads to migrate. TLV is the wire format storage starts with. If a future durable backend (save files via ADR-0041, etc.) gets retrofitted onto pre-existing data, that backend's adoption gets its own one-time migration story at that time.
+- **Adding an enum variant** → Strict for v1. Unknown `__variant` hash on the wire is a decode error; adding a variant is a breaking schema change, same migration story as field/variant renames and type changes. Tolerant mode (bucket the whole enum field as raw bytes) was rejected because Rust enums lack a sentinel arm — the typed API would have to surface "this enum had an unknown variant" through every consumer, a significant ergonomic cost for a forward-compat property that's rarely needed in single-org schema evolution. Revisit if a forcing function appears (third-party kinds with independent variant evolution, ecosystem-wide enum-evolution coordination pain).
 
 ## Open questions
 
-These are the load-bearing things this draft does *not* answer. Each needs a decision before implementation:
-
-1. **Adding an enum variant.** A new writer emits a variant the reader doesn't know — `__variant` carries a hash that doesn't match any variant in the receiver's schema. Two options:
-   - Strict (probable v1 default): unknown variant hash → decode error. Adding a variant is a breaking change.
-   - Tolerant: bucket the entire enum field's leaves as unknown bytes. The typed value can't represent the unknown variant (Rust enums lack a sentinel arm), so the API would have to surface "this enum had an unknown variant" — significant ergonomic cost. Probably defer until a forcing function appears.
+None remaining as of 2026-04-27. All initial brainstorm questions are folded into the Decision section above with their resolutions captured in *Resolved in chat*. Subsequent questions raised during implementation accumulate here.
 
 ## Alternatives considered
 
