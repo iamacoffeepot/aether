@@ -330,13 +330,13 @@ These were Open Questions in earlier drafts; resolutions are folded into the Dec
 - **Composition with the version-graph idea** → Dropped. TLV envelopes + flattening cover add/remove/reorder transparently at the wire layer; no cross-kind migration edges or graph traversal at decode. The residual cases (renames, type changes) are breaking schema changes — old wire data preserves in the unknown-fields bucket; authors who need typed access to that data run an explicit migration tool (read old storage, decode the bucket entry into the new field, re-encode under the new schema). Migration is outside the wire format's responsibility.
 - **Manifest format** → No new section. Field/variant hashes are derived at load time by walking the labeled schema in `aether.kinds` + `aether.kinds.labels`; reserved-hash sets and remap dictionaries were dropped (renames are breaking; reserved-hash tracking solves a non-problem). Strict mode rides on the trait as `Storage::STRICT: bool`, set by `#[storage(strict)]` — no wire-side surface for it.
 - **Variant rename mechanics** → Dropped along with field renames. Variant renames are breaking schema changes; old wire data buckets; typed access requires migration. No remap, no per-leaf synthesis question.
+- **Migration of existing stored payloads** → N/A. The handle store (ADR-0049) is itself unshipped — there are no existing stored payloads to migrate. TLV is the wire format storage starts with. If a future durable backend (save files via ADR-0041, etc.) gets retrofitted onto pre-existing data, that backend's adoption gets its own one-time migration story at that time.
 
 ## Open questions
 
 These are the load-bearing things this draft does *not* answer. Each needs a decision before implementation:
 
-1. **Migration of existing stored payloads.** When a component first opts into TLV storage, is there a one-time migration of old positional payloads, or do we accept that pre-TLV storage is read-only-incompatible?
-2. **Adding an enum variant.** A new writer emits a variant the reader doesn't know — `__variant` carries a hash that doesn't match any variant in the receiver's schema. Two options:
+1. **Adding an enum variant.** A new writer emits a variant the reader doesn't know — `__variant` carries a hash that doesn't match any variant in the receiver's schema. Two options:
    - Strict (probable v1 default): unknown variant hash → decode error. Adding a variant is a breaking change.
    - Tolerant: bucket the entire enum field's leaves as unknown bytes. The typed value can't represent the unknown variant (Rust enums lack a sentinel arm), so the API would have to surface "this enum had an unknown variant" — significant ergonomic cost. Probably defer until a forcing function appears.
 
