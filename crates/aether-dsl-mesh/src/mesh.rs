@@ -704,7 +704,7 @@ fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn normalize_or_default(v: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
+pub(crate) fn normalize_or_default(v: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
     let len_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
     if len_sq < 1e-12 {
         return fallback;
@@ -715,7 +715,7 @@ fn normalize_or_default(v: [f32; 3], fallback: [f32; 3]) -> [f32; 3] {
 
 /// Rotate `v` around unit axis `n` by `angle` radians (Rodrigues' formula).
 /// `n` MUST be normalized — caller's responsibility.
-fn rotate_axis_angle(v: [f32; 3], n: [f32; 3], angle: f32) -> [f32; 3] {
+pub(crate) fn rotate_axis_angle(v: [f32; 3], n: [f32; 3], angle: f32) -> [f32; 3] {
     let c = angle.cos();
     let s = angle.sin();
     let dot = n[0] * v[0] + n[1] * v[1] + n[2] * v[2];
