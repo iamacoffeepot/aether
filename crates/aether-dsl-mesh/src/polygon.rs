@@ -178,7 +178,7 @@ fn group_loops(loops: Vec<csg::polygon::Polygon>) -> Vec<Polygon> {
             }
         }
 
-        for ((_, outer), polygon_holes) in outers.into_iter().zip(hole_assignments.into_iter()) {
+        for ((_, outer), polygon_holes) in outers.into_iter().zip(hole_assignments) {
             out.push(Polygon {
                 vertices: outer,
                 holes: polygon_holes,
