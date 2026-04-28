@@ -36,6 +36,7 @@ pub mod log_capture;
 pub mod mail;
 pub mod mailer;
 pub mod net;
+pub mod panic_hook;
 pub mod registry;
 pub mod reply_table;
 pub mod scheduler;
@@ -51,6 +52,7 @@ pub use hub_client::{
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
 pub use mail::{Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 pub use mailer::Mailer;
+pub use panic_hook::init_panic_hook;
 pub use registry::{MailboxEntry, Registry, SinkHandler};
 pub use scheduler::Scheduler;
 

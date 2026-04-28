@@ -66,6 +66,12 @@ pub struct ComponentEntry {
     /// to the whole entry (which would create a cycle through the
     /// `JoinHandle`).
     gate: Arc<PendingGate>,
+    /// Stable identity for this entry (issue #321). Carried so
+    /// `splice_inbox` can rewire a fresh dispatcher under the same
+    /// thread name + dispatch span without the caller threading the id
+    /// back through, and so panic-hook events have a structured field
+    /// for the failing mailbox.
+    mailbox: MailboxId,
 }
 
 impl ComponentEntry {
@@ -75,21 +81,34 @@ impl ComponentEntry {
     /// that both the dispatcher and the `wait_reply_p32` host fn —
     /// which runs on the same dispatcher thread, nested under
     /// `deliver` — can drain the same inbox. The `Arc<Registry>` is
-    /// used by the dispatcher to format warn-logs for unknown kinds.
-    pub fn spawn(mut component: Component, registry: Arc<Registry>) -> Self {
+    /// used by the dispatcher to format warn-logs for unknown kinds
+    /// and to resolve `mailbox` to a human-readable name when naming
+    /// the dispatcher thread (issue #321) — a panic on the dispatcher
+    /// then surfaces in `engine_logs` with `thread="aether-component-
+    /// {name}-{mailbox_short}"` instead of an opaque thread label.
+    pub fn spawn(mut component: Component, registry: Arc<Registry>, mailbox: MailboxId) -> Self {
         let (tx, rx) = mpsc::channel();
         component.install_inbox_rx(rx);
         let gate: Arc<PendingGate> = Arc::new(PendingGate::default());
         let gate_for_thread = Arc::clone(&gate);
+        let thread_name = dispatcher_thread_name(&registry, mailbox);
         let handle = thread::Builder::new()
-            .name("aether-component-dispatch".into())
-            .spawn(move || dispatcher_loop(component, registry, gate_for_thread))
+            .name(thread_name)
+            .spawn(move || dispatcher_loop(component, registry, gate_for_thread, mailbox))
             .expect("spawn component dispatcher");
         Self {
             sender: Mutex::new(Some(tx)),
             handle: Mutex::new(Some(handle)),
             gate,
+            mailbox,
         }
+    }
+
+    /// Mailbox id this entry was registered under. Stable across a
+    /// `splice_inbox` (replace) — the dispatcher swaps but the entry
+    /// stays put.
+    pub fn mailbox(&self) -> MailboxId {
+        self.mailbox
     }
 
     /// Forward `mail` to this component's inbox. Returns `false` if
@@ -214,35 +233,84 @@ pub fn spawn_dispatcher_on(
 ) {
     component.install_inbox_rx(rx);
     let gate = Arc::clone(&entry.gate);
+    let mailbox = entry.mailbox;
+    let thread_name = dispatcher_thread_name(&registry, mailbox);
     let handle = thread::Builder::new()
-        .name("aether-component-dispatch".into())
-        .spawn(move || dispatcher_loop(component, registry, gate))
+        .name(thread_name)
+        .spawn(move || dispatcher_loop(component, registry, gate, mailbox))
         .expect("spawn component dispatcher");
     let prev = entry.handle.lock().unwrap().replace(handle);
     debug_assert!(prev.is_none(), "entry handle slot must be empty");
+}
+
+/// Build the dispatcher-thread name. Issue #321: panic-hook events
+/// carry `thread.name` as a structured field, and naming threads after
+/// their mailbox makes "what crashed?" answerable from one log line.
+/// Format: `aether-component-{name}-{mailbox_short}` where
+/// `mailbox_short` is the low 16 hex digits of the 64-bit id (full id
+/// is too long for `top` / `ps`). Falls back to `"?"` for unnamed
+/// mailboxes — sinks-only lookups would already have surfaced a
+/// different error before getting here, but the fallback keeps the
+/// thread-name path infallible.
+fn dispatcher_thread_name(registry: &Registry, mailbox: MailboxId) -> String {
+    let name = registry
+        .mailbox_name(mailbox)
+        .unwrap_or_else(|| "?".to_string());
+    format!("aether-component-{}-{:016x}", name, mailbox.0)
 }
 
 fn dispatcher_loop(
     mut component: Component,
     registry: Arc<Registry>,
     gate: Arc<PendingGate>,
+    mailbox: MailboxId,
 ) -> Component {
     // ADR-0042: the receiver lives on `SubstrateCtx`; `next_mail`
     // drains the overflow buffer (any non-match mail set aside by a
     // completed `wait_reply_p32` call) ahead of the mpsc. `None`
     // means both are empty and the inbox is closed — our exit.
     while let Some(mail) = component.next_mail() {
-        let rc = component.deliver(&mail).expect("component.deliver failed");
-        if rc == DISPATCH_UNKNOWN_KIND {
-            let kind_name = registry
-                .kind_name(mail.kind)
-                .unwrap_or_else(|| format!("kind#{:#x}", mail.kind));
-            tracing::warn!(
-                target: "aether_substrate::scheduler",
-                mailbox = ?mail.recipient,
-                kind = %kind_name,
-                "component has no handler for mail kind (ADR-0033 strict receiver); dropped",
-            );
+        // Issue #321: open a `dispatch` span around `deliver` so the
+        // panic hook auto-captures the mailbox + kind context if the
+        // guest (or our host code) panics. Pre-resolve `kind_name`
+        // once and reuse it both as a span field and (if we hit the
+        // unknown-kind path) the warn message.
+        let kind_name = registry
+            .kind_name(mail.kind)
+            .unwrap_or_else(|| format!("kind#{:#x}", mail.kind));
+        let span = tracing::info_span!(
+            "dispatch",
+            mailbox = mailbox.0,
+            kind = %kind_name,
+        );
+        let _enter = span.enter();
+        // Issue #321: replace `.expect("component.deliver failed")`
+        // with a logged Err. A wasmtime trap (guest unreachable, host-
+        // fn panic caught by wasmtime, etc.) used to take the whole
+        // dispatcher thread down silently; now it surfaces as a
+        // structured event and the dispatcher continues draining.
+        // Phase 2 (mailbox-Dead transitions, component_died broadcast)
+        // ships separately.
+        match component.deliver(&mail) {
+            Ok(rc) => {
+                if rc == DISPATCH_UNKNOWN_KIND {
+                    tracing::warn!(
+                        target: "aether_substrate::scheduler",
+                        mailbox = ?mail.recipient,
+                        kind = %kind_name,
+                        "component has no handler for mail kind (ADR-0033 strict receiver); dropped",
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: "aether_substrate::scheduler",
+                    mailbox = ?mail.recipient,
+                    kind = %kind_name,
+                    error = %e,
+                    "component deliver failed: wasmtime returned Err (likely guest trap)",
+                );
+            }
         }
         decrement_and_notify(&gate);
     }
@@ -301,7 +369,7 @@ impl Scheduler {
     /// `id` — replacement is an ADR-0010 primitive in its own right,
     /// handled by `ControlPlane::handle_replace`.
     pub fn add_component(&self, id: MailboxId, component: Component) {
-        let entry = ComponentEntry::spawn(component, Arc::clone(&self.registry));
+        let entry = ComponentEntry::spawn(component, Arc::clone(&self.registry), id);
         self.components.write().unwrap().insert(id, Arc::new(entry));
     }
 }
@@ -363,11 +431,27 @@ mod tests {
                 i32.const 0))
     "#;
 
-    fn minimal_component() -> Component {
+    /// Issue #321: guest unreachables on every `receive_p32` call.
+    /// Wasmtime translates the WASM `unreachable` opcode into a trap
+    /// that surfaces as `Err(wasmtime::Error)` from `Component::deliver`.
+    /// Pre-issue-321 the dispatcher's `.expect("component.deliver
+    /// failed")` turned that Err into a panic that killed the actor
+    /// thread silently — `drain` then deadlocked because the pending
+    /// counter never decremented. With the fix, `deliver` errs cleanly,
+    /// the dispatcher logs a `tracing::error!` and continues to the
+    /// next mail.
+    const WAT_TRAPS_IN_RECEIVE: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                unreachable))
+    "#;
+
+    fn component_from_wat(wat: &str) -> Component {
         let engine = Engine::default();
         let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
         crate::host_fns::register(&mut linker).expect("register host fns");
-        let wasm = wat::parse_str(WAT_NOOP).expect("compile WAT");
+        let wasm = wat::parse_str(wat).expect("compile WAT");
         let module = Module::new(&engine, &wasm).expect("compile module");
         let ctx = SubstrateCtx::new(
             MailboxId(0),
@@ -379,10 +463,15 @@ mod tests {
         Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate")
     }
 
+    fn minimal_component() -> Component {
+        component_from_wat(WAT_NOOP)
+    }
+
     fn spawn_entry() -> Arc<ComponentEntry> {
         Arc::new(ComponentEntry::spawn(
             minimal_component(),
             Arc::new(Registry::new()),
+            MailboxId(0),
         ))
     }
 
@@ -428,5 +517,95 @@ mod tests {
     fn splice_inbox_joins_old_dispatcher() {
         let entry = spawn_entry();
         let (_old_component, _new_rx) = splice_inbox(&entry);
+    }
+
+    /// Issue #321: thread name carries the resolved mailbox name plus a
+    /// 16-hex-char suffix derived from the 64-bit mailbox id. The panic
+    /// hook's `thread.name` field is what makes a dispatcher panic
+    /// answerable from one log line, so the format is load-bearing.
+    #[test]
+    fn dispatcher_thread_name_includes_mailbox_name_and_id() {
+        let registry = Registry::new();
+        let mbox = registry.register_component("test-comp");
+        let name = dispatcher_thread_name(&registry, mbox);
+        assert!(
+            name.starts_with("aether-component-test-comp-"),
+            "unexpected prefix: {name}",
+        );
+        // 16-hex-char id suffix.
+        let suffix = &name[name.len() - 16..];
+        assert_eq!(suffix.len(), 16);
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_hexdigit()),
+            "id suffix not hex: {suffix}",
+        );
+    }
+
+    /// Falls back to `?` when the mailbox isn't registered. Real
+    /// substrate paths register the mailbox before spawning, but the
+    /// fallback keeps the thread-name path infallible — a missing name
+    /// must never crash a dispatcher spawn.
+    #[test]
+    fn dispatcher_thread_name_falls_back_when_unnamed() {
+        let registry = Registry::new();
+        let name = dispatcher_thread_name(&registry, MailboxId(0xABCDEF1234567890));
+        assert_eq!(name, "aether-component-?-abcdef1234567890");
+    }
+
+    /// Load-bearing regression for issue #321: a guest that traps on
+    /// every `receive_p32` (the post-fix behaviour we're relying on)
+    /// no longer kills the dispatcher thread. Pre-fix this test would
+    /// deadlock in `drain` because `.expect("component.deliver
+    /// failed")` panicked the dispatcher before it could decrement the
+    /// pending counter.
+    #[test]
+    fn trap_in_receive_does_not_kill_dispatcher() {
+        let entry = Arc::new(ComponentEntry::spawn(
+            component_from_wat(WAT_TRAPS_IN_RECEIVE),
+            Arc::new(Registry::new()),
+            MailboxId(0),
+        ));
+
+        // First mail: guest traps. With the fix, dispatcher logs Err
+        // and decrements the gate; without the fix, drain blocks
+        // forever (pending stays at 1 because the panicked dispatcher
+        // never ran `decrement_and_notify`).
+        assert!(entry.send(Mail::new(MailboxId(0), 0xDD, vec![1], 1)));
+        entry.drain();
+        assert_eq!(
+            entry.gate.pending.load(Ordering::Acquire),
+            0,
+            "dispatcher must decrement pending even when deliver returns Err",
+        );
+
+        // Second mail: dispatcher should still be alive (proof: drain
+        // returns) and processing. Pre-fix this would also deadlock
+        // because the thread died on mail #1.
+        assert!(entry.send(Mail::new(MailboxId(0), 0xDD, vec![2], 1)));
+        entry.drain();
+        assert_eq!(entry.gate.pending.load(Ordering::Acquire), 0);
+
+        // Clean shutdown: close the channel, dispatcher exits,
+        // close_and_join recovers the Component without panicking.
+        let _component = close_and_join(entry);
+    }
+
+    /// Repeated traps don't leak state or accumulate pending counts.
+    /// Strict regression check for the decrement_and_notify path
+    /// running on every iteration of the dispatcher loop, not just
+    /// the Ok arm.
+    #[test]
+    fn repeated_traps_drain_independently() {
+        let entry = Arc::new(ComponentEntry::spawn(
+            component_from_wat(WAT_TRAPS_IN_RECEIVE),
+            Arc::new(Registry::new()),
+            MailboxId(0),
+        ));
+        for i in 0..16u32 {
+            assert!(entry.send(Mail::new(MailboxId(0), 0xDD, vec![i as u8], 1)));
+        }
+        entry.drain();
+        assert_eq!(entry.gate.pending.load(Ordering::Acquire), 0);
+        let _component = close_and_join(entry);
     }
 }

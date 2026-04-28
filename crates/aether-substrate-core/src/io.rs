@@ -1109,7 +1109,11 @@ mod tests {
         );
         let component =
             Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
-        let entry = Arc::new(ComponentEntry::spawn(component, Arc::clone(&registry)));
+        let entry = Arc::new(ComponentEntry::spawn(
+            component,
+            Arc::clone(&registry),
+            caller_mailbox,
+        ));
         components
             .write()
             .unwrap()
