@@ -277,50 +277,82 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
             // the thread running this host fn, so nobody else is
             // contending for the lock — it's structural, not
             // performance-critical.
+            //
+            // ADR-0042: scan the overflow buffer FIRST. A prior
+            // `wait_reply_p32` may have parked the matching reply
+            // (e.g. `WAIT_BUFFER_TOO_SMALL` push_front), or the
+            // dispatcher may have left non-matching mail behind for
+            // us to skip past. The dispatcher's `next_mail` already
+            // drains overflow ahead of `inbox_rx`; reading from
+            // `inbox_rx` here without first consulting overflow
+            // would let parked replies leak into normal dispatch.
             let mail = {
                 let ctx = caller.data();
-                let rx_guard = ctx.inbox_rx.lock().unwrap();
-                let Some(rx) = rx_guard.as_ref() else {
-                    // No inbox installed — pathological. Treat
-                    // as disconnect so the guest aborts rather
-                    // than spins.
-                    return WAIT_CANCELLED;
-                };
-                loop {
-                    let recv = if clamped == 0 {
-                        // `timeout_ms == 0`: try_recv only — drain
-                        // whatever's already queued, stop without
-                        // parking.
-                        match rx.try_recv() {
-                            Ok(m) => Ok(m),
-                            Err(TryRecvError::Empty) => Err(RecvTimeoutError::Timeout),
-                            Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
-                        }
-                    } else {
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        if remaining.is_zero() {
-                            Err(RecvTimeoutError::Timeout)
-                        } else {
-                            rx.recv_timeout(remaining)
-                        }
-                    };
-                    match recv {
-                        Ok(m)
-                            if m.kind == expected_kind
-                                && (expected_correlation == 0
-                                    || m.reply_to.correlation_id == expected_correlation) =>
+                // Pop a matching entry out of overflow if there is
+                // one, preserving the relative FIFO order of the
+                // entries we leave behind.
+                let matched_from_overflow = {
+                    let mut overflow = ctx.inbox_overflow.lock().unwrap();
+                    let mut idx = None;
+                    for (i, m) in overflow.iter().enumerate() {
+                        if m.kind == expected_kind
+                            && (expected_correlation == 0
+                                || m.reply_to.correlation_id == expected_correlation)
                         {
-                            break m;
+                            idx = Some(i);
+                            break;
                         }
-                        Ok(m) => {
-                            // Non-match (wrong kind, or right kind but
-                            // not our correlation): park on overflow
-                            // so the dispatcher picks it up after we
-                            // unwind. ADR-0042 correlation filter.
-                            ctx.inbox_overflow.lock().unwrap().push_back(m);
+                    }
+                    idx.and_then(|i| overflow.remove(i))
+                };
+                if let Some(m) = matched_from_overflow {
+                    m
+                } else {
+                    let rx_guard = ctx.inbox_rx.lock().unwrap();
+                    let Some(rx) = rx_guard.as_ref() else {
+                        // No inbox installed — pathological. Treat
+                        // as disconnect so the guest aborts rather
+                        // than spins.
+                        return WAIT_CANCELLED;
+                    };
+                    loop {
+                        let recv = if clamped == 0 {
+                            // `timeout_ms == 0`: try_recv only — drain
+                            // whatever's already queued, stop without
+                            // parking.
+                            match rx.try_recv() {
+                                Ok(m) => Ok(m),
+                                Err(TryRecvError::Empty) => Err(RecvTimeoutError::Timeout),
+                                Err(TryRecvError::Disconnected) => {
+                                    Err(RecvTimeoutError::Disconnected)
+                                }
+                            }
+                        } else {
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            if remaining.is_zero() {
+                                Err(RecvTimeoutError::Timeout)
+                            } else {
+                                rx.recv_timeout(remaining)
+                            }
+                        };
+                        match recv {
+                            Ok(m)
+                                if m.kind == expected_kind
+                                    && (expected_correlation == 0
+                                        || m.reply_to.correlation_id == expected_correlation) =>
+                            {
+                                break m;
+                            }
+                            Ok(m) => {
+                                // Non-match (wrong kind, or right kind but
+                                // not our correlation): park on overflow
+                                // so the dispatcher picks it up after we
+                                // unwind. ADR-0042 correlation filter.
+                                ctx.inbox_overflow.lock().unwrap().push_back(m);
+                            }
+                            Err(RecvTimeoutError::Timeout) => return WAIT_TIMEOUT,
+                            Err(RecvTimeoutError::Disconnected) => return WAIT_CANCELLED,
                         }
-                        Err(RecvTimeoutError::Timeout) => return WAIT_TIMEOUT,
-                        Err(RecvTimeoutError::Disconnected) => return WAIT_CANCELLED,
                     }
                 }
             };
