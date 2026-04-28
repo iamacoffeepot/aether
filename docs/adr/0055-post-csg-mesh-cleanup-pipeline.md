@@ -1,6 +1,6 @@
 # ADR-0055: Post-CSG mesh cleanup pipeline
 
-- **Status:** Proposed
+- **Status:** Superseded by ADR-0062
 - **Date:** 2026-04-26
 - **Amends:** ADR-0054
 

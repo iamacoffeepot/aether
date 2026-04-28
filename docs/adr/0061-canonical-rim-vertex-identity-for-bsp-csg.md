@@ -1,6 +1,6 @@
 # ADR-0061: Canonical Rim Vertex Identity for BSP CSG
 
-- **Status:** Proposed
+- **Status:** Superseded by ADR-0062
 - **Date:** 2026-04-28
 
 ## Context
