@@ -11,3 +11,7 @@ aether-component = { path = "../aether-component" }
 aether-dsl-mesh = { path = "../aether-dsl-mesh" }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }
+# ADR-0060: tracing facade reaches the substrate's `aether.sink.log`
+# via the SDK's `MailSubscriber` (installed by `export!`). The crate
+# itself stays no_std-friendly via `default-features = false`.
+tracing = { version = "0.1", default-features = false }

@@ -21,8 +21,10 @@
 //!
 //! Errors (parse failures, missing files, adapter rejection) silently
 //! drop the load. Visible symptom: no triangles render. Substrate-side
-//! errors (NotFound, Forbidden) surface via `engine_logs`. Per-component
-//! tracing is parked until the SDK exposes a logging facility.
+//! errors (NotFound, Forbidden) surface via `engine_logs`. The SDK now
+//! exposes a `tracing`-based logging facility (ADR-0060) so per-
+//! component warns can surface the parse-side too — left as a focused
+//! follow-up rather than scoped into the ADR-0060 implementation PR.
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io};
 use aether_kinds::{DrawTriangle, LoadStaticMesh, ReadResult, Tick, Vertex};

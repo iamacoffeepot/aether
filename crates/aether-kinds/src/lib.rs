@@ -1450,6 +1450,31 @@ mod control_plane {
         Ok { id: u64 },
         Err { id: u64, error: HandleError },
     }
+
+    // ADR-0060 guest-side logging via mail sink. One postcard kind on
+    // the substrate-owned `"aether.sink.log"` mailbox. The SDK installs
+    // a `tracing::Subscriber` that formats events into this shape and
+    // sends them; chassis sinks decode and re-emit through the host
+    // `tracing` subscriber so `engine_logs` (ADR-0023) sees them.
+
+    /// `aether.log` — a single tracing event the guest emitted, ready
+    /// for the substrate to re-emit into its own subscriber. Mailed to
+    /// the `"aether.sink.log"` sink; fire-and-forget (no reply).
+    /// `level` maps to a `tracing::Level` substrate-side
+    /// (`0 = trace`, `1 = debug`, `2 = info`, `3 = warn`, `4 = error`).
+    /// `target` is a module-style string the chassis's `EnvFilter`
+    /// matches against; the SDK defaults it to the guest's crate name.
+    /// `message` is pre-formatted with structured fields collapsed into
+    /// the message body in fields-first form (e.g.
+    /// `"error=<Display> count=3 parse failed"`), capped at 4096 bytes
+    /// by the SDK with a `" [truncated]"` suffix on overflow.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.log")]
+    pub struct LogEvent {
+        pub level: u8,
+        pub target: String,
+        pub message: String,
+    }
 }
 
 pub use dsl_mesh::*;

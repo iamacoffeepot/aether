@@ -52,6 +52,7 @@ dependencies = [
  "inventory",
  "postcard",
  "serde",
+ "tracing",
 ]
 
 [[package]]
@@ -155,6 +156,7 @@ dependencies = [
  "aether-dsl-mesh",
  "aether-kinds",
  "aether-math",
+ "tracing",
 ]
 
 [[package]]
@@ -182,6 +184,7 @@ dependencies = [
  "aether-mail",
  "bytemuck",
  "dirs",
+ "log",
  "postcard",
  "serde",
  "tracing",

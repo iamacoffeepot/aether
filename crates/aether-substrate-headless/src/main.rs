@@ -230,6 +230,11 @@ fn main() -> wasmtime::Result<()> {
         aether_substrate_core::net::net_sink_handler(net_adapter, Arc::clone(&boot.queue)),
     );
 
+    // `aether.sink.log`: ADR-0060. Same handler as desktop — guest
+    // log mail is independent of GPU / windowing, so headless wires
+    // it identically.
+    aether_substrate_core::log_sink::register_log_sink(&boot.registry);
+
     let tick_hz = parse_tick_hz_env();
     let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));
     tracing::info!(

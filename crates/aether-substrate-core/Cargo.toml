@@ -19,6 +19,13 @@ postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# ADR-0060 guest-side logging: the `aether.sink.log` handler bridges
+# decoded `LogEvent` payloads back into the host tracing pipeline.
+# `log::log!(target: dyn, lvl, ...)` accepts a dynamic target the
+# `tracing-log` integration in `tracing-subscriber` (default feature)
+# lifts into a tracing event, so the chassis EnvFilter sees the
+# guest's reported target without us hand-rolling a Metadata cache.
+log = "0.4"
 # ADR-0041 I/O namespace defaults. `dirs` resolves XDG on Linux,
 # Application Support on macOS, AppData on Windows without reimple-
 # menting platform-specific path logic per chassis.
