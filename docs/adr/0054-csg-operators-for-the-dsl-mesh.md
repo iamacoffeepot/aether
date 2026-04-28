@@ -1,6 +1,6 @@
 # ADR-0054: CSG operators for the DSL mesh
 
-- **Status:** Proposed
+- **Status:** Superseded by ADR-0062
 - **Date:** 2026-04-26
 - **Amends:** ADR-0026, ADR-0051
 
