@@ -1,6 +1,6 @@
 //! Player component. A world-space position + a small triangular body
-//! that renders itself and publishes `TopdownSetCenter` each tick so an
-//! attached top-down camera follows.
+//! that renders itself and publishes `CameraTopdownSet` each tick so a
+//! topdown-mode camera follows the player on the world `xy` plane.
 //!
 //! Two motion modes, swapped at runtime via `PlayerSetMode`:
 //!
@@ -24,15 +24,16 @@
 //! In tile-step mode, `PlayerSetVelocity` has no visible effect
 //! because velocity is not applied.
 //!
-//! Sink dependencies: `"aether.sink.render"` (substrate), `"topdown"` (the top-down
-//! camera, if any), `"world"` (the world authority in tile-step mode).
-//! Missing sinks surface as `UnresolvedMail` diagnostics but don't
-//! crash the player — the corresponding emissions just go to the abyss.
+//! Sink dependencies: `"aether.sink.render"` (substrate), `"camera"`
+//! (the multi-camera component, addressed by its conventional load
+//! name), `"world"` (the world authority in tile-step mode). Missing
+//! sinks surface as `UnresolvedMail` diagnostics but don't crash the
+//! player — the corresponding emissions just go to the abyss.
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
 use aether_kinds::{
-    DrawTriangle, Key, KeyRelease, PlayerRequestStep, PlayerSetMode, PlayerSetPosition,
-    PlayerSetVelocity, PlayerStepResult, Tick, TopdownSetCenter, Vertex, keycode,
+    CameraTopdownSet, DrawTriangle, Key, KeyRelease, PlayerRequestStep, PlayerSetMode,
+    PlayerSetPosition, PlayerSetVelocity, PlayerStepResult, Tick, TopdownParams, Vertex, keycode,
 };
 
 const PLAYER_HALF: f32 = 0.25;
@@ -55,7 +56,11 @@ const MODE_TILE_STEP: u32 = 1;
 
 pub struct Player {
     render: Sink<DrawTriangle>,
-    camera_follow: Sink<TopdownSetCenter>,
+    camera_follow: Sink<CameraTopdownSet>,
+    /// Cached camera-follow envelope. The `name` field is set once at
+    /// init and reused every tick to avoid re-allocating the String;
+    /// only `params.center` is mutated per frame.
+    follow_msg: CameraTopdownSet,
     world: Sink<PlayerRequestStep>,
     pos_x: f32,
     pos_y: f32,
@@ -102,11 +107,15 @@ impl Player {
 /// Player body with runtime-switchable motion model.
 ///
 /// # Agent
-/// Load alongside the top-down camera (`aether-camera-component`'s
-/// `topdown` example, named `"topdown"`). For grid-game shapes, also
-/// load a world authority (e.g. `aether-demo-sokoban`, named
-/// `"world"`) and send `PlayerSetMode { mode: 1 }` to switch to
-/// tile-step motion.
+/// Load alongside the multi-camera component (`aether-camera-component`),
+/// loaded as `"camera"` — the player publishes `CameraTopdownSet
+/// { name: "main", params: { center: [px, py] } }` each tick to follow
+/// the player on the world `xy` plane, so the camera component should
+/// have a topdown-mode camera named `"main"` (the bootstrap default
+/// is orbit, so send `set_mode { name: "main", mode: Topdown(..) }`
+/// after load). For grid-game shapes, also load a world authority
+/// (e.g. `aether-demo-sokoban`, named `"world"`) and send
+/// `PlayerSetMode { mode: 1 }` to switch to tile-step motion.
 ///
 /// **Control surface**
 ///
@@ -129,7 +138,14 @@ impl Component for Player {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Player {
             render: ctx.resolve_sink::<DrawTriangle>("aether.sink.render"),
-            camera_follow: ctx.resolve_sink::<TopdownSetCenter>("topdown"),
+            camera_follow: ctx.resolve_sink::<CameraTopdownSet>("camera"),
+            follow_msg: CameraTopdownSet {
+                name: "main".to_owned(),
+                params: TopdownParams {
+                    center: Some([0.0, 0.0]),
+                    extent: None,
+                },
+            },
             world: ctx.resolve_sink::<PlayerRequestStep>("world"),
             pos_x: 0.0,
             pos_y: 0.0,
@@ -192,13 +208,8 @@ impl Component for Player {
         };
         ctx.send(&self.render, &body);
 
-        ctx.send(
-            &self.camera_follow,
-            &TopdownSetCenter {
-                x: self.pos_x,
-                y: self.pos_y,
-            },
-        );
+        self.follow_msg.params.center = Some([self.pos_x, self.pos_y]);
+        ctx.send(&self.camera_follow, &self.follow_msg);
     }
 
     /// Teleport. Honors both modes — in tile-step mode this is the

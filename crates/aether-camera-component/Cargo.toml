@@ -10,12 +10,7 @@ crate-type = ["cdylib"]
 aether-component = { path = "../aether-component" }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }
-
-# Sibling cdylibs for alternate camera shapes. `src/lib.rs` is the
-# blessed orbit camera; each example here is its own wasm loadable
-# via `load_component` — switching between cameras is a drop+load
-# dance today, with mode-switching in the canonical component a
-# future refactor once multiple cameras prove they want to coexist.
-[[example]]
-name = "topdown"
-crate-type = ["cdylib"]
+# Substrate-side `aether.sink.log` (ADR-0060) for warn-log on rejected
+# mail (unknown camera, mode mismatch, etc.). Default-features-off to
+# match the rest of the SDK pattern.
+tracing = { version = "0.1", default-features = false }
