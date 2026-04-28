@@ -36,6 +36,7 @@
 //! the legacy triangle-domain ops in [`super::ops`] compose cleanup
 //! and tessellation explicitly via [`super::tessellate::run`].
 
+mod invariants;
 mod merge;
 pub(in crate::csg) mod mesh;
 mod slivers;
@@ -59,10 +60,26 @@ pub(in crate::csg) fn run_to_indexed(polygons: Vec<Polygon>) -> mesh::IndexedMes
     // be one annular face comes out as several small loops. Repair
     // first canonicalises the edge subdivisions so merge sees clean
     // twin pairs.
-    mesh::IndexedMesh::weld(polygons)
+    let merged = mesh::IndexedMesh::weld(polygons)
         .repair_tjunctions()
-        .merge_coplanar()
-        .remove_slivers()
+        .merge_coplanar();
+    check_invariants_after_merge(&merged);
+    merged.remove_slivers()
+}
+
+/// Issue 337: post-merge invariant — no surviving twin edges in any
+/// `(plane, color)` bucket. Warn-only for now; promote to `debug_assert!`
+/// after a soak period once warns have gone quiet.
+fn check_invariants_after_merge(mesh: &mesh::IndexedMesh) {
+    let violations = invariants::find_twin_edges(mesh);
+    if !violations.is_empty() {
+        let preview: Vec<_> = violations.iter().take(3).collect();
+        tracing::warn!(
+            count = violations.len(),
+            preview = ?preview,
+            "post-merge invariant violated: surviving twin edges (issue 337)"
+        );
+    }
 }
 
 /// Run the cleanup pipeline on a polygon list, stopping after pass 4 so
