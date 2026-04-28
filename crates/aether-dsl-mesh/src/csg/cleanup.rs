@@ -9,15 +9,20 @@
 //! 1. **Vertex welding** — converts owned-vertex polygons into an
 //!    indexed-mesh representation, deduplicating vertices by exact
 //!    integer equality. Foundation for the other passes.
-//! 2. **Coplanar polygon merging** — groups polygons by exact `Plane3`
-//!    signature, finds connected components by shared edges, extracts
-//!    each component's boundary loop(s), and emits one indexed polygon
-//!    per loop (no triangulation here per ADR-0057 — the canonical
-//!    intermediate is n-gon loops).
-//! 3. **T-junction removal** — finds vertices in the welded pool that
+//! 2. **T-junction repair** — finds vertices in the welded pool that
 //!    lie strictly on an edge of a polygon, and subdivides the edge
 //!    so the vertex becomes part of the polygon's vertex list. Loops
-//!    to fixed point. Operates on n-gons.
+//!    to fixed point. Runs *before* merge so adjacent BSP fragments
+//!    that share a collinear-but-subdivided edge end up with matching
+//!    half-edges, which is what twin cancellation in pass 3 needs to
+//!    pair them.
+//! 3. **Coplanar polygon merging** — groups polygons by `(Plane3,
+//!    color)`, runs a single directed-edge cancellation across the
+//!    whole bucket (twin pairs drop out as interior edges), then
+//!    walks the surviving boundary into closed loops via angular
+//!    continuation at X-junctions. Emits one indexed polygon per
+//!    loop (no triangulation here per ADR-0057 — the canonical
+//!    intermediate is n-gon loops).
 //! 4. **Sliver removal** — collapses near-coincident vertex pairs that
 //!    bound a short edge in some polygon (the symptom of off-axis BSP
 //!    drifting beyond the welding tolerance). Edge-triggered, not
@@ -45,9 +50,18 @@ use crate::csg::polygon::Polygon;
 /// that lets `tessellate` reuse the indexed representation without
 /// round-tripping through `Vec<Polygon>`.
 pub(in crate::csg) fn run_to_indexed(polygons: Vec<Polygon>) -> mesh::IndexedMesh {
+    // T-junction repair BEFORE merge: BSP fragments share collinear-
+    // but-subdivided edges (one polygon's edge `(a,b)` against the
+    // neighbour's `(b,c)` + `(c,a)` where `c` lies strictly between
+    // `a` and `b`). Without first inserting `c` into `(a,b)`, the
+    // bucket-wide twin cancellation in `merge_coplanar` can't pair
+    // these as `(a,c) ↔ (c,a)` and `(c,b) ↔ (b,c)`, so what should
+    // be one annular face comes out as several small loops. Repair
+    // first canonicalises the edge subdivisions so merge sees clean
+    // twin pairs.
     mesh::IndexedMesh::weld(polygons)
-        .merge_coplanar()
         .repair_tjunctions()
+        .merge_coplanar()
         .remove_slivers()
 }
 
