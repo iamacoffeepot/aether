@@ -137,8 +137,10 @@ pub struct SpawnSubstrateArgs {
     /// half-loaded scene is ever returned to the caller.
     ///
     /// Ordering matters for scenes where one component mails another
-    /// by name at init time; the `topdown` camera + `player` pairing
-    /// is the canonical example.
+    /// by name at init time; the `camera` (multi-camera component) +
+    /// `player` pairing is the canonical example — player resolves
+    /// the `"camera"` sink during init, so the camera component must
+    /// load first.
     #[serde(default)]
     pub components: Vec<SpawnComponentSpec>,
 }

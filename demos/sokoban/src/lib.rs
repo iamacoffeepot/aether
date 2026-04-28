@@ -132,7 +132,10 @@ pub struct Sokoban {
 ///
 /// # Agent
 /// Load as `"world"` alongside the external player (`"player"`) and
-/// the top-down camera (`"topdown"`). On load, sokoban emits
+/// the multi-camera component (`"camera"`). The camera should have a
+/// topdown-mode camera named `"main"` (the bootstrap default is
+/// orbit, so send `aether.camera.set_mode { name: "main", mode:
+/// Topdown(..) }` after load). On load, sokoban emits
 /// `PlayerSetPosition` to the external player so it arrives at the
 /// level's starting cell.
 ///
