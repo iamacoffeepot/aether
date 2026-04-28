@@ -62,13 +62,35 @@ pub(in crate::csg) fn run_to_indexed(polygons: Vec<Polygon>) -> mesh::IndexedMes
     // twin pairs.
     let welded = mesh::IndexedMesh::weld(polygons);
     check_invariants_after_weld(&welded);
+    check_simple_loops(&welded, "post-weld");
     let repaired = welded.repair_tjunctions();
     check_invariants_after_tjunctions(&repaired);
+    check_simple_loops(&repaired, "post-tjunctions");
     let merged = repaired.merge_coplanar();
     check_invariants_after_merge(&merged);
+    check_simple_loops(&merged, "post-merge");
     let cleaned = merged.remove_slivers();
     check_invariants_after_slivers(&cleaned);
+    check_simple_loops(&cleaned, "post-slivers");
     cleaned
+}
+
+/// Stage-boundary invariant from the auditor's spike investigation:
+/// no polygon may contain the same `VertexId` twice in its vertex loop.
+/// Wired into every cleanup stage so the first pass to emit a non-simple
+/// loop is identifiable from the warn stream alone. Warn-only for now;
+/// promote to `debug_assert!` after a soak period.
+fn check_simple_loops(mesh: &mesh::IndexedMesh, stage: &str) {
+    let violations = invariants::find_non_simple_loops(mesh);
+    if !violations.is_empty() {
+        let preview: Vec<_> = violations.iter().take(3).collect();
+        tracing::warn!(
+            stage,
+            count = violations.len(),
+            preview = ?preview,
+            "non-simple loop emitted by cleanup stage (spike or repeated vertex)"
+        );
+    }
 }
 
 /// Issue 337: post-weld invariant — every polygon vertex id resolves
