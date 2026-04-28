@@ -17,6 +17,7 @@ pub mod serialize;
 pub mod simplify;
 
 pub use ast::{Axis, Node};
+pub use csg::point::Point3;
 pub use mesh::{MeshError, Triangle, mesh};
 pub use obj::to_obj;
 pub use parse::{ParseError, parse};

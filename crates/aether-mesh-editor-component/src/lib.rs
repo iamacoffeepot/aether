@@ -31,7 +31,7 @@
 //!    re-write the file and re-send `set_path`).
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io};
-use aether_dsl_mesh::{Polygon, tessellate_polygon};
+use aether_dsl_mesh::{Point3, Polygon, tessellate_polygon};
 use aether_kinds::{DrawTriangle, ReadResult, SetPath, SetText, Tick, Vertex};
 use aether_math::Vec3;
 
@@ -202,13 +202,18 @@ impl DslMeshEditor {
 /// World-space thickness — outlines stay the same size in world units
 /// regardless of camera distance. They look thinner edge-on, which is
 /// the right behavior for face boundaries (a face viewed edge-on is
-/// itself a line).
+/// itself a line). Polygon vertices arrive in fixed-point integer
+/// coordinates (per the polygon-domain integer-throughout invariant);
+/// we convert to `Vec3` here at the GPU upload boundary so the
+/// world-space cross-product math runs in `f32` as wgpu expects.
 fn polygon_outline_triangles(polygon: &Polygon) -> Vec<[Vec3; 3]> {
     let mut tris = Vec::new();
     let n = polygon.plane_normal;
-    outline_loop(&polygon.vertices, n, &mut tris);
+    let outer_f32: Vec<Vec3> = polygon.vertices.iter().map(|p| p.to_f32()).collect();
+    outline_loop(&outer_f32, n, &mut tris);
     for hole in &polygon.holes {
-        outline_loop(hole, n, &mut tris);
+        let hole_f32: Vec<Vec3> = hole.iter().map(|p| p.to_f32()).collect();
+        outline_loop(&hole_f32, n, &mut tris);
     }
     tris
 }
@@ -236,9 +241,9 @@ fn outline_loop(loop_: &[Vec3], n: Vec3, out: &mut Vec<[Vec3; 3]>) {
     }
 }
 
-fn to_draw_triangle_palette(tri: [Vec3; 3], color: u32) -> DrawTriangle {
+fn to_draw_triangle_palette(tri: [Point3; 3], color: u32) -> DrawTriangle {
     let rgb = PALETTE[(color as usize) % PALETTE.len()];
-    to_draw_triangle_rgb(tri, rgb)
+    to_draw_triangle_rgb([tri[0].to_f32(), tri[1].to_f32(), tri[2].to_f32()], rgb)
 }
 
 fn to_draw_triangle_rgb(tri: [Vec3; 3], rgb: (f32, f32, f32)) -> DrawTriangle {
