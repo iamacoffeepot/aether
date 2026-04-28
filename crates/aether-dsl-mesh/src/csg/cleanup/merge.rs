@@ -91,10 +91,17 @@ impl IndexedMesh {
         let mut sorted_keys: Vec<&BucketKey> = buckets.keys().collect();
         sorted_keys.sort();
 
+        // Compute the global directed-edge multiset once. `process_bucket`
+        // and `collapse_unbacked_boundary_runs` both need to ask "is this
+        // edge backed by another bucket?" — i.e. is `(b, a)` present in
+        // any non-coplanar polygon? A single global count plus the
+        // bucket's own count answers that without rebuilding per bucket.
+        let global_directed = build_global_directed(&polygons);
+
         let mut merged: Vec<IndexedPolygon> = Vec::with_capacity(polygons.len());
         for key in sorted_keys {
             let bucket = &buckets[key];
-            process_bucket(&vertices, &polygons, bucket, &mut merged);
+            process_bucket(&vertices, &polygons, bucket, &global_directed, &mut merged);
         }
 
         IndexedMesh {
@@ -102,6 +109,19 @@ impl IndexedMesh {
             polygons: merged,
         }
     }
+}
+
+fn build_global_directed(polygons: &[IndexedPolygon]) -> HashMap<(VertexId, VertexId), u32> {
+    let mut directed: HashMap<(VertexId, VertexId), u32> = HashMap::new();
+    for poly in polygons {
+        let m = poly.vertices.len();
+        for i in 0..m {
+            let a = poly.vertices[i];
+            let b = poly.vertices[(i + 1) % m];
+            *directed.entry((a, b)).or_insert(0) += 1;
+        }
+    }
+    directed
 }
 
 fn group_by_bucket(polygons: &[IndexedPolygon]) -> HashMap<BucketKey, Vec<usize>> {
@@ -119,6 +139,7 @@ fn process_bucket(
     vertices: &[Point3],
     polygons: &[IndexedPolygon],
     bucket: &[usize],
+    global_directed: &HashMap<(VertexId, VertexId), u32>,
     out: &mut Vec<IndexedPolygon>,
 ) {
     if bucket.len() == 1 {
@@ -136,11 +157,7 @@ fn process_bucket(
             *directed.entry((a, b)).or_insert(0) += 1;
         }
     }
-    let boundary: Vec<(VertexId, VertexId)> = directed
-        .iter()
-        .filter(|&(&(a, b), _)| !directed.contains_key(&(b, a)))
-        .map(|(&edge, _)| edge)
-        .collect();
+    let boundary = boundary_edges_after_twin_cancellation(&directed);
 
     let plane = polygons[bucket[0]].plane;
     let loops = match extract_loops(&boundary, vertices, &plane) {
@@ -156,12 +173,178 @@ fn process_bucket(
 
     let color = polygons[bucket[0]].color;
     for loop_verts in loops {
+        let loop_verts = collapse_unbacked_boundary_runs(&loop_verts, global_directed, &directed);
         out.push(IndexedPolygon {
             vertices: loop_verts,
             plane,
             color,
         });
     }
+}
+
+/// Survivors of bucket-wide twin cancellation. For each canonical pair
+/// `(a, b)`, the multiset count of `(a, b)` and `(b, a)` differs by some
+/// imbalance — that imbalance is what survives, in the dominant direction.
+///
+/// Multiplicity matters: BSP CSG can emit two copies of one directed
+/// edge with one copy of its reverse (e.g. three coplanar fragments
+/// meeting along a partition cut, two on one side and one on the other).
+/// The naive boolean filter treats "both directions present" as
+/// cancelled, which over-cancels by one and tears the boundary open.
+/// Issue #350.
+fn boundary_edges_after_twin_cancellation(
+    directed: &HashMap<(VertexId, VertexId), u32>,
+) -> Vec<(VertexId, VertexId)> {
+    let mut edges = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut keys: Vec<(VertexId, VertexId)> = directed.keys().copied().collect();
+    keys.sort();
+
+    for (a, b) in keys {
+        let canonical = if a < b { (a, b) } else { (b, a) };
+        if !seen.insert(canonical) {
+            continue;
+        }
+
+        let forward = directed.get(&(a, b)).copied().unwrap_or(0);
+        let reverse = directed.get(&(b, a)).copied().unwrap_or(0);
+        match forward.cmp(&reverse) {
+            std::cmp::Ordering::Greater => {
+                for _ in 0..(forward - reverse) {
+                    edges.push((a, b));
+                }
+            }
+            std::cmp::Ordering::Less => {
+                for _ in 0..(reverse - forward) {
+                    edges.push((b, a));
+                }
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+
+    edges
+}
+
+/// Remove "spurious" interior vertices from a boundary loop that have no
+/// external partner — i.e. vertices that BSP CSG introduced at a
+/// 3-plane intersection (two cutter-mesh planes × this bucket's plane)
+/// where no actual cutter-mesh vertex exists. Such vertices appear when
+/// the cutter is a faceted approximation of a smooth surface (e.g. a
+/// sphere or cone): the BSP partitioner-plane cuts extend past the
+/// actual triangle's bounded extent, and where two such cuts meet on
+/// this plane they produce a vertex that has no twin on the cutter
+/// surface.
+///
+/// We recognize them by: an edge `(a, b)` whose reverse `(b, a)` exists
+/// in the *global* directed-edge multiset but **not** within this
+/// bucket. That reverse is the cross-bucket adjacency the actual
+/// boundary edge needs to be 2-manifold. A run of consecutive loop
+/// edges whose reverses are *not* externally backed is debris — they
+/// connect the spurious vertex back to the real boundary. If a chord
+/// from the run's start to its end *is* externally backed, we replace
+/// the run with that chord.
+///
+/// ## Algorithm
+///
+/// Given a closed loop of `n` vertices and the predicate
+/// `has_external_reverse(a, b)` ≡ `(b, a)` exists outside the bucket:
+///
+/// 1. **Rotate phase.** Find any collapsible chord that *wraps* the
+///    loop's start/end (i.e. `j = (i + step) % n <= i`). If found,
+///    rotate the loop so the chord no longer wraps. This avoids the
+///    walk phase splitting a wrap-around run across the start.
+///
+/// 2. **Walk phase.** Walk the loop forward. At each vertex `i`, scan
+///    `step` from largest to smallest and pick the longest collapsible
+///    chord. Emit `verts[i]`, jump to `verts[(i + step) % n]`, repeat.
+///    No collapsible chord at `i` ⇒ advance one vertex.
+///
+/// 3. **Degenerate fallback.** If the result has fewer than 3 vertices
+///    we'd produce an invalid polygon — return the original loop
+///    untouched. The original is still a valid loop topologically; it
+///    just won't be 2-manifold along the spurious vertices.
+///
+/// `can_collapse(i, step)` requires the chord `verts[i]` →
+/// `verts[(i + step) % n]` to be externally backed AND every step-1
+/// intermediate edge to be *not* externally backed (otherwise we'd be
+/// collapsing through a real boundary edge).
+fn collapse_unbacked_boundary_runs(
+    loop_verts: &[VertexId],
+    global_directed: &HashMap<(VertexId, VertexId), u32>,
+    bucket_directed: &HashMap<(VertexId, VertexId), u32>,
+) -> Vec<VertexId> {
+    if loop_verts.len() < 4 {
+        return loop_verts.to_vec();
+    }
+
+    let has_external_reverse = |a: VertexId, b: VertexId| -> bool {
+        let global = global_directed.get(&(b, a)).copied().unwrap_or(0);
+        let bucket = bucket_directed.get(&(b, a)).copied().unwrap_or(0);
+        global > bucket
+    };
+
+    let can_collapse = |verts: &[VertexId], i: usize, step: usize| -> bool {
+        let n = verts.len();
+        let a = verts[i];
+        let b = verts[(i + step) % n];
+        if !has_external_reverse(a, b) {
+            return false;
+        }
+        for k in 0..step {
+            let p = verts[(i + k) % n];
+            let q = verts[(i + k + 1) % n];
+            if has_external_reverse(p, q) {
+                return false;
+            }
+        }
+        true
+    };
+
+    let mut verts = loop_verts.to_vec();
+
+    // Rotate phase: align any wrap-around collapse chord to the start
+    // so the walk phase doesn't split a run across index 0.
+    let n = verts.len();
+    'rotate: for i in 0..n {
+        for step in (2..n).rev() {
+            let j = (i + step) % n;
+            if j <= i && can_collapse(&verts, i, step) {
+                verts.rotate_left(j);
+                break 'rotate;
+            }
+        }
+    }
+
+    // Walk phase: emit vertices, greedily collapsing the longest run
+    // available at each position.
+    let n = verts.len();
+    let mut out = Vec::with_capacity(n);
+    let mut i = 0;
+    while i < n {
+        out.push(verts[i]);
+
+        let mut next_i = None;
+        for step in (2..n).rev() {
+            if can_collapse(&verts, i, step) {
+                next_i = Some((i + step) % n);
+                break;
+            }
+        }
+
+        match next_i {
+            Some(j) if j > i => i = j,
+            // Wrap-around collapse after rotation handled the head — stop.
+            Some(_) => break,
+            None => i += 1,
+        }
+    }
+
+    out.dedup();
+    if out.len() >= 2 && out.first() == out.last() {
+        out.pop();
+    }
+    if out.len() < 3 { verts } else { out }
 }
 
 /// Walk directed boundary edges into closed loops. Returns `None` if
@@ -997,6 +1180,132 @@ mod tests {
         let loops = extract_loops(&boundary, &vertices, &plane)
             .expect("empty boundary should be Some(empty)");
         assert!(loops.is_empty());
+    }
+
+    fn map(edges: &[(VertexId, VertexId)]) -> HashMap<(VertexId, VertexId), u32> {
+        let mut m = HashMap::new();
+        for &e in edges {
+            *m.entry(e).or_insert(0) += 1;
+        }
+        m
+    }
+
+    /// All loop edges are externally backed (every reverse exists outside
+    /// the bucket). No spurious vertices to collapse — return unchanged.
+    #[test]
+    fn collapse_noop_when_every_edge_externally_backed() {
+        let loop_verts = vec![0_usize, 1, 2, 3];
+        // Every reverse in global, none in this bucket.
+        let global = map(&[(1, 0), (2, 1), (3, 2), (0, 3)]);
+        let bucket = HashMap::new();
+        let out = collapse_unbacked_boundary_runs(&loop_verts, &global, &bucket);
+        assert_eq!(out, loop_verts);
+    }
+
+    /// Single spurious vertex between two real vertices. The chord that
+    /// skips it is externally backed; its incident edges are not. Expect
+    /// the spurious vertex collapsed out.
+    #[test]
+    fn collapse_drops_one_spurious_vertex() {
+        // Loop: 0 -> 1 -> 2 -> 3 -> 4. Vertex 1 is spurious.
+        let loop_verts = vec![0_usize, 1, 2, 3, 4];
+        // Real boundary reverses: (2,0) chord + tail edges.
+        let global = map(&[(2, 0), (3, 2), (4, 3), (0, 4)]);
+        let bucket = HashMap::new();
+        let out = collapse_unbacked_boundary_runs(&loop_verts, &global, &bucket);
+        assert_eq!(out, vec![0, 2, 3, 4]);
+    }
+
+    /// Two consecutive spurious vertices. The chord that skips both is
+    /// externally backed; both incident edges and the middle edge are
+    /// not.
+    #[test]
+    fn collapse_drops_consecutive_spurious_run() {
+        // Loop: 0 -> 1 -> 2 -> 3 -> 4 -> 5. Vertices 1 and 2 are spurious.
+        let loop_verts = vec![0_usize, 1, 2, 3, 4, 5];
+        let global = map(&[(3, 0), (4, 3), (5, 4), (0, 5)]);
+        let bucket = HashMap::new();
+        let out = collapse_unbacked_boundary_runs(&loop_verts, &global, &bucket);
+        assert_eq!(out, vec![0, 3, 4, 5]);
+    }
+
+    /// Spurious run wraps the loop's start (verts at the last index +
+    /// the first index are spurious). The rotate phase normalizes the
+    /// loop so the walk phase sees the run as contiguous.
+    #[test]
+    fn collapse_handles_wrap_around_run() {
+        // Loop indices 0..5 with values 10..14. Spurious indices are 4
+        // (last) and 0 (first). The chord from index 3 to index 1 skips
+        // them.
+        let loop_verts = vec![10_usize, 11, 12, 13, 14];
+        // (11, 13) is the chord's reverse: chord verts are 13 -> 11.
+        let global = map(&[(11, 13), (12, 11), (13, 12)]);
+        let bucket = HashMap::new();
+        let out = collapse_unbacked_boundary_runs(&loop_verts, &global, &bucket);
+        // After collapsing 14 and 10, only 11, 12, 13 survive (in some
+        // rotation; rotate_left makes 11 the head).
+        assert_eq!(out.len(), 3);
+        let as_set: std::collections::BTreeSet<VertexId> = out.iter().copied().collect();
+        assert_eq!(as_set, [11, 12, 13].into_iter().collect());
+    }
+
+    /// If the only externally-backed chords would collapse the loop to
+    /// fewer than 3 vertices, fall back to the original loop. Better to
+    /// emit a non-2-manifold polygon than a degenerate one.
+    #[test]
+    fn collapse_falls_back_when_result_would_degenerate() {
+        // Loop: 0 -> 1 -> 2 -> 3. Chord (0, 3) is the only externally
+        // backed edge — collapsing would leave [0, 3], which has <3 verts.
+        let loop_verts = vec![0_usize, 1, 2, 3];
+        let global = map(&[(3, 0)]);
+        let bucket = HashMap::new();
+        let out = collapse_unbacked_boundary_runs(&loop_verts, &global, &bucket);
+        assert_eq!(out, loop_verts);
+    }
+
+    /// A reverse that exists only inside this bucket does NOT count as
+    /// externally backed — bucket-internal twins were already cancelled
+    /// before extract_loops ran. This is the "subtract bucket from
+    /// global" check working as intended.
+    #[test]
+    fn collapse_ignores_intra_bucket_reverses() {
+        let loop_verts = vec![0_usize, 1, 2, 3];
+        // Pretend (3, 0) appears once globally and once in this bucket.
+        // Net "external" count is zero — chord is not backed.
+        let global = map(&[(3, 0), (1, 0), (2, 1), (3, 2), (0, 3)]);
+        let bucket = map(&[(3, 0)]);
+        let out = collapse_unbacked_boundary_runs(&loop_verts, &global, &bucket);
+        // Same as the no-op test — no collapsible chord.
+        assert_eq!(out, loop_verts);
+    }
+
+    /// Loops shorter than 4 vertices have no internal vertex to
+    /// collapse. The function short-circuits.
+    #[test]
+    fn collapse_short_loop_short_circuits() {
+        let loop_verts = vec![0_usize, 1, 2];
+        let global = HashMap::new();
+        let bucket = HashMap::new();
+        let out = collapse_unbacked_boundary_runs(&loop_verts, &global, &bucket);
+        assert_eq!(out, loop_verts);
+    }
+
+    /// Multiplicity-preserving cancellation: forward count 2, reverse
+    /// count 1 must surface one boundary edge (the imbalance), not zero.
+    /// The naive boolean filter that issue #350 replaced would drop both.
+    #[test]
+    fn cancellation_preserves_multiplicity() {
+        let directed = map(&[(0, 1), (0, 1), (1, 0)]);
+        let boundary = boundary_edges_after_twin_cancellation(&directed);
+        assert_eq!(boundary, vec![(0, 1)]);
+    }
+
+    /// Symmetric multiplicity (2 + 2) cancels completely.
+    #[test]
+    fn cancellation_drops_symmetric_pairs() {
+        let directed = map(&[(0, 1), (0, 1), (1, 0), (1, 0)]);
+        let boundary = boundary_edges_after_twin_cancellation(&directed);
+        assert!(boundary.is_empty());
     }
 
     /// Pathological topology where extract_loops returns None and the
