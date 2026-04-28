@@ -80,8 +80,22 @@ impl IndexedMesh {
                 break;
             }
 
-            for poly in &mut polygons {
+            for (poly_idx, poly) in polygons.iter_mut().enumerate() {
                 let n = poly.vertices.len();
+                // Skip insertion when `v` already appears in this polygon's
+                // loop — either originally, or inserted earlier in the
+                // current pass through this polygon. Inserting `v` twice
+                // produces a non-simple loop `[..., v, x, v, ...]` (the
+                // spike pattern): happens when the same pool vertex is the
+                // subdivision for two different edges of the same polygon,
+                // e.g. when an off-axis cutter snap-drifts a rim vertex
+                // onto two adjacent host edges. Downstream the merge stage
+                // reads the spike as an internal twin edge `(v,x)+(x,v)`
+                // and the post-merge invariant fires. The T-junction at
+                // `v` is left unrepaired in this polygon; loop splitting
+                // (auditor's deeper fix) is the right thing if a manifold
+                // crack remains. Box × sphere is the canonical repro.
+                let mut existing: HashSet<VertexId> = poly.vertices.iter().copied().collect();
                 let mut new_verts: Vec<VertexId> = Vec::with_capacity(n + subdivisions.len());
                 for i in 0..n {
                     let a = poly.vertices[i];
@@ -92,7 +106,17 @@ impl IndexedMesh {
                         && v != a
                         && v != b
                     {
-                        new_verts.push(v);
+                        if existing.contains(&v) {
+                            tracing::trace!(
+                                poly_idx,
+                                edge = ?canon,
+                                vertex_id = v,
+                                "tjunction insert skipped to preserve simple loop (issue 350 family)"
+                            );
+                        } else {
+                            new_verts.push(v);
+                            existing.insert(v);
+                        }
                     }
                 }
                 poly.vertices = new_verts;
@@ -292,6 +316,53 @@ mod tests {
         let repaired = mesh.repair_tjunctions();
         assert_eq!(repaired.polygons.len(), 1);
         assert_eq!(repaired.polygons[0].vertices, vec![0, 1, 2]);
+    }
+
+    /// Regression for the post-merge twin-edge invariant fired by the
+    /// box × sphere matrix cells (issue 350 family). When the same pool
+    /// vertex `D` is the subdivision for *two* adjacent edges of one
+    /// polygon (`(A, B) → D` and `(B, C) → D`), the previous algorithm
+    /// inserted `D` twice in one pass — producing the spike pattern
+    /// `[A, D, B, D, C]`. Downstream merge cancellation reads the spike
+    /// as an internal twin edge `(D,B) + (B,D)`. The fix tracks
+    /// inserts within the per-polygon pass and skips repeats.
+    #[test]
+    fn same_subdivision_vertex_on_two_adjacent_edges_does_not_spike() {
+        let plane = xy_plane();
+        // Polygon `[A, B, C]` is a triangle with three collinear-ish
+        // points so D sits "strictly between" both A→B and B→C under
+        // the collinearity tolerance. The setup mirrors what off-axis
+        // BSP cuts produce when a sphere rim vertex snap-drifts onto
+        // the cube edge it meant to bisect, then onto the adjacent
+        // segment of the same edge after the first subdivision.
+        let vertices = vec![
+            pt(0.0, 0.0, 0.0), // 0: A
+            pt(2.0, 0.0, 0.0), // 1: B
+            pt(4.0, 0.0, 0.0), // 2: C
+            pt(2.0, 1.0, 0.0), // 3: anchor on the polygon (away from line)
+            pt(1.0, 0.0, 0.0), // 4: D — strictly between A and B, AND between A and C (so the canonicalization picks D for both segments)
+        ];
+        let polygons = vec![
+            // Source polygon for D so the pool entry is referenced.
+            poly(vec![0, 4, 3], plane, 0),
+            // The polygon under test: visits A, B, C without any
+            // duplicate vertex. After repair, must NOT have D appearing
+            // twice — the spike pattern is the bug.
+            poly(vec![0, 1, 2, 3], plane, 0),
+        ];
+        let mesh = IndexedMesh { vertices, polygons };
+        let repaired = mesh.repair_tjunctions();
+        let target = &repaired.polygons[1].vertices;
+        let mut counts = std::collections::HashMap::new();
+        for &v in target {
+            *counts.entry(v).or_insert(0) += 1;
+        }
+        for (&v, &c) in &counts {
+            assert!(
+                c == 1,
+                "vertex {v} appears {c} times in repaired polygon {target:?} — spike emitted"
+            );
+        }
     }
 
     #[test]
