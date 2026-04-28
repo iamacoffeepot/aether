@@ -1071,4 +1071,182 @@ mod tests {
         let result = component.read_u32(700) as i32;
         assert_eq!(result, host_fns::WAIT_CANCELLED);
     }
+
+    /// Issue 357: `wait_reply_p32` must scan `inbox_overflow` before
+    /// reading the mpsc. A non-matching mail parked on overflow must
+    /// stay there while the wait reads the matching mail off the rx;
+    /// reversing the order would let the parked mail leak out the
+    /// front of the wait path.
+    #[test]
+    fn wait_reply_drains_overflow_before_rx_with_no_match_in_overflow() {
+        use crate::mail::MailboxId as M;
+
+        let (mut component, tx) = instantiate_sync_wait_with_inbox();
+
+        // Park a non-matching mail on overflow (different kind).
+        component.push_overflow_for_test(Mail::new(M(0), 0xDEAD_BEEF, vec![9, 9, 9], 1));
+
+        // Push the matching mail on the rx.
+        let payload = vec![1, 2, 3];
+        tx.send(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload.clone(), 1))
+            .expect("send matching mail");
+
+        component.deliver(&trigger_wait(1000)).expect("deliver");
+
+        let result = component.read_u32(700) as i32;
+        assert_eq!(result, payload.len() as i32, "matching reply consumed");
+        assert_eq!(component.read_bytes(600, payload.len()), payload);
+
+        // Overflow should still hold exactly the parked non-match —
+        // the wait scanned past it without consuming it.
+        let overflow = component.store.data().inbox_overflow.lock().unwrap();
+        assert_eq!(overflow.len(), 1, "non-match must stay parked on overflow");
+        assert_eq!(overflow[0].kind, 0xDEAD_BEEF);
+    }
+
+    /// Issue 357: a matching mail already on overflow short-circuits
+    /// the rx. The wait pulls it from overflow and never touches the
+    /// channel, so unrelated mail still queued on rx is preserved for
+    /// the dispatcher.
+    #[test]
+    fn wait_reply_pulls_match_from_overflow_without_touching_rx() {
+        use crate::mail::MailboxId as M;
+
+        let (mut component, tx) = instantiate_sync_wait_with_inbox();
+
+        // Park a matching mail on overflow.
+        let payload = vec![7, 7, 7, 7];
+        component.push_overflow_for_test(Mail::new(
+            M(0),
+            SYNC_WAIT_EXPECTED_KIND,
+            payload.clone(),
+            1,
+        ));
+
+        // Pre-queue an unrelated mail on the rx — the wait must NOT
+        // consume this; the dispatcher should see it on its next pass.
+        tx.send(Mail::new(M(0), 0xCAFE_BABE, vec![0xFF], 1))
+            .expect("send rx-side filler");
+
+        // Use poll mode (timeout = 0) so the test fails loudly if the
+        // host fn falls into the rx-blocking path despite a hit on
+        // overflow.
+        component.deliver(&trigger_wait(0)).expect("deliver");
+
+        let result = component.read_u32(700) as i32;
+        assert_eq!(result, payload.len() as i32, "overflow match consumed");
+        assert_eq!(component.read_bytes(600, payload.len()), payload);
+
+        // Overflow drained empty; the unrelated rx mail should reach
+        // the dispatcher next pass.
+        let overflow_len = component.store.data().inbox_overflow.lock().unwrap().len();
+        assert_eq!(overflow_len, 0, "matching overflow entry was removed");
+        let next = component.next_mail().expect("rx mail still queued");
+        assert_eq!(next.kind, 0xCAFE_BABE);
+    }
+
+    /// Issue 357: simulate a `WAIT_BUFFER_TOO_SMALL` retry. A wait
+    /// that hits an oversized payload pushes the mail back on
+    /// overflow with `push_front`. A second wait with a bigger
+    /// buffer must rediscover that parked mail via the overflow
+    /// scan — without contributions from the rx.
+    #[test]
+    fn wait_reply_retries_after_buffer_too_small_via_overflow() {
+        use std::sync::mpsc;
+
+        use wasmtime::{Engine, Linker, Module};
+
+        use crate::host_fns;
+        use crate::mail::MailboxId as M;
+
+        // First WAT: 64-byte cap (the standard sync-wait shape) —
+        // returns WAIT_BUFFER_TOO_SMALL when the payload exceeds that
+        // and pushes the mail back on overflow.
+        // Second WAT: 256-byte cap. The 128-byte payload writes into
+        // 800..928; the result code stores at offset 1100 to leave a
+        // clear gap past the payload window so the assert can read
+        // both without aliasing.
+        const WAT_BIG_BUF: &str = r#"
+            (module
+                (import "aether" "wait_reply_p32"
+                    (func $wait (param i64 i32 i32 i32 i64) (result i32)))
+                (memory (export "memory") 1)
+                (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                    i32.const 1100
+                    (call $wait
+                        (i64.const -6148914691236517206) ;; expected_kind
+                        (i32.const 800)                  ;; out_ptr
+                        (i32.const 256)                  ;; out_cap (bigger)
+                        (i32.const 0)                    ;; timeout_ms = poll
+                        (i64.const 0))                   ;; expected_correlation
+                    i32.store
+                    i32.const 0))
+        "#;
+
+        // Run #1: small buffer, oversized payload — parks mail on
+        // overflow via push_front and returns WAIT_BUFFER_TOO_SMALL.
+        let (mut component_small, tx_small) = instantiate_sync_wait_with_inbox();
+        let payload = vec![0x42u8; 128];
+        tx_small
+            .send(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload.clone(), 1))
+            .expect("send oversized matching mail");
+        component_small
+            .deliver(&trigger_wait(0))
+            .expect("first deliver");
+        assert_eq!(
+            component_small.read_u32(700) as i32,
+            host_fns::WAIT_BUFFER_TOO_SMALL,
+            "small-buffer wait should return WAIT_BUFFER_TOO_SMALL",
+        );
+
+        // Sanity: the parked mail is in overflow now.
+        {
+            let overflow = component_small.store.data().inbox_overflow.lock().unwrap();
+            assert_eq!(overflow.len(), 1, "oversized mail parked on overflow");
+        }
+
+        // Run #2 simulates the retry. Build a second component with
+        // a bigger out_cap. We can't reuse `component_small` because
+        // the WAT is hardwired to a 64-byte cap; instead, move the
+        // parked mail across by popping it out of `component_small`'s
+        // overflow and pushing it onto `component_big`'s overflow,
+        // which is exactly the state the SDK leaves behind for the
+        // retry inside one component.
+        let parked = component_small
+            .store
+            .data()
+            .inbox_overflow
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("parked mail present");
+
+        let engine = Engine::default();
+        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        crate::host_fns::register(&mut linker).expect("register host fns");
+        let wasm = wat::parse_str(WAT_BIG_BUF).expect("compile WAT");
+        let module = Module::new(&engine, &wasm).expect("compile module");
+        let mut component_big =
+            Component::instantiate(&engine, &linker, &module, ctx()).expect("instantiate");
+        // Install an empty inbox; the retry must NOT need rx.
+        let (_tx_big, rx_big) = mpsc::channel::<Mail>();
+        component_big.install_inbox_rx(rx_big);
+        component_big.push_overflow_for_test(parked);
+
+        component_big
+            .deliver(&trigger_wait(0))
+            .expect("retry deliver");
+
+        let result = component_big.read_u32(1100) as i32;
+        assert_eq!(result, payload.len() as i32, "retry consumed parked mail");
+        assert_eq!(component_big.read_bytes(800, payload.len()), payload);
+        let overflow_len = component_big
+            .store
+            .data()
+            .inbox_overflow
+            .lock()
+            .unwrap()
+            .len();
+        assert_eq!(overflow_len, 0, "retry drained the parked mail");
+    }
 }
