@@ -60,11 +60,46 @@ pub(in crate::csg) fn run_to_indexed(polygons: Vec<Polygon>) -> mesh::IndexedMes
     // be one annular face comes out as several small loops. Repair
     // first canonicalises the edge subdivisions so merge sees clean
     // twin pairs.
-    let merged = mesh::IndexedMesh::weld(polygons)
-        .repair_tjunctions()
-        .merge_coplanar();
+    let welded = mesh::IndexedMesh::weld(polygons);
+    check_invariants_after_weld(&welded);
+    let repaired = welded.repair_tjunctions();
+    check_invariants_after_tjunctions(&repaired);
+    let merged = repaired.merge_coplanar();
     check_invariants_after_merge(&merged);
-    merged.remove_slivers()
+    let cleaned = merged.remove_slivers();
+    check_invariants_after_slivers(&cleaned);
+    cleaned
+}
+
+/// Issue 337: post-weld invariant — every polygon vertex id resolves
+/// inside the pool, and no two distinct ids share identical fixed-point
+/// coordinates. Warn-only for now; promote to `debug_assert!` after the
+/// soak period in `invariants.rs`'s module doc.
+fn check_invariants_after_weld(mesh: &mesh::IndexedMesh) {
+    let violations = invariants::find_post_weld_violations(mesh);
+    if !violations.is_empty() {
+        let preview: Vec<_> = violations.iter().take(3).collect();
+        tracing::warn!(
+            count = violations.len(),
+            preview = ?preview,
+            "post-weld invariant violated: pool integrity (issue 337)"
+        );
+    }
+}
+
+/// Issue 337: post-`repair_tjunctions` invariant — no vertex in the
+/// pool lies strictly interior to another polygon's edge. Survivors
+/// mean the repair pass exited before reaching its fixed point.
+fn check_invariants_after_tjunctions(mesh: &mesh::IndexedMesh) {
+    let violations = invariants::find_unrepaired_tjunctions(mesh);
+    if !violations.is_empty() {
+        let preview: Vec<_> = violations.iter().take(3).collect();
+        tracing::warn!(
+            count = violations.len(),
+            preview = ?preview,
+            "post-tjunctions invariant violated: unrepaired interior vertices (issue 337)"
+        );
+    }
 }
 
 /// Issue 337: post-merge invariant — no surviving twin edges in any
@@ -78,6 +113,21 @@ fn check_invariants_after_merge(mesh: &mesh::IndexedMesh) {
             count = violations.len(),
             preview = ?preview,
             "post-merge invariant violated: surviving twin edges (issue 337)"
+        );
+    }
+}
+
+/// Issue 337: post-`remove_slivers` invariant — every polygon has ≥3
+/// vertices and no two consecutive vertices coincide. The pass
+/// guarantees both tautologically; violations here are pure regressions.
+fn check_invariants_after_slivers(mesh: &mesh::IndexedMesh) {
+    let violations = invariants::find_post_sliver_violations(mesh);
+    if !violations.is_empty() {
+        let preview: Vec<_> = violations.iter().take(3).collect();
+        tracing::warn!(
+            count = violations.len(),
+            preview = ?preview,
+            "post-slivers invariant violated: degenerate polygons (issue 337)"
         );
     }
 }

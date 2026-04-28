@@ -165,6 +165,14 @@ fn triangulate_indexed(mesh: IndexedMesh) -> Vec<Polygon> {
             .iter()
             .map(|&pid| polygons[pid].vertices.clone())
             .collect();
+        // Snapshot the input bucket's non-degenerate poly count before
+        // triangulating; we use it post-emit to flag the issue 337
+        // tessellation invariant ("non-empty input ⇒ non-empty output").
+        let input_non_degenerate = group
+            .iter()
+            .filter(|&&pid| polygons[pid].vertices.len() >= 3)
+            .count();
+        let bucket_start = out.len();
 
         match cdt::triangulate_loops(&vertices, &loops, &plane) {
             Some(triangles) => {
@@ -199,6 +207,16 @@ fn triangulate_indexed(mesh: IndexedMesh) -> Vec<Polygon> {
                     }
                 }
             }
+        }
+
+        let bucket_emitted = out.len() - bucket_start;
+        if input_non_degenerate > 0 && bucket_emitted == 0 {
+            tracing::warn!(
+                ?plane,
+                color,
+                input_polygons = input_non_degenerate,
+                "tessellate invariant violated: non-degenerate input bucket emitted no triangles (issue 337)"
+            );
         }
     }
     out
