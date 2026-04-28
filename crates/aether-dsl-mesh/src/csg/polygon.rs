@@ -59,6 +59,32 @@ impl Polygon {
         front: &mut Vec<Polygon>,
         back: &mut Vec<Polygon>,
     ) {
+        // Plane-identity short-circuit: when this polygon's stored plane
+        // matches the partitioner structurally (same canonical key), the
+        // polygon IS on the partitioner plane regardless of any vertex
+        // drift accumulated by `compute_intersection` snap rounding
+        // across prior split passes. Skip the per-vertex side test and
+        // route directly to the coplanar bucket.
+        //
+        // Without this, multi-pass CSG (`union_raw`'s clip → invert →
+        // clip → invert → rebuild sequence) hits compounded snap drift:
+        // by the third `BspTree::build` call, fragment vertices have
+        // moved up to several grid units off their stored plane —
+        // beyond the per-pass `coplanar_threshold` budget. The vertex
+        // test misclassifies the splitter polygon itself as FRONT,
+        // every other coplanar fragment likewise routes forward, and
+        // the build loop spins indefinitely creating a tower of single-
+        // child nodes (CSG matrix issue 344, smoke test:
+        // `(union (box 1 1 1) (translate (0.3 0.15 0.05) (sphere 0.5 8)))`).
+        if self.plane.canonical_key() == partitioner.canonical_key() {
+            if partitioner.normal_dot_sign(&self.plane) > 0 {
+                coplanar_front.push(self.clone());
+            } else {
+                coplanar_back.push(self.clone());
+            }
+            return;
+        }
+
         // Snap-drift tolerance: a vertex within `coplanar_threshold()`
         // of the plane is treated as on it. This is what stops the
         // unbounded-recursion cascade where a split fragment's snapped
