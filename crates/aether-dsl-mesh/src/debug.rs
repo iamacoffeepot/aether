@@ -27,9 +27,17 @@ use std::collections::{HashMap, HashSet};
 /// re-derivation drift don't trip the validators on legitimate output.
 pub mod tol {
     /// Vertex-to-stored-plane distance allowed in [`validate_planarity`].
-    /// ~33 fixed-point units — enough for f32 round-trip drift on cleanup
-    /// output, tight enough to catch a polygon that legitimately bends.
-    pub const PLANARITY: f32 = 5e-4;
+    /// ~46 fixed-point units — enough for f32 round-trip drift on cleanup
+    /// output plus the per-canonicalize snap-rounding drift introduced
+    /// by ADR-0061's BigInt-rationals-with-deferred-snap pipeline, tight
+    /// enough to catch a polygon that legitimately bends. Pre-ADR-0061
+    /// this was 5e-4; the bump absorbs vertices that the new path lands
+    /// at slightly different integers than the integer pipeline's
+    /// per-step rounding chain did (e.g. the
+    /// `nonuniform_scaled_box_minus_sphere_is_geometric` regression
+    /// test, where two sphere-fragment vertices on a cube face land
+    /// 35 fixed units off their stored sphere-triangle plane).
+    pub const PLANARITY: f32 = 7e-4;
 
     /// Edge length below which an edge is "sliver" in
     /// [`validate_polygon_quality`]. ~65 fixed-point units — smaller
