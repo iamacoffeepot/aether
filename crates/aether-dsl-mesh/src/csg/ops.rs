@@ -1041,4 +1041,53 @@ mod tests {
         let loops = difference(outer, cutter).unwrap();
         assert!(!loops.is_empty());
     }
+
+    /// Pre-fix: this case spun the BSP build loop indefinitely. The
+    /// third `BspTree::build` call in `union_raw` (the rebuild after
+    /// `nb.all_polygons()`) received polygons whose accumulated snap
+    /// drift from prior `clip → invert → clip → invert` passes had
+    /// pushed their vertices several grid units off their stored
+    /// `plane`. The per-vertex `coplanar_threshold` budget (≈ 1 grid
+    /// unit) misclassified the splitter polygon itself as FRONT, and
+    /// every other coplanar fragment routed forward identically, so
+    /// each iteration created one new node holding the same 36-polygon
+    /// list — a tower of single-child nodes growing without bound.
+    ///
+    /// The fix in `Polygon::split` short-circuits via `canonical_key`
+    /// plane equality before the per-vertex test: a polygon with a
+    /// stored plane structurally identical to the partitioner is
+    /// always coplanar regardless of vertex drift. This test pins the
+    /// case so a future regression here surfaces as a wallclock
+    /// failure, not as silent infinite work.
+    #[test]
+    fn union_box_offset_sphere_does_not_hang() {
+        use crate::ast::Node;
+        use aether_math::Vec3;
+
+        let box_polys = axis_aligned_box(0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0);
+        let sphere_node = Node::Translate {
+            offset: Vec3::new(0.3, 0.15, 0.05),
+            child: std::boxed::Box::new(Node::Sphere {
+                radius: 0.5,
+                subdivisions: 8,
+                color: 1,
+            }),
+        };
+        let sphere_tris = crate::mesh::mesh(&sphere_node).expect("sphere mesh should not fail");
+        let sphere_polys: Vec<Polygon> = sphere_tris
+            .into_iter()
+            .filter_map(|t| {
+                let v0 = Point3::from_f32(t.vertices[0]).ok()?;
+                let v1 = Point3::from_f32(t.vertices[1]).ok()?;
+                let v2 = Point3::from_f32(t.vertices[2]).ok()?;
+                Polygon::from_triangle(v0, v1, v2, t.color)
+            })
+            .collect();
+
+        let result = union(box_polys, sphere_polys).expect("union should not error");
+        assert!(
+            !result.is_empty(),
+            "box ∪ offset-sphere should produce non-empty geometry"
+        );
+    }
 }
