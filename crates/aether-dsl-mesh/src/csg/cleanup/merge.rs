@@ -351,11 +351,13 @@ fn collapse_unbacked_boundary_runs(
 
 /// Normalize a possibly non-simple loop into a list of simple loops.
 ///
-/// `extract_loops` walks an X-junction by smallest-turn continuation
-/// and tracks visited *edges*, not vertices. With pinch-point topology
-/// (figure-8) the walker can re-enter a vertex via a different edge,
-/// emitting a single loop with a repeated vertex id. The post-merge
-/// invariant (issue 337) catches these as `NonSimpleLoopViolation`.
+/// Used both inside this module (after `extract_loops` /
+/// `collapse_unbacked_boundary_runs` produce a loop with a vertex
+/// re-entered via a different edge at an X-junction pinch) and from
+/// `super::tjunctions` (where unsafe subdivision insertion would
+/// repeat a vertex already in the polygon's loop). The post-merge
+/// invariant (issue 337) catches surviving non-simple loops as
+/// `NonSimpleLoopViolation`.
 ///
 /// Strategy: strip adjacent duplicates (including the wrap), then while
 /// a non-adjacent repeat exists at indices `i < j` split at the pinch:
@@ -368,13 +370,13 @@ fn collapse_unbacked_boundary_runs(
 /// All edges of the original loop are preserved; only the grouping
 /// changes. Branches with fewer than 3 vertices are dropped — they
 /// represent antennae (e.g. `[a, b, a]`) whose contributing edges
-/// twin-cancel and shouldn't have survived the bucket-wide pass.
+/// twin-cancel.
 ///
 /// Recurses to handle multiply-pinched loops. Pinch detection is the
 /// HashMap-based first-repeat scan, which is O(n) per call; recursion
 /// depth is bounded by the number of pinches (typically 1-2 in BSP
 /// output).
-fn normalize_loop(loop_verts: &[VertexId]) -> Vec<Vec<VertexId>> {
+pub(super) fn normalize_loop(loop_verts: &[VertexId]) -> Vec<Vec<VertexId>> {
     let mut verts: Vec<VertexId> = Vec::with_capacity(loop_verts.len());
     for &v in loop_verts {
         if verts.last() == Some(&v) {
