@@ -96,6 +96,22 @@ fn box_minus_protruding_sphere_is_watertight() {
     assert_watertight("(difference (box 1.5 1.5 1.5 :color 0) (sphere 0.95 12 :color 1))");
 }
 
+/// **Regression**: issue #350. A box minus an offset 8-subdivision
+/// sphere used to leave 12 unmatched rim edges. The coplanar cube-face
+/// bucket contained extra BSP partition-cut vertices that did not have
+/// sphere-wall partners, so the cube hole loop and sphere rim disagreed.
+/// Cleanup now preserves multiplicity when canceling twin edges and
+/// collapses unbacked boundary runs to neighboring non-coplanar rim
+/// edges.
+#[test]
+fn box_minus_offset_sphere_sub8_is_watertight() {
+    assert_watertight(
+        "(difference \
+         (box 1 1 1 :color 5) \
+         (translate (0.3 0.15 0.05) (sphere 0.5 8 :color 3)))",
+    );
+}
+
 /// **Known-failing**: same root cause — cylinder side facets
 /// near-cube-face planes trigger the same fragmentation asymmetry
 /// in BSP composition.
