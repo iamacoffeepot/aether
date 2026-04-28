@@ -65,6 +65,20 @@ pub fn mesh_polygons_internal(node: &Node) -> Result<Vec<CsgPolygon>, MeshError>
     Ok(csg::cleanup::run_to_loops(polys))
 }
 
+/// Same composition as [`mesh_polygons_internal`] but **stops before
+/// cleanup** — returns the raw BSP/composition polygon stream. Used by
+/// [`csg::cleanup::provenance::analyze_unmatched_boundaries`] (and
+/// other cleanup-stage diagnostics) to feed the same input the
+/// production pipeline sees, without the cleanup output stripping the
+/// stage-by-stage signal we want to inspect. Not a hot path; not
+/// stable API.
+pub fn mesh_polygons_pre_cleanup(node: &Node) -> Result<Vec<CsgPolygon>, MeshError> {
+    let simplified = crate::simplify::simplify(node);
+    let mut polys = Vec::new();
+    mesh_into_polygons(&mut polys, &simplified, Vec3::ZERO)?;
+    Ok(polys)
+}
+
 /// Recursive AST evaluator in polygon domain. Primitives still emit
 /// triangles internally; `wrap_triangles_into` lifts them into
 /// `CsgPolygon` once. Boolean ops use the `_raw` BSP entries — no

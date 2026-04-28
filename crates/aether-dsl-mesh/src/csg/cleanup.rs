@@ -39,6 +39,7 @@
 mod invariants;
 mod merge;
 pub(in crate::csg) mod mesh;
+pub mod provenance;
 mod slivers;
 mod tjunctions;
 mod weld;
