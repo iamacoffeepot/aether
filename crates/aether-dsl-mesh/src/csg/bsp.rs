@@ -32,6 +32,8 @@
 //! See `CLAUDE.md`'s "Recursion in load-bearing code" guideline for the
 //! project-wide direction this implements.
 
+mod point;
+mod polygon;
 mod rat;
 
 use super::CsgError;
