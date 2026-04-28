@@ -1528,27 +1528,27 @@ mod dsl_mesh {
     use alloc::string::String;
     use serde::{Deserialize, Serialize};
 
-    /// `aether.dsl_mesh.set_text` — replace the editor's cached mesh
+    /// `aether.mesh.set_text` — replace the editor's cached mesh
     /// with the result of parsing + meshing the supplied DSL text.
     /// Inline; no I/O. Fire-and-forget; the next tick renders the new
     /// mesh. Parse or mesh failures silently keep the prior cache;
     /// errors surface via `engine_logs`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.dsl_mesh.set_text")]
+    #[kind(name = "aether.mesh.set_text")]
     pub struct SetText {
-        /// The DSL source text. See `crates/aether-dsl-mesh/examples/`
+        /// The DSL source text. See `crates/aether-mesh/examples/`
         /// for shipped examples (box, lamp_post, teapot).
         pub dsl: String,
     }
 
-    /// `aether.dsl_mesh.set_path` — instruct the editor to load DSL
+    /// `aether.mesh.set_path` — instruct the editor to load DSL
     /// text from the substrate's I/O surface (ADR-0041 namespace +
     /// path), then parse + mesh + replace the cached triangles. The
     /// editor fires an `aether.io.read` to the `"aether.sink.io"` sink and
     /// processes the reply when it arrives. Fire-and-forget on the
     /// caller's side; the load is asynchronous.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.dsl_mesh.set_path")]
+    #[kind(name = "aether.mesh.set_path")]
     pub struct SetPath {
         /// Short namespace prefix (no `://`), e.g. `"save"`, `"assets"`.
         pub namespace: String,
@@ -1564,7 +1564,7 @@ pub use static_mesh::*;
 /// from the substrate's I/O surface (ADR-0041 namespace + path), parses
 /// it once, and replays the triangle list as `DrawTriangle` mail every
 /// tick. It exists as a developer aid for inspecting the output of the
-/// `aether-dsl-mesh` mesher in the substrate's render path; ADR-0026's
+/// `aether-mesh` mesher in the substrate's render path; ADR-0026's
 /// rejection of conventional asset import targets *production* content,
 /// not dev-tooling viewers.
 mod static_mesh {

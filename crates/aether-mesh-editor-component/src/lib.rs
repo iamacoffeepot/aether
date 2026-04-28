@@ -1,12 +1,12 @@
 //! DSL mesh editor component (ADR-0052). Accepts a `.dsl` source per
-//! ADR-0026 + ADR-0051, parses + meshes it via `aether-dsl-mesh`, and
+//! ADR-0026 + ADR-0051, parses + meshes it via `aether-mesh`, and
 //! replays the cached triangle list to the `"aether.sink.render"` sink every tick.
 //! Hot reload is by-replacement: each `SetText` (or successful
 //! `SetPath`-driven I/O reply) drops the prior cache and installs the
 //! new triangles atomically — partial parse or mesh failures keep the
 //! previous mesh visible.
 //!
-//! Per ADR-0057, the canonical mesh form returned by `aether-dsl-mesh`
+//! Per ADR-0057, the canonical mesh form returned by `aether-mesh`
 //! is now `Vec<Polygon>` (n-gons with holes); this component
 //! tessellates each polygon to triangles at emit time via
 //! `tessellate_polygon` so the upload path stays triangle-based but
@@ -22,8 +22,8 @@
 //!
 //! 1. `load_component` this binary.
 //! 2. Send either:
-//!    - `aether.dsl_mesh.set_text { dsl }` with the source inline, or
-//!    - `aether.dsl_mesh.set_path { namespace, path }` to load from
+//!    - `aether.mesh.set_text { dsl }` with the source inline, or
+//!    - `aether.mesh.set_path { namespace, path }` to load from
 //!      the substrate's I/O surface (ADR-0041).
 //! 3. The editor parses, meshes, and caches the triangles. The next
 //!    tick (and every tick after) re-emits them to `"aether.sink.render"`.
@@ -31,9 +31,9 @@
 //!    re-write the file and re-send `set_path`).
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io};
-use aether_dsl_mesh::{Point3, Polygon, tessellate_polygon};
 use aether_kinds::{DrawTriangle, ReadResult, SetPath, SetText, Tick, Vertex};
 use aether_math::Vec3;
+use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
 /// Outline edges are emitted as thin in-plane quads. Width is in world
 /// units; matches the box/sphere scale we typically demo against
@@ -72,8 +72,8 @@ pub struct DslMeshEditor {
 /// DSL mesh editor component.
 ///
 /// # Agent
-/// Send `aether.dsl_mesh.set_text { dsl: "(box 1 1 1 :color 0)" }` for
-/// inline DSL, or `aether.dsl_mesh.set_path { namespace: "assets",
+/// Send `aether.mesh.set_text { dsl: "(box 1 1 1 :color 0)" }` for
+/// inline DSL, or `aether.mesh.set_path { namespace: "assets",
 /// path: "teapot.dsl" }` to load from disk. Iterate by re-sending
 /// `set_text` with the modified source — the editor swaps the mesh
 /// atomically and the next frame reflects the change. Parse / mesh
@@ -107,7 +107,7 @@ impl Component for DslMeshEditor {
     ///
     /// # Agent
     /// The full DSL grammar is documented in ADR-0026 and ADR-0051;
-    /// `crates/aether-dsl-mesh/examples/` has worked examples
+    /// `crates/aether-mesh/examples/` has worked examples
     /// (box.dsl, lamp_post.dsl, teapot.dsl).
     #[handler]
     fn on_set_text(&mut self, _ctx: &mut Ctx<'_>, msg: SetText) {
@@ -155,7 +155,7 @@ impl DslMeshEditor {
     /// the per-tick render path stays cheap (one cached triangle list,
     /// no re-tessellation per frame).
     fn try_replace(&mut self, dsl: &str) {
-        let ast = match aether_dsl_mesh::parse(dsl) {
+        let ast = match aether_mesh::parse(dsl) {
             Ok(ast) => ast,
             Err(error) => {
                 tracing::warn!(
@@ -166,7 +166,7 @@ impl DslMeshEditor {
                 return;
             }
         };
-        let polygons = match aether_dsl_mesh::mesh_polygons(&ast) {
+        let polygons = match aether_mesh::mesh_polygons(&ast) {
             Ok(p) => p,
             Err(error) => {
                 tracing::warn!(
