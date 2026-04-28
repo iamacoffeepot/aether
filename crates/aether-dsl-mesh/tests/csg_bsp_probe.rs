@@ -176,8 +176,8 @@ fn run(label: &str, a_dsl: &str, b_dsl: &str) {
     na.build(polys_a.clone()).unwrap();
     nb.build(polys_b.clone()).unwrap();
 
-    let snap0_a = na.all_polygons();
-    let snap0_b = nb.all_polygons();
+    let snap0_a = na.all_polygons().unwrap();
+    let snap0_b = nb.all_polygons().unwrap();
     let combined0: Vec<Polygon> = snap0_a.iter().chain(snap0_b.iter()).cloned().collect();
     println!(
         "  step 0 (built):                  combined imbalance = {}",
@@ -185,7 +185,7 @@ fn run(label: &str, a_dsl: &str, b_dsl: &str) {
     );
 
     na.clip_to(&nb).unwrap();
-    let snap1_a = na.all_polygons();
+    let snap1_a = na.all_polygons().unwrap();
     let combined1: Vec<Polygon> = snap1_a.iter().chain(snap0_b.iter()).cloned().collect();
     println!(
         "  step 1 (na.clip_to(nb)):         na imbalance solo = {}, combined = {}",
@@ -194,7 +194,7 @@ fn run(label: &str, a_dsl: &str, b_dsl: &str) {
     );
 
     nb.clip_to(&na).unwrap();
-    let snap2_b = nb.all_polygons();
+    let snap2_b = nb.all_polygons().unwrap();
     let combined2: Vec<Polygon> = snap1_a.iter().chain(snap2_b.iter()).cloned().collect();
     println!(
         "  step 2 (nb.clip_to(na)):         nb imbalance solo = {}, combined = {}",
@@ -205,7 +205,7 @@ fn run(label: &str, a_dsl: &str, b_dsl: &str) {
     nb.invert();
     nb.clip_to(&na).unwrap();
     nb.invert();
-    let snap3_b = nb.all_polygons();
+    let snap3_b = nb.all_polygons().unwrap();
     let combined3: Vec<Polygon> = snap1_a.iter().chain(snap3_b.iter()).cloned().collect();
     println!(
         "  step 3 (invert/clip/invert):     nb imbalance solo = {}, combined = {}",
@@ -213,9 +213,9 @@ fn run(label: &str, a_dsl: &str, b_dsl: &str) {
         imbalance_count(&directed_edges(&combined3))
     );
 
-    let extra = nb.all_polygons();
+    let extra = nb.all_polygons().unwrap();
     na.build(extra).unwrap();
-    let final_polys = na.all_polygons();
+    let final_polys = na.all_polygons().unwrap();
     println!(
         "  step 4 (na.build(nb)):           final {} polys, imbalance = {}",
         final_polys.len(),
