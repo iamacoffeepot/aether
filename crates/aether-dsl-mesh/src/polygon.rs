@@ -355,7 +355,11 @@ fn fan_triangulate(vertices: &[Point3]) -> Vec<[Point3; 3]> {
 }
 
 fn cdt_tessellate(polygon: &Polygon) -> Option<Vec<[Point3; 3]>> {
-    csg::tessellate::tessellate_polygon_integer(&polygon.vertices, &polygon.holes)
+    csg::tessellate::tessellate_polygon_integer(
+        &polygon.vertices,
+        &polygon.holes,
+        polygon.plane_normal,
+    )
 }
 
 #[cfg(test)]

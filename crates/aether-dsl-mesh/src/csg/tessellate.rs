@@ -33,6 +33,7 @@ use super::cleanup::mesh::{IndexedMesh, VertexId};
 use crate::csg::plane::Plane3;
 use crate::csg::point::Point3;
 use crate::csg::polygon::Polygon;
+use aether_math::Vec3;
 use std::collections::HashMap;
 
 /// Plane + color — the CDT groups by this so each group produces one
@@ -61,18 +62,30 @@ pub fn run(polygons: Vec<Polygon>) -> Vec<Polygon> {
 /// the GPU upload site (`aether-mesh-editor-component`).
 ///
 /// `outer` is the CCW outer boundary; `holes` are CW inner boundaries.
+/// `plane_normal` is the polygon's authoritative face normal — CDT
+/// uses it only for projection-axis selection, so any direction with
+/// the right dominant axis and sign works (the caller's
+/// [`crate::polygon::Polygon::plane_normal`] is exactly this). Passing
+/// it in avoids re-deriving the plane from `outer[0..3]`, which is
+/// fragile when those vertices are collinear (cube faces with
+/// T-junction repair) or near-collinear (CSG-cut cylinder facets).
+///
 /// Returns `None` if the inputs collapse to fewer than 3 unique
-/// vertices or CDT fails to enforce a constraint.
+/// vertices, the supplied normal is effectively zero, or CDT fails to
+/// enforce a constraint.
 ///
 /// Callers should fall back to fan triangulation on `None` so geometry
 /// isn't dropped silently.
 pub fn tessellate_polygon_integer(
     outer: &[Point3],
     holes: &[Vec<Point3>],
+    plane_normal: Vec3,
 ) -> Option<Vec<[Point3; 3]>> {
     if outer.len() < 3 {
         return None;
     }
+
+    let plane = quantize_normal(plane_normal)?;
 
     // Build a flat vertex pool — CDT's `triangulate_loops` takes
     // (pool, loops as VertexId sequences, plane).
@@ -96,18 +109,6 @@ pub fn tessellate_polygon_integer(
         all_loops.push(indices);
     }
 
-    // Compute the plane from the outer loop's first three vertices.
-    // CDT uses it for axis selection only; the CCW outer assumption
-    // gives a normal pointing "outward" by construction.
-    let plane = Plane3::from_points(
-        vertices[all_loops[0][0]],
-        vertices[all_loops[0][1]],
-        vertices[all_loops[0][2]],
-    );
-    if plane.is_degenerate() {
-        return None;
-    }
-
     let triangles = cdt::triangulate_loops(&vertices, &all_loops, &plane)?;
     Some(
         triangles
@@ -115,6 +116,27 @@ pub fn tessellate_polygon_integer(
             .map(|tri| [vertices[tri[0]], vertices[tri[1]], vertices[tri[2]]])
             .collect(),
     )
+}
+
+/// Quantize an `f32` plane normal to the integer `Plane3` shape CDT's
+/// internals expect. Only the components' relative magnitudes and
+/// signs matter — `Plane3::projection_axes` picks the dominant axis
+/// off these, and `d` is unused for tessellation. Returns `None` for
+/// an effectively-zero vector.
+fn quantize_normal(n: Vec3) -> Option<Plane3> {
+    const SCALE: f32 = 1024.0;
+    let n_x = (n.x * SCALE).round() as i64;
+    let n_y = (n.y * SCALE).round() as i64;
+    let n_z = (n.z * SCALE).round() as i64;
+    if n_x == 0 && n_y == 0 && n_z == 0 {
+        return None;
+    }
+    Some(Plane3 {
+        n_x,
+        n_y,
+        n_z,
+        d: 0,
+    })
 }
 
 /// Triangulate the n-gon loops in an `IndexedMesh` per (plane, color)
@@ -279,16 +301,18 @@ mod tests {
     #[test]
     fn tessellate_polygon_integer_rejects_fewer_than_3_outer_vertices() {
         let outer = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0)];
-        let result = tessellate_polygon_integer(&outer, &[]);
+        let result = tessellate_polygon_integer(&outer, &[], Vec3::new(0.0, 0.0, 1.0));
         assert!(result.is_none());
     }
 
     #[test]
-    fn tessellate_polygon_integer_rejects_degenerate_collinear_outer() {
-        // Three collinear points → degenerate plane → None.
-        let outer = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(2.0, 0.0, 0.0)];
-        let result = tessellate_polygon_integer(&outer, &[]);
-        assert!(result.is_none());
+    fn tessellate_polygon_integer_rejects_zero_normal() {
+        let outer = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0)];
+        let result = tessellate_polygon_integer(&outer, &[], Vec3::ZERO);
+        assert!(
+            result.is_none(),
+            "effectively-zero normal must surface as None"
+        );
     }
 
     #[test]
@@ -305,7 +329,8 @@ mod tests {
             pt(3.0, 3.0, 0.0),
             pt(3.0, 1.0, 0.0),
         ];
-        let tris = tessellate_polygon_integer(&outer, &[hole]).expect("annular should triangulate");
+        let tris = tessellate_polygon_integer(&outer, &[hole], Vec3::new(0.0, 0.0, 1.0))
+            .expect("annular should triangulate");
         // Topological minimum for 8-vertex annular = 8 triangles.
         assert_eq!(tris.len(), 8);
         // Total area = outer (16) - hole (4) = 12 → doubled = 24. Use
@@ -328,5 +353,241 @@ mod tests {
             (signed_double_area - 24.0).abs() < 0.01,
             "annular doubled area mismatch: {signed_double_area}"
         );
+    }
+
+    /// Issue 335 regression: the cross-bored block's -Y cube face
+    /// (10-vertex outer + 13-vertex cylinder-bore hole) used to return
+    /// `None` because the function recomputed the plane from
+    /// `outer[0..3]`, which on a cube face are three collinear
+    /// T-junction inserts on a single edge. The signature now takes
+    /// the polygon's stored `plane_normal` directly so the projection
+    /// axes are derived from the authoritative face normal.
+    #[test]
+    fn tessellate_annular_cube_minus_y_face_with_collinear_first_triple() {
+        let outer = vec![
+            Point3 {
+                x: 43774,
+                y: -65536,
+                z: 65536,
+            },
+            Point3 {
+                x: -8654,
+                y: -65536,
+                z: 65536,
+            },
+            Point3 {
+                x: -65536,
+                y: -65536,
+                z: 65536,
+            },
+            Point3 {
+                x: -65536,
+                y: -65536,
+                z: -65536,
+            },
+            Point3 {
+                x: -43774,
+                y: -65536,
+                z: -65536,
+            },
+            Point3 {
+                x: 29727,
+                y: -65536,
+                z: -65536,
+            },
+            Point3 {
+                x: 65536,
+                y: -65536,
+                z: -65536,
+            },
+            Point3 {
+                x: 65536,
+                y: -65536,
+                z: -43774,
+            },
+            Point3 {
+                x: 65536,
+                y: -65536,
+                z: 29727,
+            },
+            Point3 {
+                x: 65536,
+                y: -65536,
+                z: 65536,
+            },
+        ];
+        let hole = vec![
+            Point3 {
+                x: -13107,
+                y: -65536,
+                z: 22702,
+            },
+            Point3 {
+                x: 1,
+                y: -65536,
+                z: 26214,
+            },
+            Point3 {
+                x: 13106,
+                y: -65536,
+                z: 22703,
+            },
+            Point3 {
+                x: 22702,
+                y: -65536,
+                z: 13107,
+            },
+            Point3 {
+                x: 26214,
+                y: -65536,
+                z: 0,
+            },
+            Point3 {
+                x: 22702,
+                y: -65536,
+                z: -13107,
+            },
+            Point3 {
+                x: 13107,
+                y: -65536,
+                z: -22702,
+            },
+            Point3 {
+                x: 8654,
+                y: -65536,
+                z: -23895,
+            },
+            Point3 {
+                x: -1,
+                y: -65536,
+                z: -26214,
+            },
+            Point3 {
+                x: -13106,
+                y: -65536,
+                z: -22703,
+            },
+            Point3 {
+                x: -22702,
+                y: -65536,
+                z: -13107,
+            },
+            Point3 {
+                x: -26214,
+                y: -65536,
+                z: -1,
+            },
+            Point3 {
+                x: -22702,
+                y: -65536,
+                z: 13107,
+            },
+        ];
+        let tris = tessellate_polygon_integer(&outer, &[hole], Vec3::new(0.0, -1.0, 0.0))
+            .expect("annular cube face must triangulate post-fix");
+        assert!(!tris.is_empty(), "triangulation must be non-empty");
+    }
+
+    /// Issue 335 — diagonal-plane cylinder side facet whose first three
+    /// vertices are *near*-collinear (cross magnitude ~1000 vs edge
+    /// magnitudes ~10000). The previous `find_outer_plane` scan
+    /// accepted that wonky plane, projection axes pointed the wrong
+    /// way, and many vertices collapsed to the same 2D point. Passing
+    /// the authoritative normal sidesteps the inference entirely.
+    #[test]
+    fn tessellate_diagonal_cylinder_facet_with_near_collinear_first_triple() {
+        let outer = vec![
+            Point3 {
+                x: 1,
+                y: 26214,
+                z: 65536,
+            },
+            Point3 {
+                x: -8654,
+                y: 23895,
+                z: 65536,
+            },
+            Point3 {
+                x: -13107,
+                y: 22702,
+                z: 65536,
+            },
+            Point3 {
+                x: -13107,
+                y: 22702,
+                z: 48916,
+            },
+            Point3 {
+                x: -13107,
+                y: 22702,
+                z: 29726,
+            },
+            Point3 {
+                x: -13107,
+                y: 22702,
+                z: 22702,
+            },
+            Point3 {
+                x: -13107,
+                y: 22702,
+                z: -22702,
+            },
+            Point3 {
+                x: -13107,
+                y: 22702,
+                z: -48916,
+            },
+            Point3 {
+                x: -13107,
+                y: 22702,
+                z: -65536,
+            },
+            Point3 {
+                x: 1,
+                y: 26214,
+                z: -65536,
+            },
+            Point3 {
+                x: 0,
+                y: 26214,
+                z: -35809,
+            },
+            Point3 {
+                x: 0,
+                y: 26214,
+                z: -26214,
+            },
+            Point3 {
+                x: 0,
+                y: 26214,
+                z: 26214,
+            },
+            Point3 {
+                x: 0,
+                y: 26214,
+                z: 35809,
+            },
+        ];
+        let normal = Vec3::new(0.25881836, -0.965926, 0.0);
+        let tris = tessellate_polygon_integer(&outer, &[], normal)
+            .expect("diagonal cylinder facet must triangulate post-fix");
+        assert!(!tris.is_empty());
+    }
+
+    #[test]
+    fn quantize_normal_preserves_dominant_axis_and_sign() {
+        let p = quantize_normal(Vec3::new(0.0, -1.0, 0.0)).expect("nonzero normal");
+        // -Y dominant must stay -Y dominant after quantization.
+        assert_eq!(p.n_x, 0);
+        assert!(p.n_y < 0);
+        assert!(p.n_y.abs() > p.n_x.abs() && p.n_y.abs() > p.n_z.abs());
+        assert_eq!(p.n_z, 0);
+    }
+
+    #[test]
+    fn quantize_normal_returns_none_for_zero_vector() {
+        assert!(quantize_normal(Vec3::ZERO).is_none());
+        // Sub-quantization-step values also collapse to zero.
+        assert!(quantize_normal(Vec3::new(1e-6, 1e-6, 1e-6)).is_none());
     }
 }
