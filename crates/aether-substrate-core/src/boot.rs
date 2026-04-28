@@ -175,6 +175,12 @@ impl<'a> SubstrateBootBuilder<'a> {
     /// `boot.connect_hub_from_env()` once it's done registering its
     /// sinks (issue #262).
     pub fn build(self) -> wasmtime::Result<SubstrateBoot> {
+        // Issue #321: route panics through tracing so dispatcher-thread
+        // crashes surface in `engine_logs` instead of vanishing to
+        // stderr. Idempotent — chassis re-entries / repeated builds in
+        // tests are safe.
+        crate::panic_hook::init_panic_hook();
+
         let outbound = HubOutbound::disconnected();
         log_capture::init(Arc::clone(&outbound));
 
