@@ -206,10 +206,10 @@ fn as_f32(value: &Value) -> Result<f32, ParseError> {
 }
 
 fn as_u32(value: &Value) -> Result<u32, ParseError> {
-    value
+    let n = value
         .as_u64()
-        .map(|n| n as u32)
-        .ok_or_else(|| ParseError::ExpectedInteger(format!("{value}")))
+        .ok_or_else(|| ParseError::ExpectedInteger(format!("{value}")))?;
+    u32::try_from(n).map_err(|_| ParseError::ExpectedInteger(format!("{value} (out of u32 range)")))
 }
 
 fn as_vec3(node: &'static str, value: &Value) -> Result<Vec3, ParseError> {
@@ -492,4 +492,36 @@ fn parse_difference(
         base: std::boxed::Box::new(base),
         subtract,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `as_u32` accepts values up to `u32::MAX`. Pinned by issue #362
+    /// to keep the boundary case from regressing if the conversion is
+    /// ever rewritten.
+    #[test]
+    fn as_u32_accepts_u32_max() {
+        let dsl = format!("(box 1 1 1 :color {})", u32::MAX);
+        parse(&dsl).expect("u32::MAX must parse successfully");
+    }
+
+    /// Values one past `u32::MAX` previously wrapped silently
+    /// (`n as u32` is a wrapping cast); per issue #362 they must now
+    /// surface a parse error rather than producing a different mesh.
+    #[test]
+    fn as_u32_rejects_values_above_u32_max() {
+        let dsl = format!("(box 1 1 1 :color {})", u32::MAX as u64 + 1);
+        let err = parse(&dsl).expect_err("values above u32::MAX must error");
+        match err {
+            ParseError::ExpectedInteger(msg) => {
+                assert!(
+                    msg.contains("out of u32 range"),
+                    "expected range diagnostic, got: {msg}"
+                );
+            }
+            other => panic!("expected ExpectedInteger, got {other:?}"),
+        }
+    }
 }
