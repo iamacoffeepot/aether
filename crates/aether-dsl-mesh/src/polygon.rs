@@ -228,7 +228,31 @@ pub fn tessellate_polygon(polygon: &Polygon) -> Vec<[Vec3; 3]> {
     // Slow path: anything else (concave outer, or any holes) goes
     // through the integer CDT module. Convert to fixed-point, run CDT,
     // convert back.
-    cdt_tessellate(polygon).unwrap_or_default()
+    if let Some(tris) = cdt_tessellate(polygon) {
+        return tris;
+    }
+
+    // CDT failed (issue 335). Fan-triangulate the outer plus each hole
+    // independently — matches the behaviour of
+    // `csg::tessellate::triangulate_indexed`'s same-condition fallback,
+    // so geometry isn't dropped silently. Hole triangles cover the hole
+    // (visually wrong) but the surrounding face stays visible. The warn
+    // surfaces the failing input so the underlying CDT bug can be
+    // reproduced.
+    tracing::warn!(
+        outer_len = polygon.vertices.len(),
+        holes = polygon.holes.len(),
+        normal = ?polygon.plane_normal,
+        color = polygon.color,
+        "CDT failed; fan-triangulating outer + holes (issue 335)"
+    );
+    let mut out = fan_triangulate(&polygon.vertices);
+    for hole in &polygon.holes {
+        if hole.len() >= 3 {
+            out.extend(fan_triangulate(hole));
+        }
+    }
+    out
 }
 
 fn is_convex(vertices: &[Vec3], normal: &Vec3) -> bool {
@@ -465,6 +489,45 @@ mod tests {
             d: 0,
         };
         assert_eq!(unit_normal(&degen), Vec3::new(0.0, 0.0, 1.0));
+    }
+
+    /// Issue 335 regression: when CDT returns None on a polygon-
+    /// with-holes, the display-time path used to silently return an
+    /// empty Vec via `unwrap_or_default()`, dropping whole faces from
+    /// the rendered mesh. The fan fallback now keeps the outer (and
+    /// each hole) visible. Trigger a deterministic CDT-None by passing
+    /// coordinates outside the fixed-point cap (ADR-0054, ±256 units)
+    /// — `Point3::from_f32` rejects them and `tessellate_polygon_f32`
+    /// returns None before CDT even runs. The hole bypasses the convex
+    /// fast path so the failing slow path is exercised.
+    #[test]
+    fn tessellate_polygon_falls_back_to_fan_when_cdt_returns_none() {
+        let p = Polygon {
+            vertices: vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1000.0, 0.0, 0.0), // out of fixed-point range
+                Vec3::new(1000.0, 1000.0, 0.0),
+                Vec3::new(0.0, 1000.0, 0.0),
+            ],
+            holes: vec![vec![
+                Vec3::new(100.0, 100.0, 0.0),
+                Vec3::new(100.0, 900.0, 0.0),
+                Vec3::new(900.0, 900.0, 0.0),
+                Vec3::new(900.0, 100.0, 0.0),
+            ]],
+            plane_normal: Vec3::new(0.0, 0.0, 1.0),
+            color: 0,
+        };
+        let tris = tessellate_polygon(&p);
+        // Outer quad fan-triangulates to 2 triangles; each 4-vert hole
+        // fan-triangulates to 2 more. The exact count is the contract:
+        // anything > 0 proves the face wasn't dropped.
+        assert_eq!(
+            tris.len(),
+            4,
+            "outer (2) + one hole (2) = 4 fan triangles; got {}",
+            tris.len()
+        );
     }
 
     #[test]
