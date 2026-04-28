@@ -107,8 +107,9 @@ fn mesh_into_polygons(
             profile,
             path,
             scales,
+            open,
             color,
-        } => mesh_sweep(out, profile, path, scales.as_deref(), *color, offset),
+        } => mesh_sweep(out, profile, path, scales.as_deref(), *open, *color, offset),
         Node::Cylinder {
             radius,
             height,
@@ -679,14 +680,17 @@ fn mesh_torus(
 /// transport would be) but it's stable enough for short paths like
 /// teapot spouts.
 ///
-/// Caps are NOT generated — the swept surface is open at both ends.
-/// For closed tubes, end the path on a small profile (or composition
-/// with a separate cap primitive).
+/// Caps are emitted by default so the result is a closed solid suitable
+/// as a CSG operand. Pass `open = true` to skip cap emission and recover
+/// the legacy open-tube behaviour (DSL `:open true`); the open form is
+/// not a valid BSP-CSG input — boolean classification of inside/outside
+/// is undefined for non-closed surfaces.
 fn mesh_sweep(
     out: &mut Vec<CsgPolygon>,
     profile: &[[f32; 2]],
     path: &[Vec3],
     scales: Option<&[f32]>,
+    open: bool,
     color: u32,
     offset: Vec3,
 ) -> Result<(), MeshError> {
@@ -702,6 +706,24 @@ fn mesh_sweep(
         _ => None,
     };
     let n = profile.len();
+
+    // Determine the 2D profile orientation. Positive signed area =
+    // CCW in 2D Cartesian, which (because the (r, u) basis preserves
+    // the 2D handedness with `u = t × r`) means the 3D ring is CCW
+    // about the local tangent. Both side-quad winding and cap winding
+    // pivot on this so the closed solid has consistent outward normals
+    // regardless of how the user authored the profile. A degenerate
+    // (zero-area) profile leaves `profile_ccw` arbitrary; both side
+    // and cap polygons collapse to the degenerate-reject path in
+    // `push_polygon_from_f32` so the choice is harmless.
+    let profile_signed_area_2x: f64 = (0..n)
+        .map(|i| {
+            let j = (i + 1) % n;
+            (profile[i][0] as f64) * (profile[j][1] as f64)
+                - (profile[j][0] as f64) * (profile[i][1] as f64)
+        })
+        .sum();
+    let profile_ccw = profile_signed_area_2x > 0.0;
 
     // Compute a tangent at each waypoint.
     let mut tangents: Vec<Vec3> = Vec::with_capacity(path.len());
@@ -750,9 +772,11 @@ fn mesh_sweep(
         rings.push(ring);
     }
 
-    // Stitch adjacent rings as quads — same diagonal split as the
-    // previous (a, b, c) + (c, b, d) triangulation, ordered (a, b, d, c)
-    // for CCW-from-outside winding.
+    // Stitch adjacent rings as quads. Quad winding flips with profile
+    // orientation so the side normal points away from the swept solid
+    // in both the CCW-profile (modern Cartesian) and CW-profile (the
+    // implicit pre-cap convention) cases. The two windings trace the
+    // same four corners but in opposite senses around the quad.
     for k in 0..rings.len() - 1 {
         let r0 = &rings[k];
         let r1 = &rings[k + 1];
@@ -762,8 +786,36 @@ fn mesh_sweep(
             let b = r1[i];
             let c = r0[j];
             let d = r1[j];
-            push_polygon_from_f32(out, &[a, b, d, c], color)?;
+            let quad: [Vec3; 4] = if profile_ccw {
+                [a, c, d, b]
+            } else {
+                [a, b, d, c]
+            };
+            push_polygon_from_f32(out, &quad, color)?;
         }
+    }
+
+    // Cap the start and end so the swept surface is a closed solid.
+    // With u = t × r the 3D ring inherits the profile's 2D handedness,
+    // so the natural ring's polygon-area-vector direction equals
+    // `+tangent` (CCW profile) or `-tangent` (CW profile). The start
+    // cap wants outward `-tangent[0]`; the end cap wants outward
+    // `+tangent[last]`. Reverse whichever ring's natural orientation
+    // points the wrong way.
+    if !open {
+        let last = rings.len() - 1;
+        let start_cap: Vec<Vec3> = if profile_ccw {
+            rings[0].iter().rev().copied().collect()
+        } else {
+            rings[0].clone()
+        };
+        push_polygon_from_f32(out, &start_cap, color)?;
+        let end_cap: Vec<Vec3> = if profile_ccw {
+            rings[last].clone()
+        } else {
+            rings[last].iter().rev().copied().collect()
+        };
+        push_polygon_from_f32(out, &end_cap, color)?;
     }
     Ok(())
 }

@@ -58,10 +58,13 @@ fn torus_with_under_three_segments_emits_nothing() {
 fn sweep_straight_path_is_an_extruded_polygon() {
     // 4-point square profile swept along a 2-point straight path
     // should produce a square tube: 4 sides × 1 segment × 2 triangles
-    // = 8 triangles. No caps in v1.
+    // = 8 triangles. The `:open true` opt-out keeps this test focused
+    // on the side stitching — see `sweep_default_is_capped` below for
+    // the closed-solid default counts (issue 352).
     let text = "(sweep
         ((-0.1 -0.1) (0.1 -0.1) (0.1 0.1) (-0.1 0.1))
         ((0 0 0) (1 0 0))
+        :open true
         :color 0)";
     let ast = parse(text).unwrap();
     let tris = mesh(&ast).unwrap();
@@ -76,11 +79,13 @@ fn sweep_curved_path_keeps_profile_perpendicular() {
     let text = "(sweep
         ((-0.1 -0.1) (0.1 -0.1) (0.1 0.1) (-0.1 0.1))
         ((0 0 0) (1 0 0) (1 1 0))
+        :open true
         :color 0)";
     let ast = parse(text).unwrap();
     let tris = mesh(&ast).unwrap();
     // Square profile, 3 path points → 2 tube segments → 4 quads each
-    // → 8 triangles per segment → 16 triangles.
+    // → 8 triangles per segment → 16 triangles. `:open true` skips
+    // caps so the count is side-only — issue 352.
     assert_eq!(tris.len(), 16);
     // Sanity: every vertex should be within `radius * sqrt(2)` of a
     // waypoint (corners of the square profile). Conservative bound.
@@ -153,4 +158,33 @@ fn round_trip_torus_and_sweep() {
     let serialized = aether_dsl_mesh::serialize(&ast1);
     let ast2 = parse(&serialized).unwrap();
     assert_eq!(ast1, ast2);
+}
+
+/// Issue 352: `:open true` round-trips through serialize → parse. The
+/// closed default is the absent-keyword form so it's covered by every
+/// other sweep round-trip test in the suite.
+#[test]
+fn round_trip_open_sweep() {
+    let text = "(sweep ((0 0) (1 0) (1 1) (0 1))
+                       ((0 0 0) (0 1 0))
+                       :open true
+                       :color 3)";
+    let ast1 = parse(text).unwrap();
+    let serialized = aether_dsl_mesh::serialize(&ast1);
+    let ast2 = parse(&serialized).unwrap();
+    assert_eq!(ast1, ast2);
+    // Pin the AST shape so a regression in the parser silently
+    // dropping `:open` would surface as a structural mismatch.
+    use aether_dsl_mesh::ast::Node;
+    use aether_math::Vec3;
+    assert_eq!(
+        ast1,
+        Node::Sweep {
+            profile: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            path: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)],
+            scales: None,
+            open: true,
+            color: 3,
+        }
+    );
 }

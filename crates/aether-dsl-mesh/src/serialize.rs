@@ -126,12 +126,20 @@ pub fn node_to_value(node: &Node) -> Value {
             profile,
             path,
             scales,
+            open,
             color,
         } => {
             let mut items = vec![sym("sweep"), profile_to_value(profile), path_to_value(path)];
             if let Some(s) = scales {
                 items.push(kw("scales"));
                 items.push(list(s.iter().map(|x| num(*x))));
+            }
+            // Closed (default) is the natural state for a CSG-eligible
+            // primitive; only emit `:open` when the author opted out so
+            // the round-trip stays minimal for the common case.
+            if *open {
+                items.push(kw("open"));
+                items.push(Value::Bool(true));
             }
             items.push(kw("color"));
             items.push(uint(*color));

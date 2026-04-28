@@ -1125,6 +1125,7 @@ mod compute_aabb_tests {
             profile: vec![[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]],
             path: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0)],
             scales: None,
+            open: false,
             color: 0,
         });
         // Profile worst-case radius = 1; bound at each waypoint extends
@@ -1139,6 +1140,7 @@ mod compute_aabb_tests {
             profile: vec![[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]],
             path: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0)],
             scales: Some(vec![1.0, 3.0]),
+            open: false,
             color: 0,
         });
         // Waypoint 0: ±1; waypoint 1 (scaled 3x): ±3. y/z bounds come

@@ -346,3 +346,25 @@ fn two_tilted_cylinders_union_is_geometric() {
 fn rotated_box_no_csg_is_geometric() {
     assert_geometric("(rotate (0 1 0) 0.7854 (box 1 1 1 :color 0))");
 }
+
+/// **Regression**: issue 352 — sweep used to emit an open tube, which is
+/// not a valid BSP-CSG operand. The default is now closed (caps emitted
+/// at both endpoints) so a bare sweep is watertight on its own. Note
+/// the DSL argument order is `(sweep profile path …)` — the issue body
+/// transposed the two; this test follows the parser order.
+#[test]
+fn default_sweep_is_watertight() {
+    assert_watertight("(sweep ((0 0) (1 0) (1 1) (0 1)) ((0 0 0) (0 1 0)) :color 0)");
+}
+
+/// **Regression**: issue 352 — `(difference box sweep)` used to leave the
+/// box open along the swept tube because the sweep had no caps. With
+/// caps as the default the BSP composition closes cleanly.
+#[test]
+fn box_minus_default_sweep_is_watertight() {
+    assert_watertight(
+        "(difference \
+         (box 2 2 2 :color 0) \
+         (sweep ((0 0) (0.5 0) (0.5 0.5) (0 0.5)) ((0 0 -1.5) (0 0 1.5)) :color 1))",
+    );
+}
