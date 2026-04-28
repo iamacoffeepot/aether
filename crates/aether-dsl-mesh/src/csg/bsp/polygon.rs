@@ -40,9 +40,10 @@
 //! [`crate::csg::ops::difference_raw`]. The integer pipeline is
 //! unchanged. Matrix verdict bit-identical to main.
 
-#![allow(dead_code)] // phase 2 boundary: callers land in phase 3.
-
 use std::collections::HashMap;
+
+use num_bigint::BigInt;
+use num_traits::Zero;
 
 use super::point::BspPoint3;
 use crate::csg::CsgError;
@@ -82,14 +83,22 @@ impl BspPolygon {
         }
     }
 
+    /// Reverse winding and flip the cached plane — rational mirror of
+    /// [`Polygon::invert`]. Vertex coordinates themselves don't change;
+    /// the orientation of the loop and the plane normal do.
+    pub(super) fn invert(&mut self) {
+        self.vertices.reverse();
+        self.plane = self.plane.invert();
+    }
+
     /// Classify this polygon against `partitioner` and route it into
     /// one (or two) of the four output buckets — rational mirror of
     /// [`Polygon::split`].
     ///
-    /// Returns `Err(NumericOverflow)` only if checked rational
-    /// arithmetic overflows `i128`. At ADR-0054 coordinate bounds
-    /// (`|coord| ≤ 256` fixed units) this should never trigger; if it
-    /// does, that's a bug to investigate, not absorb.
+    /// Returns `Err(NumericOverflow)` only if the snap-narrow at the
+    /// canonicalize boundary fails — internal arithmetic uses
+    /// arbitrary-precision [`BigInt`] (ADR-0061 phase 3) so split
+    /// itself never overflows.
     pub(super) fn split(
         &self,
         partitioner: &Plane3,
@@ -110,22 +119,17 @@ impl BspPolygon {
             return Ok(());
         }
 
-        // Threshold check is integer-side: side_scaled / den compared
-        // to threshold. Multiply both by den (positive) to compare
-        // integer-vs-integer. For lifted-integer points (den == 1)
-        // this collapses to today's exact comparison.
-        let threshold = partitioner.coplanar_threshold();
+        // Threshold check: rational `s = s_scaled / den` compared to
+        // integer `threshold`. Sign-equivalent integer comparison is
+        // `s_scaled vs threshold * den` since `den > 0`. For
+        // lifted-integer points (`den == 1`) this collapses to today's
+        // exact comparison.
+        let threshold = BigInt::from(partitioner.coplanar_threshold());
         let mut polygon_type = COPLANAR;
         let mut types: Vec<i32> = Vec::with_capacity(self.vertices.len());
         for v in &self.vertices {
-            let s_scaled = side_scaled(partitioner, v)?;
-            let threshold_scaled =
-                threshold
-                    .checked_mul(v.den())
-                    .ok_or(CsgError::NumericOverflow {
-                        stage: "BspPolygon::split",
-                        context: "threshold * den overflow",
-                    })?;
+            let s_scaled = side_scaled(partitioner, v);
+            let threshold_scaled = &threshold * v.den();
             let t = if s_scaled > threshold_scaled {
                 FRONT
             } else if s_scaled < -threshold_scaled {
@@ -157,17 +161,17 @@ impl BspPolygon {
                     let j = (i + 1) % n;
                     let ti = types[i];
                     let tj = types[j];
-                    let vi = self.vertices[i];
-                    let vj = self.vertices[j];
+                    let vi = &self.vertices[i];
+                    let vj = &self.vertices[j];
                     if ti != BACK {
-                        f.push(vi);
+                        f.push(vi.clone());
                     }
                     if ti != FRONT {
-                        b.push(vi);
+                        b.push(vi.clone());
                     }
                     if (ti | tj) == SPANNING {
-                        let split_pt = compute_intersection_rat(&vi, &vj, partitioner)?;
-                        f.push(split_pt);
+                        let split_pt = compute_intersection_rat(vi, vj, partitioner)?;
+                        f.push(split_pt.clone());
                         b.push(split_pt);
                     }
                 }
@@ -197,20 +201,21 @@ impl BspPolygon {
 /// sites cannot round to different integers.
 ///
 /// For lifted-integer endpoints (both `p0.den == p1.den == 1`),
-/// numerator and denominator coincide with today's integer
-/// `compute_intersection` formula — `snap()` of the result equals the
-/// integer path's output by construction.
+/// numerator and denominator are byte-identical to today's integer
+/// `compute_intersection` formula pre-`round_div` — `snap()` of the
+/// result equals the integer path's output.
 ///
-/// Returns `Err(NumericOverflow)` if any checked `i128` operation
-/// overflows. The "edge does not cross plane" case (zero denominator)
-/// surfaces as `Err` too — callers must gate on SPANNING classification.
+/// Returns `Err(NumericOverflow { context: "edge does not cross plane" })`
+/// if the denominator is zero (callers must gate on SPANNING
+/// classification). Internal arithmetic uses [`BigInt`] so cannot
+/// overflow.
 fn compute_intersection_rat(
     p0: &BspPoint3,
     p1: &BspPoint3,
     plane: &Plane3,
 ) -> Result<BspPoint3, CsgError> {
-    let s0 = side_scaled(plane, p0)?;
-    let s1 = side_scaled(plane, p1)?;
+    let s0 = side_scaled(plane, p0);
+    let s1 = side_scaled(plane, p1);
 
     // Working from `I_k = (s0_rat · p1_k - s1_rat · p0_k) / (s0_rat -
     // s1_rat)` with `s0_rat = s0 / p0.den` and `p0_k = p0.num[k] /
@@ -228,33 +233,17 @@ fn compute_intersection_rat(
     let p0d = p0.den();
     let p1d = p1.den();
 
-    let make_minor =
-        |a: i128, b: i128, c: i128, d: i128, ctx: &'static str| -> Result<i128, CsgError> {
-            let ab = a.checked_mul(b).ok_or(CsgError::NumericOverflow {
-                stage: "compute_intersection_rat",
-                context: ctx,
-            })?;
-            let cd = c.checked_mul(d).ok_or(CsgError::NumericOverflow {
-                stage: "compute_intersection_rat",
-                context: ctx,
-            })?;
-            ab.checked_sub(cd).ok_or(CsgError::NumericOverflow {
-                stage: "compute_intersection_rat",
-                context: ctx,
-            })
-        };
-
-    let den = make_minor(s0, p1d, s1, p0d, "denominator")?;
-    if den == 0 {
+    let den = &s0 * p1d - &s1 * p0d;
+    if den.is_zero() {
         return Err(CsgError::NumericOverflow {
             stage: "compute_intersection_rat",
             context: "edge does not cross plane (s0_rat == s1_rat)",
         });
     }
     let num = [
-        make_minor(s0, p1n[0], s1, p0n[0], "numerator x")?,
-        make_minor(s0, p1n[1], s1, p0n[1], "numerator y")?,
-        make_minor(s0, p1n[2], s1, p0n[2], "numerator z")?,
+        &s0 * &p1n[0] - &s1 * &p0n[0],
+        &s0 * &p1n[1] - &s1 * &p0n[1],
+        &s0 * &p1n[2] - &s1 * &p0n[2],
     ];
 
     BspPoint3::new(num, den)
@@ -262,33 +251,15 @@ fn compute_intersection_rat(
 
 /// Scaled signed side: `n · num - plane.d · den`. Sign matches the
 /// rational `n · p - plane.d` because `den > 0`. For lifted-integer
-/// (`den == 1`) this equals [`Plane3::side`] — same byte sequence,
-/// same sign comparisons, same threshold result.
-///
-/// Returns `Err(NumericOverflow)` on checked `i128` overflow.
-fn side_scaled(plane: &Plane3, p: &BspPoint3) -> Result<i128, CsgError> {
-    let nx = plane.n_x as i128;
-    let ny = plane.n_y as i128;
-    let nz = plane.n_z as i128;
+/// (`den == 1`) this is sign-equivalent to [`Plane3::side`].
+fn side_scaled(plane: &Plane3, p: &BspPoint3) -> BigInt {
+    let nx = BigInt::from(plane.n_x);
+    let ny = BigInt::from(plane.n_y);
+    let nz = BigInt::from(plane.n_z);
     let [num_x, num_y, num_z] = p.num();
     let den = p.den();
 
-    let term_x = nx.checked_mul(num_x).ok_or(overflow("side term x"))?;
-    let term_y = ny.checked_mul(num_y).ok_or(overflow("side term y"))?;
-    let term_z = nz.checked_mul(num_z).ok_or(overflow("side term z"))?;
-    let dot = term_x
-        .checked_add(term_y)
-        .and_then(|s| s.checked_add(term_z))
-        .ok_or(overflow("side dot accumulate"))?;
-    let term_d = plane.d.checked_mul(den).ok_or(overflow("side d * den"))?;
-    dot.checked_sub(term_d).ok_or(overflow("side - d"))
-}
-
-fn overflow(context: &'static str) -> CsgError {
-    CsgError::NumericOverflow {
-        stage: "side_scaled",
-        context,
-    }
+    nx * num_x + ny * num_y + nz * num_z - BigInt::from(plane.d) * den
 }
 
 /// Global canonicalization at the BSP-to-cleanup boundary. Walks every
@@ -316,7 +287,7 @@ pub(super) fn canonicalize(input: Vec<BspPolygon>) -> Result<Vec<Polygon>, CsgEr
                 Some(&existing) => existing,
                 None => {
                     let s = v.snap()?;
-                    intern.insert(*v, s);
+                    intern.insert(v.clone(), s);
                     s
                 }
             };
@@ -387,7 +358,7 @@ mod tests {
 
         let plane = Plane3::from_points(p(0, 0, 0), p(1, 0, 0), p(0, 1, 0));
         let poly_a = BspPolygon {
-            vertices: vec![shared_a, other, BspPoint3::lift(p(20, 20, 20))],
+            vertices: vec![shared_a, other.clone(), BspPoint3::lift(p(20, 20, 20))],
             plane,
             color: 0,
         };

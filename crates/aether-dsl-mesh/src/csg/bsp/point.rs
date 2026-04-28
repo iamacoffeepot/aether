@@ -1,7 +1,16 @@
-//! Exact-rational 3D point for the BSP CSG path (ADR-0061, phase 2).
+//! Exact-rational 3D point for the BSP CSG path (ADR-0061).
 //!
-//! `BspPoint3` carries three `i128` numerators sharing a single `i128`
-//! denominator. Shared denominator (rather than three independent
+//! `BspPoint3` carries three [`BigInt`] numerators sharing a single
+//! [`BigInt`] denominator. Arbitrary-precision integers (rather than
+//! `i128`) are necessary because deep `clip_to` recursion compounds
+//! intermediate magnitudes faster than any fixed width tolerates —
+//! the matrix's curved×sphere class hits ~2^150-bit numerators within
+//! a few split levels. `i128`-checked arithmetic surfaced this as
+//! `CsgError::NumericOverflow` under ADR-0054 coordinate bounds, so
+//! per the ADR's "any overflow under those bounds is a bug to fix"
+//! we widened the integer rather than capping with periodic snapping.
+//!
+//! Shared denominator (rather than three independent
 //! [`super::rat::BspRat`] fields) keeps the per-plane side test as a
 //! single linear combination — `n·p + d` — without cross-axis fraction
 //! addition. It also matches the natural shape of
@@ -9,38 +18,40 @@
 //! axes share `(s0·p1.den − s1·p0.den)` as a denominator by
 //! construction.
 //!
-//! # Phase 2 invariants
+//! # Phase 3 invariants
 //!
 //! - **Normal form.** Every value has `den > 0` and
 //!   `gcd(|num[0]|, |num[1]|, |num[2]|, den) == 1`. All constructors
 //!   enforce this.
 //! - **Equality and hashing.** `==` is bit-equal after normalization;
-//!   `Hash` agrees with `==`. Equal rationals produce identical bytes,
-//!   which is what makes the canonicalization pass's interning correct.
+//!   `Hash` agrees with `==`. Equal rationals produce identical
+//!   [`BigInt`] limbs and identical hashes.
 //! - **Lift round-trip.** `BspPoint3::lift(p).snap() == p` for any
 //!   integer `Point3` `p`.
-//! - **Snap parity.** `BspPoint3::snap` mirrors the legacy `round_div`
-//!   semantics in [`crate::csg::polygon`] per axis: round-to-nearest,
-//!   ties away from zero.
+//! - **Snap parity.** [`BspPoint3::snap`] mirrors the legacy
+//!   `round_div` semantics in [`crate::csg::polygon`] per axis:
+//!   round-to-nearest, ties away from zero.
 //!
 //! The internal representation reserves an extension point for vertex
 //! provenance (plane-A ∩ plane-B line, source edge, owning side) per
 //! ADR-0061's Decision section. No provenance semantics are required
-//! in phase 2; the field is not allocated to avoid pretending behavior
+//! in phase 3; the field is not allocated to avoid pretending behavior
 //! that doesn't exist.
 
-#![allow(dead_code)] // phase 2 boundary: callers land in phase 3.
+use num_bigint::BigInt;
+use num_integer::Integer;
+use num_traits::{One, Signed, ToPrimitive, Zero};
 
 use crate::csg::CsgError;
 use crate::csg::point::Point3;
 
-/// Exact-rational 3D point in fully-reduced normal form. Three `i128`
-/// numerators share one positive `i128` denominator; `gcd` of all four
-/// fields is `1` for any value that exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Exact-rational 3D point in fully-reduced normal form. Three
+/// arbitrary-precision numerators share one positive denominator;
+/// `gcd` of all four `BigInt`s is `1` for any value that exists.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct BspPoint3 {
-    num: [i128; 3],
-    den: i128,
+    num: [BigInt; 3],
+    den: BigInt,
 }
 
 impl BspPoint3 {
@@ -48,109 +59,94 @@ impl BspPoint3 {
     /// normal form (`den == 1`), so no reduction needed.
     pub(super) fn lift(p: Point3) -> BspPoint3 {
         BspPoint3 {
-            num: [p.x as i128, p.y as i128, p.z as i128],
-            den: 1,
+            num: [BigInt::from(p.x), BigInt::from(p.y), BigInt::from(p.z)],
+            den: BigInt::one(),
         }
     }
 
-    /// Construct from raw `num / den`, normalizing.
+    /// Construct from raw `num / den`, normalizing to:
+    /// - `den > 0` (sign carried by the numerators),
+    /// - `gcd(|num[0]|, |num[1]|, |num[2]|, den) == 1`,
+    /// - zero represented as `{[0, 0, 0], 1}`.
     ///
-    /// - `den == 0` returns `Err(NumericOverflow)`.
-    /// - `den < 0` flips signs (checked for `i128::MIN`).
-    /// - All four fields are gcd-reduced so equal rationals end up
-    ///   bit-identical.
-    pub(super) fn new(num: [i128; 3], den: i128) -> Result<BspPoint3, CsgError> {
-        if den == 0 {
+    /// Generic over `Into<BigInt>` so callers can pass either
+    /// `[BigInt; 3]` (the natural shape of
+    /// [`super::polygon::compute_intersection_rat`] output) or
+    /// `[i128; 3]` (test fixtures, lifted-integer fast paths).
+    ///
+    /// Returns `Err(NumericOverflow { context: "denominator zero" })`
+    /// for `den == 0` — degenerate; callers (Phase 3
+    /// `compute_intersection_rat`) gate on SPANNING classification, so
+    /// this should not fire under valid composition.
+    pub(super) fn new<N, D>(num: [N; 3], den: D) -> Result<BspPoint3, CsgError>
+    where
+        N: Into<BigInt>,
+        D: Into<BigInt>,
+    {
+        let num: [BigInt; 3] = num.map(Into::into);
+        let den: BigInt = den.into();
+        if den.is_zero() {
             return Err(CsgError::NumericOverflow {
                 stage: "BspPoint3::new",
                 context: "denominator zero",
             });
         }
-        let (num, den) = if den < 0 {
-            let neg = |n: i128, ctx: &'static str| -> Result<i128, CsgError> {
-                n.checked_neg().ok_or(CsgError::NumericOverflow {
-                    stage: "BspPoint3::new",
-                    context: ctx,
-                })
-            };
-            (
-                [
-                    neg(num[0], "num[0] neg overflow (i128::MIN)")?,
-                    neg(num[1], "num[1] neg overflow (i128::MIN)")?,
-                    neg(num[2], "num[2] neg overflow (i128::MIN)")?,
-                ],
-                neg(den, "den neg overflow (i128::MIN)")?,
-            )
+        let (num, den) = if den.is_negative() {
+            ([-&num[0], -&num[1], -&num[2]], -den)
         } else {
             (num, den)
         };
         // den > 0 holds.
-        let g = gcd_u128(
-            num[0].unsigned_abs(),
-            gcd_u128(
-                num[1].unsigned_abs(),
-                gcd_u128(num[2].unsigned_abs(), den as u128),
-            ),
-        );
-        // g <= den (positive i128), so cast back to i128 is safe.
-        let g_signed = g as i128;
+        let g = num[0].gcd(&num[1]).gcd(&num[2]).gcd(&den);
+        if g.is_one() {
+            return Ok(BspPoint3 { num, den });
+        }
         Ok(BspPoint3 {
-            num: [num[0] / g_signed, num[1] / g_signed, num[2] / g_signed],
-            den: den / g_signed,
+            num: [&num[0] / &g, &num[1] / &g, &num[2] / &g],
+            den: &den / &g,
         })
     }
 
-    pub(super) fn num(&self) -> [i128; 3] {
-        self.num
+    pub(super) fn num(&self) -> &[BigInt; 3] {
+        &self.num
     }
 
-    pub(super) fn den(&self) -> i128 {
-        self.den
+    pub(super) fn den(&self) -> &BigInt {
+        &self.den
     }
 
-    /// Snap each axis to the nearest `i32`, ties away from zero. Mirrors
-    /// the legacy `round_div` semantics in [`crate::csg::polygon`] so a
-    /// lifted-integer point round-trips: `lift(p).snap() == p`.
+    /// Snap each axis to the nearest `i32`, ties away from zero.
+    /// Mirrors the legacy `round_div` semantics in
+    /// [`crate::csg::polygon`] so a lifted-integer point round-trips:
+    /// `lift(p).snap() == p`.
+    ///
+    /// Returns `Err(NumericOverflow { context: "narrow to i32" })` if
+    /// the rounded quotient does not fit in `i32`. CSG coordinates
+    /// are bounded by `±256` in fixed units per ADR-0054 /
+    /// `fixed::f32_to_fixed`, so this should never trigger in
+    /// practice — but the typed error is the right shape.
     pub(super) fn snap(&self) -> Result<Point3, CsgError> {
         Ok(Point3 {
-            x: snap_axis(self.num[0], self.den)?,
-            y: snap_axis(self.num[1], self.den)?,
-            z: snap_axis(self.num[2], self.den)?,
+            x: snap_axis(&self.num[0], &self.den)?,
+            y: snap_axis(&self.num[1], &self.den)?,
+            z: snap_axis(&self.num[2], &self.den)?,
         })
     }
 }
 
 /// Round-to-nearest, ties away from zero. `den > 0` required.
-fn snap_axis(num: i128, den: i128) -> Result<i32, CsgError> {
+fn snap_axis(num: &BigInt, den: &BigInt) -> Result<i32, CsgError> {
     let half = den / 2;
-    let rounded = if num >= 0 {
-        num.checked_add(half).ok_or(CsgError::NumericOverflow {
-            stage: "BspPoint3::snap",
-            context: "round add overflow",
-        })?
+    let rounded = if !num.is_negative() {
+        num + &half
     } else {
-        num.checked_sub(half).ok_or(CsgError::NumericOverflow {
-            stage: "BspPoint3::snap",
-            context: "round sub overflow",
-        })?
+        num - &half
     };
-    let div = rounded / den;
-    i32::try_from(div).map_err(|_| CsgError::NumericOverflow {
+    let div: BigInt = &rounded / den;
+    div.to_i32().ok_or(CsgError::NumericOverflow {
         stage: "BspPoint3::snap",
         context: "narrow to i32",
     })
-}
-
-/// Euclidean gcd on `u128`. Total: `gcd(0, n) == n`, `gcd(n, 0) == n`.
-fn gcd_u128(a: u128, b: u128) -> u128 {
-    let mut a = a;
-    let mut b = b;
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    a
 }
 
 #[cfg(test)]
@@ -161,12 +157,27 @@ mod tests {
         Point3 { x, y, z }
     }
 
+    fn r(num: [i128; 3], den: i128) -> BspPoint3 {
+        BspPoint3::new(
+            [
+                BigInt::from(num[0]),
+                BigInt::from(num[1]),
+                BigInt::from(num[2]),
+            ],
+            BigInt::from(den),
+        )
+        .expect("test fixture should not fail")
+    }
+
     #[test]
     fn lift_round_trip_is_identity() {
         let original = p(7, -13, 42);
         let lifted = BspPoint3::lift(original);
-        assert_eq!(lifted.den(), 1);
-        assert_eq!(lifted.num(), [7, -13, 42]);
+        assert_eq!(lifted.den(), &BigInt::one());
+        assert_eq!(
+            lifted.num(),
+            &[BigInt::from(7), BigInt::from(-13), BigInt::from(42)]
+        );
         assert_eq!(lifted.snap().unwrap(), original);
     }
 
@@ -179,25 +190,30 @@ mod tests {
     #[test]
     fn shared_denom_normalizes_via_total_gcd() {
         // gcd(4, 6, 8, 2) = 2, so reduces to (2, 3, 4, 1).
-        let q = BspPoint3::new([4, 6, 8], 2).unwrap();
-        assert_eq!(q.num(), [2, 3, 4]);
-        assert_eq!(q.den(), 1);
+        let q = r([4, 6, 8], 2);
+        assert_eq!(
+            q.num(),
+            &[BigInt::from(2), BigInt::from(3), BigInt::from(4)]
+        );
+        assert_eq!(q.den(), &BigInt::one());
     }
 
     #[test]
     fn negative_denominator_flips_into_canonical_sign() {
-        let q = BspPoint3::new([3, 6, 9], -3).unwrap();
-        // After flipping: num = [-3, -6, -9], den = 3, gcd = 3, reduce.
-        assert_eq!(q.num(), [-1, -2, -3]);
-        assert_eq!(q.den(), 1);
+        let q = r([3, 6, 9], -3);
+        assert_eq!(
+            q.num(),
+            &[BigInt::from(-1), BigInt::from(-2), BigInt::from(-3)]
+        );
+        assert_eq!(q.den(), &BigInt::one());
     }
 
     #[test]
     fn equal_rationals_are_bit_identical() {
-        let a = BspPoint3::new([1, 2, 3], 2).unwrap();
-        let b = BspPoint3::new([2, 4, 6], 4).unwrap();
-        let c = BspPoint3::new([100, 200, 300], 200).unwrap();
-        let d = BspPoint3::new([-1, -2, -3], -2).unwrap();
+        let a = r([1, 2, 3], 2);
+        let b = r([2, 4, 6], 4);
+        let c = r([100, 200, 300], 200);
+        let d = r([-1, -2, -3], -2);
         assert_eq!(a, b);
         assert_eq!(a, c);
         assert_eq!(a, d);
@@ -214,39 +230,47 @@ mod tests {
             h.finish()
         }
 
-        let a = BspPoint3::new([1, 2, 3], 2).unwrap();
-        let b = BspPoint3::new([2, 4, 6], 4).unwrap();
+        let a = r([1, 2, 3], 2);
+        let b = r([2, 4, 6], 4);
         assert_eq!(hash_of(&a), hash_of(&b));
 
         let lifted = BspPoint3::lift(p(0, 0, 0));
-        let manual_zero = BspPoint3::new([0, 0, 0], 1).unwrap();
+        let manual_zero = r([0, 0, 0], 1);
         assert_eq!(hash_of(&lifted), hash_of(&manual_zero));
     }
 
     #[test]
     fn snap_round_half_away_from_zero_per_axis() {
         // (7/2, -7/2, 1/2) → (4, -4, 1)
-        let q = BspPoint3::new([7, -7, 1], 2).unwrap();
-        assert_eq!(q.snap().unwrap(), p(4, -4, 1));
-
+        assert_eq!(r([7, -7, 1], 2).snap().unwrap(), p(4, -4, 1));
         // (5/2, -5/2, -1/2) → (3, -3, -1)
-        let q = BspPoint3::new([5, -5, -1], 2).unwrap();
-        assert_eq!(q.snap().unwrap(), p(3, -3, -1));
-
+        assert_eq!(r([5, -5, -1], 2).snap().unwrap(), p(3, -3, -1));
         // (1/3, 2/3, -1/3) → (0, 1, 0)
-        let q = BspPoint3::new([1, 2, -1], 3).unwrap();
-        assert_eq!(q.snap().unwrap(), p(0, 1, 0));
+        assert_eq!(r([1, 2, -1], 3).snap().unwrap(), p(0, 1, 0));
     }
 
     #[test]
     fn denominator_zero_errors() {
-        let err = BspPoint3::new([1, 2, 3], 0).unwrap_err();
+        let err = BspPoint3::new(
+            [BigInt::from(1), BigInt::from(2), BigInt::from(3)],
+            BigInt::zero(),
+        )
+        .unwrap_err();
         assert!(matches!(err, CsgError::NumericOverflow { .. }));
     }
 
     #[test]
     fn snap_overflow_on_i32_narrow() {
-        let too_big = BspPoint3::new([i32::MAX as i128 + 1, 0, 0], 1).unwrap();
+        // num = i32::MAX + 1 / 1 → narrow fails.
+        let too_big = BspPoint3::new(
+            [
+                BigInt::from(i32::MAX as i128 + 1),
+                BigInt::zero(),
+                BigInt::zero(),
+            ],
+            BigInt::one(),
+        )
+        .unwrap();
         assert!(matches!(
             too_big.snap(),
             Err(CsgError::NumericOverflow { .. })
@@ -255,18 +279,21 @@ mod tests {
 
     #[test]
     fn equal_rationals_snap_equal() {
-        // Phase 2 echo of phase 1's load-bearing base case.
-        let a = BspPoint3::new([7, -3, 14], 4).unwrap();
-        let b = BspPoint3::new([14, -6, 28], 8).unwrap();
+        // Phase 3 echo of phase 1's load-bearing base case.
+        let a = r([7, -3, 14], 4);
+        let b = r([14, -6, 28], 8);
         assert_eq!(a, b);
         assert_eq!(a.snap().unwrap(), b.snap().unwrap());
     }
 
     #[test]
-    fn gcd_helper_total_at_zero() {
-        assert_eq!(gcd_u128(0, 0), 0);
-        assert_eq!(gcd_u128(0, 7), 7);
-        assert_eq!(gcd_u128(7, 0), 7);
-        assert_eq!(gcd_u128(12, 18), 6);
+    fn arbitrary_precision_does_not_overflow() {
+        // The motivating case for BigInt. With i128 this overflows
+        // during gcd reduction; with BigInt it's handled.
+        let huge = BigInt::from(i128::MAX) * BigInt::from(i128::MAX);
+        let p = BspPoint3::new([huge.clone(), huge.clone(), huge.clone()], huge).unwrap();
+        // gcd of all four is the same value, reducing to (1, 1, 1, 1).
+        assert_eq!(p.num(), &[BigInt::one(), BigInt::one(), BigInt::one()]);
+        assert_eq!(p.den(), &BigInt::one());
     }
 }

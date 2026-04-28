@@ -36,6 +36,7 @@ mod point;
 mod polygon;
 mod rat;
 
+use self::polygon::{BspPolygon, canonicalize};
 use super::CsgError;
 use super::plane::Plane3;
 use super::polygon::Polygon;
@@ -55,7 +56,7 @@ struct NodeData {
     plane: Option<Plane3>,
     front: Option<usize>,
     back: Option<usize>,
-    polygons: Vec<Polygon>,
+    polygons: Vec<BspPolygon>,
 }
 
 /// Arena-backed BSP tree. The root is always node index 0.
@@ -75,11 +76,25 @@ impl BspTree {
     /// node's plane (or adopting the first polygon's plane if the node
     /// is fresh). Polygons crossing a splitter are partitioned into
     /// front/back fragments and pushed to the work queue.
+    ///
+    /// Inputs are integer-vertex polygons; they're lifted to rational
+    /// at entry (ADR-0061). The tree's internal storage is rational
+    /// throughout — the snap-rounding step is deferred to
+    /// [`Self::all_polygons`] / [`Self::clip_polygons`].
     pub fn build(&mut self, polygons: Vec<Polygon>) -> Result<(), CsgError> {
+        let lifted: Vec<BspPolygon> = polygons.iter().map(BspPolygon::lift).collect();
+        self.build_rat(lifted)
+    }
+
+    /// Rational-form `build`. Used internally so that mid-composition
+    /// `_raw` op sequences (which extract polygons from one tree and
+    /// rebuild into another) keep BSP internal data rational across
+    /// the boundary, with only one snap-rounding pass at the end.
+    fn build_rat(&mut self, polygons: Vec<BspPolygon>) -> Result<(), CsgError> {
         if polygons.is_empty() {
             return Ok(());
         }
-        let mut work: Vec<(usize, Vec<Polygon>)> = vec![(ROOT, polygons)];
+        let mut work: Vec<(usize, Vec<BspPolygon>)> = vec![(ROOT, polygons)];
         while let Some((node_idx, mut polys)) = work.pop() {
             if work.len() >= MAX_WORK_QUEUE {
                 return Err(CsgError::RecursionLimit {
@@ -90,7 +105,7 @@ impl BspTree {
                 continue;
             }
             // Stable polygon ordering — see module docs.
-            polys.sort_by_key(polygon_sort_key);
+            polys.sort_by_key(bsp_polygon_sort_key);
 
             if self.nodes[node_idx].plane.is_none() {
                 self.nodes[node_idx].plane = Some(polys[0].plane);
@@ -108,7 +123,7 @@ impl BspTree {
                     &mut coplanar_back,
                     &mut front_polys,
                     &mut back_polys,
-                );
+                )?;
             }
             {
                 let node = &mut self.nodes[node_idx];
@@ -156,9 +171,24 @@ impl BspTree {
     /// across multiple planes; fragments routed into a missing back
     /// subtree are dropped (they're inside the volume), fragments
     /// routed into a missing front subtree are kept (outside).
+    ///
+    /// Inputs are lifted to rational at entry; the rational result is
+    /// canonicalized to integer polygons at exit (one snap per unique
+    /// rational vertex). For `clip_to`'s tree-internal use, see
+    /// [`Self::clip_polygons_rat`] which keeps the rational form.
     pub fn clip_polygons(&self, polygons: Vec<Polygon>) -> Result<Vec<Polygon>, CsgError> {
+        let lifted: Vec<BspPolygon> = polygons.iter().map(BspPolygon::lift).collect();
+        let clipped = self.clip_polygons_rat(lifted)?;
+        canonicalize(clipped)
+    }
+
+    /// Rational-form `clip_polygons`. The integer counterpart wraps
+    /// this with lift + canonicalize at the boundary. `clip_to` calls
+    /// this directly so the tree's internal rational data stays
+    /// rational across the splice.
+    fn clip_polygons_rat(&self, polygons: Vec<BspPolygon>) -> Result<Vec<BspPolygon>, CsgError> {
         let mut output = Vec::new();
-        let mut work: Vec<(usize, Vec<Polygon>)> = vec![(ROOT, polygons)];
+        let mut work: Vec<(usize, Vec<BspPolygon>)> = vec![(ROOT, polygons)];
         while let Some((node_idx, polys)) = work.pop() {
             if work.len() >= MAX_WORK_QUEUE {
                 return Err(CsgError::RecursionLimit {
@@ -167,7 +197,6 @@ impl BspTree {
             }
             let node = &self.nodes[node_idx];
             let Some(plane) = node.plane else {
-                // Empty node — nothing to classify against, pass through.
                 output.extend(polys);
                 continue;
             };
@@ -183,15 +212,11 @@ impl BspTree {
                     &mut coplanar_back,
                     &mut front,
                     &mut back,
-                );
+                )?;
             }
-            // Coplanar polygons get grouped with whichever side they
-            // face, so shared boundaries are processed by the
-            // appropriate subtree.
             front.extend(coplanar_front);
             back.extend(coplanar_back);
 
-            // Front polys → descend; if no front subtree, keep.
             if !front.is_empty() {
                 if let Some(child) = node.front {
                     work.push((child, front));
@@ -199,7 +224,6 @@ impl BspTree {
                     output.extend(front);
                 }
             }
-            // Back polys → descend; if no back subtree, drop (inside).
             if !back.is_empty()
                 && let Some(child) = node.back
             {
@@ -219,7 +243,7 @@ impl BspTree {
                 });
             }
             let owned = std::mem::take(&mut self.nodes[idx].polygons);
-            self.nodes[idx].polygons = other.clip_polygons(owned)?;
+            self.nodes[idx].polygons = other.clip_polygons_rat(owned)?;
             let front = self.nodes[idx].front;
             let back = self.nodes[idx].back;
             if let Some(c) = front {
@@ -234,7 +258,21 @@ impl BspTree {
 
     /// Flatten the tree's polygons into a single list (every node's
     /// `polygons` plus every descendant's, in DFS order).
-    pub fn all_polygons(&self) -> Vec<Polygon> {
+    ///
+    /// Returns `Result` because the rational-to-integer canonicalize
+    /// pass uses checked `i128` arithmetic and snap-narrowing to `i32`
+    /// (ADR-0061). Under ADR-0054 coordinate bounds this should never
+    /// fail, but propagation is the right shape; callers like
+    /// `_raw` ops thread the error.
+    pub fn all_polygons(&self) -> Result<Vec<Polygon>, CsgError> {
+        canonicalize(self.all_polygons_rat())
+    }
+
+    /// Rational-form flatten — used internally by `_raw` op sequences
+    /// that extract polygons mid-composition (e.g.
+    /// `nb.all_polygons_rat() → na.build_rat`) so no premature snap
+    /// happens between the extract and rebuild.
+    fn all_polygons_rat(&self) -> Vec<BspPolygon> {
         let mut out = Vec::new();
         let mut stack: Vec<usize> = vec![ROOT];
         while let Some(idx) = stack.pop() {
@@ -272,13 +310,19 @@ impl BspTree {
 }
 
 /// FNV1a-derived stable sort key per ADR-0054. Hashes the polygon's
-/// plane equation + every vertex into a 64-bit lane that's identical
-/// across runs and platforms. Hashing every vertex (not just the first)
-/// is required because cube-style geometry has multiple triangles
-/// sharing both a plane and a first vertex — without the rest of the
-/// vertex list, those polygons collide and `sort_by_key`'s stable order
-/// becomes input-order-dependent.
-fn polygon_sort_key(poly: &Polygon) -> u64 {
+/// plane equation + every rational vertex (num + den per axis) into a
+/// 64-bit lane that's identical across runs and platforms. Hashing
+/// every vertex (not just the first) is required because cube-style
+/// geometry has multiple triangles sharing both a plane and a first
+/// vertex — without the rest of the vertex list, those polygons
+/// collide and `sort_by_key`'s stable order becomes input-order-
+/// dependent.
+///
+/// Note: rational vertices are in normalized form (gcd-reduced,
+/// `den > 0`) by [`BspPoint3`]'s invariants, so equal rationals hash
+/// identically — the sort is stable across alternative spellings of
+/// the same point.
+fn bsp_polygon_sort_key(poly: &BspPolygon) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
     let mut hash = FNV_OFFSET;
@@ -292,10 +336,20 @@ fn polygon_sort_key(poly: &Polygon) -> u64 {
     feed(&poly.plane.n_y.to_le_bytes());
     feed(&poly.plane.n_z.to_le_bytes());
     feed(&poly.plane.d.to_le_bytes());
+    // BigInt limbs are variable-length; prefix each axis with its
+    // length to keep the hash unambiguous (otherwise `[0x01]` and
+    // `[0x00, 0x01]` could intermix bytes with their neighbours).
+    let mut feed_bigint = |b: &num_bigint::BigInt| {
+        let bytes = b.to_signed_bytes_le();
+        feed(&(bytes.len() as u32).to_le_bytes());
+        feed(&bytes);
+    };
     for v in &poly.vertices {
-        feed(&v.x.to_le_bytes());
-        feed(&v.y.to_le_bytes());
-        feed(&v.z.to_le_bytes());
+        let [nx, ny, nz] = v.num();
+        feed_bigint(nx);
+        feed_bigint(ny);
+        feed_bigint(nz);
+        feed_bigint(v.den());
     }
     hash
 }
@@ -347,7 +401,7 @@ mod tests {
         let n = polys.len();
         let mut tree = BspTree::new();
         tree.build(polys).unwrap();
-        let out = tree.all_polygons();
+        let out = tree.all_polygons().unwrap();
         // Self-build can split coplanar pairs apart but never drops
         // them — the count is at least the input.
         assert!(out.len() >= n, "lost polygons: {} → {}", n, out.len());
@@ -357,10 +411,10 @@ mod tests {
     fn invert_twice_is_identity_in_polygon_count() {
         let mut tree = BspTree::new();
         tree.build(unit_box()).unwrap();
-        let before = tree.all_polygons().len();
+        let before = tree.all_polygons().unwrap().len();
         tree.invert();
         tree.invert();
-        let after = tree.all_polygons().len();
+        let after = tree.all_polygons().unwrap().len();
         assert_eq!(before, after);
     }
 
@@ -381,9 +435,9 @@ mod tests {
         let mut tree = BspTree::new();
         tree.build(unit_box()).unwrap();
         let snapshot = tree.clone();
-        let before = tree.all_polygons().len();
+        let before = tree.all_polygons().unwrap().len();
         tree.clip_to(&snapshot).unwrap();
-        let after = tree.all_polygons().len();
+        let after = tree.all_polygons().unwrap().len();
         assert!(after > 0, "self-clip dropped boundary polygons");
         assert_eq!(before, after, "self-clip changed polygon count");
     }
@@ -399,8 +453,8 @@ mod tests {
         tree_b.build(b).unwrap();
         // The stable sort means the two trees flatten to the same
         // ordered polygon list (vertex-by-vertex equal).
-        let pa = tree_a.all_polygons();
-        let pb = tree_b.all_polygons();
+        let pa = tree_a.all_polygons().unwrap();
+        let pb = tree_b.all_polygons().unwrap();
         assert_eq!(pa.len(), pb.len());
         for (x, y) in pa.iter().zip(pb.iter()) {
             assert_eq!(x.vertices, y.vertices, "vertex order differs");
@@ -410,9 +464,9 @@ mod tests {
 
     #[test]
     fn polygon_sort_key_is_stable_under_clone() {
-        let polys = unit_box();
-        let original: Vec<u64> = polys.iter().map(polygon_sort_key).collect();
-        let cloned: Vec<u64> = polys.clone().iter().map(polygon_sort_key).collect();
+        let polys: Vec<BspPolygon> = unit_box().iter().map(BspPolygon::lift).collect();
+        let original: Vec<u64> = polys.iter().map(bsp_polygon_sort_key).collect();
+        let cloned: Vec<u64> = polys.clone().iter().map(bsp_polygon_sort_key).collect();
         assert_eq!(original, cloned);
     }
 
@@ -420,7 +474,7 @@ mod tests {
     fn empty_input_build_returns_ok() {
         let mut tree = BspTree::new();
         assert!(tree.build(vec![]).is_ok());
-        assert!(tree.all_polygons().is_empty());
+        assert!(tree.all_polygons().unwrap().is_empty());
     }
 
     #[test]
@@ -430,7 +484,7 @@ mod tests {
                 .unwrap();
         let mut tree = BspTree::new();
         tree.build(vec![tri.clone()]).unwrap();
-        let out = tree.all_polygons();
+        let out = tree.all_polygons().unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].vertices, tri.vertices);
     }
@@ -440,10 +494,10 @@ mod tests {
         let mut tree = BspTree::new();
         tree.build(unit_box()).unwrap();
         let nodes_before = tree.nodes.len();
-        let polys_before = tree.all_polygons().len();
+        let polys_before = tree.all_polygons().unwrap().len();
         tree.invert();
         let nodes_after = tree.nodes.len();
-        let polys_after = tree.all_polygons().len();
+        let polys_after = tree.all_polygons().unwrap().len();
         // Single invert: orientation flip only — counts unchanged.
         assert_eq!(nodes_before, nodes_after);
         assert_eq!(polys_before, polys_after);
@@ -473,10 +527,13 @@ mod tests {
             (t2.plane.n_x, t2.plane.n_y, t2.plane.n_z, t2.plane.d)
         );
         assert_eq!(t1.vertices[0], t2.vertices[0]);
-        // Sort keys must differ.
+        // Sort keys must differ — lift to the rational form the BSP
+        // actually sorts and confirm the post-lift keys still split.
+        let bp1 = BspPolygon::lift(&t1);
+        let bp2 = BspPolygon::lift(&t2);
         assert_ne!(
-            polygon_sort_key(&t1),
-            polygon_sort_key(&t2),
+            bsp_polygon_sort_key(&bp1),
+            bsp_polygon_sort_key(&bp2),
             "cube-face-twin triangles must hash to different sort keys"
         );
     }
@@ -542,9 +599,9 @@ mod tests {
         ];
         let mut b = BspTree::new();
         b.build(far).unwrap();
-        let polys_before = a.all_polygons().len();
+        let polys_before = a.all_polygons().unwrap().len();
         a.clip_to(&b).unwrap();
-        let polys_after = a.all_polygons().len();
+        let polys_after = a.all_polygons().unwrap().len();
         assert_eq!(
             polys_before, polys_after,
             "clip against disjoint volume must not drop any polygons"
@@ -567,7 +624,7 @@ mod tests {
         // load-bearing.
         let mut tree = BspTree::new();
         tree.build(unit_box()).unwrap();
-        for poly in tree.all_polygons() {
+        for poly in tree.all_polygons().unwrap() {
             assert!(poly.vertices.len() >= 3);
             assert!(!poly.plane.is_degenerate(), "degenerate polygon emitted");
         }

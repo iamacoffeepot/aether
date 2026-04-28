@@ -51,9 +51,9 @@ pub(crate) fn union_raw(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Polygon>
     nb.invert();
     nb.clip_to(&na)?;
     nb.invert();
-    let extra = nb.all_polygons();
+    let extra = nb.all_polygons()?;
     na.build(extra)?;
-    Ok(na.all_polygons())
+    na.all_polygons()
 }
 
 /// `intersection` minus the cleanup pass — see [`union_raw`].
@@ -67,10 +67,10 @@ pub(crate) fn intersection_raw(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<P
     nb.invert();
     na.clip_to(&nb)?;
     nb.clip_to(&na)?;
-    let extra = nb.all_polygons();
+    let extra = nb.all_polygons()?;
     na.build(extra)?;
     na.invert();
-    Ok(na.all_polygons())
+    na.all_polygons()
 }
 
 /// `difference` minus the cleanup pass — see [`union_raw`].
@@ -85,10 +85,10 @@ pub(crate) fn difference_raw(a: Vec<Polygon>, b: Vec<Polygon>) -> Result<Vec<Pol
     nb.invert();
     nb.clip_to(&na)?;
     nb.invert();
-    let extra = nb.all_polygons();
+    let extra = nb.all_polygons()?;
     na.build(extra)?;
     na.invert();
-    Ok(na.all_polygons())
+    na.all_polygons()
 }
 
 #[cfg(test)]
