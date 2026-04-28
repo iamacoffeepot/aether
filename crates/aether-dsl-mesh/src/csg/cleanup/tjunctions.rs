@@ -135,7 +135,7 @@ const COLLINEAR_TOLERANCE_FIXED_UNITS: i128 = 4;
 /// products fit in 2^51 — well within i128. Cross-magnitude squared
 /// fits in i128 (≤ 2^102), so the perpendicular distance comparison
 /// `cross² ≤ tolerance² · len²` stays in integer arithmetic.
-fn is_strictly_between(p: Point3, a: Point3, b: Point3) -> bool {
+pub(super) fn is_strictly_between(p: Point3, a: Point3, b: Point3) -> bool {
     let abx = (b.x - a.x) as i128;
     let aby = (b.y - a.y) as i128;
     let abz = (b.z - a.z) as i128;
