@@ -33,6 +33,7 @@ pub mod input;
 pub mod io;
 pub mod kind_manifest;
 pub mod log_capture;
+pub mod log_sink;
 pub mod mail;
 pub mod mailer;
 pub mod net;

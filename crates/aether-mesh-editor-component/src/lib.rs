@@ -155,11 +155,27 @@ impl DslMeshEditor {
     /// the per-tick render path stays cheap (one cached triangle list,
     /// no re-tessellation per frame).
     fn try_replace(&mut self, dsl: &str) {
-        let Ok(ast) = aether_dsl_mesh::parse(dsl) else {
-            return;
+        let ast = match aether_dsl_mesh::parse(dsl) {
+            Ok(ast) => ast,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_mesh_editor",
+                    error = %error,
+                    "DSL parse failed; keeping prior mesh",
+                );
+                return;
+            }
         };
-        let Ok(polygons) = aether_dsl_mesh::mesh_polygons(&ast) else {
-            return;
+        let polygons = match aether_dsl_mesh::mesh_polygons(&ast) {
+            Ok(p) => p,
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_mesh_editor",
+                    error = %error,
+                    "DSL mesh build failed; keeping prior mesh",
+                );
+                return;
+            }
         };
         let mut out = Vec::new();
         for polygon in &polygons {

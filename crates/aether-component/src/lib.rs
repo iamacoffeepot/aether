@@ -69,6 +69,7 @@ use aether_mail::{Kind, Schema, mailbox_id_from_name};
 
 pub mod handle;
 pub mod io;
+pub mod log;
 pub mod net;
 pub mod raw;
 
@@ -982,9 +983,12 @@ macro_rules! export {
         /// Receives the component's own mailbox id (ADR-0030 Phase 2)
         /// so `#[handlers]`'s synthesized `init` prologue can self-
         /// address `subscribe_input` for every `K::IS_INPUT` handler
-        /// kind.
+        /// kind. ADR-0060: also installs `MailSubscriber` as the global
+        /// `tracing` default before user `init` runs, so logging from
+        /// inside `init` reaches the substrate's `aether.sink.log` sink.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
+            $crate::log::install_global_default();
             let mut ctx = $crate::InitCtx::__new(mailbox_id);
             let instance = <$component as $crate::Component>::init(&mut ctx);
             unsafe {

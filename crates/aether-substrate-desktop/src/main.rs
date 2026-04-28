@@ -1176,6 +1176,13 @@ fn main() -> wasmtime::Result<()> {
         aether_substrate_core::net::net_sink_handler(net_adapter, Arc::clone(&boot.queue)),
     );
 
+    // `aether.sink.log`: ADR-0060 guest-side logging. Decode `LogEvent`
+    // mail and re-emit through the host `log` facade; the existing
+    // `tracing-log` bridge in `log_capture::init` lifts the record back
+    // into the chassis EnvFilter + capture ring so guest events land
+    // in `engine_logs` alongside native logs.
+    aether_substrate_core::log_sink::register_log_sink(&boot.registry);
+
     tracing::info!(
         target: "aether_substrate::boot",
         workers = WORKERS,
