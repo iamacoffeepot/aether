@@ -75,10 +75,55 @@ pub(in crate::csg) enum PostSliverViolation {
     },
 }
 
+/// One non-simple-loop violation: a polygon's vertex list contains the
+/// same `VertexId` more than once. The simplest manifestation is a spike
+/// `[..., v, x, v, ...]` produced when T-junction repair inserts a vertex
+/// that already lives elsewhere in the loop, but any non-adjacent repeat
+/// breaks the simple-polygon contract that downstream passes assume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::csg) struct NonSimpleLoopViolation {
+    pub poly_idx: usize,
+    pub vertex_id: VertexId,
+    /// First two positions in `poly.vertices` where `vertex_id` appears.
+    pub indices: (usize, usize),
+}
+
 type BucketKey = ((i64, i64, i64, i128), u32);
 
 fn bucket_key(plane: &Plane3, color: u32) -> BucketKey {
     ((plane.n_x, plane.n_y, plane.n_z, plane.d), color)
+}
+
+/// Stage-boundary invariant: every polygon's vertex loop is a simple
+/// polygon — no `VertexId` appears twice. A spike like `[..., v, x, v, ...]`
+/// produces internal twin edges `(v,x)+(x,v)` that downstream passes
+/// (merge cancellation, manifold validation, tessellation) all miscount
+/// or choke on. Checked at every cleanup stage so the first pass to
+/// emit a non-simple loop is identifiable.
+///
+/// O(P · V) — one HashSet per polygon, single linear scan.
+pub(in crate::csg) fn find_non_simple_loops(mesh: &IndexedMesh) -> Vec<NonSimpleLoopViolation> {
+    use std::collections::HashMap;
+    let mut violations: Vec<NonSimpleLoopViolation> = Vec::new();
+    for (poly_idx, poly) in mesh.polygons.iter().enumerate() {
+        let mut first_seen: HashMap<VertexId, usize> = HashMap::new();
+        for (i, &v) in poly.vertices.iter().enumerate() {
+            match first_seen.get(&v) {
+                Some(&prior) => {
+                    violations.push(NonSimpleLoopViolation {
+                        poly_idx,
+                        vertex_id: v,
+                        indices: (prior, i),
+                    });
+                    break;
+                }
+                None => {
+                    first_seen.insert(v, i);
+                }
+            }
+        }
+    }
+    violations
 }
 
 /// Post-`merge_coplanar` invariant: no two coplanar same-color polygons
@@ -431,6 +476,73 @@ mod tests {
         assert!(edges.contains(&(0, 3)));
         assert!(edges.contains(&(1, 2)));
         assert!(edges.contains(&(2, 3)));
+    }
+
+    #[test]
+    fn simple_loop_has_no_violations() {
+        let mesh = IndexedMesh {
+            vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
+            polygons: vec![IndexedPolygon {
+                vertices: vec![0, 1, 2],
+                plane: xy_plane(),
+                color: 0,
+            }],
+        };
+        assert!(find_non_simple_loops(&mesh).is_empty());
+    }
+
+    /// Spike pattern `[a, b, a]` — the canonical non-simple shape
+    /// emitted when t-junction repair inserts a vertex twice.
+    #[test]
+    fn spike_pattern_surfaces_repeated_vertex() {
+        let mesh = IndexedMesh {
+            vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(2, 0, 0), pt(0, 1, 0)],
+            polygons: vec![IndexedPolygon {
+                vertices: vec![0, 1, 3, 1, 2],
+                plane: xy_plane(),
+                color: 0,
+            }],
+        };
+        let violations = find_non_simple_loops(&mesh);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].vertex_id, 1);
+        assert_eq!(violations[0].indices, (1, 3));
+    }
+
+    /// Non-adjacent repeat — vertex appears at two non-neighboring
+    /// positions in a longer loop. Same simple-polygon violation as
+    /// the spike, just farther apart.
+    #[test]
+    fn non_adjacent_repeat_surfaces() {
+        let mesh = IndexedMesh {
+            vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(2, 0, 0), pt(3, 0, 0)],
+            polygons: vec![IndexedPolygon {
+                vertices: vec![0, 1, 2, 3, 1],
+                plane: xy_plane(),
+                color: 0,
+            }],
+        };
+        let violations = find_non_simple_loops(&mesh);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].vertex_id, 1);
+        assert_eq!(violations[0].indices, (1, 4));
+    }
+
+    /// One violation per non-simple polygon — multiple repeats in one
+    /// loop only surface the first pair (avoids quadratic noise on
+    /// pathological inputs).
+    #[test]
+    fn one_violation_per_polygon_even_with_multiple_repeats() {
+        let mesh = IndexedMesh {
+            vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(2, 0, 0)],
+            polygons: vec![IndexedPolygon {
+                vertices: vec![0, 1, 2, 1, 2],
+                plane: xy_plane(),
+                color: 0,
+            }],
+        };
+        let violations = find_non_simple_loops(&mesh);
+        assert_eq!(violations.len(), 1);
     }
 
     #[test]
