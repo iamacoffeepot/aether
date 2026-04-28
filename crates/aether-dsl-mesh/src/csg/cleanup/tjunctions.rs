@@ -20,7 +20,8 @@
 //! bucketing is the Phase 2 optimization mentioned in ADR-0055 if
 //! profiling shows cleanup time dominates mesh authoring.
 
-use super::mesh::{IndexedMesh, VertexId};
+use super::merge::normalize_loop;
+use super::mesh::{IndexedMesh, IndexedPolygon, VertexId};
 use crate::csg::point::Point3;
 use std::collections::{HashMap, HashSet};
 
@@ -80,22 +81,18 @@ impl IndexedMesh {
                 break;
             }
 
-            for (poly_idx, poly) in polygons.iter_mut().enumerate() {
+            // Insert subdivisions unconditionally; if an insertion would
+            // produce a non-simple loop (same pool vertex was already in
+            // this polygon, or is the subdivision for two adjacent edges
+            // of one polygon — the spike pattern from PR 371), feed the
+            // result through `normalize_loop` to split at the pinch into
+            // simple loops. This preserves both contracts: every
+            // subdivision is inserted (no unrepaired T-junctions) and
+            // every emitted polygon is simple. A polygon that fully
+            // collapses (every branch is degenerate) is dropped.
+            let mut next_polygons: Vec<IndexedPolygon> = Vec::with_capacity(polygons.len());
+            for poly in &polygons {
                 let n = poly.vertices.len();
-                // Skip insertion when `v` already appears in this polygon's
-                // loop — either originally, or inserted earlier in the
-                // current pass through this polygon. Inserting `v` twice
-                // produces a non-simple loop `[..., v, x, v, ...]` (the
-                // spike pattern): happens when the same pool vertex is the
-                // subdivision for two different edges of the same polygon,
-                // e.g. when an off-axis cutter snap-drifts a rim vertex
-                // onto two adjacent host edges. Downstream the merge stage
-                // reads the spike as an internal twin edge `(v,x)+(x,v)`
-                // and the post-merge invariant fires. The T-junction at
-                // `v` is left unrepaired in this polygon; loop splitting
-                // (auditor's deeper fix) is the right thing if a manifold
-                // crack remains. Box × sphere is the canonical repro.
-                let mut existing: HashSet<VertexId> = poly.vertices.iter().copied().collect();
                 let mut new_verts: Vec<VertexId> = Vec::with_capacity(n + subdivisions.len());
                 for i in 0..n {
                     let a = poly.vertices[i];
@@ -106,21 +103,18 @@ impl IndexedMesh {
                         && v != a
                         && v != b
                     {
-                        if existing.contains(&v) {
-                            tracing::trace!(
-                                poly_idx,
-                                edge = ?canon,
-                                vertex_id = v,
-                                "tjunction insert skipped to preserve simple loop (issue 350 family)"
-                            );
-                        } else {
-                            new_verts.push(v);
-                            existing.insert(v);
-                        }
+                        new_verts.push(v);
                     }
                 }
-                poly.vertices = new_verts;
+                for verts in normalize_loop(&new_verts) {
+                    next_polygons.push(IndexedPolygon {
+                        vertices: verts,
+                        plane: poly.plane,
+                        color: poly.color,
+                    });
+                }
             }
+            polygons = next_polygons;
         }
 
         IndexedMesh { vertices, polygons }
@@ -527,6 +521,71 @@ mod tests {
             "off-axis T-junction at ~2 fixed units perpendicular drift \
              must be classified as collinear (issue #299)"
         );
+    }
+
+    /// Loop-splitting regression. When a subdivision `w` for edge
+    /// `(a, b)` is already present in the polygon's loop at a different
+    /// position, inserting blindly would emit `[..., a, w, b, ..., w, ...]`
+    /// — non-simple. Skipping (PR 371's containment) leaves an
+    /// unrepaired T-junction and trips the post-tjunctions invariant.
+    /// The fix splits at `w` into two simple loops sharing the vertex.
+    /// Box × sphere was the canonical matrix repro.
+    #[test]
+    fn unsafe_subdivision_splits_polygon_into_two_simple_loops() {
+        // Polygon under test is a 7-gon `[A, B, C, w, D, E, F]` where
+        // `w` already sits at index 3 and is also collinear-strictly-
+        // between the polygon's first edge `A → B`. Inserting `w` into
+        // `(A, B)` produces `[A, w, B, C, w, D, E, F]` — w at indices
+        // 1 and 4. `normalize_loop` splits at the pinch:
+        //   outer = verts[..=1] + verts[5..] = [A, w, D, E, F]
+        //   inner = verts[1..4]              = [w, B, C]
+        let plane = xy_plane();
+        let vertices = vec![
+            pt(0.0, 0.0, 0.0),  // 0: A
+            pt(4.0, 0.0, 0.0),  // 1: B
+            pt(3.0, 1.0, 0.0),  // 2: C
+            pt(2.0, 0.0, 0.0),  // 3: w (on edge A→B, also in poly loop)
+            pt(1.0, 2.0, 0.0),  // 4: D
+            pt(0.0, 2.0, 0.0),  // 5: E
+            pt(-1.0, 1.0, 0.0), // 6: F
+        ];
+        let polygons = vec![
+            // Source polygon to keep w referenced.
+            poly(vec![0, 3, 4], plane, 0),
+            // Polygon under test.
+            poly(vec![0, 1, 2, 3, 4, 5, 6], plane, 0),
+        ];
+        let mesh = IndexedMesh { vertices, polygons };
+        let repaired = mesh.repair_tjunctions();
+
+        // Every emitted polygon must be simple (no repeated vertex).
+        for p in &repaired.polygons {
+            let mut seen = std::collections::HashSet::new();
+            for &v in &p.vertices {
+                assert!(
+                    seen.insert(v),
+                    "polygon {:?} contains repeated vertex {v}",
+                    p.vertices
+                );
+            }
+        }
+
+        // The 7-gon split — the source polygon (3 verts) plus two
+        // simple loops sharing w. Compare loops as multisets to
+        // tolerate rotation / order-of-emission differences.
+        assert_eq!(repaired.polygons.len(), 3);
+        let actual_loops: std::collections::BTreeSet<std::collections::BTreeSet<VertexId>> =
+            repaired
+                .polygons
+                .iter()
+                .map(|p| p.vertices.iter().copied().collect())
+                .collect();
+        let expected_loops: std::collections::BTreeSet<std::collections::BTreeSet<VertexId>> =
+            [vec![0, 3, 4], vec![0, 3, 4, 5, 6], vec![3, 1, 2]]
+                .into_iter()
+                .map(|v| v.into_iter().collect())
+                .collect();
+        assert_eq!(actual_loops, expected_loops);
     }
 
     #[test]
