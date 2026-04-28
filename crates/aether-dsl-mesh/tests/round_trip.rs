@@ -87,3 +87,31 @@ fn parse_errors_on_invalid_axis() {
     let result = parse("(mirror w (box 1 1 1 :color 0))");
     assert!(result.is_err(), "invalid axis should fail");
 }
+
+#[test]
+fn parse_errors_on_trailing_top_level_form() {
+    let result = parse("(box 1 1 1 :color 0) (box 2 2 2 :color 1)");
+    let err = result.expect_err("trailing top-level form should fail");
+    assert!(
+        matches!(err, aether_dsl_mesh::ParseError::TrailingInput { .. }),
+        "expected TrailingInput, got {err:?}"
+    );
+}
+
+#[test]
+fn parse_allows_trailing_comment() {
+    let result = parse("(box 1 1 1 :color 0)\n; trailing comment\n");
+    assert!(
+        result.is_ok(),
+        "trailing comment should not trigger TrailingInput, got {result:?}"
+    );
+}
+
+#[test]
+fn parse_allows_trailing_whitespace() {
+    let result = parse("(box 1 1 1 :color 0)   ");
+    assert!(
+        result.is_ok(),
+        "trailing whitespace should be OK, got {result:?}"
+    );
+}
