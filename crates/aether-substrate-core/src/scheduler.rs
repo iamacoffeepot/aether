@@ -24,15 +24,28 @@
 // per-mailbox drains.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 
+use aether_kinds::ComponentDied;
+use aether_mail::Kind;
+
 use crate::component::{Component, DISPATCH_UNKNOWN_KIND};
-use crate::mail::{Mail, MailboxId};
+use crate::mail::{Mail, MailboxId, ReplyTo};
 use crate::mailer::Mailer;
 use crate::registry::Registry;
+
+/// MailboxState tag stored in `ComponentEntry::state` (issue 321
+/// Phase 2). The dispatcher transitions Live → Dead before exiting on
+/// a panic / trap; `send` and the mailer's routing path read this on
+/// the fast path so mail to a dead mailbox warn-drops with the
+/// distinct "actor died" reason instead of queuing on a Sender
+/// nobody is reading.
+const STATE_LIVE: u8 = 0;
+const STATE_DEAD: u8 = 1;
 
 /// Per-entry quiescence counter + condvar, shared with the dispatcher
 /// thread. `send` increments `pending` before forwarding to the inbox;
@@ -72,6 +85,14 @@ pub struct ComponentEntry {
     /// back through, and so panic-hook events have a structured field
     /// for the failing mailbox.
     mailbox: MailboxId,
+    /// Issue 321 Phase 2: actor liveness flag. Shared with the
+    /// dispatcher loop so a panic / trap detected during `deliver`
+    /// transitions the entry to `STATE_DEAD` before the actor thread
+    /// exits — `send` / mailer routing then warn-drop subsequent mail
+    /// with the dead-actor reason instead of queuing on a Sender no
+    /// one is reading. Reset to `STATE_LIVE` on a successful replace
+    /// (`spawn_dispatcher_on`'s caller takes care of that path).
+    state: Arc<AtomicU8>,
 }
 
 impl ComponentEntry {
@@ -86,21 +107,38 @@ impl ComponentEntry {
     /// the dispatcher thread (issue #321) — a panic on the dispatcher
     /// then surfaces in `engine_logs` with `thread="aether-component-
     /// {name}-{mailbox_short}"` instead of an opaque thread label.
-    pub fn spawn(mut component: Component, registry: Arc<Registry>, mailbox: MailboxId) -> Self {
+    pub fn spawn(
+        mut component: Component,
+        registry: Arc<Registry>,
+        mailer: Arc<Mailer>,
+        mailbox: MailboxId,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         component.install_inbox_rx(rx);
         let gate: Arc<PendingGate> = Arc::new(PendingGate::default());
+        let state: Arc<AtomicU8> = Arc::new(AtomicU8::new(STATE_LIVE));
         let gate_for_thread = Arc::clone(&gate);
+        let state_for_thread = Arc::clone(&state);
         let thread_name = dispatcher_thread_name(&registry, mailbox);
         let handle = thread::Builder::new()
             .name(thread_name)
-            .spawn(move || dispatcher_loop(component, registry, gate_for_thread, mailbox))
+            .spawn(move || {
+                dispatcher_loop(
+                    component,
+                    registry,
+                    mailer,
+                    gate_for_thread,
+                    state_for_thread,
+                    mailbox,
+                )
+            })
             .expect("spawn component dispatcher");
         Self {
             sender: Mutex::new(Some(tx)),
             handle: Mutex::new(Some(handle)),
             gate,
             mailbox,
+            state,
         }
     }
 
@@ -111,13 +149,27 @@ impl ComponentEntry {
         self.mailbox
     }
 
+    /// Issue 321 Phase 2: `true` if the dispatcher transitioned this
+    /// mailbox to Dead after a panic or trap during deliver. Mail
+    /// routed to a dead mailbox is warn-dropped at the mailer with a
+    /// distinct reason instead of being queued on a Sender no one
+    /// reads.
+    pub fn is_dead(&self) -> bool {
+        self.state.load(Ordering::Acquire) == STATE_DEAD
+    }
+
     /// Forward `mail` to this component's inbox. Returns `false` if
-    /// the inbox is closed (caller should warn-and-drop). On success,
-    /// increments the per-entry quiescence counter before sending; the
-    /// dispatcher decrements after `deliver` returns. On closed-inbox,
-    /// the counter is left untouched (nothing to deliver, nothing to
+    /// the inbox is closed OR the mailbox transitioned to Dead
+    /// (issue 321 Phase 2; callers that want to differentiate use
+    /// `is_dead()` first). On success, increments the per-entry
+    /// quiescence counter before sending; the dispatcher decrements
+    /// after `deliver` returns. On the dead / closed paths the
+    /// counter is left untouched (nothing to deliver, nothing to
     /// drain).
     pub fn send(&self, mail: Mail) -> bool {
+        if self.is_dead() {
+            return false;
+        }
         let guard = self.sender.lock().unwrap();
         let Some(tx) = guard.as_ref() else {
             return false;
@@ -230,14 +282,22 @@ pub fn spawn_dispatcher_on(
     mut component: Component,
     rx: Receiver<Mail>,
     registry: Arc<Registry>,
+    mailer: Arc<Mailer>,
 ) {
     component.install_inbox_rx(rx);
     let gate = Arc::clone(&entry.gate);
+    let state = Arc::clone(&entry.state);
+    // Replace resets liveness — a successful swap brings a fresh
+    // instance up under the same entry, so a prior panic on the old
+    // dispatcher shouldn't leave the entry permanently Dead. ADR-0022
+    // freeze-drain-swap takes the failure-path policy elsewhere
+    // (replace returns Err and the old instance stays bound).
+    state.store(STATE_LIVE, Ordering::Release);
     let mailbox = entry.mailbox;
     let thread_name = dispatcher_thread_name(&registry, mailbox);
     let handle = thread::Builder::new()
         .name(thread_name)
-        .spawn(move || dispatcher_loop(component, registry, gate, mailbox))
+        .spawn(move || dispatcher_loop(component, registry, mailer, gate, state, mailbox))
         .expect("spawn component dispatcher");
     let prev = entry.handle.lock().unwrap().replace(handle);
     debug_assert!(prev.is_none(), "entry handle slot must be empty");
@@ -262,7 +322,9 @@ fn dispatcher_thread_name(registry: &Registry, mailbox: MailboxId) -> String {
 fn dispatcher_loop(
     mut component: Component,
     registry: Arc<Registry>,
+    mailer: Arc<Mailer>,
     gate: Arc<PendingGate>,
+    state: Arc<AtomicU8>,
     mailbox: MailboxId,
 ) -> Component {
     // ADR-0042: the receiver lives on `SubstrateCtx`; `next_mail`
@@ -270,29 +332,45 @@ fn dispatcher_loop(
     // completed `wait_reply_p32` call) ahead of the mpsc. `None`
     // means both are empty and the inbox is closed — our exit.
     while let Some(mail) = component.next_mail() {
-        // Issue #321: open a `dispatch` span around `deliver` so the
-        // panic hook auto-captures the mailbox + kind context if the
-        // guest (or our host code) panics. Pre-resolve `kind_name`
-        // once and reuse it both as a span field and (if we hit the
-        // unknown-kind path) the warn message.
+        // Issue 321: pre-resolve `kind_name` once and reuse it both as
+        // a span field and (if we hit the unknown / trap / panic
+        // paths) the warn / error / broadcast payloads.
         let kind_name = registry
             .kind_name(mail.kind)
             .unwrap_or_else(|| format!("kind#{:#x}", mail.kind));
-        let span = tracing::info_span!(
-            "dispatch",
-            mailbox = mailbox.0,
-            kind = %kind_name,
-        );
-        let _enter = span.enter();
-        // Issue #321: replace `.expect("component.deliver failed")`
-        // with a logged Err. A wasmtime trap (guest unreachable, host-
-        // fn panic caught by wasmtime, etc.) used to take the whole
-        // dispatcher thread down silently; now it surfaces as a
-        // structured event and the dispatcher continues draining.
-        // Phase 2 (mailbox-Dead transitions, component_died broadcast)
-        // ships separately.
-        match component.deliver(&mail) {
-            Ok(rc) => {
+
+        // Issue 321 Phase 2: wrap `deliver` in `catch_unwind` so a
+        // host-side Rust panic (a panicking host fn, a poisoned
+        // mutex unwrap, etc.) doesn't kill the dispatcher silently.
+        // Wasmtime traps from the guest — an `unreachable` opcode,
+        // OOB memory access, a panicked Rust guest under the SDK's
+        // default panic handler — already surface as `Err` from
+        // `deliver`, so they don't need `catch_unwind`; they're
+        // handled in the inner `Ok(Err(e))` arm below. The two paths
+        // are folded into one `kill_actor` disposition (issue 321
+        // question C: "same disposition for traps and panics") that
+        // marks the entry Dead and emits a `component_died`
+        // broadcast.
+        //
+        // `AssertUnwindSafe` is required because the closure captures
+        // `&mut component`, and `Component`'s wasmtime `Store` is not
+        // `RefUnwindSafe` by default. The contract we promise: after
+        // a panic the component's Store may be in an inconsistent
+        // state — that's fine, because we drop the actor entirely
+        // (mark Dead, exit the loop). We never touch the mid-panic
+        // Store again.
+        let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let span = tracing::info_span!(
+                "dispatch",
+                mailbox = mailbox.0,
+                kind = %kind_name,
+            );
+            let _enter = span.enter();
+            component.deliver(&mail)
+        }));
+
+        match outcome {
+            Ok(Ok(rc)) => {
                 if rc == DISPATCH_UNKNOWN_KIND {
                     tracing::warn!(
                         target: "aether_substrate::scheduler",
@@ -301,20 +379,127 @@ fn dispatcher_loop(
                         "component has no handler for mail kind (ADR-0033 strict receiver); dropped",
                     );
                 }
+                decrement_and_notify(&gate);
             }
-            Err(e) => {
+            Ok(Err(trap)) => {
                 tracing::error!(
                     target: "aether_substrate::scheduler",
                     mailbox = ?mail.recipient,
                     kind = %kind_name,
-                    error = %e,
-                    "component deliver failed: wasmtime returned Err (likely guest trap)",
+                    error = %trap,
+                    "component deliver returned Err (wasmtime trap); marking mailbox dead",
                 );
+                kill_actor(
+                    &state,
+                    &mailer,
+                    &registry,
+                    mailbox,
+                    &kind_name,
+                    format!("wasmtime trap: {trap}"),
+                );
+                decrement_and_notify(&gate);
+                return component;
+            }
+            Err(payload) => {
+                let payload_msg = panic_payload_string(&payload);
+                tracing::error!(
+                    target: "aether_substrate::scheduler",
+                    mailbox = ?mail.recipient,
+                    kind = %kind_name,
+                    payload = %payload_msg,
+                    "host-side panic during deliver; marking mailbox dead",
+                );
+                kill_actor(
+                    &state,
+                    &mailer,
+                    &registry,
+                    mailbox,
+                    &kind_name,
+                    format!("host panic: {payload_msg}"),
+                );
+                decrement_and_notify(&gate);
+                return component;
             }
         }
-        decrement_and_notify(&gate);
     }
     component
+}
+
+/// Issue 321 Phase 2: transition `state` to Dead, then emit a
+/// `aether.observation.component_died` broadcast through the mailer
+/// so external monitor components (or a Claude session in MCP) can
+/// observe the death without polling `engine_logs`. Same disposition
+/// for both wasmtime traps (`Ok(Err)` from `deliver`) and host-side
+/// Rust panics caught by `catch_unwind` — recovery policy is out of
+/// scope for the substrate (issue 321 question D).
+///
+/// The broadcast emission is itself wrapped in `catch_unwind` —
+/// pushing through the mailer involves a registered sink handler,
+/// and we don't want a panic in that handler to escape on top of an
+/// already-failing dispatcher. Worst case: the broadcast is silently
+/// dropped and the death is only visible via `engine_logs`.
+fn kill_actor(
+    state: &AtomicU8,
+    mailer: &Mailer,
+    registry: &Registry,
+    mailbox: MailboxId,
+    last_kind: &str,
+    reason: String,
+) {
+    state.store(STATE_DEAD, Ordering::Release);
+
+    let mailbox_name = registry
+        .mailbox_name(mailbox)
+        .unwrap_or_else(|| "?".to_string());
+    let died = ComponentDied {
+        mailbox_id: mailbox.0,
+        mailbox_name,
+        last_kind: last_kind.to_string(),
+        reason,
+    };
+    let payload = match postcard::to_allocvec(&died) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(
+                target: "aether_substrate::scheduler",
+                error = %e,
+                "failed to encode component_died broadcast; death visible only in logs",
+            );
+            return;
+        }
+    };
+
+    let broadcast_mbox = MailboxId::from_name(crate::HUB_CLAUDE_BROADCAST);
+    let mail = Mail {
+        recipient: broadcast_mbox,
+        kind: ComponentDied::ID,
+        payload,
+        count: 1,
+        from_component: Some(mailbox),
+        reply_to: ReplyTo::NONE,
+    };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| mailer.push(mail)));
+    if result.is_err() {
+        tracing::error!(
+            target: "aether_substrate::scheduler",
+            "panic while emitting component_died broadcast; death visible only in logs",
+        );
+    }
+}
+
+/// Best-effort stringify a panic payload caught by `catch_unwind`.
+/// Std supports `&'static str` (from `panic!("literal")`) and
+/// `String` (from `panic!("{}", x)`); falls back to a `TypeId`
+/// mention. Mirrors `panic_hook::payload_string` but takes a `Box`
+/// since `catch_unwind`'s Err is `Box<dyn Any + Send>`.
+fn panic_payload_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        format!("<non-string panic payload type_id={:?}>", payload.type_id())
+    }
 }
 
 /// Shared, runtime-mutable table of bound components. Cloned into the
@@ -369,7 +554,12 @@ impl Scheduler {
     /// `id` — replacement is an ADR-0010 primitive in its own right,
     /// handled by `ControlPlane::handle_replace`.
     pub fn add_component(&self, id: MailboxId, component: Component) {
-        let entry = ComponentEntry::spawn(component, Arc::clone(&self.registry), id);
+        let entry = ComponentEntry::spawn(
+            component,
+            Arc::clone(&self.registry),
+            Arc::clone(&self.queue),
+            id,
+        );
         self.components.write().unwrap().insert(id, Arc::new(entry));
     }
 }
@@ -471,6 +661,7 @@ mod tests {
         Arc::new(ComponentEntry::spawn(
             minimal_component(),
             Arc::new(Registry::new()),
+            Arc::new(Mailer::new()),
             MailboxId(0),
         ))
     }
@@ -552,60 +743,199 @@ mod tests {
         assert_eq!(name, "aether-component-?-abcdef1234567890");
     }
 
-    /// Load-bearing regression for issue #321: a guest that traps on
-    /// every `receive_p32` (the post-fix behaviour we're relying on)
-    /// no longer kills the dispatcher thread. Pre-fix this test would
-    /// deadlock in `drain` because `.expect("component.deliver
-    /// failed")` panicked the dispatcher before it could decrement the
-    /// pending counter.
+    /// Issue 321 Phase 2 (replaces Phase 1's
+    /// `trap_in_receive_does_not_kill_dispatcher`): a guest trap during
+    /// `deliver` now marks the mailbox Dead and exits the dispatcher.
+    /// Pre-Phase-1 this test would deadlock in `drain` because the
+    /// panicked dispatcher never decremented the pending counter.
+    /// Post-Phase-1 the dispatcher logged the Err and continued. Phase 2
+    /// changes the disposition again: same as a host panic, the actor
+    /// is killed (issue 321 question C: "same disposition for traps and
+    /// panics"). Recovery (replace_component) is policy that lives
+    /// outside the substrate.
     #[test]
-    fn trap_in_receive_does_not_kill_dispatcher() {
+    fn trap_in_receive_marks_mailbox_dead() {
+        let registry = Arc::new(Registry::new());
+        let mailer = Arc::new(Mailer::new());
+        // Install the broadcast sink so the dispatcher's death push
+        // doesn't bubble up as "unknown mailbox" — a side effect of
+        // having no broadcast in test setup. Counter is plumbed
+        // through to verify the broadcast actually fired.
+        let broadcast_count = Arc::new(AtomicU32::new(0));
+        let bc = Arc::clone(&broadcast_count);
+        registry.register_sink(
+            crate::HUB_CLAUDE_BROADCAST,
+            Arc::new(move |_, _, _, _, _, _| {
+                bc.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        // Wire the mailer with a fresh ComponentTable so push routing
+        // hits the registered sink.
+        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
+        mailer.wire(Arc::clone(&registry), Arc::clone(&components));
+
         let entry = Arc::new(ComponentEntry::spawn(
             component_from_wat(WAT_TRAPS_IN_RECEIVE),
-            Arc::new(Registry::new()),
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
             MailboxId(0),
         ));
 
-        // First mail: guest traps. With the fix, dispatcher logs Err
-        // and decrements the gate; without the fix, drain blocks
-        // forever (pending stays at 1 because the panicked dispatcher
-        // never ran `decrement_and_notify`).
+        // Send mail; guest traps on receive_p32. Phase 2 dispatcher
+        // marks state Dead, emits ComponentDied broadcast, exits.
         assert!(entry.send(Mail::new(MailboxId(0), 0xDD, vec![1], 1)));
         entry.drain();
         assert_eq!(
             entry.gate.pending.load(Ordering::Acquire),
             0,
-            "dispatcher must decrement pending even when deliver returns Err",
+            "dispatcher must decrement pending before exiting",
+        );
+        assert!(
+            entry.is_dead(),
+            "trap during deliver must transition mailbox to Dead",
+        );
+        assert_eq!(
+            broadcast_count.load(Ordering::SeqCst),
+            1,
+            "exactly one component_died broadcast must be emitted",
         );
 
-        // Second mail: dispatcher should still be alive (proof: drain
-        // returns) and processing. Pre-fix this would also deadlock
-        // because the thread died on mail #1.
-        assert!(entry.send(Mail::new(MailboxId(0), 0xDD, vec![2], 1)));
-        entry.drain();
+        // Send to dead mailbox: returns false, doesn't queue, doesn't
+        // increment pending.
+        assert!(
+            !entry.send(Mail::new(MailboxId(0), 0xDD, vec![2], 1)),
+            "send to dead mailbox must fail-fast",
+        );
         assert_eq!(entry.gate.pending.load(Ordering::Acquire), 0);
 
-        // Clean shutdown: close the channel, dispatcher exits,
-        // close_and_join recovers the Component without panicking.
+        // close_and_join still recovers cleanly — dispatcher already
+        // exited via the kill_actor path, so the JoinHandle is ready.
         let _component = close_and_join(entry);
     }
 
-    /// Repeated traps don't leak state or accumulate pending counts.
-    /// Strict regression check for the decrement_and_notify path
-    /// running on every iteration of the dispatcher loop, not just
-    /// the Ok arm.
+    /// Issue 321 Phase 2: the ComponentDied broadcast carries the
+    /// expected structured fields (mailbox_id, mailbox_name, last_kind,
+    /// reason) so external monitors can act on the failure without
+    /// polling logs.
     #[test]
-    fn repeated_traps_drain_independently() {
+    fn component_died_broadcast_carries_expected_fields() {
+        let registry = Arc::new(Registry::new());
+        // Register the dispatcher's mailbox under a known name so the
+        // broadcast's `mailbox_name` field has something to resolve.
+        let mailbox = registry.register_component("crashy");
+        let mailer = Arc::new(Mailer::new());
+
+        let captured: Arc<Mutex<Vec<ComponentDied>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        registry.register_sink(
+            crate::HUB_CLAUDE_BROADCAST,
+            Arc::new(move |kind_id, _, _, _, bytes, _| {
+                if kind_id == ComponentDied::ID
+                    && let Ok(d) = postcard::from_bytes::<ComponentDied>(bytes)
+                {
+                    cap.lock().unwrap().push(d);
+                }
+            }),
+        );
+        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
+        mailer.wire(Arc::clone(&registry), Arc::clone(&components));
+
         let entry = Arc::new(ComponentEntry::spawn(
             component_from_wat(WAT_TRAPS_IN_RECEIVE),
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            mailbox,
+        ));
+
+        assert!(entry.send(Mail::new(mailbox, 0xDD, vec![], 1)));
+        entry.drain();
+
+        let died = captured.lock().unwrap();
+        assert_eq!(died.len(), 1, "exactly one death broadcast expected");
+        let d = &died[0];
+        assert_eq!(d.mailbox_id, mailbox.0);
+        assert_eq!(d.mailbox_name, "crashy");
+        assert!(
+            d.reason.starts_with("wasmtime trap:"),
+            "expected wasmtime trap reason, got: {}",
+            d.reason,
+        );
+        // last_kind is the registry-resolved or hex-fallback name; this
+        // mailbox's send used kind 0xDD which has no registered name.
+        assert!(
+            d.last_kind.contains("0xdd") || d.last_kind == "kind#0xdd",
+            "expected hex fallback for unregistered kind, got: {}",
+            d.last_kind,
+        );
+
+        let _component = close_and_join(entry);
+    }
+
+    /// Issue 321 Phase 2: `is_dead` defaults to false on a freshly
+    /// spawned entry, transitions to true only after a kill_actor
+    /// path. Tests the AtomicU8 visibility guarantee — Acquire load
+    /// must see the dispatcher's Release store.
+    #[test]
+    fn is_dead_starts_false_and_transitions_after_trap() {
+        let registry = Arc::new(Registry::new());
+        let mailer = Arc::new(Mailer::new());
+        registry.register_sink(crate::HUB_CLAUDE_BROADCAST, Arc::new(|_, _, _, _, _, _| {}));
+        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
+        mailer.wire(Arc::clone(&registry), Arc::clone(&components));
+
+        let entry = Arc::new(ComponentEntry::spawn(
+            component_from_wat(WAT_TRAPS_IN_RECEIVE),
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            MailboxId(0),
+        ));
+        assert!(!entry.is_dead(), "freshly spawned entry must be Live");
+
+        assert!(entry.send(Mail::new(MailboxId(0), 0xDD, vec![], 1)));
+        entry.drain();
+        assert!(entry.is_dead(), "post-trap entry must be Dead");
+
+        let _component = close_and_join(entry);
+    }
+
+    /// Issue 321 Phase 2: a healthy component (no trap) stays Live
+    /// across many mails. Negative regression — kill_actor must not
+    /// fire on Ok deliveries.
+    #[test]
+    fn healthy_component_stays_live_across_many_mails() {
+        let entry = Arc::new(ComponentEntry::spawn(
+            minimal_component(),
             Arc::new(Registry::new()),
+            Arc::new(Mailer::new()),
             MailboxId(0),
         ));
         for i in 0..16u32 {
-            assert!(entry.send(Mail::new(MailboxId(0), 0xDD, vec![i as u8], 1)));
+            assert!(entry.send(Mail::new(MailboxId(0), 0xCC, vec![i as u8], 1)));
         }
         entry.drain();
+        assert!(!entry.is_dead());
         assert_eq!(entry.gate.pending.load(Ordering::Acquire), 0);
         let _component = close_and_join(entry);
+    }
+
+    /// Issue 321 Phase 2: `panic_payload_string` mirrors the
+    /// `panic_hook::payload_string` shapes for `&'static str`,
+    /// `String`, and unknown payload types. Pure-fn coverage so a
+    /// future regression in formatting shows up at the unit level
+    /// rather than only via the integration trap path.
+    #[test]
+    fn panic_payload_string_handles_common_shapes() {
+        let s_static: Box<dyn std::any::Any + Send> = Box::new("literal");
+        assert_eq!(panic_payload_string(&s_static), "literal");
+
+        let s_owned: Box<dyn std::any::Any + Send> = Box::new(String::from("formatted"));
+        assert_eq!(panic_payload_string(&s_owned), "formatted");
+
+        let other: Box<dyn std::any::Any + Send> = Box::new(42i32);
+        let out = panic_payload_string(&other);
+        assert!(
+            out.starts_with("<non-string panic payload"),
+            "unexpected: {out}",
+        );
     }
 }

@@ -528,6 +528,31 @@ pub struct FrameStats {
     pub triangles: u64,
 }
 
+/// Substrate broadcast on actor death (issue 321 Phase 2). The
+/// dispatcher emits one of these to `hub.claude.broadcast` when a
+/// component's actor thread is marked dead — either because the guest
+/// trapped during `deliver` or a host-side panic was caught around the
+/// loop body. External monitor components (or a Claude session in MCP)
+/// observe this kind via `receive_mail` and decide what to do —
+/// `replace_component` for hot-recovery, page a human, or just leave
+/// the mailbox dead. The substrate itself takes no recovery action;
+/// policy lives outside.
+///
+/// `last_kind` carries the kind name being delivered when the actor
+/// died. `reason` is a human-readable string describing the failure
+/// (panic payload, trap message). String fields make this postcard-
+/// shaped on the wire (cast eligibility is false for non-`Pod` types).
+#[derive(
+    aether_mail::Kind, aether_mail::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
+)]
+#[kind(name = "aether.observation.component_died")]
+pub struct ComponentDied {
+    pub mailbox_id: u64,
+    pub mailbox_name: alloc::string::String,
+    pub last_kind: alloc::string::String,
+    pub reason: alloc::string::String,
+}
+
 /// Diagnostic the hub emits back to an originating engine when mail
 /// that engine bubbled up (ADR-0037) doesn't resolve at the hub
 /// either. Lands on the engine's `aether.diagnostics` sink, which

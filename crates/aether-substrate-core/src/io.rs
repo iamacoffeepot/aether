@@ -1112,6 +1112,7 @@ mod tests {
         let entry = Arc::new(ComponentEntry::spawn(
             component,
             Arc::clone(&registry),
+            Arc::clone(&mailer),
             caller_mailbox,
         ));
         components
