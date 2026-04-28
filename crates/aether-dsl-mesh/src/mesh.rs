@@ -248,9 +248,19 @@ fn mesh_into_polygons(
             // the chained-pairwise hit there than risk wrong-shape
             // output.
             if subtract.len() > 1 && subtract.iter().all(is_csg_leaf) {
+                // Concatenation only equals union when cutters are
+                // disjoint; for overlapping cutters the polygons inside
+                // the overlap region survive into the BSP as interior
+                // walls (issue #341). Run the cutters through union_raw
+                // pairwise so the combined cutter is a true CSG union
+                // before the single base-difference pass.
+                let mut iter = subtract.iter();
                 let mut combined = Vec::new();
-                for s in subtract {
-                    mesh_into_polygons(&mut combined, s, offset)?;
+                mesh_into_polygons(&mut combined, iter.next().unwrap(), offset)?;
+                for s in iter {
+                    let mut s_polys = Vec::new();
+                    mesh_into_polygons(&mut s_polys, s, offset)?;
+                    combined = csg::ops::union_raw(combined, s_polys)?;
                 }
                 acc = csg::ops::difference_raw(acc, combined)?;
             } else {
@@ -994,6 +1004,48 @@ mod tests {
         .unwrap();
         let tris = mesh(&ast).expect("composite-subtractor difference must mesh");
         assert!(!tris.is_empty());
+    }
+
+    /// Regression for issue #341: the N-ary fast path must true-union
+    /// overlapping cutters, not concatenate them. Two perpendicular
+    /// cylindrical bores share volume at the cube center; under the
+    /// concatenating bug the overlap-region polygons survived as
+    /// interior walls and `(difference box cyl1 cyl2)` produced wrong
+    /// geometry vs the explicit `(difference box (union cyl1 cyl2))`
+    /// form. With the fix the two forms must mesh identically.
+    #[test]
+    fn n_ary_difference_with_overlapping_cutters_matches_explicit_union() {
+        use crate::parse;
+        let n_ary = parse(
+            "(difference \
+             (box 2 2 2 :color 5) \
+             (cylinder 0.4 3 12 :color 3) \
+             (rotate (1 0 0) 1.5707963 (cylinder 0.4 3 12 :color 3)))",
+        )
+        .unwrap();
+        let explicit_union = parse(
+            "(difference \
+             (box 2 2 2 :color 5) \
+             (union \
+              (cylinder 0.4 3 12 :color 3) \
+              (rotate (1 0 0) 1.5707963 (cylinder 0.4 3 12 :color 3))))",
+        )
+        .unwrap();
+        let mut from_n_ary = mesh(&n_ary).expect("n-ary difference must mesh");
+        let mut from_union = mesh(&explicit_union).expect("explicit-union difference must mesh");
+        let key = |t: &Triangle| {
+            let mut buf: Vec<u8> = Vec::with_capacity(40);
+            for v in &t.vertices {
+                for c in [v.x, v.y, v.z] {
+                    buf.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+            buf.extend_from_slice(&t.color.to_le_bytes());
+            buf
+        };
+        from_n_ary.sort_by_key(key);
+        from_union.sort_by_key(key);
+        assert_eq!(from_n_ary, from_union);
     }
 
     /// End-to-end equivalence for the disjoint-union rewrite: a union
