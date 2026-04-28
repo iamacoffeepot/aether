@@ -59,6 +59,8 @@ pub enum ParseError {
         min: usize,
         got: usize,
     },
+    #[error("trailing top-level form after first node: {trailing}")]
+    TrailingInput { trailing: String },
 }
 
 pub fn parse(text: &str) -> Result<Node, ParseError> {
@@ -68,7 +70,13 @@ pub fn parse(text: &str) -> Result<Node, ParseError> {
     let value = parser
         .next_value()?
         .ok_or_else(|| ParseError::NotAList("empty input".into()))?;
-    parse_node(&value)
+    let node = parse_node(&value)?;
+    if let Some(extra) = parser.next_value()? {
+        return Err(ParseError::TrailingInput {
+            trailing: format!("{extra}"),
+        });
+    }
+    Ok(node)
 }
 
 fn parse_node(value: &Value) -> Result<Node, ParseError> {
