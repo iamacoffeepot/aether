@@ -473,6 +473,7 @@ impl ControlPlane {
                 old_component,
                 new_rx,
                 Arc::clone(&self.registry),
+                Arc::clone(&self.queue),
             );
             return ReplaceResult::Err { error: err };
         }
@@ -505,6 +506,7 @@ impl ControlPlane {
                         old_component,
                         new_rx,
                         Arc::clone(&self.registry),
+                        Arc::clone(&self.queue),
                     );
                     return ReplaceResult::Err {
                         error: format!("wasm instantiation failed: {e}"),
@@ -524,6 +526,7 @@ impl ControlPlane {
                 old_component,
                 new_rx,
                 Arc::clone(&self.registry),
+                Arc::clone(&self.queue),
             );
             return ReplaceResult::Err {
                 error: format!("on_rehydrate failed: {e}"),
@@ -539,6 +542,7 @@ impl ControlPlane {
             new_component,
             new_rx,
             Arc::clone(&self.registry),
+            Arc::clone(&self.queue),
         );
 
         self.announce_kinds();
@@ -546,7 +550,12 @@ impl ControlPlane {
     }
 
     fn insert_component(&self, id: MailboxId, component: Component) {
-        let entry = ComponentEntry::spawn(component, Arc::clone(&self.registry), id);
+        let entry = ComponentEntry::spawn(
+            component,
+            Arc::clone(&self.registry),
+            Arc::clone(&self.queue),
+            id,
+        );
         self.components.write().unwrap().insert(id, Arc::new(entry));
     }
 

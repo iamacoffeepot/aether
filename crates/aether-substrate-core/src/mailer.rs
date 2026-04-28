@@ -295,11 +295,24 @@ fn route_mail(
             let entry = components.read().unwrap().get(&recipient).map(Arc::clone);
             match entry {
                 Some(entry) => {
-                    if !entry.send(mail) {
+                    // Issue 321 Phase 2: differentiate "actor died
+                    // (panic / trap)" from "shutdown closed". The
+                    // dead-state check happens before send so the
+                    // warn message is unambiguous; otherwise both
+                    // failure modes collapsed into the same line and
+                    // dead-actor diagnoses became "why is mail being
+                    // dropped?" detective work.
+                    if entry.is_dead() {
                         tracing::warn!(
                             target: "aether_substrate::queue",
                             mailbox = ?recipient,
-                            "component inbox closed; mail discarded",
+                            "mail to dead mailbox (actor panicked or trapped); discarded — see component_died broadcast",
+                        );
+                    } else if !entry.send(mail) {
+                        tracing::warn!(
+                            target: "aether_substrate::queue",
+                            mailbox = ?recipient,
+                            "component inbox closed (shutdown); mail discarded",
                         );
                     }
                 }
