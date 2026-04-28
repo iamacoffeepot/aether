@@ -78,3 +78,12 @@ crate-type = ["cdylib"]
 [[example]]
 name = "postcard_echoer"
 crate-type = ["cdylib"]
+
+# First end-to-end component (formerly `aether-hello-component`):
+# emits a fixed world-space triangle to the render sink each tick and
+# echoes `aether.ping` back as `aether.pong`. Doubles as a minimal
+# `#[handlers]` reference and the canary referenced from ADR-0012/0013/
+# 0014/0033.
+[[example]]
+name = "hello"
+crate-type = ["cdylib"]

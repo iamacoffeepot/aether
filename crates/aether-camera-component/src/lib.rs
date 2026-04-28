@@ -58,8 +58,9 @@ pub struct Orbit {
 /// `aether.camera.orbit.set_*` mail family.
 ///
 /// # Agent
-/// Load this alongside a drawing component (e.g. `aether-hello-component`)
-/// to see its geometry viewed through a moving 3D camera. To poke the
+/// Load this alongside a drawing component (e.g. the `hello` example
+/// in `aether-component/examples/`) to see its geometry viewed through
+/// a moving 3D camera. To poke the
 /// camera, send control mail to this component's mailbox:
 ///
 /// - `OrbitSetDistance { distance }` — zoom (default 3.0)
