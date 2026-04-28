@@ -53,6 +53,16 @@ pub enum CsgError {
         "CSG BSP recursion exceeded depth limit ({limit}); likely a snap-drift cascade not caught by the side-test tolerance"
     )]
     RecursionLimit { limit: usize },
+    /// Checked `i128` arithmetic in the rational BSP path (ADR-0061)
+    /// overflowed. Surfaces as a typed CSG error rather than wrapping or
+    /// panicking. The matrix and the eventual Tier B fuzz layer must run
+    /// without producing this error at ADR-0054 coordinate bounds; if it
+    /// fires, that's a bug to fix or a symptom of pathological input.
+    #[error("CSG numeric overflow at {stage}: {context}")]
+    NumericOverflow {
+        stage: &'static str,
+        context: &'static str,
+    },
 }
 
 /// Fan-triangulate a polygon list back to wire `Triangle`s. Polygons
