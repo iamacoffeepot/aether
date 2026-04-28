@@ -26,6 +26,8 @@ pub enum ParseError {
     ExpectedNumber(String),
     #[error("expected integer, got {0}")]
     ExpectedInteger(String),
+    #[error("expected boolean (#t / #f / true / false), got {0}")]
+    ExpectedBool(String),
     #[error("expected symbol, got {0}")]
     ExpectedSymbolValue(String),
     #[error("{node}: wrong number of positional arguments — expected {expected}, got {got}")]
@@ -212,6 +214,22 @@ fn as_u32(value: &Value) -> Result<u32, ParseError> {
     u32::try_from(n).map_err(|_| ParseError::ExpectedInteger(format!("{value} (out of u32 range)")))
 }
 
+fn as_bool(value: &Value) -> Result<bool, ParseError> {
+    // Accept the lexpr-native `Bool` (Scheme `#t` / `#f`) plus the
+    // bare symbols `true` / `false` so the DSL stays human-friendly.
+    if let Some(b) = value.as_bool() {
+        return Ok(b);
+    }
+    if let Some(sym) = value.as_symbol() {
+        match sym {
+            "true" => return Ok(true),
+            "false" => return Ok(false),
+            _ => {}
+        }
+    }
+    Err(ParseError::ExpectedBool(format!("{value}")))
+}
+
 fn as_vec3(node: &'static str, value: &Value) -> Result<Vec3, ParseError> {
     let items = list_to_vec(value)?;
     if items.len() != 3 {
@@ -332,7 +350,7 @@ fn parse_torus(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
 
 fn parse_sweep(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
     expect_arity("sweep", positional, 2)?;
-    check_no_extra_keywords("sweep", keywords, &["color", "scales"])?;
+    check_no_extra_keywords("sweep", keywords, &["color", "scales", "open"])?;
     let scales = keywords
         .iter()
         .find(|(k, _)| k == "scales")
@@ -347,10 +365,17 @@ fn parse_sweep(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
             path_len: path.len(),
         });
     }
+    let open = keywords
+        .iter()
+        .find(|(k, _)| k == "open")
+        .map(|(_, v)| as_bool(v))
+        .transpose()?
+        .unwrap_or(false);
     Ok(Node::Sweep {
         profile: as_profile(positional[0])?,
         path,
         scales,
+        open,
         color: require_color("sweep", keywords)?,
     })
 }

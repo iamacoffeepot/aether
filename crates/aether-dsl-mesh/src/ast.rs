@@ -85,10 +85,17 @@ pub enum Node {
     /// the profile (length must match `path` length). `None` is
     /// equivalent to all-ones — uniform tube along the path. Use this
     /// to taper a swept tube toward its tip.
+    ///
+    /// `open` controls cap generation. The default (`false`) emits start
+    /// and end caps so the result is a closed solid suitable as a CSG
+    /// operand (BSP boolean classification requires a closed surface).
+    /// Set `open: true` (DSL `:open true`) to keep the legacy open-tube
+    /// behaviour when caps would interfere with downstream composition.
     Sweep {
         profile: Vec<[f32; 2]>,
         path: Vec<Vec3>,
         scales: Option<Vec<f32>>,
+        open: bool,
         color: u32,
     },
 
