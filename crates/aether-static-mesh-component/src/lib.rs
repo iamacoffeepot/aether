@@ -2,7 +2,7 @@
 //! I/O surface (ADR-0041), parses it into `DrawTriangle`s, and replays
 //! the cached list to the `"aether.sink.render"` sink every tick.
 //!
-//! Intended as a developer tool for inspecting `aether-dsl-mesh` output
+//! Intended as a developer tool for inspecting `aether-mesh` output
 //! (or any other OBJ-producing tool) end-to-end through the substrate's
 //! render path. ADR-0026's no-import-for-production-content rule
 //! targets *asset content*; this is a viewer, not an authoring path.

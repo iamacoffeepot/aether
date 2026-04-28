@@ -8,7 +8,7 @@ members = [
     "crates/aether-kinds",
     "crates/aether-math",
     "crates/aether-component",
-    "crates/aether-dsl-mesh",
+    "crates/aether-mesh",
     "crates/aether-camera-component",
     "crates/aether-mesh-editor-component",
     "crates/aether-player-component",
