@@ -174,11 +174,13 @@ fn process_bucket(
     let color = polygons[bucket[0]].color;
     for loop_verts in loops {
         let loop_verts = collapse_unbacked_boundary_runs(&loop_verts, global_directed, &directed);
-        out.push(IndexedPolygon {
-            vertices: loop_verts,
-            plane,
-            color,
-        });
+        for normalized in normalize_loop(&loop_verts) {
+            out.push(IndexedPolygon {
+                vertices: normalized,
+                plane,
+                color,
+            });
+        }
     }
 }
 
@@ -345,6 +347,71 @@ fn collapse_unbacked_boundary_runs(
         out.pop();
     }
     if out.len() < 3 { verts } else { out }
+}
+
+/// Normalize a possibly non-simple loop into a list of simple loops.
+///
+/// `extract_loops` walks an X-junction by smallest-turn continuation
+/// and tracks visited *edges*, not vertices. With pinch-point topology
+/// (figure-8) the walker can re-enter a vertex via a different edge,
+/// emitting a single loop with a repeated vertex id. The post-merge
+/// invariant (issue 337) catches these as `NonSimpleLoopViolation`.
+///
+/// Strategy: strip adjacent duplicates (including the wrap), then while
+/// a non-adjacent repeat exists at indices `i < j` split at the pinch:
+///
+/// - outer = `verts[..=i] ++ verts[j+1..]`  (closes via the original
+///   `(verts[n-1], verts[0])` edge)
+/// - inner = `verts[i..j]`  (closes via the original `(verts[j-1], r)`
+///   edge — same topology as the figure-8's inner cycle)
+///
+/// All edges of the original loop are preserved; only the grouping
+/// changes. Branches with fewer than 3 vertices are dropped — they
+/// represent antennae (e.g. `[a, b, a]`) whose contributing edges
+/// twin-cancel and shouldn't have survived the bucket-wide pass.
+///
+/// Recurses to handle multiply-pinched loops. Pinch detection is the
+/// HashMap-based first-repeat scan, which is O(n) per call; recursion
+/// depth is bounded by the number of pinches (typically 1-2 in BSP
+/// output).
+fn normalize_loop(loop_verts: &[VertexId]) -> Vec<Vec<VertexId>> {
+    let mut verts: Vec<VertexId> = Vec::with_capacity(loop_verts.len());
+    for &v in loop_verts {
+        if verts.last() == Some(&v) {
+            continue;
+        }
+        verts.push(v);
+    }
+    while verts.len() > 1 && verts.first() == verts.last() {
+        verts.pop();
+    }
+    if verts.len() < 3 {
+        return Vec::new();
+    }
+
+    let mut first_seen: HashMap<VertexId, usize> = HashMap::with_capacity(verts.len());
+    for (j, &v) in verts.iter().enumerate() {
+        if let Some(&i) = first_seen.get(&v) {
+            let mut outer: Vec<VertexId> = verts[..=i].to_vec();
+            outer.extend_from_slice(&verts[j + 1..]);
+            let inner: Vec<VertexId> = verts[i..j].to_vec();
+
+            tracing::trace!(
+                pinch_vertex = v,
+                indices = ?(i, j),
+                outer_len = outer.len(),
+                inner_len = inner.len(),
+                "normalize_loop split non-simple loop at pinch (issue 350)"
+            );
+
+            let mut result = normalize_loop(&outer);
+            result.extend(normalize_loop(&inner));
+            return result;
+        }
+        first_seen.insert(v, j);
+    }
+
+    vec![verts]
 }
 
 /// Walk directed boundary edges into closed loops. Returns `None` if
@@ -1350,5 +1417,66 @@ mod tests {
             !merged.polygons.is_empty(),
             "pathological bucket must not crash; fallback emits originals"
         );
+    }
+
+    #[test]
+    fn normalize_simple_loop_passes_through() {
+        let loops = normalize_loop(&[0, 1, 2, 3]);
+        assert_eq!(loops, vec![vec![0, 1, 2, 3]]);
+    }
+
+    #[test]
+    fn normalize_strips_adjacent_duplicates() {
+        let loops = normalize_loop(&[0, 0, 1, 2, 2, 3]);
+        assert_eq!(loops, vec![vec![0, 1, 2, 3]]);
+    }
+
+    #[test]
+    fn normalize_strips_wrap_around_duplicate() {
+        let loops = normalize_loop(&[0, 1, 2, 3, 0]);
+        assert_eq!(loops, vec![vec![0, 1, 2, 3]]);
+    }
+
+    #[test]
+    fn normalize_splits_pinch_into_two_simple_loops() {
+        // [a, b, c, r, d, e, r, f, g] with r at indices 3, 6.
+        // outer = verts[..=3] + verts[7..] = [a, b, c, r, f, g]
+        // inner = verts[3..6]               = [r, d, e]
+        let loops = normalize_loop(&[0, 1, 2, 99, 3, 4, 99, 5, 6]);
+        assert_eq!(loops.len(), 2);
+        assert_eq!(loops[0], vec![0, 1, 2, 99, 5, 6]);
+        assert_eq!(loops[1], vec![99, 3, 4]);
+    }
+
+    #[test]
+    fn normalize_drops_antenna_spike() {
+        // [a, b, a, c, d] — split at a (0, 2): outer = [a, c, d], inner = [a, b].
+        // Inner is len 2, dropped.
+        let loops = normalize_loop(&[0, 1, 0, 2, 3]);
+        assert_eq!(loops, vec![vec![0, 2, 3]]);
+    }
+
+    #[test]
+    fn normalize_handles_recursive_pinch() {
+        // [a, b, a, c, d, c, e] — two pinches.
+        // First split at a (0, 2): outer = [a, c, d, c, e], inner = [a, b] (dropped).
+        // outer recurses, splits at c (1, 3): outer-inner = [a, c, e], inner-inner = [c, d] (dropped).
+        let loops = normalize_loop(&[0, 1, 0, 2, 3, 2, 4]);
+        assert_eq!(loops, vec![vec![0, 2, 4]]);
+    }
+
+    #[test]
+    fn normalize_drops_fully_degenerate_loop() {
+        // [a, b, a, b] — two twin pairs. Split at a (0, 2): outer = [a, b],
+        // inner = [a, b]. Both len 2, dropped.
+        let loops = normalize_loop(&[0, 1, 0, 1]);
+        assert!(loops.is_empty());
+    }
+
+    #[test]
+    fn normalize_drops_too_short_inputs() {
+        assert!(normalize_loop(&[]).is_empty());
+        assert!(normalize_loop(&[0]).is_empty());
+        assert!(normalize_loop(&[0, 1]).is_empty());
     }
 }
