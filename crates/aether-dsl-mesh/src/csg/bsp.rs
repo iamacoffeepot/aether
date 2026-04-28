@@ -32,6 +32,8 @@
 //! See `CLAUDE.md`'s "Recursion in load-bearing code" guideline for the
 //! project-wide direction this implements.
 
+mod rat;
+
 use super::CsgError;
 use super::plane::Plane3;
 use super::polygon::Polygon;
