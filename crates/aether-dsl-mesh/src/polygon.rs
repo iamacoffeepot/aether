@@ -106,11 +106,13 @@ fn group_loops(loops: Vec<csg::polygon::Polygon>) -> Vec<Polygon> {
             .collect();
         classified.sort_by_key(|(area, _)| *area);
 
-        let mut outers: Vec<Vec<Point3>> = Vec::new();
+        // Partition by sign and remember each outer's signed area for
+        // the smallest-containing-outer tie-break below.
+        let mut outers: Vec<(i128, Vec<Point3>)> = Vec::new();
         let mut holes: Vec<Vec<Point3>> = Vec::new();
         for (area, verts) in classified {
             if area > 0 {
-                outers.push(verts);
+                outers.push((area, verts));
             } else {
                 holes.push(verts);
             }
@@ -121,17 +123,62 @@ fn group_loops(loops: Vec<csg::polygon::Polygon>) -> Vec<Polygon> {
             continue;
         }
 
-        // Emit one Polygon per outer. With multiple outers in one group
-        // (rare — typically only one face per (plane, color) group), the
-        // first outer carries all holes. PR 5 will preserve component
-        // identity so each outer's holes are correctly attached.
-        let last_outer_idx = outers.len() - 1;
-        for (i, outer) in outers.into_iter().enumerate() {
-            let polygon_holes = if i == last_outer_idx {
-                std::mem::take(&mut holes)
-            } else {
-                Vec::new()
+        // Attach each hole to the smallest-area outer whose 2D
+        // projection contains the hole's first vertex. With one outer
+        // in the group this collapses to the original behaviour; with
+        // multiple disjoint coplanar outers it routes the hole to the
+        // component it actually lies inside (issue 353).
+        let containment_axes = containment_axes(&plane);
+        let outer_projections: Vec<Vec<(i64, i64)>> = outers
+            .iter()
+            .map(|(_, verts)| {
+                verts
+                    .iter()
+                    .map(|p| project_2d(*p, containment_axes))
+                    .collect()
+            })
+            .collect();
+        let mut hole_assignments: Vec<Vec<Vec<Point3>>> = vec![Vec::new(); outers.len()];
+        for hole in holes {
+            let probe = match hole.first() {
+                Some(p) => project_2d(*p, containment_axes),
+                None => continue,
             };
+            let mut best: Option<(i128, Point3, usize)> = None;
+            for (idx, ((area, outer_verts), projected)) in
+                outers.iter().zip(outer_projections.iter()).enumerate()
+            {
+                if !point_in_polygon_2d(probe, projected) {
+                    continue;
+                }
+                let first_vert = outer_verts[0];
+                let candidate = (*area, first_vert, idx);
+                let take = match best {
+                    None => true,
+                    Some((b_area, b_first, _)) => {
+                        // Smaller area wins; lex-smallest first vertex
+                        // breaks ties, matching the rest of cleanup's
+                        // determinism convention.
+                        candidate.0 < b_area || (candidate.0 == b_area && candidate.1 < b_first)
+                    }
+                };
+                if take {
+                    best = Some(candidate);
+                }
+            }
+            match best {
+                Some((_, _, idx)) => hole_assignments[idx].push(hole),
+                None => {
+                    tracing::warn!(
+                        plane_normal = ?plane_normal,
+                        color = color,
+                        "polygon hole has no containing outer; skipping (issue 353)"
+                    );
+                }
+            }
+        }
+
+        for ((_, outer), polygon_holes) in outers.into_iter().zip(hole_assignments.into_iter()) {
             out.push(Polygon {
                 vertices: outer,
                 holes: polygon_holes,
@@ -141,6 +188,64 @@ fn group_loops(loops: Vec<csg::polygon::Polygon>) -> Vec<Polygon> {
         }
     }
     out
+}
+
+/// Pick the two world axes to project onto for 2D containment tests:
+/// drop the axis with the largest absolute normal component. Same
+/// convention as `csg::cleanup::merge::drop_axis` — exact for axis-
+/// aligned planes, shears tilted ones (collinearity preserved).
+fn containment_axes(plane: &csg::plane::Plane3) -> (usize, usize) {
+    let ax = plane.n_x.unsigned_abs();
+    let ay = plane.n_y.unsigned_abs();
+    let az = plane.n_z.unsigned_abs();
+    if ax >= ay && ax >= az {
+        (1, 2)
+    } else if ay >= az {
+        (0, 2)
+    } else {
+        (0, 1)
+    }
+}
+
+fn project_2d(p: Point3, axes: (usize, usize)) -> (i64, i64) {
+    let coords = [p.x as i64, p.y as i64, p.z as i64];
+    (coords[axes.0], coords[axes.1])
+}
+
+/// Standard ray-casting point-in-polygon test in 2D fixed-point
+/// integers. Half-open horizontal-edge convention: an edge is counted
+/// if its lower endpoint is strictly below the ray (`y <= probe_y`)
+/// and its upper endpoint is at or above (`y > probe_y`). This
+/// avoids double-counting a vertex shared by two edges and matches
+/// the convention used in `csg::tessellate::cdt::triangulate`.
+fn point_in_polygon_2d(probe: (i64, i64), poly: &[(i64, i64)]) -> bool {
+    let (px, py) = (probe.0 as i128, probe.1 as i128);
+    let mut inside = false;
+    let n = poly.len();
+    if n < 3 {
+        return false;
+    }
+    for i in 0..n {
+        let j = (i + n - 1) % n;
+        let (ix, iy) = (poly[i].0 as i128, poly[i].1 as i128);
+        let (jx, jy) = (poly[j].0 as i128, poly[j].1 as i128);
+        // Half-open straddle: one endpoint strictly above py, the
+        // other at-or-below. Equivalent to `(iy > py) != (jy > py)`.
+        if (iy > py) == (jy > py) {
+            continue;
+        }
+        // Intersection x at horizontal line y = py:
+        //   x_at = jx + (ix - jx) * (py - jy) / (iy - jy)
+        // Want px < x_at; cross-multiply by (iy - jy) and track sign.
+        let denom = iy - jy;
+        let lhs = (px - jx) * denom;
+        let rhs = (ix - jx) * (py - jy);
+        let crosses = if denom > 0 { lhs < rhs } else { lhs > rhs };
+        if crosses {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 fn unit_normal(plane: &csg::plane::Plane3) -> Vec3 {
@@ -617,5 +722,249 @@ mod tests {
         let tris = tessellate_polygon(&polygon);
         // Annular triangle count: V + 2H - 2 = 8 for 4 outer + 4 hole verts.
         assert_eq!(tris.len(), 8, "expected annular topological minimum");
+    }
+
+    /// Build a `csg::polygon::Polygon` directly from an explicit loop
+    /// for `group_loops` containment tests. The plane is supplied by the
+    /// caller so outer (CCW) and hole (CW) loops can share an identical
+    /// cached plane — that's how the upstream CSG cleanup pipeline emits
+    /// them, and `group_loops` groups by `canonical_key`, which keeps
+    /// opposite-facing planes distinct.
+    fn loop_poly(
+        verts: Vec<Point3>,
+        plane: csg::plane::Plane3,
+        color: u32,
+    ) -> csg::polygon::Polygon {
+        csg::polygon::Polygon {
+            vertices: verts,
+            plane,
+            color,
+        }
+    }
+
+    fn xy_plane_pos_z() -> csg::plane::Plane3 {
+        csg::plane::Plane3 {
+            n_x: 0,
+            n_y: 0,
+            n_z: 1,
+            d: 0,
+        }
+    }
+
+    /// Issue 353: two disjoint coplanar outers share a plane and color,
+    /// only one carries a hole. The hole must attach to its containing
+    /// outer, not the other one.
+    #[test]
+    fn group_loops_attaches_hole_to_containing_outer_only() {
+        // Outer A (CCW): the unit square at the origin.
+        let outer_a = vec![
+            p(0.0, 0.0, 0.0),
+            p(1.0, 0.0, 0.0),
+            p(1.0, 1.0, 0.0),
+            p(0.0, 1.0, 0.0),
+        ];
+        // Outer B (CCW): another unit square offset by +5 on x —
+        // disjoint from A on the same z=0 plane.
+        let outer_b = vec![
+            p(5.0, 0.0, 0.0),
+            p(6.0, 0.0, 0.0),
+            p(6.0, 1.0, 0.0),
+            p(5.0, 1.0, 0.0),
+        ];
+        // Hole (CW) sitting inside outer A.
+        let hole_a = vec![
+            p(0.25, 0.25, 0.0),
+            p(0.25, 0.75, 0.0),
+            p(0.75, 0.75, 0.0),
+            p(0.75, 0.25, 0.0),
+        ];
+
+        let plane = xy_plane_pos_z();
+        let loops = vec![
+            loop_poly(outer_a.clone(), plane, 7),
+            loop_poly(outer_b.clone(), plane, 7),
+            loop_poly(hole_a.clone(), plane, 7),
+        ];
+        let polys = group_loops(loops);
+        assert_eq!(polys.len(), 2, "two outers => two output polygons");
+
+        // The polygon with the hole must be the one whose first vertex
+        // sits at the origin (outer A); the offset outer must come back
+        // hole-free.
+        let with_hole = polys
+            .iter()
+            .find(|p| !p.holes.is_empty())
+            .expect("exactly one polygon should carry a hole");
+        let without_hole = polys
+            .iter()
+            .find(|p| p.holes.is_empty())
+            .expect("the disjoint outer should be hole-free");
+        assert_eq!(with_hole.holes.len(), 1);
+        assert_eq!(with_hole.vertices[0], p(0.0, 0.0, 0.0));
+        assert_eq!(without_hole.vertices[0], p(5.0, 0.0, 0.0));
+    }
+
+    /// Issue 353: two outers each with their own hole on the same plane
+    /// and color. Each polygon must receive exactly its hole.
+    #[test]
+    fn group_loops_routes_per_outer_holes_correctly() {
+        let outer_a = vec![
+            p(0.0, 0.0, 0.0),
+            p(2.0, 0.0, 0.0),
+            p(2.0, 2.0, 0.0),
+            p(0.0, 2.0, 0.0),
+        ];
+        let outer_b = vec![
+            p(5.0, 0.0, 0.0),
+            p(7.0, 0.0, 0.0),
+            p(7.0, 2.0, 0.0),
+            p(5.0, 2.0, 0.0),
+        ];
+        let hole_a = vec![
+            p(0.5, 0.5, 0.0),
+            p(0.5, 1.5, 0.0),
+            p(1.5, 1.5, 0.0),
+            p(1.5, 0.5, 0.0),
+        ];
+        let hole_b = vec![
+            p(5.5, 0.5, 0.0),
+            p(5.5, 1.5, 0.0),
+            p(6.5, 1.5, 0.0),
+            p(6.5, 0.5, 0.0),
+        ];
+
+        let plane = xy_plane_pos_z();
+        let loops = vec![
+            loop_poly(outer_a, plane, 3),
+            loop_poly(outer_b, plane, 3),
+            loop_poly(hole_a.clone(), plane, 3),
+            loop_poly(hole_b.clone(), plane, 3),
+        ];
+        let polys = group_loops(loops);
+        assert_eq!(polys.len(), 2);
+        for poly in &polys {
+            assert_eq!(poly.holes.len(), 1, "each outer should own one hole");
+            // The hole's first vertex must lie inside the outer's 2D
+            // projection — sanity-check via x range.
+            let hx = poly.holes[0][0].x;
+            let outer_xs: Vec<i32> = poly.vertices.iter().map(|v| v.x).collect();
+            let min_x = *outer_xs.iter().min().unwrap();
+            let max_x = *outer_xs.iter().max().unwrap();
+            assert!(
+                hx > min_x && hx < max_x,
+                "hole's first vert must be in its outer's x range"
+            );
+        }
+    }
+
+    /// Single-outer-with-hole case (the previous behaviour) still works:
+    /// the smallest-containing-outer logic collapses to "the only outer
+    /// gets the hole".
+    #[test]
+    fn group_loops_single_outer_with_hole_still_works() {
+        let outer = vec![
+            p(0.0, 0.0, 0.0),
+            p(2.0, 0.0, 0.0),
+            p(2.0, 2.0, 0.0),
+            p(0.0, 2.0, 0.0),
+        ];
+        let hole = vec![
+            p(0.5, 0.5, 0.0),
+            p(0.5, 1.5, 0.0),
+            p(1.5, 1.5, 0.0),
+            p(1.5, 0.5, 0.0),
+        ];
+        let plane = xy_plane_pos_z();
+        let loops = vec![loop_poly(outer, plane, 0), loop_poly(hole, plane, 0)];
+        let polys = group_loops(loops);
+        assert_eq!(polys.len(), 1);
+        assert_eq!(polys[0].holes.len(), 1);
+    }
+
+    /// Hole with no containing outer (e.g. a stray inverted loop the
+    /// upstream pipeline shouldn't have produced). We must not attach it
+    /// to an arbitrary outer — drop it and let the warn surface.
+    #[test]
+    fn group_loops_drops_orphan_hole_with_no_containing_outer() {
+        let outer = vec![
+            p(0.0, 0.0, 0.0),
+            p(1.0, 0.0, 0.0),
+            p(1.0, 1.0, 0.0),
+            p(0.0, 1.0, 0.0),
+        ];
+        // Hole (CW) sitting far away from the only outer — not contained.
+        let stray_hole = vec![
+            p(10.0, 10.0, 0.0),
+            p(10.0, 11.0, 0.0),
+            p(11.0, 11.0, 0.0),
+            p(11.0, 10.0, 0.0),
+        ];
+        let plane = xy_plane_pos_z();
+        let loops = vec![loop_poly(outer, plane, 1), loop_poly(stray_hole, plane, 1)];
+        let polys = group_loops(loops);
+        assert_eq!(polys.len(), 1);
+        assert!(
+            polys[0].holes.is_empty(),
+            "orphan hole must not attach to a non-containing outer"
+        );
+    }
+
+    /// The grouped result with two outer-and-hole pairs must produce
+    /// valid CDT input — each polygon tessellates without dropping
+    /// geometry.
+    #[test]
+    fn group_loops_output_tessellates_validly() {
+        let outer_a = vec![
+            p(0.0, 0.0, 0.0),
+            p(2.0, 0.0, 0.0),
+            p(2.0, 2.0, 0.0),
+            p(0.0, 2.0, 0.0),
+        ];
+        let outer_b = vec![
+            p(5.0, 0.0, 0.0),
+            p(7.0, 0.0, 0.0),
+            p(7.0, 2.0, 0.0),
+            p(5.0, 2.0, 0.0),
+        ];
+        let hole_a = vec![
+            p(0.5, 0.5, 0.0),
+            p(0.5, 1.5, 0.0),
+            p(1.5, 1.5, 0.0),
+            p(1.5, 0.5, 0.0),
+        ];
+        let hole_b = vec![
+            p(5.5, 0.5, 0.0),
+            p(5.5, 1.5, 0.0),
+            p(6.5, 1.5, 0.0),
+            p(6.5, 0.5, 0.0),
+        ];
+
+        let plane = xy_plane_pos_z();
+        let loops = vec![
+            loop_poly(outer_a, plane, 4),
+            loop_poly(outer_b, plane, 4),
+            loop_poly(hole_a, plane, 4),
+            loop_poly(hole_b, plane, 4),
+        ];
+        let polys = group_loops(loops);
+        for poly in &polys {
+            let tris = tessellate_polygon(poly);
+            // Annular topology with 4 outer + 4 hole verts: 8 triangles.
+            assert_eq!(
+                tris.len(),
+                8,
+                "outer-with-hole should tessellate cleanly to 8 tris"
+            );
+        }
+    }
+
+    #[test]
+    fn point_in_polygon_2d_basic_cases() {
+        let square = vec![(0, 0), (10, 0), (10, 10), (0, 10)];
+        assert!(point_in_polygon_2d((5, 5), &square));
+        assert!(!point_in_polygon_2d((15, 5), &square));
+        assert!(!point_in_polygon_2d((-1, -1), &square));
+        // Degenerate polygon (< 3 verts) is empty.
+        assert!(!point_in_polygon_2d((0, 0), &[(0, 0), (1, 1)]));
     }
 }
