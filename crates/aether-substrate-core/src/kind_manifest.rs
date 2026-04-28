@@ -914,16 +914,17 @@ mod tests {
 
     #[test]
     fn reads_hello_component_inputs_section() {
-        // End-to-end sanity: the real hello-component's section
-        // decodes into the expected shape without wiring every byte by
-        // hand. Skips if the wasm isn't built — the cargo-test harness
-        // builds workspace members lazily.
+        // End-to-end sanity: the real hello example's section decodes
+        // into the expected shape without wiring every byte by hand.
+        // Skips if the wasm isn't built — the cargo-test harness builds
+        // workspace members lazily, and example wasms are an opt-in
+        // `--examples` build.
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../target/wasm32-unknown-unknown/release/aether_hello_component.wasm"
+            "/../../target/wasm32-unknown-unknown/release/examples/hello.wasm"
         );
         let Ok(bytes) = std::fs::read(path) else {
-            eprintln!("skipping: hello-component wasm not built at {path}");
+            eprintln!("skipping: hello example wasm not built at {path}");
             return;
         };
         let caps = read_inputs_from_bytes(&bytes).expect("decode");

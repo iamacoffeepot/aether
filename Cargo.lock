@@ -94,14 +94,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-hello-component"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-component",
- "aether-kinds",
-]
-
-[[package]]
 name = "aether-hub-protocol"
 version = "0.2.0-alpha"
 dependencies = [

@@ -1,6 +1,6 @@
 // End-to-end wiring test. Uses an inline WAT guest so the test stays
-// self-contained; `tests/*` that need the real `aether-hello-component`
-// guest pull it in separately.
+// self-contained; `tests/*` that need a real component guest pull it
+// in separately.
 //
 // The test is deliberately shaped like the real substrate flow:
 //   1. Registry populated with one component mailbox + one sink.
