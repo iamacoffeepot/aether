@@ -15,9 +15,11 @@
 //!
 //! - [`run`]: full pipeline for the legacy triangle-domain ops in
 //!   [`crate::csg::ops`] — runs cleanup and then triangulates.
-//! - [`tessellate_polygon_f32`]: display-time triangulation of a
+//! - [`tessellate_polygon_integer`]: display-time triangulation of a
 //!   single polygon-with-holes for the GPU upload step the polygon-
-//!   domain public API uses.
+//!   domain public API uses. Operates entirely in fixed-point
+//!   integers — the f32 conversion happens at the GPU upload site,
+//!   not here.
 //!
 //! Triangulation algorithm: constrained Delaunay (ADR-0056) per
 //! (plane, color) group, with even-odd inside marking. CDT failure
@@ -31,7 +33,6 @@ use super::cleanup::mesh::{IndexedMesh, VertexId};
 use crate::csg::plane::Plane3;
 use crate::csg::point::Point3;
 use crate::csg::polygon::Polygon;
-use aether_math::Vec3;
 use std::collections::HashMap;
 
 /// Plane + color — the CDT groups by this so each group produces one
@@ -53,72 +54,65 @@ pub fn run(polygons: Vec<Polygon>) -> Vec<Polygon> {
 }
 
 /// Display-time tessellation for the polygon-domain public API
-/// (ADR-0057). Takes a polygon-with-holes in f32 coords, runs the
-/// internal CDT against the integer fixed-point pool, and returns
-/// triangles in f32 for GPU upload.
+/// (ADR-0057). Takes a polygon-with-holes in fixed-point integer
+/// coordinates and returns integer triangles — same coordinate type
+/// the BSP CSG core and cleanup pipeline use, so no f32 round-trip
+/// happens inside the mesh pipeline. The f32 conversion happens at
+/// the GPU upload site (`aether-mesh-editor-component`).
 ///
 /// `outer` is the CCW outer boundary; `holes` are CW inner boundaries.
 /// Returns `None` if the inputs collapse to fewer than 3 unique
-/// vertices, fall outside the integer fixed-point coordinate budget
-/// (ADR-0054 ±256 unit cap), or CDT fails to enforce a constraint.
+/// vertices or CDT fails to enforce a constraint.
 ///
 /// Callers should fall back to fan triangulation on `None` so geometry
 /// isn't dropped silently.
-pub fn tessellate_polygon_f32(outer: &[Vec3], holes: &[Vec<Vec3>]) -> Option<Vec<[Vec3; 3]>> {
+pub fn tessellate_polygon_integer(
+    outer: &[Point3],
+    holes: &[Vec<Point3>],
+) -> Option<Vec<[Point3; 3]>> {
     if outer.len() < 3 {
         return None;
     }
 
-    // Convert to integer fixed-point and build a flat vertex pool.
-    let mut vertices: Vec<Point3> =
-        Vec::with_capacity(outer.len() + holes.iter().map(|h| h.len()).sum::<usize>());
+    // Build a flat vertex pool — CDT's `triangulate_loops` takes
+    // (pool, loops as VertexId sequences, plane).
+    let total = outer.len() + holes.iter().map(|h| h.len()).sum::<usize>();
+    let mut vertices: Vec<Point3> = Vec::with_capacity(total);
+    let mut all_loops: Vec<Vec<usize>> = Vec::with_capacity(1 + holes.len());
+
     let mut outer_indices: Vec<usize> = Vec::with_capacity(outer.len());
-    for v in outer {
-        let p = Point3::from_f32(*v).ok()?;
+    for &p in outer {
         outer_indices.push(vertices.len());
         vertices.push(p);
     }
-    let mut hole_index_loops: Vec<Vec<usize>> = Vec::with_capacity(holes.len());
+    all_loops.push(outer_indices);
+
     for hole in holes {
         let mut indices = Vec::with_capacity(hole.len());
-        for v in hole {
-            let p = Point3::from_f32(*v).ok()?;
+        for &p in hole {
             indices.push(vertices.len());
             vertices.push(p);
         }
-        hole_index_loops.push(indices);
+        all_loops.push(indices);
     }
 
-    // Compute the plane from the outer loop's first three integer
-    // vertices. The CDT uses this for axis selection only; the CCW
-    // outer assumption gives a normal pointing "outward" by construction.
-    if outer_indices.len() < 3 {
-        return None;
-    }
+    // Compute the plane from the outer loop's first three vertices.
+    // CDT uses it for axis selection only; the CCW outer assumption
+    // gives a normal pointing "outward" by construction.
     let plane = Plane3::from_points(
-        vertices[outer_indices[0]],
-        vertices[outer_indices[1]],
-        vertices[outer_indices[2]],
+        vertices[all_loops[0][0]],
+        vertices[all_loops[0][1]],
+        vertices[all_loops[0][2]],
     );
     if plane.is_degenerate() {
         return None;
     }
 
-    let mut all_loops: Vec<Vec<usize>> = Vec::with_capacity(1 + holes.len());
-    all_loops.push(outer_indices);
-    all_loops.extend(hole_index_loops);
-
     let triangles = cdt::triangulate_loops(&vertices, &all_loops, &plane)?;
     Some(
         triangles
             .into_iter()
-            .map(|tri| {
-                [
-                    vertices[tri[0]].to_f32(),
-                    vertices[tri[1]].to_f32(),
-                    vertices[tri[2]].to_f32(),
-                ]
-            })
+            .map(|tri| [vertices[tri[0]], vertices[tri[1]], vertices[tri[2]]])
             .collect(),
     )
 }
@@ -283,66 +277,53 @@ mod tests {
     }
 
     #[test]
-    fn tessellate_polygon_f32_rejects_fewer_than_3_outer_vertices() {
-        let outer = vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)];
-        let result = tessellate_polygon_f32(&outer, &[]);
+    fn tessellate_polygon_integer_rejects_fewer_than_3_outer_vertices() {
+        let outer = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0)];
+        let result = tessellate_polygon_integer(&outer, &[]);
         assert!(result.is_none());
     }
 
     #[test]
-    fn tessellate_polygon_f32_rejects_out_of_range_coordinates() {
-        // ADR-0054 caps fixed-point coordinates at ±256. Larger values
-        // must fail-fast at the f32→fixed conversion rather than silently
-        // truncate.
-        let outer = vec![
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(300.0, 0.0, 0.0), // out of range
-            Vec3::new(0.0, 1.0, 0.0),
-        ];
-        let result = tessellate_polygon_f32(&outer, &[]);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn tessellate_polygon_f32_rejects_degenerate_collinear_outer() {
+    fn tessellate_polygon_integer_rejects_degenerate_collinear_outer() {
         // Three collinear points → degenerate plane → None.
-        let outer = vec![
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            Vec3::new(2.0, 0.0, 0.0),
-        ];
-        let result = tessellate_polygon_f32(&outer, &[]);
+        let outer = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(2.0, 0.0, 0.0)];
+        let result = tessellate_polygon_integer(&outer, &[]);
         assert!(result.is_none());
     }
 
     #[test]
-    fn tessellate_polygon_f32_happy_path_square_with_hole() {
+    fn tessellate_polygon_integer_happy_path_square_with_hole() {
         let outer = vec![
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(4.0, 0.0, 0.0),
-            Vec3::new(4.0, 4.0, 0.0),
-            Vec3::new(0.0, 4.0, 0.0),
+            pt(0.0, 0.0, 0.0),
+            pt(4.0, 0.0, 0.0),
+            pt(4.0, 4.0, 0.0),
+            pt(0.0, 4.0, 0.0),
         ];
         let hole = vec![
-            Vec3::new(1.0, 1.0, 0.0),
-            Vec3::new(1.0, 3.0, 0.0),
-            Vec3::new(3.0, 3.0, 0.0),
-            Vec3::new(3.0, 1.0, 0.0),
+            pt(1.0, 1.0, 0.0),
+            pt(1.0, 3.0, 0.0),
+            pt(3.0, 3.0, 0.0),
+            pt(3.0, 1.0, 0.0),
         ];
-        let tris = tessellate_polygon_f32(&outer, &[hole]).expect("annular should triangulate");
+        let tris = tessellate_polygon_integer(&outer, &[hole]).expect("annular should triangulate");
         // Topological minimum for 8-vertex annular = 8 triangles.
         assert_eq!(tris.len(), 8);
-        // Total area = outer (16) - hole (4) = 12. Use shoelace on each
-        // triangle (signed) and sum.
-        let signed_double_area: f32 = tris
+        // Total area = outer (16) - hole (4) = 12 → doubled = 24. Use
+        // shoelace on each triangle (signed integer in fixed-point
+        // units) and sum, then convert.
+        let signed_double_area_fixed: i128 = tris
             .iter()
             .map(|tri| {
-                (tri[1].x - tri[0].x) * (tri[2].y - tri[0].y)
-                    - (tri[1].y - tri[0].y) * (tri[2].x - tri[0].x)
+                let ax = (tri[1].x - tri[0].x) as i128;
+                let ay = (tri[1].y - tri[0].y) as i128;
+                let bx = (tri[2].x - tri[0].x) as i128;
+                let by = (tri[2].y - tri[0].y) as i128;
+                ax * by - ay * bx
             })
             .sum();
-        // Doubled area of annular region = 24. Allow a small tolerance
-        // for f32 rounding through the integer fixed-point round trip.
+        // SCALE² because we summed products of fixed-point differences.
+        let scale_sq = (1u128 << 32) as f64;
+        let signed_double_area = signed_double_area_fixed as f64 / scale_sq;
         assert!(
             (signed_double_area - 24.0).abs() < 0.01,
             "annular doubled area mismatch: {signed_double_area}"

@@ -74,6 +74,21 @@ fn from_key(k: VertKey) -> Vec3 {
     Vec3::new(fixed_to_f32(k.0), fixed_to_f32(k.1), fixed_to_f32(k.2))
 }
 
+/// Convert a polygon's integer-typed loops into f32 loops — debug
+/// validators do all their tolerance / cross-product math in f32 since
+/// the thresholds (`tol::*`) are world-space distances. The polygon
+/// pipeline itself is integer end-to-end; the conversion here is
+/// purely a diagnostic-side cast.
+fn polygon_loops_f32(p: &Polygon) -> (Vec<Vec3>, Vec<Vec<Vec3>>) {
+    let outer: Vec<Vec3> = p.vertices.iter().map(|v| v.to_f32()).collect();
+    let holes: Vec<Vec<Vec3>> = p
+        .holes
+        .iter()
+        .map(|h| h.iter().map(|v| v.to_f32()).collect())
+        .collect();
+    (outer, holes)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ManifoldViolation {
     /// Edge appears in only one direction with no reverse twin —
@@ -117,8 +132,9 @@ pub fn validate_manifold(polygons: &[Polygon]) -> Vec<ManifoldViolation> {
     };
 
     for poly in polygons {
-        record_loop(&poly.vertices, &mut directed);
-        for hole in &poly.holes {
+        let (outer, holes) = polygon_loops_f32(poly);
+        record_loop(&outer, &mut directed);
+        for hole in &holes {
             record_loop(hole, &mut directed);
         }
     }
@@ -241,10 +257,11 @@ pub fn validate_planarity(polygons: &[Polygon]) -> Vec<GeometryViolation> {
             continue;
         }
         let n = poly.plane_normal;
+        let (outer, holes) = polygon_loops_f32(poly);
         // Use a vertex as the in-plane reference (any vertex works if
         // the polygon is genuinely planar; centroid would mask a single
         // out-of-plane vertex by averaging it in).
-        let p0 = poly.vertices[0];
+        let p0 = outer[0];
         let check = |v: Vec3, out: &mut Vec<GeometryViolation>| {
             let d = ((v) - (p0)).dot(n).abs();
             if d > tol::PLANARITY {
@@ -255,10 +272,10 @@ pub fn validate_planarity(polygons: &[Polygon]) -> Vec<GeometryViolation> {
                 });
             }
         };
-        for &v in &poly.vertices {
+        for &v in &outer {
             check(v, &mut out);
         }
-        for hole in &poly.holes {
+        for hole in &holes {
             for &v in hole {
                 check(v, &mut out);
             }
@@ -273,7 +290,8 @@ pub fn validate_planarity(polygons: &[Polygon]) -> Vec<GeometryViolation> {
 pub fn validate_polygon_quality(polygons: &[Polygon]) -> Vec<GeometryViolation> {
     let mut out = Vec::new();
     for (i, poly) in polygons.iter().enumerate() {
-        let area = projected_area(&poly.vertices, poly.plane_normal).abs();
+        let (outer, _holes) = polygon_loops_f32(poly);
+        let area = projected_area(&outer, poly.plane_normal).abs();
         if area < tol::DEGENERATE_AREA {
             out.push(GeometryViolation::DegenerateArea {
                 polygon_index: i,
@@ -282,10 +300,10 @@ pub fn validate_polygon_quality(polygons: &[Polygon]) -> Vec<GeometryViolation> 
         }
         let mut min_edge = f32::INFINITY;
         let mut max_edge: f32 = 0.0;
-        let n = poly.vertices.len();
+        let n = outer.len();
         for j in 0..n {
-            let a = poly.vertices[j];
-            let b = poly.vertices[(j + 1) % n];
+            let a = outer[j];
+            let b = outer[(j + 1) % n];
             let len = ((b) - (a)).length();
             if len < tol::SLIVER_EDGE {
                 out.push(GeometryViolation::SliverEdge {
@@ -342,8 +360,9 @@ pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation>
                     .push((i, poly.plane_normal));
             }
         };
-        walk(&poly.vertices, &mut edges);
-        for hole in &poly.holes {
+        let (outer, holes) = polygon_loops_f32(poly);
+        walk(&outer, &mut edges);
+        for hole in &holes {
             walk(hole, &mut edges);
         }
     }
@@ -384,12 +403,13 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
     // Collect every distinct vertex (snap-key + f32 coords for reporting).
     let mut all_verts: HashMap<VertKey, Vec3> = HashMap::new();
     for poly in polygons {
-        for &v in &poly.vertices {
-            all_verts.insert(vert_key(v), v);
+        let (outer, holes) = polygon_loops_f32(poly);
+        for v in &outer {
+            all_verts.insert(vert_key(*v), *v);
         }
-        for hole in &poly.holes {
-            for &v in hole {
-                all_verts.insert(vert_key(v), v);
+        for hole in &holes {
+            for v in hole {
+                all_verts.insert(vert_key(*v), *v);
             }
         }
     }
@@ -409,8 +429,9 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
                 edges.insert(canonical);
             }
         };
-        walk(&poly.vertices, &mut edges);
-        for hole in &poly.holes {
+        let (outer, holes) = polygon_loops_f32(poly);
+        walk(&outer, &mut edges);
+        for hole in &holes {
             walk(hole, &mut edges);
         }
     }
@@ -533,9 +554,10 @@ pub fn summary(polygons: &[Polygon]) -> Summary {
 pub fn dump(polygons: &[Polygon]) -> String {
     let mut out = String::new();
     for (i, p) in polygons.iter().enumerate() {
-        let cx: f32 = p.vertices.iter().map(|v| v.x).sum::<f32>() / p.vertices.len() as f32;
-        let cy: f32 = p.vertices.iter().map(|v| v.y).sum::<f32>() / p.vertices.len() as f32;
-        let cz: f32 = p.vertices.iter().map(|v| v.z).sum::<f32>() / p.vertices.len() as f32;
+        let (outer, _holes) = polygon_loops_f32(p);
+        let cx: f32 = outer.iter().map(|v| v.x).sum::<f32>() / outer.len() as f32;
+        let cy: f32 = outer.iter().map(|v| v.y).sum::<f32>() / outer.len() as f32;
+        let cz: f32 = outer.iter().map(|v| v.z).sum::<f32>() / outer.len() as f32;
         out.push_str(&format!(
             "[{:>3}] color={} normal=({:+.3},{:+.3},{:+.3}) verts={:>2} holes={} centroid=({:+.3},{:+.3},{:+.3})\n",
             i, p.color,
@@ -613,9 +635,13 @@ mod tests {
     use super::*;
     use crate::Polygon;
 
+    fn p(v: Vec3) -> crate::Point3 {
+        crate::Point3::from_f32(v).expect("in range")
+    }
+
     fn quad(verts: [Vec3; 4], normal: Vec3) -> Polygon {
         Polygon {
-            vertices: verts.to_vec(),
+            vertices: verts.iter().copied().map(p).collect(),
             holes: vec![],
             plane_normal: normal,
             color: 0,
@@ -785,10 +811,10 @@ mod tests {
         // +Z, so the lifted vertex's distance is exactly the lift.
         let polys = vec![Polygon {
             vertices: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1.0, 0.0, 0.0),
-                Vec3::new(1.0, 1.0, 0.0),
-                Vec3::new(0.0, 1.0, 0.01),
+                p(Vec3::new(0.0, 0.0, 0.0)),
+                p(Vec3::new(1.0, 0.0, 0.0)),
+                p(Vec3::new(1.0, 1.0, 0.0)),
+                p(Vec3::new(0.0, 1.0, 0.01)),
             ],
             holes: vec![],
             plane_normal: Vec3::new(0.0, 0.0, 1.0),
@@ -805,9 +831,9 @@ mod tests {
         // SLIVER threshold.
         let polys = vec![Polygon {
             vertices: vec![
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::new(1e-4, 0.0, 0.0),
-                Vec3::new(0.5, 1.0, 0.0),
+                p(Vec3::new(0.0, 0.0, 0.0)),
+                p(Vec3::new(1e-4, 0.0, 0.0)),
+                p(Vec3::new(0.5, 1.0, 0.0)),
             ],
             holes: vec![],
             plane_normal: Vec3::new(0.0, 0.0, 1.0),
@@ -835,13 +861,13 @@ mod tests {
         let f = Vec3::new(0.0, -1.0, 0.0);
         let polys = vec![
             Polygon {
-                vertices: vec![a, b, c, d],
+                vertices: vec![p(a), p(b), p(c), p(d)],
                 holes: vec![],
                 plane_normal: Vec3::new(0.0, 0.0, 1.0),
                 color: 0,
             },
             Polygon {
-                vertices: vec![b, a, f, e],
+                vertices: vec![p(b), p(a), p(f), p(e)],
                 holes: vec![],
                 plane_normal: Vec3::new(0.0, 0.0, -1.0),
                 color: 0,
@@ -867,7 +893,7 @@ mod tests {
         let d = Vec3::new(0.5, -1.0, 0.0);
         let polys = vec![
             Polygon {
-                vertices: vec![a, b, c],
+                vertices: vec![p(a), p(b), p(c)],
                 holes: vec![],
                 plane_normal: Vec3::new(0.0, 0.0, 1.0),
                 color: 0,
@@ -877,13 +903,13 @@ mod tests {
                 // adjacent triangles sharing mid_ab) so mid_ab is a
                 // legitimate vertex elsewhere — but NOT in the first
                 // polygon's loop.
-                vertices: vec![a, mid_ab, d],
+                vertices: vec![p(a), p(mid_ab), p(d)],
                 holes: vec![],
                 plane_normal: Vec3::new(0.0, 0.0, -1.0),
                 color: 0,
             },
             Polygon {
-                vertices: vec![mid_ab, b, d],
+                vertices: vec![p(mid_ab), p(b), p(d)],
                 holes: vec![],
                 plane_normal: Vec3::new(0.0, 0.0, -1.0),
                 color: 0,
