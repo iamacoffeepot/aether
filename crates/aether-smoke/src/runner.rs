@@ -24,8 +24,25 @@ use crate::visual::{Image, decode_png, not_all_black};
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
+    #[error("yaml parse failed: {0}")]
+    Parse(String),
+    #[error("test-bench boot failed: {0}")]
+    Boot(String),
     #[error("test-bench operation failed: {0}")]
     TestBench(String),
+}
+
+/// One-shot helper: parse a YAML script, boot a fresh `TestBench`,
+/// run the script, return the report. The bench is dropped before
+/// the function returns. Use this for the common "spin up, execute,
+/// observe" path the CLI and proc-macro consume; for finer control
+/// (existing bench, custom size, multiple scripts in one bench)
+/// drive `Runner::run` directly.
+pub fn run_yaml_str(yaml: &str) -> Result<RunReport, RunnerError> {
+    let script =
+        crate::script::parse_script(yaml).map_err(|e| RunnerError::Parse(e.to_string()))?;
+    let mut bench = TestBench::start().map_err(|e| RunnerError::Boot(e.to_string()))?;
+    Ok(Runner::run(&mut bench, &script))
 }
 
 /// Stateless walker. The runner threads its own `last_capture`

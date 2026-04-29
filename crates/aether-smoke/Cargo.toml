@@ -17,6 +17,7 @@ path = "src/lib.rs"
 aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-kinds = { path = "../aether-kinds" }
 aether-params-codec = { path = "../aether-params-codec" }
+aether-smoke-macros = { path = "../aether-smoke-macros" }
 aether-substrate-test-bench = { path = "../aether-substrate-test-bench" }
 png = "0.17"
 serde = { version = "1", features = ["derive"] }
