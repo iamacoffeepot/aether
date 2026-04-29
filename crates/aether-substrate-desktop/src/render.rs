@@ -38,7 +38,7 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 const VERTEX_STRIDE: u64 = 24; // 3 * f32 position + 3 * f32 color
-const VERTEX_BUFFER_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const VERTEX_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 const CAMERA_UNIFORM_BYTES: u64 = 64; // 4x4 f32 column-major
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -353,7 +353,7 @@ impl Gpu {
 
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("hello-triangle vertex buffer"),
-            size: VERTEX_BUFFER_BYTES,
+            size: VERTEX_BUFFER_BYTES as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -485,8 +485,12 @@ impl Gpu {
         view_proj: &[f32; 16],
         capture: bool,
     ) -> Option<Result<Vec<u8>, String>> {
-        let vertex_bytes = vertices.len() as u64;
+        let vertex_bytes = vertices.len();
         if vertex_bytes > VERTEX_BUFFER_BYTES {
+            // Belt-and-suspenders: the render sink truncates at the cap
+            // already, so we should never get here. Drop the frame
+            // rather than overflow the buffer if a future caller
+            // bypasses the sink-side clamp.
             tracing::warn!(
                 target: "aether_substrate::render",
                 vertex_bytes,
@@ -502,7 +506,7 @@ impl Gpu {
         // 64 bytes is cheap enough that a dirty flag isn't worth it.
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(view_proj));
-        let vertex_count = (vertex_bytes / VERTEX_STRIDE) as u32;
+        let vertex_count = (vertex_bytes as u64 / VERTEX_STRIDE) as u32;
 
         let mut encoder = self
             .device
@@ -541,7 +545,7 @@ impl Gpu {
             if vertex_count > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..vertex_bytes));
+                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..vertex_bytes as u64));
                 pass.draw(0..vertex_count, 0..1);
                 if let Some(wire) = &self.wire_pipeline {
                     pass.set_pipeline(wire);

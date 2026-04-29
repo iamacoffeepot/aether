@@ -35,7 +35,7 @@ use aether_substrate_desktop::{
     mail::{Mail, MailboxId, ReplyTarget, ReplyTo},
     subscribers_for,
 };
-use render::{Gpu, IDENTITY_VIEW_PROJ};
+use render::{Gpu, IDENTITY_VIEW_PROJ, VERTEX_BUFFER_BYTES};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -45,6 +45,12 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 const WORKERS: usize = 2;
 const LOG_EVERY_FRAMES: u64 = 120;
+
+/// Wire size of one `aether.draw_triangle` mail item: three vertices,
+/// each `f32 x,y,z + f32 r,g,b` (24 bytes). The render sink clamps at
+/// whole-triangle multiples so we never write a half-triangle into the
+/// GPU vertex buffer when the cap forces a truncate.
+const DRAW_TRIANGLE_BYTES: usize = 72;
 
 /// ADR-0063 fail-fast budget for the per-frame drain barrier. A
 /// dispatcher that doesn't quiesce within this window is treated as
@@ -870,7 +876,15 @@ impl ApplicationHandler<UserEvent> for App {
                         ),
                     );
                 }
-                let verts = std::mem::take(&mut *self.frame_vertices.lock().unwrap());
+                // `mem::replace` rather than `mem::take` so the per-frame
+                // drain doesn't collapse the buffer to zero capacity and
+                // re-allocate next frame. Reserve the full cap up front
+                // (4 MiB) — the buffer is bounded by the sink-side clamp
+                // so this is the worst-case allocation either way.
+                let verts = std::mem::replace(
+                    &mut *self.frame_vertices.lock().unwrap(),
+                    Vec::with_capacity(VERTEX_BUFFER_BYTES),
+                );
                 let view_proj = *self.camera_state.lock().unwrap();
                 if let Some(gpu) = self.gpu.as_mut() {
                     match pending_capture {
@@ -1081,9 +1095,29 @@ fn main() -> wasmtime::Result<()> {
                       _origin: Option<&str>,
                       _sender,
                       bytes: &[u8],
-                      count: u32| {
-                    verts_for_sink.lock().unwrap().extend_from_slice(bytes);
-                    tris_for_sink.fetch_add(u64::from(count), Ordering::Relaxed);
+                      _count: u32| {
+                    // Truncate at the sink boundary so a single oversized
+                    // mesh degrades gracefully instead of collapsing the
+                    // whole frame downstream. Round to whole triangles so
+                    // the GPU vertex buffer never sees a half-triangle.
+                    let mut verts = verts_for_sink.lock().unwrap();
+                    let available = VERTEX_BUFFER_BYTES.saturating_sub(verts.len());
+                    let write_len = bytes.len().min(available);
+                    let write_len = write_len - (write_len % DRAW_TRIANGLE_BYTES);
+                    if write_len > 0 {
+                        verts.extend_from_slice(&bytes[..write_len]);
+                        tris_for_sink
+                            .fetch_add((write_len / DRAW_TRIANGLE_BYTES) as u64, Ordering::Relaxed);
+                    }
+                    if write_len < bytes.len() {
+                        tracing::warn!(
+                            target: "aether_substrate::render",
+                            accepted_bytes = write_len,
+                            dropped_bytes = bytes.len() - write_len,
+                            cap = VERTEX_BUFFER_BYTES,
+                            "render sink dropped triangles beyond fixed vertex buffer",
+                        );
+                    }
                 },
             ),
         );
