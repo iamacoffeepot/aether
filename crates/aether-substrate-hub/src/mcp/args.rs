@@ -22,10 +22,12 @@ pub struct DescribeComponentArgs {
     /// Hub-assigned engine UUID as a string (from `list_engines`).
     pub engine_id: String,
     /// Mailbox id of the loaded component (from `load_component`'s
-    /// response). Passed as a string because MCP clients serialize
-    /// JSON numbers through IEEE-754 double, which loses precision
-    /// beyond 2^53 — and mailbox ids are full 64-bit name hashes
-    /// (ADR-0029).
+    /// response). ADR-0064 tagged-string form: `mbx-XXXX-XXXX-XXXX`,
+    /// 12 lowercase base32 chars (RFC 4648 alphabet) grouped 4-4-4
+    /// after the `mbx-` prefix. Strings, not numbers, because
+    /// JSON's IEEE-754 double rounds 64-bit ids past 2^53; the
+    /// prefix also makes copy-paste mistakes between mailbox / kind /
+    /// handle ids reject at the boundary instead of failing later.
     pub mailbox_id: String,
 }
 
@@ -351,10 +353,10 @@ pub struct FallbackCapabilityWire {
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct LoadComponentResponse {
-    /// Substrate-assigned mailbox id for the loaded component. Hand
-    /// this to `replace_component` or use as the `mailbox` in
-    /// `subscribe_input`.
-    pub mailbox_id: u64,
+    /// Substrate-assigned mailbox id for the loaded component, in the
+    /// ADR-0064 tagged-string form `mbx-XXXX-XXXX-XXXX`. Hand this to
+    /// `replace_component` or `describe_component` verbatim.
+    pub mailbox_id: String,
     /// Substrate-resolved name. Matches the `name` in the request if
     /// provided; otherwise the substrate-defaulted value.
     pub name: String,
@@ -370,9 +372,10 @@ pub struct LoadComponentResponse {
 pub struct ReplaceComponentArgs {
     /// Hub-assigned engine UUID as a string (from `list_engines`).
     pub engine_id: String,
-    /// Mailbox id of the live component to replace (from a prior
+    /// Mailbox id of the live component to replace, in the ADR-0064
+    /// tagged-string form `mbx-XXXX-XXXX-XXXX` (from a prior
     /// `load_component` or `list_engines`-derived lookup).
-    pub mailbox_id: u64,
+    pub mailbox_id: String,
     /// Absolute path to the replacement WASM binary on the hub's
     /// filesystem. Same filesystem rule as `load_component`. Kind
     /// vocabulary is embedded in the wasm's `aether.kinds` custom

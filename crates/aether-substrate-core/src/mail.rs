@@ -1,8 +1,11 @@
 // Mail envelope types. Owned by value because mails cross thread
 // boundaries through the scheduler's queue.
 
+use std::fmt;
+
 use aether_hub_protocol::{EngineId, SessionToken};
 use aether_mail::mailbox_id_from_name;
+use aether_mail::tagged_id;
 
 /// Addressing token for any mailbox — component or substrate-owned sink.
 /// Opaque `u64` newtype so it can't be accidentally mixed with wasmtime
@@ -24,6 +27,20 @@ impl MailboxId {
     /// verbatim across the FFI.
     pub fn from_name(name: &str) -> MailboxId {
         MailboxId(mailbox_id_from_name(name))
+    }
+}
+
+/// ADR-0064: render as the tagged string form (`mbx-XXXX-XXXX-XXXX`)
+/// when a tracing call site uses `%`. Falls back to a hex dump for
+/// reserved / invalid tag bits (`MailboxId::NONE` in particular) so a
+/// stray sentinel doesn't silently render as a malformed prefixed
+/// string.
+impl fmt::Display for MailboxId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match tagged_id::encode(self.0) {
+            Some(s) => f.write_str(&s),
+            None => write!(f, "{:#018x}", self.0),
+        }
     }
 }
 

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_hub_protocol::{EngineId, LogLevel, Uuid};
+use aether_mail::tagged_id::{self, Tag};
 use base64::Engine as _;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -560,6 +561,15 @@ impl Hub {
                         capabilities: capabilities.clone(),
                     },
                 );
+                // ADR-0064: encode the raw u64 the substrate returned
+                // into the tagged-string form so the agent never sees
+                // the precision-losing JSON number on the wire.
+                let mailbox_id = tagged_id::encode(mailbox_id).ok_or_else(|| {
+                    McpError::internal_error(
+                        format!("substrate returned untagged mailbox id {mailbox_id:#x}"),
+                        None,
+                    )
+                })?;
                 Ok(LoadComponentResponse {
                     mailbox_id,
                     name,
@@ -586,6 +596,11 @@ impl Hub {
                 None,
             ));
         }
+        // ADR-0064: decode the tagged-string mailbox id back to u64
+        // for the substrate-side wire (the substrate keeps internal
+        // ids raw; the prefix-string form is purely the MCP boundary).
+        let mailbox_id = tagged_id::decode_with_tag(&args.mailbox_id, Tag::Mailbox)
+            .map_err(|e| McpError::invalid_params(format!("mailbox_id: {e}"), None))?;
 
         let wasm = tokio::fs::read(&args.binary_path).await.map_err(|e| {
             McpError::invalid_params(
@@ -595,7 +610,7 @@ impl Hub {
         })?;
 
         let params = serde_json::json!({
-            "mailbox_id": args.mailbox_id,
+            "mailbox_id": mailbox_id,
             "wasm": wasm,
             "drain_timeout_ms": args.drain_timeout_ms,
         });
@@ -659,13 +674,13 @@ impl Hub {
                 // so `describe_component` reflects what's actually
                 // bound now. Name is preserved — `replace_component`
                 // keeps the existing mailbox + name by design.
-                let existing = self.state.engines.get_component(&id, args.mailbox_id);
+                let existing = self.state.engines.get_component(&id, mailbox_id);
                 let name = existing
                     .map(|r| r.name)
                     .unwrap_or_else(|| format!("mailbox_{}", args.mailbox_id));
                 self.state.engines.upsert_component(
                     &id,
-                    args.mailbox_id,
+                    mailbox_id,
                     ComponentRecord {
                         name,
                         capabilities: capabilities.clone(),
@@ -694,14 +709,15 @@ impl Hub {
                 None,
             ));
         }
-        let mailbox_id: u64 = args.mailbox_id.parse().map_err(|e| {
-            McpError::invalid_params(format!("mailbox_id must be a u64-shaped string: {e}"), None)
-        })?;
+        // ADR-0064: agents pass the tagged-string form (`mbx-XXXX-...`).
+        // Decode here so the registry lookup uses the raw u64.
+        let mailbox_id = tagged_id::decode_with_tag(&args.mailbox_id, Tag::Mailbox)
+            .map_err(|e| McpError::invalid_params(format!("mailbox_id: {e}"), None))?;
         let Some(component) = self.state.engines.get_component(&id, mailbox_id) else {
             return Err(McpError::invalid_params(
                 format!(
                     "no component at mailbox_id {} on engine {}",
-                    mailbox_id, args.engine_id
+                    args.mailbox_id, args.engine_id
                 ),
                 None,
             ));
