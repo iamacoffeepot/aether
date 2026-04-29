@@ -7,7 +7,7 @@ edition.workspace = true
 # bytes the substrate's decode path consumes. ADR-0019 made every
 # substrate kind hub-encodable from JSON params; this crate is that
 # encoder, factored out of the hub so callers outside the supervisor
-# (smoke runner, future tooling) can use the same path without taking
+# (scenario runner, future tooling) can use the same path without taking
 # a heavy dep on `aether-substrate-hub`.
 #
 # Pure functions, no hub state, no async. Inputs are

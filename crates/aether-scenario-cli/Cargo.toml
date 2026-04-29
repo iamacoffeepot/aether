@@ -1,0 +1,21 @@
+[package]
+name = "aether-scenario-cli"
+version.workspace = true
+edition.workspace = true
+
+# Thin CLI wrapper around `aether-scenario`. Takes a path to a YAML
+# scenario script, boots a TestBench, runs the script, prints a
+# report, exits 0 on pass / 1 on fail. The agent-facing entry point —
+# component developers running scenarios from the IDE use the
+# `scenario_dir!` proc-macro instead (`aether-scenario-macros`).
+
+[[bin]]
+name = "aether-scenario"
+path = "src/main.rs"
+
+[dependencies]
+aether-scenario = { path = "../aether-scenario" }
+
+[dev-dependencies]
+pollster = "0.4.0"
+wgpu = "29.0.1"

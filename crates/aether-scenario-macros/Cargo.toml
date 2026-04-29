@@ -1,0 +1,18 @@
+[package]
+name = "aether-scenario-macros"
+version.workspace = true
+edition.workspace = true
+
+# Proc-macros that expand a directory of YAML scenario scripts into
+# one `#[test]` per file at the call site. Component crates `use
+# aether_scenario_macros::scenario_dir;` and invoke
+# `scenario_dir!("scenarios")` so each `.yml` under that directory
+# becomes an IDE-runnable Rust test that boots a TestBench, runs the
+# script, and asserts it passed.
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"

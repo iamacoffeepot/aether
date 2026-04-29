@@ -1,7 +1,8 @@
 //! Schema-driven encode + decode of agent-supplied params against
 //! `aether_hub_protocol::SchemaType` descriptors. Pure functions —
-//! no hub state, no async — so callers outside the supervisor (smoke
-//! runner, future tooling) can use the same JSON ↔ wire-bytes path
+//! no hub state, no async — so callers outside the supervisor
+//! (scenario runner, future tooling) can use the same JSON ↔
+//! wire-bytes path
 //! the hub uses for `mcp__aether-hub__send_mail` and
 //! `mcp__aether-hub__receive_mail`.
 //!

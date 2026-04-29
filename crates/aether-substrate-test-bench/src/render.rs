@@ -249,7 +249,7 @@ impl Gpu {
 
     /// Resize the offscreen target. Test-bench has no surface, so a
     /// resize just reallocates the offscreen color + depth textures
-    /// and invalidates the readback buffer. Smoke scripts that need
+    /// and invalidates the readback buffer. Scenario scripts that need
     /// a different aspect ratio can mail an advance-style control to
     /// trigger this — for v1 the size is fixed at boot.
     #[allow(dead_code)] // wired in PR2 alongside test_bench.advance kinds

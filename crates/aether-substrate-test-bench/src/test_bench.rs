@@ -48,7 +48,7 @@ const DRAW_TRIANGLE_BYTES: usize = 72;
 const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
 /// Default offscreen target dimensions when the caller picks
-/// `start()` (no explicit size). 800x600 matches the smoke harness
+/// `start()` (no explicit size). 800x600 matches the scenario harness
 /// convention — large enough that `min_non_bg_pixels` thresholds
 /// discriminate, small enough that capture readback is cheap.
 pub const DEFAULT_WIDTH: u32 = 800;
@@ -257,7 +257,7 @@ impl TestBench {
     }
 
     /// Bytes-level send for callers that resolve kind+payload at
-    /// runtime (the smoke library's descriptor-driven path). Same
+    /// runtime (the scenario library's descriptor-driven path). Same
     /// recipient lookup as `send_mail` but takes a pre-encoded
     /// `(kind_id, bytes)` tuple — the typed `send_mail<K>` is the
     /// preferred path when `K` is known statically.
@@ -619,7 +619,7 @@ mod tests {
     /// Boot, advance one tick, capture, sanity-check the PNG.
     /// The default scene is empty so the captured frame is the
     /// background-clear color uniformly. The test asserts the PNG
-    /// is well-formed; deeper visual assertions land in the smoke
+    /// is well-formed; deeper visual assertions land in the scenario
     /// library.
     #[test]
     fn boot_advance_capture_round_trip() {

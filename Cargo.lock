@@ -199,13 +199,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-smoke"
+name = "aether-scenario"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-hub-protocol",
  "aether-kinds",
  "aether-params-codec",
- "aether-smoke-macros",
+ "aether-scenario-macros",
  "aether-substrate-test-bench",
  "png",
  "pollster",
@@ -217,16 +217,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-smoke-cli"
+name = "aether-scenario-cli"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-smoke",
+ "aether-scenario",
  "pollster",
  "wgpu",
 ]
 
 [[package]]
-name = "aether-smoke-macros"
+name = "aether-scenario-macros"
 version = "0.2.0-alpha"
 dependencies = [
  "proc-macro2",

@@ -1,11 +1,11 @@
 //! Declarative `Script` — name + ordered list of steps the runner
-//! executes against a `TestBench`. Parses from YAML so smoke tests
-//! live alongside the component they cover as plain text the
-//! component author edits without touching Rust.
+//! executes against a `TestBench`. Parses from YAML so scenarios live
+//! alongside the component they cover as plain text the component
+//! author edits without touching Rust.
 
 use serde::{Deserialize, Serialize};
 
-/// A complete smoke script. The `name` is surfaced in `RunReport`
+/// A complete scenario script. The `name` is surfaced in `RunReport`
 /// so failure logs identify which script tripped without re-reading
 /// the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ pub enum Step {
     /// substrate auto-derives one from the component's manifest.
     /// Fire-and-forget — the script doesn't observe the resulting
     /// `LoadResult`. A future step kind can add reply-correlation if
-    /// smokes need to gate on load success.
+    /// scenarios need to gate on load success.
     LoadComponent {
         path: String,
         #[serde(default)]

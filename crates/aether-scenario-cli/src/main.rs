@@ -1,23 +1,23 @@
-//! `aether-smoke` CLI — runs a YAML smoke script through the
+//! `aether-scenario` CLI — runs a YAML scenario script through the
 //! in-process `TestBench` chassis. Designed for agents and CI: takes
 //! one path argument, boots a fresh bench, walks the script, prints
 //! a report, exits 0 on pass / 1 on fail. Component developers
-//! typically reach for the `smoke_dir!` proc-macro instead so they
-//! get IDE-friendly per-script `#[test]` integration.
+//! typically reach for the `scenario_dir!` proc-macro instead so
+//! they get IDE-friendly per-script `#[test]` integration.
 
 use std::fs;
 use std::process::ExitCode;
 
-use aether_smoke::{RunReport, RunnerError, StepStatus, run_yaml_str};
+use aether_scenario::{RunReport, RunnerError, StepStatus, run_yaml_str};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let Some(path) = args.next() else {
-        eprintln!("usage: aether-smoke <path-to-yaml>");
+        eprintln!("usage: aether-scenario <path-to-yaml>");
         return ExitCode::from(2);
     };
     if args.next().is_some() {
-        eprintln!("usage: aether-smoke <path-to-yaml> (extra args not supported)");
+        eprintln!("usage: aether-scenario <path-to-yaml> (extra args not supported)");
         return ExitCode::from(2);
     }
 
@@ -57,7 +57,7 @@ fn main() -> ExitCode {
 /// pass/fail line so `grep` against CI logs identifies the script
 /// and step that broke without re-parsing structured output.
 fn print_report(report: &RunReport) {
-    println!("smoke: {}", report.script_name);
+    println!("scenario: {}", report.script_name);
     for step in &report.steps {
         match &step.status {
             StepStatus::Pass => println!("  [{:>3}] {} ok", step.index, step.op),
