@@ -221,9 +221,12 @@ mod tests {
         const NAME: &str = "test.triangle";
         const N: usize = canonical_len_kind(NAME, &TRIANGLE);
         const BYTES: [u8; N] = canonical_serialize_kind::<N>(NAME, &TRIANGLE);
-        // Domain-prefixed (issue #186) — agrees with the derive macro's
-        // compile-time emission.
-        let expected = fnv1a_64_prefixed(KIND_DOMAIN, &BYTES);
+        // Domain-prefixed (issue #186) + ADR-0064 tag-stamped — agrees
+        // with the derive macro's compile-time emission. The tag bits
+        // and the body mask are private constants on `schema`; the
+        // expected value here mirrors them by construction.
+        let expected =
+            (0x2_u64 << 60) | (fnv1a_64_prefixed(KIND_DOMAIN, &BYTES) & 0x0FFF_FFFF_FFFF_FFFF);
         assert_eq!(kind_id_from_parts(NAME, &TRIANGLE), expected);
     }
 

@@ -171,14 +171,19 @@ impl HandleStore {
     /// addressed ids land in Phase 3. `0` is reserved as the
     /// "no-handle" sentinel — the counter starts at 1 and never
     /// returns 0.
+    ///
+    /// ADR-0064: the high 4 bits carry `Tag::Handle` so handle ids
+    /// are bit-distinguishable from mailbox / kind ids. The counter
+    /// occupies the low 60 bits — at one mint per nanosecond it
+    /// wraps in ~37 years, well past any single substrate lifetime.
     pub fn next_ephemeral(&self) -> HandleId {
         let mut inner = self.inner.write().unwrap();
-        let id = inner.next_ephemeral;
+        let counter = inner.next_ephemeral;
         inner.next_ephemeral = inner.next_ephemeral.wrapping_add(1);
         if inner.next_ephemeral == 0 {
             inner.next_ephemeral = 1;
         }
-        id
+        aether_mail::with_tag(aether_mail::Tag::Handle, counter)
     }
 
     /// Insert (or update) a handle. The same `(id, kind_id)` pair can
@@ -751,8 +756,15 @@ mod tests {
         let store = HandleStore::new(1024);
         let a = store.next_ephemeral();
         let b = store.next_ephemeral();
-        assert_eq!(a, 1);
-        assert_eq!(b, 2);
+        // ADR-0064: counter occupies the low 60 bits; the high 4
+        // bits carry `Tag::Handle`. Strip the tag to assert on the
+        // raw counter value.
+        assert_eq!(aether_mail::tagged_id::body_of(a), 1);
+        assert_eq!(aether_mail::tagged_id::body_of(b), 2);
+        assert_eq!(
+            aether_mail::tagged_id::tag_of(a),
+            Some(aether_mail::Tag::Handle)
+        );
         assert_ne!(a, 0);
     }
 

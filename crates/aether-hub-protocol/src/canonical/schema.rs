@@ -239,14 +239,29 @@ fn variant_to_shape(v: &EnumVariant) -> crate::types::VariantShape {
 /// other way around).
 pub(crate) const KIND_DOMAIN: &[u8] = b"kind:";
 
+/// ADR-0064 type tag for kind ids. Kept in sync with
+/// `aether_mail::tagged_id::Tag::Kind` (which can't be imported here —
+/// `aether-mail` depends on `aether-hub-protocol`, not the other way
+/// around). Same shape as `KIND_DOMAIN` and `fnv1a_64_prefixed`:
+/// duplicated for the dep direction, identical to the upstream
+/// constant.
+pub(crate) const KIND_TAG: u64 = 0x2 << 60;
+
+/// ADR-0064 mask isolating the 60-bit hash body inside a tagged id.
+/// Drops the natural high 4 bits of FNV-1a output so the tag bits
+/// can OR in without collision.
+pub(crate) const HASH_MASK: u64 = 0x0FFF_FFFF_FFFF_FFFF;
+
 /// Derive a `Kind::ID` from a `(name, schema)` pair at runtime. Matches
-/// `fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema))`
-/// byte-for-byte with the derive's compile-time emission, so a
-/// substrate computing `kind_id_from_parts(&desc.name, &desc.schema)`
+/// the `#[derive(Kind)]` compile-time emission byte-for-byte:
+/// `Tag::Kind` ORed into the high 4 bits + the low 60 bits of
+/// `fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema))`.
+/// A substrate computing `kind_id_from_parts(&desc.name, &desc.schema)`
 /// after a runtime `register_kind_with_descriptor` agrees with the id
-/// the component published as `<K as Kind>::ID` (ADR-0030 Phase 2).
+/// the component published as `<K as Kind>::ID` (ADR-0030 Phase 2 +
+/// ADR-0064).
 pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
-    fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema))
+    KIND_TAG | (fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema)) & HASH_MASK)
 }
 
 /// Derive a `Kind::ID` from a decoded `KindShape`. Same hash as
@@ -257,7 +272,7 @@ pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
 pub fn kind_id_from_shape(shape: &crate::types::KindShape) -> u64 {
     let bytes =
         postcard::to_allocvec(shape).expect("canonical KindShape serialization is infallible");
-    fnv1a_64_prefixed(KIND_DOMAIN, &bytes)
+    KIND_TAG | (fnv1a_64_prefixed(KIND_DOMAIN, &bytes) & HASH_MASK)
 }
 
 /// FNV-1a 64 over `prefix ++ payload`, mirrored from
