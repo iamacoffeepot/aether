@@ -54,6 +54,19 @@ impl EventReceiver {
     pub fn recv(&self) -> Result<ChassisEvent, mpsc::RecvError> {
         self.0.recv()
     }
+
+    /// Non-blocking peek. Returns `Empty` immediately when no event
+    /// is queued and `Disconnected` when every sender is gone. The
+    /// in-process `TestBench` driver uses this to drain events
+    /// inline between queue settles.
+    ///
+    /// The binary's events loop uses `recv` (blocking), not this —
+    /// the dead-code lint sees this method as unused when compiling
+    /// just the binary, hence the allow.
+    #[allow(dead_code)]
+    pub fn try_recv(&self) -> Result<ChassisEvent, mpsc::TryRecvError> {
+        self.0.try_recv()
+    }
 }
 
 /// Build the sender/receiver pair the chassis wires once at boot.

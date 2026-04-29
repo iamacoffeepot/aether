@@ -1,21 +1,24 @@
-//! aether-substrate-test-bench: the test-bench chassis binary crate (ADR-0067).
+//! aether-substrate-test-bench: the test-bench chassis crate (ADR-0067).
 //!
-//! Holds the wgpu renderer (no presentation surface), the
-//! `CaptureQueue` handoff slot for synchronous capture, and the
-//! chassis-side control-plane handler that owns capture_frame and
-//! replies `Err` on the window-only kinds (set_window_mode,
-//! set_window_title, platform_info). The shared runtime lives in
-//! `aether-substrate-core`; this lib re-exports the subset the
-//! binary and its dependents (the smoke runner per ADR-0067) lean
-//! on.
+//! Two driver modes:
 //!
-//! The lib + bin split means Rust integration tests can link the
-//! chassis driver directly without going through process spawning.
+//! - **Binary (`src/main.rs`)** — connects to a hub via TCP, runs
+//!   the chassis events loop on the main thread blocking on
+//!   `events_rx.recv()`. Hub-driven smoke (the `spawn_substrate`
+//!   MCP path).
+//! - **In-process (`TestBench` struct)** — no hub, no TCP. Substrate
+//!   state is owned by the test thread; mail goes through the same
+//!   sinks + control plane but replies route to a loopback channel
+//!   instead of a socket. Rust integration tests and `aether-smoke`
+//!   link this directly.
 
 pub mod capture;
 pub mod chassis;
 pub mod events;
 pub mod render;
+mod test_bench;
+
+pub use test_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TestBench, TestBenchError};
 
 pub use aether_substrate_core::{
     AETHER_CONTROL, Chassis, ChassisCapabilities, ChassisControlHandler, Component, ControlPlane,

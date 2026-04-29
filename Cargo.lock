@@ -275,6 +275,8 @@ dependencies = [
  "bytemuck",
  "png",
  "pollster",
+ "postcard",
+ "serde",
  "tracing",
  "wasmtime",
  "wgpu",
