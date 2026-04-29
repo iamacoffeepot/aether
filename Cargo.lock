@@ -190,6 +190,7 @@ name = "aether-params-codec"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-hub-protocol",
+ "aether-kinds",
  "aether-mail",
  "bytemuck",
  "postcard",

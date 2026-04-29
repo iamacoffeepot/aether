@@ -11,7 +11,6 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 
 mod chassis;
-mod decoder;
 mod engine;
 mod log_store;
 mod loopback;
@@ -20,12 +19,12 @@ mod registry;
 mod session;
 mod spawn;
 
-// `encode_schema` lives in `aether-params-codec` so callers outside
-// the hub (smoke runner, future tooling) can use the same JSON →
-// wire-bytes path without depending on the hub binary crate.
-pub use aether_params_codec::{EncodeError, encode_schema};
+// Schema-driven encode/decode lives in `aether-params-codec` so
+// callers outside the hub (smoke runner, future tooling) can use the
+// same JSON ↔ wire-bytes path without depending on the hub binary
+// crate.
+pub use aether_params_codec::{DecodeError, EncodeError, decode_schema, encode_schema};
 pub use chassis::HubChassis;
-pub use decoder::{DecodeError, decode_schema};
 pub use loopback::{HUB_SELF_ENGINE_ID, LoopbackEngine, LoopbackHandle};
 
 pub use engine::HEARTBEAT_INTERVAL;

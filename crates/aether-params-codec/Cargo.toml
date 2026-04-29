@@ -26,8 +26,10 @@ serde_json = "1"
 # Round-trip tests in this crate encode JSON params via the schema
 # encoder, then decode the bytes back through `bytemuck::cast` (cast
 # kinds), `postcard::from_bytes` (postcard kinds), or a `serde`
-# deserialize. Production callers don't need these — they're only
-# pulled in for the `cargo test` build of this crate.
+# deserialize. Decoder tests also reach for concrete kinds (e.g.
+# `SubscribeInput`) to assert tagged-id round-trips. Production
+# callers don't need any of this — only pulled in for `cargo test`.
+aether-kinds = { path = "../aether-kinds" }
 aether-mail = { path = "../aether-mail", features = ["derive"] }
 bytemuck = { version = "1.19", features = ["derive"] }
 postcard = { version = "1.1", features = ["alloc"] }

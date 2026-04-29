@@ -1,0 +1,1519 @@
+// `encode_schema`: serde_json params + `SchemaType` descriptor → wire
+// bytes the substrate's decode path is happy with. Pure function; no
+// hub state, no async.
+//
+// Two wire shapes, picked per descriptor:
+//
+// 1. Cast-shaped (`Struct { repr_c: true }` and the recursive tree
+//    under it): `#[repr(C)]` byte layout. Scalars and fixed arrays
+//    laid out at the alignment they'd occupy in a Rust struct;
+//    trailing padding rounds total size to the largest field
+//    alignment. Substrate decode is `bytemuck::cast`.
+//
+// 2. Postcard (everything else): postcard 1.x wire format, written
+//    directly:
+//      - bool: 1 byte (0 or 1)
+//      - u8/i8: 1 byte
+//      - u16..u64: LEB128 varint
+//      - i16..i64: zigzag-then-LEB128
+//      - f32/f64: little-endian
+//      - String / &[u8] (Bytes): varint length + bytes
+//      - Vec<T>: varint length + concatenated encoded elements
+//      - [T; N]: concatenated encoded elements (no length prefix)
+//      - Option<T>: 1-byte tag (0 or 1), then T if Some
+//      - enum: varint discriminant, then variant body
+//      - struct: concatenated field bytes in declaration order
+//
+// We write the bytes directly rather than going through a serde
+// serializer because the JSON-driven encoding is structural — matching
+// postcard's wire format byte-for-byte is the contract, not "calling
+// postcard".
+
+use std::fmt;
+
+use aether_hub_protocol::{EnumVariant, NamedField, Primitive, SchemaType};
+use aether_mail::tagged_id;
+use serde_json::Value;
+
+#[derive(Debug)]
+pub enum EncodeError {
+    NotAnObject,
+    MissingField(String),
+    UnexpectedField(String),
+    TypeMismatch {
+        field: String,
+        expected: &'static str,
+    },
+    OutOfRange {
+        field: String,
+        reason: String,
+    },
+    ArrayLengthMismatch {
+        field: String,
+        expected: u32,
+        got: usize,
+    },
+    /// A schema arm the hub encoder can't handle in this position.
+    /// PR 5's postcard path covers every top-level `SchemaType`, so
+    /// this variant only fires for fields-inside-cast-structs that
+    /// disqualify the parent from cast eligibility. Carries a short
+    /// description so the agent error is actionable.
+    UnsupportedSchema(&'static str),
+}
+
+impl fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EncodeError::NotAnObject => write!(f, "params must be a JSON object"),
+            EncodeError::MissingField(name) => write!(f, "missing required field {name:?}"),
+            EncodeError::UnexpectedField(name) => {
+                write!(f, "unexpected field {name:?} not in descriptor")
+            }
+            EncodeError::TypeMismatch { field, expected } => {
+                write!(f, "field {field:?} expected {expected}")
+            }
+            EncodeError::OutOfRange { field, reason } => write!(f, "field {field:?}: {reason}"),
+            EncodeError::ArrayLengthMismatch {
+                field,
+                expected,
+                got,
+            } => write!(
+                f,
+                "field {field:?}: array length {got} != expected {expected}"
+            ),
+            EncodeError::UnsupportedSchema(shape) => {
+                write!(f, "schema arm not supported by hub encoder: {shape}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EncodeError {}
+
+/// ADR-0019: encode `params` against a `SchemaType` descriptor.
+/// Dispatches on the schema's wire shape:
+///
+/// - `Unit` → empty payload.
+/// - `Struct { repr_c: true }` (and the recursive cast-shaped tree
+///   under it) → `#[repr(C)]` byte layout, decodable by
+///   `bytemuck::cast` on the substrate side.
+/// - Everything else → postcard wire format, written directly per the
+///   format described at the top of this file.
+pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, EncodeError> {
+    match schema {
+        SchemaType::Unit => {
+            // Empty payload. Accept an empty object or null; reject
+            // explicit non-empty input so a typo doesn't get silently
+            // swallowed.
+            if let Some(obj) = params.as_object()
+                && !obj.is_empty()
+            {
+                return Err(EncodeError::UnexpectedField(
+                    obj.keys().next().cloned().unwrap_or_default(),
+                ));
+            }
+            Ok(Vec::new())
+        }
+        SchemaType::Struct {
+            fields,
+            repr_c: true,
+        } => {
+            let obj = params.as_object().ok_or(EncodeError::NotAnObject)?;
+            for key in obj.keys() {
+                if !fields.iter().any(|f| f.name == *key) {
+                    return Err(EncodeError::UnexpectedField(key.clone()));
+                }
+            }
+            let mut out = Vec::new();
+            let max_align = encode_struct_fields(&mut out, obj, fields)?;
+            pad_to(&mut out, max_align);
+            Ok(out)
+        }
+        // Postcard path: every non-cast schema. The walker handles
+        // top-level scalars / strings / vecs / enums uniformly with
+        // their nested counterparts.
+        _ => {
+            let mut out = Vec::new();
+            encode_postcard(params, schema, "$", &mut out)?;
+            Ok(out)
+        }
+    }
+}
+
+/// Recursively encode `value` into postcard wire format under `schema`.
+/// `path` is a dotted breadcrumb (`$.field.subfield[2]`) used to make
+/// error messages locate the offending field in deeply-nested params.
+fn encode_postcard(
+    value: &Value,
+    schema: &SchemaType,
+    path: &str,
+    out: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    match schema {
+        SchemaType::Unit => Ok(()),
+        SchemaType::Bool => {
+            let b = value.as_bool().ok_or_else(|| EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "bool",
+            })?;
+            out.push(b as u8);
+            Ok(())
+        }
+        SchemaType::Scalar(p) => write_scalar_postcard(*p, value, path, out),
+        SchemaType::String => {
+            let s = value.as_str().ok_or_else(|| EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "string",
+            })?;
+            write_varint_u64(out, s.len() as u64);
+            out.extend_from_slice(s.as_bytes());
+            Ok(())
+        }
+        SchemaType::Bytes => {
+            let arr = value.as_array().ok_or_else(|| EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "byte array",
+            })?;
+            write_varint_u64(out, arr.len() as u64);
+            for (i, v) in arr.iter().enumerate() {
+                let n = as_unsigned(v, path, "u8")?;
+                let b: u8 = n
+                    .try_into()
+                    .map_err(|_| oor(&format!("{path}[{i}]"), "u8"))?;
+                out.push(b);
+            }
+            Ok(())
+        }
+        SchemaType::Option(inner) => {
+            if value.is_null() {
+                out.push(0);
+            } else {
+                out.push(1);
+                encode_postcard(value, inner, path, out)?;
+            }
+            Ok(())
+        }
+        SchemaType::Vec(inner) => {
+            let arr = value.as_array().ok_or_else(|| EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "array",
+            })?;
+            write_varint_u64(out, arr.len() as u64);
+            for (i, v) in arr.iter().enumerate() {
+                let elem_path = format!("{path}[{i}]");
+                encode_postcard(v, inner, &elem_path, out)?;
+            }
+            Ok(())
+        }
+        SchemaType::Array { element, len } => {
+            let arr = value.as_array().ok_or_else(|| EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "array",
+            })?;
+            if arr.len() != *len as usize {
+                return Err(EncodeError::ArrayLengthMismatch {
+                    field: path.to_owned(),
+                    expected: *len,
+                    got: arr.len(),
+                });
+            }
+            for (i, v) in arr.iter().enumerate() {
+                let elem_path = format!("{path}[{i}]");
+                encode_postcard(v, element, &elem_path, out)?;
+            }
+            Ok(())
+        }
+        SchemaType::Struct { fields, .. } => {
+            // Postcard struct: concatenated field bytes in declaration
+            // order. Reject unexpected keys (typo defense) and require
+            // every field to be present.
+            let obj = value.as_object().ok_or_else(|| EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "object",
+            })?;
+            for key in obj.keys() {
+                if !fields.iter().any(|f| f.name == *key) {
+                    return Err(EncodeError::UnexpectedField(format!("{path}.{key}")));
+                }
+            }
+            for field in fields.iter() {
+                let v = obj
+                    .get(&*field.name)
+                    .ok_or_else(|| EncodeError::MissingField(format!("{path}.{}", field.name)))?;
+                let field_path = format!("{path}.{}", field.name);
+                encode_postcard(v, &field.ty, &field_path, out)?;
+            }
+            Ok(())
+        }
+        SchemaType::Enum { variants } => {
+            // Externally-tagged JSON: `{"VariantName": <body>}` for
+            // tuple/struct variants, `"VariantName"` (string) for unit
+            // variants. Same shape serde emits by default.
+            let (tag, body) = decode_enum_tag(value, path)?;
+            let variant =
+                variants
+                    .iter()
+                    .find(|v| v.name() == tag)
+                    .ok_or(EncodeError::TypeMismatch {
+                        field: path.to_owned(),
+                        expected: "enum variant matching schema",
+                    })?;
+            write_varint_u64(out, variant.discriminant() as u64);
+            encode_enum_body(body, variant, path, out)?;
+            Ok(())
+        }
+        SchemaType::Map {
+            key: key_schema,
+            value: value_schema,
+        } => {
+            // Issue #232 + proto3-style JSON mapping. Input is a JSON
+            // object: keys live as strings on the wire-side regardless
+            // of declared key type. We parse each JSON-string key
+            // through the key schema, then sort by the parsed value
+            // so the wire bytes match what `postcard::to_allocvec`
+            // would produce on a `BTreeMap` with the same contents
+            // (sorted by key). Sender-order independence keeps two
+            // tools producing byte-identical payloads from
+            // semantically-equal inputs.
+            let json_map = value.as_object().ok_or_else(|| EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "object",
+            })?;
+            let mut entries: Vec<(ParsedMapKey, Value, &Value)> =
+                Vec::with_capacity(json_map.len());
+            for (k_str, v_json) in json_map {
+                let entry_path = format!("{path}.{k_str}");
+                let (parsed, key_json) = parse_map_key(k_str, key_schema, &entry_path)?;
+                entries.push((parsed, key_json, v_json));
+            }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            write_varint_u64(out, entries.len() as u64);
+            for (_pk, k_json, v_json) in &entries {
+                encode_postcard(k_json, key_schema, path, out)?;
+                encode_postcard(v_json, value_schema, path, out)?;
+            }
+            Ok(())
+        }
+        SchemaType::Ref(inner) => {
+            // ADR-0045 typed handle. Externally-tagged JSON matches
+            // the Rust enum: `{"Inline": <inner-K>}` chooses the
+            // inline arm; `{"Handle": {"id": u64, "kind_id": u64}}`
+            // chooses the handle arm. Wire is the postcard enum
+            // encoding — discriminant varint + body, where body is
+            // either the inner kind's postcard bytes (Inline = 0)
+            // or two varints (Handle = 1).
+            let (tag, body) = decode_enum_tag(value, path)?;
+            match tag {
+                "Inline" => {
+                    write_varint_u64(out, 0);
+                    encode_postcard(body, inner, path, out)
+                }
+                "Handle" => {
+                    write_varint_u64(out, 1);
+                    let obj = body.as_object().ok_or_else(|| EncodeError::TypeMismatch {
+                        field: path.to_owned(),
+                        expected: "Handle object",
+                    })?;
+                    for key in obj.keys() {
+                        if key != "id" && key != "kind_id" {
+                            return Err(EncodeError::UnexpectedField(format!("{path}.{key}")));
+                        }
+                    }
+                    let id_path = format!("{path}.id");
+                    let kind_id_path = format!("{path}.kind_id");
+                    let id_v = obj
+                        .get("id")
+                        .ok_or_else(|| EncodeError::MissingField(id_path.clone()))?;
+                    let kind_id_v = obj
+                        .get("kind_id")
+                        .ok_or_else(|| EncodeError::MissingField(kind_id_path.clone()))?;
+                    let id = as_unsigned(id_v, &id_path, "u64")?;
+                    let kind_id = as_unsigned(kind_id_v, &kind_id_path, "u64")?;
+                    write_varint_u64(out, id);
+                    write_varint_u64(out, kind_id);
+                    Ok(())
+                }
+                _ => Err(EncodeError::TypeMismatch {
+                    field: path.to_owned(),
+                    expected: "Inline or Handle variant",
+                }),
+            }
+        }
+        // ADR-0065 typed id. Wire is a u64 varint; JSON is the
+        // ADR-0064 tagged-string form (`mbx-XXXX-XXXX-XXXX` etc.)
+        // for the post-migration shape, with a back-compat path that
+        // accepts a JSON number for callers (test fixtures, older
+        // examples) that haven't migrated yet.
+        SchemaType::TypeId(type_id) => {
+            let id = decode_type_id_value(value, *type_id, path)?;
+            write_varint_u64(out, id);
+            Ok(())
+        }
+    }
+}
+
+/// JSON → u64 helper for `SchemaType::TypeId(type_id)`. Accepts a
+/// tagged string (decoded via `tagged_id::decode_with_tag` against
+/// the expected `Tag` for `type_id`) or a JSON number (back-compat).
+/// Errors with `TypeMismatch` on any other shape, or
+/// `UnsupportedSchema` if the schema's `type_id` doesn't correspond
+/// to a typed-id newtype the codec knows how to translate.
+fn decode_type_id_value(value: &Value, type_id: u64, path: &str) -> Result<u64, EncodeError> {
+    let expected = aether_mail::tag_for_type_id(type_id)
+        .ok_or(EncodeError::UnsupportedSchema("unknown TypeId in schema"))?;
+    match value {
+        Value::String(s) => {
+            tagged_id::decode_with_tag(s, expected).map_err(|e| EncodeError::OutOfRange {
+                field: path.to_owned(),
+                reason: format!("invalid tagged id: {e}"),
+            })
+        }
+        Value::Number(_) => Ok(as_unsigned(value, path, "u64 (typed-id back-compat)")?),
+        _ => Err(EncodeError::TypeMismatch {
+            field: path.to_owned(),
+            expected: "tagged-id string or u64 number",
+        }),
+    }
+}
+
+/// Normalized map-key form for sorting (issue #232). Cross-variant
+/// ordering is irrelevant — every key in a single map shares the
+/// declared key schema, so all `ParsedMapKey` values produced for one
+/// encode call land in the same arm. The derived `Ord` keeps the type
+/// total so callers don't need a custom comparator.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum ParsedMapKey<'a> {
+    Bool(bool),
+    UInt(u64),
+    SInt(i64),
+    Str(&'a str),
+}
+
+/// Parse a JSON-string map key per the declared key schema and produce
+/// (a) a sortable normalized form and (b) a `serde_json::Value` shaped
+/// for `encode_postcard` so the actual wire bytes flow through the
+/// existing scalar/string/bool encoders. Proto3 stringify rule —
+/// integer keys land as JSON-string digits, bool keys as `"true"` /
+/// `"false"`, string keys identity. Any other key shape is
+/// `UnsupportedSchema`; the `BTreeMap<K: Ord, V>` bound at the Rust
+/// layer makes most of these unreachable, but the codec rejects them
+/// defensively.
+fn parse_map_key<'a>(
+    k_str: &'a str,
+    schema: &SchemaType,
+    path: &str,
+) -> Result<(ParsedMapKey<'a>, Value), EncodeError> {
+    match schema {
+        SchemaType::String => Ok((ParsedMapKey::Str(k_str), Value::String(k_str.to_owned()))),
+        SchemaType::Bool => match k_str {
+            "true" => Ok((ParsedMapKey::Bool(true), Value::Bool(true))),
+            "false" => Ok((ParsedMapKey::Bool(false), Value::Bool(false))),
+            _ => Err(EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "\"true\" or \"false\" (bool map key)",
+            }),
+        },
+        SchemaType::Scalar(p) => match p {
+            Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::U64 => {
+                let n: u64 = k_str.parse().map_err(|_| EncodeError::TypeMismatch {
+                    field: path.to_owned(),
+                    expected: "unsigned integer (map key as decimal string)",
+                })?;
+                // Range-check happens at the scalar-write step via
+                // `as_unsigned`; storing as u64 here is lossless for
+                // every supported key width.
+                Ok((ParsedMapKey::UInt(n), Value::Number(n.into())))
+            }
+            Primitive::I8 | Primitive::I16 | Primitive::I32 | Primitive::I64 => {
+                let n: i64 = k_str.parse().map_err(|_| EncodeError::TypeMismatch {
+                    field: path.to_owned(),
+                    expected: "signed integer (map key as decimal string)",
+                })?;
+                Ok((ParsedMapKey::SInt(n), Value::Number(n.into())))
+            }
+            Primitive::F32 | Primitive::F64 => {
+                Err(EncodeError::UnsupportedSchema("float as Map key (no Ord)"))
+            }
+        },
+        _ => Err(EncodeError::UnsupportedSchema(
+            "Map key must be String, integer scalar, or Bool",
+        )),
+    }
+}
+
+fn write_scalar_postcard(
+    p: Primitive,
+    v: &Value,
+    name: &str,
+    out: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    match p {
+        Primitive::U8 => {
+            let n = as_unsigned(v, name, "u8")?;
+            let n: u8 = n.try_into().map_err(|_| oor(name, "u8"))?;
+            out.push(n);
+        }
+        Primitive::U16 => {
+            let n = as_unsigned(v, name, "u16")?;
+            let _: u16 = n.try_into().map_err(|_| oor(name, "u16"))?;
+            write_varint_u64(out, n);
+        }
+        Primitive::U32 => {
+            let n = as_unsigned(v, name, "u32")?;
+            let _: u32 = n.try_into().map_err(|_| oor(name, "u32"))?;
+            write_varint_u64(out, n);
+        }
+        Primitive::U64 => {
+            let n = as_unsigned(v, name, "u64")?;
+            write_varint_u64(out, n);
+        }
+        Primitive::I8 => {
+            let n = as_signed(v, name, "i8")?;
+            let n: i8 = n.try_into().map_err(|_| oor(name, "i8"))?;
+            out.push(n as u8);
+        }
+        Primitive::I16 => {
+            let n = as_signed(v, name, "i16")?;
+            let n: i16 = n.try_into().map_err(|_| oor(name, "i16"))?;
+            write_varint_u64(out, zigzag_i64(n as i64));
+        }
+        Primitive::I32 => {
+            let n = as_signed(v, name, "i32")?;
+            let n: i32 = n.try_into().map_err(|_| oor(name, "i32"))?;
+            write_varint_u64(out, zigzag_i64(n as i64));
+        }
+        Primitive::I64 => {
+            let n = as_signed(v, name, "i64")?;
+            write_varint_u64(out, zigzag_i64(n));
+        }
+        Primitive::F32 => {
+            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch {
+                field: name.to_owned(),
+                expected: "f32",
+            })?;
+            out.extend_from_slice(&(n as f32).to_le_bytes());
+        }
+        Primitive::F64 => {
+            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch {
+                field: name.to_owned(),
+                expected: "f64",
+            })?;
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+/// LEB128-style varint write. Postcard 1.x uses this for u16/u32/u64
+/// and (zigzagged) for i16/i32/i64, plus all collection lengths.
+fn write_varint_u64(out: &mut Vec<u8>, mut n: u64) {
+    while n >= 0x80 {
+        out.push((n as u8) | 0x80);
+        n >>= 7;
+    }
+    out.push(n as u8);
+}
+
+fn zigzag_i64(n: i64) -> u64 {
+    ((n << 1) ^ (n >> 63)) as u64
+}
+
+/// Pull `(tag, body)` out of an enum-shaped JSON value. Accepts:
+///   - `"Variant"` (string) — unit variant.
+///   - `{"Variant": body}` — single-key object — tuple or struct
+///     variant. Body is whatever the variant's schema expects.
+fn decode_enum_tag<'a>(value: &'a Value, path: &str) -> Result<(&'a str, &'a Value), EncodeError> {
+    if let Some(s) = value.as_str() {
+        return Ok((s, &Value::Null));
+    }
+    let obj = value.as_object().ok_or_else(|| EncodeError::TypeMismatch {
+        field: path.to_owned(),
+        expected: "enum (string or single-key object)",
+    })?;
+    if obj.len() != 1 {
+        return Err(EncodeError::TypeMismatch {
+            field: path.to_owned(),
+            expected: "enum object with exactly one tag key",
+        });
+    }
+    let (tag, body) = obj.iter().next().expect("len == 1");
+    Ok((tag.as_str(), body))
+}
+
+fn encode_enum_body(
+    body: &Value,
+    variant: &EnumVariant,
+    path: &str,
+    out: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    match variant {
+        EnumVariant::Unit { .. } => {
+            // Body should be Null (or absent — the string-tag form).
+            // Anything else is suspicious; reject so a typo'd
+            // {"Pending": {...}} doesn't get silently dropped.
+            if !body.is_null() {
+                return Err(EncodeError::TypeMismatch {
+                    field: path.to_owned(),
+                    expected: "unit variant has no body — pass the variant name as a bare string",
+                });
+            }
+            Ok(())
+        }
+        EnumVariant::Tuple { fields, name, .. } => {
+            // Tuple variant body is a JSON array (one entry per
+            // tuple field), or — for a single-element tuple — the
+            // element value directly. Serde's external tagging does
+            // both interchangeably.
+            if fields.len() == 1 {
+                let nested_path = format!("{path}::{name}.0");
+                encode_postcard(body, &fields[0], &nested_path, out)
+            } else {
+                let arr = body.as_array().ok_or_else(|| EncodeError::TypeMismatch {
+                    field: path.to_owned(),
+                    expected: "tuple variant body as array",
+                })?;
+                if arr.len() != fields.len() {
+                    return Err(EncodeError::ArrayLengthMismatch {
+                        field: path.to_owned(),
+                        expected: fields.len() as u32,
+                        got: arr.len(),
+                    });
+                }
+                for (i, (v, ty)) in arr.iter().zip(fields.iter()).enumerate() {
+                    let nested = format!("{path}::{name}.{i}");
+                    encode_postcard(v, ty, &nested, out)?;
+                }
+                Ok(())
+            }
+        }
+        EnumVariant::Struct { fields, name, .. } => {
+            let obj = body.as_object().ok_or_else(|| EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "struct variant body as object",
+            })?;
+            for key in obj.keys() {
+                if !fields.iter().any(|f| f.name == *key) {
+                    return Err(EncodeError::UnexpectedField(format!(
+                        "{path}::{name}.{key}"
+                    )));
+                }
+            }
+            for field in fields.iter() {
+                let v = obj.get(&*field.name).ok_or_else(|| {
+                    EncodeError::MissingField(format!("{path}::{name}.{}", field.name))
+                })?;
+                let nested = format!("{path}::{name}.{}", field.name);
+                encode_postcard(v, &field.ty, &nested, out)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Recursively walk a `repr_c: true` struct's fields, packing them
+/// into `out` with `#[repr(C)]` alignment rules. Returns the maximum
+/// field alignment so the caller can apply trailing padding.
+fn encode_struct_fields(
+    out: &mut Vec<u8>,
+    obj: &serde_json::Map<String, Value>,
+    fields: &[NamedField],
+) -> Result<usize, EncodeError> {
+    let mut max_align = 1usize;
+    for field in fields.iter() {
+        let value = obj
+            .get(&*field.name)
+            .ok_or_else(|| EncodeError::MissingField(field.name.to_string()))?;
+        let a = encode_field_value(out, &field.name, &field.ty, value)?;
+        max_align = max_align.max(a);
+    }
+    Ok(max_align)
+}
+
+/// Encode one field value into `out`. Returns the alignment requirement
+/// the field imposed (so the parent can track `max_align`). Recurses
+/// into nested cast structs; rejects any non-cast leaf type with
+/// `UnsupportedSchema`.
+fn encode_field_value(
+    out: &mut Vec<u8>,
+    name: &str,
+    ty: &SchemaType,
+    value: &Value,
+) -> Result<usize, EncodeError> {
+    match ty {
+        SchemaType::Scalar(p) => {
+            let a = align_of_primitive(*p);
+            pad_to(out, a);
+            write_primitive_schema(out, *p, value, name)?;
+            Ok(a)
+        }
+        SchemaType::Array { element, len } => {
+            let arr = value.as_array().ok_or_else(|| EncodeError::TypeMismatch {
+                field: name.to_owned(),
+                expected: "array",
+            })?;
+            if arr.len() != *len as usize {
+                return Err(EncodeError::ArrayLengthMismatch {
+                    field: name.to_owned(),
+                    expected: *len,
+                    got: arr.len(),
+                });
+            }
+            // Compute element alignment up-front and pad the start
+            // before the first element. Subsequent elements are
+            // contiguous (no per-element re-pad) — matches `[T; N]`
+            // layout under `#[repr(C)]`.
+            let elem_align = alignment_of_schema(element)?;
+            pad_to(out, elem_align);
+            for (i, v) in arr.iter().enumerate() {
+                let elem_name = format!("{name}[{i}]");
+                encode_field_value(out, &elem_name, element, v)?;
+            }
+            Ok(elem_align)
+        }
+        SchemaType::Struct {
+            fields,
+            repr_c: true,
+        } => {
+            // Nested cast struct — pad to its alignment, encode in
+            // place, apply trailing padding so the next sibling field
+            // starts at the right offset.
+            let nested_align = alignment_of_schema(ty)?;
+            pad_to(out, nested_align);
+            let obj = value.as_object().ok_or_else(|| EncodeError::TypeMismatch {
+                field: name.to_owned(),
+                expected: "object",
+            })?;
+            for key in obj.keys() {
+                if !fields.iter().any(|f| f.name == *key) {
+                    return Err(EncodeError::UnexpectedField(format!("{name}.{key}")));
+                }
+            }
+            let inner_max = encode_struct_fields(out, obj, fields)?;
+            pad_to(out, inner_max);
+            Ok(nested_align)
+        }
+        SchemaType::Struct { repr_c: false, .. } => Err(EncodeError::UnsupportedSchema(
+            "Struct { repr_c: false } in cast-shaped parent",
+        )),
+        SchemaType::TypeId(type_id) => {
+            // ADR-0065 typed id inside a `repr_c: true` parent. Wire
+            // is a u64 (8 bytes, 8-byte align — same as a `u64`
+            // scalar) so the typed wrapper doesn't disturb the
+            // parent's cast-eligibility.
+            pad_to(out, 8);
+            let id = decode_type_id_value(value, *type_id, name)?;
+            out.extend_from_slice(&id.to_le_bytes());
+            Ok(8)
+        }
+        SchemaType::Bool
+        | SchemaType::String
+        | SchemaType::Bytes
+        | SchemaType::Option(_)
+        | SchemaType::Vec(_)
+        | SchemaType::Enum { .. }
+        | SchemaType::Unit
+        | SchemaType::Ref(_)
+        | SchemaType::Map { .. } => Err(EncodeError::UnsupportedSchema(
+            "non-cast field inside cast-shaped struct",
+        )),
+    }
+}
+
+/// Compute the `#[repr(C)]` alignment of a cast-shaped schema. Used to
+/// place fields at the right offsets without actually encoding them.
+fn alignment_of_schema(ty: &SchemaType) -> Result<usize, EncodeError> {
+    match ty {
+        SchemaType::Scalar(p) => Ok(align_of_primitive(*p)),
+        // ADR-0065: typed ids are u64-shaped — 8 bytes, 8-byte align.
+        SchemaType::TypeId(_) => Ok(8),
+        SchemaType::Array { element, .. } => alignment_of_schema(element),
+        SchemaType::Struct {
+            fields,
+            repr_c: true,
+        } => {
+            let mut a = 1usize;
+            for f in fields.iter() {
+                a = a.max(alignment_of_schema(&f.ty)?);
+            }
+            Ok(a)
+        }
+        _ => Err(EncodeError::UnsupportedSchema(
+            "alignment query on non-cast schema",
+        )),
+    }
+}
+
+fn align_of_primitive(p: Primitive) -> usize {
+    match p {
+        Primitive::U8 | Primitive::I8 => 1,
+        Primitive::U16 | Primitive::I16 => 2,
+        Primitive::U32 | Primitive::I32 | Primitive::F32 => 4,
+        Primitive::U64 | Primitive::I64 | Primitive::F64 => 8,
+    }
+}
+
+/// Write one `Primitive` scalar into `out` at the cast-shaped wire
+/// layout (LE bytes, no padding — the caller pre-pads to alignment).
+fn write_primitive_schema(
+    out: &mut Vec<u8>,
+    p: Primitive,
+    v: &Value,
+    name: &str,
+) -> Result<(), EncodeError> {
+    match p {
+        Primitive::U8 => {
+            let n = as_unsigned(v, name, "u8")?;
+            let n: u8 = n.try_into().map_err(|_| oor(name, "u8"))?;
+            out.push(n);
+        }
+        Primitive::U16 => {
+            let n = as_unsigned(v, name, "u16")?;
+            let n: u16 = n.try_into().map_err(|_| oor(name, "u16"))?;
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        Primitive::U32 => {
+            let n = as_unsigned(v, name, "u32")?;
+            let n: u32 = n.try_into().map_err(|_| oor(name, "u32"))?;
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        Primitive::U64 => {
+            let n = as_unsigned(v, name, "u64")?;
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        Primitive::I8 => {
+            let n = as_signed(v, name, "i8")?;
+            let n: i8 = n.try_into().map_err(|_| oor(name, "i8"))?;
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        Primitive::I16 => {
+            let n = as_signed(v, name, "i16")?;
+            let n: i16 = n.try_into().map_err(|_| oor(name, "i16"))?;
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        Primitive::I32 => {
+            let n = as_signed(v, name, "i32")?;
+            let n: i32 = n.try_into().map_err(|_| oor(name, "i32"))?;
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        Primitive::I64 => {
+            let n = as_signed(v, name, "i64")?;
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        Primitive::F32 => {
+            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch {
+                field: name.to_owned(),
+                expected: "f32",
+            })?;
+            out.extend_from_slice(&(n as f32).to_le_bytes());
+        }
+        Primitive::F64 => {
+            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch {
+                field: name.to_owned(),
+                expected: "f64",
+            })?;
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
+fn pad_to(out: &mut Vec<u8>, align: usize) {
+    while !out.len().is_multiple_of(align) {
+        out.push(0);
+    }
+}
+
+fn as_unsigned(v: &Value, name: &str, expected: &'static str) -> Result<u64, EncodeError> {
+    v.as_u64().ok_or_else(|| EncodeError::TypeMismatch {
+        field: name.to_owned(),
+        expected,
+    })
+}
+
+fn as_signed(v: &Value, name: &str, expected: &'static str) -> Result<i64, EncodeError> {
+    v.as_i64().ok_or_else(|| EncodeError::TypeMismatch {
+        field: name.to_owned(),
+        expected,
+    })
+}
+
+fn oor(name: &str, ty: &str) -> EncodeError {
+    EncodeError::OutOfRange {
+        field: name.to_owned(),
+        reason: format!("out of range for {ty}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_hub_protocol::SchemaCell;
+    use serde_json::json;
+
+    fn scalar(name: &str, ty: Primitive) -> NamedField {
+        NamedField {
+            name: name.to_string().into(),
+            ty: SchemaType::Scalar(ty),
+        }
+    }
+
+    fn cast_struct(fields: Vec<NamedField>) -> SchemaType {
+        SchemaType::Struct {
+            fields: fields.into(),
+            repr_c: true,
+        }
+    }
+
+    fn postcard_struct(fields: Vec<NamedField>) -> SchemaType {
+        SchemaType::Struct {
+            fields: fields.into(),
+            repr_c: false,
+        }
+    }
+
+    fn enum_schema(variants: Vec<EnumVariant>) -> SchemaType {
+        SchemaType::Enum {
+            variants: variants.into(),
+        }
+    }
+
+    #[test]
+    fn unit_encodes_empty_payload() {
+        let bytes = encode_schema(&json!({}), &SchemaType::Unit).unwrap();
+        assert!(bytes.is_empty());
+        let bytes = encode_schema(&json!(null), &SchemaType::Unit).unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn unit_rejects_non_empty_object() {
+        let err = encode_schema(&json!({"x": 1}), &SchemaType::Unit).unwrap_err();
+        assert!(matches!(err, EncodeError::UnexpectedField(_)));
+    }
+
+    #[test]
+    fn cast_struct_single_u32_field() {
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let bytes = encode_schema(&json!({"code": 42}), &schema).unwrap();
+        assert_eq!(bytes, vec![42, 0, 0, 0]);
+    }
+
+    #[test]
+    fn cast_struct_two_f32_fields() {
+        let schema = cast_struct(vec![
+            scalar("x", Primitive::F32),
+            scalar("y", Primitive::F32),
+        ]);
+        let bytes = encode_schema(&json!({"x": 1.5, "y": -3.25}), &schema).unwrap();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&1.5f32.to_le_bytes());
+        expected.extend_from_slice(&(-3.25f32).to_le_bytes());
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn cast_struct_pads_between_u8_and_u32() {
+        // #[repr(C)] { a: u8, b: u32 } is 8 bytes: a at 0, 3 bytes of
+        // padding, b at 4.
+        let schema = cast_struct(vec![
+            scalar("a", Primitive::U8),
+            scalar("b", Primitive::U32),
+        ]);
+        let bytes = encode_schema(&json!({"a": 7, "b": 0x0102_0304u32}), &schema).unwrap();
+        assert_eq!(bytes, vec![7, 0, 0, 0, 4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn cast_struct_trailing_padding_for_u64_then_u8() {
+        // { a: u64, b: u8 } — 9 bytes of content, rounded to 16 by
+        // trailing padding for align-8.
+        let schema = cast_struct(vec![
+            scalar("a", Primitive::U64),
+            scalar("b", Primitive::U8),
+        ]);
+        let bytes = encode_schema(&json!({"a": 1u64, "b": 2}), &schema).unwrap();
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(&bytes[0..8], &1u64.to_le_bytes());
+        assert_eq!(bytes[8], 2);
+        assert_eq!(&bytes[9..16], &[0u8; 7]);
+    }
+
+    #[test]
+    fn cast_struct_fixed_array_field() {
+        let schema = cast_struct(vec![NamedField {
+            name: "xs".into(),
+            ty: SchemaType::Array {
+                element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)),
+                len: 4,
+            },
+        }]);
+        let bytes = encode_schema(&json!({"xs": [1, 2, 3, 4]}), &schema).unwrap();
+        assert_eq!(bytes, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn cast_struct_signed_negative_roundtrip() {
+        // i32 in cast layout = LE bytes; -1 = 0xffffffff.
+        let schema = cast_struct(vec![scalar("n", Primitive::I32)]);
+        let bytes = encode_schema(&json!({"n": -1}), &schema).unwrap();
+        assert_eq!(bytes, vec![0xff, 0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn cast_struct_bytemuck_roundtrip_for_key_shape() {
+        // Re-decoding our bytes via bytemuck::cast (as the engine
+        // would) is the load-bearing proof of layout correctness.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
+        struct Key {
+            code: u32,
+        }
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let bytes = encode_schema(&json!({"code": 0xdead_beefu32}), &schema).unwrap();
+        let back: Key = bytemuck::cast_slice(&bytes)[0];
+        assert_eq!(back, Key { code: 0xdead_beef });
+    }
+
+    #[test]
+    fn cast_struct_missing_field_errors() {
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let err = encode_schema(&json!({}), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::MissingField(n) if n == "code"));
+    }
+
+    #[test]
+    fn cast_struct_unexpected_field_errors() {
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let err = encode_schema(&json!({"code": 1, "extra": 2}), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::UnexpectedField(n) if n == "extra"));
+    }
+
+    #[test]
+    fn cast_struct_type_mismatch_errors() {
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let err = encode_schema(&json!({"code": "not-a-number"}), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn cast_struct_out_of_range_errors() {
+        let schema = cast_struct(vec![scalar("b", Primitive::U8)]);
+        let err = encode_schema(&json!({"b": 300}), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::OutOfRange { .. }));
+    }
+
+    #[test]
+    fn cast_struct_array_length_mismatch_errors() {
+        let schema = cast_struct(vec![NamedField {
+            name: "xs".into(),
+            ty: SchemaType::Array {
+                element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)),
+                len: 4,
+            },
+        }]);
+        let err = encode_schema(&json!({"xs": [1, 2, 3]}), &schema).unwrap_err();
+        assert!(matches!(
+            err,
+            EncodeError::ArrayLengthMismatch {
+                expected: 4,
+                got: 3,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn cast_struct_non_object_params_errors() {
+        let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
+        let err = encode_schema(&json!([1, 2, 3]), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::NotAnObject));
+    }
+
+    #[test]
+    fn cast_nested_struct_drawtriangle_layout() {
+        // DrawTriangle's shape: { verts: [Vertex; 3] } where Vertex is
+        // 5 f32s. Cast wire format = 60 bytes, no internal padding.
+        let vertex = SchemaType::Struct {
+            repr_c: true,
+            fields: vec![
+                scalar("x", Primitive::F32),
+                scalar("y", Primitive::F32),
+                scalar("r", Primitive::F32),
+                scalar("g", Primitive::F32),
+                scalar("b", Primitive::F32),
+            ]
+            .into(),
+        };
+        let triangle = cast_struct(vec![NamedField {
+            name: "verts".into(),
+            ty: SchemaType::Array {
+                element: SchemaCell::owned(vertex),
+                len: 3,
+            },
+        }]);
+        let v = json!({"x": 0.0, "y": 0.5, "r": 1.0, "g": 0.0, "b": 0.0});
+        let params = json!({"verts": [v, v, v]});
+        let bytes = encode_schema(&params, &triangle).unwrap();
+        assert_eq!(bytes.len(), 60);
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
+        struct Vertex {
+            x: f32,
+            y: f32,
+            r: f32,
+            g: f32,
+            b: f32,
+        }
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
+        struct DrawTriangle {
+            verts: [Vertex; 3],
+        }
+        let back: DrawTriangle = bytemuck::cast_slice(&bytes)[0];
+        let v_struct = Vertex {
+            x: 0.0,
+            y: 0.5,
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+        };
+        assert_eq!(
+            back,
+            DrawTriangle {
+                verts: [v_struct, v_struct, v_struct]
+            }
+        );
+    }
+
+    // Postcard path. Each test asserts byte-identity with
+    // `postcard::to_allocvec` on an equivalent typed value — if these
+    // match, the substrate decode (via `postcard::from_bytes`) sees
+    // the same value the agent sent.
+
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct PostcardString {
+        body: String,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct PostcardBytes {
+        blob: Vec<u8>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct PostcardOption {
+        name: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct PostcardVec {
+        tags: Vec<String>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Inner {
+        seq: u32,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct PostcardNested {
+        items: Vec<Inner>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    enum SimpleSum {
+        Pending,
+        Ok(u64),
+        Err { reason: String },
+    }
+
+    fn pc_string_schema() -> SchemaType {
+        postcard_struct(vec![NamedField {
+            name: "body".into(),
+            ty: SchemaType::String,
+        }])
+    }
+
+    #[test]
+    fn postcard_string_field_matches_serde() {
+        let value = PostcardString {
+            body: "hello world".into(),
+        };
+        let expected = postcard::to_allocvec(&value).unwrap();
+        let bytes = encode_schema(&json!({"body": "hello world"}), &pc_string_schema()).unwrap();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn postcard_string_decodes_back() {
+        let bytes = encode_schema(&json!({"body": "round-trip"}), &pc_string_schema()).unwrap();
+        let back: PostcardString = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back.body, "round-trip");
+    }
+
+    #[test]
+    fn postcard_bytes_field_matches_serde() {
+        let value = PostcardBytes {
+            blob: vec![1, 2, 3, 4, 5],
+        };
+        let expected = postcard::to_allocvec(&value).unwrap();
+        let schema = postcard_struct(vec![NamedField {
+            name: "blob".into(),
+            ty: SchemaType::Bytes,
+        }]);
+        let bytes = encode_schema(&json!({"blob": [1, 2, 3, 4, 5]}), &schema).unwrap();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn postcard_option_some_and_none() {
+        let schema = postcard_struct(vec![NamedField {
+            name: "name".into(),
+            ty: SchemaType::Option(SchemaCell::owned(SchemaType::String)),
+        }]);
+        let some = PostcardOption {
+            name: Some("Aether".into()),
+        };
+        let some_bytes = encode_schema(&json!({"name": "Aether"}), &schema).unwrap();
+        assert_eq!(some_bytes, postcard::to_allocvec(&some).unwrap());
+
+        let none = PostcardOption { name: None };
+        let none_bytes = encode_schema(&json!({"name": null}), &schema).unwrap();
+        assert_eq!(none_bytes, postcard::to_allocvec(&none).unwrap());
+    }
+
+    #[test]
+    fn postcard_vec_of_strings_matches_serde() {
+        let value = PostcardVec {
+            tags: vec!["alpha".into(), "beta".into(), "gamma".into()],
+        };
+        let expected = postcard::to_allocvec(&value).unwrap();
+        let schema = postcard_struct(vec![NamedField {
+            name: "tags".into(),
+            ty: SchemaType::Vec(SchemaCell::owned(SchemaType::String)),
+        }]);
+        let bytes = encode_schema(&json!({"tags": ["alpha", "beta", "gamma"]}), &schema).unwrap();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn postcard_vec_of_nested_structs_matches_serde() {
+        let value = PostcardNested {
+            items: vec![Inner { seq: 1 }, Inner { seq: 256 }, Inner { seq: 0xDEAD }],
+        };
+        let expected = postcard::to_allocvec(&value).unwrap();
+        let inner_schema = postcard_struct(vec![NamedField {
+            name: "seq".into(),
+            ty: SchemaType::Scalar(Primitive::U32),
+        }]);
+        let schema = postcard_struct(vec![NamedField {
+            name: "items".into(),
+            ty: SchemaType::Vec(SchemaCell::owned(inner_schema)),
+        }]);
+        let bytes = encode_schema(
+            &json!({"items": [{"seq": 1}, {"seq": 256}, {"seq": 0xDEAD}]}),
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(bytes, expected);
+    }
+
+    fn sum_schema() -> SchemaType {
+        enum_schema(vec![
+            EnumVariant::Unit {
+                name: "Pending".into(),
+                discriminant: 0,
+            },
+            EnumVariant::Tuple {
+                name: "Ok".into(),
+                discriminant: 1,
+                fields: vec![SchemaType::Scalar(Primitive::U64)].into(),
+            },
+            EnumVariant::Struct {
+                name: "Err".into(),
+                discriminant: 2,
+                fields: vec![NamedField {
+                    name: "reason".into(),
+                    ty: SchemaType::String,
+                }]
+                .into(),
+            },
+        ])
+    }
+
+    #[test]
+    fn postcard_enum_unit_variant_as_string_tag() {
+        // Unit variant accepts the bare-string form `"Pending"`.
+        let bytes = encode_schema(&json!("Pending"), &sum_schema()).unwrap();
+        assert_eq!(bytes, postcard::to_allocvec(&SimpleSum::Pending).unwrap());
+    }
+
+    #[test]
+    fn postcard_enum_tuple_variant_with_unwrapped_body() {
+        // Single-element tuple variants accept either `{"Ok": 42}` or
+        // `{"Ok": [42]}`. Cover the unwrapped-body form here.
+        let bytes = encode_schema(&json!({"Ok": 42u64}), &sum_schema()).unwrap();
+        assert_eq!(bytes, postcard::to_allocvec(&SimpleSum::Ok(42)).unwrap());
+    }
+
+    #[test]
+    fn postcard_enum_struct_variant() {
+        let bytes =
+            encode_schema(&json!({"Err": {"reason": "kind conflict"}}), &sum_schema()).unwrap();
+        let expected = postcard::to_allocvec(&SimpleSum::Err {
+            reason: "kind conflict".into(),
+        })
+        .unwrap();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn postcard_enum_unknown_tag_errors() {
+        let err = encode_schema(&json!("Nope"), &sum_schema()).unwrap_err();
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn postcard_string_rejects_non_string() {
+        let err = encode_schema(&json!({"body": 7}), &pc_string_schema()).unwrap_err();
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn postcard_struct_rejects_unexpected_field() {
+        let err = encode_schema(&json!({"body": "ok", "extra": "nope"}), &pc_string_schema())
+            .unwrap_err();
+        assert!(matches!(err, EncodeError::UnexpectedField(_)));
+    }
+
+    #[test]
+    fn varint_matches_postcard_for_boundaries() {
+        // 0, 127, 128, 16383, 16384 — each crosses a varint byte
+        // boundary and is the most likely place for an off-by-one.
+        for n in [0u64, 127, 128, 16383, 16384, u32::MAX as u64, u64::MAX] {
+            let mut ours = Vec::new();
+            write_varint_u64(&mut ours, n);
+            let theirs = postcard::to_allocvec(&n).unwrap();
+            assert_eq!(ours, theirs, "varint mismatch for {n}");
+        }
+    }
+
+    #[test]
+    fn zigzag_matches_postcard_for_signed() {
+        for n in [0i64, -1, 1, -128, 127, i32::MIN as i64, i32::MAX as i64] {
+            let mut ours = Vec::new();
+            write_varint_u64(&mut ours, zigzag_i64(n));
+            let theirs = postcard::to_allocvec(&n).unwrap();
+            assert_eq!(ours, theirs, "zigzag mismatch for {n}");
+        }
+    }
+
+    // Issue #232 — `SchemaType::Map` encode tests. proto3-style JSON:
+    // object input always, integer/bool keys stringified.
+
+    fn map_schema(key: SchemaType, value: SchemaType) -> SchemaType {
+        SchemaType::Map {
+            key: SchemaCell::owned(key),
+            value: SchemaCell::owned(value),
+        }
+    }
+
+    #[test]
+    fn map_string_keys_matches_postcard_btreemap() {
+        // Reference value is a `BTreeMap<String, String>` postcarded by
+        // serde — that's the wire shape every receiving substrate will
+        // decode into. Sender input is unsorted to lock in the
+        // sort-after-parse step.
+        let schema = postcard_struct(vec![NamedField {
+            name: "headers".into(),
+            ty: map_schema(SchemaType::String, SchemaType::String),
+        }]);
+
+        let mut reference: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        reference.insert("content-type".into(), "application/json".into());
+        reference.insert("x-trace".into(), "abc123".into());
+
+        let expected = postcard::to_allocvec(&reference).unwrap();
+
+        let bytes = encode_schema(
+            &json!({"headers": {"x-trace": "abc123", "content-type": "application/json"}}),
+            &schema,
+        )
+        .unwrap();
+
+        // Strip the schema-struct field-prefix bytes — there are none
+        // here since the field's value is the whole map. The encoded
+        // payload is exactly the BTreeMap postcard bytes.
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn map_string_keys_sender_order_independent() {
+        // Two callers produce the same wire bytes regardless of JSON
+        // input order. Pins the sort-by-parsed-key step.
+        let schema = map_schema(SchemaType::String, SchemaType::Scalar(Primitive::U32));
+        let a = encode_schema(&json!({"alpha": 1, "beta": 2, "gamma": 3}), &schema).unwrap();
+        let b = encode_schema(&json!({"gamma": 3, "alpha": 1, "beta": 2}), &schema).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn map_u32_keys_match_postcard_btreemap() {
+        let schema = map_schema(SchemaType::Scalar(Primitive::U32), SchemaType::String);
+
+        let mut reference: std::collections::BTreeMap<u32, String> =
+            std::collections::BTreeMap::new();
+        reference.insert(1, "one".into());
+        reference.insert(42, "answer".into());
+        reference.insert(255, "max-u8".into());
+
+        let expected = postcard::to_allocvec(&reference).unwrap();
+
+        let bytes = encode_schema(
+            &json!({"42": "answer", "1": "one", "255": "max-u8"}),
+            &schema,
+        )
+        .unwrap();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn map_bool_keys_match_postcard_btreemap() {
+        let schema = map_schema(SchemaType::Bool, SchemaType::Scalar(Primitive::U32));
+        let mut reference: std::collections::BTreeMap<bool, u32> =
+            std::collections::BTreeMap::new();
+        reference.insert(false, 0);
+        reference.insert(true, 1);
+        let expected = postcard::to_allocvec(&reference).unwrap();
+        let bytes = encode_schema(&json!({"true": 1, "false": 0}), &schema).unwrap();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn map_rejects_non_object_input() {
+        let schema = map_schema(SchemaType::String, SchemaType::String);
+        let err = encode_schema(&json!([["k", "v"]]), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn map_rejects_unparsable_integer_key() {
+        let schema = map_schema(SchemaType::Scalar(Primitive::U32), SchemaType::String);
+        let err = encode_schema(&json!({"not-a-number": "v"}), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn map_rejects_invalid_bool_key() {
+        let schema = map_schema(SchemaType::Bool, SchemaType::Scalar(Primitive::U32));
+        let err = encode_schema(&json!({"yes": 1}), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn map_inside_cast_struct_rejected() {
+        // A `Map` field inside a `repr_c: true` parent has no fixed
+        // layout — must surface as `UnsupportedSchema`, not silently
+        // produce garbled bytes.
+        let schema = SchemaType::Struct {
+            repr_c: true,
+            fields: vec![NamedField {
+                name: "headers".into(),
+                ty: map_schema(SchemaType::String, SchemaType::String),
+            }]
+            .into(),
+        };
+        let err = encode_schema(&json!({"headers": {"k": "v"}}), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::UnsupportedSchema(_)));
+    }
+
+    // ADR-0065: typed-id JSON ↔ postcard.
+
+    #[test]
+    fn type_id_postcard_accepts_tagged_string() {
+        // `mailbox` field carrying a tagged `mbx-...` string lands as
+        // a postcard u64 varint — wire-identical to a raw `u64` field.
+        let schema = postcard_struct(vec![NamedField {
+            name: "mailbox".into(),
+            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+        }]);
+        let mailbox = aether_mail::MailboxId::from_name("aether.control");
+        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        let bytes = encode_schema(&json!({ "mailbox": s }), &schema).unwrap();
+        let mut expected = Vec::new();
+        write_varint_u64(&mut expected, mailbox.0);
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn type_id_postcard_accepts_raw_number_for_back_compat() {
+        // Pre-ADR-0065 callers passing a JSON number still work — the
+        // codec falls through to the back-compat `as_unsigned` path.
+        let schema = postcard_struct(vec![NamedField {
+            name: "mailbox".into(),
+            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+        }]);
+        let mailbox = aether_mail::MailboxId::from_name("aether.control");
+        let bytes = encode_schema(&json!({ "mailbox": mailbox.0 }), &schema).unwrap();
+        let mut expected = Vec::new();
+        write_varint_u64(&mut expected, mailbox.0);
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn type_id_postcard_rejects_wrong_tag() {
+        // A `KindId`-tagged string passed to a `MailboxId` field
+        // surfaces a typed `OutOfRange` so the agent learns the field
+        // expected `mbx-...` rather than corrupting the wire.
+        let schema = postcard_struct(vec![NamedField {
+            name: "mailbox".into(),
+            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+        }]);
+        let knd_string = aether_mail::tagged_id::encode(aether_mail::with_tag(
+            aether_mail::Tag::Kind,
+            0xdeadbeef,
+        ))
+        .unwrap();
+        let err = encode_schema(&json!({ "mailbox": knd_string }), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::OutOfRange { .. }));
+    }
+
+    #[test]
+    fn type_id_cast_struct_lays_out_as_u64() {
+        // Inside a `repr_c: true` parent, a typed-id field is 8 bytes
+        // LE at 8-byte alignment — same layout as a `u64`. Two-field
+        // `{ stream: u8, mailbox: MailboxId }` lays out as 1 + 7 pad +
+        // 8 = 16 bytes.
+        let schema = cast_struct(vec![
+            scalar("stream", Primitive::U8),
+            NamedField {
+                name: "mailbox".into(),
+                ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+            },
+        ]);
+        let mailbox = aether_mail::MailboxId::from_name("aether.control");
+        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        let bytes = encode_schema(&json!({ "stream": 1, "mailbox": s }), &schema).unwrap();
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(bytes[0], 1);
+        assert_eq!(&bytes[1..8], &[0u8; 7]);
+        assert_eq!(&bytes[8..16], &mailbox.0.to_le_bytes());
+    }
+
+    #[test]
+    fn type_id_postcard_rejects_unknown_type_id() {
+        // A schema declaring a `TypeId(...)` value the codec doesn't
+        // recognise must surface `UnsupportedSchema` rather than
+        // corrupt the wire or silently fall through.
+        let schema = postcard_struct(vec![NamedField {
+            name: "mystery".into(),
+            ty: SchemaType::TypeId(0xdead_beef_cafe_f00d),
+        }]);
+        let err = encode_schema(&json!({ "mystery": 0u64 }), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::UnsupportedSchema(_)));
+    }
+}
