@@ -29,6 +29,7 @@ use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use aether_kinds::ComponentDied;
 use aether_mail::Kind;
@@ -50,14 +51,58 @@ const STATE_DEAD: u8 = 1;
 /// Per-entry quiescence counter + condvar, shared with the dispatcher
 /// thread. `send` increments `pending` before forwarding to the inbox;
 /// the dispatcher decrements after each `deliver` and signals when the
-/// counter reaches zero. `drain` waits on the condvar for that signal,
-/// giving callers a per-mailbox barrier equivalent to the Phase-2
-/// global `Mailer::wait_idle`.
+/// counter reaches zero. `drain_with_budget` waits on the condvar for
+/// that signal, giving callers a per-mailbox barrier with a deadline.
+///
+/// `death` is populated by `kill_actor` before it calls
+/// `decrement_and_notify`, so a `drain_with_budget` waking on the same
+/// notify reads a fully-formed `DrainDeath` and can report
+/// `DrainOutcome::Died` instead of `Quiesced` (ADR-0063).
 #[derive(Default)]
 struct PendingGate {
     pending: AtomicU32,
     lock: Mutex<()>,
     cv: Condvar,
+    death: Mutex<Option<DrainDeath>>,
+}
+
+/// Structured information about a dispatcher death — recorded by
+/// `kill_actor` and surfaced through `drain_with_budget` /
+/// `drain_all_with_budget` so the chassis can fail-fast (ADR-0063)
+/// without scraping log text.
+#[derive(Debug, Clone)]
+pub struct DrainDeath {
+    pub mailbox: MailboxId,
+    pub mailbox_name: String,
+    pub last_kind: String,
+    pub reason: String,
+}
+
+/// Result of a single per-entry `drain_with_budget` call.
+#[derive(Debug)]
+pub enum DrainOutcome {
+    /// Pending counter reached zero with the entry still live.
+    Quiesced,
+    /// The dispatcher transitioned to Dead during the wait. The
+    /// `DrainDeath` carries the mailbox identity and trap / panic
+    /// reason recorded by `kill_actor`.
+    Died(DrainDeath),
+    /// The budget expired with `pending > 0`. The dispatcher is
+    /// either mid-trap or wedged in host code; the chassis treats
+    /// this as a fatal substrate event.
+    Wedged { waited: Duration },
+}
+
+/// Aggregate outcome of `drain_all_with_budget` across the whole
+/// component table. The chassis matches on this each frame and routes
+/// abnormal cases through `lifecycle::fatal_abort` (ADR-0063).
+#[derive(Debug, Default)]
+pub struct DrainSummary {
+    pub deaths: Vec<DrainDeath>,
+    /// First wedged entry encountered. Walking stops on the first
+    /// wedge — the substrate is going down regardless, so collecting
+    /// further state isn't useful.
+    pub wedged: Option<(MailboxId, Duration)>,
 }
 
 /// Per-mailbox scheduler state. The `Component` (and its wasmtime
@@ -190,10 +235,53 @@ impl ComponentEntry {
     /// arriving during the wait re-raise the counter and extend the
     /// wait; callers that need a single-frame barrier should ensure
     /// no concurrent sends target this mailbox.
+    ///
+    /// Has no upper bound on wait time — chassis callers that need a
+    /// fail-fast policy on stuck dispatchers use `drain_with_budget`
+    /// instead (ADR-0063).
     pub fn drain(&self) {
         let mut guard = self.gate.lock.lock().unwrap();
         while self.gate.pending.load(Ordering::Acquire) > 0 {
             guard = self.gate.cv.wait(guard).unwrap();
+        }
+    }
+
+    /// Budget-aware drain (ADR-0063). Same wait semantics as `drain`
+    /// but with a deadline; returns a structured outcome the chassis
+    /// can match on:
+    ///
+    /// - `Quiesced` — the entry is live and its inbox drained cleanly.
+    /// - `Died(...)` — the dispatcher transitioned to Dead during the
+    ///   wait; the `DrainDeath` carries the trap / panic reason
+    ///   recorded by `kill_actor`.
+    /// - `Wedged { waited }` — the budget elapsed with `pending > 0`.
+    ///
+    /// The death-vs-quiesce distinction reads from `gate.death` (a
+    /// slot `kill_actor` populates before notifying the condvar), not
+    /// from the `STATE_DEAD` flag. The slot is the structured signal;
+    /// the state flag is for the `send`-side fast path.
+    pub fn drain_with_budget(&self, budget: Duration) -> DrainOutcome {
+        let deadline = Instant::now() + budget;
+        let mut guard = self.gate.lock.lock().unwrap();
+        while self.gate.pending.load(Ordering::Acquire) > 0 {
+            let now = Instant::now();
+            if now >= deadline {
+                return DrainOutcome::Wedged { waited: budget };
+            }
+            let remaining = deadline - now;
+            let (next, timeout) = self.gate.cv.wait_timeout(guard, remaining).unwrap();
+            guard = next;
+            if timeout.timed_out() && self.gate.pending.load(Ordering::Acquire) > 0 {
+                return DrainOutcome::Wedged { waited: budget };
+            }
+        }
+        // pending == 0. The death slot is the source of truth: if
+        // `kill_actor` ran, it populated the slot before
+        // `decrement_and_notify`, and that notify is what woke us.
+        if let Some(d) = self.gate.death.lock().unwrap().clone() {
+            DrainOutcome::Died(d)
+        } else {
+            DrainOutcome::Quiesced
         }
     }
 }
@@ -293,6 +381,10 @@ pub fn spawn_dispatcher_on(
     // freeze-drain-swap takes the failure-path policy elsewhere
     // (replace returns Err and the old instance stays bound).
     state.store(STATE_LIVE, Ordering::Release);
+    // ADR-0063: clear the prior death record so a post-replace
+    // `drain_with_budget` doesn't see stale `Died` from the dispatcher
+    // we just replaced.
+    *gate.death.lock().unwrap() = None;
     let mailbox = entry.mailbox;
     let thread_name = dispatcher_thread_name(&registry, mailbox);
     let handle = thread::Builder::new()
@@ -391,6 +483,7 @@ fn dispatcher_loop(
                 );
                 kill_actor(
                     &state,
+                    &gate,
                     &mailer,
                     &registry,
                     mailbox,
@@ -411,6 +504,7 @@ fn dispatcher_loop(
                 );
                 kill_actor(
                     &state,
+                    &gate,
                     &mailer,
                     &registry,
                     mailbox,
@@ -440,17 +534,34 @@ fn dispatcher_loop(
 /// dropped and the death is only visible via `engine_logs`.
 fn kill_actor(
     state: &AtomicU8,
+    gate: &PendingGate,
     mailer: &Mailer,
     registry: &Registry,
     mailbox: MailboxId,
     last_kind: &str,
     reason: String,
 ) {
-    state.store(STATE_DEAD, Ordering::Release);
-
     let mailbox_name = registry
         .mailbox_name(mailbox)
         .unwrap_or_else(|| "?".to_string());
+
+    // ADR-0063: record the structured death into the gate's slot
+    // *before* `decrement_and_notify` (called immediately after we
+    // return). A `drain_with_budget` waking on that notify reads this
+    // slot and reports `DrainOutcome::Died` instead of `Quiesced`,
+    // which is what lets the chassis fail-fast without scraping logs.
+    {
+        let mut slot = gate.death.lock().unwrap();
+        *slot = Some(DrainDeath {
+            mailbox,
+            mailbox_name: mailbox_name.clone(),
+            last_kind: last_kind.to_string(),
+            reason: reason.clone(),
+        });
+    }
+
+    state.store(STATE_DEAD, Ordering::Release);
+
     let died = ComponentDied {
         mailbox_id: mailbox.0,
         mailbox_name,
@@ -596,6 +707,46 @@ pub fn drain_all(components: &ComponentTable) {
         }
     }
 }
+
+/// Budget-aware variant of `drain_all` (ADR-0063). Walks the component
+/// table, collecting structured outcomes from each per-entry drain.
+/// Returns a `DrainSummary` the chassis matches on — non-empty
+/// `deaths` or any `wedged` triggers `lifecycle::fatal_abort`.
+///
+/// Stops iteration on the first wedged entry: the substrate is going
+/// down regardless, so collecting further state isn't useful and may
+/// itself be slow if other entries are also stuck.
+///
+/// Re-iterates after a clean pass if any entry's pending counter has
+/// risen again — a delivered mail can dispatch fresh mail to another
+/// mailbox we already drained, same way the no-budget `drain_all`
+/// handles that case. The budget applies per-entry-per-pass; a
+/// single chassis call can wait up to `budget * passes` in pathological
+/// cross-component send loops, but in practice quiesces in one pass.
+pub fn drain_all_with_budget(components: &ComponentTable, budget: Duration) -> DrainSummary {
+    let mut summary = DrainSummary::default();
+    loop {
+        let entries: Vec<Arc<ComponentEntry>> =
+            components.read().unwrap().values().cloned().collect();
+        for entry in &entries {
+            match entry.drain_with_budget(budget) {
+                DrainOutcome::Quiesced => {}
+                DrainOutcome::Died(d) => summary.deaths.push(d),
+                DrainOutcome::Wedged { waited } => {
+                    summary.wedged = Some((entry.mailbox, waited));
+                    return summary;
+                }
+            }
+        }
+        let still_busy = entries
+            .iter()
+            .any(|e| e.gate.pending.load(Ordering::Acquire) > 0);
+        if !still_busy {
+            return summary;
+        }
+    }
+}
+
 // Per-component dispatcher threads exit when their `ComponentEntry`
 // Arc drops (the `Sender` drops with it, the inbox closes, `recv()`
 // returns `None`). The scheduler no longer owns a router thread, so
@@ -937,5 +1088,178 @@ mod tests {
             out.starts_with("<non-string panic payload"),
             "unexpected: {out}",
         );
+    }
+
+    /// ADR-0063: a clean delivery cycle ends with the entry still
+    /// live, so `drain_with_budget` returns `Quiesced`.
+    #[test]
+    fn drain_with_budget_returns_quiesced_on_clean_delivery() {
+        let entry = spawn_entry();
+        assert!(entry.send(Mail::new(MailboxId(0), 0xBB, vec![1], 1)));
+        match entry.drain_with_budget(Duration::from_secs(1)) {
+            DrainOutcome::Quiesced => {}
+            other => panic!("expected Quiesced, got {other:?}"),
+        }
+        let _component = close_and_join(entry);
+    }
+
+    /// ADR-0063: a guest trap during deliver records a `DrainDeath`
+    /// in the gate, and `drain_with_budget` reads it on wake to
+    /// return `Died`. Mirrors the existing `trap_in_receive_marks_
+    /// mailbox_dead` test but exercises the new budget-aware path.
+    #[test]
+    fn drain_with_budget_returns_died_after_trap() {
+        let registry = Arc::new(Registry::new());
+        let mailbox = registry.register_component("trappy");
+        let mailer = Arc::new(Mailer::new());
+
+        // Broadcast sink: the dispatcher's death push goes through
+        // it; without a registered sink the broadcast warn-drops as
+        // an unknown mailbox, harmless but noisy.
+        registry.register_sink(crate::HUB_CLAUDE_BROADCAST, Arc::new(|_, _, _, _, _, _| {}));
+        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
+        mailer.wire(Arc::clone(&registry), Arc::clone(&components));
+
+        let entry = Arc::new(ComponentEntry::spawn(
+            component_from_wat(WAT_TRAPS_IN_RECEIVE),
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            mailbox,
+        ));
+
+        assert!(entry.send(Mail::new(mailbox, 0xDD, vec![], 1)));
+        let outcome = entry.drain_with_budget(Duration::from_secs(2));
+        match outcome {
+            DrainOutcome::Died(d) => {
+                assert_eq!(d.mailbox, mailbox);
+                assert_eq!(d.mailbox_name, "trappy");
+                assert!(
+                    d.reason.starts_with("wasmtime trap:"),
+                    "expected wasmtime trap reason, got: {}",
+                    d.reason,
+                );
+            }
+            other => panic!("expected Died, got {other:?}"),
+        }
+
+        let _component = close_and_join(entry);
+    }
+
+    /// ADR-0063: a dispatcher that doesn't decrement pending within
+    /// the budget triggers `Wedged`. Simulated by bumping the
+    /// pending counter directly so the dispatcher never sees the
+    /// "mail" — the wait_timeout path is what we're testing, and
+    /// driving it via an actual stuck guest would leak a wasmtime
+    /// thread for the rest of the test run.
+    #[test]
+    fn drain_with_budget_returns_wedged_when_pending_does_not_drop() {
+        let entry = spawn_entry();
+        // Bump pending without going through `send` — no mpsc message
+        // is queued, so the dispatcher never wakes to decrement.
+        entry.gate.pending.fetch_add(1, Ordering::AcqRel);
+
+        let outcome = entry.drain_with_budget(Duration::from_millis(100));
+        match outcome {
+            DrainOutcome::Wedged { waited } => {
+                assert_eq!(waited, Duration::from_millis(100));
+            }
+            other => panic!("expected Wedged, got {other:?}"),
+        }
+
+        // Restore pending so close_and_join's drop doesn't leak the
+        // gate state for any other tests.
+        entry.gate.pending.fetch_sub(1, Ordering::AcqRel);
+        let _component = close_and_join(entry);
+    }
+
+    /// ADR-0063: `drain_all_with_budget` aggregates per-entry
+    /// outcomes. Quiesced entries leave `summary.deaths` empty;
+    /// died entries land there.
+    #[test]
+    fn drain_all_with_budget_collects_deaths() {
+        let registry = Arc::new(Registry::new());
+        let mailbox_ok = registry.register_component("alive");
+        let mailbox_dies = registry.register_component("dies");
+        let mailer = Arc::new(Mailer::new());
+        registry.register_sink(crate::HUB_CLAUDE_BROADCAST, Arc::new(|_, _, _, _, _, _| {}));
+        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
+        mailer.wire(Arc::clone(&registry), Arc::clone(&components));
+
+        let entry_ok = Arc::new(ComponentEntry::spawn(
+            minimal_component(),
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            mailbox_ok,
+        ));
+        let entry_dies = Arc::new(ComponentEntry::spawn(
+            component_from_wat(WAT_TRAPS_IN_RECEIVE),
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            mailbox_dies,
+        ));
+        components
+            .write()
+            .unwrap()
+            .insert(mailbox_ok, Arc::clone(&entry_ok));
+        components
+            .write()
+            .unwrap()
+            .insert(mailbox_dies, Arc::clone(&entry_dies));
+
+        // Send to both: one quiesces cleanly, the other traps.
+        assert!(entry_ok.send(Mail::new(mailbox_ok, 0xBB, vec![], 1)));
+        assert!(entry_dies.send(Mail::new(mailbox_dies, 0xDD, vec![], 1)));
+
+        let summary = drain_all_with_budget(&components, Duration::from_secs(2));
+        assert!(summary.wedged.is_none(), "no entry should be wedged");
+        assert_eq!(summary.deaths.len(), 1, "exactly one entry died");
+        assert_eq!(summary.deaths[0].mailbox, mailbox_dies);
+        assert_eq!(summary.deaths[0].mailbox_name, "dies");
+    }
+
+    /// ADR-0063: a successful replace clears the prior death record
+    /// so a post-replace drain sees `Quiesced` rather than the
+    /// stale `Died` from the dispatcher we just retired.
+    #[test]
+    fn replace_clears_prior_death() {
+        let registry = Arc::new(Registry::new());
+        let mailbox = registry.register_component("rep");
+        let mailer = Arc::new(Mailer::new());
+        registry.register_sink(crate::HUB_CLAUDE_BROADCAST, Arc::new(|_, _, _, _, _, _| {}));
+        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
+        mailer.wire(Arc::clone(&registry), Arc::clone(&components));
+
+        let entry = Arc::new(ComponentEntry::spawn(
+            component_from_wat(WAT_TRAPS_IN_RECEIVE),
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            mailbox,
+        ));
+
+        // Trigger a death.
+        assert!(entry.send(Mail::new(mailbox, 0xDD, vec![], 1)));
+        match entry.drain_with_budget(Duration::from_secs(2)) {
+            DrainOutcome::Died(_) => {}
+            other => panic!("expected Died after trap, got {other:?}"),
+        }
+
+        // Splice + spawn fresh dispatcher onto the same entry.
+        let (_old_component, new_rx) = splice_inbox(&entry);
+        spawn_dispatcher_on(
+            &entry,
+            minimal_component(),
+            new_rx,
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+        );
+
+        // Death slot should be cleared, state back to LIVE, drain
+        // returns Quiesced.
+        match entry.drain_with_budget(Duration::from_secs(1)) {
+            DrainOutcome::Quiesced => {}
+            other => panic!("expected Quiesced after replace, got {other:?}"),
+        }
+
+        let _component = close_and_join(entry);
     }
 }

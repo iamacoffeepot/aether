@@ -17,7 +17,7 @@ mod render;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, InputStream,
@@ -45,6 +45,15 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 const WORKERS: usize = 2;
 const LOG_EVERY_FRAMES: u64 = 120;
+
+/// ADR-0063 fail-fast budget for the per-frame drain barrier. A
+/// dispatcher that doesn't quiesce within this window is treated as
+/// wedged: the substrate logs, broadcasts `SubstrateDying`, and
+/// exits. 5 s is patient enough that ordinary frames don't trip it
+/// even on slow first-load compiles, short enough that an operator
+/// staring at a frozen window gets a clean exit instead of a
+/// multi-minute wait.
+const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
 /// ADR-0035 desktop chassis. Owns the winit event loop and the
 /// `App` that drives it. The `Chassis` trait's `run(self) -> Result`
@@ -828,7 +837,39 @@ impl ApplicationHandler<UserEvent> for App {
                         self.publish_window_size(size.width, size.height);
                     }
                 }
-                self.queue.drain_all();
+                // ADR-0063: budget-aware drain. Dispatcher deaths or
+                // wedges abort the substrate cleanly via `fatal_abort`
+                // — the hub respawns on the next operator action. The
+                // 5-second budget is a deliberately patient bound;
+                // anything past it indicates a wedged dispatcher
+                // (slow trap, host deadlock) we have no recovery path
+                // for in v1.
+                let summary = self.queue.drain_all_with_budget(DRAIN_BUDGET);
+                if let Some((mailbox, waited)) = summary.wedged {
+                    aether_substrate_core::lifecycle::fatal_abort(
+                        &self.outbound,
+                        format!("dispatcher wedged: mailbox={mailbox:?} waited={waited:?}",),
+                    );
+                }
+                if let Some(first) = summary.deaths.first() {
+                    for d in &summary.deaths {
+                        tracing::error!(
+                            target: "aether_substrate::lifecycle",
+                            mailbox = ?d.mailbox,
+                            mailbox_name = %d.mailbox_name,
+                            last_kind = %d.last_kind,
+                            reason = %d.reason,
+                            "component died; substrate aborting (ADR-0063)",
+                        );
+                    }
+                    aether_substrate_core::lifecycle::fatal_abort(
+                        &self.outbound,
+                        format!(
+                            "component died: {} (kind {}) — {}",
+                            first.mailbox_name, first.last_kind, first.reason,
+                        ),
+                    );
+                }
                 let verts = std::mem::take(&mut *self.frame_vertices.lock().unwrap());
                 let view_proj = *self.camera_state.lock().unwrap();
                 if let Some(gpu) = self.gpu.as_mut() {

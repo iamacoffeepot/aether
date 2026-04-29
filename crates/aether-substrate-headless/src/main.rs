@@ -25,6 +25,13 @@ const WORKERS: usize = 2;
 const DEFAULT_TICK_HZ: u32 = 60;
 const LOG_EVERY_FRAMES: u64 = 120;
 
+/// ADR-0063 fail-fast budget for the per-tick drain barrier. A
+/// dispatcher that doesn't quiesce within this window is treated as
+/// wedged and the substrate exits cleanly via `fatal_abort`. Same
+/// 5-second value the desktop chassis uses — both run the same
+/// dispatcher kernel.
+const DRAIN_BUDGET: Duration = Duration::from_secs(5);
+
 /// Headless chassis. Owns the tick loop + the bookkeeping every
 /// subsequent frame needs. `run(self)` takes ownership and drives
 /// the loop forever — the process exits on SIGTERM (hub-spawned
@@ -37,6 +44,9 @@ struct HeadlessChassis {
     kind_tick: u64,
     kind_frame_stats: u64,
     tick_period: Duration,
+    /// ADR-0063: passed to `lifecycle::fatal_abort` for the final
+    /// `SubstrateDying` broadcast before exit.
+    outbound: Arc<aether_substrate_core::HubOutbound>,
     // Held so the scheduler's worker threads + the hub's reader /
     // heartbeat threads stay alive for the life of the chassis.
     _scheduler: Scheduler,
@@ -73,7 +83,34 @@ impl Chassis for HeadlessChassis {
                 self.queue
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
             }
-            self.queue.drain_all();
+            // ADR-0063: budget-aware drain. Dispatcher deaths or
+            // wedges abort the substrate cleanly via `fatal_abort`.
+            let summary = self.queue.drain_all_with_budget(DRAIN_BUDGET);
+            if let Some((mailbox, waited)) = summary.wedged {
+                aether_substrate_core::lifecycle::fatal_abort(
+                    &self.outbound,
+                    format!("dispatcher wedged: mailbox={mailbox:?} waited={waited:?}"),
+                );
+            }
+            if let Some(first) = summary.deaths.first() {
+                for d in &summary.deaths {
+                    tracing::error!(
+                        target: "aether_substrate::lifecycle",
+                        mailbox = ?d.mailbox,
+                        mailbox_name = %d.mailbox_name,
+                        last_kind = %d.last_kind,
+                        reason = %d.reason,
+                        "component died; substrate aborting (ADR-0063)",
+                    );
+                }
+                aether_substrate_core::lifecycle::fatal_abort(
+                    &self.outbound,
+                    format!(
+                        "component died: {} (kind {}) — {}",
+                        first.mailbox_name, first.last_kind, first.reason,
+                    ),
+                );
+            }
 
             if frame.is_multiple_of(LOG_EVERY_FRAMES) {
                 let stats = FrameStats {
@@ -258,6 +295,7 @@ fn main() -> wasmtime::Result<()> {
         kind_tick,
         kind_frame_stats,
         tick_period,
+        outbound: boot.outbound,
         _scheduler: boot.scheduler,
         _hub: hub,
     };
