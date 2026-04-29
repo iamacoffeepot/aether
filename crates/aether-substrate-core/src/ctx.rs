@@ -232,7 +232,7 @@ mod tests {
     /// `ReplyTo::EngineMailbox` for the receiving component.
     #[test]
     fn unknown_recipient_bubbles_up_with_sender_mailbox() {
-        let (outbound, outbound_rx) = HubOutbound::test_channel();
+        let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let sender = registry.register_component("client");
 
@@ -270,7 +270,7 @@ mod tests {
     /// upstream frame.
     #[test]
     fn unknown_recipient_without_outbound_warn_drops() {
-        let (outbound, outbound_rx) = HubOutbound::test_channel();
+        let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let sender = registry.register_component("client");
 

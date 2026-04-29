@@ -260,7 +260,7 @@ mod tests {
         for d in aether_kinds::descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let (outbound, rx) = HubOutbound::test_channel();
+        let (outbound, rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(Arc::clone(&registry), Arc::new(RwLock::new(HashMap::new())));
         mailer.wire_outbound(outbound);

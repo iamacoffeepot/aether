@@ -338,7 +338,7 @@ mod tests {
     use super::*;
 
     fn make_inner() -> (Arc<Inner>, std::sync::mpsc::Receiver<EngineToHub>) {
-        let (outbound, rx) = HubOutbound::test_channel();
+        let (outbound, rx) = HubOutbound::attached_loopback();
         (Arc::new(Inner::new(outbound)), rx)
     }
 

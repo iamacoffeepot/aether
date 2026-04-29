@@ -458,7 +458,7 @@ mod tests {
         use std::collections::HashMap;
         use std::sync::RwLock;
 
-        let (outbound, rx) = HubOutbound::test_channel();
+        let (outbound, rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(
             Arc::new(crate::registry::Registry::new()),

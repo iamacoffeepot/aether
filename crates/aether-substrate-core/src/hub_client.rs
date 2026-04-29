@@ -140,12 +140,12 @@ impl HubOutbound {
         self.tx.get().is_some()
     }
 
-    /// Test helper: build an attached outbound paired with the
-    /// receiver end so tests can assert on the frames components
-    /// emit. Mirrors the channel `HubClient::connect` would attach
-    /// but skips the TCP machinery.
-    #[cfg(test)]
-    pub fn test_channel() -> (Arc<Self>, std::sync::mpsc::Receiver<EngineToHub>) {
+    /// Build an attached outbound paired with the receiver end so
+    /// in-process drivers (tests, the test-bench's `TestBench` API
+    /// per ADR-0067) can intercept frames the substrate would
+    /// otherwise serialise to a hub. Mirrors the channel
+    /// `HubClient::connect` attaches, minus the TCP machinery.
+    pub fn attached_loopback() -> (Arc<Self>, mpsc::Receiver<EngineToHub>) {
         let (tx, rx) = mpsc::channel::<EngineToHub>();
         let outbound = Arc::new(Self {
             tx: OnceLock::new(),
