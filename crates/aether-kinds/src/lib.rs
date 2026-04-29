@@ -203,101 +203,6 @@ pub struct Camera {
 // every one carries a `String` name and `Option<...>` per-field
 // deltas, so they can't ride the cast-shaped path.
 
-/// Teleport the player to a world-space position. Also zeroes velocity
-/// isn't implied — send `PlayerSetVelocity { 0, 0 }` explicitly if you
-/// want to stop motion at the new point.
-#[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
-)]
-#[kind(name = "aether.player.set_position")]
-pub struct PlayerSetPosition {
-    pub x: f32,
-    pub y: f32,
-}
-
-/// Set the player's per-tick velocity in world units. `(0, 0)` stops
-/// motion; values compose per-axis so `(1, 0)` drifts +x, `(0, -1)`
-/// drifts -y.
-#[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
-)]
-#[kind(name = "aether.player.set_velocity")]
-pub struct PlayerSetVelocity {
-    pub vx: f32,
-    pub vy: f32,
-}
-
-/// Switch the player between continuous and tile-step motion modes.
-/// `0 = continuous` (WASD / `PlayerSetVelocity` drive per-tick
-/// velocity — the original model). `1 = tile_step` (each WASD press
-/// emits a `PlayerRequestStep` to the world authority; the player's
-/// position changes only when it receives a `PlayerStepResult` back).
-/// Other values are ignored.
-#[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
-)]
-#[kind(name = "aether.player.set_mode")]
-pub struct PlayerSetMode {
-    pub mode: u32,
-}
-
-/// Player → world-authority request: "I want to step by `(dx, dy)`
-/// world units — what actually happens?". Authority addressed by the
-/// mailbox name `"world"` (resolved as a sink during player init).
-/// Deltas are integer cell offsets in tile-step mode: `(+1, 0)` east,
-/// `(0, +1)` north (matching the engine's +Y-up world). The player
-/// does not apply the motion itself in tile-step mode — it waits for
-/// `PlayerStepResult` before updating its position.
-#[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
-)]
-#[kind(name = "aether.player.request_step")]
-pub struct PlayerRequestStep {
-    pub dx: i32,
-    pub dy: i32,
-}
-
-/// World-authority → player reply to `PlayerRequestStep`. `accepted`
-/// is `1` when the requested motion was applied (with any side
-/// effects like a box push already committed on the world side) and
-/// `0` when the authority refused (wall, out of bounds, unpushable
-/// box, etc.). `new_x` / `new_y` are the player's post-resolution
-/// world position either way — authoritative. The player overwrites
-/// its own position from these fields, so a rejected step leaves the
-/// player where the world says it is, not where it tried to go.
-#[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
-)]
-#[kind(name = "aether.player.step_result")]
-pub struct PlayerStepResult {
-    pub accepted: u32,
-    pub new_x: f32,
-    pub new_y: f32,
-}
-
 /// Start a note playing on the desktop chassis's MIDI synth (ADR-0039).
 /// `pitch` is a standard MIDI note number (0–127, middle C = 60).
 /// `velocity` is 0–127 (MIDI convention; 0 has the same effect as a
@@ -1720,11 +1625,6 @@ mod tests {
         assert_eq!(CameraSetMode::NAME, "aether.camera.set_mode");
         assert_eq!(CameraOrbitSet::NAME, "aether.camera.orbit.set");
         assert_eq!(CameraTopdownSet::NAME, "aether.camera.topdown.set");
-        assert_eq!(PlayerSetPosition::NAME, "aether.player.set_position");
-        assert_eq!(PlayerSetVelocity::NAME, "aether.player.set_velocity");
-        assert_eq!(PlayerSetMode::NAME, "aether.player.set_mode");
-        assert_eq!(PlayerRequestStep::NAME, "aether.player.request_step");
-        assert_eq!(PlayerStepResult::NAME, "aether.player.step_result");
         assert_eq!(NoteOn::NAME, "aether.audio.note_on");
         assert_eq!(NoteOff::NAME, "aether.audio.note_off");
         assert_eq!(SetMasterGain::NAME, "aether.audio.set_master_gain");
