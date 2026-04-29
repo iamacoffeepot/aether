@@ -3,24 +3,26 @@
 // frame renders into an offscreen color target paired with a depth
 // target; capture_frame reads back from that same offscreen.
 //
-// v1 keeps headless's std-timer tick driver. ADR-0067 calls for a
-// control-mail tick driver (`aether.test_bench.advance`) so smoke
-// scripts can advance the mail clock deterministically — that
-// lands in a follow-up PR alongside the new kinds. Until then the
-// chassis ticks at AETHER_TICK_HZ (default 60), same shape as
-// headless.
+// Tick driver is control-mail (ADR-0067): the chassis loop blocks
+// waiting for `aether.test_bench.advance { ticks }` events from the
+// chassis-control handler. Each Advance runs `ticks` complete
+// frames (Tick fanout → drain → render-or-capture), then replies
+// with `AdvanceResult::Ok`. Capture-frame requests wake the loop
+// for one drain → render-with-capture cycle without dispatching
+// Tick (capture observes; advance ticks). With no Advance, the
+// world doesn't tick — the chassis is fully deterministic.
 
 mod capture;
 mod chassis;
+mod events;
 mod render;
 
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_kinds::{CaptureFrameResult, FrameStats, InputStream, Tick};
+use aether_kinds::{AdvanceResult, CaptureFrameResult, FrameStats, InputStream, Tick};
 use aether_mail::{Kind, encode, encode_empty};
 use aether_substrate_core::{
     Chassis, ChassisCapabilities, HubOutbound, InputSubscribers, Mailer, ReplyTo, Scheduler,
@@ -30,10 +32,10 @@ use aether_substrate_core::{
 };
 
 use crate::capture::CaptureQueue;
+use crate::events::{ChassisEvent, EventReceiver};
 use crate::render::{Gpu, IDENTITY_VIEW_PROJ, VERTEX_BUFFER_BYTES};
 
 const WORKERS: usize = 2;
-const DEFAULT_TICK_HZ: u32 = 60;
 const LOG_EVERY_FRAMES: u64 = 120;
 
 /// Wire size of one `aether.draw_triangle` mail item: three
@@ -54,23 +56,26 @@ const DEFAULT_HEIGHT: u32 = 600;
 /// 5-second value desktop and headless use — same dispatcher kernel.
 const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
-/// Test-bench chassis. Owns the tick loop, the GPU, the shared
+/// Test-bench chassis. Owns the event loop, the GPU, the shared
 /// frame state (vertex buffer, camera matrix), and the capture
-/// queue. `run(self)` takes ownership and drives the loop forever
-/// — process exits on SIGTERM (hub-spawned) or SIGINT (manual run).
+/// queue. `run(self)` blocks on the event receiver — the loop
+/// returns only when every sender has been dropped (chassis
+/// shutdown). Process exit on SIGTERM (hub-spawned) is caught by
+/// the chassis-control handler dropping its sender; SIGINT (manual
+/// run) terminates the process directly.
 struct TestBenchChassis {
     queue: Arc<Mailer>,
     input_subscribers: InputSubscribers,
     broadcast_mbox: MailboxId,
     kind_tick: u64,
     kind_frame_stats: u64,
-    tick_period: Duration,
     gpu: Gpu,
     frame_vertices: Arc<Mutex<Vec<u8>>>,
     camera_state: Arc<Mutex<[f32; 16]>>,
     triangles_rendered: Arc<AtomicU64>,
     capture_queue: CaptureQueue,
     outbound: Arc<HubOutbound>,
+    events_rx: EventReceiver,
     _scheduler: Scheduler,
     _hub: Option<aether_substrate_core::HubClient>,
 }
@@ -86,116 +91,116 @@ impl Chassis for TestBenchChassis {
     fn run(mut self) -> wasmtime::Result<()> {
         let started = Instant::now();
         let mut frame: u64 = 0;
-        let mut next_deadline = Instant::now() + self.tick_period;
-        loop {
-            let now = Instant::now();
-            if now < next_deadline {
-                thread::sleep(next_deadline - now);
+        // `recv()` returns Err only when every sender has been
+        // dropped — that's chassis shutdown, exit the loop cleanly.
+        while let Ok(event) = self.events_rx.recv() {
+            match event {
+                ChassisEvent::Advance { reply_to, ticks } => {
+                    for _ in 0..ticks {
+                        frame += 1;
+                        self.run_frame(frame, started, /* dispatch_tick */ true);
+                    }
+                    self.outbound.send_reply(
+                        reply_to,
+                        &AdvanceResult::Ok {
+                            ticks_completed: ticks,
+                        },
+                    );
+                }
+                ChassisEvent::CaptureRequested => {
+                    frame += 1;
+                    self.run_frame(frame, started, /* dispatch_tick */ false);
+                }
             }
-            next_deadline = Instant::now() + self.tick_period;
+        }
+        Ok(())
+    }
+}
 
-            frame += 1;
+impl TestBenchChassis {
+    /// Run one frame: optionally dispatch `Tick` to subscribers,
+    /// drain the queue with the ADR-0063 budget, take any pending
+    /// capture and render-with-capture (otherwise plain render),
+    /// emit periodic frame_stats. Any death or wedge mid-drain
+    /// aborts the chassis cleanly via `lifecycle::fatal_abort`.
+    fn run_frame(&mut self, frame: u64, started: Instant, dispatch_tick: bool) {
+        if dispatch_tick {
             let subs = subscribers_for(&self.input_subscribers, InputStream::Tick);
             for mbox in subs {
                 self.queue
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
             }
-            // ADR-0063: budget-aware drain. Same lifecycle handling
-            // headless uses — wedges and component deaths exit the
-            // chassis cleanly via `fatal_abort`.
-            let summary = self.queue.drain_all_with_budget(DRAIN_BUDGET);
-            if let Some((mailbox, waited)) = summary.wedged {
-                aether_substrate_core::lifecycle::fatal_abort(
-                    &self.outbound,
-                    format!("dispatcher wedged: mailbox={mailbox:?} waited={waited:?}"),
-                );
-            }
-            if let Some(first) = summary.deaths.first() {
-                for d in &summary.deaths {
-                    tracing::error!(
-                        target: "aether_substrate::lifecycle",
-                        mailbox = ?d.mailbox,
-                        mailbox_name = %d.mailbox_name,
-                        last_kind = %d.last_kind,
-                        reason = %d.reason,
-                        "component died; substrate aborting (ADR-0063)",
-                    );
-                }
-                aether_substrate_core::lifecycle::fatal_abort(
-                    &self.outbound,
-                    format!(
-                        "component died: {} (kind {}) — {}",
-                        first.mailbox_name, first.last_kind, first.reason,
-                    ),
-                );
-            }
-
-            // Drain accumulated vertices and the latest camera. Replace
-            // the vertex buffer with an empty same-capacity Vec so the
-            // 4 MiB allocation isn't rebuilt every frame (matches
-            // desktop's pattern).
-            let verts = std::mem::replace(
-                &mut *self.frame_vertices.lock().unwrap(),
-                Vec::with_capacity(VERTEX_BUFFER_BYTES),
+        }
+        let summary = self.queue.drain_all_with_budget(DRAIN_BUDGET);
+        if let Some((mailbox, waited)) = summary.wedged {
+            aether_substrate_core::lifecycle::fatal_abort(
+                &self.outbound,
+                format!("dispatcher wedged: mailbox={mailbox:?} waited={waited:?}"),
             );
-            let view_proj = *self.camera_state.lock().unwrap();
-
-            // If a capture is pending, render with capture, push
-            // after_mails, and reply. Otherwise just render.
-            match self.capture_queue.take() {
-                Some(req) => {
-                    let result = match self.gpu.render_and_capture(&verts, &view_proj) {
-                        Ok(png) => CaptureFrameResult::Ok { png },
-                        Err(error) => CaptureFrameResult::Err { error },
-                    };
-                    for mail in req.after_mails {
-                        self.queue.push(mail);
-                    }
-                    self.outbound.send_reply(req.reply_to, &result);
-                }
-                None => {
-                    self.gpu.render(&verts, &view_proj);
-                }
-            }
-
-            if frame.is_multiple_of(LOG_EVERY_FRAMES) {
-                let triangles = self.triangles_rendered.load(Ordering::Relaxed);
-                let stats = FrameStats { frame, triangles };
-                self.queue.push(Mail::new(
-                    self.broadcast_mbox,
-                    self.kind_frame_stats,
-                    encode(&stats),
-                    1,
-                ));
-                let elapsed = started.elapsed().as_secs_f64().max(0.001);
-                tracing::info!(
-                    target: "aether_substrate::frame_loop",
-                    frame = frame,
-                    fps = frame as f64 / elapsed,
-                    triangles,
-                    "test-bench tick",
+        }
+        if let Some(first) = summary.deaths.first() {
+            for d in &summary.deaths {
+                tracing::error!(
+                    target: "aether_substrate::lifecycle",
+                    mailbox = ?d.mailbox,
+                    mailbox_name = %d.mailbox_name,
+                    last_kind = %d.last_kind,
+                    reason = %d.reason,
+                    "component died; substrate aborting (ADR-0063)",
                 );
+            }
+            aether_substrate_core::lifecycle::fatal_abort(
+                &self.outbound,
+                format!(
+                    "component died: {} (kind {}) — {}",
+                    first.mailbox_name, first.last_kind, first.reason,
+                ),
+            );
+        }
+
+        // Drain accumulated vertices and the latest camera. Replace
+        // the vertex buffer with an empty same-capacity Vec so the
+        // 4 MiB allocation isn't rebuilt every frame.
+        let verts = std::mem::replace(
+            &mut *self.frame_vertices.lock().unwrap(),
+            Vec::with_capacity(VERTEX_BUFFER_BYTES),
+        );
+        let view_proj = *self.camera_state.lock().unwrap();
+
+        match self.capture_queue.take() {
+            Some(req) => {
+                let result = match self.gpu.render_and_capture(&verts, &view_proj) {
+                    Ok(png) => CaptureFrameResult::Ok { png },
+                    Err(error) => CaptureFrameResult::Err { error },
+                };
+                for mail in req.after_mails {
+                    self.queue.push(mail);
+                }
+                self.outbound.send_reply(req.reply_to, &result);
+            }
+            None => {
+                self.gpu.render(&verts, &view_proj);
             }
         }
-    }
-}
 
-fn parse_tick_hz_env() -> u32 {
-    match std::env::var("AETHER_TICK_HZ") {
-        Ok(s) => s
-            .trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|&hz| hz > 0)
-            .unwrap_or_else(|| {
-                tracing::warn!(
-                    target: "aether_substrate::boot",
-                    value = %s,
-                    "AETHER_TICK_HZ unparseable or zero — falling back to default",
-                );
-                DEFAULT_TICK_HZ
-            }),
-        Err(_) => DEFAULT_TICK_HZ,
+        if frame.is_multiple_of(LOG_EVERY_FRAMES) {
+            let triangles = self.triangles_rendered.load(Ordering::Relaxed);
+            let stats = FrameStats { frame, triangles };
+            self.queue.push(Mail::new(
+                self.broadcast_mbox,
+                self.kind_frame_stats,
+                encode(&stats),
+                1,
+            ));
+            let elapsed = started.elapsed().as_secs_f64().max(0.001);
+            tracing::info!(
+                target: "aether_substrate::frame_loop",
+                frame = frame,
+                fps = frame as f64 / elapsed,
+                triangles,
+                "test-bench frame",
+            );
+        }
     }
 }
 
@@ -225,14 +230,17 @@ fn parse_size_env() -> (u32, u32) {
 
 fn main() -> wasmtime::Result<()> {
     let capture_queue = CaptureQueue::new();
+    let (events_tx, events_rx) = events::channel();
 
     let boot = SubstrateBoot::builder("test-bench", env!("CARGO_PKG_VERSION"))
         .workers(WORKERS)
         .chassis_handler({
             let cq = capture_queue.clone();
+            let tx = events_tx.clone();
             move |ctx| {
                 Some(chassis::chassis_control_handler(
                     cq,
+                    tx,
                     Arc::clone(ctx.registry),
                     Arc::clone(ctx.queue),
                     Arc::clone(ctx.outbound),
@@ -247,9 +255,9 @@ fn main() -> wasmtime::Result<()> {
         .kind_id(FrameStats::NAME)
         .expect("FrameStats registered");
 
-    // `aether.sink.render`: real renderer. The tick loop drains
-    // `frame_vertices` each tick, so every `DrawTriangle` emitted
-    // before the next tick is consolidated into one vertex buffer.
+    // `aether.sink.render`: real renderer. The frame loop drains
+    // `frame_vertices` each frame, so every `DrawTriangle` emitted
+    // before the next frame is consolidated into one vertex buffer.
     // Truncate at the sink boundary so a single oversized mesh
     // degrades gracefully.
     let frame_vertices = Arc::new(Mutex::new(Vec::<u8>::with_capacity(VERTEX_BUFFER_BYTES)));
@@ -290,8 +298,8 @@ fn main() -> wasmtime::Result<()> {
     }
 
     // `aether.sink.camera`: latest-value-wins. Decode the 64-byte
-    // column-major view_proj and store; the tick loop reads it each
-    // frame and uploads to the GPU uniform.
+    // column-major view_proj and store; the frame loop reads it
+    // each frame and uploads to the GPU uniform.
     let camera_state = Arc::new(Mutex::new(IDENTITY_VIEW_PROJ));
     {
         let cam_for_sink = Arc::clone(&camera_state);
@@ -364,9 +372,6 @@ fn main() -> wasmtime::Result<()> {
     // egress, and including it would add a real I/O side channel.
 
     let (width, height) = parse_size_env();
-    let tick_hz = parse_tick_hz_env();
-    let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));
-
     let gpu = Gpu::new(width, height);
     tracing::info!(
         target: "aether_substrate::boot",
@@ -375,12 +380,18 @@ fn main() -> wasmtime::Result<()> {
         device_type = ?gpu.adapter_info.device_type,
         width,
         height,
-        tick_hz,
         workers = WORKERS,
-        "test-bench componentless boot — load a component via aether.control.load_component",
+        "test-bench componentless boot — drive ticks via aether.test_bench.advance",
     );
 
     let hub = boot.connect_hub_from_env()?;
+
+    // The chassis owns its receiver; the chassis-control handler
+    // already holds a clone of the sender (captured into the boot
+    // closure above). Drop the local `events_tx` so the receiver
+    // hangs up cleanly when every chassis_control_handler clone is
+    // released — matches the ADR-0063 lifecycle.
+    drop(events_tx);
 
     let chassis = TestBenchChassis {
         queue: boot.queue,
@@ -388,13 +399,13 @@ fn main() -> wasmtime::Result<()> {
         broadcast_mbox: boot.broadcast_mbox,
         kind_tick,
         kind_frame_stats,
-        tick_period,
         gpu,
         frame_vertices,
         camera_state,
         triangles_rendered,
         capture_queue,
         outbound: boot.outbound,
+        events_rx,
         _scheduler: boot.scheduler,
         _hub: hub,
     };

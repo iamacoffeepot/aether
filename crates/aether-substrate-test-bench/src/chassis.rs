@@ -1,22 +1,25 @@
 //! Test-bench chassis-registered control-plane handler (ADR-0067).
 //!
-//! Mirrors desktop's `chassis_control_handler` for `capture_frame` —
-//! resolves the pre/post mail bundles atomically, pushes the
-//! pre-bundle, hands off a `PendingCapture` to the render thread
-//! via `CaptureQueue`. Test-bench has no winit event loop, so there
-//! is no `EventLoopProxy` hop — the std-timer tick loop polls the
-//! capture queue every iteration.
+//! Owns three custom kinds:
 //!
-//! `set_window_mode`, `set_window_title`, and `platform_info` reply
-//! `Err { error: "unsupported on test-bench chassis" }` — the
-//! chassis is GPU-capable but has no window peripherals to address.
-//! Same shape as headless's chassis handler for these kinds.
+//! - `aether.control.capture_frame` — same two-phase resolve / push
+//!   / handoff desktop uses, but the handoff target is the chassis
+//!   event channel (not a winit `EventLoopProxy`). The `PendingCapture`
+//!   itself rides in `CaptureQueue`; the event channel just signals
+//!   the loop to wake up.
+//! - `aether.test_bench.advance` — pushes an `Advance` event onto the
+//!   chassis event channel. The loop runs N ticks (Tick fanout →
+//!   drain → render or render-with-capture) and replies once they
+//!   complete.
+//! - `set_window_mode` / `set_window_title` / `platform_info` —
+//!   reply `Err` with an "unsupported on test-bench chassis" message.
+//!   Same fail-fast shape headless uses on these.
 
 use std::sync::Arc;
 
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, PlatformInfo, PlatformInfoResult, SetWindowMode,
-    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
+    Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, PlatformInfo, PlatformInfoResult,
+    SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
 };
 use aether_mail::Kind;
 use aether_substrate_core::{
@@ -25,12 +28,14 @@ use aether_substrate_core::{
 };
 
 use crate::capture::{CaptureQueue, PendingCapture};
+use crate::events::{ChassisEvent, EventSender};
 
 const UNSUPPORTED_WINDOW: &str = "unsupported on test-bench chassis — no window peripherals (set_window_mode, set_window_title, \
      platform_info are desktop-only)";
 
 pub fn chassis_control_handler(
     capture_queue: CaptureQueue,
+    events: EventSender,
     registry: Arc<Registry>,
     queue: Arc<Mailer>,
     outbound: Arc<HubOutbound>,
@@ -38,7 +43,17 @@ pub fn chassis_control_handler(
     Arc::new(
         move |kind_id: u64, kind_name: &str, sender: ReplyTo, bytes: &[u8]| {
             if kind_id == CaptureFrame::ID {
-                handle_capture_frame(&capture_queue, &registry, &queue, &outbound, sender, bytes);
+                handle_capture_frame(
+                    &capture_queue,
+                    &events,
+                    &registry,
+                    &queue,
+                    &outbound,
+                    sender,
+                    bytes,
+                );
+            } else if kind_id == Advance::ID {
+                handle_advance(&events, &outbound, sender, bytes);
             } else if kind_id == SetWindowMode::ID {
                 outbound.send_reply(
                     sender,
@@ -73,11 +88,11 @@ pub fn chassis_control_handler(
 
 /// Two-phase capture request. Resolve both mail bundles atomically
 /// against the registry before touching the queue, push pre-mails,
-/// enqueue the capture, return. The tick loop polls the capture
-/// queue each iteration; if a request is pending it calls
-/// `render_and_capture`, pushes after_mails, and replies.
+/// enqueue the capture, signal the loop. The loop drains and renders-
+/// with-capture (no Tick fanout — capture observes; advance ticks).
 fn handle_capture_frame(
     capture_queue: &CaptureQueue,
+    events: &EventSender,
     registry: &Registry,
     queue: &Mailer,
     outbound: &HubOutbound,
@@ -121,6 +136,48 @@ fn handle_capture_frame(
             &CaptureFrameResult::Err {
                 error: "capture already pending; try again once the in-flight request completes"
                     .to_owned(),
+            },
+        );
+        return;
+    }
+
+    if events.send(ChassisEvent::CaptureRequested).is_err() {
+        // The tick loop has dropped its receiver — chassis is
+        // shutting down. The capture is queued but won't be drained.
+        // Reply Err so the caller doesn't hang.
+        let _ = capture_queue.take();
+        outbound.send_reply(
+            sender,
+            &CaptureFrameResult::Err {
+                error: "test-bench chassis shutting down — capture aborted".to_owned(),
+            },
+        );
+    }
+}
+
+/// Decode `Advance { ticks }`, push the request onto the event
+/// channel. The tick loop runs `ticks` cycles and replies. A
+/// shut-down loop replies `Err` inline.
+fn handle_advance(events: &EventSender, outbound: &HubOutbound, sender: ReplyTo, bytes: &[u8]) {
+    let payload: Advance = match decode_payload(bytes) {
+        Ok(p) => p,
+        Err(error) => {
+            outbound.send_reply(sender, &AdvanceResult::Err { error });
+            return;
+        }
+    };
+
+    if events
+        .send(ChassisEvent::Advance {
+            reply_to: sender,
+            ticks: payload.ticks,
+        })
+        .is_err()
+    {
+        outbound.send_reply(
+            sender,
+            &AdvanceResult::Err {
+                error: "test-bench chassis shutting down — advance aborted".to_owned(),
             },
         );
     }
