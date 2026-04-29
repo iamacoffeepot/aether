@@ -21,7 +21,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod ids;
 pub mod tagged_id;
+pub use ids::{HandleId, KindId, MailboxId, tag_for_type_id, type_name_for_type_id};
 pub use tagged_id::{Tag, with_tag};
 
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
@@ -183,6 +185,12 @@ pub const MAILBOX_DOMAIN: &[u8] = b"mailbox:";
 /// the rationale; the derive macro and `kind_id_from_parts` both
 /// prepend this before the canonical schema bytes.
 pub const KIND_DOMAIN: &[u8] = b"kind:";
+
+/// ADR-0065: domain prefix for type-id hashes. Hashed input is
+/// `TYPE_DOMAIN ++ canonical_type_name.as_bytes()` (e.g.
+/// `"type:aether.mailbox_id"`). Disjoint from mailbox / kind domains
+/// so a typed-id `TYPE_ID` cannot alias either space.
+pub const TYPE_DOMAIN: &[u8] = b"type:";
 
 /// FNV-1a 64 over a byte slice (ADR-0032). Retained for the few
 /// call sites that hash neither a mailbox name nor a kind schema.

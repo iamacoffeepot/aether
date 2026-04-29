@@ -349,6 +349,7 @@ fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>) -> SchemaType {
                 value: SchemaCell::owned(merge_schema(value, value_label)),
             }
         }
+        SchemaShape::TypeId(id) => SchemaType::TypeId(*id),
     }
 }
 

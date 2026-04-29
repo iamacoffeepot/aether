@@ -177,6 +177,13 @@ fn decode_cast_field(
         SchemaType::Struct { repr_c: false, .. } => Err(DecodeError::UnsupportedSchema(
             "Struct { repr_c: false } in cast-shaped parent",
         )),
+        SchemaType::TypeId(type_id) => {
+            // ADR-0065: typed-id inside cast-shape parent. 8 bytes
+            // LE, 8-byte align — same as a `u64`.
+            cur.skip_pad_to(8);
+            let id = u64::from_le_bytes(cur.take::<8>(path)?);
+            Ok(render_type_id_value(id, *type_id, path)?)
+        }
         SchemaType::Bool
         | SchemaType::String
         | SchemaType::Bytes
@@ -188,6 +195,22 @@ fn decode_cast_field(
         | SchemaType::Map { .. } => Err(DecodeError::UnsupportedSchema(
             "non-cast field inside cast-shaped struct",
         )),
+    }
+}
+
+/// u64 → JSON helper for `SchemaType::TypeId(type_id)`. Emits the
+/// ADR-0064 tagged string form when the id's tag bits are valid;
+/// falls back to a JSON number for the reserved-tag sentinels (e.g.
+/// `MailboxId::NONE = 0`) so the codec doesn't error on a sentinel
+/// payload. Errors with `UnsupportedSchema` if the schema's
+/// `type_id` doesn't correspond to a typed-id newtype the codec
+/// knows how to translate.
+fn render_type_id_value(id: u64, type_id: u64, _path: &str) -> Result<Value, DecodeError> {
+    let _expected = aether_mail::tag_for_type_id(type_id)
+        .ok_or(DecodeError::UnsupportedSchema("unknown TypeId in schema"))?;
+    match aether_mail::tagged_id::encode(id) {
+        Some(s) => Ok(Value::String(s)),
+        None => Ok(Value::from(id)),
     }
 }
 
@@ -221,6 +244,8 @@ fn struct_alignment(fields: &[NamedField]) -> Result<usize, DecodeError> {
 fn alignment_of_schema(ty: &SchemaType) -> Result<usize, DecodeError> {
     match ty {
         SchemaType::Scalar(p) => Ok(align_of_primitive(*p)),
+        // ADR-0065: typed ids are u64-shaped — 8 bytes, 8-byte align.
+        SchemaType::TypeId(_) => Ok(8),
         SchemaType::Array { element, .. } => alignment_of_schema(element),
         SchemaType::Struct {
             fields,
@@ -375,6 +400,13 @@ fn decode_postcard(
                     discriminant: disc,
                 }),
             }
+        }
+        SchemaType::TypeId(type_id) => {
+            // ADR-0065 typed id. Wire is a u64 varint; emit the
+            // tagged string form (or back-compat number for
+            // reserved-tag sentinels).
+            let id = read_varint_u64(cur, path)?;
+            render_type_id_value(id, *type_id, path)
         }
     }
 }
@@ -1008,5 +1040,89 @@ mod tests {
         // 1-byte payload is enough to fail at the field-walk step.
         let err = decode_schema(&[0], &schema).unwrap_err();
         assert!(matches!(err, DecodeError::UnsupportedSchema(_)));
+    }
+
+    // ADR-0065: typed-id round-trips through both wire shapes.
+
+    #[test]
+    fn type_id_postcard_round_trips_as_tagged_string() {
+        // JSON in: tagged string. Wire: u64 varint. JSON out: same
+        // tagged string. The post-migration shape an agent sees end
+        // to end.
+        let schema = pc_struct(vec![NamedField {
+            name: "mailbox".into(),
+            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+        }]);
+        let mailbox = aether_mail::MailboxId::from_name("aether.control");
+        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        roundtrip(json!({ "mailbox": s }), &schema);
+    }
+
+    #[test]
+    fn type_id_cast_round_trips_as_tagged_string() {
+        // Same as above but with a `repr_c: true` parent so the
+        // cast-shape path runs (8 bytes LE at 8-byte align).
+        let schema = cast_struct(vec![
+            NamedField {
+                name: "stream".into(),
+                ty: SchemaType::Scalar(Primitive::U8),
+            },
+            NamedField {
+                name: "mailbox".into(),
+                ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+            },
+        ]);
+        let mailbox = aether_mail::MailboxId::from_name("aether.control");
+        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        roundtrip(json!({ "stream": 1, "mailbox": s }), &schema);
+    }
+
+    #[test]
+    fn subscribe_input_kind_round_trips_with_tagged_mailbox() {
+        // End-to-end through the `SubscribeInput` kind's actual
+        // schema — mirrors the worked example in ADR-0065's Context
+        // section. An agent receives a tagged-string mailbox id from
+        // `load_component`, drops it directly into `subscribe_input.
+        // mailbox`, and the wire bytes match what the substrate
+        // expects.
+        use aether_mail::Kind;
+        let mailbox = aether_mail::MailboxId::from_name("aether.control");
+        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        let json_in = json!({ "stream": "Tick", "mailbox": s });
+
+        let bytes = encode_schema(
+            &json_in,
+            &<aether_kinds::SubscribeInput as aether_mail::Schema>::SCHEMA,
+        )
+        .expect("encode subscribe_input via TypeId schema");
+
+        // Substrate decode path — wire is byte-identical to a
+        // hand-postcard'd `SubscribeInput`.
+        let decoded: aether_kinds::SubscribeInput = postcard::from_bytes(&bytes)
+            .expect("postcard decode subscribe_input from hub-encoded bytes");
+        assert_eq!(decoded.stream, aether_kinds::InputStream::Tick);
+        assert_eq!(decoded.mailbox, mailbox);
+
+        // And the kind's id is sensitive to the typed identity —
+        // ADR-0065 phase 3 shifts it from the previous `u64`-shape
+        // hash. Cross-check it lands on a `Tag::Kind` value (the
+        // `with_tag` discipline holds through the schema-bytes
+        // change).
+        assert_eq!(
+            aether_mail::tagged_id::tag_of(aether_kinds::SubscribeInput::ID),
+            Some(aether_mail::Tag::Kind),
+        );
+    }
+
+    #[test]
+    fn type_id_round_trip_of_sentinel_uses_back_compat_number() {
+        // `MailboxId::NONE` (= 0) has reserved tag bits, so it
+        // serialises as a JSON number. Round-trip preserves the
+        // sentinel value end to end.
+        let schema = pc_struct(vec![NamedField {
+            name: "mailbox".into(),
+            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+        }]);
+        roundtrip(json!({ "mailbox": 0u64 }), &schema);
     }
 }

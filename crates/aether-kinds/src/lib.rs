@@ -686,7 +686,7 @@ mod control_plane {
     #[kind(name = "aether.control.subscribe_input")]
     pub struct SubscribeInput {
         pub stream: InputStream,
-        pub mailbox: u64,
+        pub mailbox: aether_mail::MailboxId,
     }
 
     /// `aether.control.unsubscribe_input` — remove `mailbox` from the
@@ -697,7 +697,7 @@ mod control_plane {
     #[kind(name = "aether.control.unsubscribe_input")]
     pub struct UnsubscribeInput {
         pub stream: InputStream,
-        pub mailbox: u64,
+        pub mailbox: aether_mail::MailboxId,
     }
 
     /// Reply to both subscribe and unsubscribe (ADR-0021 §2). Only
