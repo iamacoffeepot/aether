@@ -45,8 +45,9 @@ pub enum Step {
     },
     /// Generic mail send. `recipient` is a mailbox name (e.g.
     /// `"aether.sink.io"`); `kind` names the payload kind in the
-    /// catalog (e.g. `"aether.io.write"`); `params` is the YAML body
-    /// the catalog's encoder maps onto the kind's wire shape.
+    /// substrate's descriptor inventory (e.g. `"aether.io.write"`);
+    /// `params` is the YAML body the schema encoder maps onto the
+    /// kind's wire shape.
     SendMail {
         recipient: String,
         kind: String,

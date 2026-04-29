@@ -1,0 +1,8 @@
+name: clear color cli round trip
+steps:
+  - op: advance
+    ticks: 1
+  - op: capture
+  - op: assert
+    check:
+      kind: not_all_black
