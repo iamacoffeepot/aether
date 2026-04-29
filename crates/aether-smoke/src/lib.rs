@@ -3,13 +3,15 @@
 //!
 //! A `Script` enumerates the steps to execute against a freshly-booted
 //! `TestBench`: advance ticks, capture a frame, assert visual
-//! properties. The `Runner` walks the steps and produces a `RunReport`
-//! whose `passed` flag is the gate CI consumes.
+//! properties, drive components via `LoadComponent` / `SendMail`. The
+//! `Runner` walks the steps and produces a `RunReport` whose `passed`
+//! flag is the gate CI consumes.
 //!
-//! v1 vocabulary covers chassis-level smokes (does the bench boot?
-//! does an empty capture round-trip?). Component-driving steps
-//! (`load_component`, `send_mail`) land in a follow-up PR alongside
-//! descriptor-based JSON encoding.
+//! `SendMail` consults `aether_kinds::descriptors::all()` to look up
+//! the kind by name, then encodes YAML params into wire bytes through
+//! `aether_params_codec::encode_schema` — the same path the hub uses
+//! for `mcp__aether-hub__send_mail`. Adding a new kind to the
+//! substrate makes it sendable from a smoke script automatically.
 
 mod report;
 mod runner;

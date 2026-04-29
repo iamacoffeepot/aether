@@ -202,10 +202,14 @@ dependencies = [
 name = "aether-smoke"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-hub-protocol",
+ "aether-kinds",
+ "aether-params-codec",
  "aether-substrate-test-bench",
  "png",
  "pollster",
  "serde",
+ "serde_json",
  "serde_yml",
  "thiserror 1.0.69",
  "wgpu",
