@@ -16,3 +16,8 @@ spikes/*/target/
 !.claude/skills/adr/
 !.claude/skills/delegate/
 !.claude/skills/sweep/
+# Agent audit artifacts — runs of an audit workflow that examines
+# the repo and emits findings. Outputs are per-run and per-machine,
+# not part of the source tree; issues filed from them link back to
+# the source instead.
+/audits/
