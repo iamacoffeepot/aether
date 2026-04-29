@@ -615,7 +615,7 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoder::encode_schema;
+    use crate::encode_schema;
     use aether_hub_protocol::SchemaCell;
     use serde_json::json;
 

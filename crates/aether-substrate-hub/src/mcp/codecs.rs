@@ -16,8 +16,8 @@ use aether_hub_protocol::{
     EngineId, HubToEngine, KindDescriptor, MailFrame, SchemaType, SessionToken, Uuid,
 };
 
-use crate::decoder::decode_schema;
-use crate::encoder::encode_schema;
+use aether_params_codec::{decode_schema, encode_schema};
+
 use crate::registry::{EngineRecord, EngineRegistry};
 
 use super::args::MailSpec;

@@ -7,6 +7,7 @@ members = [
     "crates/aether-substrate-hub",
     "crates/aether-substrate-test-bench",
     "crates/aether-smoke",
+    "crates/aether-params-codec",
     "crates/aether-kinds",
     "crates/aether-math",
     "crates/aether-component",
