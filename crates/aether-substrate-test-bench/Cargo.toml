@@ -13,11 +13,6 @@ edition.workspace = true
 # verification and Rust integration tests where opening a window
 # isn't an option.
 #
-# v1 keeps the std-timer tick driver from headless. ADR-0067 calls
-# for a control-mail tick driver (`aether.test_bench.advance`) so
-# smoke scripts can advance the mail clock deterministically; that
-# lands in a follow-up PR alongside the new kinds.
-
 [[bin]]
 name = "aether-substrate-test-bench"
 path = "src/main.rs"
@@ -33,6 +28,8 @@ aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"
 png = "0.17"
 pollster = "0.4.0"
+postcard = { version = "1.1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 wasmtime = "30"
 wgpu = "29.0.1"

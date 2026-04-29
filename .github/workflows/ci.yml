@@ -72,8 +72,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: Install ALSA dev headers (cpal Linux backend)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Install Linux deps (ALSA for cpal, Mesa lavapipe for wgpu)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
 
