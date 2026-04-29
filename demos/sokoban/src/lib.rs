@@ -1,33 +1,28 @@
 //! Sokoban demo: a grid-based puzzle world. The world owns walls,
-//! boxes, targets, and the player's grid position; an external player
-//! component (`aether-player-component` in tile-step mode, loaded as
-//! `"player"`) renders itself and drives motion.
+//! boxes, targets, the player's grid position, *and* the player's
+//! visible body — there is no longer a separate player component.
 //!
-//! Protocol:
-//!
-//! 1. On `SokobanLoadLevel` / `SokobanReset`, sokoban parses the level,
-//!    initializes the grid, stores the player's starting cell, and
-//!    emits `PlayerSetPosition` to the `"player"` mailbox to place the
-//!    external body at the starting world coordinate.
-//! 2. The player (in tile-step mode) emits
-//!    `PlayerRequestStep { dx, dy }` on each movement keypress,
-//!    addressed to the mailbox named `"world"` — i.e. this component.
-//! 3. Sokoban resolves the outcome (wall block, floor pass, box
-//!    push-or-block) and replies with `PlayerStepResult`, carrying the
-//!    authoritative world-space position. The player applies it.
-//!
-//! The world is rendered each tick (floor, walls, boxes, targets).
-//! The external player renders itself — the grid no longer tracks
-//! `CELL_PLAYER` state.
+//! Each tick sokoban renders the grid and the player triangle, and
+//! publishes a `CameraTopdownSet` follow target so a topdown camera
+//! tracks the player. WASD / arrow keypresses step the player one
+//! cell; key-release is ignored. Walls, boxes, and targets resolve
+//! the same as before — the only change is that the request-step
+//! round-trip went away.
 //!
 //! Grid is still capped at 16×16 (pre-ADR-0028 carryover).
 
 use aether_component::{Component, Ctx, InitCtx, KindId, Sink, handlers};
-use aether_kinds::{
-    DrawTriangle, PlayerRequestStep, PlayerSetPosition, PlayerStepResult, Tick, Vertex,
-};
+use aether_kinds::{CameraTopdownSet, DrawTriangle, Key, Tick, TopdownParams, Vertex, keycode};
 use aether_mail::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
+
+const PLAYER_HALF: f32 = 0.25;
+const PLAYER_R: f32 = 1.0;
+const PLAYER_G: f32 = 0.3;
+const PLAYER_B: f32 = 0.9;
+/// World-z for the player body. Larger than the grid floor's z so the
+/// desktop substrate's `LessEqual` depth test draws the player on top.
+const PLAYER_Z: f32 = 0.1;
 
 pub const GRID_MAX: usize = 16;
 pub const CELLS_MAX: usize = GRID_MAX * GRID_MAX;
@@ -121,38 +116,41 @@ const LEVELS: &[&[&str]] = &[
 pub struct Sokoban {
     state: SokobanState,
     state_kind: KindId<SokobanState>,
-    step_result_kind: KindId<PlayerStepResult>,
     render: Sink<DrawTriangle>,
-    player: Sink<PlayerSetPosition>,
+    camera_follow: Sink<CameraTopdownSet>,
+    /// Cached camera-follow envelope. The `name` field is set once at
+    /// init and reused every tick to avoid re-allocating the String;
+    /// only `params.center` is mutated per frame.
+    follow_msg: CameraTopdownSet,
 }
 
-/// Sokoban world. Owns the grid and the player's grid cell; the
-/// external `aether-player-component` (loaded as `"player"`, mode set
-/// to tile-step) drives motion via `PlayerRequestStep`.
+/// Sokoban world. Owns the grid, the player's grid cell, and renders
+/// the player body itself. WASD / arrow keys step one cell per press;
+/// walls and unpushable boxes block the move.
 ///
 /// # Agent
-/// Load as `"world"` alongside the external player (`"player"`) and
-/// the top-down camera (`"topdown"`). On load, sokoban emits
-/// `PlayerSetPosition` to the external player so it arrives at the
-/// level's starting cell.
+/// Load as `"world"` alongside the multi-camera component (loaded as
+/// `"camera"`); sokoban publishes `CameraTopdownSet { name: "main" }`
+/// every tick so a topdown camera named `"main"` follows the player.
 ///
 /// - `SokobanLoadLevel { id }` — switch levels. Out-of-range is a
 ///   no-op.
 /// - `SokobanReset` — reload the active level.
-/// - `PlayerRequestStep { dx, dy }` — typically sent by the player on
-///   each WASD press; you can also send it directly for scripted
-///   moves. `dx`/`dy` are integer cell deltas (+1 east, +1 north in
-///   the engine's +Y-up world). Reply is `PlayerStepResult` with the
-///   authoritative post-move world coordinate.
 #[handlers]
 impl Component for Sokoban {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         let mut me = Sokoban {
             state: SokobanState::default(),
             state_kind: ctx.resolve::<SokobanState>(),
-            step_result_kind: ctx.resolve::<PlayerStepResult>(),
             render: ctx.resolve_sink::<DrawTriangle>("aether.sink.render"),
-            player: ctx.resolve_sink::<PlayerSetPosition>("player"),
+            camera_follow: ctx.resolve_sink::<CameraTopdownSet>("camera"),
+            follow_msg: CameraTopdownSet {
+                name: "main".to_owned(),
+                params: TopdownParams {
+                    center: Some([0.0, 0.0]),
+                    extent: None,
+                },
+            },
         };
         me.load_level(0);
         me
@@ -161,39 +159,34 @@ impl Component for Sokoban {
     #[handler]
     fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
         self.render_grid(ctx);
+        let (px, py) = self.player_world_pos();
+        self.render_player(ctx, px, py);
+        self.follow_msg.params.center = Some([px, py]);
+        ctx.send(&self.camera_follow, &self.follow_msg);
     }
 
-    /// Apply a player step request. Resolves wall/floor/box outcomes
-    /// against the current grid, updates state, and replies to the
-    /// sender with the authoritative new world position.
+    /// Movement key. Tile-step on press; release is ignored.
+    ///
+    /// # Agent
+    /// Publish-subscribe — the substrate delivers every mapped press.
+    /// Hold doesn't auto-repeat: one press = one step. For scripted
+    /// moves, send a fresh `Key` per cell.
     #[handler]
-    fn on_request_step(&mut self, ctx: &mut Ctx<'_>, req: PlayerRequestStep) {
-        let accepted = self.apply_step(req.dx, req.dy);
-        let (world_x, world_y) = self.player_world_pos();
-        if let Some(sender) = ctx.reply_to() {
-            ctx.reply(
-                sender,
-                self.step_result_kind,
-                &PlayerStepResult {
-                    accepted: u32::from(accepted),
-                    new_x: world_x,
-                    new_y: world_y,
-                },
-            );
+    fn on_key(&mut self, _ctx: &mut Ctx<'_>, key: Key) {
+        if let Some((dx, dy)) = step_delta(key.code) {
+            self.apply_step(dx, dy);
         }
     }
 
     #[handler]
     fn on_reset(&mut self, ctx: &mut Ctx<'_>, _rst: SokobanReset) {
         self.load_level(self.state.level_id);
-        self.sync_player(ctx);
         self.reply_state(ctx);
     }
 
     #[handler]
     fn on_load_level(&mut self, ctx: &mut Ctx<'_>, load: SokobanLoadLevel) {
         self.load_level(load.id);
-        self.sync_player(ctx);
         self.reply_state(ctx);
     }
 }
@@ -319,12 +312,38 @@ impl Sokoban {
         (gx - w * 0.5 + 0.5, h * 0.5 - gy - 0.5)
     }
 
-    /// Emit a `PlayerSetPosition` to the external player with the
-    /// current player cell's world coordinate. Called after load /
-    /// reset so the rendered body snaps to the level's starting cell.
-    fn sync_player(&self, ctx: &mut Ctx<'_>) {
-        let (x, y) = self.player_world_pos();
-        ctx.send(&self.player, &PlayerSetPosition { x, y });
+    /// Emit one `DrawTriangle` for the player body, centered at the
+    /// supplied world coords.
+    fn render_player(&self, ctx: &mut Ctx<'_>, px: f32, py: f32) {
+        let body = DrawTriangle {
+            verts: [
+                Vertex {
+                    x: px,
+                    y: py + PLAYER_HALF,
+                    z: PLAYER_Z,
+                    r: PLAYER_R,
+                    g: PLAYER_G,
+                    b: PLAYER_B,
+                },
+                Vertex {
+                    x: px - PLAYER_HALF,
+                    y: py - PLAYER_HALF,
+                    z: PLAYER_Z,
+                    r: PLAYER_R,
+                    g: PLAYER_G,
+                    b: PLAYER_B,
+                },
+                Vertex {
+                    x: px + PLAYER_HALF,
+                    y: py - PLAYER_HALF,
+                    z: PLAYER_Z,
+                    r: PLAYER_R,
+                    g: PLAYER_G,
+                    b: PLAYER_B,
+                },
+            ],
+        };
+        ctx.send(&self.render, &body);
     }
 
     fn reply_state(&self, ctx: &mut Ctx<'_>) {
@@ -441,6 +460,18 @@ fn is_solved(state: &SokobanState) -> bool {
         }
     }
     true
+}
+
+/// Map a mapped keycode to a tile-step world delta. Returns `None`
+/// for keys that aren't bound to movement. Convention: world +Y north.
+fn step_delta(code: u32) -> Option<(i32, i32)> {
+    match code {
+        keycode::KEY_W | keycode::KEY_UP => Some((0, 1)),
+        keycode::KEY_S | keycode::KEY_DOWN => Some((0, -1)),
+        keycode::KEY_D | keycode::KEY_RIGHT => Some((1, 0)),
+        keycode::KEY_A | keycode::KEY_LEFT => Some((-1, 0)),
+        _ => None,
+    }
 }
 
 fn cell_color(cell: u8) -> (f32, f32, f32) {
