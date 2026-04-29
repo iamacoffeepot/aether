@@ -11,8 +11,9 @@
 //!
 //! Grid is still capped at 16×16 (pre-ADR-0028 carryover).
 
+use aether_camera::{CameraTopdownSet, TopdownParams};
 use aether_component::{Component, Ctx, InitCtx, KindId, Sink, handlers};
-use aether_kinds::{CameraTopdownSet, DrawTriangle, Key, Tick, TopdownParams, Vertex, keycode};
+use aether_kinds::{DrawTriangle, Key, Tick, Vertex, keycode};
 use aether_mail::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 

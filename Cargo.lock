@@ -34,9 +34,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "aether-camera"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-hub-protocol",
+ "aether-mail",
+ "inventory",
+ "serde",
+]
+
+[[package]]
 name = "aether-camera-component"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-camera",
  "aether-component",
  "aether-kinds",
  "aether-math",
@@ -60,6 +71,7 @@ dependencies = [
 name = "aether-demo-sokoban"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-camera",
  "aether-component",
  "aether-kinds",
  "aether-mail",
@@ -152,6 +164,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-mesh-viewer"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-hub-protocol",
+ "aether-mail",
+ "inventory",
+ "serde",
+]
+
+[[package]]
 name = "aether-mesh-viewer-component"
 version = "0.2.0-alpha"
 dependencies = [
@@ -159,6 +181,7 @@ dependencies = [
  "aether-kinds",
  "aether-math",
  "aether-mesh",
+ "aether-mesh-viewer",
  "tracing",
 ]
 
