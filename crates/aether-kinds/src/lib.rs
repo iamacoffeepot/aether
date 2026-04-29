@@ -1351,8 +1351,9 @@ mod control_plane {
     pub struct OrbitParams {
         /// Eye radius from `target`. `0.0` collapses to the target.
         pub distance: Option<f32>,
-        /// Vertical tilt (radians). Positive tilts the eye up so the
-        /// camera looks down. `±π/2` are degenerate.
+        /// Vertical tilt (radians). Positive places the eye below the
+        /// target (camera looks up); negative places it above (camera
+        /// looks down). `±π/2` are degenerate.
         pub pitch: Option<f32>,
         /// Absolute yaw (radians). Auto-advance keeps ticking from
         /// this value next frame; pair with `speed: Some(0.0)` to pin.
