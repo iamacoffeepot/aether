@@ -1,0 +1,25 @@
+[package]
+name = "aether-smoke"
+version.workspace = true
+edition.workspace = true
+
+# ADR-0067 smoke library: declarative Script → Runner → RunReport
+# pipeline that drives an in-process `TestBench` chassis through a
+# sequence of steps and asserts visual properties of captured frames.
+# This crate ships the core types + a YAML parser; per-component
+# smokes live in their owning crates' tests/ directories and the CLI
+# wrapper (PR 6) gives agents a one-shot "run smoke at path" entry.
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aether-substrate-test-bench = { path = "../aether-substrate-test-bench" }
+png = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_yml = "0.0.12"
+thiserror = "1"
+
+[dev-dependencies]
+pollster = "0.4.0"
+wgpu = "29.0.1"
