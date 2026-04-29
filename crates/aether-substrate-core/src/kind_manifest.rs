@@ -151,7 +151,7 @@ pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, Stri
         match record {
             InputsRecord::Handler { id, name, doc } => {
                 caps.handlers.push(HandlerCapability {
-                    id,
+                    id: aether_mail::KindId(id),
                     name: name.into_owned(),
                     doc: doc.map(|d| d.into_owned()),
                 });
@@ -860,13 +860,13 @@ mod tests {
         let caps = read_inputs_from_bytes(&wasm).unwrap();
         assert_eq!(caps.doc.as_deref(), Some("Draws triangles on tick."));
         assert_eq!(caps.handlers.len(), 2);
-        assert_eq!(caps.handlers[0].id, 42);
+        assert_eq!(caps.handlers[0].id, aether_mail::KindId(42));
         assert_eq!(caps.handlers[0].name, "aether.tick");
         assert_eq!(
             caps.handlers[0].doc.as_deref(),
             Some("substrate drives this")
         );
-        assert_eq!(caps.handlers[1].id, 0xff);
+        assert_eq!(caps.handlers[1].id, aether_mail::KindId(0xff));
         assert_eq!(caps.handlers[1].name, "aether.ping");
         assert!(caps.handlers[1].doc.is_none());
         assert!(caps.fallback.is_none());

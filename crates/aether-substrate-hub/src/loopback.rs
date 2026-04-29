@@ -197,8 +197,8 @@ fn send_unresolved_diagnostic(
         return;
     };
     let payload = bytemuck::bytes_of(&UnresolvedMail {
-        recipient_mailbox_id,
-        kind_id,
+        recipient_mailbox_id: aether_mail::MailboxId(recipient_mailbox_id),
+        kind_id: aether_mail::KindId(kind_id),
     })
     .to_vec();
     let frame = HubToEngine::MailById(MailByIdFrame {
@@ -542,8 +542,14 @@ mod tests {
             mailbox_id_from_name(AETHER_DIAGNOSTICS),
         );
         let record: &UnresolvedMail = bytemuck::from_bytes(&frame.payload);
-        assert_eq!(record.recipient_mailbox_id, 0xBAD_C0FFEE_u64);
-        assert_eq!(record.kind_id, <aether_kinds::Tick as Kind>::ID);
+        assert_eq!(
+            record.recipient_mailbox_id,
+            aether_mail::MailboxId(0xBAD_C0FFEE_u64)
+        );
+        assert_eq!(
+            record.kind_id,
+            aether_mail::KindId(<aether_kinds::Tick as Kind>::ID),
+        );
         assert_eq!(frame.count, 1);
         assert!(
             mail_rx.try_recv().is_err(),

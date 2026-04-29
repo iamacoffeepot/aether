@@ -563,7 +563,7 @@ fn kill_actor(
     state.store(STATE_DEAD, Ordering::Release);
 
     let died = ComponentDied {
-        mailbox_id: mailbox.0,
+        mailbox_id: mailbox,
         mailbox_name,
         last_kind: last_kind.to_string(),
         reason,
@@ -1004,7 +1004,7 @@ mod tests {
         let died = captured.lock().unwrap();
         assert_eq!(died.len(), 1, "exactly one death broadcast expected");
         let d = &died[0];
-        assert_eq!(d.mailbox_id, mailbox.0);
+        assert_eq!(d.mailbox_id, mailbox);
         assert_eq!(d.mailbox_name, "crashy");
         assert!(
             d.reason.starts_with("wasmtime trap:"),
