@@ -1330,168 +1330,17 @@ mod control_plane {
         pub message: String,
     }
 
-    // Camera control. The `aether-camera-component` hosts N cameras
-    // keyed by string name; each camera carries one mode (orbit /
-    // topdown) and only the active camera publishes `aether.camera`
-    // (the cast-shaped view-proj kind defined above) into
-    // `"aether.sink.camera"`. Per-mode params arrive as `Option<...>`
-    // so the same kind seeds creation (every field present) and
-    // streams deltas (only the changing fields present, others left
-    // alone). All postcard-shaped — `String` + `Option` rule out the
-    // cast path.
+    // ADR-0066: camera control kinds (`aether.camera.{create, destroy,
+    // set_active, set_mode, orbit.set, topdown.set}` + `OrbitParams` /
+    // `TopdownParams` / `ModeInit`) moved to the `aether-camera` trunk
+    // crate. The `aether.camera` view_proj sink contract above stays
+    // here — it's a chassis primitive consumed by the desktop chassis's
+    // `aether.sink.camera` sink. The migrated kinds are still wire-
+    // compatible (kind names + schemas unchanged); only the source-side
+    // home moved.
 
-    /// Per-mode parameters for the orbit camera. Every field is
-    /// `Option<...>`: present → apply, absent → leave whatever the
-    /// camera already has. Used both for create-time initial state
-    /// (`CameraCreate { mode: Orbit(OrbitParams { distance: Some(5.0),
-    /// .. }) }` — anything left `None` falls back to the orbit
-    /// component's compiled defaults) and for live tweaks
-    /// (`CameraOrbitSet`).
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-    pub struct OrbitParams {
-        /// Eye radius from `target`. `0.0` collapses to the target.
-        pub distance: Option<f32>,
-        /// Vertical tilt (radians). Positive places the eye below the
-        /// target (camera looks up); negative places it above (camera
-        /// looks down). `±π/2` are degenerate.
-        pub pitch: Option<f32>,
-        /// Absolute yaw (radians). Auto-advance keeps ticking from
-        /// this value next frame; pair with `speed: Some(0.0)` to pin.
-        pub yaw: Option<f32>,
-        /// Auto-rotation rate (radians per tick). `0.0` freezes;
-        /// negative reverses.
-        pub speed: Option<f32>,
-        /// Vertical field of view (radians).
-        pub fov_y_rad: Option<f32>,
-        /// World-space pivot the camera orbits around.
-        pub target: Option<[f32; 3]>,
-    }
-
-    /// Per-mode parameters for the orthographic top-down camera.
-    /// Same `Option<...>` semantics as `OrbitParams`: present → apply,
-    /// absent → keep current.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-    pub struct TopdownParams {
-        /// World-xy centerpoint. Z is implicit — the camera always
-        /// looks down `-Z`.
-        pub center: Option<[f32; 2]>,
-        /// Half-height of the orthographic frustum in world units.
-        /// Visible width is `extent * aspect`. Must be positive at
-        /// apply time; the camera component clamps to a tiny floor.
-        pub extent: Option<f32>,
-    }
-
-    /// Mode + initial parameters for create / mode-switch. Each
-    /// variant carries the full param struct for that mode; pass
-    /// `Default::default()` (all `None`) to take the camera
-    /// component's compiled defaults wholesale.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
-    pub enum ModeInit {
-        Orbit(OrbitParams),
-        Topdown(TopdownParams),
-    }
-
-    /// `aether.camera.create` — create a new named camera in the given
-    /// mode. Errors if `name` is already taken; use `CameraSetMode` to
-    /// swap an existing camera's mode in place. Newly-created cameras
-    /// are not made active automatically; pair with `CameraSetActive`
-    /// or rely on the bootstrap `"main"` camera.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.camera.create")]
-    pub struct CameraCreate {
-        pub name: String,
-        pub mode: ModeInit,
-    }
-
-    /// `aether.camera.destroy` — drop a camera by name. No-op if the
-    /// name isn't bound. If the destroyed camera was the active one
-    /// the publish stream pauses (no `aether.camera` mail goes out)
-    /// until another camera is made active.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.camera.destroy")]
-    pub struct CameraDestroy {
-        pub name: String,
-    }
-
-    /// `aether.camera.set_active` — promote the named camera to be the
-    /// one whose `view_proj` publishes to `"aether.sink.camera"` each
-    /// tick. Errors if the name isn't bound. Inactive cameras still
-    /// tick (orbit yaw keeps accumulating, etc.) so re-activating
-    /// later doesn't snap.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.camera.set_active")]
-    pub struct CameraSetActive {
-        pub name: String,
-    }
-
-    /// `aether.camera.set_mode` — swap an existing camera's mode in
-    /// place. State for the prior mode is discarded; the new mode is
-    /// seeded from the supplied params + per-mode compiled defaults.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.camera.set_mode")]
-    pub struct CameraSetMode {
-        pub name: String,
-        pub mode: ModeInit,
-    }
-
-    /// `aether.camera.orbit.set` — apply orbit-mode field deltas to
-    /// the named camera. Errors silently (warn-log) if the camera is
-    /// in a non-orbit mode; switch with `CameraSetMode` first. Every
-    /// `Some` field overwrites; `None` leaves the current value
-    /// alone, so partial pokes (e.g. just `distance`) ride a single
-    /// kind without restating the rest.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.camera.orbit.set")]
-    pub struct CameraOrbitSet {
-        pub name: String,
-        pub params: OrbitParams,
-    }
-
-    /// `aether.camera.topdown.set` — apply topdown-mode field deltas
-    /// to the named camera. Same semantics as `CameraOrbitSet` but for
-    /// the orthographic mode's `center` / `extent`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.camera.topdown.set")]
-    pub struct CameraTopdownSet {
-        pub name: String,
-        pub params: TopdownParams,
-    }
-}
-
-pub use mesh_viewer::*;
-
-/// Mesh viewer vocabulary. The mesh viewer component
-/// (`crates/aether-mesh-viewer-component/`) loads a mesh file from the
-/// substrate's I/O surface (ADR-0041 namespace + path) and replays it
-/// as `DrawTriangle` mail every tick. It dispatches on file extension:
-/// `.dsl` runs through the `aether-mesh` parser+mesher (ADR-0026 +
-/// ADR-0051) and emits polygon-edge wireframes alongside filled
-/// triangles; `.obj` is parsed as triangulated Wavefront geometry with
-/// no wireframe.
-///
-/// This component supersedes `aether-mesh-editor-component` (the
-/// inline-DSL `set_text` path) and `aether-static-mesh-component` (the
-/// OBJ-only path). The DSL is still the authoring path per ADR-0052;
-/// iteration is now write-file-then-load instead of inline mail.
-mod mesh_viewer {
-    use alloc::string::String;
-    use serde::{Deserialize, Serialize};
-
-    /// `aether.mesh.load` — instruct the mesh viewer to load and display
-    /// the file at `namespace://path`. The viewer dispatches on the
-    /// file extension: `.dsl` runs through `aether-mesh`'s parser +
-    /// mesher; `.obj` runs through the OBJ parser. Subsequent `Load`
-    /// mails replace the cached mesh. Fire-and-forget; errors surface
-    /// in `engine_logs`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.load")]
-    pub struct LoadMesh {
-        /// Short namespace prefix (no `://`), e.g. `"save"`, `"assets"`.
-        pub namespace: String,
-        /// Relative path within the namespace. Extension picks the
-        /// parser: `.dsl` or `.obj`. Other extensions are rejected.
-        pub path: String,
-    }
+    // ADR-0066: `aether.mesh.load` moved to the `aether-mesh-viewer`
+    // trunk crate.
 }
 
 #[cfg(test)]
@@ -1581,12 +1430,11 @@ mod tests {
             "aether.control.set_window_title_result"
         );
         assert_eq!(Camera::NAME, "aether.camera");
-        assert_eq!(CameraCreate::NAME, "aether.camera.create");
-        assert_eq!(CameraDestroy::NAME, "aether.camera.destroy");
-        assert_eq!(CameraSetActive::NAME, "aether.camera.set_active");
-        assert_eq!(CameraSetMode::NAME, "aether.camera.set_mode");
-        assert_eq!(CameraOrbitSet::NAME, "aether.camera.orbit.set");
-        assert_eq!(CameraTopdownSet::NAME, "aether.camera.topdown.set");
+        // ADR-0066: aether.camera.{create,destroy,set_active,set_mode,
+        // orbit.set,topdown.set} kind-name asserts live in
+        // `aether-camera`'s tests; aether.mesh.load lives in
+        // `aether-mesh-viewer`'s tests. The view-proj sink contract
+        // (`aether.camera`) stays here as a chassis primitive.
         assert_eq!(NoteOn::NAME, "aether.audio.note_on");
         assert_eq!(NoteOff::NAME, "aether.audio.note_off");
         assert_eq!(SetMasterGain::NAME, "aether.audio.set_master_gain");

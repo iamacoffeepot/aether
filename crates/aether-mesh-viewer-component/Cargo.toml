@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 [dependencies]
 aether-component = { path = "../aether-component" }
 aether-kinds = { path = "../aether-kinds" }
+aether-mesh-viewer = { path = "../aether-mesh-viewer" }
 aether-mesh = { path = "../aether-mesh" }
 aether-math = { path = "../aether-math" }
 # ADR-0060: tracing facade reaches the substrate's `aether.sink.log`

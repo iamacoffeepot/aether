@@ -32,9 +32,10 @@
 //!    `"aether.sink.render"`.
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io};
-use aether_kinds::{DrawTriangle, LoadMesh, ReadResult, Tick, Vertex};
+use aether_kinds::{DrawTriangle, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
+use aether_mesh_viewer::LoadMesh;
 
 const OUTLINE_WIDTH: f32 = 0.012;
 const OUTLINE_LIFT: f32 = 0.002;

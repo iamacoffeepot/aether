@@ -34,11 +34,12 @@
 
 use std::collections::HashMap;
 
-use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
-use aether_kinds::{
-    Camera, CameraCreate, CameraDestroy, CameraOrbitSet, CameraSetActive, CameraSetMode,
-    CameraTopdownSet, ModeInit, OrbitParams, Tick, TopdownParams, WindowSize,
+use aether_camera::{
+    CameraCreate, CameraDestroy, CameraOrbitSet, CameraSetActive, CameraSetMode, CameraTopdownSet,
+    ModeInit, OrbitParams, TopdownParams,
 };
+use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
+use aether_kinds::{Camera, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, Vec2, Vec3};
 
 const Z_NEAR: f32 = 0.1;

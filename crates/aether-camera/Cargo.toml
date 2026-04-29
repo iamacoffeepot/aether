@@ -1,0 +1,21 @@
+[package]
+name = "aether-camera"
+version.workspace = true
+edition.workspace = true
+
+# Trunk rlib for the camera component (ADR-0066). The runtime cdylib
+# lives in `aether-camera-component`; consumers that want to *talk to*
+# a camera (mail kinds, parameter structs) depend on this crate. This
+# crate never depends on `aether-component` and never emits FFI exports.
+
+[dependencies]
+aether-mail = { path = "../aether-mail", features = ["derive"] }
+aether-hub-protocol = { path = "../aether-hub-protocol", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+# Issue #243: every crate that derives `Kind` needs `inventory` reachable
+# on native builds so the `aether.kinds` substrate descriptor list picks
+# up its types. Wasm guests skip the submission via the derive's
+# `cfg(not(target_arch = "wasm32"))` gate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = "0.3"
