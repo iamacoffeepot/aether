@@ -256,6 +256,25 @@ impl TestBench {
         Ok(())
     }
 
+    /// Bytes-level send for callers that resolve kind+payload at
+    /// runtime (the smoke library's descriptor-driven path). Same
+    /// recipient lookup as `send_mail` but takes a pre-encoded
+    /// `(kind_id, bytes)` tuple — the typed `send_mail<K>` is the
+    /// preferred path when `K` is known statically.
+    pub fn send_bytes(
+        &self,
+        recipient_name: &str,
+        kind_id: u64,
+        bytes: Vec<u8>,
+    ) -> Result<(), TestBenchError> {
+        let mailbox = self
+            .registry
+            .lookup(recipient_name)
+            .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
+        self.queue.push(Mail::new(mailbox, kind_id, bytes, 1));
+        Ok(())
+    }
+
     /// Run `ticks` complete frames synchronously. Each frame
     /// dispatches `Tick` to subscribers, drains the queue, and
     /// renders. Returns once the substrate has replied with
