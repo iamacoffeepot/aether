@@ -1,5 +1,5 @@
 [package]
-name = "aether-mesh-editor-component"
+name = "aether-mesh-viewer-component"
 version.workspace = true
 edition.workspace = true
 
@@ -8,10 +8,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 aether-component = { path = "../aether-component" }
-aether-mesh = { path = "../aether-mesh" }
 aether-kinds = { path = "../aether-kinds" }
+aether-mesh = { path = "../aether-mesh" }
 aether-math = { path = "../aether-math" }
 # ADR-0060: tracing facade reaches the substrate's `aether.sink.log`
-# via the SDK's `MailSubscriber` (installed by `export!`). The crate
-# itself stays no_std-friendly via `default-features = false`.
+# via the SDK's `MailSubscriber` (installed by `export!`).
 tracing = { version = "0.1", default-features = false }
