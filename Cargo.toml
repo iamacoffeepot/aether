@@ -5,6 +5,7 @@ members = [
     "crates/aether-substrate-desktop",
     "crates/aether-substrate-headless",
     "crates/aether-substrate-hub",
+    "crates/aether-substrate-test-bench",
     "crates/aether-kinds",
     "crates/aether-math",
     "crates/aether-component",

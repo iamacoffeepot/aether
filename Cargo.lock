@@ -265,6 +265,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-substrate-test-bench"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-hub-protocol",
+ "aether-kinds",
+ "aether-mail",
+ "aether-substrate-core",
+ "bytemuck",
+ "png",
+ "pollster",
+ "tracing",
+ "wasmtime",
+ "wgpu",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

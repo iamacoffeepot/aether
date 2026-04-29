@@ -1,0 +1,38 @@
+[package]
+name = "aether-substrate-test-bench"
+version.workspace = true
+edition.workspace = true
+
+# ADR-0067 test-bench chassis binary: GPU-capable, no window, no
+# winit. Mirrors the desktop chassis's offscreen render path
+# (offscreen color target + depth target + capture readback) but
+# omits surface acquisition and presentation. The shared runtime
+# (scheduler, mail, wasmtime host, control plane, hub client) lives
+# in aether-substrate-core; this crate binds that core to a wgpu
+# device with no presentation surface — suitable for CI smoke
+# verification and Rust integration tests where opening a window
+# isn't an option.
+#
+# v1 keeps the std-timer tick driver from headless. ADR-0067 calls
+# for a control-mail tick driver (`aether.test_bench.advance`) so
+# smoke scripts can advance the mail clock deterministically; that
+# lands in a follow-up PR alongside the new kinds.
+
+[[bin]]
+name = "aether-substrate-test-bench"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aether-substrate-core = { path = "../aether-substrate-core" }
+aether-hub-protocol = { path = "../aether-hub-protocol" }
+aether-mail = { path = "../aether-mail" }
+aether-kinds = { path = "../aether-kinds" }
+bytemuck = "1.19"
+png = "0.17"
+pollster = "0.4.0"
+tracing = "0.1"
+wasmtime = "30"
+wgpu = "29.0.1"
