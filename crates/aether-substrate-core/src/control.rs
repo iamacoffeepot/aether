@@ -28,10 +28,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use aether_hub_protocol::{EngineToHub, KindDescriptor};
 use aether_kinds::{
-    DropComponent, DropResult, LoadComponent, LoadResult, MailEnvelope, ReplaceComponent,
-    ReplaceResult, SubscribeInput, SubscribeInputResult, UnsubscribeInput,
+    ComponentCapabilities, DropComponent, DropResult, InputStream, Key, KeyRelease, LoadComponent,
+    LoadResult, MailEnvelope, MouseButton, MouseMove, ReplaceComponent, ReplaceResult,
+    SubscribeInput, SubscribeInputResult, Tick, UnsubscribeInput, WindowSize,
 };
-use aether_mail::Kind;
+#[cfg(test)]
+use aether_kinds::{DrawTriangle, HandlerCapability};
+use aether_mail::{Kind, KindId};
 use wasmtime::{Engine, Linker, Module};
 
 use crate::component::Component;
@@ -83,6 +86,60 @@ fn register_or_match_all(
             .map_err(|e| format!("register `{}`: {e}", kind.name))?;
     }
     Ok(())
+}
+
+/// The substrate's six fixed input streams paired with the typed
+/// `Kind::ID` constants that drive them. `K::ID` is a compile-time
+/// const, so the table folds at const-eval; a rename or schema
+/// change on either side trips a compile error here instead of a
+/// silent name-string miss.
+///
+/// Temporary by design — this bridge between the closed `InputStream`
+/// enum and `KindId` exists only because `InputStream` is a separate
+/// identifier. Issue #405 retires the enum and keys subscribers by
+/// `KindId` directly, at which point this table goes away entirely.
+const INPUT_STREAM_KINDS: &[(u64, InputStream)] = &[
+    (Tick::ID, InputStream::Tick),
+    (Key::ID, InputStream::Key),
+    (KeyRelease::ID, InputStream::KeyRelease),
+    (MouseMove::ID, InputStream::MouseMove),
+    (MouseButton::ID, InputStream::MouseButton),
+    (WindowSize::ID, InputStream::WindowSize),
+];
+
+/// Map an input-kind id to its `InputStream` variant. Used by the
+/// load / replace paths to derive auto-subscriptions from the
+/// component's `aether.kinds.inputs` manifest, so a component that
+/// declares an input handler is wired to the matching stream without
+/// the guest SDK needing to round-trip through `subscribe_input` at
+/// init time (which races mailbox registration — issue #403).
+///
+/// User-space input kinds (anything outside the substrate's six
+/// fixed streams) return `None`; those continue to ride the explicit
+/// `ctx.subscribe_input::<K>()` runtime API.
+fn input_stream_for_kind_id(id: KindId) -> Option<InputStream> {
+    INPUT_STREAM_KINDS
+        .iter()
+        .find_map(|(k, s)| (id.0 == *k).then_some(*s))
+}
+
+/// Wire the freshly-registered mailbox into every input-stream
+/// subscriber set its handler manifest declares. Called by `handle_
+/// load` (after `try_register_component`) and `handle_replace` (after
+/// the dispatcher swap commits) so the auto-subscribe is observable
+/// the moment the component is reachable, with no `subscribe_input`
+/// reply to wait on.
+fn auto_subscribe_inputs(
+    input_subscribers: &InputSubscribers,
+    mailbox: MailboxId,
+    capabilities: &ComponentCapabilities,
+) {
+    let mut subs = input_subscribers.write().unwrap();
+    for handler in &capabilities.handlers {
+        if let Some(stream) = input_stream_for_kind_id(handler.id) {
+            subs.entry(stream).or_default().insert(mailbox);
+        }
+    }
 }
 
 /// Shared validation for `subscribe_input` / `unsubscribe_input`: the
@@ -266,10 +323,14 @@ impl ControlPlane {
         // `Component::instantiate` (which calls `init(mailbox_id)`)
         // run *before* publishing the mailbox — on instantiate
         // failure the registry is untouched and the name remains
-        // available for a retry. Subscribe-input mail emitted from
-        // `init` carries the still-unpublished id, which is fine: the
-        // subscriber set is recorded against the id and will be valid
-        // by the time the platform thread fans out events.
+        // available for a retry. Auto-subscriptions are not driven
+        // from `init` for that reason (issue #403): a `subscribe_
+        // input` mail emitted before `try_register_component` would
+        // race against `validate_subscriber_mailbox` and be rejected
+        // as an unknown id. Instead, the substrate derives the
+        // subscription set from the component's `aether.kinds.inputs`
+        // manifest after the mailbox is published — see
+        // `auto_subscribe_inputs` below.
         let mailbox = MailboxId::from_name(&name);
 
         let ctx = SubstrateCtx::new(
@@ -312,6 +373,14 @@ impl ControlPlane {
             registered, mailbox,
             "registered mailbox id must match precomputed id from name hash",
         );
+
+        // Issue #403: derive auto-subscriptions from the handler
+        // manifest now that the mailbox is registered. The guest SDK
+        // no longer fires `subscribe_input` mail during `init` for the
+        // six fixed substrate input streams; the substrate wires them
+        // directly so the subscribe is observable the moment the
+        // component is reachable.
+        auto_subscribe_inputs(&self.input_subscribers, mailbox, &capabilities);
 
         self.insert_component(mailbox, component);
         self.announce_kinds();
@@ -567,6 +636,16 @@ impl ControlPlane {
             Arc::clone(&self.queue),
         );
 
+        // Issue #403: drive auto-subscriptions substrate-side here
+        // too, now that the SDK walker is retired. Replace is
+        // additive — existing subscriptions (whether they came from
+        // the prior binary's manifest or from a runtime
+        // `ctx.subscribe_input::<K>()` call) are preserved (ADR-0021
+        // §4: "subscriptions are preserved across replace_component").
+        // We only ensure the new manifest's input streams are wired,
+        // matching the pre-#403 SDK walker behaviour.
+        auto_subscribe_inputs(&self.input_subscribers, id, &capabilities);
+
         self.announce_kinds();
         ReplaceResult::Ok { capabilities }
     }
@@ -619,7 +698,7 @@ mod tests {
             LoadResult::Ok {
                 mailbox_id: MailboxId(7),
                 name: "x".into(),
-                capabilities: aether_kinds::ComponentCapabilities::default(),
+                capabilities: ComponentCapabilities::default(),
             },
             LoadResult::Err {
                 error: "nope".into(),
@@ -1567,8 +1646,10 @@ mod tests {
     // replace-preserves-subscriptions. `make_plane` already threads an
     // empty `InputSubscribers` into the handler, so these tests only
     // need to load a component and exercise the subscribe surface.
-
-    use aether_kinds::{InputStream, SubscribeInput, SubscribeInputResult, UnsubscribeInput};
+    // (The types these tests use — `InputStream`, `SubscribeInput`,
+    // `SubscribeInputResult`, `UnsubscribeInput` — come in via the
+    // top-level `use aether_kinds::{...}` plus the test mod's
+    // `use super::*;`; no inline import needed.)
 
     fn subs(plane: &ControlPlane, stream: InputStream) -> std::collections::BTreeSet<MailboxId> {
         plane
@@ -1779,6 +1860,101 @@ mod tests {
         assert!(matches!(result, ReplaceResult::Ok { .. }));
         assert!(subs(&plane, InputStream::Tick).contains(&MailboxId(id)));
         assert!(subs(&plane, InputStream::Key).contains(&MailboxId(id)));
+    }
+
+    #[test]
+    fn auto_subscribe_inputs_wires_known_streams_from_capabilities() {
+        // Issue #403 regression: a component declaring an input handler
+        // in its `aether.kinds.inputs` manifest must end up in the
+        // matching stream's subscriber set after `handle_load` /
+        // `handle_replace` register it. Pre-fix the SDK fired
+        // `subscribe_input` mail during `init`, before the mailbox was
+        // in the registry, and `validate_subscriber_mailbox` rejected
+        // the unknown id — silently. The substrate now derives the
+        // subscriptions from the manifest after registering, and this
+        // test pins that wiring.
+        let mailbox = MailboxId(0xdead_beef);
+        let subscribers = input::new_subscribers();
+        let capabilities = ComponentCapabilities {
+            handlers: vec![
+                HandlerCapability {
+                    id: KindId(Tick::ID),
+                    name: Tick::NAME.into(),
+                    doc: None,
+                },
+                HandlerCapability {
+                    id: KindId(WindowSize::ID),
+                    name: WindowSize::NAME.into(),
+                    doc: None,
+                },
+                // User-space kinds fall through — the runtime API
+                // (`ctx.subscribe_input::<K>()`) handles those.
+                HandlerCapability {
+                    id: KindId(0xdeadbeef_cafef00d),
+                    name: "user.custom.event".into(),
+                    doc: None,
+                },
+            ],
+            fallback: None,
+            doc: None,
+        };
+        auto_subscribe_inputs(&subscribers, mailbox, &capabilities);
+        let snapshot = subscribers.read().unwrap();
+        assert!(
+            snapshot
+                .get(&InputStream::Tick)
+                .is_some_and(|set| set.contains(&mailbox)),
+            "Tick handler should auto-subscribe the mailbox",
+        );
+        assert!(
+            snapshot
+                .get(&InputStream::WindowSize)
+                .is_some_and(|set| set.contains(&mailbox)),
+            "WindowSize handler should auto-subscribe the mailbox",
+        );
+        for stream in [
+            InputStream::Key,
+            InputStream::KeyRelease,
+            InputStream::MouseMove,
+            InputStream::MouseButton,
+        ] {
+            assert!(
+                snapshot
+                    .get(&stream)
+                    .is_none_or(|set| !set.contains(&mailbox)),
+                "{stream:?} should not be subscribed when the manifest \
+                 doesn't declare its handler",
+            );
+        }
+    }
+
+    #[test]
+    fn input_stream_for_kind_id_covers_six_substrate_streams() {
+        let cases = [
+            (Tick::ID, InputStream::Tick),
+            (Key::ID, InputStream::Key),
+            (KeyRelease::ID, InputStream::KeyRelease),
+            (MouseMove::ID, InputStream::MouseMove),
+            (MouseButton::ID, InputStream::MouseButton),
+            (WindowSize::ID, InputStream::WindowSize),
+        ];
+        for (id, expected) in cases {
+            assert_eq!(input_stream_for_kind_id(KindId(id)), Some(expected));
+        }
+        // Non-input substrate kinds and user-space ids must return None
+        // so the runtime API stays the only path for non-stream
+        // subscriptions. `DrawTriangle::ID` covers the substrate-side
+        // ringer; the literal handles the user-space case.
+        assert_eq!(
+            input_stream_for_kind_id(KindId(DrawTriangle::ID)),
+            None,
+            "non-input substrate kinds must not auto-subscribe",
+        );
+        assert_eq!(
+            input_stream_for_kind_id(KindId(0xdeadbeef_cafef00d)),
+            None,
+            "user-space ids must not auto-subscribe",
+        );
     }
 
     #[test]

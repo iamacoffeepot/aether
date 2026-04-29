@@ -101,20 +101,41 @@ impl Component for MeshViewer {
     /// root and must end in `.dsl` or `.obj`.
     #[handler]
     fn on_load(&mut self, _ctx: &mut Ctx<'_>, msg: LoadMesh) {
+        tracing::info!(
+            target: "aether_mesh_viewer",
+            namespace = %msg.namespace,
+            path = %msg.path,
+            "load requested; issuing read",
+        );
         io::read(&msg.namespace, &msg.path);
     }
 
     /// Consumes the substrate's I/O reply. Dispatches on the echoed
     /// `path`'s extension and replaces the cached triangle list on
     /// success. Any failure (read error, non-utf8, parse error,
-    /// unknown extension) silently leaves the previous cache intact.
+    /// unknown extension) leaves the previous cache intact, with a
+    /// warn log explaining the failure.
     ///
     /// # Agent
     /// Substrate-driven; do not send manually.
     #[handler]
     fn on_read_result(&mut self, _ctx: &mut Ctx<'_>, r: ReadResult) {
-        let ReadResult::Ok { path, bytes, .. } = r else {
-            return;
+        let (path, bytes) = match r {
+            ReadResult::Ok { path, bytes, .. } => (path, bytes),
+            ReadResult::Err {
+                namespace,
+                path,
+                error,
+            } => {
+                tracing::warn!(
+                    target: "aether_mesh_viewer",
+                    namespace = %namespace,
+                    path = %path,
+                    error = ?error,
+                    "read failed; keeping prior mesh",
+                );
+                return;
+            }
         };
         let Ok(text) = core::str::from_utf8(&bytes) else {
             tracing::warn!(
@@ -171,12 +192,25 @@ impl MeshViewer {
                 out.push(to_draw_triangle_rgb(tri, OUTLINE_RGB));
             }
         }
+        tracing::info!(
+            target: "aether_mesh_viewer",
+            polygons = polygons.len(),
+            triangles = out.len(),
+            "DSL load complete; cache replaced",
+        );
         self.triangles = out;
     }
 
     fn try_replace_obj(&mut self, obj: &str) {
         match parse_obj(obj) {
-            Ok(tris) => self.triangles = tris,
+            Ok(tris) => {
+                tracing::info!(
+                    target: "aether_mesh_viewer",
+                    triangles = tris.len(),
+                    "OBJ load complete; cache replaced",
+                );
+                self.triangles = tris;
+            }
             Err(error) => tracing::warn!(
                 target: "aether_mesh_viewer",
                 error = ?error,
