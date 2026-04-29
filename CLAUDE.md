@@ -35,6 +35,17 @@ Claude drives a running engine through MCP — the concrete form of the "Claude-
 
 When verifying substrate behavior end-to-end, reach for the MCP harness before running a new test binary.
 
+## Smoke runner (ADR-0067)
+
+For Rust integration tests and CI gating that don't need a live MCP session, the **smoke runner** drives the same in-process substrate from a Rust thread. Three crates ship the surface:
+
+- **`aether-substrate-test-bench`** — `TestBench::start()` boots a full chassis (scheduler, mail queue, wgpu offscreen render target) on the test thread, with a loopback channel attached to outbound so substrate replies route back without going through a hub. `advance(ticks)`, `capture()`, `send_mail<K>()`, `send_bytes(name, kind_id, bytes)`.
+- **`aether-smoke`** — declarative `Script` of `Step`s (`Advance`, `Capture`, `Assert`, `LoadComponent`, `SendMail`) parsed from YAML. `Runner::run(&mut bench, &script)` walks the steps, encoding `SendMail` params via `aether-params-codec::encode_schema` against `aether_kinds::descriptors::all()` — same path the hub uses for `mcp__aether-hub__send_mail`, so any substrate kind is sendable from a script for free. Returns a `RunReport` with per-step pass/fail.
+- **`aether-smoke-cli`** — `aether-smoke <path.yml>` boots a TestBench, runs the script, prints a per-step report, exits 0/1. The agent-facing entry point.
+- **`aether-smoke-macros`** — `aether_smoke::smoke_dir!("smokes")` proc-macro emits one `#[test]` per `.yml` file under the named directory. Component crates author smokes as plain YAML and get IDE-runnable tests for free.
+
+Smokes need a wgpu adapter; CI installs `mesa-vulkan-drivers` on Linux runners and pre-builds component wasm before `cargo test`. Driverless dev boxes skip cleanly with an `eprintln!`. Reach for the smoke runner over a hand-rolled test binary when you want repeatable substrate verification in `cargo test`; reach for the MCP harness when you want exploratory or live observation.
+
 The observation path (ADR-0008) goes the other way: engines emit to the well-known sink `"hub.claude.broadcast"` and the hub fans out to every attached session. The live substrate binary pushes `aether.observation.frame_stats` there every 120 frames — a good smoke test for `receive_mail`. Components reply to a specific sender (Claude session or other component) via the `reply_mail` host fn (ADR-0013, ADR-0017), wrapped by `Ctx::reply` in the SDK.
 
 Input streams (tick, key, mouse_move, mouse_button) are publish/subscribe (ADR-0021): the substrate boots with empty subscriber sets and drops every input event until something subscribes. To wire a freshly-loaded component into the platform's event stream, mail `aether.control.subscribe_input` with `{ "stream": "Tick" | "Key" | "MouseMove" | "MouseButton", "mailbox": <id from load_result> }`. Multiple components may subscribe to the same stream; the substrate fans out to every subscriber. `aether.control.unsubscribe_input` removes one. Both reply via `aether.control.subscribe_input_result`. Subscriptions are auto-cleared when a component is dropped and preserved across `replace_component` (the mailbox id is stable).
