@@ -32,6 +32,7 @@
 use std::fmt;
 
 use aether_hub_protocol::{EnumVariant, NamedField, Primitive, SchemaType};
+use aether_mail::tagged_id;
 use serde_json::Value;
 
 #[derive(Debug)]
@@ -338,6 +339,40 @@ fn encode_postcard(
                 }),
             }
         }
+        // ADR-0065 typed id. Wire is a u64 varint; JSON is the
+        // ADR-0064 tagged-string form (`mbx-XXXX-XXXX-XXXX` etc.)
+        // for the post-migration shape, with a back-compat path that
+        // accepts a JSON number for callers (test fixtures, older
+        // examples) that haven't migrated yet.
+        SchemaType::TypeId(type_id) => {
+            let id = decode_type_id_value(value, *type_id, path)?;
+            write_varint_u64(out, id);
+            Ok(())
+        }
+    }
+}
+
+/// JSON → u64 helper for `SchemaType::TypeId(type_id)`. Accepts a
+/// tagged string (decoded via `tagged_id::decode_with_tag` against
+/// the expected `Tag` for `type_id`) or a JSON number (back-compat).
+/// Errors with `TypeMismatch` on any other shape, or
+/// `UnsupportedSchema` if the schema's `type_id` doesn't correspond
+/// to a typed-id newtype the codec knows how to translate.
+fn decode_type_id_value(value: &Value, type_id: u64, path: &str) -> Result<u64, EncodeError> {
+    let expected = aether_mail::tag_for_type_id(type_id)
+        .ok_or(EncodeError::UnsupportedSchema("unknown TypeId in schema"))?;
+    match value {
+        Value::String(s) => {
+            tagged_id::decode_with_tag(s, expected).map_err(|e| EncodeError::OutOfRange {
+                field: path.to_owned(),
+                reason: format!("invalid tagged id: {e}"),
+            })
+        }
+        Value::Number(_) => Ok(as_unsigned(value, path, "u64 (typed-id back-compat)")?),
+        _ => Err(EncodeError::TypeMismatch {
+            field: path.to_owned(),
+            expected: "tagged-id string or u64 number",
+        }),
     }
 }
 
@@ -660,6 +695,16 @@ fn encode_field_value(
         SchemaType::Struct { repr_c: false, .. } => Err(EncodeError::UnsupportedSchema(
             "Struct { repr_c: false } in cast-shaped parent",
         )),
+        SchemaType::TypeId(type_id) => {
+            // ADR-0065 typed id inside a `repr_c: true` parent. Wire
+            // is a u64 (8 bytes, 8-byte align — same as a `u64`
+            // scalar) so the typed wrapper doesn't disturb the
+            // parent's cast-eligibility.
+            pad_to(out, 8);
+            let id = decode_type_id_value(value, *type_id, name)?;
+            out.extend_from_slice(&id.to_le_bytes());
+            Ok(8)
+        }
         SchemaType::Bool
         | SchemaType::String
         | SchemaType::Bytes
@@ -679,6 +724,8 @@ fn encode_field_value(
 fn alignment_of_schema(ty: &SchemaType) -> Result<usize, EncodeError> {
     match ty {
         SchemaType::Scalar(p) => Ok(align_of_primitive(*p)),
+        // ADR-0065: typed ids are u64-shaped — 8 bytes, 8-byte align.
+        SchemaType::TypeId(_) => Ok(8),
         SchemaType::Array { element, .. } => alignment_of_schema(element),
         SchemaType::Struct {
             fields,
@@ -1381,6 +1428,92 @@ mod tests {
             .into(),
         };
         let err = encode_schema(&json!({"headers": {"k": "v"}}), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::UnsupportedSchema(_)));
+    }
+
+    // ADR-0065: typed-id JSON ↔ postcard.
+
+    #[test]
+    fn type_id_postcard_accepts_tagged_string() {
+        // `mailbox` field carrying a tagged `mbx-...` string lands as
+        // a postcard u64 varint — wire-identical to a raw `u64` field.
+        let schema = postcard_struct(vec![NamedField {
+            name: "mailbox".into(),
+            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+        }]);
+        let mailbox = aether_mail::MailboxId::from_name("aether.control");
+        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        let bytes = encode_schema(&json!({ "mailbox": s }), &schema).unwrap();
+        let mut expected = Vec::new();
+        write_varint_u64(&mut expected, mailbox.0);
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn type_id_postcard_accepts_raw_number_for_back_compat() {
+        // Pre-ADR-0065 callers passing a JSON number still work — the
+        // codec falls through to the back-compat `as_unsigned` path.
+        let schema = postcard_struct(vec![NamedField {
+            name: "mailbox".into(),
+            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+        }]);
+        let mailbox = aether_mail::MailboxId::from_name("aether.control");
+        let bytes = encode_schema(&json!({ "mailbox": mailbox.0 }), &schema).unwrap();
+        let mut expected = Vec::new();
+        write_varint_u64(&mut expected, mailbox.0);
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn type_id_postcard_rejects_wrong_tag() {
+        // A `KindId`-tagged string passed to a `MailboxId` field
+        // surfaces a typed `OutOfRange` so the agent learns the field
+        // expected `mbx-...` rather than corrupting the wire.
+        let schema = postcard_struct(vec![NamedField {
+            name: "mailbox".into(),
+            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+        }]);
+        let knd_string = aether_mail::tagged_id::encode(aether_mail::with_tag(
+            aether_mail::Tag::Kind,
+            0xdeadbeef,
+        ))
+        .unwrap();
+        let err = encode_schema(&json!({ "mailbox": knd_string }), &schema).unwrap_err();
+        assert!(matches!(err, EncodeError::OutOfRange { .. }));
+    }
+
+    #[test]
+    fn type_id_cast_struct_lays_out_as_u64() {
+        // Inside a `repr_c: true` parent, a typed-id field is 8 bytes
+        // LE at 8-byte alignment — same layout as a `u64`. Two-field
+        // `{ stream: u8, mailbox: MailboxId }` lays out as 1 + 7 pad +
+        // 8 = 16 bytes.
+        let schema = cast_struct(vec![
+            scalar("stream", Primitive::U8),
+            NamedField {
+                name: "mailbox".into(),
+                ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+            },
+        ]);
+        let mailbox = aether_mail::MailboxId::from_name("aether.control");
+        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        let bytes = encode_schema(&json!({ "stream": 1, "mailbox": s }), &schema).unwrap();
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(bytes[0], 1);
+        assert_eq!(&bytes[1..8], &[0u8; 7]);
+        assert_eq!(&bytes[8..16], &mailbox.0.to_le_bytes());
+    }
+
+    #[test]
+    fn type_id_postcard_rejects_unknown_type_id() {
+        // A schema declaring a `TypeId(...)` value the codec doesn't
+        // recognise must surface `UnsupportedSchema` rather than
+        // corrupt the wire or silently fall through.
+        let schema = postcard_struct(vec![NamedField {
+            name: "mystery".into(),
+            ty: SchemaType::TypeId(0xdead_beef_cafe_f00d),
+        }]);
+        let err = encode_schema(&json!({ "mystery": 0u64 }), &schema).unwrap_err();
         assert!(matches!(err, EncodeError::UnsupportedSchema(_)));
     }
 }

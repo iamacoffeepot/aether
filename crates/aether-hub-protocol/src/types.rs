@@ -116,6 +116,16 @@ pub enum SchemaType {
         key: SchemaCell,
         value: SchemaCell,
     },
+    /// ADR-0065: a first-class typed reference, identified by a
+    /// 64-bit type id (FNV-1a of the type's canonical name with a
+    /// disjoint `TYPE_DOMAIN` prefix). The codec's `TypeId` arm
+    /// hard-codes the per-id encode/decode logic — for v1, the three
+    /// known type ids are `MailboxId`, `KindId`, `HandleId`, all of
+    /// which are u64 varint on postcard and tagged-string on JSON.
+    /// Cast-shape size/align is 8 bytes, 8-byte align — same as a
+    /// `u64`, so a typed-id field embedded in a `repr_c: true`
+    /// struct keeps the parent's cast-eligibility.
+    TypeId(u64),
 }
 
 /// Recursion-breaking indirection for nested `SchemaType` fields
@@ -300,6 +310,9 @@ pub enum SchemaShape {
         key: Box<SchemaShape>,
         value: Box<SchemaShape>,
     },
+    /// ADR-0065 first-class typed reference. Wire-identical to
+    /// `SchemaType::TypeId(u64)`.
+    TypeId(u64),
 }
 
 /// Positional enum variant — `VariantShape::Tuple { discriminant, fields }`

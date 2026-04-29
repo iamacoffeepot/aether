@@ -12,8 +12,8 @@
 use crate::types::{EnumVariant, Primitive, SchemaCell, SchemaType};
 
 use super::primitives::{
-    cow_enum_variants, cow_named_fields, cow_schema_types, str_len, varint_u32_len,
-    varint_usize_len, write_str, write_varint_u32, write_varint_usize,
+    cow_enum_variants, cow_named_fields, cow_schema_types, str_len, varint_u32_len, varint_u64_len,
+    varint_usize_len, write_str, write_varint_u32, write_varint_u64, write_varint_usize,
 };
 
 const SCHEMA_UNIT: u8 = 0;
@@ -28,6 +28,7 @@ const SCHEMA_STRUCT: u8 = 8;
 const SCHEMA_ENUM: u8 = 9;
 const SCHEMA_REF: u8 = 10;
 const SCHEMA_MAP: u8 = 11;
+const SCHEMA_TYPE_ID: u8 = 12;
 
 const VARIANT_UNIT: u8 = 0;
 const VARIANT_TUPLE: u8 = 1;
@@ -79,6 +80,7 @@ pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
         }
         SchemaType::Ref(cell) => 1 + canonical_len_cell(cell),
         SchemaType::Map { key, value } => 1 + canonical_len_cell(key) + canonical_len_cell(value),
+        SchemaType::TypeId(id) => 1 + varint_u64_len(*id),
     }
 }
 
@@ -204,6 +206,7 @@ fn schema_to_shape(s: &SchemaType) -> crate::types::SchemaShape {
             key: alloc::boxed::Box::new(schema_to_shape(key)),
             value: alloc::boxed::Box::new(schema_to_shape(value)),
         },
+        SchemaType::TypeId(id) => SchemaShape::TypeId(*id),
     }
 }
 
@@ -363,6 +366,11 @@ const fn write_schema(schema: &SchemaType, out: &mut [u8], cursor: usize) -> usi
             pos += 1;
             pos = write_cell(key, out, pos);
             pos = write_cell(value, out, pos);
+        }
+        SchemaType::TypeId(id) => {
+            out[pos] = SCHEMA_TYPE_ID;
+            pos += 1;
+            pos = write_varint_u64(*id, out, pos);
         }
     }
     pos

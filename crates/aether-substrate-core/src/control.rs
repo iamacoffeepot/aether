@@ -342,7 +342,7 @@ impl ControlPlane {
             Ok(p) => p,
             Err(error) => return SubscribeInputResult::Err { error },
         };
-        let id = MailboxId(payload.mailbox);
+        let id = payload.mailbox;
         if let Err(e) = validate_subscriber_mailbox(&self.registry, id) {
             return SubscribeInputResult::Err { error: e };
         }
@@ -360,7 +360,7 @@ impl ControlPlane {
             Ok(p) => p,
             Err(error) => return SubscribeInputResult::Err { error },
         };
-        let id = MailboxId(payload.mailbox);
+        let id = payload.mailbox;
         // Unsubscribe is idempotent on "not currently subscribed" but
         // still validates the mailbox: an unknown or sink id is a
         // clear programming error, not something to swallow. A dropped
@@ -1504,7 +1504,13 @@ mod tests {
         mailbox: u64,
         stream: InputStream,
     ) -> SubscribeInputResult {
-        plane.handle_subscribe(&postcard::to_allocvec(&SubscribeInput { stream, mailbox }).unwrap())
+        plane.handle_subscribe(
+            &postcard::to_allocvec(&SubscribeInput {
+                stream,
+                mailbox: MailboxId(mailbox),
+            })
+            .unwrap(),
+        )
     }
 
     fn do_unsubscribe(
@@ -1513,7 +1519,11 @@ mod tests {
         stream: InputStream,
     ) -> SubscribeInputResult {
         plane.handle_unsubscribe(
-            &postcard::to_allocvec(&UnsubscribeInput { stream, mailbox }).unwrap(),
+            &postcard::to_allocvec(&UnsubscribeInput {
+                stream,
+                mailbox: MailboxId(mailbox),
+            })
+            .unwrap(),
         )
     }
 
@@ -1687,7 +1697,7 @@ mod tests {
             crate::mail::ReplyTo::NONE,
             &postcard::to_allocvec(&SubscribeInput {
                 stream: InputStream::Tick,
-                mailbox: id,
+                mailbox: MailboxId(id),
             })
             .unwrap(),
         );
@@ -1697,7 +1707,7 @@ mod tests {
             crate::mail::ReplyTo::NONE,
             &postcard::to_allocvec(&UnsubscribeInput {
                 stream: InputStream::Tick,
-                mailbox: id,
+                mailbox: MailboxId(id),
             })
             .unwrap(),
         );

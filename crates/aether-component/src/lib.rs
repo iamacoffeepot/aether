@@ -391,7 +391,7 @@ impl InitCtx<'_> {
         };
         let payload = SubscribeInput {
             stream,
-            mailbox: self.mailbox,
+            mailbox: ::aether_mail::MailboxId(self.mailbox),
         };
         resolve_sink::<SubscribeInput>("aether.control").send(&payload);
     }

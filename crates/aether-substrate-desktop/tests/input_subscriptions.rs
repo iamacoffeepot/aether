@@ -153,11 +153,23 @@ fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> u64 {
 }
 
 fn subscribe(plane: &ControlPlane, stream: InputStream, mailbox: u64) {
-    dispatch(plane, &SubscribeInput { stream, mailbox });
+    dispatch(
+        plane,
+        &SubscribeInput {
+            stream,
+            mailbox: aether_mail::MailboxId(mailbox),
+        },
+    );
 }
 
 fn unsubscribe(plane: &ControlPlane, stream: InputStream, mailbox: u64) {
-    dispatch(plane, &UnsubscribeInput { stream, mailbox });
+    dispatch(
+        plane,
+        &UnsubscribeInput {
+            stream,
+            mailbox: aether_mail::MailboxId(mailbox),
+        },
+    );
 }
 
 fn drop_component(plane: &ControlPlane, mailbox_id: u64) {

@@ -409,6 +409,9 @@ pub fn schema_contains_ref(schema: &SchemaType) -> bool {
         // those defensively rather than the type system, so be
         // conservative and walk both sides.
         SchemaType::Map { key, value } => schema_contains_ref(key) || schema_contains_ref(value),
+        // ADR-0065: typed-id leaves carry no nested fields and so
+        // can never embed a `Ref`.
+        SchemaType::TypeId(_) => false,
     }
 }
 
@@ -666,6 +669,13 @@ fn walk(
                 }
                 _ => Err(WalkError::UnknownRefDiscriminant),
             }
+        }
+        // ADR-0065: typed-id wire is a u64 varint regardless of
+        // which `TYPE_ID` is set. Skip the varint; nothing to
+        // resolve since typed-ids don't embed `Ref`s.
+        SchemaType::TypeId(_) => {
+            state.skip_varint()?;
+            Ok(None)
         }
     }
 }
