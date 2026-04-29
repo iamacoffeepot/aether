@@ -459,15 +459,20 @@ mod tests {
     #[tokio::test]
     async fn describe_component_returns_stored_capabilities() {
         use crate::registry::ComponentRecord;
+        use aether_mail::tagged_id::{self, Tag};
+        use aether_mail::with_tag;
 
         let engines = EngineRegistry::new();
         let (rec, _rx) = record(50);
         let id = rec.id;
         engines.insert(rec);
         let capabilities = stub_capabilities();
+        // ADR-0064: registry stores raw u64 with tag bits set; the
+        // wire form is the tagged-string encoding of that u64.
+        let mailbox_id = with_tag(Tag::Mailbox, 7);
         engines.upsert_component(
             &id,
-            7,
+            mailbox_id,
             ComponentRecord {
                 name: "hello".into(),
                 capabilities: capabilities.clone(),
@@ -478,7 +483,7 @@ mod tests {
         let json = hub
             .describe_component(Parameters(args::DescribeComponentArgs {
                 engine_id: id.0.to_string(),
-                mailbox_id: "7".into(),
+                mailbox_id: tagged_id::encode(mailbox_id).unwrap(),
             }))
             .await
             .unwrap();
@@ -496,8 +501,58 @@ mod tests {
 
     #[tokio::test]
     async fn describe_component_unknown_mailbox_errors() {
+        use aether_mail::tagged_id::{self, Tag};
+        use aether_mail::with_tag;
+
         let engines = EngineRegistry::new();
         let (rec, _rx) = record(51);
+        let id = rec.id;
+        engines.insert(rec);
+        let hub = Hub::new(test_state(engines, SessionRegistry::new()));
+
+        let bogus = tagged_id::encode(with_tag(Tag::Mailbox, 999)).unwrap();
+        let err = hub
+            .describe_component(Parameters(args::DescribeComponentArgs {
+                engine_id: id.0.to_string(),
+                mailbox_id: bogus.clone(),
+            }))
+            .await
+            .unwrap_err();
+        // The error message echoes the original tagged-string form so
+        // the agent sees back what they passed in (not a re-encoded
+        // u64). Asserting on the prefix keeps the test robust to the
+        // base32 body's exact bytes.
+        let msg = format!("{err:?}");
+        assert!(msg.contains("no component at mailbox_id"));
+        assert!(msg.contains(&bogus));
+    }
+
+    #[tokio::test]
+    async fn describe_component_unknown_engine_errors() {
+        use aether_mail::tagged_id::{self, Tag};
+        use aether_mail::with_tag;
+
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
+        let hub = Hub::new(state);
+
+        let err = hub
+            .describe_component(Parameters(args::DescribeComponentArgs {
+                engine_id: Uuid::from_u128(0xdead).to_string(),
+                mailbox_id: tagged_id::encode(with_tag(Tag::Mailbox, 0)).unwrap(),
+            }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("unknown engine_id"));
+    }
+
+    #[tokio::test]
+    async fn describe_component_rejects_malformed_mailbox_id() {
+        // ADR-0064: a bare-number mailbox id is no longer valid wire
+        // form. Reject at the boundary with a typed error so the
+        // agent sees a clear "looks malformed" signal rather than a
+        // mysterious lookup miss.
+        let engines = EngineRegistry::new();
+        let (rec, _rx) = record(52);
         let id = rec.id;
         engines.insert(rec);
         let hub = Hub::new(test_state(engines, SessionRegistry::new()));
@@ -509,22 +564,34 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert!(format!("{err:?}").contains("no component at mailbox_id 999"));
+        assert!(format!("{err:?}").to_lowercase().contains("mailbox_id"));
     }
 
     #[tokio::test]
-    async fn describe_component_unknown_engine_errors() {
-        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
-        let hub = Hub::new(state);
+    async fn describe_component_rejects_wrong_tag() {
+        // Passing a kind id (`knd-...`) where a mailbox id is expected
+        // is exactly what the tag bits exist to catch. Verify the
+        // boundary surfaces it as a tag-mismatch error rather than
+        // silently treating the kind id as a mailbox id and missing
+        // the lookup.
+        use aether_mail::tagged_id::{self, Tag};
+        use aether_mail::with_tag;
 
+        let engines = EngineRegistry::new();
+        let (rec, _rx) = record(53);
+        let id = rec.id;
+        engines.insert(rec);
+        let hub = Hub::new(test_state(engines, SessionRegistry::new()));
+
+        let kind_form = tagged_id::encode(with_tag(Tag::Kind, 42)).unwrap();
         let err = hub
             .describe_component(Parameters(args::DescribeComponentArgs {
-                engine_id: Uuid::from_u128(0xdead).to_string(),
-                mailbox_id: "0".into(),
+                engine_id: id.0.to_string(),
+                mailbox_id: kind_form,
             }))
             .await
             .unwrap_err();
-        assert!(format!("{err:?}").contains("unknown engine_id"));
+        assert!(format!("{err:?}").contains("tag mismatch"));
     }
 
     async fn push_queued(sessions: &SessionRegistry, token: SessionToken, mail: QueuedMail) {
