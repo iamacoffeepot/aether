@@ -18,13 +18,7 @@
 use alloc::string::String;
 use core::fmt;
 
-/// Mask isolating the 60-bit hash body inside a tagged `u64`. Used
-/// by `with_tag` to drop the hash's natural high bits before OR-ing
-/// in the tag, and by `body_of` for tag-stripping.
-pub const HASH_MASK: u64 = 0x0FFF_FFFF_FFFF_FFFF;
-
-/// Bit-shift placing the 4-bit tag in the high nibble of a `u64`.
-pub const TAG_SHIFT: u32 = 60;
+pub use aether_hub_protocol::tag_bits::{HASH_MASK, TAG_HANDLE, TAG_KIND, TAG_MAILBOX, TAG_SHIFT};
 
 /// Type tag identifying an id space. Encoded in the high 4 bits of
 /// every tagged id. `0x0` is reserved as an invalid sentinel — a
@@ -35,11 +29,11 @@ pub const TAG_SHIFT: u32 = 60;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Tag {
     /// Mailbox id (ADR-0029) — recipient of mail.
-    Mailbox = 0x1,
+    Mailbox = TAG_MAILBOX,
     /// Kind id (ADR-0030) — schema-hashed payload identity.
-    Kind = 0x2,
+    Kind = TAG_KIND,
     /// Handle id (ADR-0045) — entry in the substrate's handle store.
-    Handle = 0x3,
+    Handle = TAG_HANDLE,
 }
 
 impl Tag {
@@ -59,9 +53,9 @@ impl Tag {
     /// for any reserved-future value (`0x4..=0xF`).
     pub const fn from_bits(bits: u8) -> Option<Tag> {
         match bits {
-            0x1 => Some(Tag::Mailbox),
-            0x2 => Some(Tag::Kind),
-            0x3 => Some(Tag::Handle),
+            TAG_MAILBOX => Some(Tag::Mailbox),
+            TAG_KIND => Some(Tag::Kind),
+            TAG_HANDLE => Some(Tag::Handle),
             _ => None,
         }
     }
