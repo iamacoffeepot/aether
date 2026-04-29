@@ -630,7 +630,7 @@ mod tests {
         use crate::hub_client::HubOutbound;
         use crate::mail::MailboxId as M;
 
-        let (outbound, rx) = HubOutbound::test_channel();
+        let (outbound, rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let pong_id = registry
             .register_kind_with_descriptor(KindDescriptor {
@@ -712,7 +712,7 @@ mod tests {
         use crate::hub_client::HubOutbound;
         use crate::mail::MailboxId as M;
 
-        let (outbound, rx) = HubOutbound::test_channel();
+        let (outbound, rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let caller = registry.register_component("caller");
         let pong_id = registry

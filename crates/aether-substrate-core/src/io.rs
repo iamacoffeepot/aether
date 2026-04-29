@@ -736,7 +736,7 @@ mod tests {
     // against a tempdir, pushes encoded mail bytes through the
     // handler closure, and reads the outbound reply channel to
     // confirm the correct `*Result` variant was sent back. The
-    // outbound is built via `HubOutbound::test_channel` which skips
+    // outbound is built via `HubOutbound::attached_loopback` which skips
     // the TCP plumbing but keeps `send_reply`'s encode path live.
 
     use crate::hub_client::HubOutbound;
@@ -763,7 +763,7 @@ mod tests {
         use std::collections::HashMap;
         use std::sync::RwLock;
 
-        let (outbound, rx) = HubOutbound::test_channel();
+        let (outbound, rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(
             Arc::new(crate::registry::Registry::new()),
@@ -1088,7 +1088,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let caller_mailbox = registry.register_component("test_caller");
         let components: crate::scheduler::ComponentTable = Arc::new(RwLock::new(HashMap::new()));
-        let (outbound, _outbound_rx) = HubOutbound::test_channel();
+        let (outbound, _outbound_rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(Arc::clone(&registry), Arc::clone(&components));
         mailer.wire_outbound(Arc::clone(&outbound));

@@ -414,7 +414,7 @@ mod tests {
     /// mailbox id / kind / payload / count the caller pushed.
     #[test]
     fn unknown_mailbox_with_connected_outbound_bubbles_up() {
-        let (outbound, outbound_rx) = HubOutbound::test_channel();
+        let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let components = Arc::new(RwLock::new(HashMap::new()));
 
