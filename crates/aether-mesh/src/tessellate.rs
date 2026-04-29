@@ -59,7 +59,7 @@ pub fn run(polygons: Vec<Polygon>) -> Vec<Polygon> {
 /// coordinates and returns integer triangles — same coordinate type
 /// the BSP CSG core and cleanup pipeline use, so no f32 round-trip
 /// happens inside the mesh pipeline. The f32 conversion happens at
-/// the GPU upload site (`aether-mesh-editor-component`).
+/// the GPU upload site (`aether-mesh-viewer-component`).
 ///
 /// `outer` is the CCW outer boundary; `holes` are CW inner boundaries.
 /// `plane_normal` is the polygon's authoritative face normal — CDT

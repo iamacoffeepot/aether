@@ -152,7 +152,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-mesh-editor-component"
+name = "aether-mesh-viewer-component"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-component",
@@ -160,14 +160,6 @@ dependencies = [
  "aether-math",
  "aether-mesh",
  "tracing",
-]
-
-[[package]]
-name = "aether-static-mesh-component"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-component",
- "aether-kinds",
 ]
 
 [[package]]

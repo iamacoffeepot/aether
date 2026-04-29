@@ -1457,77 +1457,38 @@ mod control_plane {
     }
 }
 
-pub use dsl_mesh::*;
+pub use mesh_viewer::*;
 
-/// DSL mesh editor component vocabulary (ADR-0052). The editor accepts
-/// a `.dsl` source (per ADR-0026 + ADR-0051), parses + meshes it, and
-/// replays the triangle list as `DrawTriangle` mail every tick. Hot
-/// reload is by-replacement: each `SetText` / successful `SetPath` reply
-/// drops the prior cache wholesale and installs the new triangles.
+/// Mesh viewer vocabulary. The mesh viewer component
+/// (`crates/aether-mesh-viewer-component/`) loads a mesh file from the
+/// substrate's I/O surface (ADR-0041 namespace + path) and replays it
+/// as `DrawTriangle` mail every tick. It dispatches on file extension:
+/// `.dsl` runs through the `aether-mesh` parser+mesher (ADR-0026 +
+/// ADR-0051) and emits polygon-edge wireframes alongside filled
+/// triangles; `.obj` is parsed as triangulated Wavefront geometry with
+/// no wireframe.
 ///
-/// The editor that previously held a stateful vertex/face graph and
-/// accepted `aether.mesh.set_primitive` / `translate_vertices` /
-/// `scale_vertices` / `rotate_vertices` / `extrude_face` /
-/// `delete_faces` / `describe` was retired in ADR-0052. Edits happen
-/// by rewriting DSL text, not by mutating an off-screen state graph.
-mod dsl_mesh {
+/// This component supersedes `aether-mesh-editor-component` (the
+/// inline-DSL `set_text` path) and `aether-static-mesh-component` (the
+/// OBJ-only path). The DSL is still the authoring path per ADR-0052;
+/// iteration is now write-file-then-load instead of inline mail.
+mod mesh_viewer {
     use alloc::string::String;
     use serde::{Deserialize, Serialize};
 
-    /// `aether.mesh.set_text` — replace the editor's cached mesh
-    /// with the result of parsing + meshing the supplied DSL text.
-    /// Inline; no I/O. Fire-and-forget; the next tick renders the new
-    /// mesh. Parse or mesh failures silently keep the prior cache;
-    /// errors surface via `engine_logs`.
+    /// `aether.mesh.load` — instruct the mesh viewer to load and display
+    /// the file at `namespace://path`. The viewer dispatches on the
+    /// file extension: `.dsl` runs through `aether-mesh`'s parser +
+    /// mesher; `.obj` runs through the OBJ parser. Subsequent `Load`
+    /// mails replace the cached mesh. Fire-and-forget; errors surface
+    /// in `engine_logs`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.set_text")]
-    pub struct SetText {
-        /// The DSL source text. See `crates/aether-mesh/examples/`
-        /// for shipped examples (box, lamp_post, teapot).
-        pub dsl: String,
-    }
-
-    /// `aether.mesh.set_path` — instruct the editor to load DSL
-    /// text from the substrate's I/O surface (ADR-0041 namespace +
-    /// path), then parse + mesh + replace the cached triangles. The
-    /// editor fires an `aether.io.read` to the `"aether.sink.io"` sink and
-    /// processes the reply when it arrives. Fire-and-forget on the
-    /// caller's side; the load is asynchronous.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.mesh.set_path")]
-    pub struct SetPath {
+    #[kind(name = "aether.mesh.load")]
+    pub struct LoadMesh {
         /// Short namespace prefix (no `://`), e.g. `"save"`, `"assets"`.
         pub namespace: String,
-        /// Relative path within the namespace.
-        pub path: String,
-    }
-}
-
-pub use static_mesh::*;
-
-/// Static mesh viewer vocabulary. The static-mesh component
-/// (`crates/aether-static-mesh-component/`) loads a Wavefront OBJ file
-/// from the substrate's I/O surface (ADR-0041 namespace + path), parses
-/// it once, and replays the triangle list as `DrawTriangle` mail every
-/// tick. It exists as a developer aid for inspecting the output of the
-/// `aether-mesh` mesher in the substrate's render path; ADR-0026's
-/// rejection of conventional asset import targets *production* content,
-/// not dev-tooling viewers.
-mod static_mesh {
-    use alloc::string::String;
-    use serde::{Deserialize, Serialize};
-
-    /// `aether.static_mesh.load` — instruct the static-mesh component to
-    /// load and display an OBJ file. The component sends a corresponding
-    /// `aether.io.read` to the substrate's `"aether.sink.io"` sink and parses the
-    /// reply. Subsequent `Load` mails replace the cached mesh.
-    /// Fire-and-forget; errors surface in `engine_logs`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.static_mesh.load")]
-    pub struct LoadStaticMesh {
-        /// Short namespace prefix (no `://`), e.g. `"save"`, `"assets"`.
-        pub namespace: String,
-        /// Relative path within the namespace.
+        /// Relative path within the namespace. Extension picks the
+        /// parser: `.dsl` or `.obj`. Other extensions are rejected.
         pub path: String,
     }
 }
