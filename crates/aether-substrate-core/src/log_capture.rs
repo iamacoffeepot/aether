@@ -22,7 +22,7 @@
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -52,6 +52,13 @@ const BATCH_TRIGGER_INTERVAL: Duration = Duration::from_millis(250);
 /// Env var name for overriding the default filter.
 const FILTER_ENV: &str = "AETHER_LOG_FILTER";
 
+/// Process-lifetime handle to the capture ring, populated by `init`.
+/// `flush_now` reads this so `lifecycle::fatal_abort` can drain the
+/// ring synchronously before the substrate exits (ADR-0063); the
+/// background flush thread on a 250 ms timer can't be relied on when
+/// the process is about to call `std::process::exit`.
+static CAPTURE: OnceLock<Arc<Inner>> = OnceLock::new();
+
 /// Install the global tracing subscriber and spawn the flush thread.
 ///
 /// `outbound` is the same handle the hub client populates; this lets
@@ -80,11 +87,45 @@ pub fn init(outbound: Arc<HubOutbound>) {
         .is_ok();
 
     if registered {
+        // Publish the ring handle for `flush_now`. Set on first init
+        // only; subsequent inits (chassis re-entry / tests) are no-ops
+        // because `try_init` already returned false above.
+        let _ = CAPTURE.set(Arc::clone(&inner));
+
         let flusher = Arc::clone(&inner);
         thread::Builder::new()
             .name("aether-log-flush".into())
             .spawn(move || flush_loop(flusher))
             .expect("spawn flush thread");
+    }
+}
+
+/// Synchronously drain the capture ring and push it through the
+/// configured `HubOutbound` on the calling thread. Used by
+/// `lifecycle::fatal_abort` (ADR-0063) immediately before
+/// `std::process::exit` so the abort log lands in `engine_logs`
+/// instead of being lost with the process.
+///
+/// No-op if `init` was never called (e.g. unit tests that don't boot
+/// the global subscriber). Safe to call from any thread.
+pub fn flush_now() {
+    if let Some(inner) = CAPTURE.get() {
+        flush_into(inner);
+    }
+}
+
+/// Inner half of `flush_now` — does the synchronous take + send
+/// against an explicit `Inner`. Pulled out so tests can drive the
+/// drain path against a test channel without touching the
+/// process-global `CAPTURE` static (which `init` populates exactly
+/// once for the substrate's lifetime).
+fn flush_into(inner: &Inner) {
+    let batch = {
+        let mut s = inner.state.lock().unwrap();
+        take_batch(&mut s)
+    };
+    if !batch.is_empty() {
+        inner.outbound.send(EngineToHub::LogBatch(batch));
     }
 }
 
@@ -343,6 +384,34 @@ mod tests {
         assert_eq!(batch[1].message, "kept");
         // Counter resets after flush.
         assert_eq!(s.dropped_since_last_flush, 0);
+    }
+
+    /// ADR-0063: `flush_into` (the inner half of `flush_now`) drains
+    /// the ring on the calling thread — no background flusher
+    /// involvement, so a `fatal_abort` flushing immediately before
+    /// `process::exit` actually lands the abort log on the engine
+    /// TCP. Subsequent flushes are no-ops because the ring is empty.
+    #[test]
+    fn flush_into_drains_synchronously_on_calling_thread() {
+        let (inner, rx) = make_inner();
+        inner.push(LogLevel::Error, "lifecycle".into(), "abort msg".into());
+        inner.push(LogLevel::Warn, "lifecycle".into(), "secondary".into());
+
+        flush_into(&inner);
+
+        let frame = rx.try_recv().expect("flush_into should send a batch");
+        let EngineToHub::LogBatch(batch) = frame else {
+            panic!("unexpected frame variant: {frame:?}");
+        };
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].message, "abort msg");
+        assert_eq!(batch[1].message, "secondary");
+
+        // Re-flushing an empty ring is a no-op — no extra frame on
+        // the channel, ring stays empty.
+        flush_into(&inner);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(inner.state.lock().unwrap().entries.len(), 0);
     }
 
     #[test]

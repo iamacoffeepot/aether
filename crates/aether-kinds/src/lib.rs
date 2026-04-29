@@ -461,6 +461,26 @@ pub struct ComponentDied {
     pub reason: alloc::string::String,
 }
 
+/// Final broadcast emitted by the substrate before `lifecycle::
+/// fatal_abort` calls `std::process::exit` (ADR-0063). Tells attached
+/// hub sessions that the substrate is going down on purpose, with a
+/// human-readable reason. Distinct from `ComponentDied`: the latter
+/// fires per dying component while the substrate keeps running;
+/// `SubstrateDying` fires once, immediately before exit, regardless of
+/// whether the cause was a component death or a wedged dispatcher.
+///
+/// `reason` is the same string that lands in `engine_logs` (e.g.
+/// `"component died: <kind> ..."` or `"dispatcher wedged: mailbox=...
+/// waited=5s"`). Receivers should treat this as the engine's last
+/// word — the TCP connection drops moments later.
+#[derive(
+    aether_mail::Kind, aether_mail::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
+)]
+#[kind(name = "aether.observation.substrate_dying")]
+pub struct SubstrateDying {
+    pub reason: alloc::string::String,
+}
+
 /// Diagnostic the hub emits back to an originating engine when mail
 /// that engine bubbled up (ADR-0037) doesn't resolve at the hub
 /// either. Lands on the engine's `aether.diagnostics` sink, which

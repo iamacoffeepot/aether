@@ -210,6 +210,18 @@ impl Mailer {
         let components = self.components.get().expect("Mailer not wired");
         crate::scheduler::drain_all(components);
     }
+
+    /// Budget-aware variant of `drain_all` (ADR-0063). Returns a
+    /// `DrainSummary` the chassis matches on to detect dispatcher
+    /// deaths and wedges; on either, the chassis routes through
+    /// `lifecycle::fatal_abort`.
+    pub fn drain_all_with_budget(
+        &self,
+        budget: std::time::Duration,
+    ) -> crate::scheduler::DrainSummary {
+        let components = self.components.get().expect("Mailer not wired");
+        crate::scheduler::drain_all_with_budget(components, budget)
+    }
 }
 
 impl Default for Mailer {
