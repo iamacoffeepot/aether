@@ -1341,6 +1341,39 @@ mod control_plane {
 
     // ADR-0066: `aether.mesh.load` moved to the `aether-mesh-viewer`
     // trunk crate.
+
+    /// `aether.test_bench.advance` — request the test-bench chassis
+    /// step the world forward by `ticks` Tick events. Each tick
+    /// dispatches a `Tick` mail to every subscriber, drains the
+    /// resulting mail to quiescence, and renders one frame. Replies
+    /// with `AdvanceResult` once all ticks have completed.
+    ///
+    /// The test-bench chassis is event-driven (ADR-0067): without
+    /// an `advance` request the world doesn't tick at all. Smoke
+    /// scripts pair this with `capture_frame` to drive deterministic
+    /// "send mail → step N → capture" cycles. Other chassis reply
+    /// `Err { error: "unsupported on <kind> chassis" }` so callers
+    /// fail fast.
+    ///
+    /// Reply: `AdvanceResult`.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.test_bench.advance")]
+    pub struct Advance {
+        pub ticks: u32,
+    }
+
+    /// Reply to `Advance`. `Ok` echoes the number of ticks completed
+    /// (always equal to the request's `ticks` on the happy path —
+    /// the variant is structured so a future partial-completion
+    /// outcome can extend it without widening the kind). `Err`
+    /// carries a free-form reason: chassis doesn't support advance,
+    /// dispatcher wedged mid-advance, etc.
+    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.test_bench.advance_result")]
+    pub enum AdvanceResult {
+        Ok { ticks_completed: u32 },
+        Err { error: String },
+    }
 }
 
 #[cfg(test)]

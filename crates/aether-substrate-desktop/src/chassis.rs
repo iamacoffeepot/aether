@@ -17,8 +17,8 @@
 use std::sync::Arc;
 
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult, WindowMode,
+    Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode,
+    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, WindowMode,
 };
 use aether_mail::Kind;
 use aether_substrate_core::{
@@ -92,6 +92,15 @@ pub fn chassis_control_handler(
                 handle_set_window_mode(&proxy, &outbound, sender, bytes);
             } else if kind_id == SetWindowTitle::ID {
                 handle_set_window_title(&proxy, &outbound, sender, bytes);
+            } else if kind_id == Advance::ID {
+                outbound.send_reply(
+                    sender,
+                    &AdvanceResult::Err {
+                        error: "unsupported on desktop chassis — aether.test_bench.advance is \
+                                test-bench-only (ADR-0067)"
+                            .to_owned(),
+                    },
+                );
             } else {
                 tracing::warn!(
                     target: "aether_substrate::chassis",

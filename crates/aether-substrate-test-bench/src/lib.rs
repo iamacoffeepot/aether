@@ -14,6 +14,7 @@
 
 pub mod capture;
 pub mod chassis;
+pub mod events;
 pub mod render;
 
 pub use aether_substrate_core::{

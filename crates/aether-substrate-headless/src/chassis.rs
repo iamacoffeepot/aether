@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult,
+    Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode,
+    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
 };
 use aether_mail::Kind;
 use aether_substrate_core::{ChassisControlHandler, HubOutbound, ReplyTo};
@@ -43,6 +43,15 @@ pub fn chassis_control_handler(outbound: Arc<HubOutbound>) -> ChassisControlHand
                     sender,
                     &SetWindowTitleResult::Err {
                         error: UNSUPPORTED.to_owned(),
+                    },
+                );
+            } else if kind_id == Advance::ID {
+                outbound.send_reply(
+                    sender,
+                    &AdvanceResult::Err {
+                        error: "unsupported on headless chassis — aether.test_bench.advance is \
+                                test-bench-only (ADR-0067)"
+                            .to_owned(),
                     },
                 );
             } else if kind_id == PlatformInfo::ID {
