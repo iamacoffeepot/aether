@@ -455,7 +455,7 @@ pub struct FrameStats {
 )]
 #[kind(name = "aether.observation.component_died")]
 pub struct ComponentDied {
-    pub mailbox_id: u64,
+    pub mailbox_id: aether_mail::MailboxId,
     pub mailbox_name: alloc::string::String,
     pub last_kind: alloc::string::String,
     pub reason: alloc::string::String,
@@ -507,8 +507,8 @@ pub struct SubstrateDying {
 )]
 #[kind(name = "aether.mail.unresolved")]
 pub struct UnresolvedMail {
-    pub recipient_mailbox_id: u64,
-    pub kind_id: u64,
+    pub recipient_mailbox_id: aether_mail::MailboxId,
+    pub kind_id: aether_mail::KindId,
 }
 
 // Reserved control-plane vocabulary (ADR-0010). The substrate handles
@@ -557,7 +557,7 @@ mod control_plane {
     #[kind(name = "aether.control.load_result")]
     pub enum LoadResult {
         Ok {
-            mailbox_id: u64,
+            mailbox_id: aether_mail::MailboxId,
             name: String,
             capabilities: ComponentCapabilities,
         },
@@ -588,7 +588,7 @@ mod control_plane {
     /// `# Agent` section convention when present, else the full doc.
     #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct HandlerCapability {
-        pub id: u64,
+        pub id: aether_mail::KindId,
         pub name: String,
         pub doc: Option<String>,
     }
@@ -607,7 +607,7 @@ mod control_plane {
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.drop_component")]
     pub struct DropComponent {
-        pub mailbox_id: u64,
+        pub mailbox_id: aether_mail::MailboxId,
     }
 
     /// Reply to `DropComponent`. `Ok` on success; `Err` if the
@@ -630,7 +630,7 @@ mod control_plane {
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.replace_component")]
     pub struct ReplaceComponent {
-        pub mailbox_id: u64,
+        pub mailbox_id: aether_mail::MailboxId,
         pub wasm: Vec<u8>,
         pub drain_timeout_ms: Option<u32>,
     }
@@ -1312,7 +1312,7 @@ mod control_plane {
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.publish")]
     pub struct HandlePublish {
-        pub kind_id: u64,
+        pub kind_id: aether_mail::KindId,
         pub bytes: Vec<u8>,
     }
 
@@ -1323,8 +1323,14 @@ mod control_plane {
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.publish_result")]
     pub enum HandlePublishResult {
-        Ok { kind_id: u64, id: u64 },
-        Err { kind_id: u64, error: HandleError },
+        Ok {
+            kind_id: aether_mail::KindId,
+            id: aether_mail::HandleId,
+        },
+        Err {
+            kind_id: aether_mail::KindId,
+            error: HandleError,
+        },
     }
 
     /// `aether.handle.release` — drop one reference on `id`. Reply:
@@ -1334,7 +1340,7 @@ mod control_plane {
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.release")]
     pub struct HandleRelease {
-        pub id: u64,
+        pub id: aether_mail::HandleId,
     }
 
     /// Reply to `HandleRelease`. Both arms echo the originating
@@ -1342,8 +1348,13 @@ mod control_plane {
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.release_result")]
     pub enum HandleReleaseResult {
-        Ok { id: u64 },
-        Err { id: u64, error: HandleError },
+        Ok {
+            id: aether_mail::HandleId,
+        },
+        Err {
+            id: aether_mail::HandleId,
+            error: HandleError,
+        },
     }
 
     /// `aether.handle.pin` — protect `id` from LRU eviction even
@@ -1351,15 +1362,20 @@ mod control_plane {
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.pin")]
     pub struct HandlePin {
-        pub id: u64,
+        pub id: aether_mail::HandleId,
     }
 
     /// Reply to `HandlePin`. Both arms echo the originating `id`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.pin_result")]
     pub enum HandlePinResult {
-        Ok { id: u64 },
-        Err { id: u64, error: HandleError },
+        Ok {
+            id: aether_mail::HandleId,
+        },
+        Err {
+            id: aether_mail::HandleId,
+            error: HandleError,
+        },
     }
 
     /// `aether.handle.unpin` — clear the pinned flag on `id`.
@@ -1368,15 +1384,20 @@ mod control_plane {
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.unpin")]
     pub struct HandleUnpin {
-        pub id: u64,
+        pub id: aether_mail::HandleId,
     }
 
     /// Reply to `HandleUnpin`. Both arms echo the originating `id`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.unpin_result")]
     pub enum HandleUnpinResult {
-        Ok { id: u64 },
-        Err { id: u64, error: HandleError },
+        Ok {
+            id: aether_mail::HandleId,
+        },
+        Err {
+            id: aether_mail::HandleId,
+            error: HandleError,
+        },
     }
 
     // ADR-0060 guest-side logging via mail sink. One postcard kind on

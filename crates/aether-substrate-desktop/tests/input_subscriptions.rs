@@ -173,7 +173,12 @@ fn unsubscribe(plane: &ControlPlane, stream: InputStream, mailbox: u64) {
 }
 
 fn drop_component(plane: &ControlPlane, mailbox_id: u64) {
-    dispatch(plane, &DropComponent { mailbox_id });
+    dispatch(
+        plane,
+        &DropComponent {
+            mailbox_id: aether_mail::MailboxId(mailbox_id),
+        },
+    );
 }
 
 /// Publish one Tick exactly as `App::window_event` does: snapshot the

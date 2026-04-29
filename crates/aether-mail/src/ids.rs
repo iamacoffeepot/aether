@@ -19,6 +19,7 @@ use aether_hub_protocol::{LabelNode, SchemaType};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::CastEligible;
 use crate::schema::Schema;
 use crate::tagged_id::{self, Tag};
 use crate::{TYPE_DOMAIN, fnv1a_64_prefixed, mailbox_id_from_name};
@@ -133,8 +134,12 @@ pub const fn type_name_for_type_id(type_id: u64) -> Option<&'static str> {
 /// bits in the high nibble. `#[repr(transparent)]` over `u64` so
 /// cast-shape kinds keep their layouts.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct MailboxId(pub u64);
+
+impl CastEligible for MailboxId {
+    const ELIGIBLE: bool = true;
+}
 
 impl MailboxId {
     /// Stable type id — FNV-1a of `TYPE_DOMAIN ++ TYPE_NAME`. The
@@ -190,8 +195,12 @@ impl<'de> Deserialize<'de> for MailboxId {
 /// `Tag::Kind` discriminator + a 60-bit FNV-1a hash of the kind's
 /// canonical schema bytes. `#[repr(transparent)]` over `u64`.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct KindId(pub u64);
+
+impl CastEligible for KindId {
+    const ELIGIBLE: bool = true;
+}
 
 impl KindId {
     pub const TYPE_ID: u64 = fnv1a_64_prefixed(TYPE_DOMAIN, b"aether.kind_id");
@@ -227,8 +236,12 @@ impl<'de> Deserialize<'de> for KindId {
 /// counter masked into the low bits. `#[repr(transparent)]` over
 /// `u64`.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct HandleId(pub u64);
+
+impl CastEligible for HandleId {
+    const ELIGIBLE: bool = true;
+}
 
 impl HandleId {
     pub const TYPE_ID: u64 = fnv1a_64_prefixed(TYPE_DOMAIN, b"aether.handle_id");

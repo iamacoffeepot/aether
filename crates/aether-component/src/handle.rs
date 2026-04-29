@@ -154,7 +154,9 @@ impl<K> Drop for Handle<K> {
         // Fire-and-forget: a panicking wait would poison teardown.
         // The substrate's release dispatch is idempotent — calling
         // it on an already-released id saturates harmlessly.
-        let req = HandleRelease { id: self.id };
+        let req = HandleRelease {
+            id: ::aether_mail::HandleId(self.id),
+        };
         resolve_sink::<HandleRelease>(HANDLE_SINK_NAME).send(&req);
     }
 }
@@ -169,7 +171,7 @@ impl<K> Drop for Handle<K> {
 pub fn publish<K: Kind + Serialize>(value: &K) -> Result<Handle<K>, SyncHandleError> {
     let bytes = postcard::to_allocvec(value).expect("postcard encode to Vec is infallible");
     let req = HandlePublish {
-        kind_id: K::ID,
+        kind_id: ::aether_mail::KindId(K::ID),
         bytes,
     };
     resolve_sink::<HandlePublish>(HANDLE_SINK_NAME).send(&req);
@@ -177,7 +179,7 @@ pub fn publish<K: Kind + Serialize>(value: &K) -> Result<Handle<K>, SyncHandleEr
     let result: HandlePublishResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
     match result {
         HandlePublishResult::Ok { id, .. } => Ok(Handle {
-            id,
+            id: id.0,
             _k: PhantomData,
         }),
         HandlePublishResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
@@ -185,7 +187,9 @@ pub fn publish<K: Kind + Serialize>(value: &K) -> Result<Handle<K>, SyncHandleEr
 }
 
 fn sync_release(id: u64) -> Result<(), SyncHandleError> {
-    let req = HandleRelease { id };
+    let req = HandleRelease {
+        id: ::aether_mail::HandleId(id),
+    };
     resolve_sink::<HandleRelease>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
     let result: HandleReleaseResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
@@ -196,7 +200,9 @@ fn sync_release(id: u64) -> Result<(), SyncHandleError> {
 }
 
 fn sync_pin(id: u64) -> Result<(), SyncHandleError> {
-    let req = HandlePin { id };
+    let req = HandlePin {
+        id: ::aether_mail::HandleId(id),
+    };
     resolve_sink::<HandlePin>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
     let result: HandlePinResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
@@ -207,7 +213,9 @@ fn sync_pin(id: u64) -> Result<(), SyncHandleError> {
 }
 
 fn sync_unpin(id: u64) -> Result<(), SyncHandleError> {
-    let req = HandleUnpin { id };
+    let req = HandleUnpin {
+        id: ::aether_mail::HandleId(id),
+    };
     resolve_sink::<HandleUnpin>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
     let result: HandleUnpinResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
@@ -277,21 +285,23 @@ mod tests {
     #[test]
     fn publish_request_bytes_decode_to_handle_publish() {
         let req = HandlePublish {
-            kind_id: 0xCAFE,
+            kind_id: ::aether_mail::KindId(0xCAFE),
             bytes: vec![1, 2, 3, 4, 5],
         };
         let encoded = postcard::to_allocvec(&req).unwrap();
         let decoded: HandlePublish = postcard::from_bytes(&encoded).unwrap();
-        assert_eq!(decoded.kind_id, 0xCAFE);
+        assert_eq!(decoded.kind_id, ::aether_mail::KindId(0xCAFE));
         assert_eq!(decoded.bytes, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn release_request_bytes_decode_to_handle_release() {
-        let req = HandleRelease { id: 0xDEAD };
+        let req = HandleRelease {
+            id: ::aether_mail::HandleId(0xDEAD),
+        };
         let encoded = postcard::to_allocvec(&req).unwrap();
         let decoded: HandleRelease = postcard::from_bytes(&encoded).unwrap();
-        assert_eq!(decoded.id, 0xDEAD);
+        assert_eq!(decoded.id, ::aether_mail::HandleId(0xDEAD));
     }
 
     #[test]

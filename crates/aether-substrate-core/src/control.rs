@@ -295,7 +295,7 @@ impl ControlPlane {
         self.announce_kinds();
 
         LoadResult::Ok {
-            mailbox_id: mailbox.0,
+            mailbox_id: mailbox,
             name,
             capabilities,
         }
@@ -306,7 +306,7 @@ impl ControlPlane {
             Ok(p) => p,
             Err(error) => return DropResult::Err { error },
         };
-        let id = MailboxId(payload.mailbox_id);
+        let id = payload.mailbox_id;
         if let Err(e) = self.registry.drop_mailbox(id) {
             return DropResult::Err {
                 error: e.to_string(),
@@ -387,7 +387,7 @@ impl ControlPlane {
             Ok(p) => p,
             Err(error) => return ReplaceResult::Err { error },
         };
-        let id = MailboxId(payload.mailbox_id);
+        let id = payload.mailbox_id;
         // ADR-0038 retires the freeze-drain timeout as a load-bearing
         // knob — the splice is structural. The field is still
         // accepted for wire compatibility and ignored here; a future
@@ -595,7 +595,7 @@ mod tests {
     fn load_result_roundtrip() {
         for r in [
             LoadResult::Ok {
-                mailbox_id: 7,
+                mailbox_id: MailboxId(7),
                 name: "x".into(),
                 capabilities: aether_kinds::ComponentCapabilities::default(),
             },
@@ -745,14 +745,8 @@ mod tests {
                 capabilities: _,
             } => {
                 assert_eq!(name, "loaded");
-                assert_eq!(plane.registry.lookup("loaded"), Some(MailboxId(mailbox_id)));
-                assert!(
-                    plane
-                        .components
-                        .read()
-                        .unwrap()
-                        .contains_key(&MailboxId(mailbox_id))
-                );
+                assert_eq!(plane.registry.lookup("loaded"), Some(mailbox_id));
+                assert!(plane.components.read().unwrap().contains_key(&mailbox_id));
             }
             LoadResult::Err { error } => panic!("load should succeed: {error}"),
         }
@@ -970,17 +964,13 @@ mod tests {
         );
         assert!(
             matches!(
-                plane.registry.entry(MailboxId(mailbox_id)),
+                plane.registry.entry(mailbox_id),
                 Some(crate::registry::MailboxEntry::Dropped),
             ),
             "entry should be marked Dropped",
         );
         assert!(
-            !plane
-                .components
-                .read()
-                .unwrap()
-                .contains_key(&MailboxId(mailbox_id)),
+            !plane.components.read().unwrap().contains_key(&mailbox_id),
             "component must be removed from scheduler table",
         );
     }
@@ -1012,7 +1002,7 @@ mod tests {
             .components
             .read()
             .unwrap()
-            .get(&MailboxId(mailbox_id))
+            .get(&mailbox_id)
             .cloned()
             .expect("entry must be bound after load");
 
@@ -1030,8 +1020,12 @@ mod tests {
     #[test]
     fn drop_component_rejects_unknown_id() {
         let plane = make_plane();
-        let result =
-            plane.handle_drop(&postcard::to_allocvec(&DropComponent { mailbox_id: 99 }).unwrap());
+        let result = plane.handle_drop(
+            &postcard::to_allocvec(&DropComponent {
+                mailbox_id: MailboxId(99),
+            })
+            .unwrap(),
+        );
         assert!(matches!(result, DropResult::Err { .. }));
     }
 
@@ -1083,17 +1077,8 @@ mod tests {
         );
         assert!(matches!(result, ReplaceResult::Ok { .. }));
         // Name still resolves to the same id; new Component bound.
-        assert_eq!(
-            plane.registry.lookup("swap_target"),
-            Some(MailboxId(mailbox_id))
-        );
-        assert!(
-            plane
-                .components
-                .read()
-                .unwrap()
-                .contains_key(&MailboxId(mailbox_id))
-        );
+        assert_eq!(plane.registry.lookup("swap_target"), Some(mailbox_id));
+        assert!(plane.components.read().unwrap().contains_key(&mailbox_id));
     }
 
     #[test]
@@ -1102,7 +1087,7 @@ mod tests {
         let wasm = wat::parse_str(WAT).unwrap();
         let result = plane.handle_replace(
             &postcard::to_allocvec(&ReplaceComponent {
-                mailbox_id: 99,
+                mailbox_id: MailboxId(99),
                 wasm,
                 drain_timeout_ms: None,
             })
@@ -1201,7 +1186,7 @@ mod tests {
         assert!(matches!(dropped, DropResult::Ok));
         // Mailbox still marked Dropped; component still removed.
         assert!(matches!(
-            plane.registry.entry(MailboxId(mailbox_id)),
+            plane.registry.entry(mailbox_id),
             Some(crate::registry::MailboxEntry::Dropped),
         ));
     }
@@ -1344,12 +1329,9 @@ mod tests {
         // Ask the rehydrated component to emit its rehydrated-state
         // window to our sink. Payload: sink mailbox id as u64 LE.
         let payload = sink_mbox.0.to_le_bytes().to_vec();
-        plane.queue.push(Mail::new(
-            MailboxId(mailbox_id),
-            snapshot_kind_id,
-            payload,
-            1,
-        ));
+        plane
+            .queue
+            .push(Mail::new(mailbox_id, snapshot_kind_id, payload, 1));
         plane.queue.drain_all();
 
         let bytes = captured
@@ -1392,14 +1374,8 @@ mod tests {
         };
         assert!(error.contains("exceeds"), "got: {error}");
         // Old instance is still bound; name still resolves to its id.
-        assert_eq!(plane.registry.lookup("greedy"), Some(MailboxId(mailbox_id)));
-        assert!(
-            plane
-                .components
-                .read()
-                .unwrap()
-                .contains_key(&MailboxId(mailbox_id))
-        );
+        assert_eq!(plane.registry.lookup("greedy"), Some(mailbox_id));
+        assert!(plane.components.read().unwrap().contains_key(&mailbox_id));
     }
 
     // Retired under ADR-0038 — see the comment block above
@@ -1461,7 +1437,7 @@ mod tests {
         );
         assert!(matches!(result, ReplaceResult::Ok { .. }));
         let table = plane.components.read().unwrap();
-        let cell = table.get(&MailboxId(mailbox_id)).expect("present");
+        let cell = table.get(&mailbox_id).expect("present");
         let mut new = cell.component.lock().unwrap();
         assert_eq!(new.read_u32(396), 0);
         assert_eq!(new.read_u32(400), 0);
@@ -1496,7 +1472,7 @@ mod tests {
         let LoadResult::Ok { mailbox_id, .. } = result else {
             panic!("load should succeed: {result:?}");
         };
-        mailbox_id
+        mailbox_id.0
     }
 
     fn do_subscribe(
@@ -1623,7 +1599,12 @@ mod tests {
     fn subscribe_dropped_mailbox_is_err() {
         let plane = make_plane();
         let id = load_blank(&plane, "victim");
-        plane.handle_drop(&postcard::to_allocvec(&DropComponent { mailbox_id: id }).unwrap());
+        plane.handle_drop(
+            &postcard::to_allocvec(&DropComponent {
+                mailbox_id: MailboxId(id),
+            })
+            .unwrap(),
+        );
         assert!(matches!(
             do_subscribe(&plane, id, InputStream::Tick),
             SubscribeInputResult::Err { .. }
@@ -1639,8 +1620,12 @@ mod tests {
         do_subscribe(&plane, id, InputStream::Tick);
         do_subscribe(&plane, id, InputStream::Key);
         do_subscribe(&plane, id, InputStream::MouseButton);
-        let dropped =
-            plane.handle_drop(&postcard::to_allocvec(&DropComponent { mailbox_id: id }).unwrap());
+        let dropped = plane.handle_drop(
+            &postcard::to_allocvec(&DropComponent {
+                mailbox_id: MailboxId(id),
+            })
+            .unwrap(),
+        );
         assert!(matches!(dropped, DropResult::Ok));
         for s in [
             InputStream::Tick,
@@ -1665,7 +1650,7 @@ mod tests {
         do_subscribe(&plane, id, InputStream::Key);
         let result = plane.handle_replace(
             &postcard::to_allocvec(&ReplaceComponent {
-                mailbox_id: id,
+                mailbox_id: MailboxId(id),
                 wasm: wat::parse_str(WAT).unwrap(),
                 drain_timeout_ms: None,
             })
@@ -1821,13 +1806,7 @@ mod tests {
             panic!("load failed");
         };
 
-        let entry = plane
-            .components
-            .read()
-            .unwrap()
-            .get(&MailboxId(id))
-            .unwrap()
-            .clone();
+        let entry = plane.components.read().unwrap().get(&id).unwrap().clone();
         // Park three mails directly on the entry. Real workers would
         // do this when frozen=true; here we simulate the post-park
         // state without standing up a worker pool. We do NOT touch
@@ -1838,7 +1817,7 @@ mod tests {
         let _ = kind_id;
         for n in 1..=3u32 {
             entry.parked.lock().unwrap().push_back(Mail {
-                recipient: MailboxId(id),
+                recipient: id,
                 kind: 0,
                 payload: sink_id.0.to_le_bytes().to_vec(),
                 count: n,
@@ -1862,13 +1841,7 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 1 + 2 + 3);
 
         // New entry is bound now, parked is empty, frozen cleared.
-        let entry_after = plane
-            .components
-            .read()
-            .unwrap()
-            .get(&MailboxId(id))
-            .unwrap()
-            .clone();
+        let entry_after = plane.components.read().unwrap().get(&id).unwrap().clone();
         assert!(!Arc::ptr_eq(&entry, &entry_after));
         assert!(entry_after.parked.lock().unwrap().is_empty());
         assert!(!entry_after.frozen.load(Ordering::SeqCst));
@@ -1911,7 +1884,7 @@ mod tests {
         entry.frozen.store(true, Ordering::SeqCst);
         for n in 1..=2u32 {
             entry.parked.lock().unwrap().push_back(Mail {
-                recipient: MailboxId(id),
+                recipient: id,
                 kind: 0,
                 payload: sink_id.0.to_le_bytes().to_vec(),
                 count: n,

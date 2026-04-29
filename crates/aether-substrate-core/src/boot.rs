@@ -253,8 +253,8 @@ impl<'a> SubstrateBootBuilder<'a> {
                     {
                         tracing::warn!(
                             target: "aether_substrate::diagnostics",
-                            recipient_mailbox_id = format_args!("{:#x}", record.recipient_mailbox_id),
-                            kind_id = format_args!("{:#x}", record.kind_id),
+                            recipient_mailbox_id = %record.recipient_mailbox_id,
+                            kind_id = %record.kind_id,
                             "hub could not resolve bubbled-up mail recipient (ADR-0037); \
                              mail dropped. Likely a typoed mailbox name at the sender.",
                         );
