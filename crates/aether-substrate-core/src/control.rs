@@ -261,14 +261,16 @@ impl ControlPlane {
             format!("component_{n}")
         });
 
-        let mailbox = match self.registry.try_register_component(&name) {
-            Ok(id) => id,
-            Err(e) => {
-                return LoadResult::Err {
-                    error: e.to_string(),
-                };
-            }
-        };
+        // ADR-0029: mailbox ids are name-derived (FNV-1a 64), so we
+        // can compute the id without touching the registry. That lets
+        // `Component::instantiate` (which calls `init(mailbox_id)`)
+        // run *before* publishing the mailbox — on instantiate
+        // failure the registry is untouched and the name remains
+        // available for a retry. Subscribe-input mail emitted from
+        // `init` carries the still-unpublished id, which is fine: the
+        // subscriber set is recorded against the id and will be valid
+        // by the time the platform thread fans out events.
+        let mailbox = MailboxId::from_name(&name);
 
         let ctx = SubstrateCtx::new(
             mailbox,
@@ -277,19 +279,39 @@ impl ControlPlane {
             Arc::clone(&self.outbound),
             Arc::clone(&self.input_subscribers),
         );
-        let component = match Component::instantiate(&self.engine, &self.linker, &module, ctx) {
+        let mut component = match Component::instantiate(&self.engine, &self.linker, &module, ctx) {
             Ok(c) => c,
             Err(e) => {
-                // The mailbox and kinds are left in the registry. A
-                // retry with a different name will get a fresh mailbox;
-                // the kinds are idempotent and re-registering them is
-                // a no-op. Rolling back the mailbox would need a
-                // Registry API we don't have yet and is parked.
                 return LoadResult::Err {
                     error: format!("wasm instantiation failed: {e}"),
                 };
             }
         };
+
+        // Publish the mailbox now that instantiation succeeded.
+        // `try_register_component` re-derives the same name-hashed id
+        // (ADR-0029, ADR-0030), so the registered id matches the one
+        // `init` already saw — assert that invariant to catch any
+        // future drift between the precompute and the registry's
+        // internal id derivation. The only realistic way to reach the
+        // `Err` arm is a concurrent registration that won the slot
+        // between our precompute and this insert; in that race, drop
+        // the freshly-built component (firing its `on_drop` hook
+        // symmetrically with a normal drop) and surface the
+        // NameConflict.
+        let registered = match self.registry.try_register_component(&name) {
+            Ok(id) => id,
+            Err(e) => {
+                component.on_drop();
+                return LoadResult::Err {
+                    error: e.to_string(),
+                };
+            }
+        };
+        debug_assert_eq!(
+            registered, mailbox,
+            "registered mailbox id must match precomputed id from name hash",
+        );
 
         self.insert_component(mailbox, component);
         self.announce_kinds();
@@ -788,6 +810,104 @@ mod tests {
         };
         let result = plane.handle_load(&postcard::to_allocvec(&payload).unwrap());
         assert!(matches!(result, LoadResult::Err { .. }));
+    }
+
+    /// Issue 358: a wasm whose `init` traps must not leave a ghost
+    /// mailbox in the registry. The first load fails (instantiate
+    /// trapped); a second load with the *same* name is expected to
+    /// succeed because the registry was never published the failed
+    /// id.
+    #[test]
+    fn load_component_init_trap_does_not_reserve_name() {
+        let plane = make_plane();
+        // `init` traps via `unreachable`. Matches the legacy single-arg
+        // init signature `init() -> i32` so wasmtime resolves the typed
+        // func and runs the body — which then traps.
+        const WAT_INIT_TRAPS: &str = r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "init") (result i32)
+                    unreachable)
+                (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                    i32.const 0))
+        "#;
+        let wasm = wat::parse_str(WAT_INIT_TRAPS).unwrap();
+        let first = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponent {
+                wasm: wasm.clone(),
+                name: Some("trap_init".into()),
+            })
+            .unwrap(),
+        );
+        assert!(
+            matches!(first, LoadResult::Err { .. }),
+            "first load should fail with init trap, got {first:?}",
+        );
+        assert!(
+            plane.registry.lookup("trap_init").is_none(),
+            "failed instantiate must not leave a ghost mailbox",
+        );
+
+        // Second load: same name, but a healthy module. Without the
+        // fix, the failed first load would have reserved "trap_init"
+        // and this would fail with a name conflict.
+        let healthy = wat::parse_str(WAT).unwrap();
+        let second = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponent {
+                wasm: healthy,
+                name: Some("trap_init".into()),
+            })
+            .unwrap(),
+        );
+        assert!(
+            matches!(second, LoadResult::Ok { .. }),
+            "second load with same name should succeed, got {second:?}",
+        );
+    }
+
+    /// Issue 358: a wasm with a missing import fails at
+    /// `linker.instantiate`, before `init` even runs. Same invariant:
+    /// the registry must not retain a ghost mailbox.
+    #[test]
+    fn load_component_missing_import_does_not_reserve_name() {
+        let plane = make_plane();
+        // Import a host fn the substrate's linker does not provide.
+        const WAT_MISSING_IMPORT: &str = r#"
+            (module
+                (import "nonexistent" "missing_fn" (func))
+                (memory (export "memory") 1)
+                (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                    i32.const 0))
+        "#;
+        let wasm = wat::parse_str(WAT_MISSING_IMPORT).unwrap();
+        let first = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponent {
+                wasm,
+                name: Some("missing_import".into()),
+            })
+            .unwrap(),
+        );
+        assert!(
+            matches!(first, LoadResult::Err { .. }),
+            "first load should fail with missing import, got {first:?}",
+        );
+        assert!(
+            plane.registry.lookup("missing_import").is_none(),
+            "failed instantiate must not leave a ghost mailbox",
+        );
+
+        let healthy = wat::parse_str(WAT).unwrap();
+        let second = plane.handle_load(
+            &postcard::to_allocvec(&LoadComponent {
+                wasm: healthy,
+                name: Some("missing_import".into()),
+            })
+            .unwrap(),
+        );
+        assert!(
+            matches!(second, LoadResult::Ok { .. }),
+            "second load with same name should succeed, got {second:?}",
+        );
     }
 
     /// ADR-0028 / ADR-0032 happy path: a component ships both its
