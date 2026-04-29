@@ -852,7 +852,17 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
         ));
     }
 
-    let wrapped_init = wrap_init_with_subscribes(init_method, &handlers)?;
+    // Issue #403: the SDK no longer prepends `ctx.subscribe_input::<K>()`
+    // calls to `init` for the substrate's six fixed input streams (Tick,
+    // Key, KeyRelease, MouseMove, MouseButton, WindowSize). Pre-#403
+    // those calls fired during `Component::instantiate` — i.e. *before*
+    // `try_register_component` published the mailbox — and were rejected
+    // by `validate_subscriber_mailbox`. The substrate now derives those
+    // subscriptions from the component's `aether.kinds.inputs` manifest
+    // post-register. The `Ctx::subscribe_input` runtime API is still
+    // available for components that want to subscribe / unsubscribe at
+    // runtime (e.g. conditional input streams).
+    let wrapped_init = init_method;
     let dispatch_body = build_dispatch_body(&handlers, fallback.as_ref());
 
     let handler_methods_tokens = handlers.iter().map(|h| &h.method);
@@ -991,62 +1001,6 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
         #( #arms )*
         #tail
     }
-}
-
-/// Rewrite the user's `fn init` so its body is prepended with
-/// `ctx.subscribe_input::<K>()` for every handler kind `K` where
-/// `K::IS_INPUT` (ADR-0021, ADR-0030 Phase 2). Non-input kinds fold
-/// out at const-eval. Replaces the ADR-0027 `KindList::resolve_all`
-/// walker that phase 3 retires.
-fn wrap_init_with_subscribes(
-    mut init_method: syn::ImplItemFn,
-    handlers: &[HandlerFn],
-) -> syn::Result<syn::ImplItemFn> {
-    let ctx_ident = init_ctx_param_ident(&init_method.sig)?;
-    let subscribe_stmts: Vec<syn::Stmt> = handlers
-        .iter()
-        .map(|h| {
-            let k = &h.kind_ty;
-            syn::parse_quote! {
-                if <#k as ::aether_component::__macro_internals::Kind>::IS_INPUT {
-                    #ctx_ident.subscribe_input::<#k>();
-                }
-            }
-        })
-        .collect();
-    // Prepend: splice the subscribe block before the user's body so
-    // subscriptions are live before any user-side work (including
-    // `send`s that might race the first tick).
-    let mut new_stmts: Vec<syn::Stmt> = subscribe_stmts;
-    new_stmts.append(&mut init_method.block.stmts);
-    init_method.block.stmts = new_stmts;
-    Ok(init_method)
-}
-
-/// Pull the identifier of `init`'s `ctx` parameter so the synthesized
-/// subscribe calls reference the same binding the user's body uses.
-/// Accepts the conventional `ctx: &mut InitCtx<'_>` signature; any
-/// deviation is flagged with a clear error.
-fn init_ctx_param_ident(sig: &Signature) -> syn::Result<syn::Ident> {
-    if sig.inputs.len() != 1 {
-        return Err(syn::Error::new_spanned(
-            sig,
-            "#[handlers] requires `fn init(ctx: &mut InitCtx<'_>) -> Self`",
-        ));
-    }
-    let FnArg::Typed(pt) = &sig.inputs[0] else {
-        return Err(syn::Error::new_spanned(
-            &sig.inputs[0],
-            "#[handlers] `init` cannot take `self`",
-        ));
-    };
-    let syn::Pat::Ident(pat_ident) = pt.pat.as_ref() else {
-        return Err(syn::Error::new_spanned(
-            &pt.pat,
-            "#[handlers] `init` ctx param must be a plain binding (e.g. `ctx: &mut InitCtx<'_>`)",
-        ));
-    };
-    Ok(pat_ident.ident.clone())
 }
 
 /// Emit the `#[link_section = "aether.kinds.inputs"]` statics — one
