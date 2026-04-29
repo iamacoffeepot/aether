@@ -5,11 +5,14 @@ spikes/*/target/
 # Claude Code session-local state. The base `settings.json` and
 # `hooks/` are shippable (project-wide permissions + pre-flight
 # checks); everything else is per-user / runtime. Skills are local
-# by default — opt project-process skills (e.g. /adr) into the repo
-# with a targeted negation below. Note the `*` glob: gitignore can't
-# re-include a file whose parent dir is excluded, so we ignore
-# children of `.claude/skills/` instead of the directory itself.
+# by default — opt project-process skills (e.g. /adr, /delegate,
+# /sweep) into the repo with a targeted negation below. Note the
+# `*` glob: gitignore can't re-include a file whose parent dir is
+# excluded, so we ignore children of `.claude/skills/` instead of
+# the directory itself.
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/skills/*
 !.claude/skills/adr/
+!.claude/skills/delegate/
+!.claude/skills/sweep/
