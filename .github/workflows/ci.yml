@@ -75,6 +75,13 @@ jobs:
       - name: Install Linux deps (ALSA for cpal, Mesa lavapipe for wgpu)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@v2
+      # Pre-build component wasm artifacts the smoke runner loads at
+      # test time. Without this, ADR-0067 per-component smokes
+      # silently skip in CI ("wasm not built"). Cheap to build —
+      # the wasm targets are tiny next to the host workspace and
+      # rust-cache picks up the wasm artifacts on subsequent runs.
+      - name: Pre-build component wasm for smoke tests
+        run: cargo build --target wasm32-unknown-unknown -p aether-camera-component
       - run: cargo test --workspace --all-targets
 
   # Desktop chassis tests run the full OS matrix because winit event
