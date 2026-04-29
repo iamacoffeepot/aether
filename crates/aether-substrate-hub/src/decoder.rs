@@ -615,8 +615,8 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoder::encode_schema;
     use aether_hub_protocol::SchemaCell;
+    use aether_params_codec::encode_schema;
     use serde_json::json;
 
     fn scalar(name: &str, ty: Primitive) -> NamedField {
