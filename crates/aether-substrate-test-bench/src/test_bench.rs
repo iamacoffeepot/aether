@@ -582,6 +582,21 @@ fn register_camera_sink(boot: &SubstrateBoot, camera_state: &Arc<Mutex<[f32; 16]
 mod tests {
     use super::*;
 
+    /// Probe wgpu for any usable adapter. Headless Linux CI runners
+    /// have no Vulkan/GL drivers installed, so adapter discovery
+    /// returns `None` — those runs skip rather than panic. macOS
+    /// (Metal) and Windows (DX12) always succeed.
+    fn has_wgpu_adapter() -> bool {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .is_ok()
+    }
+
     /// Boot, advance one tick, capture, sanity-check the PNG.
     /// The default scene is empty so the captured frame is the
     /// background-clear color uniformly. The test asserts the PNG
@@ -589,6 +604,10 @@ mod tests {
     /// library.
     #[test]
     fn boot_advance_capture_round_trip() {
+        if !has_wgpu_adapter() {
+            eprintln!("skipping: no wgpu adapter available on this runner");
+            return;
+        }
         let mut tb = TestBench::start_with_size(64, 48).expect("start");
         let ticks_completed = tb.advance(1).expect("advance");
         assert_eq!(ticks_completed, 1);
