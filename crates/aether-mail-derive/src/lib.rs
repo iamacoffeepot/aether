@@ -128,9 +128,17 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     Ok(quote! {
         impl ::aether_mail::Kind for #name {
             const NAME: &'static str = #kind_name;
-            const ID: u64 = ::aether_mail::fnv1a_64_prefixed(
-                ::aether_mail::KIND_DOMAIN,
-                &#canonical_bytes_ident,
+            // ADR-0064: tag the high 4 bits with `Tag::Kind` so kind
+            // ids are distinguishable from mailbox / handle ids by
+            // bit pattern alone. The `KIND_DOMAIN` byte prefix still
+            // rides the FNV input (ADR-0030) — type info ends up
+            // encoded in two independent places that cross-check.
+            const ID: u64 = ::aether_mail::with_tag(
+                ::aether_mail::Tag::Kind,
+                ::aether_mail::fnv1a_64_prefixed(
+                    ::aether_mail::KIND_DOMAIN,
+                    &#canonical_bytes_ident,
+                ),
             );
             #is_input_item
 

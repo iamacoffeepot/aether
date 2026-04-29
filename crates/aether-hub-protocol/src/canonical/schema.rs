@@ -239,14 +239,19 @@ fn variant_to_shape(v: &EnumVariant) -> crate::types::VariantShape {
 /// other way around).
 pub(crate) const KIND_DOMAIN: &[u8] = b"kind:";
 
+use crate::tag_bits::{HASH_MASK, TAG_KIND, TAG_SHIFT};
+
 /// Derive a `Kind::ID` from a `(name, schema)` pair at runtime. Matches
-/// `fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema))`
-/// byte-for-byte with the derive's compile-time emission, so a
-/// substrate computing `kind_id_from_parts(&desc.name, &desc.schema)`
+/// the `#[derive(Kind)]` compile-time emission byte-for-byte:
+/// `Tag::Kind` ORed into the high 4 bits + the low 60 bits of
+/// `fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema))`.
+/// A substrate computing `kind_id_from_parts(&desc.name, &desc.schema)`
 /// after a runtime `register_kind_with_descriptor` agrees with the id
-/// the component published as `<K as Kind>::ID` (ADR-0030 Phase 2).
+/// the component published as `<K as Kind>::ID` (ADR-0030 Phase 2 +
+/// ADR-0064).
 pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
-    fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema))
+    ((TAG_KIND as u64) << TAG_SHIFT)
+        | (fnv1a_64_prefixed(KIND_DOMAIN, &canonical_kind_bytes(name, schema)) & HASH_MASK)
 }
 
 /// Derive a `Kind::ID` from a decoded `KindShape`. Same hash as
@@ -257,7 +262,7 @@ pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
 pub fn kind_id_from_shape(shape: &crate::types::KindShape) -> u64 {
     let bytes =
         postcard::to_allocvec(shape).expect("canonical KindShape serialization is infallible");
-    fnv1a_64_prefixed(KIND_DOMAIN, &bytes)
+    ((TAG_KIND as u64) << TAG_SHIFT) | (fnv1a_64_prefixed(KIND_DOMAIN, &bytes) & HASH_MASK)
 }
 
 /// FNV-1a 64 over `prefix ++ payload`, mirrored from

@@ -21,6 +21,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod tagged_id;
+pub use tagged_id::{Tag, with_tag};
+
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
 /// `"aether.tick"`, `"hello.npc_health"`) and a `u64` id derived from
 /// that name plus the kind's canonical schema bytes (ADR-0030 Phase 2,
@@ -153,8 +156,18 @@ impl<K, V> CastEligible for alloc::collections::BTreeMap<K, V> {
 /// use it directly as the `recipient` on `send_mail`. `0` is reserved
 /// as the no-sender sentinel — callers should reject on the astronomical
 /// chance of a collision with it.
+///
+/// ADR-0064: the high 4 bits carry the `Tag::Mailbox` discriminator;
+/// the low 60 bits are the FNV-1a output masked by `HASH_MASK`. The
+/// `MAILBOX_DOMAIN` byte prefix still rides on the FNV input — the
+/// type ends up encoded twice (in the tag bits and avalanched into
+/// the hash via the domain prefix), and the two layers cross-check
+/// each other.
 pub const fn mailbox_id_from_name(name: &str) -> u64 {
-    fnv1a_64_prefixed(MAILBOX_DOMAIN, name.as_bytes())
+    with_tag(
+        Tag::Mailbox,
+        fnv1a_64_prefixed(MAILBOX_DOMAIN, name.as_bytes()),
+    )
 }
 
 /// Domain tag prefixed to every mailbox-name hash so the `MailboxId`
@@ -732,14 +745,14 @@ mod tests {
         let c = mailbox_id_from_name("render");
         assert_eq!(a, b);
         assert_ne!(a, c);
-        // Empty name hashes the domain prefix alone. Pins the
-        // prefixing convention — a regression that drops the prefix
-        // would collapse to `0xcbf29ce484222325` (the raw FNV offset
-        // basis) here.
+        // Empty name hashes the domain prefix alone. Pins both
+        // ADR-0029 (the domain prefix rides the FNV input) and
+        // ADR-0064 (the high 4 bits carry the `Tag::Mailbox` tag).
         assert_eq!(
             mailbox_id_from_name(""),
-            fnv1a_64_prefixed(MAILBOX_DOMAIN, &[]),
+            with_tag(Tag::Mailbox, fnv1a_64_prefixed(MAILBOX_DOMAIN, &[]),),
         );
+        assert_eq!(tagged_id::tag_of(a), Some(Tag::Mailbox));
         assert_ne!(mailbox_id_from_name(""), 0xcbf29ce484222325);
     }
 

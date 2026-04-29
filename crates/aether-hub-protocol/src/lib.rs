@@ -22,6 +22,7 @@ mod types;
 pub use types::*;
 
 pub mod canonical;
+pub mod tag_bits;
 
 /// Maximum accepted frame body size. Bounded so a malformed length
 /// prefix cannot drive a reader into an OOM. 16 MiB is comfortably
