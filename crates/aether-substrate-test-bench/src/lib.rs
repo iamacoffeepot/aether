@@ -4,12 +4,12 @@
 //!
 //! - **Binary (`src/main.rs`)** — connects to a hub via TCP, runs
 //!   the chassis events loop on the main thread blocking on
-//!   `events_rx.recv()`. Hub-driven smoke (the `spawn_substrate`
-//!   MCP path).
+//!   `events_rx.recv()`. Hub-driven exploration (the
+//!   `spawn_substrate` MCP path).
 //! - **In-process (`TestBench` struct)** — no hub, no TCP. Substrate
 //!   state is owned by the test thread; mail goes through the same
 //!   sinks + control plane but replies route to a loopback channel
-//!   instead of a socket. Rust integration tests and `aether-smoke`
+//!   instead of a socket. Rust integration tests and `aether-scenario`
 //!   link this directly.
 
 pub mod capture;

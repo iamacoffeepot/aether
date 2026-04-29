@@ -1,5 +1,5 @@
-//! End-to-end CLI test: invoke the `aether-smoke` binary against a
-//! fixture YAML, assert exit code + stdout. The binary boots a real
+//! End-to-end CLI test: invoke the `aether-scenario` binary against
+//! a fixture YAML, assert exit code + stdout. The binary boots a real
 //! TestBench, so this needs a wgpu adapter — same gating as the
 //! library's integration tests.
 
@@ -19,12 +19,12 @@ fn has_wgpu_adapter() -> bool {
 }
 
 #[test]
-fn cli_runs_passing_smoke() {
+fn cli_runs_passing_scenario() {
     if !has_wgpu_adapter() {
         eprintln!("skipping: no wgpu adapter available");
         return;
     }
-    let bin = env!("CARGO_BIN_EXE_aether-smoke");
+    let bin = env!("CARGO_BIN_EXE_aether-scenario");
     let fixture = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/clear_color.yml"
@@ -46,7 +46,7 @@ fn cli_runs_passing_smoke() {
 
 #[test]
 fn cli_missing_path_arg_exits_nonzero() {
-    let bin = env!("CARGO_BIN_EXE_aether-smoke");
+    let bin = env!("CARGO_BIN_EXE_aether-scenario");
     let output = Command::new(bin).output().expect("run cli");
     assert!(
         !output.status.success(),
@@ -57,7 +57,7 @@ fn cli_missing_path_arg_exits_nonzero() {
 
 #[test]
 fn cli_missing_file_exits_nonzero() {
-    let bin = env!("CARGO_BIN_EXE_aether-smoke");
+    let bin = env!("CARGO_BIN_EXE_aether-scenario");
     let output = Command::new(bin)
         .arg("/this/path/does/not/exist.yml")
         .output()

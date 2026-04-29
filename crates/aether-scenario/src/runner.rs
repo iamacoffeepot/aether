@@ -1,7 +1,7 @@
 //! `Runner` — walks a `Script` against a borrowed `TestBench`,
 //! producing a `RunReport`. The bench is `&mut` because `advance`
 //! and `capture` mutate state; the runner doesn't own the bench so
-//! tests can interleave smokes with their own bench operations.
+//! tests can interleave scenarios with their own bench operations.
 //!
 //! `SendMail` resolves kinds via `aether_kinds::descriptors::all()`
 //! (inventory-collected at link time) and encodes YAML params through

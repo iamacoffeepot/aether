@@ -46,7 +46,7 @@ const LOG_EVERY_FRAMES: u64 = 120;
 const DRAW_TRIANGLE_BYTES: usize = 72;
 
 /// Default offscreen target size when `AETHER_TEST_BENCH_SIZE` is
-/// unset. 800x600 matches the smoke harness convention — large
+/// unset. 800x600 matches the scenario harness convention — large
 /// enough that `min_non_bg_pixels` thresholds discriminate, small
 /// enough that capture readback is cheap.
 const DEFAULT_WIDTH: u32 = 800;
@@ -205,7 +205,7 @@ impl TestBenchChassis {
 }
 
 /// Parse `AETHER_TEST_BENCH_SIZE=WxH`. Falls back to defaults on
-/// missing/unparseable input with a warn log so smoke scripts can
+/// missing/unparseable input with a warn log so scenario scripts can
 /// see what dimensions they actually got.
 fn parse_size_env() -> (u32, u32) {
     let raw = match std::env::var("AETHER_TEST_BENCH_SIZE") {
@@ -366,9 +366,9 @@ fn main() -> wasmtime::Result<()> {
     aether_substrate_core::log_sink::register_log_sink(&boot.registry);
 
     // ADR-0067 sink set is render + camera + io + log. Audio is
-    // skipped (no cpal — smoke tests don't need audio output and
+    // skipped (no cpal — scenarios don't need audio output and
     // skipping it removes a flaky-driver surface on CI runners).
-    // Net is also out for v1 — smoke tests don't need network
+    // Net is also out for v1 — scenarios don't need network
     // egress, and including it would add a real I/O side channel.
 
     let (width, height) = parse_size_env();

@@ -1,9 +1,9 @@
-//! End-to-end smoke runner test: parse YAML, boot a TestBench,
+//! End-to-end scenario runner test: parse YAML, boot a TestBench,
 //! run the script, assert the report. Skipped on driverless runners
 //! by probing for a wgpu adapter — same gating pattern as the
 //! TestBench unit test (ADR-0067).
 
-use aether_smoke::{Runner, parse_script};
+use aether_scenario::{Runner, parse_script};
 use aether_substrate_test_bench::TestBench;
 
 /// Probe for any usable wgpu adapter. Headless Linux runners without
@@ -66,7 +66,7 @@ steps:
 /// "UnknownMailbox" error as a step failure. Validates the encode →
 /// send_bytes path runs end-to-end against a real bench: the catalog
 /// resolves the kind, encoding succeeds, but `send_bytes` rejects
-/// the unknown recipient — which is the symptom we want a smoke
+/// the unknown recipient — which is the symptom we want a scenario
 /// author to see when they typo a mailbox name.
 #[test]
 fn send_mail_unknown_mailbox_fails_clearly() {
@@ -89,7 +89,7 @@ steps:
     let mut bench = TestBench::start_with_size(32, 32).expect("boot");
     let report = Runner::run(&mut bench, &script);
     assert!(!report.passed, "should fail: {report:?}");
-    let aether_smoke::StepStatus::Fail(reason) = &report.steps[0].status else {
+    let aether_scenario::StepStatus::Fail(reason) = &report.steps[0].status else {
         panic!("expected step 0 to fail");
     };
     // Either the catalog couldn't decode the params (e.g. mailbox_id
@@ -126,9 +126,9 @@ steps:
     // skipped rather than executed.
     assert!(matches!(
         report.steps[0].status,
-        aether_smoke::StepStatus::Fail(_)
+        aether_scenario::StepStatus::Fail(_)
     ));
-    let aether_smoke::StepStatus::Fail(reason) = &report.steps[1].status else {
+    let aether_scenario::StepStatus::Fail(reason) = &report.steps[1].status else {
         panic!("expected step 1 to be skipped");
     };
     assert!(reason.contains("skipped"), "step 1 reason: {reason}");

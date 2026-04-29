@@ -1,14 +1,14 @@
 [package]
-name = "aether-smoke"
+name = "aether-scenario"
 version.workspace = true
 edition.workspace = true
 
-# ADR-0067 smoke library: declarative Script → Runner → RunReport
+# ADR-0067 scenario library: declarative Script → Runner → RunReport
 # pipeline that drives an in-process `TestBench` chassis through a
 # sequence of steps and asserts visual properties of captured frames.
 # This crate ships the core types + a YAML parser; per-component
-# smokes live in their owning crates' tests/ directories and the CLI
-# wrapper (PR 7) gives agents a one-shot "run smoke at path" entry.
+# scenarios live in their owning crates' tests/ directories and the
+# CLI wrapper gives agents a one-shot "run scenario at path" entry.
 
 [lib]
 path = "src/lib.rs"
@@ -17,7 +17,7 @@ path = "src/lib.rs"
 aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-kinds = { path = "../aether-kinds" }
 aether-params-codec = { path = "../aether-params-codec" }
-aether-smoke-macros = { path = "../aether-smoke-macros" }
+aether-scenario-macros = { path = "../aether-scenario-macros" }
 aether-substrate-test-bench = { path = "../aether-substrate-test-bench" }
 png = "0.17"
 serde = { version = "1", features = ["derive"] }

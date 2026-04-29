@@ -1,10 +1,10 @@
-//! First per-component smoke (ADR-0067, PR 8). Loads a real
+//! First per-component scenario (ADR-0067, PR 8). Loads a real
 //! wasm component into a `TestBench`, advances a few ticks, captures
 //! a frame, and asserts the bench survived. The visual assertion is
 //! `not_all_black` only — chassis clears to a non-black color so any
 //! capture passes — but the test still validates the load path,
 //! wasm runtime boot, mail dispatch, tick fanout, and capture
-//! end-to-end. Future smokes assert tighter visual properties once
+//! end-to-end. Future scenarios assert tighter visual properties once
 //! the IO sink + DSL path lets us write actual geometry.
 //!
 //! Skipped when:
@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aether_smoke::{Runner, Script, Step, VisualAssert};
+use aether_scenario::{Runner, Script, Step, VisualAssert};
 use aether_substrate_test_bench::TestBench;
 
 /// Probe for any usable wgpu adapter.
@@ -37,7 +37,7 @@ fn has_wgpu_adapter() -> bool {
 /// `debug` so either build profile satisfies the test. Returns `None`
 /// if neither exists — the caller skips the test.
 fn camera_component_wasm() -> Option<PathBuf> {
-    // CARGO_MANIFEST_DIR is the smoke crate; the workspace target dir
+    // CARGO_MANIFEST_DIR is the scenario crate; the workspace target dir
     // is two levels up.
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
