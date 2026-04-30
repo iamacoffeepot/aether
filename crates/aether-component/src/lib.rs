@@ -962,6 +962,20 @@ unsafe impl<T> Sync for Slot<T> {}
 ///   `T::init`, stashes the result in the slot.
 /// - `extern "C" fn receive(kind, ptr, count) -> u32` — builds
 ///   `Ctx` and `Mail`, calls `T::receive` on the stashed instance.
+/// - The `#[link_section = "aether.kinds.inputs"]` static that pins
+///   the component's handler manifest into the wasm custom section
+///   the substrate reads at `load_component`. The manifest *bytes*
+///   are emitted as associated consts on `T`'s inherent impl by
+///   `#[handlers]`; this macro is the only place they get a
+///   `link_section` attribute, which means the section can only
+///   land in the cdylib root that calls `export!()` — never in
+///   transitive rlib pulls of a `#[handlers]`-using crate (issue
+///   442). That structural property is what keeps duplicate
+///   Component records from stacking when a cdylib deps on a
+///   sibling `cdylib + rlib` crate's rlib output. ADR-0066's
+///   trunk-rlib pattern (kinds + names in an rlib, runtime impl in
+///   a separate cdylib) is the recommended layout for shared
+///   component types regardless.
 ///
 /// Only one component per guest crate. A second `export!` call in
 /// the same crate is a duplicate-symbol compile error on the shared
@@ -977,6 +991,21 @@ unsafe impl<T> Sync for Slot<T> {}
 macro_rules! export {
     ($component:ty) => {
         static __AETHER_COMPONENT: $crate::Slot<$component> = $crate::Slot::new();
+
+        // ADR-0033 / issue 442: pin the component's `aether.kinds.inputs`
+        // bytes into the cdylib's wasm custom section. The const data
+        // (`__AETHER_INPUTS_MANIFEST_LEN` / `__AETHER_INPUTS_MANIFEST`)
+        // is emitted by `#[handlers]` on the type's inherent impl;
+        // section emission lives here so it only fires in the cdylib
+        // root crate (where `export!()` is invoked) and never in
+        // transitive rlib pulls of a `#[handlers]`-using crate, which
+        // would otherwise stack duplicate Component records and fail
+        // the substrate's manifest reader.
+        #[cfg(target_arch = "wasm32")]
+        #[used]
+        #[unsafe(link_section = "aether.kinds.inputs")]
+        static __AETHER_INPUTS_SECTION: [u8; <$component>::__AETHER_INPUTS_MANIFEST_LEN] =
+            <$component>::__AETHER_INPUTS_MANIFEST;
 
         /// # Safety
         /// Called exactly once by the substrate before any `receive`.

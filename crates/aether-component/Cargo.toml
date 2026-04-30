@@ -43,6 +43,14 @@ serde = { version = "1", default-features = false, features = ["derive", "alloc"
 # native targets. The macro path needs `::inventory` reachable. Tests
 # always run native, so a plain dev-dep with no target gating is right.
 inventory = "0.3"
+# Issue 442 regression test (`tests/handlers_manifest.rs`) decodes the
+# `aether.kinds.inputs` payload `#[handlers]` emits as a const on the
+# component type. The wire shape is `postcard(InputsRecord)` per
+# ADR-0033; pulling hub-protocol in as a dev-dep gives the test direct
+# access to that type without forcing it into the SDK's runtime
+# dependency surface.
+aether-hub-protocol = { path = "../aether-hub-protocol" }
+postcard = { version = "1.1", features = ["alloc"] }
 
 # ADR-0017 (component-to-component reply) smoke pair: caller sends
 # `demo.request` to "echoer" and observes the reply.
