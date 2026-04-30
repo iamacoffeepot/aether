@@ -322,18 +322,32 @@ impl TestBench {
         }
     }
 
-    /// Issue a `capture_frame` request. Drains the queue (so any
-    /// state-changing mail already in flight settles), runs one
-    /// render-with-capture cycle, and returns the PNG bytes.
-    /// Capture observes the current state — it does not dispatch
-    /// `Tick`. Pair with `advance` if the world needs to advance
-    /// before the capture.
+    /// Issue a `capture_frame` request with no pre/after mail bundles.
+    /// Drains the queue (so any state-changing mail already in flight
+    /// settles), runs one render-with-capture cycle, and returns the
+    /// PNG bytes. Capture observes the current state — it does not
+    /// dispatch `Tick`. Pair with `advance` if the world needs to
+    /// advance before the capture.
     pub fn capture(&mut self) -> Result<Vec<u8>, TestBenchError> {
+        self.capture_with_mails(Vec::new(), Vec::new())
+    }
+
+    /// Same as `capture` but with the two `CaptureFrame` mail bundles
+    /// (ADR-0020 §capture_frame). `pre` is dispatched *before* the
+    /// readback — its effects appear in the captured frame; `after`
+    /// is dispatched *after* the readback — typically cleanup that
+    /// restores state the caller flipped for the capture. Matches
+    /// the wire shape of the MCP `capture_frame` tool.
+    pub fn capture_with_mails(
+        &mut self,
+        pre: Vec<aether_kinds::MailEnvelope>,
+        after: Vec<aether_kinds::MailEnvelope>,
+    ) -> Result<Vec<u8>, TestBenchError> {
         let cid = self.fresh_correlation_id();
         self.push_control(
             &CaptureFrame {
-                mails: Vec::new(),
-                after_mails: Vec::new(),
+                mails: pre,
+                after_mails: after,
             },
             cid,
         );

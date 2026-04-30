@@ -1,7 +1,9 @@
 //! Phase 3 substrate-feature scenarios (issue 430). Each test boots
 //! a `TestBench`, loads `aether-test-fixture-probe`'s wasm, and
-//! exercises one substrate primitive (input subscription, drop, etc.)
-//! by counting fixture-emitted broadcasts on the bench loopback.
+//! exercises one substrate primitive (input subscription, drop,
+//! capture_frame round-trip, replace_component) by either counting
+//! fixture-emitted broadcasts on the bench loopback or inspecting
+//! the captured frame.
 //!
 //! Skipped when:
 //! - No wgpu adapter is available (driverless Linux runners without
@@ -15,9 +17,11 @@
 
 use std::path::{Path, PathBuf};
 
-use aether_kinds::{DropComponent, LoadComponent};
-use aether_mail::{MailboxId, mailbox_id_from_name};
+use aether_kinds::{DropComponent, LoadComponent, MailEnvelope, ReplaceComponent};
+use aether_mail::{Kind, MailboxId, mailbox_id_from_name};
+use aether_scenario::{decode_png, differs_from_background};
 use aether_substrate_test_bench::TestBench;
+use aether_test_fixture_probe::SetRender;
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary. Without the reference, the
@@ -89,6 +93,18 @@ fn require_runtime() -> Option<PathBuf> {
 
 const PROBE_NAME: &str = "probe";
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
+
+/// Build a `MailEnvelope` for a `CaptureFrame` mail bundle. Uses
+/// the kind's wire encoding (`encode_into_bytes`) so any K — cast
+/// or postcard — packs correctly.
+fn envelope<K: Kind>(recipient: &str, mail: &K) -> MailEnvelope {
+    MailEnvelope {
+        recipient_name: recipient.to_owned(),
+        kind_name: K::NAME.to_owned(),
+        payload: mail.encode_into_bytes(),
+        count: 1,
+    }
+}
 
 /// Loads the probe into the bench. The load mail is queued and
 /// processed during the next `advance` (the bench's queue is FIFO
@@ -170,6 +186,133 @@ fn drop_component_silences_tick_echoes() {
         bench.count_observed(TICK_OBSERVED),
         post_drop,
         "tick_observed count climbed after drop_component; observed kinds: {:?}",
+        bench.observed_kinds(),
+    );
+}
+
+/// `capture_frame` round-trip with non-empty mail bundles. The
+/// pre-mail bundle flips the fixture's render state to "visible
+/// red"; the captured PNG must contain at least one pixel that
+/// diverges from the chassis clear color. The after-mail bundle
+/// flips render back to invisible; a follow-up advance + plain
+/// capture must produce a frame back at the clear color, proving
+/// the after-mail cleanup ran.
+#[test]
+fn capture_frame_round_trip_runs_pre_and_after_mails() {
+    let Some(wasm_path) = require_runtime() else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    load_probe(&bench, &wasm_path);
+    // Advance once so the probe is loaded + subscribed; the capture
+    // path doesn't dispatch Tick on its own (`run_frame` runs with
+    // dispatch_tick=false during capture), so we need at least one
+    // prior tick to have wired the subscriber set.
+    bench.advance(1).expect("priming advance");
+
+    // Capture's `run_frame` runs with `dispatch_tick=false`, so the
+    // probe won't auto-tick during the captured frame. The pre-mail
+    // bundle wires it up manually: set_render flips state to "visible
+    // red", and a synthesised `aether.tick` immediately drives the
+    // probe's on_tick to emit a `DrawTriangle` into the bench's
+    // frame_vertices buffer right before the GPU readback.
+    let pre = vec![
+        envelope(
+            PROBE_NAME,
+            &SetRender {
+                r: 200,
+                g: 32,
+                b: 32,
+                visible: 1,
+            },
+        ),
+        MailEnvelope {
+            recipient_name: PROBE_NAME.to_owned(),
+            kind_name: "aether.tick".to_owned(),
+            payload: Vec::new(),
+            count: 1,
+        },
+    ];
+    // After-mail bundle dispatches *after* the readback. Flips
+    // render state to invisible so the post-cleanup capture is back
+    // at the chassis clear color.
+    let after = vec![envelope(
+        PROBE_NAME,
+        &SetRender {
+            r: 0,
+            g: 0,
+            b: 0,
+            visible: 0,
+        },
+    )];
+    let png = bench
+        .capture_with_mails(pre, after)
+        .expect("capture with mails");
+    let img = decode_png(&png).expect("decode capture png");
+    differs_from_background(&img, 5).expect("captured frame should contain a non-background pixel");
+
+    // Cleanup ran: probe.render is now { visible: 0 }. Advance once
+    // and capture again — the next tick won't emit DrawTriangle, so
+    // the frame stays at clear color. (The next advance does fire a
+    // tick against the probe, but with visible=0 the probe broadcasts
+    // tick_observed without emitting any geometry.)
+    bench.advance(1).expect("post-cleanup advance");
+    let png2 = bench.capture().expect("plain capture after cleanup");
+    let img2 = decode_png(&png2).expect("decode cleanup png");
+    assert!(
+        differs_from_background(&img2, 5).is_err(),
+        "after after-mail cleanup the captured frame should be uniform clear color, \
+         but at least one pixel still diverges (cleanup did not run)",
+    );
+}
+
+/// `replace_component` preserves the mailbox identity across the
+/// splice (ADR-0022 + ADR-0038). Loads the probe, lets it broadcast
+/// N ticks, replaces the wasm at the same mailbox id with the same
+/// fixture binary, and asserts the post-replace count climbs —
+/// proving the new component instance inherits the input
+/// subscriptions and continues receiving ticks at the original
+/// mailbox.
+#[test]
+fn replace_component_preserves_mailbox_identity() {
+    let Some(wasm_path) = require_runtime() else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    load_probe(&bench, &wasm_path);
+
+    bench.advance(3).expect("pre-replace advance");
+    let pre_replace = bench.count_observed(TICK_OBSERVED);
+    assert_eq!(
+        pre_replace,
+        3,
+        "expected 3 tick_observed before replace; observed kinds: {:?}",
+        bench.observed_kinds(),
+    );
+
+    let probe_mbox = MailboxId(mailbox_id_from_name(PROBE_NAME));
+    let wasm = std::fs::read(&wasm_path).expect("re-read fixture wasm");
+    bench
+        .send_mail(
+            "aether.control",
+            &ReplaceComponent {
+                mailbox_id: probe_mbox,
+                wasm,
+                drain_timeout_ms: None,
+            },
+        )
+        .expect("dispatch replace_component");
+    bench.advance(1).expect("replace drain advance");
+
+    let post_replace_baseline = bench.count_observed(TICK_OBSERVED);
+    bench.advance(4).expect("post-replace advance");
+    let post_replace = bench.count_observed(TICK_OBSERVED);
+
+    assert!(
+        post_replace > post_replace_baseline,
+        "tick_observed count did not climb after replace; \
+         baseline={post_replace_baseline}, final={post_replace}; \
+         observed kinds: {:?}",
         bench.observed_kinds(),
     );
 }
