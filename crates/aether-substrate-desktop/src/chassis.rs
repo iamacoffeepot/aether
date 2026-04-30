@@ -17,14 +17,14 @@
 use std::sync::Arc;
 
 use aether_kinds::{
-    Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode,
-    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, WindowMode,
+    Advance, CaptureFrame, PlatformInfo, SetWindowMode, SetWindowModeResult, SetWindowTitle,
+    SetWindowTitleResult, WindowMode,
 };
 use aether_mail::Kind;
 use aether_substrate_core::{
     ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo,
-    capture::{CaptureQueue, PendingCapture},
-    control::{decode_payload, resolve_bundle},
+    capture::{CaptureQueue, begin_capture_request, reply_unsupported_advance},
+    control::decode_payload,
 };
 use winit::event_loop::EventLoopProxy;
 
@@ -73,14 +73,22 @@ pub fn chassis_control_handler(
     Arc::new(
         move |kind_id: u64, kind_name: &str, sender: ReplyTo, bytes: &[u8]| {
             if kind_id == CaptureFrame::ID {
-                handle_capture_frame(
-                    &proxy,
+                let proxy = proxy.clone();
+                begin_capture_request(
+                    &queue,
                     &capture_queue,
                     &registry,
-                    &queue,
                     &outbound,
                     sender,
                     bytes,
+                    move || {
+                        // `send_event` only fails if the event loop
+                        // has shut down; in that case nothing listens
+                        // for captures anyway, so swallow the error
+                        // and let the queued capture sit until exit.
+                        let _ = proxy.send_event(UserEvent::Capture);
+                        Ok(())
+                    },
                 );
             } else if kind_id == PlatformInfo::ID {
                 // Empty payload; forward the sender straight to the
@@ -92,13 +100,11 @@ pub fn chassis_control_handler(
             } else if kind_id == SetWindowTitle::ID {
                 handle_set_window_title(&proxy, &outbound, sender, bytes);
             } else if kind_id == Advance::ID {
-                outbound.send_reply(
+                reply_unsupported_advance(
+                    &outbound,
                     sender,
-                    &AdvanceResult::Err {
-                        error: "unsupported on desktop chassis — aether.test_bench.advance is \
-                                test-bench-only (ADR-0067)"
-                            .to_owned(),
-                    },
+                    "unsupported on desktop chassis — aether.test_bench.advance is \
+                     test-bench-only (ADR-0067)",
                 );
             } else {
                 tracing::warn!(
@@ -109,75 +115,6 @@ pub fn chassis_control_handler(
             }
         },
     )
-}
-
-/// Two-phase capture request (pre-capture mail push + render handoff).
-/// Ports the old `ControlPlane::handle_capture_frame` verbatim: resolve
-/// both mail bundles atomically against the registry before touching
-/// the queue, push pre-mails, enqueue the capture, poke the event loop.
-/// Decode / resolve / queue-full errors reply inline; the render thread
-/// fulfils the happy path on its next redraw.
-fn handle_capture_frame(
-    proxy: &EventLoopProxy<UserEvent>,
-    capture_queue: &CaptureQueue,
-    registry: &Registry,
-    queue: &Mailer,
-    outbound: &HubOutbound,
-    sender: ReplyTo,
-    bytes: &[u8],
-) {
-    let payload: CaptureFrame = match decode_payload(bytes) {
-        Ok(p) => p,
-        Err(error) => {
-            outbound.send_reply(sender, &CaptureFrameResult::Err { error });
-            return;
-        }
-    };
-
-    // Phase 1: resolve every envelope in both bundles before pushing
-    // anything or requesting a capture. Any failure aborts the whole
-    // request so a partial dispatch can't leak into the next frame.
-    let pre = match resolve_bundle(registry, &payload.mails, "capture bundle") {
-        Ok(v) => v,
-        Err(e) => {
-            outbound.send_reply(sender, &CaptureFrameResult::Err { error: e });
-            return;
-        }
-    };
-    let after = match resolve_bundle(registry, &payload.after_mails, "capture after bundle") {
-        Ok(v) => v,
-        Err(e) => {
-            outbound.send_reply(sender, &CaptureFrameResult::Err { error: e });
-            return;
-        }
-    };
-
-    // Phase 2: push resolved pre-mails, enqueue capture, wake loop.
-    // `queue.drain_all()` on the render thread is what enforces
-    // "capture after all mail processed" (per-mailbox drain under
-    // ADR-0038 Phase 3).
-    for mail in pre {
-        queue.push(mail);
-    }
-
-    let pending = PendingCapture {
-        reply_to: sender,
-        after_mails: after,
-    };
-    if !capture_queue.request(pending) {
-        outbound.send_reply(
-            sender,
-            &CaptureFrameResult::Err {
-                error: "capture already pending; try again once the in-flight \
-                    request completes"
-                    .to_owned(),
-            },
-        );
-        return;
-    }
-    // `send_event` only fails if the event loop has shut down; in
-    // that case nothing listens for captures anyway.
-    let _ = proxy.send_event(UserEvent::Capture);
 }
 
 /// Decode + forward to the event loop. Applying the mode requires
