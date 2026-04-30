@@ -1,0 +1,12 @@
+name: frame_stats emitted after 120 ticks
+# The substrate emits aether.observation.frame_stats every 120 frames
+# (ADR-0023). Advancing exactly 120 ticks should produce one such
+# broadcast on the loopback, observable via mail_observed.
+steps:
+  - op: advance
+    ticks: 120
+  - op: assert
+    check:
+      kind: mail_observed
+      name: aether.observation.frame_stats
+      min_count: 1

@@ -21,5 +21,5 @@ mod visual;
 pub use aether_scenario_macros::scenario_dir;
 pub use report::{RunReport, StepReport, StepStatus};
 pub use runner::{Runner, RunnerError, run_yaml_str};
-pub use script::{Script, Step, VisualAssert, parse_script};
-pub use visual::{Image, ImageError, decode_png, not_all_black};
+pub use script::{Check, Script, Step, parse_script};
+pub use visual::{Image, ImageError, decode_png, differs_from_background, not_all_black};

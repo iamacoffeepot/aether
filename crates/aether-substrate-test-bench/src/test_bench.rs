@@ -136,6 +136,16 @@ pub struct TestBench {
     /// late-arriving frame) doesn't get silently dropped.
     stashed_replies: HashMap<u64, EngineToHub>,
 
+    /// Kind names of mail observed via the chassis-owned sinks
+    /// (`aether.sink.render`, `aether.sink.camera`) plus broadcast /
+    /// session-zero frames that arrived on the loopback. Used by
+    /// scenario assertions like `Check::MailObserved`. Limitation
+    /// (v1): mail addressed to other sinks (`aether.sink.io`,
+    /// `aether.sink.log`) and direct component-to-component mail does
+    /// not show up here — those flows don't pass through outbound and
+    /// are not observed by the chassis-owned sinks the bench wraps.
+    observed_kinds: Arc<Mutex<Vec<String>>>,
+
     /// Lifetime guard. Boot owns the scheduler; dropping the
     /// TestBench drops the boot which joins the worker threads.
     _boot: SubstrateBoot,
@@ -188,12 +198,14 @@ impl TestBench {
             .kind_id(FrameStats::NAME)
             .expect("FrameStats registered");
 
+        let observed_kinds = Arc::new(Mutex::new(Vec::<String>::new()));
+
         let frame_vertices = Arc::new(Mutex::new(Vec::<u8>::with_capacity(VERTEX_BUFFER_BYTES)));
         let triangles_rendered = Arc::new(AtomicU64::new(0));
-        register_render_sink(&boot, &frame_vertices, &triangles_rendered);
+        register_render_sink(&boot, &frame_vertices, &triangles_rendered, &observed_kinds);
 
         let camera_state = Arc::new(Mutex::new(IDENTITY_VIEW_PROJ));
-        register_camera_sink(&boot, &camera_state);
+        register_camera_sink(&boot, &camera_state, &observed_kinds);
 
         if let Ok((reg, _roots)) = aether_substrate_core::io::build_default_registry() {
             boot.registry.register_sink(
@@ -235,8 +247,30 @@ impl TestBench {
             next_correlation_id: AtomicU64::new(1),
             session: SessionToken(Uuid::from_u128(TESTBENCH_SESSION_UUID)),
             stashed_replies: HashMap::new(),
+            observed_kinds,
             _boot: boot,
         })
+    }
+
+    /// Count how many mail observations match `kind_name`. Includes
+    /// mail observed at the chassis-owned `aether.sink.render` /
+    /// `aether.sink.camera` sinks plus any broadcast / session-zero
+    /// frames that arrived on the loopback. Mail to other sinks and
+    /// direct component-to-component flows are not observed (v1).
+    pub fn count_observed(&self, kind_name: &str) -> usize {
+        self.observed_kinds
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|n| n.as_str() == kind_name)
+            .count()
+    }
+
+    /// Snapshot every kind name currently observed, oldest first.
+    /// Cheap clone — used for scenario diagnostics when an assert
+    /// trips, so the failure message can list "what we did see."
+    pub fn observed_kinds(&self) -> Vec<String> {
+        self.observed_kinds.lock().unwrap().clone()
     }
 
     /// Push a fire-and-forget mail into the queue. Recipient is
@@ -375,7 +409,14 @@ impl TestBench {
                     continue;
                 }
                 // Broadcast or session-zero — frame_stats and the
-                // like. Drop.
+                // like. Record the kind so scenario assertions can
+                // observe substrate-emitted broadcasts.
+                if let EngineToHub::Mail(m) = &frame {
+                    self.observed_kinds
+                        .lock()
+                        .unwrap()
+                        .push(m.kind_name.clone());
+                }
             }
 
             if iteration > 0 && events_processed == 0 {
@@ -529,18 +570,21 @@ fn register_render_sink(
     boot: &SubstrateBoot,
     frame_vertices: &Arc<Mutex<Vec<u8>>>,
     triangles_rendered: &Arc<AtomicU64>,
+    observed_kinds: &Arc<Mutex<Vec<String>>>,
 ) {
     let verts_for_sink = Arc::clone(frame_vertices);
     let tris_for_sink = Arc::clone(triangles_rendered);
+    let observed_for_sink = Arc::clone(observed_kinds);
     boot.registry.register_sink(
         "aether.sink.render",
         Arc::new(
             move |_kind_id: u64,
-                  _kind_name: &str,
+                  kind_name: &str,
                   _origin: Option<&str>,
                   _sender: ReplyTo,
                   bytes: &[u8],
                   _count: u32| {
+                observed_for_sink.lock().unwrap().push(kind_name.to_owned());
                 let mut verts = verts_for_sink.lock().unwrap();
                 let available = VERTEX_BUFFER_BYTES.saturating_sub(verts.len());
                 let write_len = bytes.len().min(available);
@@ -564,17 +608,23 @@ fn register_render_sink(
     );
 }
 
-fn register_camera_sink(boot: &SubstrateBoot, camera_state: &Arc<Mutex<[f32; 16]>>) {
+fn register_camera_sink(
+    boot: &SubstrateBoot,
+    camera_state: &Arc<Mutex<[f32; 16]>>,
+    observed_kinds: &Arc<Mutex<Vec<String>>>,
+) {
     let cam_for_sink = Arc::clone(camera_state);
+    let observed_for_sink = Arc::clone(observed_kinds);
     boot.registry.register_sink(
         "aether.sink.camera",
         Arc::new(
             move |_kind_id: u64,
-                  _kind_name: &str,
+                  kind_name: &str,
                   _origin: Option<&str>,
                   _sender: ReplyTo,
                   bytes: &[u8],
                   _count: u32| {
+                observed_for_sink.lock().unwrap().push(kind_name.to_owned());
                 if bytes.len() != 64 {
                     tracing::warn!(
                         target: "aether_substrate::camera",

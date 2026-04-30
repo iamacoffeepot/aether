@@ -67,6 +67,37 @@ pub fn not_all_black(image: &Image) -> Result<(), String> {
     ))
 }
 
+/// Asserts at least one pixel differs from the top-left pixel by
+/// more than `tolerance` per RGB channel. The top-left pixel is the
+/// "background reference" — for chassis-rendered scenes it's almost
+/// always the clear color (geometry sits in the middle), so a passing
+/// check means "something was drawn on top of the clear pass." Alpha
+/// is ignored. Returns a one-line failure string identifying the
+/// reference color, suitable for `StepReport::Fail`.
+pub fn differs_from_background(image: &Image, tolerance: u8) -> Result<(), String> {
+    if image.rgba.len() < 4 {
+        return Err(format!(
+            "image too small to sample background: {}x{}",
+            image.width, image.height
+        ));
+    }
+    let bg_r = image.rgba[0];
+    let bg_g = image.rgba[1];
+    let bg_b = image.rgba[2];
+    for chunk in image.rgba.chunks_exact(4) {
+        let dr = chunk[0].abs_diff(bg_r);
+        let dg = chunk[1].abs_diff(bg_g);
+        let db = chunk[2].abs_diff(bg_b);
+        if dr > tolerance || dg > tolerance || db > tolerance {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "all {}x{} pixels within tolerance ±{} of top-left ({},{},{})",
+        image.width, image.height, tolerance, bg_r, bg_g, bg_b
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +143,42 @@ mod tests {
         let mut img = solid(2, 2, [0, 0, 0, 255]);
         img.rgba[8] = 1; // R channel of pixel index 2
         assert!(not_all_black(&img).is_ok());
+    }
+
+    #[test]
+    fn differs_from_background_fails_on_uniform_color() {
+        let img = solid(8, 8, [69, 79, 105, 255]);
+        let err = differs_from_background(&img, 5).unwrap_err();
+        assert!(err.contains("69,79,105"));
+        assert!(err.contains("8x8"));
+    }
+
+    #[test]
+    fn differs_from_background_passes_when_one_pixel_diverges() {
+        let mut img = solid(4, 4, [69, 79, 105, 255]);
+        img.rgba[20] = 200; // R channel of pixel index 5
+        assert!(differs_from_background(&img, 5).is_ok());
+    }
+
+    #[test]
+    fn differs_from_background_respects_tolerance() {
+        // Pixel at idx 5 has R that differs from bg by 4 — within
+        // tolerance 5.
+        let mut img = solid(4, 4, [69, 79, 105, 255]);
+        img.rgba[20] = 73;
+        assert!(differs_from_background(&img, 5).is_err());
+        // Tolerance 3 — same diff now exceeds.
+        assert!(differs_from_background(&img, 3).is_ok());
+    }
+
+    #[test]
+    fn differs_from_background_handles_tiny_image() {
+        let img = Image {
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+        };
+        let err = differs_from_background(&img, 5).unwrap_err();
+        assert!(err.contains("too small"));
     }
 }
