@@ -54,8 +54,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # Workspace-wide tests run on linux only. Non-chassis crates
-  # (aether-kinds, aether-mail, aether-hub-protocol, aether-component,
-  # aether-mail-derive, aether-substrate-core, demo components) are
+  # (aether-kinds, aether-data, aether-hub-protocol, aether-component,
+  # aether-data-derive, aether-substrate-core, demo components) are
   # pure Rust with no per-OS behavior — a matrix triples CI time without
   # catching anything new. See ADR-0035 § CI matrix scope.
   test:

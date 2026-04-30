@@ -47,6 +47,8 @@ aether-data            (no_std + alloc; foundation for everything that describes
 
 > **Note (post-implementation correction).** The drafted layout retained an `aether-mail` crate as the "transport envelope." Implementation surfaced that the only types that belong to the envelope concept — `Mail<'_>` and `Sink<K>` — already live in `aether-component` (the guest SDK), tightly coupled to wasm host-fns and FFI lifetime parameters; they cannot move into a shared crate without dragging the wasm-only `raw` extern declarations with them. The remaining content of `aether-mail` was the well-known `MailboxId` registry (`mailboxes.rs`), which is substrate-vocabulary, not transport-envelope, and therefore folds into `aether-kinds`. `aether-mail` is **deleted entirely**, taking the crate count from 6 → 4 (one fewer than the original 5 → 4 plan). The "mail" concept is preserved by the host-side and guest-side envelope types in their respective owning crates; there is no shared envelope abstraction.
 
+> **Note (follow-up rename).** The original draft kept `aether-mail-derive` as the proc-macro crate name to avoid a third crate-name change (see Neutral §4 below). Once `aether-mail` was deleted entirely, the name became actively misleading — the macro emits exclusively into `aether-data` and ships its derives via `aether-data`'s `derive` feature. Renamed to **`aether-data-derive`** as a follow-up. Consumers don't notice the rename: derives keep being imported as `aether_data::{Kind, Schema}`, only the workspace-internal crate path changes.
+
 ### Crate-by-crate
 
 **`aether-data`** *(new — absorbs all of `aether-id`, the schema half of `aether-hub-protocol`, and the data-shape half of `aether-mail`)*
@@ -137,7 +139,7 @@ Schema-hashed kind ids (ADR-0030) round-trip identically: the canonical-bytes en
 - The wire is unchanged. Hub TCP framing, `aether.kinds` custom sections, mail dispatch bytes — every byte boundary holds. This is a source-layout decision; the network and on-disk shapes are untouched.
 - ADR-0064 / ADR-0065 (tagged-id newtypes) are unaffected — the types move crates but keep their semantics.
 - ADR-0066 (per-component trunk rlibs) is orthogonal; component-owned trunk crates depend on `aether-data` instead of `aether-mail` for their kind types, but the per-component split itself is unchanged.
-- `aether-mail-derive` is renamed in spirit (it now emits `aether_data` paths) but keeps its crate name — renaming a proc-macro crate is more disruptive than renaming a target crate, and the macro's *callers* see `aether_data::{Kind, Schema}` derives anyway via re-export.
+- `aether-mail-derive` was originally planned to keep its name (callers see `aether_data::{Kind, Schema}` via re-export, so the crate name is invisible at use sites). After `aether-mail` was deleted entirely (see Decision §note 1), keeping the `mail` prefix on the proc-macro crate became actively misleading, and it was renamed to `aether-data-derive` as a follow-up (see Decision §note 2).
 
 **Follow-on work**
 

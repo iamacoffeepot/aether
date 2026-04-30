@@ -86,11 +86,24 @@ dependencies = [
 name = "aether-data"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-mail-derive",
+ "aether-data-derive",
  "bytemuck",
  "inventory",
  "postcard",
  "serde",
+]
+
+[[package]]
+name = "aether-data-derive"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-data",
+ "bytemuck",
+ "inventory",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn",
 ]
 
 [[package]]
@@ -165,19 +178,6 @@ dependencies = [
  "inventory",
  "postcard",
  "serde",
-]
-
-[[package]]
-name = "aether-mail-derive"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-data",
- "bytemuck",
- "inventory",
- "proc-macro2",
- "quote",
- "serde",
- "syn",
 ]
 
 [[package]]

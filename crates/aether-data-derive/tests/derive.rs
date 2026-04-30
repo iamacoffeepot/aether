@@ -1,7 +1,7 @@
 // Integration tests for `#[derive(Kind)]` and `#[derive(Schema)]`. Run
-// with `cargo test -p aether-mail-derive`. The aether-mail dev-dep
-// has both `derive` and `descriptors` features enabled (Cargo.toml of
-// this crate), so the macros expand and the runtime traits resolve.
+// with `cargo test -p aether-data-derive`. The `aether-data` dev-dep
+// has the `derive` feature enabled (Cargo.toml of this crate), so the
+// macros expand and the runtime traits resolve.
 //
 // Each test pins one slice of behavior:
 //   - `#[derive(Kind)]` sets `NAME` and `CastEligible::ELIGIBLE`
