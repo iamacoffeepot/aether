@@ -41,3 +41,7 @@ wgpu = "29.0.1"
 # touches it.
 [dev-dependencies]
 aether-test-fixture-probe = { path = "../aether-test-fixture-probe" }
+# Re-uses the visual/PNG helpers (`decode_png`, `differs_from_background`)
+# the per-component scenarios already exercise; avoids reinventing
+# pixel-diff plumbing in the test-bench's own scenarios.
+aether-scenario = { path = "../aether-scenario" }

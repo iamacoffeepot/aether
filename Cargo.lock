@@ -355,6 +355,7 @@ dependencies = [
  "aether-hub-protocol",
  "aether-kinds",
  "aether-mail",
+ "aether-scenario",
  "aether-substrate-core",
  "aether-test-fixture-probe",
  "bytemuck",
@@ -374,6 +375,7 @@ dependencies = [
  "aether-component",
  "aether-kinds",
  "aether-mail",
+ "bytemuck",
  "serde",
 ]
 

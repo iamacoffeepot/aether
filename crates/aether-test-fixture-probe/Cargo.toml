@@ -10,4 +10,5 @@ crate-type = ["cdylib", "rlib"]
 aether-component = { path = "../aether-component" }
 aether-kinds = { path = "../aether-kinds" }
 aether-mail = { path = "../aether-mail", features = ["derive"] }
+bytemuck = { version = "1", default-features = false, features = ["derive"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
