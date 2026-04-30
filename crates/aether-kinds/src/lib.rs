@@ -46,7 +46,7 @@ use bytemuck::{Pod, Zeroable};
     aether_mail::Kind,
     aether_mail::Schema,
 )]
-#[kind(name = "aether.tick", input)]
+#[kind(name = "aether.tick", stream)]
 pub struct Tick;
 
 /// A single keyboard keypress, identified by the stable codes in
@@ -66,7 +66,7 @@ pub struct Tick;
     aether_mail::Kind,
     aether_mail::Schema,
 )]
-#[kind(name = "aether.key", input)]
+#[kind(name = "aether.key", stream)]
 pub struct Key {
     pub code: u32,
 }
@@ -88,7 +88,7 @@ pub struct Key {
     aether_mail::Kind,
     aether_mail::Schema,
 )]
-#[kind(name = "aether.key_release", input)]
+#[kind(name = "aether.key_release", stream)]
 pub struct KeyRelease {
     pub code: u32,
 }
@@ -109,7 +109,7 @@ pub struct KeyRelease {
     aether_mail::Kind,
     aether_mail::Schema,
 )]
-#[kind(name = "aether.mouse_button", input)]
+#[kind(name = "aether.mouse_button", stream)]
 pub struct MouseButton;
 
 /// Cursor position in window coordinates, as logical pixels cast to f32.
@@ -117,7 +117,7 @@ pub struct MouseButton;
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
 )]
-#[kind(name = "aether.mouse_move", input)]
+#[kind(name = "aether.mouse_move", stream)]
 pub struct MouseMove {
     pub x: f32,
     pub y: f32,
@@ -144,7 +144,7 @@ pub struct MouseMove {
     aether_mail::Kind,
     aether_mail::Schema,
 )]
-#[kind(name = "aether.window_size", input)]
+#[kind(name = "aether.window_size", stream)]
 pub struct WindowSize {
     pub width: u32,
     pub height: u32,
@@ -558,58 +558,34 @@ mod control_plane {
         Err { error: String },
     }
 
-    // ADR-0021 publish/subscribe routing for substrate input streams.
-    // Closed enum over streams the platform layer publishes; a
-    // SubscribeInput names one and a mailbox to receive it. Reserved
-    // kind names `aether.control.subscribe_input` /
-    // `aether.control.unsubscribe_input` / `aether.control.subscribe_input_result`
-    // match the namespace used for load/drop/replace; the substrate
-    // handles them inline and replies via reply-to-sender.
-
-    /// A substrate-published input stream (ADR-0021). Closed set —
-    /// adding a platform event (e.g. `Resize`) is an additive variant
-    /// plus a publisher change on the substrate side.
-    #[derive(
-        aether_mail::Schema,
-        Serialize,
-        Deserialize,
-        Debug,
-        Clone,
-        Copy,
-        PartialEq,
-        Eq,
-        Hash,
-        PartialOrd,
-        Ord,
-    )]
-    pub enum InputStream {
-        Tick,
-        Key,
-        MouseMove,
-        MouseButton,
-        WindowSize,
-        KeyRelease,
-    }
+    // ADR-0021 publish/subscribe routing for substrate input streams,
+    // ADR-0068 keying. The substrate maintains one subscriber set per
+    // input `KindId`; a `SubscribeInput` names the kind id and the
+    // mailbox to add. Reserved kind names `aether.control.subscribe_input`
+    // / `aether.control.unsubscribe_input` /
+    // `aether.control.subscribe_input_result` match the namespace used
+    // for load/drop/replace; the substrate handles them inline and
+    // replies via reply-to-sender.
 
     /// `aether.control.subscribe_input` — add `mailbox` to the
-    /// subscriber set for `stream`. Idempotent: subscribing a mailbox
+    /// subscriber set for `kind`. Idempotent: subscribing a mailbox
     /// already in the set is still `Ok` (subscriptions are a set, not
     /// a counter). Reply: `SubscribeInputResult`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.subscribe_input")]
     pub struct SubscribeInput {
-        pub stream: InputStream,
+        pub kind: aether_mail::KindId,
         pub mailbox: aether_mail::MailboxId,
     }
 
     /// `aether.control.unsubscribe_input` — remove `mailbox` from the
-    /// subscriber set for `stream`. Idempotent: unsubscribing a mailbox
+    /// subscriber set for `kind`. Idempotent: unsubscribing a mailbox
     /// that isn't subscribed is still `Ok`. Reply:
     /// `SubscribeInputResult`.
     #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.unsubscribe_input")]
     pub struct UnsubscribeInput {
-        pub stream: InputStream,
+        pub kind: aether_mail::KindId,
         pub mailbox: aether_mail::MailboxId,
     }
 

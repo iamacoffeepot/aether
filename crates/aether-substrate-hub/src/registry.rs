@@ -252,6 +252,7 @@ mod tests {
         let new_kinds = vec![KindDescriptor {
             name: "physics.contact".into(),
             schema: SchemaType::Bytes,
+            is_stream: false,
         }];
         reg.update_kinds(&id, new_kinds.clone());
         assert_eq!(reg.get(&id).unwrap().kinds, new_kinds);

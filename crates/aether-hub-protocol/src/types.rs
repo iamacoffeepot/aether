@@ -50,10 +50,20 @@ pub struct Hello {
 /// One entry in `Hello.kinds`: a kind-name plus its schema. The hub
 /// uses the schema to encode agent-supplied params into the exact
 /// bytes the engine expects (cast-shaped or postcard, ADR-0019).
+///
+/// `is_stream` carries the guest-side `<K as Kind>::IS_STREAM` flag
+/// (ADR-0068) — `true` when the kind is a substrate-published event
+/// stream that components can subscribe to (Tick, Key, MouseMove,
+/// MouseButton, KeyRelease, WindowSize). Metadata-only: the canonical
+/// hash bytes that drive `Kind::ID` are still `(name, schema)` per
+/// ADR-0030, so toggling this flag never shifts a kind's id. The
+/// substrate uses it to decide whether a freshly-loaded handler
+/// should be auto-subscribed into the per-kind subscriber set.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KindDescriptor {
     pub name: String,
     pub schema: SchemaType,
+    pub is_stream: bool,
 }
 
 /// ADR-0019 schema type vocabulary. Describes the structure of a mail

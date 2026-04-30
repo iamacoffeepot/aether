@@ -300,6 +300,7 @@ impl Registry {
         let descriptor = KindDescriptor {
             name: name.clone(),
             schema: SchemaType::Bytes,
+            is_stream: false,
         };
         // A fresh `Bytes` descriptor can only conflict with a prior
         // `Bytes` registration under the same name — in which case the
@@ -559,6 +560,7 @@ mod tests {
         KindDescriptor {
             name: name.to_string(),
             schema: SchemaType::Unit,
+            is_stream: false,
         }
     }
 
@@ -574,6 +576,7 @@ mod tests {
                 }]
                 .into(),
             },
+            is_stream: false,
         }
     }
 
@@ -626,6 +629,7 @@ mod tests {
                 }]
                 .into(),
             },
+            is_stream: false,
         };
         let unnamed_id = r
             .register_kind_with_descriptor(unnamed)

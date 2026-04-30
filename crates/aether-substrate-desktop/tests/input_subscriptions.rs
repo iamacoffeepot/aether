@@ -11,10 +11,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use aether_kinds::{
-    DropComponent, InputStream, LoadComponent, SubscribeInput, Tick, UnsubscribeInput,
-};
-use aether_mail::Kind;
+use aether_kinds::{DropComponent, LoadComponent, SubscribeInput, Tick, UnsubscribeInput};
+use aether_mail::{Kind, KindId};
 use aether_substrate_desktop::{
     ControlPlane, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
     host_fns,
@@ -152,21 +150,21 @@ fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> u64 {
         .expect("load inserted a new component")
 }
 
-fn subscribe(plane: &ControlPlane, stream: InputStream, mailbox: u64) {
+fn subscribe(plane: &ControlPlane, kind: KindId, mailbox: u64) {
     dispatch(
         plane,
         &SubscribeInput {
-            stream,
+            kind,
             mailbox: aether_mail::MailboxId(mailbox),
         },
     );
 }
 
-fn unsubscribe(plane: &ControlPlane, stream: InputStream, mailbox: u64) {
+fn unsubscribe(plane: &ControlPlane, kind: KindId, mailbox: u64) {
     dispatch(
         plane,
         &UnsubscribeInput {
-            stream,
+            kind,
             mailbox: aether_mail::MailboxId(mailbox),
         },
     );
@@ -185,7 +183,7 @@ fn drop_component(plane: &ControlPlane, mailbox_id: u64) {
 /// subscriber set, push one mail per subscriber, block until the
 /// scheduler drains.
 fn publish_tick(h: &Harness) {
-    for mbox in subscribers_for(&h.input_subscribers, InputStream::Tick) {
+    for mbox in subscribers_for(&h.input_subscribers, KindId(Tick::ID)) {
         h.queue.push(Mail::new(mbox, h.kind_tick, vec![], 1));
     }
     h.queue.drain_all();
@@ -197,16 +195,16 @@ fn empty_subscribers_means_no_delivery() {
     publish_tick(&h);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 0);
-    assert!(subscribers_for(&h.input_subscribers, InputStream::Tick).is_empty());
+    assert!(subscribers_for(&h.input_subscribers, KindId(Tick::ID)).is_empty());
 }
 
 #[test]
 fn subscribed_component_receives_published_ticks() {
     let h = make_harness();
     let id = load_wat(&h.plane, &h.wat, "listener");
-    subscribe(&h.plane, InputStream::Tick, id);
+    subscribe(&h.plane, KindId(Tick::ID), id);
     assert_eq!(
-        subscribers_for(&h.input_subscribers, InputStream::Tick),
+        subscribers_for(&h.input_subscribers, KindId(Tick::ID)),
         vec![MailboxId(id)]
     );
     for _ in 0..3 {
@@ -220,8 +218,8 @@ fn two_subscribers_each_receive_every_tick() {
     let h = make_harness();
     let a = load_wat(&h.plane, &h.wat, "a");
     let b = load_wat(&h.plane, &h.wat, "b");
-    subscribe(&h.plane, InputStream::Tick, a);
-    subscribe(&h.plane, InputStream::Tick, b);
+    subscribe(&h.plane, KindId(Tick::ID), a);
+    subscribe(&h.plane, KindId(Tick::ID), b);
     publish_tick(&h);
     publish_tick(&h);
     // 2 subscribers × 2 ticks = 4 deliveries.
@@ -232,11 +230,11 @@ fn two_subscribers_each_receive_every_tick() {
 fn unsubscribe_stops_delivery() {
     let h = make_harness();
     let id = load_wat(&h.plane, &h.wat, "listener");
-    subscribe(&h.plane, InputStream::Tick, id);
+    subscribe(&h.plane, KindId(Tick::ID), id);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);
 
-    unsubscribe(&h.plane, InputStream::Tick, id);
+    unsubscribe(&h.plane, KindId(Tick::ID), id);
     publish_tick(&h);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);
@@ -246,12 +244,12 @@ fn unsubscribe_stops_delivery() {
 fn drop_clears_subscriptions() {
     let h = make_harness();
     let id = load_wat(&h.plane, &h.wat, "victim");
-    subscribe(&h.plane, InputStream::Tick, id);
+    subscribe(&h.plane, KindId(Tick::ID), id);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);
 
     drop_component(&h.plane, id);
-    assert!(subscribers_for(&h.input_subscribers, InputStream::Tick).is_empty());
+    assert!(subscribers_for(&h.input_subscribers, KindId(Tick::ID)).is_empty());
     publish_tick(&h);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);

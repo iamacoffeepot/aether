@@ -636,6 +636,7 @@ mod tests {
             .register_kind_with_descriptor(KindDescriptor {
                 name: "test.pong".into(),
                 schema: SchemaType::Unit,
+                is_stream: false,
             })
             .expect("register kind");
         let ctx = SubstrateCtx::new(
@@ -719,6 +720,7 @@ mod tests {
             .register_kind_with_descriptor(KindDescriptor {
                 name: "test.pong".into(),
                 schema: SchemaType::Unit,
+                is_stream: false,
             })
             .expect("register kind");
         let queue = Arc::new(Mailer::new());

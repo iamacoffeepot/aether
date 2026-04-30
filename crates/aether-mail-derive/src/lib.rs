@@ -65,7 +65,7 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let KindAttr {
         name: kind_name,
-        is_input,
+        is_stream,
     } = parse_kind_attr(&input.attrs)?;
     if let Data::Union(u) = &input.data {
         return Err(syn::Error::new_spanned(
@@ -73,11 +73,12 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
             "Kind derive does not support unions",
         ));
     }
-    let is_input_item = if is_input {
-        quote! { const IS_INPUT: bool = true; }
+    let is_stream_item = if is_stream {
+        quote! { const IS_STREAM: bool = true; }
     } else {
         quote! {}
     };
+    let is_stream_byte: u8 = if is_stream { 1 } else { 0 };
 
     // ADR-0033 wire-shape autodetect: `#[repr(C)]` on the type means
     // the substrate carried it as raw cast bytes (and the user has
@@ -140,7 +141,7 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     &#canonical_bytes_ident,
                 ),
             );
-            #is_input_item
+            #is_stream_item
 
             fn decode_from_bytes(bytes: &[u8]) -> ::core::option::Option<Self> {
                 #decode_body
@@ -189,17 +190,22 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 &#labels_ident,
             );
 
+        // ADR-0068 v0x03: trailing byte after the canonical bytes
+        // carries `IS_STREAM`. Canonical bytes (and therefore
+        // `Kind::ID`) unchanged from v0x02 — the stream flag is
+        // metadata that rides alongside identity, never inside it.
         #[cfg(target_arch = "wasm32")]
         #[used]
         #[unsafe(link_section = "aether.kinds")]
-        static #kind_static_ident: [u8; #canonical_len_ident + 1] = {
-            let mut out = [0u8; #canonical_len_ident + 1];
-            out[0] = 0x02;
+        static #kind_static_ident: [u8; #canonical_len_ident + 2] = {
+            let mut out = [0u8; #canonical_len_ident + 2];
+            out[0] = 0x03;
             let mut i = 0;
             while i < #canonical_len_ident {
                 out[i + 1] = #canonical_bytes_ident[i];
                 i += 1;
             }
+            out[#canonical_len_ident + 1] = #is_stream_byte;
             out
         };
 
@@ -231,6 +237,7 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
             ::aether_mail::__inventory::DescriptorEntry {
                 name: <#name as ::aether_mail::Kind>::NAME,
                 schema: &#schema_static_ident,
+                is_stream: <#name as ::aether_mail::Kind>::IS_STREAM,
             }
         }
     })
@@ -553,7 +560,7 @@ fn reject_hashmap(ty: &Type) -> syn::Result<()> {
 
 struct KindAttr {
     name: String,
-    is_input: bool,
+    is_stream: bool,
 }
 
 fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
@@ -562,7 +569,7 @@ fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
             continue;
         }
         let mut name: Option<String> = None;
-        let mut is_input = false;
+        let mut is_stream = false;
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("name") {
                 let value = meta.value()?;
@@ -575,17 +582,21 @@ fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
                 }
                 return Err(meta.error("`name` must be a string literal"));
             }
-            if meta.path.is_ident("input") {
-                // Flag-shaped — no `= value`. ADR-0021: marks this
-                // kind as a substrate-published input stream so the
-                // SDK's auto-subscribe walk catches it at init.
-                is_input = true;
+            if meta.path.is_ident("stream") {
+                // Flag-shaped — no `= value`. ADR-0021 + ADR-0068:
+                // marks this kind as a substrate-published event
+                // stream that components subscribe to via the per-kind
+                // subscriber set. Drives `<K as Kind>::IS_STREAM` and
+                // the trailing byte in the `aether.kinds` v0x03 wire
+                // format that the substrate reads to gate auto-
+                // subscribe.
+                is_stream = true;
                 return Ok(());
             }
-            Err(meta.error("expected `name = \"...\"` or `input`"))
+            Err(meta.error("expected `name = \"...\"` or `stream`"))
         })?;
         if let Some(name) = name {
-            return Ok(KindAttr { name, is_input });
+            return Ok(KindAttr { name, is_stream });
         }
     }
     Err(syn::Error::new(
@@ -1232,17 +1243,24 @@ fn build_kinds_section_retention_statics(self_ty: &Type, handlers: &[HandlerFn])
                     <#k as ::aether_component::__macro_internals::Kind>::NAME,
                     &#schema_ident,
                 );
+            // ADR-0068 v0x03: trailing byte after canonical bytes
+            // carries `<K as Kind>::IS_STREAM`. Same wire shape as
+            // `expand_kind`'s primary emission so retention records
+            // (when this kind lives in a dependency rlib) and the
+            // primary records pair cleanly by id without disagreeing
+            // on the trailing flag.
             #[cfg(target_arch = "wasm32")]
             #[used]
             #[unsafe(link_section = "aether.kinds")]
-            static #section_ident: [u8; #len_ident + 1] = {
-                let mut out = [0u8; #len_ident + 1];
-                out[0] = 0x02;
+            static #section_ident: [u8; #len_ident + 2] = {
+                let mut out = [0u8; #len_ident + 2];
+                out[0] = 0x03;
                 let mut i = 0;
                 while i < #len_ident {
                     out[i + 1] = #bytes_ident[i];
                     i += 1;
                 }
+                out[#len_ident + 1] = if <#k as ::aether_component::__macro_internals::Kind>::IS_STREAM { 1 } else { 0 };
                 out
             };
 

@@ -155,6 +155,7 @@ mod tests {
                 KindDescriptor {
                     name: "aether.tick".into(),
                     schema: SchemaType::Unit,
+                    is_stream: false,
                 },
                 KindDescriptor {
                     name: "aether.key".into(),
@@ -166,6 +167,7 @@ mod tests {
                         }]
                         .into(),
                     },
+                    is_stream: false,
                 },
             ],
         });
@@ -275,10 +277,12 @@ mod tests {
             KindDescriptor {
                 name: "aether.tick".into(),
                 schema: SchemaType::Unit,
+                is_stream: false,
             },
             KindDescriptor {
                 name: "physics.contact".into(),
                 schema: SchemaType::Bytes,
+                is_stream: false,
             },
         ]);
         let mut buf = Vec::new();
@@ -408,6 +412,7 @@ mod tests {
         let desc = KindDescriptor {
             name: "demo.tick".into(),
             schema: SchemaType::Unit,
+            is_stream: false,
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(
@@ -418,6 +423,7 @@ mod tests {
         let desc = KindDescriptor {
             name: "demo.seq".into(),
             schema: SchemaType::Scalar(Primitive::U32),
+            is_stream: false,
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(
@@ -458,6 +464,7 @@ mod tests {
         let desc = KindDescriptor {
             name: "demo.draw_triangle".into(),
             schema: triangle,
+            is_stream: false,
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(
@@ -491,6 +498,7 @@ mod tests {
         let desc = KindDescriptor {
             name: "demo.load_component".into(),
             schema: load,
+            is_stream: false,
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(
@@ -529,6 +537,7 @@ mod tests {
         let desc = KindDescriptor {
             name: "demo.load_result".into(),
             schema: result,
+            is_stream: false,
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(
@@ -557,6 +566,7 @@ mod tests {
                     }]
                     .into(),
                 },
+                is_stream: false,
             }],
         });
         let mut buf = Vec::new();
@@ -644,6 +654,7 @@ mod tests {
                 }]
                 .into(),
             },
+            is_stream: false,
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(
@@ -662,6 +673,7 @@ mod tests {
                 key: SchemaCell::owned(SchemaType::Scalar(Primitive::U32)),
                 value: SchemaCell::owned(SchemaType::String),
             },
+            is_stream: false,
         };
         let bytes = postcard::to_allocvec(&desc).unwrap();
         assert_eq!(

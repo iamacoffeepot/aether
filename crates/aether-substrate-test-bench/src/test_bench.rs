@@ -26,10 +26,9 @@ use std::time::Instant;
 
 use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
 use aether_kinds::{
-    Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, DRAW_TRIANGLE_BYTES, FrameStats,
-    InputStream, Tick,
+    Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, DRAW_TRIANGLE_BYTES, FrameStats, Tick,
 };
-use aether_mail::{Kind, encode_empty, encode_struct, mailbox_id_from_name};
+use aether_mail::{Kind, KindId, encode_empty, encode_struct, mailbox_id_from_name};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use aether_substrate_core::{
@@ -519,7 +518,7 @@ impl TestBench {
 
     fn run_frame(&mut self, dispatch_tick: bool) {
         if dispatch_tick {
-            let subs = subscribers_for(&self.input_subscribers, InputStream::Tick);
+            let subs = subscribers_for(&self.input_subscribers, KindId(Tick::ID));
             for mbox in subs {
                 self.queue
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_kinds::{FrameStats, InputStream, Tick};
-use aether_mail::{Kind, encode_empty};
+use aether_kinds::{FrameStats, Tick};
+use aether_mail::{Kind, KindId, encode_empty};
 use aether_substrate_core::{
     Chassis, ChassisCapabilities, InputSubscribers, Mailer, Scheduler, SubstrateBoot, frame_loop,
     mail::{Mail, MailboxId},
@@ -75,7 +75,7 @@ impl Chassis for HeadlessChassis {
             next_deadline = Instant::now() + self.tick_period;
 
             frame += 1;
-            let subs = subscribers_for(&self.input_subscribers, InputStream::Tick);
+            let subs = subscribers_for(&self.input_subscribers, KindId(Tick::ID));
             for mbox in subs {
                 self.queue
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));

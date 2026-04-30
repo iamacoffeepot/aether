@@ -20,12 +20,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use aether_kinds::{
-    CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, InputStream,
-    Key, KeyRelease, MonitorInfo, MouseButton, MouseMove, NoteOff, NoteOn, OsInfo,
-    PlatformInfoResult, SetMasterGain, SetMasterGainResult, SetWindowModeResult,
-    SetWindowTitleResult, Tick, VideoMode, WindowInfo, WindowMode, WindowSize, keycode,
+    CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, Key,
+    KeyRelease, MonitorInfo, MouseButton, MouseMove, NoteOff, NoteOn, OsInfo, PlatformInfoResult,
+    SetMasterGain, SetMasterGainResult, SetWindowModeResult, SetWindowTitleResult, Tick, VideoMode,
+    WindowInfo, WindowMode, WindowSize, keycode,
 };
-use aether_mail::Kind;
+use aether_mail::{Kind, KindId};
 use aether_mail::{encode, encode_empty};
 use aether_substrate_core::sinks::{RenderAccumulator, build_camera_sink, build_render_sink};
 use aether_substrate_desktop::{
@@ -692,7 +692,7 @@ impl App {
     }
 
     fn publish_window_size(&self, width: u32, height: u32) {
-        let subs = subscribers_for(&self.input_subscribers, InputStream::WindowSize);
+        let subs = subscribers_for(&self.input_subscribers, KindId(WindowSize::ID));
         if subs.is_empty() {
             return;
         }
@@ -816,7 +816,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.occluded && pending_capture.is_none() {
                     return;
                 }
-                let tick_subs = subscribers_for(&self.input_subscribers, InputStream::Tick);
+                let tick_subs = subscribers_for(&self.input_subscribers, KindId(Tick::ID));
                 for mbox in tick_subs {
                     self.queue
                         .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
@@ -933,7 +933,7 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 match key_event.state {
                     ElementState::Pressed => {
-                        let subs = subscribers_for(&self.input_subscribers, InputStream::Key);
+                        let subs = subscribers_for(&self.input_subscribers, KindId(Key::ID));
                         for mbox in subs {
                             self.queue.push(Mail::new(
                                 mbox,
@@ -944,8 +944,7 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     ElementState::Released => {
-                        let subs =
-                            subscribers_for(&self.input_subscribers, InputStream::KeyRelease);
+                        let subs = subscribers_for(&self.input_subscribers, KindId(KeyRelease::ID));
                         for mbox in subs {
                             self.queue.push(Mail::new(
                                 mbox,
@@ -961,7 +960,7 @@ impl ApplicationHandler<UserEvent> for App {
                 state: ElementState::Pressed,
                 ..
             } => {
-                let subs = subscribers_for(&self.input_subscribers, InputStream::MouseButton);
+                let subs = subscribers_for(&self.input_subscribers, KindId(MouseButton::ID));
                 for mbox in subs {
                     self.queue.push(Mail::new(
                         mbox,
@@ -972,7 +971,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let subs = subscribers_for(&self.input_subscribers, InputStream::MouseMove);
+                let subs = subscribers_for(&self.input_subscribers, KindId(MouseMove::ID));
                 if !subs.is_empty() {
                     let payload = encode(&MouseMove {
                         x: position.x as f32,

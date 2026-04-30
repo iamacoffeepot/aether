@@ -62,7 +62,6 @@
 
 extern crate alloc;
 
-use core::any::TypeId;
 use core::marker::PhantomData;
 
 use aether_mail::{Kind, Schema, mailbox_id_from_name};
@@ -359,38 +358,15 @@ impl InitCtx<'_> {
     }
 
     /// Send `aether.control.subscribe_input` with this component's
-    /// mailbox as the subscriber for `K`'s stream. Called by
-    /// `KindList::resolve_all` for every `K::IS_INPUT` kind — ADR-0030
-    /// Phase 2 moved the subscribe side effect out of `resolve_kind`
-    /// and into the guest SDK. No-op if `K` isn't one of the four
-    /// known substrate input kind types (input kinds defined downstream
-    /// of aether-kinds get to pick their own subscribe path).
-    ///
-    /// Stream selection goes through `TypeId` rather than `K::NAME`
-    /// so a future rename on either side of the pairing surfaces as a
-    /// type error instead of silently skipping the subscribe.
+    /// mailbox as the subscriber for `K`. ADR-0068 keys subscriber
+    /// sets by `KindId` directly, so this collapses to a one-line
+    /// send: any `Kind` is sendable, the substrate's platform thread
+    /// fans out only for kinds it actually publishes, and a subscribe
+    /// for a non-stream kind is a harmless no-op.
     pub fn subscribe_input<K: Kind + 'static>(&self) {
-        use aether_kinds::{
-            InputStream, Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, Tick, WindowSize,
-        };
-        let tid = TypeId::of::<K>();
-        let stream = if tid == TypeId::of::<Tick>() {
-            InputStream::Tick
-        } else if tid == TypeId::of::<Key>() {
-            InputStream::Key
-        } else if tid == TypeId::of::<KeyRelease>() {
-            InputStream::KeyRelease
-        } else if tid == TypeId::of::<MouseMove>() {
-            InputStream::MouseMove
-        } else if tid == TypeId::of::<MouseButton>() {
-            InputStream::MouseButton
-        } else if tid == TypeId::of::<WindowSize>() {
-            InputStream::WindowSize
-        } else {
-            return;
-        };
+        use aether_kinds::SubscribeInput;
         let payload = SubscribeInput {
-            stream,
+            kind: ::aether_mail::KindId(<K as Kind>::ID),
             mailbox: ::aether_mail::MailboxId(self.mailbox),
         };
         resolve_sink::<SubscribeInput>("aether.control").send(&payload);

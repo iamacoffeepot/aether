@@ -159,6 +159,7 @@ mod tests {
         let tick = aether_hub_protocol::KindDescriptor {
             name: "aether.tick".into(),
             schema: aether_hub_protocol::SchemaType::Unit,
+            is_stream: false,
         };
         record_with_kinds(id_u128, vec![tick])
     }
@@ -275,6 +276,7 @@ mod tests {
                 ]
                 .into(),
             },
+            is_stream: false,
         }];
         let (rec, mut rx) = record_with_kinds(3, kinds);
         let id = rec.id;
@@ -309,6 +311,7 @@ mod tests {
         let kinds = vec![KindDescriptor {
             name: "aether.tick".into(),
             schema: SchemaType::Unit,
+            is_stream: false,
         }];
         let (rec, mut rx) = record_with_kinds(4, kinds);
         let id = rec.id;
@@ -382,6 +385,7 @@ mod tests {
             KindDescriptor {
                 name: "aether.tick".into(),
                 schema: SchemaType::Unit,
+                is_stream: false,
             },
             KindDescriptor {
                 name: "hello.note".into(),
@@ -393,6 +397,7 @@ mod tests {
                     }]
                     .into(),
                 },
+                is_stream: false,
             },
             KindDescriptor {
                 name: "hello.cast".into(),
@@ -404,6 +409,7 @@ mod tests {
                     }]
                     .into(),
                 },
+                is_stream: false,
             },
         ];
         let engines = EngineRegistry::new();
@@ -725,6 +731,7 @@ mod tests {
                 ]
                 .into(),
             },
+            is_stream: false,
         }];
         let (rec, _rx) = record_with_kinds(33, kinds);
         let id = rec.id;
@@ -779,6 +786,7 @@ mod tests {
                 }]
                 .into(),
             },
+            is_stream: false,
         }];
         let (rec, _rx) = record_with_kinds(34, kinds);
         let id = rec.id;
@@ -854,6 +862,7 @@ mod tests {
         let kinds = vec![KindDescriptor {
             name: "aether.observation.ping".into(),
             schema: SchemaType::Unit,
+            is_stream: false,
         }];
         let (rec, _rx) = record_with_kinds(36, kinds);
         let id = rec.id;
@@ -957,6 +966,7 @@ mod tests {
                 ]
                 .into(),
             },
+            is_stream: false,
         }
     }
 
@@ -1185,6 +1195,7 @@ mod tests {
             KindDescriptor {
                 name: "demo.tick".into(),
                 schema: SchemaType::Unit,
+                is_stream: false,
             },
         ];
         let (rec, mut rx) = record_with_kinds(781, kinds);

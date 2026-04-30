@@ -1,4 +1,5 @@
-// ADR-0021 publish/subscribe routing for substrate input streams.
+// ADR-0021 publish/subscribe routing for substrate input streams,
+// ADR-0068 keying.
 //
 // `InputSubscribers` is the shared table between the platform thread
 // (which publishes `aether.tick`, `aether.key`, `aether.mouse_move`,
@@ -13,14 +14,15 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 
-use aether_kinds::InputStream;
+use aether_mail::KindId;
 
 use crate::mail::MailboxId;
 
-/// Per-stream subscriber sets. One entry per `InputStream`; absent
-/// entries are treated the same as empty sets, which lets subscribe
-/// lazily initialise an entry without a boot-time prepass.
-pub type InputSubscribers = Arc<RwLock<HashMap<InputStream, BTreeSet<MailboxId>>>>;
+/// Per-kind subscriber sets, keyed on the input kind's compile-time
+/// `KindId` (ADR-0068). Absent entries are treated the same as empty
+/// sets, which lets subscribe lazily initialise an entry without a
+/// boot-time prepass.
+pub type InputSubscribers = Arc<RwLock<HashMap<KindId, BTreeSet<MailboxId>>>>;
 
 /// Build an empty subscriber table. Callers clone the returned `Arc`
 /// into both the control plane (mutator) and the platform thread
@@ -29,15 +31,15 @@ pub fn new_subscribers() -> InputSubscribers {
     Arc::new(RwLock::new(HashMap::new()))
 }
 
-/// Snapshot of the subscribers for a single stream, returned as a
+/// Snapshot of the subscribers for a single input kind, returned as a
 /// `Vec` so the caller can drop the read lock before dispatching. The
 /// platform thread calls this once per platform event; the copy is
 /// cheap (small sets, integer elements).
-pub fn subscribers_for(table: &InputSubscribers, stream: InputStream) -> Vec<MailboxId> {
+pub fn subscribers_for(table: &InputSubscribers, kind: KindId) -> Vec<MailboxId> {
     table
         .read()
         .unwrap()
-        .get(&stream)
+        .get(&kind)
         .map(|set| set.iter().copied().collect())
         .unwrap_or_default()
 }
