@@ -357,7 +357,7 @@ mod tests {
         let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
         mailer.wire(Arc::clone(&registry), components);
 
-        let kind_id = aether_mail::KindId(FrameStats::ID);
+        let kind_id = FrameStats::ID;
         emit_frame_stats(&mailer, broadcast, MailboxId(0), kind_id, 1, 0);
         emit_frame_stats(&mailer, broadcast, MailboxId(0), kind_id, 119, 0);
         assert!(captured.read().unwrap().is_empty());
@@ -387,7 +387,7 @@ mod tests {
             &mailer,
             broadcast,
             MailboxId(0),
-            aether_mail::KindId(FrameStats::ID),
+            FrameStats::ID,
             LOG_EVERY_FRAMES,
             42,
         );

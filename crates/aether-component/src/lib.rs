@@ -233,7 +233,7 @@ impl<K: Kind + bytemuck::NoUninit> Sink<K> {
 /// revision, and that surfaces as "kind not found" on the first mail.
 pub const fn resolve<K: Kind>() -> KindId<K> {
     KindId {
-        raw: K::ID,
+        raw: K::ID.0,
         _k: PhantomData,
     }
 }
@@ -245,8 +245,8 @@ pub const fn resolve<K: Kind>() -> KindId<K> {
 /// exist on the substrate side at init time.
 pub const fn resolve_sink<K: Kind>(mailbox_name: &str) -> Sink<K> {
     Sink {
-        mailbox: mailbox_id_from_name(mailbox_name),
-        kind: K::ID,
+        mailbox: mailbox_id_from_name(mailbox_name).0,
+        kind: K::ID.0,
         _k: PhantomData,
     }
 }
@@ -366,7 +366,7 @@ impl InitCtx<'_> {
     pub fn subscribe_input<K: Kind + 'static>(&self) {
         use aether_kinds::SubscribeInput;
         let payload = SubscribeInput {
-            kind: ::aether_mail::KindId(<K as Kind>::ID),
+            kind: <K as Kind>::ID,
             mailbox: ::aether_mail::MailboxId(self.mailbox),
         };
         resolve_sink::<SubscribeInput>("aether.control").send(&payload);
@@ -596,7 +596,7 @@ impl DropCtx<'_> {
     where
         K: Kind + Schema + serde::Serialize,
     {
-        let mut out = alloc::vec::Vec::from(K::ID.to_le_bytes());
+        let mut out = alloc::vec::Vec::from(K::ID.0.to_le_bytes());
         let payload = postcard::to_allocvec(value).expect("postcard encode to Vec is infallible");
         out.extend_from_slice(&payload);
         self.save_state(version, &out);
@@ -671,7 +671,7 @@ impl<'a> PriorState<'a> {
         let mut id_arr = [0u8; 8];
         id_arr.copy_from_slice(id_bytes);
         let id = u64::from_le_bytes(id_arr);
-        if id != K::ID {
+        if id != K::ID.0 {
             return None;
         }
         postcard::from_bytes(payload).ok()
@@ -810,7 +810,7 @@ impl<'a> Mail<'a> {
     /// how to handle a kind, or as a signal check when `K` is a
     /// zero-sized input marker like `Tick` / `MouseButton`.
     pub fn is<K: Kind>(&self) -> bool {
-        self.kind == K::ID
+        self.kind == K::ID.0
     }
 
     /// Type-driven sibling of `decode`: takes `K` as a type parameter
@@ -822,7 +822,7 @@ impl<'a> Mail<'a> {
     /// Copies rather than borrows so alignment of the underlying bytes
     /// doesn't matter — same semantics as `decode`.
     pub fn decode_typed<K: Kind + bytemuck::AnyBitPattern>(&self) -> Option<K> {
-        if self.kind != K::ID || self.count != 1 {
+        if self.kind != K::ID.0 || self.count != 1 {
             return None;
         }
         let byte_len = core::mem::size_of::<K>();
@@ -836,7 +836,7 @@ impl<'a> Mail<'a> {
     /// Type-driven sibling of `decode_slice`. Borrowed, alignment
     /// required (returns `None` if misaligned).
     pub fn decode_slice_typed<K: Kind + bytemuck::AnyBitPattern>(&self) -> Option<&'a [K]> {
-        if self.kind != K::ID {
+        if self.kind != K::ID.0 {
             return None;
         }
         let byte_len = core::mem::size_of::<K>() * self.count as usize;
@@ -866,7 +866,7 @@ impl<'a> Mail<'a> {
     /// didn't override, a cast-size mismatch, or a postcard decode
     /// error.
     pub fn decode_kind<K: Kind>(&self) -> Option<K> {
-        if self.kind != K::ID || self.count != 1 {
+        if self.kind != K::ID.0 || self.count != 1 {
             return None;
         }
         let bytes =
@@ -1084,7 +1084,8 @@ mod tests {
     struct FakeKind;
     impl Kind for FakeKind {
         const NAME: &'static str = "test.fake";
-        const ID: u64 = aether_mail::mailbox_id_from_name(Self::NAME);
+        // Stable test sentinel — distinct from real schema-hashed kind ids.
+        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0001_0001);
     }
 
     #[test]
@@ -1144,7 +1145,8 @@ mod tests {
     }
     impl Kind for FakePod {
         const NAME: &'static str = "test.fake_pod";
-        const ID: u64 = aether_mail::mailbox_id_from_name(Self::NAME);
+        // Stable test sentinel — distinct from real schema-hashed kind ids.
+        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0001_0002);
     }
 
     #[test]
@@ -1266,7 +1268,7 @@ mod tests {
 
     #[test]
     fn mail_is_typed_matches_kind_id() {
-        let mail = unsafe { Mail::__from_ptr_test(FakeKind::ID, 0, 0, 0, NO_REPLY_HANDLE) };
+        let mail = unsafe { Mail::__from_ptr_test(FakeKind::ID.0, 0, 0, 0, NO_REPLY_HANDLE) };
         assert!(mail.is::<FakeKind>());
         assert!(!mail.is::<FakePod>());
     }
@@ -1277,7 +1279,7 @@ mod tests {
         let ptr_raw = (&value as *const FakePod).addr();
         let byte_len = core::mem::size_of::<FakePod>() as u32;
         let mail =
-            unsafe { Mail::__from_ptr_test(FakePod::ID, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
+            unsafe { Mail::__from_ptr_test(FakePod::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let out = mail.decode_typed::<FakePod>().unwrap();
         assert_eq!(out, value);
     }
@@ -1289,7 +1291,7 @@ mod tests {
         let byte_len = core::mem::size_of::<FakePod>() as u32;
         // Kind id deliberately mismatched (FakeKind instead of FakePod).
         let mail =
-            unsafe { Mail::__from_ptr_test(FakeKind::ID, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
+            unsafe { Mail::__from_ptr_test(FakeKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         assert!(mail.decode_typed::<FakePod>().is_none());
     }
 
@@ -1299,7 +1301,7 @@ mod tests {
         let ptr_raw = values.as_ptr().addr();
         let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
         let mail =
-            unsafe { Mail::__from_ptr_test(FakePod::ID, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
+            unsafe { Mail::__from_ptr_test(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
         assert!(mail.decode_typed::<FakePod>().is_none());
     }
 
@@ -1309,7 +1311,7 @@ mod tests {
         let ptr_raw = values.as_ptr().addr();
         let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
         let mail =
-            unsafe { Mail::__from_ptr_test(FakePod::ID, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
+            unsafe { Mail::__from_ptr_test(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
         let out = mail.decode_slice_typed::<FakePod>().unwrap();
         assert_eq!(out, &values);
     }
@@ -1342,7 +1344,7 @@ mod tests {
         let bytes = postcard::to_allocvec(&value).unwrap();
         let mail = unsafe {
             Mail::__from_ptr_test(
-                FakePostcard::ID,
+                FakePostcard::ID.0,
                 bytes.as_ptr().addr(),
                 bytes.len() as u32,
                 1,
@@ -1379,7 +1381,7 @@ mod tests {
         let ptr_raw = (&value as *const FakeCastKind).addr();
         let byte_len = core::mem::size_of::<FakeCastKind>() as u32;
         let mail = unsafe {
-            Mail::__from_ptr_test(FakeCastKind::ID, ptr_raw, byte_len, 1, NO_REPLY_HANDLE)
+            Mail::__from_ptr_test(FakeCastKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE)
         };
         let out = mail.decode_kind::<FakeCastKind>().expect("decode");
         assert_eq!(out, value);
@@ -1442,7 +1444,7 @@ mod tests {
         let bytes = postcard::to_allocvec(&value).unwrap();
         let mail = unsafe {
             Mail::__from_ptr_test(
-                FakeKind::ID,
+                FakeKind::ID.0,
                 bytes.as_ptr().addr(),
                 bytes.len() as u32,
                 1,
@@ -1461,7 +1463,7 @@ mod tests {
         let bytes = postcard::to_allocvec(&value).unwrap();
         let mail = unsafe {
             Mail::__from_ptr_test(
-                FakePostcard::ID,
+                FakePostcard::ID.0,
                 bytes.as_ptr().addr(),
                 bytes.len() as u32,
                 2,
@@ -1483,7 +1485,7 @@ mod tests {
         // and surfaces the parse error as `None`.
         let mail = unsafe {
             Mail::__from_ptr_test(
-                FakePostcard::ID,
+                FakePostcard::ID.0,
                 bytes.as_ptr().addr(),
                 2,
                 1,
@@ -1502,7 +1504,7 @@ mod tests {
         // is UB even when the length is zero.
         let buf: [u8; 1] = [0];
         let mail = unsafe {
-            Mail::__from_ptr_test(FakeKind::ID, buf.as_ptr().addr(), 0, 1, NO_REPLY_HANDLE)
+            Mail::__from_ptr_test(FakeKind::ID.0, buf.as_ptr().addr(), 0, 1, NO_REPLY_HANDLE)
         };
         assert!(mail.decode_kind::<FakeKind>().is_none());
     }
@@ -1517,7 +1519,7 @@ mod tests {
         let ptr_raw = (&value as *const FakePod).addr();
         let bogus_byte_len = (core::mem::size_of::<FakePod>() + 4) as u32;
         let mail = unsafe {
-            Mail::__from_ptr_test(FakePod::ID, ptr_raw, bogus_byte_len, 1, NO_REPLY_HANDLE)
+            Mail::__from_ptr_test(FakePod::ID.0, ptr_raw, bogus_byte_len, 1, NO_REPLY_HANDLE)
         };
         assert!(mail.decode_typed::<FakePod>().is_none());
     }
@@ -1552,7 +1554,7 @@ mod tests {
     }
 
     fn frame_bundle<K: Kind + Schema + Serialize>(value: &K) -> Vec<u8> {
-        let mut out = Vec::from(K::ID.to_le_bytes());
+        let mut out = Vec::from(K::ID.0.to_le_bytes());
         let payload = postcard::to_allocvec(value).unwrap();
         out.extend_from_slice(&payload);
         out
@@ -1612,7 +1614,7 @@ mod tests {
     fn as_kind_correct_id_garbage_payload_returns_none() {
         // Leading id matches but the postcard tail is truncated.
         // Decode error must surface as None, not a panic.
-        let mut buf = Vec::from(StateStruct::ID.to_le_bytes());
+        let mut buf = Vec::from(StateStruct::ID.0.to_le_bytes());
         buf.push(0xff);
         let prior = prior_from(&buf, 0);
         assert!(prior.as_kind::<StateStruct>().is_none());

@@ -131,7 +131,7 @@ pub fn fetch_blocking(fetch: &Fetch, timeout_ms: u32) -> Result<FetchResponse, S
     let mut buf: Vec<u8> = alloc::vec![0u8; FETCH_REPLY_CAP];
     let rc = unsafe {
         raw::wait_reply(
-            <FetchResult as Kind>::ID,
+            <FetchResult as Kind>::ID.0,
             buf.as_mut_ptr().addr() as u32,
             buf.len() as u32,
             timeout_ms,

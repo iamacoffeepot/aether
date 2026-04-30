@@ -1090,7 +1090,7 @@ mod tests {
         use aether_mail::Kind;
         let mailbox = aether_mail::MailboxId::from_name("aether.control");
         let mailbox_str = aether_mail::tagged_id::encode(mailbox.0).unwrap();
-        let kind_id = aether_mail::KindId(aether_kinds::Tick::ID);
+        let kind_id = aether_kinds::Tick::ID;
         let kind_str = aether_mail::tagged_id::encode(kind_id.0).unwrap();
         let json_in = json!({ "kind": kind_str, "mailbox": mailbox_str });
 
@@ -1113,7 +1113,7 @@ mod tests {
         // `with_tag` discipline holds through the schema-bytes
         // change).
         assert_eq!(
-            aether_mail::tagged_id::tag_of(aether_kinds::SubscribeInput::ID),
+            aether_mail::tagged_id::tag_of(aether_kinds::SubscribeInput::ID.0),
             Some(aether_mail::Tag::Kind),
         );
     }

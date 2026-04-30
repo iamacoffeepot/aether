@@ -43,8 +43,8 @@ pub fn chassis_control_handler(
     outbound: Arc<HubOutbound>,
 ) -> ChassisControlHandler {
     Arc::new(
-        move |kind: KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| {
-            if kind == KindId(CaptureFrame::ID) {
+        move |kind: KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| match kind {
+            CaptureFrame::ID => {
                 let events = events.clone();
                 begin_capture_request(
                     &queue,
@@ -59,15 +59,20 @@ pub fn chassis_control_handler(
                             .map_err(|_| "test-bench chassis shutting down — capture aborted")
                     },
                 );
-            } else if kind == KindId(Advance::ID) {
+            }
+            Advance::ID => {
                 handle_advance(&events, &outbound, sender, bytes);
-            } else if kind == KindId(SetWindowMode::ID) {
+            }
+            SetWindowMode::ID => {
                 reply_unsupported_window_mode(&outbound, sender, UNSUPPORTED_WINDOW);
-            } else if kind == KindId(SetWindowTitle::ID) {
+            }
+            SetWindowTitle::ID => {
                 reply_unsupported_window_title(&outbound, sender, UNSUPPORTED_WINDOW);
-            } else if kind == KindId(PlatformInfo::ID) {
+            }
+            PlatformInfo::ID => {
                 reply_unsupported_platform_info(&outbound, sender, UNSUPPORTED_WINDOW);
-            } else {
+            }
+            _ => {
                 tracing::warn!(
                     target: "aether_substrate::chassis",
                     kind = %kind_name,

@@ -53,24 +53,24 @@ pub fn handle_sink_handler(store: Arc<HandleStore>, mailer: Arc<Mailer>) -> Sink
 }
 
 fn dispatch(store: &HandleStore, mailer: &Mailer, kind: KindId, sender: ReplyTo, bytes: &[u8]) {
-    if kind == KindId(<HandlePublish as Kind>::ID) {
-        dispatch_publish(store, mailer, sender, bytes);
-    } else if kind == KindId(<HandleRelease as Kind>::ID) {
-        dispatch_release(store, mailer, sender, bytes);
-    } else if kind == KindId(<HandlePin as Kind>::ID) {
-        dispatch_pin(store, mailer, sender, bytes);
-    } else if kind == KindId(<HandleUnpin as Kind>::ID) {
-        dispatch_unpin(store, mailer, sender, bytes);
-    } else {
-        // Unknown kind on this sink — warn and drop. The sender's
-        // wait_reply on a paired *Result kind will time out, which
-        // is the right surface for "you mailed something the
-        // handle sink doesn't know about."
-        tracing::warn!(
-            target: "aether_substrate::handle_sink",
-            kind = %kind,
-            "handle sink received unknown kind",
-        );
+    // Issue 466: `Kind::ID` is typed `KindId`, so the match arms read
+    // each typed const directly.
+    match kind {
+        <HandlePublish as Kind>::ID => dispatch_publish(store, mailer, sender, bytes),
+        <HandleRelease as Kind>::ID => dispatch_release(store, mailer, sender, bytes),
+        <HandlePin as Kind>::ID => dispatch_pin(store, mailer, sender, bytes),
+        <HandleUnpin as Kind>::ID => dispatch_unpin(store, mailer, sender, bytes),
+        _ => {
+            // Unknown kind on this sink — warn and drop. The sender's
+            // wait_reply on a paired *Result kind will time out, which
+            // is the right surface for "you mailed something the
+            // handle sink doesn't know about."
+            tracing::warn!(
+                target: "aether_substrate::handle_sink",
+                kind = %kind,
+                "handle sink received unknown kind",
+            );
+        }
     }
 }
 
@@ -293,7 +293,7 @@ mod tests {
         };
         let bytes = postcard::to_allocvec(&req).unwrap();
         handler(
-            KindId(<HandlePublish as Kind>::ID),
+            <HandlePublish as Kind>::ID,
             "aether.handle.publish",
             None,
             session_reply_to(),
@@ -327,7 +327,7 @@ mod tests {
         };
         let bytes = postcard::to_allocvec(&req).unwrap();
         handler(
-            KindId(<HandleRelease as Kind>::ID),
+            <HandleRelease as Kind>::ID,
             "aether.handle.release",
             None,
             session_reply_to(),
@@ -355,7 +355,7 @@ mod tests {
             bytes: vec![1, 2, 3],
         };
         handler(
-            KindId(<HandlePublish as Kind>::ID),
+            <HandlePublish as Kind>::ID,
             "aether.handle.publish",
             None,
             session_reply_to(),
@@ -371,7 +371,7 @@ mod tests {
         // Pin.
         let pin_req = HandlePin { id };
         handler(
-            KindId(<HandlePin as Kind>::ID),
+            <HandlePin as Kind>::ID,
             "aether.handle.pin",
             None,
             session_reply_to(),
@@ -384,7 +384,7 @@ mod tests {
         // Unpin.
         let unpin_req = HandleUnpin { id };
         handler(
-            KindId(<HandleUnpin as Kind>::ID),
+            <HandleUnpin as Kind>::ID,
             "aether.handle.unpin",
             None,
             session_reply_to(),
@@ -407,7 +407,7 @@ mod tests {
         // Truncated postcard bytes — a `HandlePublish` is at least
         // a u64 + a varint length, so 1 byte is malformed.
         handler(
-            KindId(<HandlePublish as Kind>::ID),
+            <HandlePublish as Kind>::ID,
             "aether.handle.publish",
             None,
             session_reply_to(),
@@ -468,7 +468,7 @@ mod tests {
             bytes: vec![9, 9, 9],
         };
         handler(
-            KindId(<HandlePublish as Kind>::ID),
+            <HandlePublish as Kind>::ID,
             "aether.handle.publish",
             None,
             ReplyTo::to(ReplyTarget::Component(component_mbox)),

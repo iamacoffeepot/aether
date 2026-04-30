@@ -697,7 +697,7 @@ mod tests {
     use std::sync::Arc;
 
     use aether_hub_protocol::{NamedField, SchemaCell};
-    use aether_mail::{Kind, Ref, mailbox_id_from_name};
+    use aether_mail::{Kind, Ref};
 
     use crate::mail::{Mail, MailboxId};
 
@@ -889,7 +889,8 @@ mod tests {
 
     impl Kind for Note {
         const NAME: &'static str = "test.note";
-        const ID: u64 = mailbox_id_from_name(Self::NAME);
+        // Stable test sentinel — distinct from real schema-hashed kind ids.
+        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0002_0001);
     }
 
     fn note_schema() -> SchemaType {
@@ -1007,7 +1008,7 @@ mod tests {
         match outcome {
             WalkOutcome::Parked { handle, kind } => {
                 assert_eq!(handle, HandleId(0xCAFE));
-                assert_eq!(kind, KindId(Note::ID));
+                assert_eq!(kind, Note::ID);
             }
             WalkOutcome::Resolved { .. } => panic!("expected park on missing handle"),
         }
@@ -1021,9 +1022,7 @@ mod tests {
             seq: 99,
         };
         let inner_bytes = postcard::to_allocvec(&inner).unwrap();
-        store
-            .put(HandleId(0xCAFE), KindId(Note::ID), inner_bytes)
-            .unwrap();
+        store.put(HandleId(0xCAFE), Note::ID, inner_bytes).unwrap();
 
         let outer = HeldNote {
             held: Ref::handle(0xCAFE),
@@ -1069,14 +1068,14 @@ mod tests {
         store
             .put(
                 HandleId(1),
-                KindId(Note::ID),
+                Note::ID,
                 postcard::to_allocvec(&stored_a).unwrap(),
             )
             .unwrap();
         store
             .put(
                 HandleId(2),
-                KindId(Note::ID),
+                Note::ID,
                 postcard::to_allocvec(&stored_b).unwrap(),
             )
             .unwrap();
@@ -1117,7 +1116,7 @@ mod tests {
         store
             .put(
                 HandleId(1),
-                KindId(Note::ID),
+                Note::ID,
                 postcard::to_allocvec(&stored).unwrap(),
             )
             .unwrap();
@@ -1190,9 +1189,7 @@ mod tests {
             seq: 7,
         };
         let inner_bytes = postcard::to_allocvec(&inner_note).unwrap();
-        store
-            .put(HandleId(20), KindId(Note::ID), inner_bytes)
-            .unwrap();
+        store.put(HandleId(20), Note::ID, inner_bytes).unwrap();
 
         // Mid-level HeldNote, with held = Handle(Y), goes under X.
         let mid = HeldNote {

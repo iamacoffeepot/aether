@@ -365,206 +365,212 @@ fn dispatch_io_mail(
     // strings in the echo fields — the `AdapterError` text carries
     // the decode diagnostic, and empty-string echo is a loud signal
     // that the request itself was malformed.
-    if kind == KindId(<Read as Kind>::ID) {
-        let req: Read = match postcard::from_bytes(bytes) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    target: "aether_substrate::io",
-                    error = %e,
-                    "read: decode failed, replying Err",
-                );
+    match kind {
+        <Read as Kind>::ID => {
+            let req: Read = match postcard::from_bytes(bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "aether_substrate::io",
+                        error = %e,
+                        "read: decode failed, replying Err",
+                    );
+                    mailer.send_reply(
+                        sender,
+                        &ReadResult::Err {
+                            namespace: String::new(),
+                            path: String::new(),
+                            error: IoError::AdapterError(format!("decode failed: {e}")),
+                        },
+                    );
+                    return;
+                }
+            };
+            let Some(adapter) = registry.get(&req.namespace) else {
                 mailer.send_reply(
                     sender,
                     &ReadResult::Err {
-                        namespace: String::new(),
-                        path: String::new(),
-                        error: IoError::AdapterError(format!("decode failed: {e}")),
+                        namespace: req.namespace.clone(),
+                        path: req.path.clone(),
+                        error: IoError::UnknownNamespace,
                     },
                 );
                 return;
-            }
-        };
-        let Some(adapter) = registry.get(&req.namespace) else {
-            mailer.send_reply(
-                sender,
-                &ReadResult::Err {
-                    namespace: req.namespace.clone(),
-                    path: req.path.clone(),
-                    error: IoError::UnknownNamespace,
-                },
-            );
-            return;
-        };
-        let _ = match adapter.read(&req.path) {
-            Ok(bytes) => mailer.send_reply(
-                sender,
-                &ReadResult::Ok {
-                    namespace: req.namespace.clone(),
-                    path: req.path.clone(),
-                    bytes,
-                },
-            ),
-            Err(error) => mailer.send_reply(
-                sender,
-                &ReadResult::Err {
-                    namespace: req.namespace,
-                    path: req.path,
-                    error,
-                },
-            ),
-        };
-    } else if kind == KindId(<Write as Kind>::ID) {
-        let req: Write = match postcard::from_bytes(bytes) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    target: "aether_substrate::io",
-                    error = %e,
-                    "write: decode failed, replying Err",
-                );
+            };
+            let _ = match adapter.read(&req.path) {
+                Ok(bytes) => mailer.send_reply(
+                    sender,
+                    &ReadResult::Ok {
+                        namespace: req.namespace.clone(),
+                        path: req.path.clone(),
+                        bytes,
+                    },
+                ),
+                Err(error) => mailer.send_reply(
+                    sender,
+                    &ReadResult::Err {
+                        namespace: req.namespace,
+                        path: req.path,
+                        error,
+                    },
+                ),
+            };
+        }
+        <Write as Kind>::ID => {
+            let req: Write = match postcard::from_bytes(bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "aether_substrate::io",
+                        error = %e,
+                        "write: decode failed, replying Err",
+                    );
+                    mailer.send_reply(
+                        sender,
+                        &WriteResult::Err {
+                            namespace: String::new(),
+                            path: String::new(),
+                            error: IoError::AdapterError(format!("decode failed: {e}")),
+                        },
+                    );
+                    return;
+                }
+            };
+            let Some(adapter) = registry.get(&req.namespace) else {
                 mailer.send_reply(
                     sender,
                     &WriteResult::Err {
-                        namespace: String::new(),
-                        path: String::new(),
-                        error: IoError::AdapterError(format!("decode failed: {e}")),
+                        namespace: req.namespace.clone(),
+                        path: req.path.clone(),
+                        error: IoError::UnknownNamespace,
                     },
                 );
                 return;
-            }
-        };
-        let Some(adapter) = registry.get(&req.namespace) else {
-            mailer.send_reply(
-                sender,
-                &WriteResult::Err {
-                    namespace: req.namespace.clone(),
-                    path: req.path.clone(),
-                    error: IoError::UnknownNamespace,
-                },
-            );
-            return;
-        };
-        let _ = match adapter.write(&req.path, &req.bytes) {
-            Ok(()) => mailer.send_reply(
-                sender,
-                &WriteResult::Ok {
-                    namespace: req.namespace.clone(),
-                    path: req.path.clone(),
-                },
-            ),
-            Err(error) => mailer.send_reply(
-                sender,
-                &WriteResult::Err {
-                    namespace: req.namespace,
-                    path: req.path,
-                    error,
-                },
-            ),
-        };
-    } else if kind == KindId(<Delete as Kind>::ID) {
-        let req: Delete = match postcard::from_bytes(bytes) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    target: "aether_substrate::io",
-                    error = %e,
-                    "delete: decode failed, replying Err",
-                );
+            };
+            let _ = match adapter.write(&req.path, &req.bytes) {
+                Ok(()) => mailer.send_reply(
+                    sender,
+                    &WriteResult::Ok {
+                        namespace: req.namespace.clone(),
+                        path: req.path.clone(),
+                    },
+                ),
+                Err(error) => mailer.send_reply(
+                    sender,
+                    &WriteResult::Err {
+                        namespace: req.namespace,
+                        path: req.path,
+                        error,
+                    },
+                ),
+            };
+        }
+        <Delete as Kind>::ID => {
+            let req: Delete = match postcard::from_bytes(bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "aether_substrate::io",
+                        error = %e,
+                        "delete: decode failed, replying Err",
+                    );
+                    mailer.send_reply(
+                        sender,
+                        &DeleteResult::Err {
+                            namespace: String::new(),
+                            path: String::new(),
+                            error: IoError::AdapterError(format!("decode failed: {e}")),
+                        },
+                    );
+                    return;
+                }
+            };
+            let Some(adapter) = registry.get(&req.namespace) else {
                 mailer.send_reply(
                     sender,
                     &DeleteResult::Err {
-                        namespace: String::new(),
-                        path: String::new(),
-                        error: IoError::AdapterError(format!("decode failed: {e}")),
+                        namespace: req.namespace.clone(),
+                        path: req.path.clone(),
+                        error: IoError::UnknownNamespace,
                     },
                 );
                 return;
-            }
-        };
-        let Some(adapter) = registry.get(&req.namespace) else {
-            mailer.send_reply(
-                sender,
-                &DeleteResult::Err {
-                    namespace: req.namespace.clone(),
-                    path: req.path.clone(),
-                    error: IoError::UnknownNamespace,
-                },
-            );
-            return;
-        };
-        let _ = match adapter.delete(&req.path) {
-            Ok(()) => mailer.send_reply(
-                sender,
-                &DeleteResult::Ok {
-                    namespace: req.namespace.clone(),
-                    path: req.path.clone(),
-                },
-            ),
-            Err(error) => mailer.send_reply(
-                sender,
-                &DeleteResult::Err {
-                    namespace: req.namespace,
-                    path: req.path,
-                    error,
-                },
-            ),
-        };
-    } else if kind == KindId(<List as Kind>::ID) {
-        let req: List = match postcard::from_bytes(bytes) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    target: "aether_substrate::io",
-                    error = %e,
-                    "list: decode failed, replying Err",
-                );
+            };
+            let _ = match adapter.delete(&req.path) {
+                Ok(()) => mailer.send_reply(
+                    sender,
+                    &DeleteResult::Ok {
+                        namespace: req.namespace.clone(),
+                        path: req.path.clone(),
+                    },
+                ),
+                Err(error) => mailer.send_reply(
+                    sender,
+                    &DeleteResult::Err {
+                        namespace: req.namespace,
+                        path: req.path,
+                        error,
+                    },
+                ),
+            };
+        }
+        <List as Kind>::ID => {
+            let req: List = match postcard::from_bytes(bytes) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "aether_substrate::io",
+                        error = %e,
+                        "list: decode failed, replying Err",
+                    );
+                    mailer.send_reply(
+                        sender,
+                        &ListResult::Err {
+                            namespace: String::new(),
+                            prefix: String::new(),
+                            error: IoError::AdapterError(format!("decode failed: {e}")),
+                        },
+                    );
+                    return;
+                }
+            };
+            let Some(adapter) = registry.get(&req.namespace) else {
                 mailer.send_reply(
                     sender,
                     &ListResult::Err {
-                        namespace: String::new(),
-                        prefix: String::new(),
-                        error: IoError::AdapterError(format!("decode failed: {e}")),
+                        namespace: req.namespace.clone(),
+                        prefix: req.prefix.clone(),
+                        error: IoError::UnknownNamespace,
                     },
                 );
                 return;
-            }
-        };
-        let Some(adapter) = registry.get(&req.namespace) else {
-            mailer.send_reply(
-                sender,
-                &ListResult::Err {
-                    namespace: req.namespace.clone(),
-                    prefix: req.prefix.clone(),
-                    error: IoError::UnknownNamespace,
-                },
+            };
+            let _ = match adapter.list(&req.prefix) {
+                Ok(entries) => mailer.send_reply(
+                    sender,
+                    &ListResult::Ok {
+                        namespace: req.namespace.clone(),
+                        prefix: req.prefix.clone(),
+                        entries,
+                    },
+                ),
+                Err(error) => mailer.send_reply(
+                    sender,
+                    &ListResult::Err {
+                        namespace: req.namespace,
+                        prefix: req.prefix,
+                        error,
+                    },
+                ),
+            };
+        }
+        _ => {
+            tracing::warn!(
+                target: "aether_substrate::io",
+                kind = %kind,
+                "io sink received unknown kind — dropping",
             );
-            return;
-        };
-        let _ = match adapter.list(&req.prefix) {
-            Ok(entries) => mailer.send_reply(
-                sender,
-                &ListResult::Ok {
-                    namespace: req.namespace.clone(),
-                    prefix: req.prefix.clone(),
-                    entries,
-                },
-            ),
-            Err(error) => mailer.send_reply(
-                sender,
-                &ListResult::Err {
-                    namespace: req.namespace,
-                    prefix: req.prefix,
-                    error,
-                },
-            ),
-        };
-    } else {
-        tracing::warn!(
-            target: "aether_substrate::io",
-            kind = %kind,
-            "io sink received unknown kind — dropping",
-        );
+        }
     }
 }
 
@@ -826,7 +832,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Read as Kind>::ID),
+            <Read as Kind>::ID,
             Read::NAME,
             None,
             session_sender(),
@@ -860,7 +866,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Read as Kind>::ID),
+            <Read as Kind>::ID,
             Read::NAME,
             None,
             session_sender(),
@@ -896,7 +902,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Read as Kind>::ID),
+            <Read as Kind>::ID,
             Read::NAME,
             None,
             session_sender(),
@@ -926,7 +932,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Write as Kind>::ID),
+            <Write as Kind>::ID,
             Write::NAME,
             None,
             session_sender(),
@@ -960,7 +966,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Write as Kind>::ID),
+            <Write as Kind>::ID,
             Write::NAME,
             None,
             session_sender(),
@@ -990,7 +996,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Delete as Kind>::ID),
+            <Delete as Kind>::ID,
             Delete::NAME,
             None,
             session_sender(),
@@ -1025,7 +1031,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<List as Kind>::ID),
+            <List as Kind>::ID,
             List::NAME,
             None,
             session_sender(),
@@ -1159,7 +1165,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Read as Kind>::ID),
+            <Read as Kind>::ID,
             Read::NAME,
             Some("test_caller"),
             ReplyTo::to(crate::mail::ReplyTarget::Component(caller_mailbox)),
@@ -1177,7 +1183,7 @@ mod tests {
         let observed_kind = lo | (hi << 32);
         assert_eq!(
             observed_kind,
-            <ReadResult as Kind>::ID,
+            <ReadResult as Kind>::ID.0,
             "component received a kind id different from ReadResult",
         );
 
@@ -1197,7 +1203,7 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         handler(
-            KindId(<Read as Kind>::ID),
+            <Read as Kind>::ID,
             Read::NAME,
             None,
             session_sender(),
