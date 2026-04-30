@@ -90,7 +90,8 @@ jobs:
             -p aether-camera-component \
             -p aether-mesh-viewer-component \
             -p aether-demo-sokoban \
-            -p aether-demo-tic-tac-toe
+            -p aether-demo-tic-tac-toe-server \
+            -p aether-demo-tic-tac-toe-client
       - run: cargo test --workspace --all-targets
         env:
           AETHER_REQUIRE_RUNTIME: "1"

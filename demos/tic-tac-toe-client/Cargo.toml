@@ -4,9 +4,30 @@ version.workspace = true
 edition.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+# `cdylib` is the production artifact (wasm32 build → component). `rlib`
+# is added so host builds can link integration tests under `tests/` —
+# the crate's own scenario tests load the wasm at runtime, but cargo
+# still needs a host-target lib to resolve the test binary against.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aether-component = { path = "../../crates/aether-component" }
+# Trunk rlib for the demo (ADR-0066) — wire types + well-known names.
+# The server's runtime `Component` impl + FFI exports live in the
+# sibling `aether-demo-tic-tac-toe-server` cdylib, which this crate
+# does not depend on at all. Per issue 442.
 aether-demo-tic-tac-toe = { path = "../tic-tac-toe" }
 aether-kinds = { path = "../../crates/aether-kinds" }
+
+# Integration tests boot a `TestBench`, load the demo's own wasm
+# artifact (and the server's, for the click→PlayMove→broadcast flow),
+# and assert mail-flow + render properties via `aether-scenario`.
+# Tests run host-side; the wasm is built separately for
+# `wasm32-unknown-unknown` and discovered at runtime under
+# `target/wasm32-unknown-unknown/{debug,release}/`.
+[dev-dependencies]
+aether-scenario = { path = "../../crates/aether-scenario" }
+aether-substrate-test-bench = { path = "../../crates/aether-substrate-test-bench" }
+pollster = "0.4.0"
+serde_yml = "0.0.12"
+wgpu = "29.0.1"

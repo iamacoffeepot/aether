@@ -23,11 +23,11 @@
 //!
 //! Hub-hosted deployment (ADR-0037 Phase 3):
 //! ```text
-//! cargo build -p aether-demo-tic-tac-toe --target wasm32-unknown-unknown --release
+//! cargo build -p aether-demo-tic-tac-toe-server --target wasm32-unknown-unknown --release
 //! cargo build -p aether-demo-tic-tac-toe-client --target wasm32-unknown-unknown --release
 //! cargo run -p aether-substrate-hub            # hub boots its own substrate
 //! # From a Claude session attached to the hub:
-//! #   load_component(hub_engine_id, "<path>/aether_demo_tic_tac_toe.wasm", name="tic_tac_toe")
+//! #   load_component(hub_engine_id, "<path>/aether_demo_tic_tac_toe_server.wasm", name="tic_tac_toe")
 //! #   spawn_substrate("<path>/aether-substrate-desktop")
 //! #   load_component(desktop_engine_id, "<path>/aether_demo_tic_tac_toe_client.wasm",
 //! #                  name="tic_tac_toe.client")

@@ -92,15 +92,9 @@ dependencies = [
 name = "aether-demo-tic-tac-toe"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-component",
- "aether-kinds",
  "aether-mail",
- "aether-scenario",
- "aether-substrate-test-bench",
  "bytemuck",
- "pollster",
- "serde_yml",
- "wgpu",
+ "inventory",
 ]
 
 [[package]]
@@ -110,6 +104,25 @@ dependencies = [
  "aether-component",
  "aether-demo-tic-tac-toe",
  "aether-kinds",
+ "aether-scenario",
+ "aether-substrate-test-bench",
+ "pollster",
+ "serde_yml",
+ "wgpu",
+]
+
+[[package]]
+name = "aether-demo-tic-tac-toe-server"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-component",
+ "aether-demo-tic-tac-toe",
+ "aether-mail",
+ "aether-scenario",
+ "aether-substrate-test-bench",
+ "pollster",
+ "serde_yml",
+ "wgpu",
 ]
 
 [[package]]

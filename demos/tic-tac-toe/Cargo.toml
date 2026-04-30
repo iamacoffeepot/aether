@@ -3,25 +3,24 @@ name = "aether-demo-tic-tac-toe"
 version.workspace = true
 edition.workspace = true
 
+# Trunk rlib for the tic-tac-toe demo (ADR-0066). Hosts the kind types
+# and well-known mailbox names other components consume. The runtime
+# `Component` impl + `aether_component::export!` live in the sibling
+# `aether-demo-tic-tac-toe-server` cdylib; consumers (e.g.
+# `aether-demo-tic-tac-toe-client`) depend on this crate for the wire
+# shapes without pulling in the server's `#[handlers]` section
+# emissions, which would stack on top of their own and trip the
+# substrate's "duplicate Component record" check (issue 442).
 [lib]
-# cdylib for wasm loading (the primary product); rlib so the client
-# demo can `use` shared kinds + constants without duplicating them.
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
-aether-component = { path = "../../crates/aether-component" }
-aether-kinds = { path = "../../crates/aether-kinds" }
 aether-mail = { path = "../../crates/aether-mail", features = ["derive"] }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
 
-# Integration tests boot a `TestBench`, load the demo's own wasm
-# artifact, and assert mail-flow properties via `aether-scenario`.
-# Tests run host-side; the wasm is built separately for
-# `wasm32-unknown-unknown` and discovered at runtime under
-# `target/wasm32-unknown-unknown/{debug,release}/`.
-[dev-dependencies]
-aether-scenario = { path = "../../crates/aether-scenario" }
-aether-substrate-test-bench = { path = "../../crates/aether-substrate-test-bench" }
-pollster = "0.4.0"
-serde_yml = "0.0.12"
-wgpu = "29.0.1"
+# Issue #243: every crate that derives `Kind` needs `inventory` reachable
+# on native builds so the `aether.kinds` substrate descriptor list picks
+# up its types. Wasm guests skip the submission via the derive's
+# `cfg(not(target_arch = "wasm32"))` gate.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = "0.3"
