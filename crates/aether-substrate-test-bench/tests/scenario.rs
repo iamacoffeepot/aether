@@ -15,15 +15,19 @@
 //!   fixture wasm before invoking `cargo test`; setting
 //!   `AETHER_REQUIRE_RUNTIME=1` (CI does) flips both skip points
 //!   into hard panics so a missing pre-build is loud.
+//!
+//! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
+//! gate, `AETHER_SAVE_DIR` sandbox) live in
+//! `aether_scenario::test_helpers` (issue 460).
 
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::Path;
 
 use aether_kinds::{
     Delete, DeleteResult, DropComponent, IoError, List, ListResult, LoadComponent, MailEnvelope,
     Read, ReadResult, ReplaceComponent, Write, WriteResult,
 };
 use aether_mail::{Kind, MailboxId, mailbox_id_from_name};
+use aether_scenario::test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime};
 use aether_scenario::{decode_png, differs_from_background};
 use aether_substrate_test_bench::TestBench;
 use aether_test_fixture_probe::SetRender;
@@ -33,68 +37,6 @@ use aether_test_fixture_probe::SetRender;
 // host-target rlib's descriptor symbols can be stripped by the linker
 // and `aether_kinds::descriptors::all()` won't see fixture kinds.
 use aether_test_fixture_probe as _;
-
-/// Probe for any usable wgpu adapter.
-fn has_wgpu_adapter() -> bool {
-    let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::default(),
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .is_ok()
-}
-
-/// Locate the fixture's wasm artifact under the workspace target dir.
-/// Tries `release` first, then `debug` so either build profile works.
-fn locate_fixture_wasm() -> Option<PathBuf> {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root reachable from CARGO_MANIFEST_DIR");
-    for profile in ["release", "debug"] {
-        let path = workspace
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join(profile)
-            .join("aether_test_fixture_probe.wasm");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
-}
-
-/// Common boot path: probe wgpu, locate the fixture wasm, return
-/// both. `AETHER_REQUIRE_RUNTIME=1` turns either missing requirement
-/// into a panic so CI failures are loud.
-fn require_runtime() -> Option<PathBuf> {
-    let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    if !has_wgpu_adapter() {
-        assert!(
-            !strict,
-            "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",
-        );
-        eprintln!("skipping: no wgpu adapter available");
-        return None;
-    }
-    match locate_fixture_wasm() {
-        Some(path) => Some(path),
-        None => {
-            assert!(
-                !strict,
-                "AETHER_REQUIRE_RUNTIME set but aether_test_fixture_probe.wasm not pre-built; \
-                 CI's `Pre-build component wasm for scenario tests` step is missing this crate",
-            );
-            eprintln!(
-                "skipping: aether_test_fixture_probe.wasm not built; run \
-                 `cargo build --target wasm32-unknown-unknown -p aether-test-fixture-probe`",
-            );
-            None
-        }
-    }
-}
 
 const PROBE_NAME: &str = "probe";
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
@@ -133,7 +75,7 @@ fn load_probe(bench: &TestBench, wasm_path: &Path) {
 /// subscribe_input → tick fanout path end-to-end.
 #[test]
 fn input_subscription_yields_one_tick_observed_per_advance() {
-    let Some(wasm_path) = require_runtime() else {
+    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -155,7 +97,7 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
 /// reach it (ADR-0021 + ADR-0038 actor lifecycle).
 #[test]
 fn drop_component_silences_tick_echoes() {
-    let Some(wasm_path) = require_runtime() else {
+    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -204,7 +146,7 @@ fn drop_component_silences_tick_echoes() {
 /// the after-mail cleanup ran.
 #[test]
 fn capture_frame_round_trip_runs_pre_and_after_mails() {
-    let Some(wasm_path) = require_runtime() else {
+    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -280,7 +222,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
 /// mailbox.
 #[test]
 fn replace_component_preserves_mailbox_identity() {
-    let Some(wasm_path) = require_runtime() else {
+    let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
@@ -322,30 +264,6 @@ fn replace_component_preserves_mailbox_identity() {
     );
 }
 
-/// Process-wide `save://` sandbox. `NamespaceRoots::from_env`
-/// reads `AETHER_SAVE_DIR` once per chassis boot, so the env var
-/// must be set before any TestBench boot. `OnceLock` linearises
-/// the set; tests gate through `init_test_save_dir()` first.
-static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
-
-/// Create the per-process sandbox (idempotent) and point
-/// `AETHER_SAVE_DIR` at it. Subsequent `TestBench::start()` calls
-/// see the env var and wire `save://` to this dir.
-///
-/// `set_var` is racy with concurrent `getenv` on POSIX, but
-/// `OnceLock` linearises the set, and every IO test gates through
-/// this helper before booting a TestBench — so by the time any
-/// test thread reads env, the set has completed.
-fn init_test_save_dir() -> &'static Path {
-    TEST_SAVE_DIR.get_or_init(|| {
-        let dir = std::env::temp_dir()
-            .join(format!("aether-test-bench-io-tests-{}", std::process::id(),));
-        std::fs::create_dir_all(&dir).expect("create test save dir");
-        unsafe { std::env::set_var("AETHER_SAVE_DIR", &dir) };
-        dir
-    })
-}
-
 /// IO scenarios need wgpu (the bench unconditionally builds a
 /// `Gpu` at boot) but not the fixture wasm. Skips on wgpu-less
 /// runners and panics under `AETHER_REQUIRE_RUNTIME` so a
@@ -375,7 +293,7 @@ fn io_write_then_read_round_trips_in_save_namespace() {
     if !require_wgpu_only() {
         return;
     }
-    init_test_save_dir();
+    init_save_sandbox("test-bench-io");
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
 
     let path = "io-roundtrip.bin".to_owned();
@@ -433,7 +351,7 @@ fn io_delete_removes_written_file() {
     if !require_wgpu_only() {
         return;
     }
-    init_test_save_dir();
+    init_save_sandbox("test-bench-io");
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
 
     let path = "io-delete.bin".to_owned();
@@ -489,7 +407,7 @@ fn io_list_returns_written_path() {
     if !require_wgpu_only() {
         return;
     }
-    init_test_save_dir();
+    init_save_sandbox("test-bench-io");
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
 
     let path = "probe-list.bin".to_owned();
@@ -531,7 +449,7 @@ fn io_read_unknown_path_returns_not_found() {
     if !require_wgpu_only() {
         return;
     }
-    init_test_save_dir();
+    init_save_sandbox("test-bench-io");
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
 
     let read_reply: ReadResult = bench

@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 aether-scenario = { path = "../aether-scenario" }
 
-[dev-dependencies]
-pollster = "0.4.0"
-wgpu = "29.0.1"
+# `cli_round_trip.rs` reaches `aether_scenario::test_helpers::has_wgpu_adapter`
+# for the same skip-on-driverless gating as the library tests. Pulling
+# the helper from the published crate API drops the local pollster +
+# wgpu dev-deps (issue 460).

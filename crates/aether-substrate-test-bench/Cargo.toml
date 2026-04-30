@@ -42,10 +42,8 @@ wgpu = "29.0.1"
 [dev-dependencies]
 aether-test-fixture-probe = { path = "../aether-test-fixture-probe" }
 # Re-uses the visual/PNG helpers (`decode_png`, `differs_from_background`)
-# the per-component scenarios already exercise; avoids reinventing
-# pixel-diff plumbing in the test-bench's own scenarios.
+# and the shared `test_helpers` module (issue 460) the per-component
+# scenarios already exercise; avoids reinventing pixel-diff plumbing
+# and boilerplate skip-or-panic gating in the test-bench's own
+# scenarios.
 aether-scenario = { path = "../aether-scenario" }
-# IO sink scenarios sandbox `AETHER_SAVE_DIR` to a per-process
-# tempdir so `save://` writes don't pollute the developer's
-# data_dir() and parallel test threads don't collide.
-tempfile = "3"
