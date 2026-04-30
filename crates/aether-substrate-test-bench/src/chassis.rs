@@ -24,10 +24,10 @@ use aether_kinds::{
 use aether_mail::Kind;
 use aether_substrate_core::{
     ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo,
+    capture::{CaptureQueue, PendingCapture},
     control::{decode_payload, resolve_bundle},
 };
 
-use crate::capture::{CaptureQueue, PendingCapture};
 use crate::events::{ChassisEvent, EventSender};
 
 const UNSUPPORTED_WINDOW: &str = "unsupported on test-bench chassis — no window peripherals (set_window_mode, set_window_title, \

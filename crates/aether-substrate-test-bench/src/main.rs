@@ -12,7 +12,6 @@
 // Tick (capture observes; advance ticks). With no Advance, the
 // world doesn't tick — the chassis is fully deterministic.
 
-mod capture;
 mod chassis;
 mod events;
 mod render;
@@ -27,11 +26,11 @@ use aether_mail::{Kind, encode, encode_empty};
 use aether_substrate_core::{
     Chassis, ChassisCapabilities, HubOutbound, InputSubscribers, Mailer, ReplyTo, Scheduler,
     SubstrateBoot,
+    capture::CaptureQueue,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
 
-use crate::capture::CaptureQueue;
 use crate::events::{ChassisEvent, EventReceiver};
 use crate::render::{Gpu, IDENTITY_VIEW_PROJ, VERTEX_BUFFER_BYTES};
 

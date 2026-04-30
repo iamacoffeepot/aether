@@ -33,11 +33,11 @@ use aether_mail::{Kind, encode, encode_empty, encode_struct, mailbox_id_from_nam
 // used for control kinds (postcard-shape).
 use aether_substrate_core::{
     HubOutbound, InputSubscribers, Mailer, ReplyTarget, ReplyTo, SubstrateBoot,
+    capture::CaptureQueue,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
 
-use crate::capture::CaptureQueue;
 use crate::chassis;
 use crate::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use crate::render::{Gpu, IDENTITY_VIEW_PROJ, VERTEX_BUFFER_BYTES};
