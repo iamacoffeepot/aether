@@ -65,13 +65,38 @@ fn ttt_wasm() -> Option<PathBuf> {
     None
 }
 
+/// Common setup: skip-if-no-adapter / skip-if-no-wasm. Returns the
+/// wasm path on success.
+///
+/// `AETHER_REQUIRE_RUNTIME=1` flips both skip points into a panic so
+/// CI catches a forgotten pre-build entry instead of passing a 30ms
+/// vacuous test. CI sets this; local devs leave it unset and keep the
+/// existing skip behavior.
 fn require_runtime() -> Option<PathBuf> {
+    let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
     if !has_wgpu_adapter() {
+        assert!(
+            !strict,
+            "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",
+        );
         eprintln!("skipping: no wgpu adapter available");
         return None;
     }
-    let path = ttt_wasm()?;
-    Some(path)
+    match ttt_wasm() {
+        Some(path) => Some(path),
+        None => {
+            assert!(
+                !strict,
+                "AETHER_REQUIRE_RUNTIME set but aether_demo_tic_tac_toe.wasm not pre-built; \
+                 CI's `Pre-build component wasm for scenario tests` step is missing this crate",
+            );
+            eprintln!(
+                "skipping: aether_demo_tic_tac_toe.wasm not built; \
+                 run `cargo build --target wasm32-unknown-unknown -p aether-demo-tic-tac-toe`",
+            );
+            None
+        }
+    }
 }
 
 /// Legal `tic_tac_toe.play_move` accepts and broadcasts. The server
