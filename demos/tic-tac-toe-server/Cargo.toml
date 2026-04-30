@@ -1,0 +1,30 @@
+[package]
+name = "aether-demo-tic-tac-toe-server"
+version.workspace = true
+edition.workspace = true
+
+# Runtime cdylib for the tic-tac-toe demo (ADR-0066). Wire types and
+# well-known mailbox names live in the `aether-demo-tic-tac-toe` trunk
+# rlib; this crate owns the `Component` impl, the `apply_move` /
+# `reply` helpers, and the `aether_component::export!` invocation.
+# `rlib` is added so host builds can link integration tests under
+# `tests/`.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-component = { path = "../../crates/aether-component" }
+aether-demo-tic-tac-toe = { path = "../tic-tac-toe" }
+aether-mail = { path = "../../crates/aether-mail" }
+
+# Integration tests boot a `TestBench`, load the server's own wasm
+# artifact, and assert mail-flow properties via `aether-scenario`.
+# Tests run host-side; the wasm is built separately for
+# `wasm32-unknown-unknown` and discovered at runtime under
+# `target/wasm32-unknown-unknown/{debug,release}/`.
+[dev-dependencies]
+aether-scenario = { path = "../../crates/aether-scenario" }
+aether-substrate-test-bench = { path = "../../crates/aether-substrate-test-bench" }
+pollster = "0.4.0"
+serde_yml = "0.0.12"
+wgpu = "29.0.1"

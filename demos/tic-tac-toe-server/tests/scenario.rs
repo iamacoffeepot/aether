@@ -16,7 +16,7 @@
 //!   `mesa-vulkan-drivers`). The bench still needs the GPU even for
 //!   render-less tests because the chassis owns the offscreen target.
 //! - The component's wasm hasn't been built — tests read
-//!   `target/wasm32-unknown-unknown/{debug,release}/aether_demo_tic_tac_toe.wasm`
+//!   `target/wasm32-unknown-unknown/{debug,release}/aether_demo_tic_tac_toe_server.wasm`
 //!   and skip with an `eprintln!` when both paths are absent. CI
 //!   builds the wasm before invoking `cargo test`.
 
@@ -57,7 +57,7 @@ fn ttt_wasm() -> Option<PathBuf> {
             .join("target")
             .join("wasm32-unknown-unknown")
             .join(profile)
-            .join("aether_demo_tic_tac_toe.wasm");
+            .join("aether_demo_tic_tac_toe_server.wasm");
         if path.exists() {
             return Some(path);
         }
@@ -87,11 +87,11 @@ fn require_runtime() -> Option<PathBuf> {
         None => {
             assert!(
                 !strict,
-                "AETHER_REQUIRE_RUNTIME set but aether_demo_tic_tac_toe.wasm not pre-built; \
+                "AETHER_REQUIRE_RUNTIME set but aether_demo_tic_tac_toe_server.wasm not pre-built; \
                  CI's `Pre-build component wasm for scenario tests` step is missing this crate",
             );
             eprintln!(
-                "skipping: aether_demo_tic_tac_toe.wasm not built; \
+                "skipping: aether_demo_tic_tac_toe_server.wasm not built; \
                  run `cargo build --target wasm32-unknown-unknown -p aether-demo-tic-tac-toe`",
             );
             None
