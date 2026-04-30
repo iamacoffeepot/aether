@@ -38,6 +38,40 @@ fn has_wgpu_adapter() -> bool {
     .is_ok()
 }
 
+/// Common setup: skip-if-no-adapter / skip-if-no-wasm. Returns the
+/// wasm path on success.
+///
+/// `AETHER_REQUIRE_RUNTIME=1` flips both skip points into a panic so
+/// CI catches a forgotten pre-build entry instead of passing a 30ms
+/// vacuous test. CI sets this; local devs leave it unset and keep the
+/// existing skip behavior.
+fn require_runtime() -> Option<PathBuf> {
+    let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+    if !has_wgpu_adapter() {
+        assert!(
+            !strict,
+            "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",
+        );
+        eprintln!("skipping: no wgpu adapter available");
+        return None;
+    }
+    match camera_component_wasm() {
+        Some(path) => Some(path),
+        None => {
+            assert!(
+                !strict,
+                "AETHER_REQUIRE_RUNTIME set but aether_camera_component.wasm not pre-built; \
+                 CI's `Pre-build component wasm for scenario tests` step is missing this crate",
+            );
+            eprintln!(
+                "skipping: aether_camera_component.wasm not built; \
+                 run `cargo build --target wasm32-unknown-unknown -p aether-camera-component`",
+            );
+            None
+        }
+    }
+}
+
 /// Locate this crate's wasm artifact. Tries `release` then `debug`
 /// so either build profile satisfies the test. Returns `None` if
 /// neither exists — the caller skips the test. `CARGO_MANIFEST_DIR`
@@ -63,15 +97,7 @@ fn camera_component_wasm() -> Option<PathBuf> {
 
 #[test]
 fn camera_component_lifecycle() {
-    if !has_wgpu_adapter() {
-        eprintln!("skipping: no wgpu adapter available");
-        return;
-    }
-    let Some(wasm_path) = camera_component_wasm() else {
-        eprintln!(
-            "skipping: aether_camera_component.wasm not built; \
-             run `cargo build --target wasm32-unknown-unknown -p aether-camera-component`",
-        );
+    let Some(wasm_path) = require_runtime() else {
         return;
     };
 
@@ -115,15 +141,7 @@ fn camera_component_lifecycle() {
 /// `TestBench::count_observed`.
 #[test]
 fn camera_default_orbit_publishes_view_proj() {
-    if !has_wgpu_adapter() {
-        eprintln!("skipping: no wgpu adapter available");
-        return;
-    }
-    let Some(wasm_path) = camera_component_wasm() else {
-        eprintln!(
-            "skipping: aether_camera_component.wasm not built; \
-             run `cargo build --target wasm32-unknown-unknown -p aether-camera-component`",
-        );
+    let Some(wasm_path) = require_runtime() else {
         return;
     };
 
@@ -167,15 +185,7 @@ fn camera_default_orbit_publishes_view_proj() {
 /// shouldn't take down the chassis.
 #[test]
 fn camera_destroy_main_keeps_substrate_alive() {
-    if !has_wgpu_adapter() {
-        eprintln!("skipping: no wgpu adapter available");
-        return;
-    }
-    let Some(wasm_path) = camera_component_wasm() else {
-        eprintln!(
-            "skipping: aether_camera_component.wasm not built; \
-             run `cargo build --target wasm32-unknown-unknown -p aether-camera-component`",
-        );
+    let Some(wasm_path) = require_runtime() else {
         return;
     };
 
