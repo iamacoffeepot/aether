@@ -45,6 +45,8 @@ pub mod registry;
 pub mod render;
 pub mod reply_table;
 pub mod scheduler;
+#[cfg(feature = "render")]
+pub mod sinks;
 
 pub use boot::{ChassisHandlerContext, SubstrateBoot, SubstrateBootBuilder};
 pub use chassis::{Chassis, ChassisCapabilities};

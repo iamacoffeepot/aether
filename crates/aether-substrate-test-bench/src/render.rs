@@ -10,7 +10,7 @@ use aether_substrate_core::render::{
     prepare_capture_copy, record_main_pass,
 };
 
-pub use render::{IDENTITY_VIEW_PROJ, VERTEX_BUFFER_BYTES};
+pub use render::VERTEX_BUFFER_BYTES;
 
 /// Render target format. Test-bench commits to RGBA at init since
 /// there's no surface to query, which keeps the readback path swizzle-

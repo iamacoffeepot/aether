@@ -27,6 +27,7 @@ use aether_kinds::{
 };
 use aether_mail::Kind;
 use aether_mail::{encode, encode_empty};
+use aether_substrate_core::sinks::{RenderAccumulator, build_camera_sink, build_render_sink};
 use aether_substrate_desktop::{
     CaptureQueue, Chassis, ChassisCapabilities, HubClient, HubOutbound, InputSubscribers, Mailer,
     Scheduler, SubstrateBoot, UserEvent,
@@ -35,7 +36,7 @@ use aether_substrate_desktop::{
     mail::{Mail, MailboxId, ReplyTarget, ReplyTo},
     subscribers_for,
 };
-use render::{Gpu, IDENTITY_VIEW_PROJ, VERTEX_BUFFER_BYTES};
+use render::{Gpu, VERTEX_BUFFER_BYTES};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -45,12 +46,6 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 const WORKERS: usize = 2;
 const LOG_EVERY_FRAMES: u64 = 120;
-
-/// Wire size of one `aether.draw_triangle` mail item: three vertices,
-/// each `f32 x,y,z + f32 r,g,b` (24 bytes). The render sink clamps at
-/// whole-triangle multiples so we never write a half-triangle into the
-/// GPU vertex buffer when the cap forces a truncate.
-const DRAW_TRIANGLE_BYTES: usize = 72;
 
 /// ADR-0063 fail-fast budget for the per-frame drain barrier. A
 /// dispatcher that doesn't quiesce within this window is treated as
@@ -1082,46 +1077,15 @@ fn main() -> wasmtime::Result<()> {
     // Desktop-only render sink: the winit render thread drains
     // `frame_vertices` each redraw, so every `DrawTriangle` emitted
     // before the next frame is consolidated into one vertex buffer.
-    let frame_vertices = Arc::new(Mutex::new(Vec::<u8>::with_capacity(4096)));
-    let triangles_rendered = Arc::new(AtomicU64::new(0));
-    {
-        let verts_for_sink = Arc::clone(&frame_vertices);
-        let tris_for_sink = Arc::clone(&triangles_rendered);
-        boot.registry.register_sink(
-            "aether.sink.render",
-            Arc::new(
-                move |_kind_id: u64,
-                      _kind_name: &str,
-                      _origin: Option<&str>,
-                      _sender,
-                      bytes: &[u8],
-                      _count: u32| {
-                    // Truncate at the sink boundary so a single oversized
-                    // mesh degrades gracefully instead of collapsing the
-                    // whole frame downstream. Round to whole triangles so
-                    // the GPU vertex buffer never sees a half-triangle.
-                    let mut verts = verts_for_sink.lock().unwrap();
-                    let available = VERTEX_BUFFER_BYTES.saturating_sub(verts.len());
-                    let write_len = bytes.len().min(available);
-                    let write_len = write_len - (write_len % DRAW_TRIANGLE_BYTES);
-                    if write_len > 0 {
-                        verts.extend_from_slice(&bytes[..write_len]);
-                        tris_for_sink
-                            .fetch_add((write_len / DRAW_TRIANGLE_BYTES) as u64, Ordering::Relaxed);
-                    }
-                    if write_len < bytes.len() {
-                        tracing::warn!(
-                            target: "aether_substrate::render",
-                            accepted_bytes = write_len,
-                            dropped_bytes = bytes.len() - write_len,
-                            cap = VERTEX_BUFFER_BYTES,
-                            "render sink dropped triangles beyond fixed vertex buffer",
-                        );
-                    }
-                },
-            ),
-        );
-    }
+    // Helper lives in `aether-substrate-core::sinks` (issue 428) so
+    // desktop and test-bench share one definition.
+    let (render_acc, render_handler) = build_render_sink(VERTEX_BUFFER_BYTES);
+    let RenderAccumulator {
+        frame_vertices,
+        triangles_rendered,
+    } = render_acc;
+    boot.registry
+        .register_sink("aether.sink.render", render_handler);
 
     // `aether.audio.*`: ADR-0039 Phase 2. Try to build a cpal stream;
     // if it succeeds, register a sink that decodes inbound NoteOn /
@@ -1174,40 +1138,11 @@ fn main() -> wasmtime::Result<()> {
     // bytes (4x4 f32 column-major view_proj). The render loop reads
     // the stored value each frame and uploads to the GPU uniform.
     // Malformed payloads are dropped with a warn so a buggy component
-    // can't spook the camera.
-    let camera_state = Arc::new(Mutex::new(IDENTITY_VIEW_PROJ));
-    {
-        let cam_for_sink = Arc::clone(&camera_state);
-        boot.registry.register_sink(
-            "aether.sink.camera",
-            Arc::new(
-                move |_kind_id: u64,
-                      _kind_name: &str,
-                      _origin: Option<&str>,
-                      _sender,
-                      bytes: &[u8],
-                      _count: u32| {
-                    if bytes.len() != 64 {
-                        tracing::warn!(
-                            target: "aether_substrate::camera",
-                            got = bytes.len(),
-                            expected = 64,
-                            "camera sink: payload length mismatch, dropping",
-                        );
-                        return;
-                    }
-                    match bytemuck::try_pod_read_unaligned::<[f32; 16]>(bytes) {
-                        Ok(mat) => *cam_for_sink.lock().unwrap() = mat,
-                        Err(e) => tracing::warn!(
-                            target: "aether_substrate::camera",
-                            error = %e,
-                            "camera sink: cast failed, dropping",
-                        ),
-                    }
-                },
-            ),
-        );
-    }
+    // can't spook the camera. Helper shared with test-bench via
+    // `aether-substrate-core::sinks` (issue 428).
+    let (camera_state, camera_handler) = build_camera_sink();
+    boot.registry
+        .register_sink("aether.sink.camera", camera_handler);
 
     // `aether.io.*`: ADR-0041 substrate file I/O. Build the default
     // adapter registry (save/assets/config roots from env vars or

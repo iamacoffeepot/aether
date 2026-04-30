@@ -24,25 +24,18 @@ use std::time::{Duration, Instant};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, FrameStats, InputStream, Tick};
 use aether_mail::{Kind, encode, encode_empty};
 use aether_substrate_core::{
-    Chassis, ChassisCapabilities, HubOutbound, InputSubscribers, Mailer, ReplyTo, Scheduler,
-    SubstrateBoot,
+    Chassis, ChassisCapabilities, HubOutbound, InputSubscribers, Mailer, Scheduler, SubstrateBoot,
     capture::CaptureQueue,
     mail::{Mail, MailboxId},
+    sinks::{RenderAccumulator, build_camera_sink, build_render_sink},
     subscribers_for,
 };
 
 use crate::events::{ChassisEvent, EventReceiver};
-use crate::render::{Gpu, IDENTITY_VIEW_PROJ, VERTEX_BUFFER_BYTES};
+use crate::render::{Gpu, VERTEX_BUFFER_BYTES};
 
 const WORKERS: usize = 2;
 const LOG_EVERY_FRAMES: u64 = 120;
-
-/// Wire size of one `aether.draw_triangle` mail item: three
-/// vertices, each `f32 x,y,z + f32 r,g,b` (24 bytes). The render
-/// sink clamps at whole-triangle multiples so we never write a
-/// half-triangle into the GPU vertex buffer when the cap forces a
-/// truncate.
-const DRAW_TRIANGLE_BYTES: usize = 72;
 
 /// Default offscreen target size when `AETHER_TEST_BENCH_SIZE` is
 /// unset. 800x600 matches the scenario harness convention — large
@@ -258,80 +251,23 @@ fn main() -> wasmtime::Result<()> {
     // `frame_vertices` each frame, so every `DrawTriangle` emitted
     // before the next frame is consolidated into one vertex buffer.
     // Truncate at the sink boundary so a single oversized mesh
-    // degrades gracefully.
-    let frame_vertices = Arc::new(Mutex::new(Vec::<u8>::with_capacity(VERTEX_BUFFER_BYTES)));
-    let triangles_rendered = Arc::new(AtomicU64::new(0));
-    {
-        let verts_for_sink = Arc::clone(&frame_vertices);
-        let tris_for_sink = Arc::clone(&triangles_rendered);
-        boot.registry.register_sink(
-            "aether.sink.render",
-            Arc::new(
-                move |_kind_id: u64,
-                      _kind_name: &str,
-                      _origin: Option<&str>,
-                      _sender: ReplyTo,
-                      bytes: &[u8],
-                      _count: u32| {
-                    let mut verts = verts_for_sink.lock().unwrap();
-                    let available = VERTEX_BUFFER_BYTES.saturating_sub(verts.len());
-                    let write_len = bytes.len().min(available);
-                    let write_len = write_len - (write_len % DRAW_TRIANGLE_BYTES);
-                    if write_len > 0 {
-                        verts.extend_from_slice(&bytes[..write_len]);
-                        tris_for_sink
-                            .fetch_add((write_len / DRAW_TRIANGLE_BYTES) as u64, Ordering::Relaxed);
-                    }
-                    if write_len < bytes.len() {
-                        tracing::warn!(
-                            target: "aether_substrate::render",
-                            accepted_bytes = write_len,
-                            dropped_bytes = bytes.len() - write_len,
-                            cap = VERTEX_BUFFER_BYTES,
-                            "render sink dropped triangles beyond fixed vertex buffer",
-                        );
-                    }
-                },
-            ),
-        );
-    }
+    // degrades gracefully. Helper shared with desktop via
+    // `aether-substrate-core::sinks` (issue 428).
+    let (render_acc, render_handler) = build_render_sink(VERTEX_BUFFER_BYTES);
+    let RenderAccumulator {
+        frame_vertices,
+        triangles_rendered,
+    } = render_acc;
+    boot.registry
+        .register_sink("aether.sink.render", render_handler);
 
     // `aether.sink.camera`: latest-value-wins. Decode the 64-byte
     // column-major view_proj and store; the frame loop reads it
-    // each frame and uploads to the GPU uniform.
-    let camera_state = Arc::new(Mutex::new(IDENTITY_VIEW_PROJ));
-    {
-        let cam_for_sink = Arc::clone(&camera_state);
-        boot.registry.register_sink(
-            "aether.sink.camera",
-            Arc::new(
-                move |_kind_id: u64,
-                      _kind_name: &str,
-                      _origin: Option<&str>,
-                      _sender: ReplyTo,
-                      bytes: &[u8],
-                      _count: u32| {
-                    if bytes.len() != 64 {
-                        tracing::warn!(
-                            target: "aether_substrate::camera",
-                            got = bytes.len(),
-                            expected = 64,
-                            "camera sink: payload length mismatch, dropping",
-                        );
-                        return;
-                    }
-                    match bytemuck::try_pod_read_unaligned::<[f32; 16]>(bytes) {
-                        Ok(mat) => *cam_for_sink.lock().unwrap() = mat,
-                        Err(e) => tracing::warn!(
-                            target: "aether_substrate::camera",
-                            error = %e,
-                            "camera sink: cast failed, dropping",
-                        ),
-                    }
-                },
-            ),
-        );
-    }
+    // each frame and uploads to the GPU uniform. Helper shared with
+    // desktop via `aether-substrate-core::sinks` (issue 428).
+    let (camera_state, camera_handler) = build_camera_sink();
+    boot.registry
+        .register_sink("aether.sink.camera", camera_handler);
 
     // `aether.sink.io` per ADR-0041. Test-bench gets the same sink
     // as desktop / headless — the io path is purely I/O. Boot-time
