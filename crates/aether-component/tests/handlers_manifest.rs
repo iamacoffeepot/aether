@@ -34,6 +34,13 @@ struct Ping {
     seq: u32,
 }
 
+// Minimal fixture, mirrored from `examples/hello.rs`. Lives here as a
+// duplicate (rather than reused) because `examples/*.rs` declare
+// `crate-type = ["cdylib"]` and only build for `wasm32-unknown-unknown`
+// — the test exercises the const path host-side. Maintenance is the
+// usual SDK-surface cadence: when `Component` / `Ctx` / `Mail` /
+// `#[handlers]` change shape, this fixture moves with every other
+// component in the workspace.
 struct ManifestProbe;
 
 #[handlers]
