@@ -51,7 +51,12 @@ dependencies = [
  "aether-component",
  "aether-kinds",
  "aether-math",
+ "aether-scenario",
+ "aether-substrate-test-bench",
+ "pollster",
+ "serde_yml",
  "tracing",
+ "wgpu",
 ]
 
 [[package]]

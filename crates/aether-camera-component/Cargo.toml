@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+# `cdylib` is the production artifact (wasm32 build → component). `rlib`
+# is added so host builds can link integration tests under `tests/` —
+# the crate's own scenario tests load the wasm at runtime, but cargo
+# still needs a host-target lib to resolve the test binary against.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aether-component = { path = "../aether-component" }
@@ -15,3 +19,21 @@ aether-math = { path = "../aether-math" }
 # mail (unknown camera, mode mismatch, etc.). Default-features-off to
 # match the rest of the SDK pattern.
 tracing = { version = "0.1", default-features = false }
+
+# Integration tests boot a `TestBench`, load the component's own wasm
+# artifact, and assert mail-flow + render properties via `aether-scenario`.
+# Tests run host-side; the wasm is built separately for `wasm32-unknown-unknown`
+# and discovered at runtime under `target/wasm32-unknown-unknown/{debug,release}/`.
+[dev-dependencies]
+# Tests need an explicit handle on aether-camera so the linker keeps
+# the kind descriptors `aether-camera`'s `Kind` derives submit via
+# `inventory::submit!`. The component's regular dep on aether-camera
+# wires the runtime types but the test binary's link of the cdylib's
+# host artifact strips the descriptor symbols without an explicit
+# reference. See `use aether_camera as _;` in tests/scenario.rs.
+aether-camera = { path = "../aether-camera" }
+aether-scenario = { path = "../aether-scenario" }
+aether-substrate-test-bench = { path = "../aether-substrate-test-bench" }
+pollster = "0.4.0"
+serde_yml = "0.0.12"
+wgpu = "29.0.1"
