@@ -222,8 +222,8 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                     ctx.outbound.send(EngineToHub::MailToEngineMailbox(
                         aether_hub_protocol::MailToEngineMailboxFrame {
                             target_engine_id: engine_id,
-                            target_mailbox_id: mailbox_id.0,
-                            kind_id: kind.0,
+                            target_mailbox_id: mailbox_id,
+                            kind_id: kind,
                             payload,
                             count,
                             correlation_id: correlation,

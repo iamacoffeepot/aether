@@ -43,8 +43,7 @@ use aether_hub_protocol::{
 use aether_kinds::UnresolvedMail;
 use aether_mail::Kind;
 use aether_substrate_core::{
-    Mail, MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,
-    dispatch_hub_to_engine_mail,
+    Mail, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot, dispatch_hub_to_engine_mail,
 };
 use tokio::sync::mpsc;
 
@@ -128,19 +127,18 @@ impl LoopbackHandle {
     ) {
         let EngineMailToHubSubstrateFrame {
             recipient_mailbox_id,
-            kind_id,
+            kind_id: kind,
             payload,
             count,
             source_mailbox_id,
             correlation_id,
         } = frame;
-        let kind = aether_mail::KindId(kind_id);
         // Kind lookup guards against an engine bubbling up a kind
         // the hub substrate doesn't know — without it the mail
         // would reach a component expecting a different layout.
         if self.registry.kind_name(kind).is_none() {
             eprintln!(
-                "aether-substrate-hub: bubbled-up mail of unknown kind_id={kind_id} \
+                "aether-substrate-hub: bubbled-up mail of unknown kind_id={kind} \
                  mailbox_id={recipient_mailbox_id} — dropped"
             );
             return;
@@ -151,37 +149,27 @@ impl LoopbackHandle {
         // `aether.mail.unresolved` observation back to the
         // originating engine so the typo surfaces in that engine's
         // own `engine_logs`. ADR-0037 follow-up / issue #185.
-        if self
-            .registry
-            .entry(MailboxId(recipient_mailbox_id))
-            .is_none()
-        {
+        if self.registry.entry(recipient_mailbox_id).is_none() {
             eprintln!(
                 "aether-substrate-hub: bubbled-up mail from engine {source_engine_id:?} to \
-                 unknown mailbox_id={recipient_mailbox_id:#x} kind_id={kind_id:#x} — returning \
+                 unknown mailbox_id={recipient_mailbox_id} kind_id={kind} — returning \
                  `aether.mail.unresolved` diagnostic to originator"
             );
-            send_unresolved_diagnostic(
-                engines,
-                source_engine_id,
-                MailboxId(recipient_mailbox_id),
-                kind,
-            );
+            send_unresolved_diagnostic(engines, source_engine_id, recipient_mailbox_id, kind);
             return;
         }
         let sender = match source_mailbox_id {
             Some(mailbox_id) => ReplyTo::with_correlation(
                 ReplyTarget::EngineMailbox {
                     engine_id: source_engine_id,
-                    mailbox_id: MailboxId(mailbox_id),
+                    mailbox_id,
                 },
                 correlation_id,
             ),
             None => ReplyTo::with_correlation(ReplyTarget::None, correlation_id),
         };
-        self.queue.push(
-            Mail::new(MailboxId(recipient_mailbox_id), kind, payload, count).with_reply_to(sender),
-        );
+        self.queue
+            .push(Mail::new(recipient_mailbox_id, kind, payload, count).with_reply_to(sender));
     }
 }
 
@@ -207,8 +195,8 @@ fn send_unresolved_diagnostic(
     })
     .to_vec();
     let frame = HubToEngine::MailById(MailByIdFrame {
-        recipient_mailbox_id: aether_mail::mailboxes::DIAGNOSTICS.0,
-        kind_id: UnresolvedMail::ID.0,
+        recipient_mailbox_id: aether_mail::mailboxes::DIAGNOSTICS,
+        kind_id: UnresolvedMail::ID,
         payload,
         count: 1,
         correlation_id: 0,
@@ -435,8 +423,8 @@ mod tests {
         outbound_tx
             .send(EngineToHub::MailToEngineMailbox(MailToEngineMailboxFrame {
                 target_engine_id,
-                target_mailbox_id: 99,
-                kind_id: 42,
+                target_mailbox_id: aether_mail::MailboxId(99),
+                kind_id: aether_mail::KindId(42),
                 payload: vec![1, 2, 3],
                 count: 1,
                 correlation_id: 0,
@@ -449,8 +437,8 @@ mod tests {
             .expect("mail_rx closed");
         match got {
             HubToEngine::MailById(frame) => {
-                assert_eq!(frame.recipient_mailbox_id, 99);
-                assert_eq!(frame.kind_id, 42);
+                assert_eq!(frame.recipient_mailbox_id, aether_mail::MailboxId(99));
+                assert_eq!(frame.kind_id, aether_mail::KindId(42));
                 assert_eq!(frame.payload, vec![1, 2, 3]);
                 assert_eq!(frame.count, 1);
             }
@@ -477,8 +465,8 @@ mod tests {
         handle.deliver_bubbled_mail(
             EngineId(Uuid::from_u128(0x1234)),
             EngineMailToHubSubstrateFrame {
-                recipient_mailbox_id: 42,
-                kind_id: 0xDEAD_BEEF_DEAD_BEEF,
+                recipient_mailbox_id: aether_mail::MailboxId(42),
+                kind_id: aether_mail::KindId(0xDEAD_BEEF_DEAD_BEEF),
                 payload: vec![1, 2, 3],
                 count: 1,
                 source_mailbox_id: None,
@@ -525,11 +513,11 @@ mod tests {
         handle.deliver_bubbled_mail(
             originator_id,
             EngineMailToHubSubstrateFrame {
-                recipient_mailbox_id: 0xBAD_C0FFEE_u64,
-                kind_id: <aether_kinds::Tick as Kind>::ID.0,
+                recipient_mailbox_id: aether_mail::MailboxId(0xBAD_C0FFEE_u64),
+                kind_id: <aether_kinds::Tick as Kind>::ID,
                 payload: vec![],
                 count: 1,
-                source_mailbox_id: Some(0x5151),
+                source_mailbox_id: Some(aether_mail::MailboxId(0x5151)),
                 correlation_id: 0,
             },
             &engines,
@@ -541,10 +529,10 @@ mod tests {
         let HubToEngine::MailById(frame) = got else {
             panic!("expected MailById, got {got:?}");
         };
-        assert_eq!(frame.kind_id, UnresolvedMail::ID.0);
+        assert_eq!(frame.kind_id, UnresolvedMail::ID);
         assert_eq!(
             frame.recipient_mailbox_id,
-            aether_mail::mailboxes::DIAGNOSTICS.0,
+            aether_mail::mailboxes::DIAGNOSTICS,
         );
         let record: &UnresolvedMail = bytemuck::from_bytes(&frame.payload);
         assert_eq!(

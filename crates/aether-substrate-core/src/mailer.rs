@@ -363,15 +363,15 @@ fn route_mail(
                 // for the receiving component. `None` for mail
                 // with no local component origin (broadcast-
                 // originated, substrate-generated).
-                let source_mailbox_id = mail.from_component.map(|mbox| mbox.0);
+                let source_mailbox_id = mail.from_component;
                 // ADR-0042: carry the correlation through the bubble-
                 // up frame so a reply coming back via Phase-2 reply
                 // routing lands at the originator's `wait_reply_p32`.
                 let correlation_id = mail.reply_to.correlation_id;
                 let sent = outbound.send(EngineToHub::MailToHubSubstrate(
                     EngineMailToHubSubstrateFrame {
-                        recipient_mailbox_id: recipient.0,
-                        kind_id: mail.kind.0,
+                        recipient_mailbox_id: recipient,
+                        kind_id: mail.kind,
                         payload: mail.payload,
                         count: mail.count,
                         source_mailbox_id,
@@ -432,8 +432,8 @@ mod tests {
         let frame = outbound_rx.try_recv().expect("bubble-up frame emitted");
         match frame {
             EngineToHub::MailToHubSubstrate(f) => {
-                assert_eq!(f.recipient_mailbox_id, unknown.0);
-                assert_eq!(f.kind_id, kind.0);
+                assert_eq!(f.recipient_mailbox_id, unknown);
+                assert_eq!(f.kind_id, kind);
                 assert_eq!(f.payload, payload);
                 assert_eq!(f.count, 1);
             }

@@ -3,10 +3,10 @@
 //! Each type is `#[repr(transparent)]` over a `u64` (postcard
 //! wire-identical to a raw u64; cast-shape kinds keep their
 //! `#[repr(C)]` layout) and exposes a `pub const TYPE_ID: u64`
-//! that the `Schema` impl emits as `SchemaType::TypeId(Self::TYPE_ID)`.
-//! The hub's encoder/decoder dispatch on the `TYPE_ID` value to
-//! translate JSON (tagged-string form per ADR-0064) ↔ postcard
-//! (u64 varint) at the wire boundary.
+//! that downstream `Schema` impls (in `aether-mail`) emit as
+//! `SchemaType::TypeId(Self::TYPE_ID)`. The hub's encoder/decoder
+//! dispatch on the `TYPE_ID` value to translate JSON (tagged-string
+//! form per ADR-0064) ↔ postcard (u64 varint) at the wire boundary.
 //!
 //! The underlying `u64` carries the ADR-0064 tag bits (4-bit type
 //! discriminator in the high nibble + 60-bit FNV-1a hash in the low
@@ -15,14 +15,11 @@
 
 use core::fmt;
 
-use aether_hub_protocol::{LabelNode, SchemaType};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::CastEligible;
-use crate::schema::Schema;
+use crate::hash::{TYPE_DOMAIN, fnv1a_64_prefixed, mailbox_id_from_name};
 use crate::tagged_id::{self, Tag};
-use crate::{TYPE_DOMAIN, fnv1a_64_prefixed, mailbox_id_from_name};
 
 /// Shared `Display` body — render tagged-string form when the tag
 /// bits are valid, fall back to hex for reserved sentinels.
@@ -137,15 +134,11 @@ pub const fn type_name_for_type_id(type_id: u64) -> Option<&'static str> {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct MailboxId(pub u64);
 
-impl CastEligible for MailboxId {
-    const ELIGIBLE: bool = true;
-}
-
 impl MailboxId {
     /// Stable type id — FNV-1a of `TYPE_DOMAIN ++ TYPE_NAME`. The
-    /// `Schema` impl emits this as `SchemaType::TypeId(...)`; the
-    /// hub's codec arms key on it to pick the JSON/postcard
-    /// translation.
+    /// `Schema` impl (in `aether-mail`) emits this as
+    /// `SchemaType::TypeId(...)`; the hub's codec arms key on it to
+    /// pick the JSON/postcard translation.
     pub const TYPE_ID: u64 = fnv1a_64_prefixed(TYPE_DOMAIN, b"aether.mailbox_id");
 
     /// Canonical name used to compute `TYPE_ID`. Surfaced by
@@ -173,12 +166,6 @@ impl fmt::Display for MailboxId {
     }
 }
 
-impl Schema for MailboxId {
-    const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
-    const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
-    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
-}
-
 impl Serialize for MailboxId {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         serialize_id(self.0, s)
@@ -198,10 +185,6 @@ impl<'de> Deserialize<'de> for MailboxId {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct KindId(pub u64);
 
-impl CastEligible for KindId {
-    const ELIGIBLE: bool = true;
-}
-
 impl KindId {
     pub const TYPE_ID: u64 = fnv1a_64_prefixed(TYPE_DOMAIN, b"aether.kind_id");
     pub const TYPE_NAME: &'static str = "aether.kind_id";
@@ -211,12 +194,6 @@ impl fmt::Display for KindId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_tagged(self.0, f)
     }
-}
-
-impl Schema for KindId {
-    const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
-    const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
-    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
 
 impl Serialize for KindId {
@@ -239,10 +216,6 @@ impl<'de> Deserialize<'de> for KindId {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct HandleId(pub u64);
 
-impl CastEligible for HandleId {
-    const ELIGIBLE: bool = true;
-}
-
 impl HandleId {
     pub const TYPE_ID: u64 = fnv1a_64_prefixed(TYPE_DOMAIN, b"aether.handle_id");
     pub const TYPE_NAME: &'static str = "aether.handle_id";
@@ -252,12 +225,6 @@ impl fmt::Display for HandleId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_tagged(self.0, f)
     }
-}
-
-impl Schema for HandleId {
-    const SCHEMA: SchemaType = SchemaType::TypeId(Self::TYPE_ID);
-    const LABEL: Option<&'static str> = Some(Self::TYPE_NAME);
-    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
 
 impl Serialize for HandleId {

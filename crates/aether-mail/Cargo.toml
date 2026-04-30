@@ -16,6 +16,7 @@ derive = ["dep:aether-mail-derive"]
 # `Schema` trait and the derive's `const ID` emission work uniformly
 # on host and wasm.
 aether-hub-protocol = { path = "../aether-hub-protocol", default-features = false }
+aether-id = { path = "../aether-id" }
 aether-mail-derive = { path = "../aether-mail-derive", optional = true }
 bytemuck = { version = "1.19", features = ["derive"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }

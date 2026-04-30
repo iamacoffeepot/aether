@@ -22,7 +22,11 @@ mod types;
 pub use types::*;
 
 pub mod canonical;
-pub mod tag_bits;
+// ADR-0064 tag-bit constants migrated to the `aether-id` leaf crate
+// (see `aether-id::tag_bits`). The re-export keeps the historical
+// `aether_hub_protocol::tag_bits::TAG_KIND` call paths working for
+// downstream crates without forcing them to take a fresh dep edge.
+pub use aether_id::tag_bits;
 
 /// Maximum accepted frame body size. Bounded so a malformed length
 /// prefix cannot drive a reader into an OOM. 16 MiB is comfortably
@@ -594,7 +598,7 @@ mod tests {
     #[test]
     fn inputs_record_handler_roundtrip() {
         let rec = InputsRecord::Handler {
-            id: 0xdead_beef_cafe_f00d,
+            id: aether_id::KindId(0xdead_beef_cafe_f00d),
             name: "aether.tick".into(),
             doc: Some("Not useful to send manually — the substrate drives this.".into()),
         };
@@ -605,7 +609,7 @@ mod tests {
     #[test]
     fn inputs_record_handler_without_doc_roundtrip() {
         let rec = InputsRecord::Handler {
-            id: 1,
+            id: aether_id::KindId(1),
             name: "aether.key".into(),
             doc: None,
         };
@@ -712,12 +716,12 @@ mod tests {
                 doc: "A canary component.".into(),
             },
             InputsRecord::Handler {
-                id: 42,
+                id: aether_id::KindId(42),
                 name: "aether.tick".into(),
                 doc: Some("heartbeat".into()),
             },
             InputsRecord::Handler {
-                id: 0xff,
+                id: aether_id::KindId(0xff),
                 name: "test.ping".into(),
                 doc: None,
             },
