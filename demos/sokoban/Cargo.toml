@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+# `cdylib` is the production artifact (wasm32 build → component). `rlib`
+# is added so host builds can link integration tests under `tests/` —
+# the crate's own scenario tests load the wasm at runtime, but cargo
+# still needs a host-target lib to resolve the test binary against.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aether-component = { path = "../../crates/aether-component" }
@@ -12,3 +16,15 @@ aether-camera = { path = "../../crates/aether-camera" }
 aether-kinds = { path = "../../crates/aether-kinds" }
 aether-mail = { path = "../../crates/aether-mail", features = ["derive"] }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
+
+# Integration tests boot a `TestBench`, load the demo's own wasm
+# artifact, and assert mail-flow + render properties via `aether-scenario`.
+# Tests run host-side; the wasm is built separately for
+# `wasm32-unknown-unknown` and discovered at runtime under
+# `target/wasm32-unknown-unknown/{debug,release}/`.
+[dev-dependencies]
+aether-scenario = { path = "../../crates/aether-scenario" }
+aether-substrate-test-bench = { path = "../../crates/aether-substrate-test-bench" }
+pollster = "0.4.0"
+serde_yml = "0.0.12"
+wgpu = "29.0.1"
