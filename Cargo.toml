@@ -18,6 +18,7 @@ members = [
     "crates/aether-mesh-viewer",
     "crates/aether-camera-component",
     "crates/aether-mesh-viewer-component",
+    "crates/aether-test-fixture-probe",
     "crates/aether-hub-protocol",
     "crates/aether-mail",
     "crates/aether-mail-derive",

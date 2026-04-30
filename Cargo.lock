@@ -356,6 +356,7 @@ dependencies = [
  "aether-kinds",
  "aether-mail",
  "aether-substrate-core",
+ "aether-test-fixture-probe",
  "bytemuck",
  "png",
  "pollster",
@@ -364,6 +365,16 @@ dependencies = [
  "tracing",
  "wasmtime",
  "wgpu",
+]
+
+[[package]]
+name = "aether-test-fixture-probe"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-component",
+ "aether-kinds",
+ "aether-mail",
+ "serde",
 ]
 
 [[package]]
