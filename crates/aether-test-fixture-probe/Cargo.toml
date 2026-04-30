@@ -1,0 +1,13 @@
+[package]
+name = "aether-test-fixture-probe"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-component = { path = "../aether-component" }
+aether-kinds = { path = "../aether-kinds" }
+aether-mail = { path = "../aether-mail", features = ["derive"] }
+serde = { version = "1", default-features = false, features = ["derive"] }

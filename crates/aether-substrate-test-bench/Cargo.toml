@@ -33,3 +33,11 @@ serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 wasmtime = "30"
 wgpu = "29.0.1"
+
+# Phase 3 substrate-feature scenarios (issue 430). Tests boot a
+# `TestBench` and load `aether-test-fixture-probe`'s wasm to exercise
+# input subscription, drop_component, etc. The fixture is the only
+# component crate that's a dev-dep here — production code never
+# touches it.
+[dev-dependencies]
+aether-test-fixture-probe = { path = "../aether-test-fixture-probe" }

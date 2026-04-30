@@ -91,7 +91,8 @@ jobs:
             -p aether-mesh-viewer-component \
             -p aether-demo-sokoban \
             -p aether-demo-tic-tac-toe-server \
-            -p aether-demo-tic-tac-toe-client
+            -p aether-demo-tic-tac-toe-client \
+            -p aether-test-fixture-probe
       - run: cargo test --workspace --all-targets
         env:
           AETHER_REQUIRE_RUNTIME: "1"
