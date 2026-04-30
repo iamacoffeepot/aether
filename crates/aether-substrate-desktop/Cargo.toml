@@ -16,7 +16,7 @@ name = "aether-substrate"
 path = "src/main.rs"
 
 [dependencies]
-aether-substrate-core = { path = "../aether-substrate-core" }
+aether-substrate-core = { path = "../aether-substrate-core", features = ["render"] }
 aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-mail = { path = "../aether-mail" }
 aether-kinds = { path = "../aether-kinds" }

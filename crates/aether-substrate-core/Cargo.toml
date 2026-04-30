@@ -6,9 +6,16 @@ edition.workspace = true
 # ADR-0035 Phase 1: runtime (wasmtime host, mail scheduler, kind
 # manifest, registry, control-plane dispatch, hub client) factored
 # out of `aether-substrate` so the same runtime can power multiple
-# chassis (desktop today, headless + hub incoming). Core deliberately
-# excludes winit, wgpu, png, pollster — those live in whichever
-# chassis crate actually drives a GPU or window.
+# chassis (desktop today, headless + hub incoming). Winit + pollster
+# stay chassis-side; wgpu + png are gated behind the optional
+# `render` feature so chassis that don't render (headless, hub) skip
+# the wgpu/png compile entirely.
+
+[features]
+# Issue 421: chassis that draw enable `render` to pull in the shared
+# offscreen pipeline + capture path. Headless and hub leave it off
+# and never link wgpu.
+render = ["dep:wgpu", "dep:png"]
 
 [dependencies]
 aether-hub-protocol = { path = "../aether-hub-protocol" }
@@ -36,6 +43,11 @@ dirs = "5"
 ureq = { version = "3", features = ["rustls"] }
 url = "2"
 wasmtime = "30"
+# Render-only deps; gated by the `render` feature. Headless + hub
+# don't enable the feature, so wgpu's transitive graph stays out of
+# their builds.
+wgpu = { version = "29.0.1", optional = true }
+png = { version = "0.17", optional = true }
 # Wasmtime 30 doesn't expose `custom_sections` on `Module`; use
 # wasmparser directly to walk the raw wasm bytes for the ADR-0028
 # `aether.kinds` section. Pin to the version wasmtime re-exports
