@@ -365,7 +365,7 @@ fn dispatch_io_mail(
     // strings in the echo fields — the `AdapterError` text carries
     // the decode diagnostic, and empty-string echo is a loud signal
     // that the request itself was malformed.
-    if kind == KindId(<Read as Kind>::ID) {
+    if kind == <Read as Kind>::ID {
         let req: Read = match postcard::from_bytes(bytes) {
             Ok(r) => r,
             Err(e) => {
@@ -414,7 +414,7 @@ fn dispatch_io_mail(
                 },
             ),
         };
-    } else if kind == KindId(<Write as Kind>::ID) {
+    } else if kind == <Write as Kind>::ID {
         let req: Write = match postcard::from_bytes(bytes) {
             Ok(r) => r,
             Err(e) => {
@@ -462,7 +462,7 @@ fn dispatch_io_mail(
                 },
             ),
         };
-    } else if kind == KindId(<Delete as Kind>::ID) {
+    } else if kind == <Delete as Kind>::ID {
         let req: Delete = match postcard::from_bytes(bytes) {
             Ok(r) => r,
             Err(e) => {
@@ -510,7 +510,7 @@ fn dispatch_io_mail(
                 },
             ),
         };
-    } else if kind == KindId(<List as Kind>::ID) {
+    } else if kind == <List as Kind>::ID {
         let req: List = match postcard::from_bytes(bytes) {
             Ok(r) => r,
             Err(e) => {
@@ -826,7 +826,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Read as Kind>::ID),
+            <Read as Kind>::ID,
             Read::NAME,
             None,
             session_sender(),
@@ -860,7 +860,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Read as Kind>::ID),
+            <Read as Kind>::ID,
             Read::NAME,
             None,
             session_sender(),
@@ -896,7 +896,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Read as Kind>::ID),
+            <Read as Kind>::ID,
             Read::NAME,
             None,
             session_sender(),
@@ -926,7 +926,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Write as Kind>::ID),
+            <Write as Kind>::ID,
             Write::NAME,
             None,
             session_sender(),
@@ -960,7 +960,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Write as Kind>::ID),
+            <Write as Kind>::ID,
             Write::NAME,
             None,
             session_sender(),
@@ -990,7 +990,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Delete as Kind>::ID),
+            <Delete as Kind>::ID,
             Delete::NAME,
             None,
             session_sender(),
@@ -1025,7 +1025,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<List as Kind>::ID),
+            <List as Kind>::ID,
             List::NAME,
             None,
             session_sender(),
@@ -1159,7 +1159,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Read as Kind>::ID),
+            <Read as Kind>::ID,
             Read::NAME,
             Some("test_caller"),
             ReplyTo::to(crate::mail::ReplyTarget::Component(caller_mailbox)),
@@ -1177,7 +1177,7 @@ mod tests {
         let observed_kind = lo | (hi << 32);
         assert_eq!(
             observed_kind,
-            <ReadResult as Kind>::ID,
+            <ReadResult as Kind>::ID.0,
             "component received a kind id different from ReadResult",
         );
 
@@ -1197,7 +1197,7 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         handler(
-            KindId(<Read as Kind>::ID),
+            <Read as Kind>::ID,
             Read::NAME,
             None,
             session_sender(),

@@ -29,21 +29,26 @@ const UNSUPPORTED_ADVANCE: &str =
 
 pub fn chassis_control_handler(outbound: Arc<HubOutbound>) -> ChassisControlHandler {
     Arc::new(
-        move |kind: KindId, kind_name: &str, sender: ReplyTo, _bytes: &[u8]| {
-            if kind == KindId(CaptureFrame::ID) {
+        move |kind: KindId, kind_name: &str, sender: ReplyTo, _bytes: &[u8]| match kind {
+            CaptureFrame::ID => {
                 reply_unsupported_capture_frame(&outbound, sender, UNSUPPORTED);
-            } else if kind == KindId(SetWindowMode::ID) {
+            }
+            SetWindowMode::ID => {
                 reply_unsupported_window_mode(&outbound, sender, UNSUPPORTED);
-            } else if kind == KindId(SetWindowTitle::ID) {
+            }
+            SetWindowTitle::ID => {
                 reply_unsupported_window_title(&outbound, sender, UNSUPPORTED);
-            } else if kind == KindId(Advance::ID) {
+            }
+            Advance::ID => {
                 reply_unsupported_advance(&outbound, sender, UNSUPPORTED_ADVANCE);
-            } else if kind == KindId(PlatformInfo::ID) {
+            }
+            PlatformInfo::ID => {
                 // PlatformInfoResult::Err also exists — future work
                 // could return a partial Ok (OS + engine info, empty
                 // GPU/monitors) once headless needs that detail.
                 reply_unsupported_platform_info(&outbound, sender, UNSUPPORTED);
-            } else {
+            }
+            _ => {
                 tracing::warn!(
                     target: "aether_substrate::chassis",
                     kind = %kind_name,

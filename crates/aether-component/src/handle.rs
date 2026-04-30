@@ -144,7 +144,9 @@ impl<K: Kind> Handle<K> {
     pub fn as_ref(&self) -> Ref<K> {
         Ref::Handle {
             id: self.id,
-            kind_id: K::ID,
+            // `Ref::Handle.kind_id` is wire-format `u64`; `Kind::ID`
+            // is typed `KindId` post-issue 466, so drop into `.0`.
+            kind_id: K::ID.0,
         }
     }
 }
@@ -171,7 +173,7 @@ impl<K> Drop for Handle<K> {
 pub fn publish<K: Kind + Serialize>(value: &K) -> Result<Handle<K>, SyncHandleError> {
     let bytes = postcard::to_allocvec(value).expect("postcard encode to Vec is infallible");
     let req = HandlePublish {
-        kind_id: ::aether_mail::KindId(K::ID),
+        kind_id: K::ID,
         bytes,
     };
     resolve_sink::<HandlePublish>(HANDLE_SINK_NAME).send(&req);
@@ -243,7 +245,7 @@ where
     let mut buf: Vec<u8> = vec![0u8; capacity];
     let rc = unsafe {
         raw::wait_reply(
-            K::ID,
+            K::ID.0,
             buf.as_mut_ptr().addr() as u32,
             buf.len() as u32,
             timeout_ms,
@@ -317,7 +319,7 @@ mod tests {
         match handle.as_ref() {
             Ref::Handle { id, kind_id } => {
                 assert_eq!(id, 42);
-                assert_eq!(kind_id, Payload::ID);
+                assert_eq!(kind_id, Payload::ID.0);
             }
             Ref::Inline(_) => panic!("as_ref should produce Handle, not Inline"),
         }

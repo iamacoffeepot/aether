@@ -259,7 +259,7 @@ fn ref_inner_kind_id_is_carried_in_handle_arm() {
         panic!("expected Handle variant");
     };
     assert_eq!(id, 0xfeed_0000);
-    assert_eq!(kind_id, <Note as Kind>::ID);
+    assert_eq!(kind_id, <Note as Kind>::ID.0);
 }
 
 #[test]

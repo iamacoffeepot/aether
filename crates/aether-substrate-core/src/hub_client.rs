@@ -122,7 +122,9 @@ impl HubOutbound {
             } => self.send(EngineToHub::MailToEngineMailbox(MailToEngineMailboxFrame {
                 target_engine_id: engine_id,
                 target_mailbox_id: mailbox_id.0,
-                kind_id: K::ID,
+                // wire frame is `u64`; drop into `.0` from the typed
+                // `Kind::ID` (issue 466).
+                kind_id: K::ID.0,
                 payload,
                 count: 1,
                 correlation_id: sender.correlation_id,

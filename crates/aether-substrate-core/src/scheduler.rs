@@ -601,7 +601,7 @@ fn kill_actor(
     let broadcast_mbox = MailboxId::from_name(crate::HUB_CLAUDE_BROADCAST);
     let mail = Mail {
         recipient: broadcast_mbox,
-        kind: aether_mail::KindId(ComponentDied::ID),
+        kind: ComponentDied::ID,
         payload,
         count: 1,
         from_component: Some(mailbox),
@@ -1019,7 +1019,7 @@ mod tests {
         registry.register_sink(
             crate::HUB_CLAUDE_BROADCAST,
             Arc::new(move |kind, _, _, _, bytes, _| {
-                if kind == aether_mail::KindId(ComponentDied::ID)
+                if kind == ComponentDied::ID
                     && let Ok(d) = postcard::from_bytes::<ComponentDied>(bytes)
                 {
                     cap.lock().unwrap().push(d);

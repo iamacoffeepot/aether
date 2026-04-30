@@ -426,7 +426,7 @@ fn dispatch_net_mail(
     bytes: &[u8],
     default_timeout: Duration,
 ) {
-    if kind != KindId(<Fetch as Kind>::ID) {
+    if kind != <Fetch as Kind>::ID {
         tracing::warn!(
             target: "aether_substrate::net",
             kind = %kind,
@@ -566,7 +566,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Fetch as Kind>::ID),
+            <Fetch as Kind>::ID,
             Fetch::NAME,
             None,
             session_sender(),
@@ -680,7 +680,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Fetch as Kind>::ID),
+            <Fetch as Kind>::ID,
             Fetch::NAME,
             None,
             session_sender(),
@@ -721,7 +721,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Fetch as Kind>::ID),
+            <Fetch as Kind>::ID,
             Fetch::NAME,
             None,
             session_sender(),
@@ -751,7 +751,7 @@ mod tests {
             Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
         );
         handler(
-            KindId(<Fetch as Kind>::ID),
+            <Fetch as Kind>::ID,
             Fetch::NAME,
             None,
             session_sender(),
@@ -814,7 +814,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            KindId(<Fetch as Kind>::ID),
+            <Fetch as Kind>::ID,
             Fetch::NAME,
             None,
             session_sender(),

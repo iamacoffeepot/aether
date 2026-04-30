@@ -231,7 +231,7 @@ where
     let mut buf: Vec<u8> = alloc::vec![0u8; capacity];
     let rc = unsafe {
         raw::wait_reply(
-            K::ID,
+            K::ID.0,
             buf.as_mut_ptr().addr() as u32,
             buf.len() as u32,
             timeout_ms,

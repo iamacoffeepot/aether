@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 pub mod ids;
+pub mod mailboxes;
 pub mod tagged_id;
 pub use ids::{HandleId, KindId, MailboxId, tag_for_type_id, type_name_for_type_id};
 pub use tagged_id::{Tag, with_tag};
@@ -43,7 +44,7 @@ pub use tagged_id::{Tag, with_tag};
 /// leave the default alone.
 pub trait Kind {
     const NAME: &'static str;
-    const ID: u64;
+    const ID: KindId;
     /// `true` when the kind is a substrate-published event stream
     /// (Tick, Key, MouseMove, etc.) that components subscribe to via
     /// the per-kind subscriber set. Drives `auto_subscribe_inputs` on
@@ -270,7 +271,10 @@ impl<K: Kind> Ref<K> {
     /// callers can't pass a kind id that disagrees with the type
     /// parameter.
     pub const fn handle(id: u64) -> Self {
-        Ref::Handle { id, kind_id: K::ID }
+        Ref::Handle {
+            id,
+            kind_id: K::ID.0,
+        }
     }
 }
 
@@ -670,7 +674,7 @@ mod tests {
         // doesn't matter. `mailbox_id_from_name` gives us a stable
         // derivation without pulling Schema into tests that don't
         // use it.
-        const ID: u64 = mailbox_id_from_name(Self::NAME);
+        const ID: KindId = KindId(mailbox_id_from_name(Self::NAME));
     }
 
     #[repr(C)]
@@ -681,7 +685,7 @@ mod tests {
     }
     impl Kind for Vertex {
         const NAME: &'static str = "test.vertex";
-        const ID: u64 = mailbox_id_from_name(Self::NAME);
+        const ID: KindId = KindId(mailbox_id_from_name(Self::NAME));
     }
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -691,13 +695,13 @@ mod tests {
     }
     impl Kind for TestStruct {
         const NAME: &'static str = "test.struct";
-        const ID: u64 = mailbox_id_from_name(Self::NAME);
+        const ID: KindId = KindId(mailbox_id_from_name(Self::NAME));
     }
 
     struct Signal;
     impl Kind for Signal {
         const NAME: &'static str = "test.signal";
-        const ID: u64 = mailbox_id_from_name(Self::NAME);
+        const ID: KindId = KindId(mailbox_id_from_name(Self::NAME));
     }
 
     #[test]
@@ -781,7 +785,7 @@ mod tests {
         match r {
             Ref::Handle { id, kind_id } => {
                 assert_eq!(id, 42);
-                assert_eq!(kind_id, TestStruct::ID);
+                assert_eq!(kind_id, TestStruct::ID.0);
             }
             _ => panic!("expected Handle variant"),
         }

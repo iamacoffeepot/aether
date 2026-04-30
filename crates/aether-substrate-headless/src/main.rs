@@ -75,7 +75,7 @@ impl Chassis for HeadlessChassis {
             next_deadline = Instant::now() + self.tick_period;
 
             frame += 1;
-            let subs = subscribers_for(&self.input_subscribers, KindId(Tick::ID));
+            let subs = subscribers_for(&self.input_subscribers, Tick::ID);
             for mbox in subs {
                 self.queue
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));

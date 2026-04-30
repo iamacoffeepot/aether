@@ -223,29 +223,41 @@ impl ControlPlane {
     }
 
     fn dispatch(&self, kind: KindId, kind_name: &str, sender: crate::mail::ReplyTo, bytes: &[u8]) {
-        if kind == KindId(LoadComponent::ID) {
-            let result = self.handle_load(bytes);
-            self.outbound.send_reply(sender, &result);
-        } else if kind == KindId(DropComponent::ID) {
-            let result = self.handle_drop(bytes);
-            self.outbound.send_reply(sender, &result);
-        } else if kind == KindId(ReplaceComponent::ID) {
-            let result = self.handle_replace(bytes);
-            self.outbound.send_reply(sender, &result);
-        } else if kind == KindId(SubscribeInput::ID) {
-            let result = self.handle_subscribe(bytes);
-            self.outbound.send_reply(sender, &result);
-        } else if kind == KindId(UnsubscribeInput::ID) {
-            let result = self.handle_unsubscribe(bytes);
-            self.outbound.send_reply(sender, &result);
-        } else if let Some(handler) = &self.chassis_handler {
-            handler(kind, kind_name, sender, bytes);
-        } else {
-            tracing::warn!(
-                target: "aether_substrate::control",
-                kind = %kind_name,
-                "{AETHER_CONTROL} received unrecognised kind (no chassis handler registered) — dropping",
-            );
+        // Issue 466: `Kind::ID` is typed `KindId`, so each arm pattern
+        // is the typed const directly — no `KindId(X::ID)` wrapping
+        // required. Subsumes issue 465's match-on-`.0` workaround.
+        match kind {
+            LoadComponent::ID => {
+                let result = self.handle_load(bytes);
+                self.outbound.send_reply(sender, &result);
+            }
+            DropComponent::ID => {
+                let result = self.handle_drop(bytes);
+                self.outbound.send_reply(sender, &result);
+            }
+            ReplaceComponent::ID => {
+                let result = self.handle_replace(bytes);
+                self.outbound.send_reply(sender, &result);
+            }
+            SubscribeInput::ID => {
+                let result = self.handle_subscribe(bytes);
+                self.outbound.send_reply(sender, &result);
+            }
+            UnsubscribeInput::ID => {
+                let result = self.handle_unsubscribe(bytes);
+                self.outbound.send_reply(sender, &result);
+            }
+            _ => {
+                if let Some(handler) = &self.chassis_handler {
+                    handler(kind, kind_name, sender, bytes);
+                } else {
+                    tracing::warn!(
+                        target: "aether_substrate::control",
+                        kind = %kind_name,
+                        "{AETHER_CONTROL} received unrecognised kind (no chassis handler registered) — dropping",
+                    );
+                }
+            }
         }
     }
 

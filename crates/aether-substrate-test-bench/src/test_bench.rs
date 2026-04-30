@@ -28,7 +28,7 @@ use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
 use aether_kinds::{
     Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, DRAW_TRIANGLE_BYTES, FrameStats, Tick,
 };
-use aether_mail::{Kind, KindId, encode_empty, encode_struct, mailbox_id_from_name};
+use aether_mail::{Kind, KindId, encode_empty, encode_struct};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use aether_substrate_core::{
@@ -365,8 +365,7 @@ impl TestBench {
             .lookup(recipient_name)
             .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
         let payload = encode_struct(mail);
-        self.queue
-            .push(Mail::new(mailbox, KindId(K::ID), payload, 1));
+        self.queue.push(Mail::new(mailbox, K::ID, payload, 1));
         Ok(())
     }
 
@@ -415,7 +414,7 @@ impl TestBench {
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
         let payload = encode_struct(mail);
         self.queue
-            .push(Mail::new(mailbox, KindId(K::ID), payload, 1).with_reply_to(reply_to));
+            .push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
         self.pump_until_reply::<R>(cid, std::any::type_name::<R>())
     }
 
@@ -475,11 +474,11 @@ impl TestBench {
     where
         K: Kind + serde::Serialize,
     {
-        let mailbox = MailboxId(mailbox_id_from_name(aether_substrate_core::AETHER_CONTROL));
+        let mailbox = aether_mail::mailboxes::CONTROL;
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
         let payload = encode_struct(mail);
         self.queue
-            .push(Mail::new(mailbox, KindId(K::ID), payload, 1).with_reply_to(reply_to));
+            .push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
     }
 
     fn fresh_correlation_id(&self) -> u64 {
@@ -599,7 +598,7 @@ impl TestBench {
 
     fn run_frame(&mut self, dispatch_tick: bool) {
         if dispatch_tick {
-            let subs = subscribers_for(&self.input_subscribers, KindId(Tick::ID));
+            let subs = subscribers_for(&self.input_subscribers, Tick::ID);
             for mbox in subs {
                 self.queue
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));

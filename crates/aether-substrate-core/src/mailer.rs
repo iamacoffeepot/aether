@@ -196,7 +196,7 @@ impl Mailer {
                 // correlation picks the right reply out of the mpsc.
                 // Reply target is None — nobody replies to a reply.
                 let reply_to = ReplyTo::with_correlation(ReplyTarget::None, sender.correlation_id);
-                self.push(Mail::new(mailbox, KindId(K::ID), payload, 1).with_reply_to(reply_to));
+                self.push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
                 true
             }
         }
@@ -470,7 +470,7 @@ mod tests {
     }
     impl Kind for Note {
         const NAME: &'static str = "test.mailer_note";
-        const ID: u64 = mailbox_id_from_name(Self::NAME);
+        const ID: ::aether_mail::KindId = ::aether_mail::KindId(mailbox_id_from_name(Self::NAME));
     }
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
@@ -480,7 +480,7 @@ mod tests {
     }
     impl Kind for HeldNote {
         const NAME: &'static str = "test.mailer_held_note";
-        const ID: u64 = mailbox_id_from_name(Self::NAME);
+        const ID: ::aether_mail::KindId = ::aether_mail::KindId(mailbox_id_from_name(Self::NAME));
     }
 
     fn note_schema() -> SchemaType {

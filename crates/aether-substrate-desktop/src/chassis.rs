@@ -71,8 +71,9 @@ pub fn chassis_control_handler(
     outbound: Arc<HubOutbound>,
 ) -> ChassisControlHandler {
     Arc::new(
-        move |kind: aether_mail::KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| {
-            if kind == aether_mail::KindId(CaptureFrame::ID) {
+        move |kind: aether_mail::KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| match kind
+        {
+            CaptureFrame::ID => {
                 let proxy = proxy.clone();
                 begin_capture_request(
                     &queue,
@@ -90,23 +91,28 @@ pub fn chassis_control_handler(
                         Ok(())
                     },
                 );
-            } else if kind == aether_mail::KindId(PlatformInfo::ID) {
+            }
+            PlatformInfo::ID => {
                 // Empty payload; forward the sender straight to the
                 // event loop and let it snapshot + reply on its own
                 // thread (winit monitor / scale-factor APIs require it).
                 let _ = proxy.send_event(UserEvent::PlatformInfo { reply_to: sender });
-            } else if kind == aether_mail::KindId(SetWindowMode::ID) {
+            }
+            SetWindowMode::ID => {
                 handle_set_window_mode(&proxy, &outbound, sender, bytes);
-            } else if kind == aether_mail::KindId(SetWindowTitle::ID) {
+            }
+            SetWindowTitle::ID => {
                 handle_set_window_title(&proxy, &outbound, sender, bytes);
-            } else if kind == aether_mail::KindId(Advance::ID) {
+            }
+            Advance::ID => {
                 reply_unsupported_advance(
                     &outbound,
                     sender,
                     "unsupported on desktop chassis — aether.test_bench.advance is \
                      test-bench-only (ADR-0067)",
                 );
-            } else {
+            }
+            _ => {
                 tracing::warn!(
                     target: "aether_substrate::chassis",
                     kind = %kind_name,

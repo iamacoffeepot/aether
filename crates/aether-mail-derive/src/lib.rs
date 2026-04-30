@@ -134,11 +134,17 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
             // bit pattern alone. The `KIND_DOMAIN` byte prefix still
             // rides the FNV input (ADR-0030) — type info ends up
             // encoded in two independent places that cross-check.
-            const ID: u64 = ::aether_mail::with_tag(
-                ::aether_mail::Tag::Kind,
-                ::aether_mail::fnv1a_64_prefixed(
-                    ::aether_mail::KIND_DOMAIN,
-                    &#canonical_bytes_ident,
+            // Issue 466: `Kind::ID` is typed `KindId`; the wrapper
+            // wraps the raw `u64` hash. Wire-format sites that need
+            // raw bytes call `.0`; dispatch sites compare `KindId` to
+            // `KindId` directly.
+            const ID: ::aether_mail::KindId = ::aether_mail::KindId(
+                ::aether_mail::with_tag(
+                    ::aether_mail::Tag::Kind,
+                    ::aether_mail::fnv1a_64_prefixed(
+                        ::aether_mail::KIND_DOMAIN,
+                        &#canonical_bytes_ident,
+                    ),
                 ),
             );
             #is_stream_item
@@ -177,7 +183,10 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // `&#labels_ident` see a stable `'static` reference.
         static #labels_ident: ::aether_mail::__derive_runtime::KindLabels =
             ::aether_mail::__derive_runtime::KindLabels {
-                kind_id: <#name as ::aether_mail::Kind>::ID,
+                // KindLabels.kind_id is wire-format `u64`; `Kind::ID` is
+                // typed `KindId` (issue 466) so we drop into the raw
+                // hash for the wire bytes.
+                kind_id: <#name as ::aether_mail::Kind>::ID.0,
                 kind_label: ::aether_mail::__derive_runtime::Cow::Borrowed(
                     ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
                 ),
@@ -994,8 +1003,11 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
     let arms = handlers.iter().map(|h| {
         let k = &h.kind_ty;
         let method = &h.method.sig.ident;
+        // `Mail::kind()` returns the raw `u64` the FFI carried; `Kind::ID`
+        // is typed `KindId` post-issue 466, so we drop into `.0` for the
+        // comparison.
         quote! {
-            if __aether_kind == <#k as ::aether_component::__macro_internals::Kind>::ID {
+            if __aether_kind == <#k as ::aether_component::__macro_internals::Kind>::ID.0 {
                 if let ::core::option::Option::Some(__aether_decoded) =
                     __aether_mail.decode_kind::<#k>()
                 {
@@ -1048,9 +1060,12 @@ fn build_inputs_manifest_consts(
     for h in handlers {
         let k = &h.kind_ty;
         let doc_expr = option_str_token(&h.agent_doc);
+        // `inputs_handler_len` / `write_inputs_handler` take a raw `u64`
+        // for the wire bytes; `Kind::ID` is `KindId` post-issue 466 so
+        // we drop into `.0` here.
         len_terms.push(quote! {
             (1 + ::aether_component::__macro_internals::canonical::inputs_handler_len(
-                <#k as ::aether_component::__macro_internals::Kind>::ID,
+                <#k as ::aether_component::__macro_internals::Kind>::ID.0,
                 <#k as ::aether_component::__macro_internals::Kind>::NAME,
                 #doc_expr,
             ))
@@ -1059,13 +1074,13 @@ fn build_inputs_manifest_consts(
             {
                 const REC_LEN: usize =
                     ::aether_component::__macro_internals::canonical::inputs_handler_len(
-                        <#k as ::aether_component::__macro_internals::Kind>::ID,
+                        <#k as ::aether_component::__macro_internals::Kind>::ID.0,
                         <#k as ::aether_component::__macro_internals::Kind>::NAME,
                         #doc_expr,
                     );
                 const REC_BYTES: [u8; REC_LEN] =
                     ::aether_component::__macro_internals::canonical::write_inputs_handler::<REC_LEN>(
-                        <#k as ::aether_component::__macro_internals::Kind>::ID,
+                        <#k as ::aether_component::__macro_internals::Kind>::ID.0,
                         <#k as ::aether_component::__macro_internals::Kind>::NAME,
                         #doc_expr,
                     );
@@ -1276,7 +1291,9 @@ fn build_kinds_section_retention_statics(self_ty: &Type, handlers: &[HandlerFn])
             // Schema impls).
             static #labels_static_ident: ::aether_component::__macro_internals::KindLabels =
                 ::aether_component::__macro_internals::KindLabels {
-                    kind_id: <#k as ::aether_component::__macro_internals::Kind>::ID,
+                    // KindLabels.kind_id is wire-format `u64`; drop into
+                    // `.0` from the typed `Kind::ID` (issue 466).
+                    kind_id: <#k as ::aether_component::__macro_internals::Kind>::ID.0,
                     kind_label: ::aether_component::__macro_internals::Cow::Borrowed(
                         match <#k as ::aether_component::__macro_internals::Schema>::LABEL {
                             ::core::option::Option::Some(s) => s,

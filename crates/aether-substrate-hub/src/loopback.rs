@@ -41,9 +41,9 @@ use aether_hub_protocol::{
     EngineId, EngineMailToHubSubstrateFrame, EngineToHub, HubToEngine, MailByIdFrame, Uuid,
 };
 use aether_kinds::UnresolvedMail;
-use aether_mail::{Kind, mailbox_id_from_name};
+use aether_mail::Kind;
 use aether_substrate_core::{
-    AETHER_DIAGNOSTICS, Mail, MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,
+    Mail, MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,
     dispatch_hub_to_engine_mail,
 };
 use tokio::sync::mpsc;
@@ -207,8 +207,8 @@ fn send_unresolved_diagnostic(
     })
     .to_vec();
     let frame = HubToEngine::MailById(MailByIdFrame {
-        recipient_mailbox_id: mailbox_id_from_name(AETHER_DIAGNOSTICS),
-        kind_id: UnresolvedMail::ID,
+        recipient_mailbox_id: aether_mail::mailboxes::DIAGNOSTICS.0,
+        kind_id: UnresolvedMail::ID.0,
         payload,
         count: 1,
         correlation_id: 0,
@@ -526,7 +526,7 @@ mod tests {
             originator_id,
             EngineMailToHubSubstrateFrame {
                 recipient_mailbox_id: 0xBAD_C0FFEE_u64,
-                kind_id: <aether_kinds::Tick as Kind>::ID,
+                kind_id: <aether_kinds::Tick as Kind>::ID.0,
                 payload: vec![],
                 count: 1,
                 source_mailbox_id: Some(0x5151),
@@ -541,20 +541,17 @@ mod tests {
         let HubToEngine::MailById(frame) = got else {
             panic!("expected MailById, got {got:?}");
         };
-        assert_eq!(frame.kind_id, UnresolvedMail::ID);
+        assert_eq!(frame.kind_id, UnresolvedMail::ID.0);
         assert_eq!(
             frame.recipient_mailbox_id,
-            mailbox_id_from_name(AETHER_DIAGNOSTICS),
+            aether_mail::mailboxes::DIAGNOSTICS.0,
         );
         let record: &UnresolvedMail = bytemuck::from_bytes(&frame.payload);
         assert_eq!(
             record.recipient_mailbox_id,
             aether_mail::MailboxId(0xBAD_C0FFEE_u64)
         );
-        assert_eq!(
-            record.kind_id,
-            aether_mail::KindId(<aether_kinds::Tick as Kind>::ID),
-        );
+        assert_eq!(record.kind_id, <aether_kinds::Tick as Kind>::ID);
         assert_eq!(frame.count, 1);
         assert!(
             mail_rx.try_recv().is_err(),
