@@ -80,19 +80,29 @@ jobs:
       # silently skip in CI ("wasm not built"). Cheap to build —
       # the wasm targets are tiny next to the host workspace and
       # rust-cache picks up the wasm artifacts on subsequent runs.
-      # Every component crate that ships a `tests/scenario.rs` belongs
-      # in this list; `AETHER_REQUIRE_RUNTIME=1` on the test step turns
-      # any missing wasm into a hard failure so a forgotten pre-build
-      # entry is loud, not silent.
+      # Component crates are discovered from `cargo metadata` by two
+      # structural signals (issue 439): the package declares a
+      # `cdylib` lib target AND depends on `aether-component`. The dep
+      # IS the component contract — anything that imports the SDK
+      # (init, receive_p32, Mailer, etc.) deps on it; anything that
+      # doesn't isn't a component. No filename convention to remember
+      # and no static list to keep in sync.
+      # `AETHER_REQUIRE_RUNTIME=1` on the test step turns any missing
+      # wasm into a hard failure so a discovery miss is loud, not silent.
       - name: Pre-build component wasm for scenario tests
         run: |
-          cargo build --target wasm32-unknown-unknown \
-            -p aether-camera-component \
-            -p aether-mesh-viewer-component \
-            -p aether-demo-sokoban \
-            -p aether-demo-tic-tac-toe-server \
-            -p aether-demo-tic-tac-toe-client \
-            -p aether-test-fixture-probe
+          set -euo pipefail
+          pkgs=$(cargo metadata --format-version=1 --no-deps |
+            jq -r '.packages[]
+              | select(.targets[] | .kind | contains(["cdylib"]))
+              | select([.dependencies[] | .name] | contains(["aether-component"]))
+              | .name')
+          if [ -z "$pkgs" ]; then
+            echo "no wasm component crates discovered"; exit 1
+          fi
+          echo "Building wasm for:"; echo "$pkgs"
+          args=$(echo "$pkgs" | xargs -n1 -I{} echo -p {})
+          cargo build --target wasm32-unknown-unknown $args
       - run: cargo test --workspace --all-targets
         env:
           AETHER_REQUIRE_RUNTIME: "1"
