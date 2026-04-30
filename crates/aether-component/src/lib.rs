@@ -245,7 +245,7 @@ pub const fn resolve<K: Kind>() -> KindId<K> {
 /// exist on the substrate side at init time.
 pub const fn resolve_sink<K: Kind>(mailbox_name: &str) -> Sink<K> {
     Sink {
-        mailbox: mailbox_id_from_name(mailbox_name),
+        mailbox: mailbox_id_from_name(mailbox_name).0,
         kind: K::ID.0,
         _k: PhantomData,
     }
@@ -1084,8 +1084,8 @@ mod tests {
     struct FakeKind;
     impl Kind for FakeKind {
         const NAME: &'static str = "test.fake";
-        const ID: ::aether_mail::KindId =
-            ::aether_mail::KindId(aether_mail::mailbox_id_from_name(Self::NAME));
+        // Stable test sentinel — distinct from real schema-hashed kind ids.
+        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0001_0001);
     }
 
     #[test]
@@ -1145,8 +1145,8 @@ mod tests {
     }
     impl Kind for FakePod {
         const NAME: &'static str = "test.fake_pod";
-        const ID: ::aether_mail::KindId =
-            ::aether_mail::KindId(aether_mail::mailbox_id_from_name(Self::NAME));
+        // Stable test sentinel — distinct from real schema-hashed kind ids.
+        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0001_0002);
     }
 
     #[test]

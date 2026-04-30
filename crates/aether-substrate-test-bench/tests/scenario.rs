@@ -28,7 +28,7 @@ use aether_kinds::{
     Delete, DeleteResult, DropComponent, IoError, List, ListResult, LoadComponent, MailEnvelope,
     Read, ReadResult, ReplaceComponent, Write, WriteResult,
 };
-use aether_mail::{Kind, MailboxId, mailbox_id_from_name};
+use aether_mail::{Kind, mailbox_id_from_name};
 use aether_scenario::test_helpers::{
     has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots,
 };
@@ -119,7 +119,7 @@ fn drop_component_silences_tick_echoes() {
     // beat the first tick fanout means the drop mail beats the next
     // tick fanout — by the time `Advance{1}`'s `run_frame` queries
     // subscribers, the probe's mailbox is already gone.
-    let probe_mbox = MailboxId(mailbox_id_from_name(PROBE_NAME));
+    let probe_mbox = mailbox_id_from_name(PROBE_NAME);
     bench
         .send_mail(
             "aether.control",
@@ -241,7 +241,7 @@ fn replace_component_preserves_mailbox_identity() {
         bench.observed_kinds(),
     );
 
-    let probe_mbox = MailboxId(mailbox_id_from_name(PROBE_NAME));
+    let probe_mbox = mailbox_id_from_name(PROBE_NAME);
     let wasm = std::fs::read(&wasm_path).expect("re-read fixture wasm");
     bench
         .send_mail(

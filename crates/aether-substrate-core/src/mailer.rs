@@ -403,7 +403,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
-    use aether_mail::{Kind, Ref, mailbox_id_from_name};
+    use aether_mail::{Kind, Ref};
 
     use super::*;
     use crate::handle_store::HandleStore;
@@ -470,7 +470,8 @@ mod tests {
     }
     impl Kind for Note {
         const NAME: &'static str = "test.mailer_note";
-        const ID: ::aether_mail::KindId = ::aether_mail::KindId(mailbox_id_from_name(Self::NAME));
+        // Stable test sentinel — distinct from real schema-hashed kind ids.
+        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0003_0001);
     }
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
@@ -480,7 +481,8 @@ mod tests {
     }
     impl Kind for HeldNote {
         const NAME: &'static str = "test.mailer_held_note";
-        const ID: ::aether_mail::KindId = ::aether_mail::KindId(mailbox_id_from_name(Self::NAME));
+        // Stable test sentinel — distinct from real schema-hashed kind ids.
+        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0003_0002);
     }
 
     fn note_schema() -> SchemaType {

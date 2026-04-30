@@ -163,7 +163,7 @@ impl MailboxId {
     /// the guest SDK uses on the component side — ids round-trip
     /// verbatim across the FFI.
     pub fn from_name(name: &str) -> MailboxId {
-        MailboxId(mailbox_id_from_name(name))
+        mailbox_id_from_name(name)
     }
 }
 

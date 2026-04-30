@@ -160,11 +160,11 @@ impl<K, V> CastEligible for alloc::collections::BTreeMap<K, V> {
 /// At 64 bits the birthday bound is far past realistic mailbox
 /// counts — see ADR-0029 "Consequences" for the table.
 ///
-/// The returned `u64` is the raw id wrapped into
-/// `aether_substrate::mail::MailboxId` on the substrate side; guests
-/// use it directly as the `recipient` on `send_mail`. `0` is reserved
-/// as the no-sender sentinel — callers should reject on the astronomical
-/// chance of a collision with it.
+/// The returned `MailboxId` is a `#[repr(transparent)]` newtype
+/// over `u64`; guests that need the raw scalar for FFI (`send_mail`'s
+/// `recipient`) call `.0`. `0` is reserved as the no-sender sentinel —
+/// callers should reject on the astronomical chance of a collision
+/// with it.
 ///
 /// ADR-0064: the high 4 bits carry the `Tag::Mailbox` discriminator;
 /// the low 60 bits are the FNV-1a output masked by `HASH_MASK`. The
@@ -172,11 +172,11 @@ impl<K, V> CastEligible for alloc::collections::BTreeMap<K, V> {
 /// type ends up encoded twice (in the tag bits and avalanched into
 /// the hash via the domain prefix), and the two layers cross-check
 /// each other.
-pub const fn mailbox_id_from_name(name: &str) -> u64 {
-    with_tag(
+pub const fn mailbox_id_from_name(name: &str) -> MailboxId {
+    MailboxId(with_tag(
         Tag::Mailbox,
         fnv1a_64_prefixed(MAILBOX_DOMAIN, name.as_bytes()),
-    )
+    ))
 }
 
 /// Domain tag prefixed to every mailbox-name hash so the `MailboxId`
@@ -668,13 +668,13 @@ mod tests {
         a: u32,
         b: f32,
     }
+    // Tests exercise encode/decode, not routing, so the exact ID
+    // values don't matter — they only need to be stable and distinct
+    // across the four test kinds. Hand-picked sentinels are clearer
+    // than hashing a name through a domain-mismatched helper.
     impl Kind for TestPod {
         const NAME: &'static str = "test.pod";
-        // Tests exercise encode/decode, not routing, so the exact ID
-        // doesn't matter. `mailbox_id_from_name` gives us a stable
-        // derivation without pulling Schema into tests that don't
-        // use it.
-        const ID: KindId = KindId(mailbox_id_from_name(Self::NAME));
+        const ID: KindId = KindId(0xDEAD_BEEF_0000_0001);
     }
 
     #[repr(C)]
@@ -685,7 +685,7 @@ mod tests {
     }
     impl Kind for Vertex {
         const NAME: &'static str = "test.vertex";
-        const ID: KindId = KindId(mailbox_id_from_name(Self::NAME));
+        const ID: KindId = KindId(0xDEAD_BEEF_0000_0002);
     }
 
     #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -695,13 +695,13 @@ mod tests {
     }
     impl Kind for TestStruct {
         const NAME: &'static str = "test.struct";
-        const ID: KindId = KindId(mailbox_id_from_name(Self::NAME));
+        const ID: KindId = KindId(0xDEAD_BEEF_0000_0003);
     }
 
     struct Signal;
     impl Kind for Signal {
         const NAME: &'static str = "test.signal";
-        const ID: KindId = KindId(mailbox_id_from_name(Self::NAME));
+        const ID: KindId = KindId(0xDEAD_BEEF_0000_0004);
     }
 
     #[test]
@@ -773,10 +773,13 @@ mod tests {
         // ADR-0064 (the high 4 bits carry the `Tag::Mailbox` tag).
         assert_eq!(
             mailbox_id_from_name(""),
-            with_tag(Tag::Mailbox, fnv1a_64_prefixed(MAILBOX_DOMAIN, &[]),),
+            MailboxId(with_tag(
+                Tag::Mailbox,
+                fnv1a_64_prefixed(MAILBOX_DOMAIN, &[]),
+            )),
         );
-        assert_eq!(tagged_id::tag_of(a), Some(Tag::Mailbox));
-        assert_ne!(mailbox_id_from_name(""), 0xcbf29ce484222325);
+        assert_eq!(tagged_id::tag_of(a.0), Some(Tag::Mailbox));
+        assert_ne!(mailbox_id_from_name("").0, 0xcbf29ce484222325);
     }
 
     #[test]

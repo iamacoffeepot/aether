@@ -697,7 +697,7 @@ mod tests {
     use std::sync::Arc;
 
     use aether_hub_protocol::{NamedField, SchemaCell};
-    use aether_mail::{Kind, Ref, mailbox_id_from_name};
+    use aether_mail::{Kind, Ref};
 
     use crate::mail::{Mail, MailboxId};
 
@@ -889,7 +889,8 @@ mod tests {
 
     impl Kind for Note {
         const NAME: &'static str = "test.note";
-        const ID: ::aether_mail::KindId = ::aether_mail::KindId(mailbox_id_from_name(Self::NAME));
+        // Stable test sentinel — distinct from real schema-hashed kind ids.
+        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0002_0001);
     }
 
     fn note_schema() -> SchemaType {
