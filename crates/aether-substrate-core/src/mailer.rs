@@ -317,13 +317,13 @@ fn route_mail(
                     if entry.is_dead() {
                         tracing::warn!(
                             target: "aether_substrate::queue",
-                            mailbox = ?recipient,
+                            mailbox = %recipient,
                             "mail to dead mailbox (actor panicked or trapped); discarded — see component_died broadcast",
                         );
                     } else if !entry.send(mail) {
                         tracing::warn!(
                             target: "aether_substrate::queue",
-                            mailbox = ?recipient,
+                            mailbox = %recipient,
                             "component inbox closed (shutdown); mail discarded",
                         );
                     }
@@ -331,7 +331,7 @@ fn route_mail(
                 None => {
                     tracing::warn!(
                         target: "aether_substrate::queue",
-                        mailbox = ?recipient,
+                        mailbox = %recipient,
                         "mail to registered-component mailbox but no component bound — dropped",
                     );
                 }
@@ -340,7 +340,7 @@ fn route_mail(
         Some(MailboxEntry::Dropped) => {
             tracing::warn!(
                 target: "aether_substrate::queue",
-                mailbox = ?recipient,
+                mailbox = %recipient,
                 "mail to dropped mailbox — discarded",
             );
         }
@@ -379,7 +379,7 @@ fn route_mail(
                 if !sent {
                     tracing::warn!(
                         target: "aether_substrate::queue",
-                        mailbox = ?recipient,
+                        mailbox = %recipient,
                         "bubbles-up failed (writer channel closed); mail dropped",
                     );
                 }
@@ -387,7 +387,7 @@ fn route_mail(
             }
             tracing::warn!(
                 target: "aether_substrate::queue",
-                mailbox = ?recipient,
+                mailbox = %recipient,
                 "mail to unknown mailbox — dropped",
             );
         }

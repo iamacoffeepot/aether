@@ -529,14 +529,14 @@ impl TestBench {
         if let Some((mailbox, waited)) = summary.wedged {
             aether_substrate_core::lifecycle::fatal_abort(
                 &self.outbound,
-                format!("dispatcher wedged: mailbox={mailbox:?} waited={waited:?}"),
+                format!("dispatcher wedged: mailbox={mailbox} waited={waited:?}"),
             );
         }
         if let Some(first) = summary.deaths.first() {
             for d in &summary.deaths {
                 tracing::error!(
                     target: "aether_substrate::lifecycle",
-                    mailbox = ?d.mailbox,
+                    mailbox = %d.mailbox,
                     mailbox_name = %d.mailbox_name,
                     last_kind = %d.last_kind,
                     reason = %d.reason,
