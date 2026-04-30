@@ -20,11 +20,18 @@
 //! **Hub connect is explicit.** `build()` does NOT dial
 //! `AETHER_HUB_URL`. The chassis registers its own sinks and any
 //! other state that should exist before the hub knows the engine is
-//! alive, then calls `boot.connect_hub_from_env()` to dial. Without
-//! this separation, a hub-driven `load_component` could race ahead
-//! of the chassis's main thread and bind a chassis sink name to a
-//! freshly-loaded component before the chassis's later
-//! `register_sink` call, panicking the substrate (issue #262).
+//! alive, then calls `boot.connect_hub(url)` (or its `_from_env`
+//! wrapper) to dial. Without this separation, a hub-driven
+//! `load_component` could race ahead of the chassis's main thread
+//! and bind a chassis sink name to a freshly-loaded component before
+//! the chassis's later `register_sink` call, panicking the substrate
+//! (issue #262).
+//!
+//! **Env-var reading is the chassis's job.** Per issue 464,
+//! substrate-core takes config explicitly (`connect_hub` accepts an
+//! optional URL; `SubstrateBootBuilder::namespace_roots` accepts
+//! resolved roots) and chassis `main()` is the single edge that
+//! reads env vars. Tests pass config in directly, never touch env.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -69,12 +76,20 @@ pub struct SubstrateBoot {
     /// way through; chassis-level handlers (PR 3 host-fn shims)
     /// will publish into it via `Mailer::handle_store()`.
     pub handle_store: Arc<HandleStore>,
-    /// Retained so `connect_hub_from_env` can hand the descriptor
-    /// list to `HubClient::connect`, the chassis can log the count,
-    /// etc. Same `Vec` that was registered with the `Registry`.
+    /// Retained so `connect_hub` / `connect_hub_from_env` can hand
+    /// the descriptor list to `HubClient::connect`, the chassis can
+    /// log the count, etc. Same `Vec` that was registered with the
+    /// `Registry`.
     pub boot_descriptors: Vec<KindDescriptor>,
+    /// Resolved ADR-0041 filesystem roots. Either the override
+    /// supplied to `SubstrateBootBuilder::namespace_roots` or
+    /// [`crate::io::NamespaceRoots::from_env`] when no override was
+    /// set. Chassis mains pass this to `crate::io::build_registry`
+    /// when wiring the `aether.sink.io` sink.
+    pub namespace_roots: crate::io::NamespaceRoots,
     /// Substrate identity for the hub `Hello` handshake. Owned so
-    /// `connect_hub_from_env` can use them after `build()` returns.
+    /// `connect_hub` / `connect_hub_from_env` can use them after
+    /// `build()` returns.
     name: String,
     version: String,
 }
@@ -97,6 +112,7 @@ pub struct SubstrateBootBuilder<'a> {
     name: &'a str,
     version: &'a str,
     workers: usize,
+    namespace_roots: Option<crate::io::NamespaceRoots>,
     build_handler: ChassisHandlerFactory,
 }
 
@@ -110,30 +126,36 @@ impl SubstrateBoot {
             name,
             version,
             workers: 2,
+            namespace_roots: None,
             build_handler: Box::new(|_| None),
         }
     }
 
-    /// Dial `AETHER_HUB_URL` and start the hub reader + heartbeat
-    /// threads. Returns `Ok(Some(client))` on success — the chassis
-    /// MUST keep the client alive (typically by stashing it in its
-    /// own struct) for those threads to stay running. `Ok(None)` if
-    /// `AETHER_HUB_URL` is unset (substrate runs locally, no hub).
-    /// `Err` propagates a hub-connect failure (TCP refused, handshake
-    /// timeout, etc.) so the chassis can decide whether to fail the
-    /// boot or run hub-disconnected.
+    /// Dial `url` and start the hub reader + heartbeat threads.
+    /// Returns `Ok(Some(client))` on success — the chassis MUST keep
+    /// the client alive (typically by stashing it in its own struct)
+    /// for those threads to stay running. `Ok(None)` if `url` is
+    /// `None` (substrate runs locally, no hub). `Err` propagates a
+    /// hub-connect failure (TCP refused, handshake timeout, etc.) so
+    /// the chassis can decide whether to fail the boot or run
+    /// hub-disconnected.
     ///
     /// Call this **after** every chassis sink is registered (and any
     /// other state that should exist before the hub knows about the
     /// engine). Before this returns, no hub-driven `load_component`
     /// can race the chassis's setup. See issue #262.
-    pub fn connect_hub_from_env(&self) -> wasmtime::Result<Option<HubClient>> {
-        let url = match std::env::var("AETHER_HUB_URL") {
-            Ok(u) => u,
-            Err(_) => return Ok(None),
+    ///
+    /// Per issue 464, this is the substrate-core entry point — the
+    /// chassis main reads `AETHER_HUB_URL` from env and passes it
+    /// through. `connect_hub_from_env` is a thin wrapper for callers
+    /// that still want the env-driven behaviour inline.
+    pub fn connect_hub(&self, url: Option<&str>) -> wasmtime::Result<Option<HubClient>> {
+        let url = match url {
+            Some(u) if !u.is_empty() => u,
+            _ => return Ok(None),
         };
         let client = HubClient::connect(
-            url.as_str(),
+            url,
             &self.name,
             &self.version,
             self.boot_descriptors.clone(),
@@ -144,12 +166,41 @@ impl SubstrateBoot {
         .map_err(|e| wasmtime::Error::msg(format!("hub connect to {url:?} failed: {e}")))?;
         Ok(Some(client))
     }
+
+    /// Env-driven wrapper around [`SubstrateBoot::connect_hub`].
+    /// Reads `AETHER_HUB_URL` from the process env and forwards it
+    /// to `connect_hub`. Returns `Ok(None)` if the var is unset or
+    /// empty.
+    ///
+    /// Chassis mains should prefer reading the env once and calling
+    /// `connect_hub` directly — see issue 464. This wrapper is kept
+    /// for callers that don't need to thread env through their own
+    /// config struct.
+    pub fn connect_hub_from_env(&self) -> wasmtime::Result<Option<HubClient>> {
+        self.connect_hub(std::env::var("AETHER_HUB_URL").ok().as_deref())
+    }
 }
 
 impl<'a> SubstrateBootBuilder<'a> {
     /// Scheduler worker count. Default 2.
     pub fn workers(mut self, workers: usize) -> Self {
         self.workers = workers;
+        self
+    }
+
+    /// Override the ADR-0041 namespace roots used at boot. When not
+    /// set, the builder defaults to [`crate::io::NamespaceRoots::from_env`]
+    /// — same behaviour as before issue 464. Tests and chassis-as-
+    /// library embedders pass an explicit `NamespaceRoots` here so
+    /// no env mutation is required to redirect `save://` / `config://`
+    /// / `assets://` at a tempdir.
+    ///
+    /// The override doesn't itself wire the `aether.sink.io` sink —
+    /// the chassis still drives that via `crate::io::build_registry`,
+    /// reading [`SubstrateBoot::namespace_roots`] for the resolved
+    /// paths.
+    pub fn namespace_roots(mut self, roots: crate::io::NamespaceRoots) -> Self {
+        self.namespace_roots = Some(roots);
         self
     }
 
@@ -314,6 +365,10 @@ impl<'a> SubstrateBootBuilder<'a> {
         };
         registry.register_sink(AETHER_CONTROL, control_plane.into_sink_handler());
 
+        let namespace_roots = self
+            .namespace_roots
+            .unwrap_or_else(crate::io::NamespaceRoots::from_env);
+
         Ok(SubstrateBoot {
             engine,
             registry,
@@ -325,6 +380,7 @@ impl<'a> SubstrateBootBuilder<'a> {
             scheduler,
             handle_store,
             boot_descriptors,
+            namespace_roots,
             name: self.name.to_owned(),
             version: self.version.to_owned(),
         })
@@ -340,34 +396,23 @@ mod tests {
     /// sinks can race ahead and bind a chassis sink name to a
     /// component, panicking the substrate when the chassis later
     /// tries to install the real sink handler. The fix moved hub
-    /// connect out of `build()` into the explicit
-    /// `connect_hub_from_env` so the chassis controls the timing.
-    /// Set `AETHER_HUB_URL` to a bogus address — if `build()` still
-    /// tried to dial, this test would either hang or surface a
-    /// connect error. Neither happens because the dial doesn't
-    /// occur.
+    /// connect out of `build()` into the explicit `connect_hub` (and
+    /// `connect_hub_from_env` wrapper) so the chassis controls the
+    /// timing. Per issue 464, the env-driven helper is the chassis's
+    /// edge — this test passes a bogus URL through `connect_hub`
+    /// directly to confirm `build()` itself never dials, without
+    /// touching process env.
     #[test]
     fn build_does_not_dial_hub() {
-        // Use a setter+resetter to keep the env mutation scoped; if
-        // a sibling test reads `AETHER_HUB_URL`, it sees the
-        // restored state.
-        let prior = std::env::var("AETHER_HUB_URL").ok();
-        // SAFETY: tests run with --test-threads in CI but this var is
-        // only consulted by `connect_hub_from_env`, which we don't call.
-        unsafe {
-            std::env::set_var("AETHER_HUB_URL", "127.0.0.1:1");
-        }
-        let result = SubstrateBoot::builder("test", env!("CARGO_PKG_VERSION")).build();
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("AETHER_HUB_URL", v),
-                None => std::env::remove_var("AETHER_HUB_URL"),
-            }
-        }
-        let boot = result.expect("build must succeed without dialling the hub");
+        let boot = SubstrateBoot::builder("test", env!("CARGO_PKG_VERSION"))
+            .build()
+            .expect("build must succeed without dialling the hub");
         // The boot is alive; chassis sinks can be registered without
         // racing a hub-driven load.
         boot.registry
             .register_sink("test_chassis_sink", Arc::new(|_, _, _, _, _, _| {}));
+        // And `connect_hub(None)` short-circuits to `Ok(None)` —
+        // proving the env-free path.
+        assert!(boot.connect_hub(None).expect("connect_hub None").is_none());
     }
 }

@@ -126,8 +126,17 @@ fn parse_tick_hz_env() -> u32 {
 }
 
 fn main() -> wasmtime::Result<()> {
+    // Per issue 464, this `main()` is the env-reading edge. Read every
+    // chassis-relevant env var into a config struct and thread it
+    // through the substrate-core APIs explicitly. Substrate-core
+    // itself never reads env from now on.
+    let hub_url = std::env::var("AETHER_HUB_URL").ok();
+    let net_config = aether_substrate_core::net::NetConfig::from_env();
+    let namespace_roots = aether_substrate_core::io::NamespaceRoots::from_env();
+
     let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION"))
         .workers(WORKERS)
+        .namespace_roots(namespace_roots)
         .chassis_handler(|ctx| Some(chassis::chassis_control_handler(Arc::clone(ctx.outbound))))
         .build()?;
 
@@ -201,10 +210,12 @@ fn main() -> wasmtime::Result<()> {
 
     // `aether.io.*` per ADR-0041. Headless gets the same sink as
     // desktop — the io path is purely I/O, no GPU or window surface,
-    // so there's nothing chassis-specific to diverge on. Boot-time
-    // filesystem failure logs loud and skips the sink (same policy
-    // as desktop) rather than failing the whole chassis.
-    match aether_substrate_core::io::build_default_registry() {
+    // so there's nothing chassis-specific to diverge on. The
+    // namespace roots come from `boot.namespace_roots` (built from
+    // env at the top of `main`, per issue 464). Boot-time filesystem
+    // failure logs loud and skips the sink (same policy as desktop)
+    // rather than failing the whole chassis.
+    match aether_substrate_core::io::build_registry(boot.namespace_roots.clone()) {
         Ok((registry, roots)) => {
             tracing::info!(
                 target: "aether_substrate::io",
@@ -231,11 +242,17 @@ fn main() -> wasmtime::Result<()> {
     // runs the asset pipeline, so net is first-class here — same
     // shape as desktop. Deny-by-default via `AETHER_NET_ALLOWLIST`;
     // `AETHER_NET_DISABLE=1` swaps to a nop adapter that replies
-    // `Disabled`.
-    let net_adapter = aether_substrate_core::net::build_default_adapter();
+    // `Disabled`. The `NetConfig` was built from env at the top of
+    // `main` (issue 464).
+    let net_default_timeout = net_config.default_timeout;
+    let net_adapter = aether_substrate_core::net::build_net_adapter(net_config);
     boot.registry.register_sink(
         "aether.sink.net",
-        aether_substrate_core::net::net_sink_handler(net_adapter, Arc::clone(&boot.queue)),
+        aether_substrate_core::net::net_sink_handler(
+            net_adapter,
+            Arc::clone(&boot.queue),
+            net_default_timeout,
+        ),
     );
 
     // `aether.sink.log`: ADR-0060. Same handler as desktop — guest
@@ -256,8 +273,9 @@ fn main() -> wasmtime::Result<()> {
     // Before this returns no hub-driven `load_component` can race
     // ahead of the chassis setup and bind a chassis sink name to a
     // component (issue #262). Must happen before moving fields out of
-    // `boot` below — connect_hub_from_env borrows `&boot`.
-    let hub = boot.connect_hub_from_env()?;
+    // `boot` below — connect_hub borrows `&boot`. Per issue 464,
+    // `hub_url` was read from env at the top of `main`.
+    let hub = boot.connect_hub(hub_url.as_deref())?;
 
     let chassis = HeadlessChassis {
         queue: boot.queue,

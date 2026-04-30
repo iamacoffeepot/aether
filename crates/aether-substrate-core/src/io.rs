@@ -224,6 +224,7 @@ fn io_error_from_std(err: std::io::Error) -> IoError {
 /// chassis reads this at boot, hands each path to a `LocalFileAdapter`,
 /// and registers the result in an `AdapterRegistry` keyed on the
 /// namespace short name (`"save"`, `"assets"`, `"config"`).
+#[derive(Clone, Debug)]
 pub struct NamespaceRoots {
     pub save: PathBuf,
     pub assets: PathBuf,
@@ -245,6 +246,13 @@ impl NamespaceRoots {
     /// If a platform directory lookup fails (e.g. no HOME) or
     /// `current_exe()` can't resolve, the fallback is `temp_dir()/aether/...`
     /// so a boot always finishes even on headless CI.
+    ///
+    /// Per issue 464, this is the chassis-main edge — substrate-core
+    /// itself never reads env. The builder
+    /// (`SubstrateBootBuilder::namespace_roots`) accepts a resolved
+    /// `NamespaceRoots` directly so tests and chassis-as-library
+    /// embedders can supply their own roots without process-env
+    /// mutation.
     pub fn from_env() -> Self {
         let save = env_or_default("AETHER_SAVE_DIR", || {
             dirs::data_dir()
@@ -280,13 +288,19 @@ fn env_or_default(var: &str, default: impl FnOnce() -> PathBuf) -> PathBuf {
 }
 
 /// Populate a fresh `AdapterRegistry` with `LocalFileAdapter`s for
-/// each of the three ADR-0041 namespaces. `save` and `config` are
-/// writable; `assets` is read-only. Returns the populated registry
-/// along with the resolved roots so the chassis can log what it
-/// actually wired. Propagates any `create_dir_all` / `canonicalize`
-/// failure verbatim so the chassis can decide whether to fail boot.
-pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
-    let roots = NamespaceRoots::from_env();
+/// each of the three ADR-0041 namespaces using the supplied
+/// [`NamespaceRoots`]. `save` and `config` are writable; `assets` is
+/// read-only. Returns the populated registry along with the roots
+/// echoed back (cloned) so the chassis can log what it actually
+/// wired. Propagates any `create_dir_all` / `canonicalize` failure
+/// verbatim so the chassis can decide whether to fail boot.
+///
+/// Per issue 464, this is the explicit-config entry point — chassis
+/// mains read env into a `NamespaceRoots` and pass it here. Tests
+/// pass their own tempdir-backed roots directly.
+pub fn build_registry(
+    roots: NamespaceRoots,
+) -> std::io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
     let mut registry = AdapterRegistry::new();
     let save = Arc::new(LocalFileAdapter::new(roots.save.clone(), true)?);
     let assets = Arc::new(LocalFileAdapter::new(roots.assets.clone(), false)?);
@@ -295,6 +309,16 @@ pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, Namesp
     registry.register("assets", assets as Arc<dyn FileAdapter>);
     registry.register("config", config as Arc<dyn FileAdapter>);
     Ok((Arc::new(registry), roots))
+}
+
+/// Env-driven wrapper around [`build_registry`]. Resolves
+/// [`NamespaceRoots::from_env`] then delegates. Kept for callers
+/// that don't need to thread roots through their own config.
+///
+/// Chassis mains should prefer reading env once into `NamespaceRoots`
+/// and calling `build_registry` directly (issue 464).
+pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
+    build_registry(NamespaceRoots::from_env())
 }
 
 /// Build the `"aether.sink.io"` sink handler. The chassis calls this
@@ -742,7 +766,7 @@ mod tests {
     use crate::hub_client::HubOutbound;
     use aether_hub_protocol::{EngineToHub, SessionToken, Uuid};
 
-    fn build_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
+    fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
         let adapter: Arc<dyn FileAdapter> =
             Arc::new(LocalFileAdapter::new(root.to_path_buf(), writable).unwrap());
         let mut r = AdapterRegistry::new();
@@ -789,7 +813,7 @@ mod tests {
     #[test]
     fn dispatch_read_ok_replies_with_bytes() {
         let root = scratch_root("dispatch-read");
-        let reg = build_registry(&root, true);
+        let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         reg.get("save")
             .unwrap()
@@ -827,7 +851,7 @@ mod tests {
     #[test]
     fn dispatch_read_unknown_namespace_replies_err() {
         let root = scratch_root("dispatch-ns");
-        let reg = build_registry(&root, true);
+        let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Read {
@@ -863,7 +887,7 @@ mod tests {
     #[test]
     fn dispatch_read_not_found_replies_err() {
         let root = scratch_root("dispatch-nf");
-        let reg = build_registry(&root, true);
+        let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Read {
@@ -892,7 +916,7 @@ mod tests {
     #[test]
     fn dispatch_write_ok_persists_bytes() {
         let root = scratch_root("dispatch-write");
-        let reg = build_registry(&root, true);
+        let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Write {
@@ -926,7 +950,7 @@ mod tests {
     #[test]
     fn dispatch_write_read_only_namespace_replies_forbidden() {
         let root = scratch_root("dispatch-ro");
-        let reg = build_registry(&root, false);
+        let reg = build_save_only_registry(&root, false);
         let (mailer, rx) = test_mailer_and_rx();
         let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Write {
@@ -956,7 +980,7 @@ mod tests {
     #[test]
     fn dispatch_delete_then_read_surfaces_not_found() {
         let root = scratch_root("dispatch-del");
-        let reg = build_registry(&root, true);
+        let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("x.bin", b"x").unwrap();
         let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
@@ -990,7 +1014,7 @@ mod tests {
     #[test]
     fn dispatch_list_returns_sorted_entries() {
         let root = scratch_root("dispatch-list");
-        let reg = build_registry(&root, true);
+        let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("b.bin", b"").unwrap();
         reg.get("save").unwrap().write("a.bin", b"").unwrap();
@@ -1029,7 +1053,7 @@ mod tests {
         // not panic, and must not produce a reply (nothing for the
         // sender to be waiting on).
         let root = scratch_root("dispatch-unknown");
-        let reg = build_registry(&root, true);
+        let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         handler(
@@ -1084,7 +1108,7 @@ mod tests {
         "#;
 
         let root = scratch_root("dispatch-component-reply");
-        let reg = build_registry(&root, true);
+        let reg = build_save_only_registry(&root, true);
         reg.get("save")
             .unwrap()
             .write("slot.bin", &[1, 2, 3])
@@ -1169,7 +1193,7 @@ mod tests {
         // parsed request to pull them from — loud signal that the
         // request itself was malformed.
         let root = scratch_root("dispatch-mal");
-        let reg = build_registry(&root, true);
+        let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         handler(
