@@ -21,6 +21,7 @@
 //! can validate mail bundles the same way core does.
 
 pub mod boot;
+pub mod capture;
 pub mod chassis;
 pub mod component;
 pub mod control;

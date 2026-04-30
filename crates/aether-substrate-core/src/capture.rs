@@ -19,7 +19,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use aether_substrate_core::{Mail, ReplyTo};
+use crate::{Mail, ReplyTo};
 
 /// One pending capture request. Carries the reply handle so the
 /// render thread can reply once it has bytes, plus a resolved list
@@ -67,9 +67,9 @@ impl CaptureQueue {
 #[cfg(test)]
 mod tests {
     use aether_hub_protocol::{SessionToken, Uuid};
-    use aether_substrate_core::ReplyTarget;
 
     use super::*;
+    use crate::ReplyTarget;
 
     fn reply_to(u: u128) -> ReplyTo {
         ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(u))))

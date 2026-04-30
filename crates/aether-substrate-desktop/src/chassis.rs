@@ -23,11 +23,10 @@ use aether_kinds::{
 use aether_mail::Kind;
 use aether_substrate_core::{
     ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo,
+    capture::{CaptureQueue, PendingCapture},
     control::{decode_payload, resolve_bundle},
 };
 use winit::event_loop::EventLoopProxy;
-
-use crate::capture::{CaptureQueue, PendingCapture};
 
 /// Event the event-loop thread consumes from the desktop chassis.
 /// Either a chassis-originated request for work that needs winit/wgpu
