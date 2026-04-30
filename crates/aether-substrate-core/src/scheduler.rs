@@ -454,7 +454,7 @@ fn dispatcher_loop(
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
             let span = tracing::info_span!(
                 "dispatch",
-                mailbox = mailbox.0,
+                mailbox = %mailbox,
                 kind = %kind_name,
             );
             let _enter = span.enter();
@@ -466,7 +466,7 @@ fn dispatcher_loop(
                 if rc == DISPATCH_UNKNOWN_KIND {
                     tracing::warn!(
                         target: "aether_substrate::scheduler",
-                        mailbox = ?mail.recipient,
+                        mailbox = %mail.recipient,
                         kind = %kind_name,
                         "component has no handler for mail kind (ADR-0033 strict receiver); dropped",
                     );
@@ -476,7 +476,7 @@ fn dispatcher_loop(
             Ok(Err(trap)) => {
                 tracing::error!(
                     target: "aether_substrate::scheduler",
-                    mailbox = ?mail.recipient,
+                    mailbox = %mail.recipient,
                     kind = %kind_name,
                     error = %trap,
                     "component deliver returned Err (wasmtime trap); marking mailbox dead",
@@ -497,7 +497,7 @@ fn dispatcher_loop(
                 let payload_msg = panic_payload_string(&payload);
                 tracing::error!(
                     target: "aether_substrate::scheduler",
-                    mailbox = ?mail.recipient,
+                    mailbox = %mail.recipient,
                     kind = %kind_name,
                     payload = %payload_msg,
                     "host-side panic during deliver; marking mailbox dead",
