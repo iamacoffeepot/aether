@@ -40,7 +40,8 @@ use aether_substrate_core::{
 
 use crate::chassis;
 use crate::events::{ChassisEvent, EventReceiver, channel as event_channel};
-use crate::render::{Gpu, IDENTITY_VIEW_PROJ, VERTEX_BUFFER_BYTES};
+use crate::render::{Gpu, VERTEX_BUFFER_BYTES};
+use aether_substrate_core::render::IDENTITY_VIEW_PROJ;
 
 const WORKERS: usize = 2;
 const LOG_EVERY_FRAMES: u64 = 120;

@@ -26,7 +26,7 @@ use aether_substrate_core::render::{
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-pub use render::{IDENTITY_VIEW_PROJ, VERTEX_BUFFER_BYTES};
+pub use render::VERTEX_BUFFER_BYTES;
 
 /// Wireframe-overlay shader: same vertex layout as the main shader so
 /// the pipeline shares the existing vertex buffer. The fragment stage
