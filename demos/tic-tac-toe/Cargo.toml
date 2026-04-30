@@ -13,3 +13,15 @@ aether-component = { path = "../../crates/aether-component" }
 aether-kinds = { path = "../../crates/aether-kinds" }
 aether-mail = { path = "../../crates/aether-mail", features = ["derive"] }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
+
+# Integration tests boot a `TestBench`, load the demo's own wasm
+# artifact, and assert mail-flow properties via `aether-scenario`.
+# Tests run host-side; the wasm is built separately for
+# `wasm32-unknown-unknown` and discovered at runtime under
+# `target/wasm32-unknown-unknown/{debug,release}/`.
+[dev-dependencies]
+aether-scenario = { path = "../../crates/aether-scenario" }
+aether-substrate-test-bench = { path = "../../crates/aether-substrate-test-bench" }
+pollster = "0.4.0"
+serde_yml = "0.0.12"
+wgpu = "29.0.1"
