@@ -187,7 +187,12 @@ dependencies = [
  "aether-math",
  "aether-mesh",
  "aether-mesh-viewer",
+ "aether-scenario",
+ "aether-substrate-test-bench",
+ "pollster",
+ "serde_yml",
  "tracing",
+ "wgpu",
 ]
 
 [[package]]
