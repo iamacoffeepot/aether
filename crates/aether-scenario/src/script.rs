@@ -28,10 +28,11 @@ pub enum Step {
     /// Capture the current offscreen frame as a PNG and stash it on
     /// the runner so subsequent `Assert` steps can inspect it.
     Capture,
-    /// Run a visual assertion against the most recent capture. Fails
-    /// the step if no capture has been taken yet, with a clear error
-    /// pointing at script ordering.
-    Assert { check: VisualAssert },
+    /// Run an assertion against the bench state — visual checks
+    /// inspect the most-recent capture; mail checks inspect the
+    /// observation log accumulated since boot. Visual checks fail
+    /// with a clear error if no capture has been taken yet.
+    Assert { check: Check },
     /// Load a WASM component from `path` (filesystem, read by the
     /// runner before sending). `name` is optional; when omitted the
     /// substrate auto-derives one from the component's manifest.
@@ -56,15 +57,53 @@ pub enum Step {
     },
 }
 
-/// Visual assertions over a captured frame's decoded pixels. Names
-/// describe the property being asserted, not the failure mode.
+/// Assertions runnable inside an `Assert` step. Visual variants
+/// inspect the most-recent capture; mail variants inspect the bench's
+/// observation log. Names describe the property being asserted, not
+/// the failure mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum VisualAssert {
-    /// Asserts at least one pixel in the frame is non-black. Cheapest
-    /// "the chassis rendered something" check — useful when a script
-    /// loaded a mesh and expects geometry to land on the framebuffer.
+pub enum Check {
+    /// Visual: asserts at least one pixel in the frame has a non-zero
+    /// RGB component. Weak — the chassis clear color is non-black, so
+    /// this only catches "the GPU produced no output at all." Prefer
+    /// `DiffersFromBackground` for "geometry rendered on top of the
+    /// clear pass" checks.
     NotAllBlack,
+    /// Visual: asserts at least one pixel differs from the top-left
+    /// pixel by more than `tolerance` per channel. The top-left is
+    /// (almost) always the chassis clear color in our scenes since
+    /// geometry is centered, so this catches "the frame is a uniform
+    /// clear color" — i.e. nothing rendered on top. `tolerance`
+    /// absorbs sRGB-encoding noise across GPUs.
+    DiffersFromBackground {
+        #[serde(default = "default_tolerance")]
+        tolerance: u8,
+    },
+    /// Mail: asserts at least `min_count` mail frames with kind name
+    /// `name` were observed. Observations come from the bench's
+    /// chassis-owned `aether.sink.render` and `aether.sink.camera`
+    /// sinks plus broadcast / session-zero frames on the loopback —
+    /// see `TestBench::count_observed` for the full surface.
+    MailObserved {
+        name: String,
+        #[serde(default = "default_min_count")]
+        min_count: usize,
+    },
+    /// Mail: asserts no mail frame with kind name `name` has been
+    /// observed since bench boot. Negative companion to
+    /// `MailObserved`. Bench observations are cumulative — if a kind
+    /// arrived earlier in the script, this assert will fail even
+    /// after the producing component has been dropped.
+    MailNotObserved { name: String },
+}
+
+fn default_tolerance() -> u8 {
+    5
+}
+
+fn default_min_count() -> usize {
+    1
 }
 
 /// Parse a script from YAML source. Returns the underlying serde_yml
@@ -102,8 +141,72 @@ steps:
         }
         match &script.steps[2] {
             Step::Assert { check } => {
-                assert!(matches!(check, VisualAssert::NotAllBlack));
+                assert!(matches!(check, Check::NotAllBlack));
             }
+            other => panic!("expected Assert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_differs_from_background_with_default_tolerance() {
+        let yaml = r#"
+name: bg
+steps:
+  - op: assert
+    check:
+      kind: differs_from_background
+"#;
+        let script = parse_script(yaml).expect("parse");
+        match &script.steps[0] {
+            Step::Assert { check } => match check {
+                Check::DiffersFromBackground { tolerance } => assert_eq!(*tolerance, 5),
+                other => panic!("expected DiffersFromBackground, got {other:?}"),
+            },
+            other => panic!("expected Assert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_mail_observed_with_default_min_count() {
+        let yaml = r#"
+name: mail
+steps:
+  - op: assert
+    check:
+      kind: mail_observed
+      name: aether.draw_triangle
+"#;
+        let script = parse_script(yaml).expect("parse");
+        match &script.steps[0] {
+            Step::Assert { check } => match check {
+                Check::MailObserved { name, min_count } => {
+                    assert_eq!(name, "aether.draw_triangle");
+                    assert_eq!(*min_count, 1);
+                }
+                other => panic!("expected MailObserved, got {other:?}"),
+            },
+            other => panic!("expected Assert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_mail_not_observed() {
+        let yaml = r#"
+name: no-mail
+steps:
+  - op: assert
+    check:
+      kind: mail_not_observed
+      name: aether.audio.note_on
+"#;
+        let script = parse_script(yaml).expect("parse");
+        match &script.steps[0] {
+            Step::Assert { check } => match check {
+                Check::MailNotObserved { name } => {
+                    assert_eq!(name, "aether.audio.note_on");
+                }
+                other => panic!("expected MailNotObserved, got {other:?}"),
+            },
             other => panic!("expected Assert, got {other:?}"),
         }
     }

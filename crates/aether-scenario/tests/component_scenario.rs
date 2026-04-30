@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aether_scenario::{Runner, Script, Step, VisualAssert};
+use aether_scenario::{Check, Runner, Script, Step};
 use aether_substrate_test_bench::TestBench;
 
 /// Probe for any usable wgpu adapter.
@@ -85,7 +85,7 @@ fn camera_component_lifecycle() {
             Step::Advance { ticks: 5 },
             Step::Capture,
             Step::Assert {
-                check: VisualAssert::NotAllBlack,
+                check: Check::NotAllBlack,
             },
         ],
     };

@@ -1,0 +1,23 @@
+name: empty boot observes no geometry
+# An empty bench should clear to the chassis background, never produce
+# DrawTriangle, and emit no FrameStats within fewer than 120 ticks.
+# Validates the new mail-observation and visual asserts on the
+# baseline state. NotAllBlack should pass (background is non-black);
+# DiffersFromBackground should fail (uniform clear); MailNotObserved
+# for DrawTriangle should pass; MailNotObserved for FrameStats should
+# pass at <120 ticks.
+steps:
+  - op: advance
+    ticks: 5
+  - op: capture
+  - op: assert
+    check:
+      kind: not_all_black
+  - op: assert
+    check:
+      kind: mail_not_observed
+      name: aether.draw_triangle
+  - op: assert
+    check:
+      kind: mail_not_observed
+      name: aether.observation.frame_stats

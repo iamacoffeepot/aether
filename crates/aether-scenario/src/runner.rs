@@ -19,8 +19,8 @@ use aether_substrate_test_bench::TestBench;
 use thiserror::Error;
 
 use crate::report::{RunReport, StepReport, StepStatus};
-use crate::script::{Script, Step, VisualAssert};
-use crate::visual::{Image, decode_png, not_all_black};
+use crate::script::{Check, Script, Step};
+use crate::visual::{Image, decode_png, differs_from_background, not_all_black};
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
@@ -117,17 +117,7 @@ fn run_step(
             },
             Err(e) => StepStatus::Fail(format!("capture failed: {e}")),
         },
-        Step::Assert { check } => match last_capture.as_ref() {
-            None => StepStatus::Fail(
-                "assert with no prior capture: add a `capture` step first".to_owned(),
-            ),
-            Some(img) => match check {
-                VisualAssert::NotAllBlack => match not_all_black(img) {
-                    Ok(()) => StepStatus::Pass,
-                    Err(reason) => StepStatus::Fail(reason),
-                },
-            },
-        },
+        Step::Assert { check } => run_assert(bench, check, last_capture.as_ref()),
         Step::LoadComponent { path, name } => {
             let wasm = match fs::read(path) {
                 Ok(bytes) => bytes,
@@ -153,6 +143,53 @@ fn run_step(
                 Err(e) => StepStatus::Fail(format!("send_bytes to {recipient}: {e}")),
             },
         },
+    }
+}
+
+/// Dispatch one `Assert` check against the current bench state.
+/// Visual checks require a prior capture; mail checks always read
+/// `TestBench::count_observed` and never touch `last_capture`.
+fn run_assert(bench: &TestBench, check: &Check, last_capture: Option<&Image>) -> StepStatus {
+    match check {
+        Check::NotAllBlack => match last_capture {
+            None => StepStatus::Fail(
+                "assert with no prior capture: add a `capture` step first".to_owned(),
+            ),
+            Some(img) => match not_all_black(img) {
+                Ok(()) => StepStatus::Pass,
+                Err(reason) => StepStatus::Fail(reason),
+            },
+        },
+        Check::DiffersFromBackground { tolerance } => match last_capture {
+            None => StepStatus::Fail(
+                "assert with no prior capture: add a `capture` step first".to_owned(),
+            ),
+            Some(img) => match differs_from_background(img, *tolerance) {
+                Ok(()) => StepStatus::Pass,
+                Err(reason) => StepStatus::Fail(reason),
+            },
+        },
+        Check::MailObserved { name, min_count } => {
+            let actual = bench.count_observed(name);
+            if actual >= *min_count {
+                StepStatus::Pass
+            } else {
+                StepStatus::Fail(format!(
+                    "expected `{name}` observed at least {min_count} time(s), got {actual}; observed kinds so far: {:?}",
+                    bench.observed_kinds()
+                ))
+            }
+        }
+        Check::MailNotObserved { name } => {
+            let actual = bench.count_observed(name);
+            if actual == 0 {
+                StepStatus::Pass
+            } else {
+                StepStatus::Fail(format!(
+                    "expected `{name}` not observed, but saw {actual} occurrence(s)"
+                ))
+            }
+        }
     }
 }
 
@@ -191,13 +228,13 @@ fn op_label(step: &Step) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::script::{Script, Step, VisualAssert};
+    use crate::script::{Check, Script, Step};
 
     fn assert_before_capture_script() -> Script {
         Script {
             name: "early assert".to_owned(),
             steps: vec![Step::Assert {
-                check: VisualAssert::NotAllBlack,
+                check: Check::NotAllBlack,
             }],
         }
     }
@@ -220,7 +257,7 @@ mod tests {
             (Step::Capture, "capture"),
             (
                 Step::Assert {
-                    check: VisualAssert::NotAllBlack,
+                    check: Check::NotAllBlack,
                 },
                 "assert",
             ),
