@@ -13,7 +13,7 @@
 //! supports — see the server crate's top-level docstring for the
 //! agent-driving narrative.
 
-use aether_mail::{Kind, Schema};
+use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
 // Cell / player codes. A cell is `CELL_EMPTY` until a move lands; then

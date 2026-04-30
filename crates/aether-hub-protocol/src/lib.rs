@@ -1,32 +1,31 @@
-//! aether-hub-protocol: engine ↔ hub wire types and framing per ADR-0006.
+//! aether-hub-protocol: engine ↔ hub channel wire and framing per
+//! ADR-0006.
 //!
 //! Mail flows in both directions: Claude → hub → engine (dispatch) and
 //! engine → hub → Claude (observations and reply-to-sender, ADRs 0008
-//! and 0013). Engines also send lifecycle frames (Hello, Heartbeat,
-//! Goodbye) and `KindsChanged` notifications.
+//! and 0013). Engines also send lifecycle frames (`Hello`, `Heartbeat`,
+//! `Goodbye`) and `KindsChanged` notifications.
 //!
 //! Framing: each frame on the TCP stream is a 4-byte little-endian
 //! length prefix followed by the postcard-encoded message. Two enum
 //! types (`EngineToHub`, `HubToEngine`) enforce direction at the type
-//! level. Framing helpers live behind the `std` feature so wasm guests
-//! that need only the schema vocabulary (`SchemaType`, `LabelNode`,
-//! `KindShape`, …) and `canonical::*` const fns don't pull std in.
-
-#![cfg_attr(not(feature = "std"), no_std)]
-
-extern crate alloc;
+//! level.
+//!
+//! ADR-0069 split the universal data layer (typed-id newtypes, schema
+//! vocabulary, canonical bytes encoders, the `Kind` / `Schema` traits)
+//! out into `aether-data`. This crate now carries only the hub channel
+//! itself — frames + framing helpers — and is unambiguously host-side
+//! std code.
 
 pub use uuid::Uuid;
 
 mod types;
 pub use types::*;
 
-pub mod canonical;
-// ADR-0064 tag-bit constants migrated to the `aether-id` leaf crate
-// (see `aether-id::tag_bits`). The re-export keeps the historical
-// `aether_hub_protocol::tag_bits::TAG_KIND` call paths working for
-// downstream crates without forcing them to take a fresh dep edge.
-pub use aether_id::tag_bits;
+use std::fmt;
+use std::io::{self, Read, Write};
+
+use serde::{Serialize, de::DeserializeOwned};
 
 /// Maximum accepted frame body size. Bounded so a malformed length
 /// prefix cannot drive a reader into an OOM. 16 MiB is comfortably
@@ -34,94 +33,82 @@ pub use aether_id::tag_bits;
 /// streams travel through the render sink, not the hub).
 pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
-#[cfg(feature = "std")]
-mod framing {
-    use std::fmt;
-    use std::io::{self, Read, Write};
+/// Errors from the framing helpers. Wraps I/O and postcard decode
+/// errors; adds its own variant for an oversize length prefix.
+#[derive(Debug)]
+pub enum FrameError {
+    Io(io::Error),
+    Postcard(postcard::Error),
+    FrameTooLarge { size: usize, max: usize },
+}
 
-    use serde::{Serialize, de::DeserializeOwned};
-
-    use super::MAX_FRAME_SIZE;
-
-    /// Errors from the framing helpers. Wraps I/O and postcard decode
-    /// errors; adds its own variant for an oversize length prefix.
-    #[derive(Debug)]
-    pub enum FrameError {
-        Io(io::Error),
-        Postcard(postcard::Error),
-        FrameTooLarge { size: usize, max: usize },
-    }
-
-    impl fmt::Display for FrameError {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                FrameError::Io(e) => write!(f, "hub protocol io: {e}"),
-                FrameError::Postcard(e) => write!(f, "hub protocol decode: {e}"),
-                FrameError::FrameTooLarge { size, max } => {
-                    write!(f, "hub protocol frame too large: {size} > {max}")
-                }
+impl fmt::Display for FrameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FrameError::Io(e) => write!(f, "hub protocol io: {e}"),
+            FrameError::Postcard(e) => write!(f, "hub protocol decode: {e}"),
+            FrameError::FrameTooLarge { size, max } => {
+                write!(f, "hub protocol frame too large: {size} > {max}")
             }
         }
     }
+}
 
-    impl std::error::Error for FrameError {}
+impl std::error::Error for FrameError {}
 
-    impl From<io::Error> for FrameError {
-        fn from(e: io::Error) -> Self {
-            FrameError::Io(e)
-        }
-    }
-
-    impl From<postcard::Error> for FrameError {
-        fn from(e: postcard::Error) -> Self {
-            FrameError::Postcard(e)
-        }
-    }
-
-    /// Encode a message into its framed wire representation (4-byte LE
-    /// length prefix + postcard body). Infallible — postcard encoding
-    /// of `alloc::Vec` is infallible for the types in this crate.
-    pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
-        let body = postcard::to_allocvec(msg).expect("postcard encode to Vec is infallible");
-        let mut out = Vec::with_capacity(4 + body.len());
-        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-        out.extend_from_slice(&body);
-        out
-    }
-
-    /// Synchronous read of one framed message. Blocks until a complete
-    /// frame is consumed from `r`. Async callers should inline the
-    /// length+body reads on their own async stream rather than calling
-    /// this on a blocking wrapper.
-    pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, FrameError> {
-        let mut len_buf = [0u8; 4];
-        r.read_exact(&mut len_buf)?;
-        let len = u32::from_le_bytes(len_buf) as usize;
-        if len > MAX_FRAME_SIZE {
-            return Err(FrameError::FrameTooLarge {
-                size: len,
-                max: MAX_FRAME_SIZE,
-            });
-        }
-        let mut buf = vec![0u8; len];
-        r.read_exact(&mut buf)?;
-        Ok(postcard::from_bytes(&buf)?)
-    }
-
-    /// Synchronous write of one framed message.
-    pub fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T) -> Result<(), FrameError> {
-        let bytes = encode_frame(msg);
-        w.write_all(&bytes)?;
-        Ok(())
+impl From<io::Error> for FrameError {
+    fn from(e: io::Error) -> Self {
+        FrameError::Io(e)
     }
 }
 
-#[cfg(feature = "std")]
-pub use framing::*;
+impl From<postcard::Error> for FrameError {
+    fn from(e: postcard::Error) -> Self {
+        FrameError::Postcard(e)
+    }
+}
+
+/// Encode a message into its framed wire representation (4-byte LE
+/// length prefix + postcard body). Infallible — postcard encoding
+/// of `alloc::Vec` is infallible for the types in this crate.
+pub fn encode_frame<T: Serialize>(msg: &T) -> Vec<u8> {
+    let body = postcard::to_allocvec(msg).expect("postcard encode to Vec is infallible");
+    let mut out = Vec::with_capacity(4 + body.len());
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Synchronous read of one framed message. Blocks until a complete
+/// frame is consumed from `r`. Async callers should inline the
+/// length+body reads on their own async stream rather than calling
+/// this on a blocking wrapper.
+pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, FrameError> {
+    let mut len_buf = [0u8; 4];
+    r.read_exact(&mut len_buf)?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_FRAME_SIZE {
+        return Err(FrameError::FrameTooLarge {
+            size: len,
+            max: MAX_FRAME_SIZE,
+        });
+    }
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf)?;
+    Ok(postcard::from_bytes(&buf)?)
+}
+
+/// Synchronous write of one framed message.
+pub fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T) -> Result<(), FrameError> {
+    let bytes = encode_frame(msg);
+    w.write_all(&bytes)?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_data::{KindDescriptor, SchemaType};
     use std::io::Cursor;
 
     #[test]
@@ -146,49 +133,6 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
-    }
-
-    #[test]
-    fn hello_with_kinds_roundtrip() {
-        let hello = EngineToHub::Hello(Hello {
-            name: "hello-triangle".into(),
-            pid: 1,
-            started_unix: 0,
-            version: "0".into(),
-            kinds: vec![
-                KindDescriptor {
-                    name: "aether.tick".into(),
-                    schema: SchemaType::Unit,
-                    is_stream: false,
-                },
-                KindDescriptor {
-                    name: "aether.key".into(),
-                    schema: SchemaType::Struct {
-                        repr_c: true,
-                        fields: vec![NamedField {
-                            name: "code".into(),
-                            ty: SchemaType::Scalar(Primitive::U32),
-                        }]
-                        .into(),
-                    },
-                    is_stream: false,
-                },
-            ],
-        });
-
-        let mut buf = Vec::new();
-        write_frame(&mut buf, &hello).unwrap();
-        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
-        let EngineToHub::Hello(h) = back else {
-            panic!("wrong variant")
-        };
-        assert_eq!(h.kinds.len(), 2);
-        assert_eq!(h.kinds[0].schema, SchemaType::Unit);
-        let SchemaType::Struct { fields, .. } = &h.kinds[1].schema else {
-            panic!("expected Struct")
-        };
-        assert_eq!(fields[0].name, "code");
-        assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U32));
     }
 
     #[test]
@@ -404,346 +348,5 @@ mod tests {
         buf.push(0xff);
         let err = read_frame::<_, EngineToHub>(&mut Cursor::new(buf)).unwrap_err();
         assert!(matches!(err, FrameError::Postcard(_)));
-    }
-
-    // ADR-0019 — schema descriptor roundtrips. The `SchemaType` vocabulary
-    // must survive postcard encode/decode end-to-end including nested types
-    // and every enum variant shape. These tests pin the wire format so
-    // consumers (hub encoder, substrate decoder, derive macro) can rely on it.
-
-    #[test]
-    fn schema_unit_and_scalar_roundtrip() {
-        let desc = KindDescriptor {
-            name: "demo.tick".into(),
-            schema: SchemaType::Unit,
-            is_stream: false,
-        };
-        let bytes = postcard::to_allocvec(&desc).unwrap();
-        assert_eq!(
-            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
-            desc
-        );
-
-        let desc = KindDescriptor {
-            name: "demo.seq".into(),
-            schema: SchemaType::Scalar(Primitive::U32),
-            is_stream: false,
-        };
-        let bytes = postcard::to_allocvec(&desc).unwrap();
-        assert_eq!(
-            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
-            desc
-        );
-    }
-
-    #[test]
-    fn schema_cast_eligible_struct_roundtrip() {
-        // `Struct { repr_c: true }` — vertex-shaped: scalars + fixed array
-        // of a nested cast-eligible struct.
-        let vertex = SchemaType::Struct {
-            repr_c: true,
-            fields: vec![
-                NamedField {
-                    name: "x".into(),
-                    ty: SchemaType::Scalar(Primitive::F32),
-                },
-                NamedField {
-                    name: "y".into(),
-                    ty: SchemaType::Scalar(Primitive::F32),
-                },
-            ]
-            .into(),
-        };
-        let triangle = SchemaType::Struct {
-            repr_c: true,
-            fields: vec![NamedField {
-                name: "verts".into(),
-                ty: SchemaType::Array {
-                    element: SchemaCell::owned(vertex),
-                    len: 3,
-                },
-            }]
-            .into(),
-        };
-        let desc = KindDescriptor {
-            name: "demo.draw_triangle".into(),
-            schema: triangle,
-            is_stream: false,
-        };
-        let bytes = postcard::to_allocvec(&desc).unwrap();
-        assert_eq!(
-            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
-            desc
-        );
-    }
-
-    #[test]
-    fn schema_postcard_struct_with_rich_fields_roundtrip() {
-        // `Struct { repr_c: false }` — control-plane-shaped: string,
-        // bytes, optional, nested vec.
-        let load = SchemaType::Struct {
-            repr_c: false,
-            fields: vec![
-                NamedField {
-                    name: "wasm".into(),
-                    ty: SchemaType::Bytes,
-                },
-                NamedField {
-                    name: "name".into(),
-                    ty: SchemaType::Option(SchemaCell::owned(SchemaType::String)),
-                },
-                NamedField {
-                    name: "tags".into(),
-                    ty: SchemaType::Vec(SchemaCell::owned(SchemaType::String)),
-                },
-            ]
-            .into(),
-        };
-        let desc = KindDescriptor {
-            name: "demo.load_component".into(),
-            schema: load,
-            is_stream: false,
-        };
-        let bytes = postcard::to_allocvec(&desc).unwrap();
-        assert_eq!(
-            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
-            desc
-        );
-    }
-
-    #[test]
-    fn schema_enum_with_all_variant_shapes_roundtrip() {
-        // Cover every `EnumVariant` arm in one descriptor: result-shaped
-        // sum (`Ok(payload) | Err { reason }`) plus a unit variant.
-        let result = SchemaType::Enum {
-            variants: vec![
-                EnumVariant::Unit {
-                    name: "Pending".into(),
-                    discriminant: 0,
-                },
-                EnumVariant::Tuple {
-                    name: "Ok".into(),
-                    discriminant: 1,
-                    fields: vec![SchemaType::Scalar(Primitive::U64)].into(),
-                },
-                EnumVariant::Struct {
-                    name: "Err".into(),
-                    discriminant: 2,
-                    fields: vec![NamedField {
-                        name: "reason".into(),
-                        ty: SchemaType::String,
-                    }]
-                    .into(),
-                },
-            ]
-            .into(),
-        };
-        let desc = KindDescriptor {
-            name: "demo.load_result".into(),
-            schema: result,
-            is_stream: false,
-        };
-        let bytes = postcard::to_allocvec(&desc).unwrap();
-        assert_eq!(
-            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
-            desc
-        );
-    }
-
-    #[test]
-    fn schema_descriptor_survives_full_frame_roundtrip() {
-        // The schema arm has to survive a real `Hello` frame, not just a
-        // bare `KindDescriptor`. This catches enum-tag drift inside the
-        // outer `EngineToHub` envelope.
-        let hello = EngineToHub::Hello(Hello {
-            name: "schema-demo".into(),
-            pid: 1,
-            started_unix: 0,
-            version: "0".into(),
-            kinds: vec![KindDescriptor {
-                name: "demo.note".into(),
-                schema: SchemaType::Struct {
-                    repr_c: false,
-                    fields: vec![NamedField {
-                        name: "body".into(),
-                        ty: SchemaType::String,
-                    }]
-                    .into(),
-                },
-                is_stream: false,
-            }],
-        });
-        let mut buf = Vec::new();
-        write_frame(&mut buf, &hello).unwrap();
-        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
-        let EngineToHub::Hello(h) = back else {
-            panic!("wrong variant")
-        };
-        assert_eq!(h.kinds.len(), 1);
-        let SchemaType::Struct { repr_c, fields } = &h.kinds[0].schema else {
-            panic!("expected Struct")
-        };
-        assert!(!*repr_c);
-        assert_eq!(fields[0].name, "body");
-        assert_eq!(fields[0].ty, SchemaType::String);
-    }
-
-    // ADR-0033 — `InputsRecord` wire-format tests. The `#[handlers]`
-    // macro emits one `[INPUTS_SECTION_VERSION][postcard(InputsRecord)]`
-    // record per handler/fallback/component-doc, concatenated by the
-    // linker into the `aether.kinds.inputs` custom section. These tests
-    // pin the record shape both for the macro and for any downstream
-    // consumer that decodes the section.
-
-    #[test]
-    fn inputs_record_handler_roundtrip() {
-        let rec = InputsRecord::Handler {
-            id: aether_id::KindId(0xdead_beef_cafe_f00d),
-            name: "aether.tick".into(),
-            doc: Some("Not useful to send manually — the substrate drives this.".into()),
-        };
-        let bytes = postcard::to_allocvec(&rec).unwrap();
-        assert_eq!(postcard::from_bytes::<InputsRecord>(&bytes).unwrap(), rec);
-    }
-
-    #[test]
-    fn inputs_record_handler_without_doc_roundtrip() {
-        let rec = InputsRecord::Handler {
-            id: aether_id::KindId(1),
-            name: "aether.key".into(),
-            doc: None,
-        };
-        let bytes = postcard::to_allocvec(&rec).unwrap();
-        assert_eq!(postcard::from_bytes::<InputsRecord>(&bytes).unwrap(), rec);
-    }
-
-    #[test]
-    fn inputs_record_fallback_roundtrip() {
-        let rec = InputsRecord::Fallback {
-            doc: Some("Forwards anything unrecognized.".into()),
-        };
-        let bytes = postcard::to_allocvec(&rec).unwrap();
-        assert_eq!(postcard::from_bytes::<InputsRecord>(&bytes).unwrap(), rec);
-
-        let bare = InputsRecord::Fallback { doc: None };
-        let bytes = postcard::to_allocvec(&bare).unwrap();
-        assert_eq!(postcard::from_bytes::<InputsRecord>(&bytes).unwrap(), bare);
-    }
-
-    #[test]
-    fn inputs_record_component_roundtrip() {
-        let rec = InputsRecord::Component {
-            doc: "Logs every input event to the broadcast sink.".into(),
-        };
-        let bytes = postcard::to_allocvec(&rec).unwrap();
-        assert_eq!(postcard::from_bytes::<InputsRecord>(&bytes).unwrap(), rec);
-    }
-
-    // Issue #232 — `SchemaType::Map` wire-format tests. The Map arm
-    // describes `BTreeMap<K, V>` payloads; canonical bytes must be
-    // stable so `Kind::ID` doesn't drift across runs/builds.
-
-    #[test]
-    fn schema_map_string_keys_roundtrip() {
-        let desc = KindDescriptor {
-            name: "demo.headers".into(),
-            schema: SchemaType::Struct {
-                repr_c: false,
-                fields: vec![NamedField {
-                    name: "headers".into(),
-                    ty: SchemaType::Map {
-                        key: SchemaCell::owned(SchemaType::String),
-                        value: SchemaCell::owned(SchemaType::String),
-                    },
-                }]
-                .into(),
-            },
-            is_stream: false,
-        };
-        let bytes = postcard::to_allocvec(&desc).unwrap();
-        assert_eq!(
-            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
-            desc
-        );
-    }
-
-    #[test]
-    fn schema_map_integer_keys_roundtrip() {
-        // Integer-keyed map — Map<u32, String>. Wire shape unaffected
-        // by key type; only encoder/decoder JSON projection cares.
-        let desc = KindDescriptor {
-            name: "demo.lookup".into(),
-            schema: SchemaType::Map {
-                key: SchemaCell::owned(SchemaType::Scalar(Primitive::U32)),
-                value: SchemaCell::owned(SchemaType::String),
-            },
-            is_stream: false,
-        };
-        let bytes = postcard::to_allocvec(&desc).unwrap();
-        assert_eq!(
-            postcard::from_bytes::<KindDescriptor>(&bytes).unwrap(),
-            desc
-        );
-    }
-
-    #[test]
-    fn schema_map_canonical_bytes_deterministic() {
-        // `Kind::ID` derives from `fnv1a_64_prefixed(KIND_DOMAIN,
-        // canonical_kind_bytes(name, schema))`. Two calls with the same
-        // schema must produce byte-identical canonical bytes — otherwise
-        // the same kind would hash to different ids across builds. Pins
-        // the Map arm against the stability invariant ADR-0030 set up.
-        let schema = SchemaType::Map {
-            key: SchemaCell::owned(SchemaType::String),
-            value: SchemaCell::owned(SchemaType::Scalar(Primitive::U64)),
-        };
-        let bytes_a = canonical::canonical_kind_bytes("demo.counters", &schema);
-        let bytes_b = canonical::canonical_kind_bytes("demo.counters", &schema);
-        assert_eq!(bytes_a, bytes_b);
-        // Also pin the id derivation — it's the load-bearing call.
-        let id_a = canonical::kind_id_from_parts("demo.counters", &schema);
-        let id_b = canonical::kind_id_from_parts("demo.counters", &schema);
-        assert_eq!(id_a, id_b);
-    }
-
-    #[test]
-    fn inputs_section_concatenated_records_streaming_decode() {
-        // Walk-the-section pattern the substrate reader will use:
-        // `[version][postcard(InputsRecord)]` back-to-back, consumed
-        // with `postcard::take_from_bytes` until the cursor empties.
-        let records = vec![
-            InputsRecord::Component {
-                doc: "A canary component.".into(),
-            },
-            InputsRecord::Handler {
-                id: aether_id::KindId(42),
-                name: "aether.tick".into(),
-                doc: Some("heartbeat".into()),
-            },
-            InputsRecord::Handler {
-                id: aether_id::KindId(0xff),
-                name: "test.ping".into(),
-                doc: None,
-            },
-            InputsRecord::Fallback {
-                doc: Some("catchall".into()),
-            },
-        ];
-
-        let mut section = Vec::new();
-        for rec in &records {
-            section.push(INPUTS_SECTION_VERSION);
-            section.extend(postcard::to_allocvec(rec).unwrap());
-        }
-
-        let mut cursor = &section[..];
-        let mut decoded = Vec::new();
-        while !cursor.is_empty() {
-            assert_eq!(cursor[0], INPUTS_SECTION_VERSION);
-            let (rec, rest) = postcard::take_from_bytes::<InputsRecord>(&cursor[1..]).unwrap();
-            decoded.push(rec);
-            cursor = rest;
-        }
-        assert_eq!(decoded, records);
     }
 }

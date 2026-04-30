@@ -20,7 +20,7 @@
 
 use std::fmt;
 
-use aether_hub_protocol::{EnumVariant, NamedField, Primitive, SchemaType};
+use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::{Map, Value};
 
 #[derive(Debug)]
@@ -206,9 +206,9 @@ fn decode_cast_field(
 /// `type_id` doesn't correspond to a typed-id newtype the codec
 /// knows how to translate.
 fn render_type_id_value(id: u64, type_id: u64, _path: &str) -> Result<Value, DecodeError> {
-    let _expected = aether_mail::tag_for_type_id(type_id)
+    let _expected = aether_data::tag_for_type_id(type_id)
         .ok_or(DecodeError::UnsupportedSchema("unknown TypeId in schema"))?;
-    match aether_mail::tagged_id::encode(id) {
+    match aether_data::tagged_id::encode(id) {
         Some(s) => Ok(Value::String(s)),
         None => Ok(Value::from(id)),
     }
@@ -616,7 +616,7 @@ impl<'a> Cursor<'a> {
 mod tests {
     use super::*;
     use crate::encode_schema;
-    use aether_hub_protocol::SchemaCell;
+    use aether_data::SchemaCell;
     use serde_json::json;
 
     fn scalar(name: &str, ty: Primitive) -> NamedField {
@@ -1051,10 +1051,10 @@ mod tests {
         // to end.
         let schema = pc_struct(vec![NamedField {
             name: "mailbox".into(),
-            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+            ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let mailbox = aether_mail::MailboxId::from_name("aether.control");
-        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        let mailbox = aether_data::MailboxId::from_name("aether.control");
+        let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
         roundtrip(json!({ "mailbox": s }), &schema);
     }
 
@@ -1069,11 +1069,11 @@ mod tests {
             },
             NamedField {
                 name: "mailbox".into(),
-                ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+                ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
             },
         ]);
-        let mailbox = aether_mail::MailboxId::from_name("aether.control");
-        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        let mailbox = aether_data::MailboxId::from_name("aether.control");
+        let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
         roundtrip(json!({ "stream": 1, "mailbox": s }), &schema);
     }
 
@@ -1087,16 +1087,16 @@ mod tests {
         // `load_component` / `describe_kinds`, drops them straight
         // into `subscribe_input.{kind, mailbox}`, and the wire bytes
         // match what the substrate expects.
-        use aether_mail::Kind;
-        let mailbox = aether_mail::MailboxId::from_name("aether.control");
-        let mailbox_str = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        use aether_data::Kind;
+        let mailbox = aether_data::MailboxId::from_name("aether.control");
+        let mailbox_str = aether_data::tagged_id::encode(mailbox.0).unwrap();
         let kind_id = aether_kinds::Tick::ID;
-        let kind_str = aether_mail::tagged_id::encode(kind_id.0).unwrap();
+        let kind_str = aether_data::tagged_id::encode(kind_id.0).unwrap();
         let json_in = json!({ "kind": kind_str, "mailbox": mailbox_str });
 
         let bytes = encode_schema(
             &json_in,
-            &<aether_kinds::SubscribeInput as aether_mail::Schema>::SCHEMA,
+            &<aether_kinds::SubscribeInput as aether_data::Schema>::SCHEMA,
         )
         .expect("encode subscribe_input via TypeId schema");
 
@@ -1113,8 +1113,8 @@ mod tests {
         // `with_tag` discipline holds through the schema-bytes
         // change).
         assert_eq!(
-            aether_mail::tagged_id::tag_of(aether_kinds::SubscribeInput::ID.0),
-            Some(aether_mail::Tag::Kind),
+            aether_data::tagged_id::tag_of(aether_kinds::SubscribeInput::ID.0),
+            Some(aether_data::Tag::Kind),
         );
     }
 
@@ -1125,7 +1125,7 @@ mod tests {
         // sentinel value end to end.
         let schema = pc_struct(vec![NamedField {
             name: "mailbox".into(),
-            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+            ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
         roundtrip(json!({ "mailbox": 0u64 }), &schema);
     }

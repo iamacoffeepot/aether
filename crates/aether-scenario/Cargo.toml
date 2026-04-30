@@ -14,9 +14,10 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+aether-data = { path = "../aether-data" }
 aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-kinds = { path = "../aether-kinds" }
-aether-params-codec = { path = "../aether-params-codec" }
+aether-codec = { path = "../aether-codec" }
 aether-scenario-macros = { path = "../aether-scenario-macros" }
 aether-substrate-test-bench = { path = "../aether-substrate-test-bench" }
 png = "0.17"

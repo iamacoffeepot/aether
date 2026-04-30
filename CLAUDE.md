@@ -6,6 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Pre-1.0 Rust project (edition 2024). Vision: a game engine where Claude sits in a harness as assistant/engineer/designer. Architectural direction (see `docs/adr/`): a thin native **substrate** owns I/O, GPU, audio, and hosts a WASM runtime; engine **components** run as WASM modules and communicate via a **mail** system. (The whole system — substrate + components + tooling — is "Aether" or "the engine"; the substrate is just the native base layer.)
 
+## Infrastructure crates (ADR-0069)
+
+The non-component infrastructure cluster has four crates with role-distinct names:
+
+- **`aether-data`** — universal data layer. Typed-id newtypes (`MailboxId`, `KindId`, `HandleId`), schema vocabulary (`SchemaType`, `KindShape`, `KindLabels`, `InputsRecord`, canonical bytes), `Kind` / `Schema` / `CastEligible` traits, `Ref<K>`, encode/decode helpers, native descriptor inventory. `no_std` + `alloc`. Every consumer that describes typed bytes depends on this.
+- **`aether-codec`** — schema-driven JSON ↔ wire bytes (formerly `aether-params-codec`). Pure functions over `aether_data::SchemaType`; future home for non-JSON codecs (msgpack, save-format adapters).
+- **`aether-hub-protocol`** — engine ↔ hub channel wire only (frames + framing helpers). Std-only.
+- **`aether-kinds`** — substrate vocabulary: concrete kind types (`Tick`, `Key`, `DrawTriangle`, `aether.audio.*`, `aether.io.*`, `aether.control.*`, `aether.observation.*`, `aether.camera`) plus the well-known mailboxes registry (`mailboxes::CONTROL`, `mailboxes::DIAGNOSTICS`, `mailboxes::SINK_*`).
+
+`aether-id`, `aether-mail`, and `aether-params-codec` are retired. `Mail<'_>` and `Sink<K>` live in `aether-component` (guest SDK); the host's dispatcher-side `Mail` lives in `aether-substrate-core`. The "transport envelope" abstraction is split between SDK and dispatcher rather than shared.
+
 ## Workflow
 
 - **Exploration and design discussion** happens in chat with the user. No artifact required.
@@ -40,7 +51,7 @@ When verifying substrate behavior end-to-end, reach for the MCP harness before r
 For Rust integration tests and CI gating that don't need a live MCP session, the **scenario runner** drives the same in-process substrate from a Rust thread. Four crates ship the surface:
 
 - **`aether-substrate-test-bench`** — `TestBench::start()` boots a full chassis (scheduler, mail queue, wgpu offscreen render target) on the test thread, with a loopback channel attached to outbound so substrate replies route back without going through a hub. `advance(ticks)`, `capture()`, `send_mail<K>()`, `send_bytes(name, kind_id, bytes)`.
-- **`aether-scenario`** — declarative `Script` of `Step`s (`Advance`, `Capture`, `Assert`, `LoadComponent`, `SendMail`) parsed from YAML. `Runner::run(&mut bench, &script)` walks the steps, encoding `SendMail` params via `aether-params-codec::encode_schema` against `aether_kinds::descriptors::all()` — same path the hub uses for `mcp__aether-hub__send_mail`, so any substrate kind is sendable from a script for free. Returns a `RunReport` with per-step pass/fail.
+- **`aether-scenario`** — declarative `Script` of `Step`s (`Advance`, `Capture`, `Assert`, `LoadComponent`, `SendMail`) parsed from YAML. `Runner::run(&mut bench, &script)` walks the steps, encoding `SendMail` params via `aether-codec::encode_schema` against `aether_kinds::descriptors::all()` — same path the hub uses for `mcp__aether-hub__send_mail`, so any substrate kind is sendable from a script for free. Returns a `RunReport` with per-step pass/fail.
 - **`aether-scenario-cli`** — `aether-scenario <path.yml>` boots a TestBench, runs the script, prints a per-step report, exits 0/1. The agent-facing entry point.
 - **`aether-scenario-macros`** — `aether_scenario::scenario_dir!("scenarios")` proc-macro emits one `#[test]` per `.yml` file under the named directory. Component crates author scenarios as plain YAML and get IDE-runnable tests for free.
 

@@ -9,7 +9,7 @@
 //! can't silently change the wire without showing up here too. The
 //! substrate/hub `SchemaShape` enum must keep the same order.
 
-use crate::types::{EnumVariant, Primitive, SchemaCell, SchemaType};
+use crate::schema::{EnumVariant, Primitive, SchemaCell, SchemaType};
 
 use super::primitives::{
     cow_enum_variants, cow_named_fields, cow_schema_types, str_len, varint_u32_len, varint_u64_len,
@@ -171,15 +171,15 @@ pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &Schem
 /// byte-identical output. Pinned by the `canonical_kind_bytes_runtime_
 /// matches_const` test below.
 pub fn canonical_kind_bytes(name: &str, schema: &SchemaType) -> alloc::vec::Vec<u8> {
-    let shape = crate::types::KindShape {
+    let shape = crate::schema::KindShape {
         name: alloc::borrow::Cow::Owned(name.into()),
         schema: schema_to_shape(schema),
     };
     postcard::to_allocvec(&shape).expect("canonical KindShape serialization is infallible")
 }
 
-fn schema_to_shape(s: &SchemaType) -> crate::types::SchemaShape {
-    use crate::types::SchemaShape;
+fn schema_to_shape(s: &SchemaType) -> crate::schema::SchemaShape {
+    use crate::schema::SchemaShape;
     match s {
         SchemaType::Unit => SchemaShape::Unit,
         SchemaType::Bool => SchemaShape::Bool,
@@ -210,8 +210,8 @@ fn schema_to_shape(s: &SchemaType) -> crate::types::SchemaShape {
     }
 }
 
-fn variant_to_shape(v: &EnumVariant) -> crate::types::VariantShape {
-    use crate::types::VariantShape;
+fn variant_to_shape(v: &EnumVariant) -> crate::schema::VariantShape {
+    use crate::schema::VariantShape;
     match v {
         EnumVariant::Unit { discriminant, .. } => VariantShape::Unit {
             discriminant: *discriminant,
@@ -237,12 +237,12 @@ fn variant_to_shape(v: &EnumVariant) -> crate::types::VariantShape {
 
 /// Domain tag prefixed to every kind-id hash input so the `Kind::ID`
 /// space is disjoint from `MailboxId`. Must stay byte-identical to
-/// `aether_mail::KIND_DOMAIN`; duplicated here for the same reason
+/// `aether_data::KIND_DOMAIN`; duplicated here for the same reason
 /// `fnv1a_64` is (aether-mail depends on hub-protocol, not the
 /// other way around).
 pub(crate) const KIND_DOMAIN: &[u8] = b"kind:";
 
-use aether_id::tag_bits::{HASH_MASK, TAG_KIND, TAG_SHIFT};
+use crate::tag_bits::{HASH_MASK, TAG_KIND, TAG_SHIFT};
 
 /// Derive a `Kind::ID` from a `(name, schema)` pair at runtime. Matches
 /// the `#[derive(Kind)]` compile-time emission byte-for-byte:
@@ -262,14 +262,14 @@ pub fn kind_id_from_parts(name: &str, schema: &SchemaType) -> u64 {
 /// `postcard(KindShape)`, so we postcard the shape directly without a
 /// `SchemaShape → SchemaType` detour. Used by `kind_manifest` to key
 /// labels records by id after decoding both sections off the wasm.
-pub fn kind_id_from_shape(shape: &crate::types::KindShape) -> u64 {
+pub fn kind_id_from_shape(shape: &crate::schema::KindShape) -> u64 {
     let bytes =
         postcard::to_allocvec(shape).expect("canonical KindShape serialization is infallible");
     ((TAG_KIND as u64) << TAG_SHIFT) | (fnv1a_64_prefixed(KIND_DOMAIN, &bytes) & HASH_MASK)
 }
 
 /// FNV-1a 64 over `prefix ++ payload`, mirrored from
-/// `aether_mail::fnv1a_64_prefixed`. Duplicated here because
+/// `aether_data::fnv1a_64_prefixed`. Duplicated here because
 /// `aether-mail` depends on `aether-hub-protocol`, not the other way
 /// around — same offset basis and prime, identical output. Exposed at
 /// crate scope so the hub's canonical-bytes path can hash

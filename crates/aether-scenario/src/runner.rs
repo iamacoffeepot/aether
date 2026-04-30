@@ -5,16 +5,16 @@
 //!
 //! `SendMail` resolves kinds via `aether_kinds::descriptors::all()`
 //! (inventory-collected at link time) and encodes YAML params through
-//! `aether_params_codec::encode_schema` — same path the hub uses for
+//! `aether_codec::encode_schema` — same path the hub uses for
 //! `mcp__aether-hub__send_mail`. The runner caches the descriptor
 //! lookup once per script run so each step is an `O(1)` HashMap probe.
 
 use std::collections::HashMap;
 use std::fs;
 
-use aether_hub_protocol::{KindDescriptor, canonical::kind_id_from_parts};
+use aether_codec::encode_schema;
+use aether_data::{KindDescriptor, canonical::kind_id_from_parts};
 use aether_kinds::{LoadComponent, descriptors};
-use aether_params_codec::encode_schema;
 use aether_substrate_test_bench::{KindId, TestBench};
 use thiserror::Error;
 

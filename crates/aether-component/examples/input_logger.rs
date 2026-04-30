@@ -15,8 +15,8 @@
 //! starts driving input — no manual `subscribe_input` needed.
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
+use aether_data::{Kind, Schema};
 use aether_kinds::{Key, MouseButton, MouseMove, Tick};
-use aether_mail::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]

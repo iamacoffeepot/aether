@@ -48,7 +48,7 @@ pub fn fatal_abort(outbound: &HubOutbound, reason: String) -> ! {
     }) {
         outbound.send(EngineToHub::Mail(EngineMailFrame {
             address: ClaudeAddress::Broadcast,
-            kind_name: <SubstrateDying as aether_mail::Kind>::NAME.to_owned(),
+            kind_name: <SubstrateDying as aether_data::Kind>::NAME.to_owned(),
             payload,
             origin: None,
             correlation_id: 0,

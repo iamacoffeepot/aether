@@ -11,8 +11,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
+use aether_data::{Kind, KindId};
 use aether_kinds::{DropComponent, LoadComponent, SubscribeInput, Tick, UnsubscribeInput};
-use aether_mail::{Kind, KindId};
 use aether_substrate_desktop::{
     ControlPlane, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
     host_fns, mail::Mail, new_subscribers, subscribers_for,
@@ -107,7 +107,7 @@ fn make_harness() -> Harness {
 /// sink-handler surface. `ControlPlane::into_sink_handler` consumes
 /// its receiver, so the harness clones the plane (`Arc`-cheap) for
 /// each call. Mirrors how main.rs wires the handler at boot.
-fn dispatch<K: aether_mail::Kind + serde::Serialize>(plane: &ControlPlane, payload: &K) {
+fn dispatch<K: aether_data::Kind + serde::Serialize>(plane: &ControlPlane, payload: &K) {
     let bytes = postcard::to_allocvec(payload).unwrap();
     let handler = plane.clone().into_sink_handler();
     handler(
@@ -120,8 +120,8 @@ fn dispatch<K: aether_mail::Kind + serde::Serialize>(plane: &ControlPlane, paylo
     );
 }
 
-fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> aether_mail::MailboxId {
-    let before: std::collections::HashSet<aether_mail::MailboxId> =
+fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> aether_data::MailboxId {
+    let before: std::collections::HashSet<aether_data::MailboxId> =
         plane.components.read().unwrap().keys().copied().collect();
     dispatch(
         plane,
@@ -130,7 +130,7 @@ fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> aether_mail::Mailbox
             name: Some(name.into()),
         },
     );
-    let after: std::collections::HashSet<aether_mail::MailboxId> =
+    let after: std::collections::HashSet<aether_data::MailboxId> =
         plane.components.read().unwrap().keys().copied().collect();
     *after
         .difference(&before)
@@ -138,15 +138,15 @@ fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> aether_mail::Mailbox
         .expect("load inserted a new component")
 }
 
-fn subscribe(plane: &ControlPlane, kind: KindId, mailbox: aether_mail::MailboxId) {
+fn subscribe(plane: &ControlPlane, kind: KindId, mailbox: aether_data::MailboxId) {
     dispatch(plane, &SubscribeInput { kind, mailbox });
 }
 
-fn unsubscribe(plane: &ControlPlane, kind: KindId, mailbox: aether_mail::MailboxId) {
+fn unsubscribe(plane: &ControlPlane, kind: KindId, mailbox: aether_data::MailboxId) {
     dispatch(plane, &UnsubscribeInput { kind, mailbox });
 }
 
-fn drop_component(plane: &ControlPlane, mailbox_id: aether_mail::MailboxId) {
+fn drop_component(plane: &ControlPlane, mailbox_id: aether_data::MailboxId) {
     dispatch(plane, &DropComponent { mailbox_id });
 }
 

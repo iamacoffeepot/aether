@@ -9,7 +9,7 @@ edition.workspace = true
 # `derive` feature. The SDK forwards them to consumers so they can
 # `use aether_component::{handlers, handler, fallback};` alongside the
 # rest of the component vocabulary.
-aether-mail = { path = "../aether-mail", features = ["derive"] }
+aether-data = { path = "../aether-data", features = ["derive"] }
 # ADR-0030 Phase 2: the init walker auto-subscribes each `K::IS_INPUT`
 # kind by mailing `aether.control.subscribe_input` — the SDK needs the
 # concrete `InputStream` + `SubscribeInput` types from the substrate's

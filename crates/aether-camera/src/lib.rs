@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// .. }) }` — anything left `None` falls back to the orbit
 /// component's compiled defaults) and for live tweaks
 /// (`CameraOrbitSet`).
-#[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct OrbitParams {
     /// Eye radius from `target`. `0.0` collapses to the target.
     pub distance: Option<f32>,
@@ -44,7 +44,7 @@ pub struct OrbitParams {
 /// Per-mode parameters for the orthographic top-down camera.
 /// Same `Option<...>` semantics as `OrbitParams`: present → apply,
 /// absent → keep current.
-#[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct TopdownParams {
     /// World-xy centerpoint. Z is implicit — the camera always
     /// looks down `-Z`.
@@ -59,7 +59,7 @@ pub struct TopdownParams {
 /// variant carries the full param struct for that mode; pass
 /// `Default::default()` (all `None`) to take the camera
 /// component's compiled defaults wholesale.
-#[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum ModeInit {
     Orbit(OrbitParams),
     Topdown(TopdownParams),
@@ -70,7 +70,7 @@ pub enum ModeInit {
 /// swap an existing camera's mode in place. Newly-created cameras
 /// are not made active automatically; pair with `CameraSetActive`
 /// or rely on the bootstrap `"main"` camera.
-#[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.camera.create")]
 pub struct CameraCreate {
     pub name: String,
@@ -81,7 +81,7 @@ pub struct CameraCreate {
 /// name isn't bound. If the destroyed camera was the active one
 /// the publish stream pauses (no `aether.camera` mail goes out)
 /// until another camera is made active.
-#[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.camera.destroy")]
 pub struct CameraDestroy {
     pub name: String,
@@ -92,7 +92,7 @@ pub struct CameraDestroy {
 /// tick. Errors if the name isn't bound. Inactive cameras still
 /// tick (orbit yaw keeps accumulating, etc.) so re-activating
 /// later doesn't snap.
-#[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.camera.set_active")]
 pub struct CameraSetActive {
     pub name: String,
@@ -101,7 +101,7 @@ pub struct CameraSetActive {
 /// `aether.camera.set_mode` — swap an existing camera's mode in
 /// place. State for the prior mode is discarded; the new mode is
 /// seeded from the supplied params + per-mode compiled defaults.
-#[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.camera.set_mode")]
 pub struct CameraSetMode {
     pub name: String,
@@ -114,7 +114,7 @@ pub struct CameraSetMode {
 /// `Some` field overwrites; `None` leaves the current value
 /// alone, so partial pokes (e.g. just `distance`) ride a single
 /// kind without restating the rest.
-#[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.camera.orbit.set")]
 pub struct CameraOrbitSet {
     pub name: String,
@@ -124,7 +124,7 @@ pub struct CameraOrbitSet {
 /// `aether.camera.topdown.set` — apply topdown-mode field deltas
 /// to the named camera. Same semantics as `CameraOrbitSet` but for
 /// the orthographic mode's `center` / `extent`.
-#[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.camera.topdown.set")]
 pub struct CameraTopdownSet {
     pub name: String,
@@ -134,7 +134,7 @@ pub struct CameraTopdownSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_mail::Kind;
+    use aether_data::Kind;
 
     #[test]
     fn kind_names_are_stable() {

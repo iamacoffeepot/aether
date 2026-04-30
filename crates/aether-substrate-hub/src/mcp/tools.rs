@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_data::tagged_id::{self, Tag};
 use aether_hub_protocol::{EngineId, LogLevel, Uuid};
-use aether_mail::tagged_id::{self, Tag};
 use base64::Engine as _;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -555,7 +555,7 @@ impl Hub {
             } => {
                 self.state.engines.upsert_component(
                     engine_id,
-                    aether_mail::MailboxId(mailbox_id),
+                    aether_data::MailboxId(mailbox_id),
                     ComponentRecord {
                         name: name.clone(),
                         capabilities: capabilities.clone(),
@@ -674,7 +674,7 @@ impl Hub {
                 // so `describe_component` reflects what's actually
                 // bound now. Name is preserved — `replace_component`
                 // keeps the existing mailbox + name by design.
-                let mailbox = aether_mail::MailboxId(mailbox_id);
+                let mailbox = aether_data::MailboxId(mailbox_id);
                 let existing = self.state.engines.get_component(&id, mailbox);
                 let name = existing
                     .map(|r| r.name)
@@ -717,7 +717,7 @@ impl Hub {
         let Some(component) = self
             .state
             .engines
-            .get_component(&id, aether_mail::MailboxId(mailbox_id))
+            .get_component(&id, aether_data::MailboxId(mailbox_id))
         else {
             return Err(McpError::invalid_params(
                 format!(

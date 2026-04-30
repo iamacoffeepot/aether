@@ -16,11 +16,11 @@
 
 use std::sync::Arc;
 
+use aether_data::Kind;
 use aether_kinds::{
     Advance, CaptureFrame, PlatformInfo, SetWindowMode, SetWindowModeResult, SetWindowTitle,
     SetWindowTitleResult, WindowMode,
 };
-use aether_mail::Kind;
 use aether_substrate_core::{
     ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo,
     capture::{CaptureQueue, begin_capture_request, reply_unsupported_advance},
@@ -71,7 +71,7 @@ pub fn chassis_control_handler(
     outbound: Arc<HubOutbound>,
 ) -> ChassisControlHandler {
     Arc::new(
-        move |kind: aether_mail::KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| match kind
+        move |kind: aether_data::KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| match kind
         {
             CaptureFrame::ID => {
                 let proxy = proxy.clone();

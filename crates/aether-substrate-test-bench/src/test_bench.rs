@@ -24,11 +24,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 
+use aether_data::{Kind, KindId, encode_empty, encode_struct};
 use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
 use aether_kinds::{
     Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, DRAW_TRIANGLE_BYTES, FrameStats, Tick,
 };
-use aether_mail::{Kind, KindId, encode_empty, encode_struct};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use aether_substrate_core::{
@@ -474,7 +474,7 @@ impl TestBench {
     where
         K: Kind + serde::Serialize,
     {
-        let mailbox = aether_mail::mailboxes::CONTROL;
+        let mailbox = aether_kinds::mailboxes::CONTROL;
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
         let payload = encode_struct(mail);
         self.queue

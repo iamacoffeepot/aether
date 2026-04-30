@@ -86,7 +86,7 @@ fn tick_roundtrip_component_to_sink() {
     for frame in 1..=3u32 {
         queue.push(Mail::new(
             component_mbox,
-            aether_mail::KindId(1),
+            aether_data::KindId(1),
             vec![],
             frame,
         ));
@@ -153,7 +153,7 @@ fn batched_mail_preserves_fifo_per_mailbox() {
     scheduler.add_component(component_mbox, component);
 
     for i in 1..=N {
-        queue.push(Mail::new(component_mbox, aether_mail::KindId(1), vec![], i));
+        queue.push(Mail::new(component_mbox, aether_data::KindId(1), vec![], i));
     }
     queue.drain_all();
 

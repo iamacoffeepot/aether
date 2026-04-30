@@ -23,7 +23,7 @@ mod spawn;
 // callers outside the hub (smoke runner, future tooling) can use the
 // same JSON ↔ wire-bytes path without depending on the hub binary
 // crate.
-pub use aether_params_codec::{DecodeError, EncodeError, decode_schema, encode_schema};
+pub use aether_codec::{DecodeError, EncodeError, decode_schema, encode_schema};
 pub use chassis::HubChassis;
 pub use loopback::{HUB_SELF_ENGINE_ID, LoopbackEngine, LoopbackHandle};
 

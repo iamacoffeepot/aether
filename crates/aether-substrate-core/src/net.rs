@@ -21,12 +21,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
-use aether_mail::{Kind, KindId};
-
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
 use crate::registry::SinkHandler;
+use aether_data::{Kind, KindId};
+use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
 /// Default response-body cap when `AETHER_NET_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -518,7 +517,6 @@ mod tests {
 
     use crate::hub_client::HubOutbound;
     use aether_hub_protocol::{EngineToHub, SessionToken, Uuid};
-
     fn session_sender() -> ReplyTo {
         ReplyTo::to(crate::mail::ReplyTarget::Session(SessionToken(Uuid::nil())))
     }
@@ -537,7 +535,7 @@ mod tests {
         (mailer, rx)
     }
 
-    fn decode_reply<K: aether_mail::Kind + serde::de::DeserializeOwned>(
+    fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
         rx: &std::sync::mpsc::Receiver<EngineToHub>,
     ) -> K {
         let frame = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();

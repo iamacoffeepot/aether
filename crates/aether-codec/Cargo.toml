@@ -1,25 +1,29 @@
 [package]
-name = "aether-params-codec"
+name = "aether-codec"
 version.workspace = true
 edition.workspace = true
 
-# Schema-driven encoding of agent-supplied JSON params into the wire
-# bytes the substrate's decode path consumes. ADR-0019 made every
+# Schema-driven encode + decode of agent-supplied JSON params against
+# `aether_data::SchemaType` descriptors. ADR-0019 made every
 # substrate kind hub-encodable from JSON params; this crate is that
 # encoder, factored out of the hub so callers outside the supervisor
-# (scenario runner, future tooling) can use the same path without taking
-# a heavy dep on `aether-substrate-hub`.
+# (scenario runner, future tooling) can use the same path without
+# taking a heavy dep on `aether-substrate-hub`.
+#
+# ADR-0069 renamed this crate from `aether-params-codec` to
+# `aether-codec` — the codec is universal (schema → bytes), not
+# specific to mail params, and the next consumer is the prompt-system
+# save format.
 #
 # Pure functions, no hub state, no async. Inputs are
-# `serde_json::Value` + `aether_hub_protocol::SchemaType`; outputs
-# are wire bytes the substrate's existing decoders accept.
+# `serde_json::Value` + `aether_data::SchemaType`; outputs are wire
+# bytes the substrate's existing decoders accept.
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
-aether-hub-protocol = { path = "../aether-hub-protocol" }
-aether-mail = { path = "../aether-mail" }
+aether-data = { path = "../aether-data" }
 serde_json = "1"
 
 [dev-dependencies]
@@ -30,7 +34,7 @@ serde_json = "1"
 # `SubscribeInput`) to assert tagged-id round-trips. Production
 # callers don't need any of this — only pulled in for `cargo test`.
 aether-kinds = { path = "../aether-kinds" }
-aether-mail = { path = "../aether-mail", features = ["derive"] }
+aether-data = { path = "../aether-data", features = ["derive"] }
 bytemuck = { version = "1.19", features = ["derive"] }
 postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }

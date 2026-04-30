@@ -29,7 +29,7 @@ use aether_kinds::{IoError, Tick};
 /// kind's schema rides in this wasm's `aether.kinds` custom section,
 /// so the hub registers it automatically at load.
 #[derive(
-    aether_mail::Kind, aether_mail::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
 )]
 #[kind(name = "demo.save_counter.count")]
 pub struct Count {

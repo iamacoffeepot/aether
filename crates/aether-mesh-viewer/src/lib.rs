@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// mesher; `.obj` runs through the OBJ parser. Subsequent `Load`
 /// mails replace the cached mesh. Fire-and-forget; errors surface
 /// in `engine_logs`.
-#[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.mesh.load")]
 pub struct LoadMesh {
     /// Short namespace prefix (no `://`), e.g. `"save"`, `"assets"`.
@@ -35,7 +35,7 @@ pub struct LoadMesh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_mail::Kind;
+    use aether_data::Kind;
 
     #[test]
     fn kind_name_is_stable() {

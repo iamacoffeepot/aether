@@ -15,7 +15,7 @@ edition.workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
-aether-mail = { path = "../../crates/aether-mail", features = ["derive"] }
+aether-data = { path = "../../crates/aether-data", features = ["derive"] }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
 
 # Issue #243: every crate that derives `Kind` needs `inventory` reachable

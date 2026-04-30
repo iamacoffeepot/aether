@@ -22,16 +22,15 @@
 
 use std::sync::Arc;
 
-use aether_kinds::{
-    HandleError, HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
-    HandleReleaseResult, HandleUnpin, HandleUnpinResult,
-};
-use aether_mail::{HandleId, Kind, KindId};
-
 use crate::handle_store::{HandleStore, PutError};
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
 use crate::registry::SinkHandler;
+use aether_data::{HandleId, Kind, KindId};
+use aether_kinds::{
+    HandleError, HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
+    HandleReleaseResult, HandleUnpin, HandleUnpinResult,
+};
 
 /// Build the `"aether.sink.handle"` sink handler. Boot calls this
 /// after constructing the `HandleStore` and `Mailer`, and registers

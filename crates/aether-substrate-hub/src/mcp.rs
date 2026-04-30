@@ -156,9 +156,9 @@ mod tests {
         // record and still send tick mail. ADR-0019 PR 5 removed
         // `payload_bytes`, so a kind without a descriptor is now
         // unreachable from `send_mail`.
-        let tick = aether_hub_protocol::KindDescriptor {
+        let tick = aether_data::KindDescriptor {
             name: "aether.tick".into(),
-            schema: aether_hub_protocol::SchemaType::Unit,
+            schema: aether_data::SchemaType::Unit,
             is_stream: false,
         };
         record_with_kinds(id_u128, vec![tick])
@@ -166,7 +166,7 @@ mod tests {
 
     fn record_with_kinds(
         id_u128: u128,
-        kinds: Vec<aether_hub_protocol::KindDescriptor>,
+        kinds: Vec<aether_data::KindDescriptor>,
     ) -> (EngineRecord, mpsc::Receiver<HubToEngine>) {
         let (tx, rx) = mpsc::channel(16);
         let rec = EngineRecord {
@@ -257,8 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_mail_params_encodes_via_descriptor() {
-        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaType};
-
+        use aether_data::{KindDescriptor, NamedField, Primitive, SchemaType};
         let engines = EngineRegistry::new();
         let kinds = vec![KindDescriptor {
             name: "aether.mouse_move".into(),
@@ -305,8 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_mail_unit_kind_no_params() {
-        use aether_hub_protocol::{KindDescriptor, SchemaType};
-
+        use aether_data::{KindDescriptor, SchemaType};
         let engines = EngineRegistry::new();
         let kinds = vec![KindDescriptor {
             name: "aether.tick".into(),
@@ -379,8 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn describe_kinds_returns_descriptors() {
-        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaType};
-
+        use aether_data::{KindDescriptor, NamedField, Primitive, SchemaType};
         let kinds = vec![
             KindDescriptor {
                 name: "aether.tick".into(),
@@ -465,8 +462,8 @@ mod tests {
     #[tokio::test]
     async fn describe_component_returns_stored_capabilities() {
         use crate::registry::ComponentRecord;
-        use aether_mail::tagged_id::{self, Tag};
-        use aether_mail::with_tag;
+        use aether_data::tagged_id::{self, Tag};
+        use aether_data::with_tag;
 
         let engines = EngineRegistry::new();
         let (rec, _rx) = record(50);
@@ -478,7 +475,7 @@ mod tests {
         let mailbox_id = with_tag(Tag::Mailbox, 7);
         engines.upsert_component(
             &id,
-            aether_mail::MailboxId(mailbox_id),
+            aether_data::MailboxId(mailbox_id),
             ComponentRecord {
                 name: "hello".into(),
                 capabilities: capabilities.clone(),
@@ -507,8 +504,8 @@ mod tests {
 
     #[tokio::test]
     async fn describe_component_unknown_mailbox_errors() {
-        use aether_mail::tagged_id::{self, Tag};
-        use aether_mail::with_tag;
+        use aether_data::tagged_id::{self, Tag};
+        use aether_data::with_tag;
 
         let engines = EngineRegistry::new();
         let (rec, _rx) = record(51);
@@ -535,8 +532,8 @@ mod tests {
 
     #[tokio::test]
     async fn describe_component_unknown_engine_errors() {
-        use aether_mail::tagged_id::{self, Tag};
-        use aether_mail::with_tag;
+        use aether_data::tagged_id::{self, Tag};
+        use aether_data::with_tag;
 
         let state = test_state(EngineRegistry::new(), SessionRegistry::new());
         let hub = Hub::new(state);
@@ -580,8 +577,8 @@ mod tests {
         // boundary surfaces it as a tag-mismatch error rather than
         // silently treating the kind id as a mailbox id and missing
         // the lookup.
-        use aether_mail::tagged_id::{self, Tag};
-        use aether_mail::with_tag;
+        use aether_data::tagged_id::{self, Tag};
+        use aether_data::with_tag;
 
         let engines = EngineRegistry::new();
         let (rec, _rx) = record(53);
@@ -712,8 +709,7 @@ mod tests {
         // FrameStats-shaped: cast struct with two u64 fields. The
         // engine ships raw cast bytes; the hub looks up the descriptor
         // and lifts them into structured `params`.
-        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaType};
-
+        use aether_data::{KindDescriptor, NamedField, Primitive, SchemaType};
         let engines = EngineRegistry::new();
         let kinds = vec![KindDescriptor {
             name: "aether.observation.frame_stats".into(),
@@ -773,8 +769,7 @@ mod tests {
         // Descriptor declares 8-byte u64; hub gets only 2 bytes.
         // Decoder must surface a Truncated error in `decode_error` and
         // leave `params` null without dropping the item.
-        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaType};
-
+        use aether_data::{KindDescriptor, NamedField, Primitive, SchemaType};
         let engines = EngineRegistry::new();
         let kinds = vec![KindDescriptor {
             name: "demo.short".into(),
@@ -856,8 +851,7 @@ mod tests {
 
     #[tokio::test]
     async fn receive_mail_unit_kind_decodes_to_null_params() {
-        use aether_hub_protocol::{KindDescriptor, SchemaType};
-
+        use aether_data::{KindDescriptor, SchemaType};
         let engines = EngineRegistry::new();
         let kinds = vec![KindDescriptor {
             name: "aether.observation.ping".into(),
@@ -926,8 +920,8 @@ mod tests {
     /// and `after_mails` fields, both `Vec<MailEnvelope>`. Used
     /// across capture_frame tests so they all exercise the same
     /// wire shape.
-    fn capture_frame_kind_descriptor() -> aether_hub_protocol::KindDescriptor {
-        use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
+    fn capture_frame_kind_descriptor() -> aether_data::KindDescriptor {
+        use aether_data::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
         let envelope = SchemaType::Struct {
             repr_c: false,
             fields: vec![
@@ -1185,8 +1179,7 @@ mod tests {
         // into a CaptureFrame, and the request-mail payload on the
         // wire carries a valid postcard-encoded bundle the substrate
         // could decode.
-        use aether_hub_protocol::{KindDescriptor, SchemaType};
-
+        use aether_data::{KindDescriptor, SchemaType};
         let engines = EngineRegistry::new();
         // Two kinds on this engine: capture_frame plus a `demo.tick`
         // Unit kind we'll bundle into the capture request.

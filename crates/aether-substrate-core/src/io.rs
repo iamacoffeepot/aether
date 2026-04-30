@@ -15,14 +15,13 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aether_kinds::{
-    Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
-};
-use aether_mail::{Kind, KindId};
-
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
 use crate::registry::SinkHandler;
+use aether_data::{Kind, KindId};
+use aether_kinds::{
+    Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
+};
 
 /// Result shape used throughout the adapter layer. The variants of
 /// `IoError` map directly onto ADR-0041 §1's reply enums, so the
@@ -771,7 +770,6 @@ mod tests {
 
     use crate::hub_client::HubOutbound;
     use aether_hub_protocol::{EngineToHub, SessionToken, Uuid};
-
     fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
         let adapter: Arc<dyn FileAdapter> =
             Arc::new(LocalFileAdapter::new(root.to_path_buf(), writable).unwrap());
@@ -803,7 +801,7 @@ mod tests {
         (mailer, rx)
     }
 
-    fn decode_reply<K: aether_mail::Kind + serde::de::DeserializeOwned>(
+    fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
         rx: &std::sync::mpsc::Receiver<EngineToHub>,
     ) -> K {
         // The test channel gets `EngineToHub::Mail` frames from

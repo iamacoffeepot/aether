@@ -22,8 +22,8 @@
 
 use std::sync::Arc;
 
+use aether_data::KindId;
 use aether_kinds::LogEvent;
-use aether_mail::KindId;
 
 use crate::mail::ReplyTo;
 use crate::registry::{Registry, SinkHandler};
@@ -85,7 +85,7 @@ pub fn register_log_sink(registry: &Registry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_mail::Kind;
+    use aether_data::Kind;
 
     #[test]
     fn log_event_kind_name_matches() {

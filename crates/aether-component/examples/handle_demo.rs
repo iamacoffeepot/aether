@@ -23,11 +23,11 @@
 //! `net::*`.
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers, resolve_sink};
+use aether_data::Ref;
 use aether_kinds::Tick;
-use aether_mail::Ref;
 
 #[derive(
-    aether_mail::Kind, aether_mail::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
 )]
 #[kind(name = "demo.handle.note")]
 pub struct Note {
@@ -36,7 +36,7 @@ pub struct Note {
 }
 
 #[derive(
-    aether_mail::Kind, aether_mail::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
 )]
 #[kind(name = "demo.handle.held_note")]
 pub struct HeldNote {

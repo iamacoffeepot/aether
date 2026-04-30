@@ -3,7 +3,7 @@
 //! section at const-eval time, matching the substrate/hub runtime
 //! decode via `postcard::from_bytes::<KindLabels>`.
 
-use crate::types::{KindLabels, LabelCell, LabelNode, VariantLabel};
+use crate::schema::{KindLabels, LabelCell, LabelNode, VariantLabel};
 
 use super::primitives::{
     cow_label_nodes, cow_str_as_str, cow_strs, cow_variant_labels, option_str_len, str_len,

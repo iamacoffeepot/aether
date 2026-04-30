@@ -12,7 +12,7 @@ edition.workspace = true
 [dependencies]
 aether-substrate-core = { path = "../aether-substrate-core" }
 aether-hub-protocol = { path = "../aether-hub-protocol" }
-aether-mail = { path = "../aether-mail" }
+aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 tracing = "0.1"
 wasmtime = "30"

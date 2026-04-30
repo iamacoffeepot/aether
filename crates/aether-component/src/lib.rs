@@ -64,8 +64,7 @@ extern crate alloc;
 
 use core::marker::PhantomData;
 
-use aether_mail::{Kind, Schema, mailbox_id_from_name};
-
+use aether_data::{Kind, Schema, mailbox_id_from_name};
 pub mod handle;
 pub mod io;
 pub mod log;
@@ -79,8 +78,7 @@ pub use handle::{Handle, SyncHandleError};
 /// typed handler method; `#[fallback]` on an optional catchall.
 /// Forwarded from `aether-mail-derive` so the full component
 /// vocabulary sits behind one `use aether_component::*` line.
-pub use aether_mail::{fallback, handler, handlers};
-
+pub use aether_data::{fallback, handler, handlers};
 /// Return code the `#[handlers]`-synthesized dispatcher sends back up
 /// through `receive_p32` when a `#[handler]` arm matched (or the
 /// `#[fallback]` ran, which by definition handles anything). Propagated
@@ -99,13 +97,13 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 /// crates that only pull in `aether-component`). Keeping the macro's
 /// emitted paths rooted at `::aether_component::__macro_internals`
 /// removes the "add aether-mail to your Cargo.toml" boilerplate that
-/// `::aether_mail::...` paths would otherwise force on every consumer.
+/// `::aether_data::...` paths would otherwise force on every consumer.
 ///
 /// Not part of the public API; the macro is the only intended caller.
 #[doc(hidden)]
 pub mod __macro_internals {
-    pub use aether_mail::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
-    pub use aether_mail::{Kind, Schema};
+    pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
+    pub use aether_data::{Kind, Schema};
 }
 
 /// Phantom-typed wrapper around a resolved kind id. A `KindId<Tick>`
@@ -367,7 +365,7 @@ impl InitCtx<'_> {
         use aether_kinds::SubscribeInput;
         let payload = SubscribeInput {
             kind: <K as Kind>::ID,
-            mailbox: ::aether_mail::MailboxId(self.mailbox),
+            mailbox: ::aether_data::MailboxId(self.mailbox),
         };
         resolve_sink::<SubscribeInput>("aether.control").send(&payload);
     }
@@ -1085,7 +1083,7 @@ mod tests {
     impl Kind for FakeKind {
         const NAME: &'static str = "test.fake";
         // Stable test sentinel — distinct from real schema-hashed kind ids.
-        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0001_0001);
+        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0001_0001);
     }
 
     #[test]
@@ -1146,7 +1144,7 @@ mod tests {
     impl Kind for FakePod {
         const NAME: &'static str = "test.fake_pod";
         // Stable test sentinel — distinct from real schema-hashed kind ids.
-        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0001_0002);
+        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0001_0002);
     }
 
     #[test]
@@ -1321,8 +1319,8 @@ mod tests {
     // so these tests exercise both arms via two fixture types.
 
     #[derive(
-        aether_mail::Kind,
-        aether_mail::Schema,
+        aether_data::Kind,
+        aether_data::Schema,
         serde::Serialize,
         serde::Deserialize,
         Debug,
@@ -1368,8 +1366,8 @@ mod tests {
             PartialEq,
             bytemuck::Pod,
             bytemuck::Zeroable,
-            aether_mail::Kind,
-            aether_mail::Schema,
+            aether_data::Kind,
+            aether_data::Schema,
         )]
         #[kind(name = "test.fake_cast_kind")]
         struct FakeCastKind {
@@ -1417,8 +1415,8 @@ mod tests {
             PartialEq,
             bytemuck::Pod,
             bytemuck::Zeroable,
-            aether_mail::Kind,
-            aether_mail::Schema,
+            aether_data::Kind,
+            aether_data::Schema,
         )]
         #[kind(name = "test.encode_cast")]
         struct EncodeCast {
@@ -1536,7 +1534,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     #[derive(
-        aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
     )]
     #[kind(name = "test.state.struct")]
     struct StateStruct {
@@ -1546,7 +1544,7 @@ mod tests {
     }
 
     #[derive(
-        aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
     )]
     #[kind(name = "test.state.other")]
     struct OtherState {

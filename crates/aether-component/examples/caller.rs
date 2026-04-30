@@ -11,8 +11,8 @@
 //! send-side mailbox name (data, not type).
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
+use aether_data::{Kind, Schema};
 use aether_kinds::Tick;
-use aether_mail::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]

@@ -36,7 +36,9 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub, KindDescriptor};
+use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
+
+use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::{
@@ -250,7 +252,7 @@ impl<'a> SubstrateBootBuilder<'a> {
             registry.register_sink(
                 HUB_CLAUDE_BROADCAST,
                 Arc::new(
-                    move |_kind: aether_mail::KindId,
+                    move |_kind: aether_data::KindId,
                           kind_name: &str,
                           origin: Option<&str>,
                           sender: crate::mail::ReplyTo,
@@ -292,13 +294,13 @@ impl<'a> SubstrateBootBuilder<'a> {
         registry.register_sink(
             AETHER_DIAGNOSTICS,
             Arc::new(
-                |_kind: aether_mail::KindId,
+                |_kind: aether_data::KindId,
                  kind_name: &str,
                  _origin: Option<&str>,
                  _sender,
                  bytes: &[u8],
                  _count: u32| {
-                    if kind_name == <aether_kinds::UnresolvedMail as aether_mail::Kind>::NAME
+                    if kind_name == <aether_kinds::UnresolvedMail as aether_data::Kind>::NAME
                         && let Ok(record) =
                             bytemuck::try_from_bytes::<aether_kinds::UnresolvedMail>(bytes)
                     {

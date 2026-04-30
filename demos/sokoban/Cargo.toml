@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 aether-component = { path = "../../crates/aether-component" }
 aether-camera = { path = "../../crates/aether-camera" }
 aether-kinds = { path = "../../crates/aether-kinds" }
-aether-mail = { path = "../../crates/aether-mail", features = ["derive"] }
+aether-data = { path = "../../crates/aether-data", features = ["derive"] }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
 
 # Integration tests boot a `TestBench`, load the demo's own wasm

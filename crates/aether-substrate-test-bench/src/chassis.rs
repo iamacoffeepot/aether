@@ -17,10 +17,10 @@
 
 use std::sync::Arc;
 
+use aether_data::{Kind, KindId};
 use aether_kinds::{
     Advance, AdvanceResult, CaptureFrame, PlatformInfo, SetWindowMode, SetWindowTitle,
 };
-use aether_mail::{Kind, KindId};
 use aether_substrate_core::{
     ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo,
     capture::{

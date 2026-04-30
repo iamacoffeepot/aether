@@ -13,8 +13,7 @@
 //! mirror it as a `pub const` here, and the substrate side stays in
 //! lockstep.
 
-use crate::{MailboxId, mailbox_id_from_name};
-
+use aether_data::{MailboxId, mailbox_id_from_name};
 /// ADR-0010 control plane mailbox. Every load / drop / replace /
 /// subscribe-input / unsubscribe-input lands here.
 pub const CONTROL: MailboxId = mailbox_id_from_name("aether.control");

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_data::{Kind, KindId, encode_empty};
 use aether_kinds::{FrameStats, Tick};
-use aether_mail::{Kind, KindId, encode_empty};
 use aether_substrate_core::{
     Chassis, ChassisCapabilities, InputSubscribers, Mailer, Scheduler, SubstrateBoot, frame_loop,
     mail::{Mail, MailboxId},

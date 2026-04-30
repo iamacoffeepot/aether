@@ -9,7 +9,7 @@
 //!
 //! `SendMail` consults `aether_kinds::descriptors::all()` to look up
 //! the kind by name, then encodes YAML params into wire bytes through
-//! `aether_params_codec::encode_schema` — the same path the hub uses
+//! `aether_codec::encode_schema` — the same path the hub uses
 //! for `mcp__aether-hub__send_mail`. Adding a new kind to the
 //! substrate makes it sendable from a scenario script automatically.
 

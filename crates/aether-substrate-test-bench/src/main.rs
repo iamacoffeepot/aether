@@ -21,8 +21,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use aether_data::{Kind, encode_empty};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, FrameStats, Tick};
-use aether_mail::{Kind, encode_empty};
 use aether_substrate_core::{
     Chassis, ChassisCapabilities, HubOutbound, InputSubscribers, Mailer, Scheduler, SubstrateBoot,
     capture::CaptureQueue,
@@ -60,8 +60,8 @@ struct TestBenchChassis {
     queue: Arc<Mailer>,
     input_subscribers: InputSubscribers,
     broadcast_mbox: MailboxId,
-    kind_tick: aether_mail::KindId,
-    kind_frame_stats: aether_mail::KindId,
+    kind_tick: aether_data::KindId,
+    kind_frame_stats: aether_data::KindId,
     gpu: Gpu,
     frame_vertices: Arc<Mutex<Vec<u8>>>,
     camera_state: Arc<Mutex<[f32; 16]>>,

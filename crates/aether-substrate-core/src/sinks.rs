@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use aether_data::KindId;
 use aether_kinds::DRAW_TRIANGLE_BYTES;
-use aether_mail::KindId;
 
 use crate::registry::SinkHandler;
 use crate::render::IDENTITY_VIEW_PROJ;

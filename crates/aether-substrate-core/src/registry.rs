@@ -14,10 +14,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-use aether_hub_protocol::canonical::{canonical_kind_bytes, kind_id_from_parts};
-use aether_hub_protocol::{KindDescriptor, SchemaType};
-
 use crate::mail::{KindId, MailboxId, ReplyTo};
+use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
+use aether_data::{KindDescriptor, SchemaType};
 
 /// Handler invoked when mail is delivered to a substrate-owned sink.
 /// Called on a scheduler worker thread; must be `Send + Sync`.
@@ -575,7 +574,7 @@ mod tests {
     }
 
     fn cast_struct_desc(name: &str) -> KindDescriptor {
-        use aether_hub_protocol::{NamedField, Primitive};
+        use aether_data::{NamedField, Primitive};
         KindDescriptor {
             name: name.to_string(),
             schema: SchemaType::Struct {
@@ -622,8 +621,7 @@ mod tests {
     /// duplicate boot-registered ones.
     #[test]
     fn register_kind_with_descriptor_accepts_nominal_only_differences() {
-        use aether_hub_protocol::{NamedField, Primitive};
-
+        use aether_data::{NamedField, Primitive};
         let r = Registry::new();
         let named_id = r
             .register_kind_with_descriptor(cast_struct_desc("aether.foo"))

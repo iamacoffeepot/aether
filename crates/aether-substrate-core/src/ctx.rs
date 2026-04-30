@@ -249,7 +249,7 @@ mod tests {
         );
 
         let unknown = MailboxId(0xDEADBEEF_u64);
-        let kind = aether_mail::KindId(0xABCD_u64);
+        let kind = aether_data::KindId(0xABCD_u64);
         ctx.send(unknown, kind, vec![1, 2, 3], 1);
 
         let frame = outbound_rx.try_recv().expect("bubble-up frame emitted");
@@ -288,7 +288,7 @@ mod tests {
 
         ctx.send(
             MailboxId(0xDEADBEEF_u64),
-            aether_mail::KindId(0xABCD),
+            aether_data::KindId(0xABCD),
             vec![],
             0,
         );
