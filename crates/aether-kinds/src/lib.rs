@@ -179,6 +179,14 @@ pub struct DrawTriangle {
     pub verts: [Vertex; 3],
 }
 
+/// Wire size of one `aether.draw_triangle` mail item: three vertices,
+/// each `f32 x,y,z + f32 r,g,b` (24 bytes) — 72 bytes total. Lives
+/// next to the type itself rather than chassis-side because it's a
+/// property of the wire shape, not a chassis policy choice. Render
+/// sinks across desktop and the test-bench import this to clamp
+/// payloads at whole-triangle multiples.
+pub const DRAW_TRIANGLE_BYTES: usize = core::mem::size_of::<DrawTriangle>();
+
 /// Camera state: column-major `view_proj` matrix (world → clip). The
 /// desktop chassis's `camera` sink writes the latest payload into the
 /// GPU uniform every frame; the WGSL vertex shader multiplies each

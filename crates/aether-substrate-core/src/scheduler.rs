@@ -203,6 +203,28 @@ impl ComponentEntry {
         self.state.load(Ordering::Acquire) == STATE_DEAD
     }
 
+    /// Test-only: bump the pending counter without going through
+    /// `send`, simulating a dispatcher that's seen mail but isn't
+    /// decrementing (the wedge condition the chassis frame loop's
+    /// drain budget is supposed to detect). Issue 427 added this to
+    /// drive the `frame_loop::drain_or_abort` wedge test from a
+    /// neighbouring module — without it, that test would have to
+    /// reach into the private `gate` field. The intra-module wedge
+    /// test in `scheduler::tests` still touches `self.gate.pending`
+    /// directly because it's in the same module.
+    #[cfg(test)]
+    pub fn bump_pending_for_test(&self) {
+        self.gate.pending.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Test-only complement to `bump_pending_for_test`: clear a
+    /// previously-bumped counter so test teardown doesn't trip the
+    /// dispatcher's drain assertions on shutdown.
+    #[cfg(test)]
+    pub fn clear_pending_for_test(&self) {
+        self.gate.pending.store(0, Ordering::Release);
+    }
+
     /// Forward `mail` to this component's inbox. Returns `false` if
     /// the inbox is closed OR the mailbox transitioned to Dead
     /// (issue 321 Phase 2; callers that want to differentiate use

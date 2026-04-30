@@ -22,18 +22,20 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
 use aether_kinds::{
-    Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, FrameStats, InputStream, Tick,
+    Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, DRAW_TRIANGLE_BYTES, FrameStats,
+    InputStream, Tick,
 };
-use aether_mail::{Kind, encode, encode_empty, encode_struct, mailbox_id_from_name};
-// `encode` is used for FrameStats (cast-shape); `encode_struct` is
-// used for control kinds (postcard-shape).
+use aether_mail::{Kind, encode_empty, encode_struct, mailbox_id_from_name};
+// `encode_struct` is used for control kinds (postcard-shape); the
+// FrameStats cast-encode lives in `frame_loop::emit_frame_stats`.
 use aether_substrate_core::{
     HubOutbound, InputSubscribers, Mailer, ReplyTarget, ReplyTo, SubstrateBoot,
     capture::CaptureQueue,
+    frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -42,10 +44,10 @@ use crate::chassis;
 use crate::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use crate::render::{Gpu, IDENTITY_VIEW_PROJ, VERTEX_BUFFER_BYTES};
 
+/// Wire-stable `EngineInfo.workers` (ADR-0038 retained for hub-
+/// protocol compatibility). Stays bench-side; not loop policy. Same
+/// rationale as the chassis binaries.
 const WORKERS: usize = 2;
-const LOG_EVERY_FRAMES: u64 = 120;
-const DRAW_TRIANGLE_BYTES: usize = 72;
-const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
 /// Default offscreen target dimensions when the caller picks
 /// `start()` (no explicit size). 800x600 matches the scenario harness
@@ -432,8 +434,13 @@ impl TestBench {
             // Settle the queue. The control mail we pushed flows
             // through the dispatcher → control plane → chassis
             // handler, which produces an event on `events_rx` for
-            // Advance/CaptureRequested kinds.
-            self.queue.drain_all_with_budget(DRAIN_BUDGET);
+            // Advance/CaptureRequested kinds. We reuse the shared
+            // `DRAIN_BUDGET` here without going through
+            // `drain_or_abort` because this is the in-process pump,
+            // not a chassis frame: a wedge in a TestBench-driven
+            // scenario should surface as a `Timeout` test failure,
+            // not a `process::exit`.
+            self.queue.drain_all_with_budget(frame_loop::DRAIN_BUDGET);
 
             // Drain any pending chassis events. Each invocation
             // potentially produces a reply on `outbound`.
@@ -525,32 +532,8 @@ impl TestBench {
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
             }
         }
-        let summary = self.queue.drain_all_with_budget(DRAIN_BUDGET);
-        if let Some((mailbox, waited)) = summary.wedged {
-            aether_substrate_core::lifecycle::fatal_abort(
-                &self.outbound,
-                format!("dispatcher wedged: mailbox={mailbox} waited={waited:?}"),
-            );
-        }
-        if let Some(first) = summary.deaths.first() {
-            for d in &summary.deaths {
-                tracing::error!(
-                    target: "aether_substrate::lifecycle",
-                    mailbox = %d.mailbox,
-                    mailbox_name = %d.mailbox_name,
-                    last_kind = %d.last_kind,
-                    reason = %d.reason,
-                    "component died; substrate aborting (ADR-0063)",
-                );
-            }
-            aether_substrate_core::lifecycle::fatal_abort(
-                &self.outbound,
-                format!(
-                    "component died: {} (kind {}) — {}",
-                    first.mailbox_name, first.last_kind, first.reason,
-                ),
-            );
-        }
+        // Issue 427: shared frame-loop policy.
+        frame_loop::drain_or_abort(&self.queue, &self.outbound);
 
         let verts = std::mem::replace(
             &mut *self.frame_vertices.lock().unwrap(),
@@ -574,18 +557,17 @@ impl TestBench {
             }
         }
 
-        if self.frame.is_multiple_of(LOG_EVERY_FRAMES) {
+        if self.frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
             let triangles = self.triangles_rendered.load(Ordering::Relaxed);
-            let stats = FrameStats {
-                frame: self.frame,
-                triangles,
-            };
-            self.queue.push(Mail::new(
+            // Issue 427: helper-internal cadence + emission.
+            frame_loop::emit_frame_stats(
+                &self.queue,
+                self.broadcast_mbox,
                 self.broadcast_mbox,
                 self.kind_frame_stats,
-                encode(&stats),
-                1,
-            ));
+                self.frame,
+                triangles,
+            );
             let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             tracing::info!(
                 target: "aether_substrate::frame_loop",
