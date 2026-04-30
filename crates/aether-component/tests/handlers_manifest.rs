@@ -101,11 +101,11 @@ fn manifest_const_round_trips_to_expected_records() {
                 handler_count += 1;
                 match name.as_ref() {
                     "test.tick" => {
-                        assert_eq!(*id, <Tick as Kind>::ID.0);
+                        assert_eq!(*id, <Tick as Kind>::ID);
                         tick_doc = doc.as_ref().map(|c| c.to_string());
                     }
                     "test.ping" => {
-                        assert_eq!(*id, <Ping as Kind>::ID.0);
+                        assert_eq!(*id, <Ping as Kind>::ID);
                     }
                     other => panic!("unexpected handler name: {other}"),
                 }

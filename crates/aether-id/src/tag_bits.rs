@@ -1,12 +1,5 @@
 //! ADR-0064 bit-layout constants for tagged opaque ids.
 //!
-//! Lives here rather than in `aether-mail` because
-//! `aether-hub-protocol::canonical::schema::kind_id_from_parts`
-//! needs to OR the kind tag in at runtime, and the dep direction is
-//! `aether-mail → aether-hub-protocol`. `aether-mail::tagged_id`
-//! re-exports these and layers the `Tag` enum + base32 string
-//! encoding on top.
-//!
 //! `[tag: 4 bits | hash: 60 bits]`. The tag identifies the id space
 //! (mailbox / kind / handle); the hash is the low 60 bits of an
 //! FNV-1a output (mailbox, kind) or a counter (handle). `0x0` is

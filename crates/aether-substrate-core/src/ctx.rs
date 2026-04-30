@@ -255,11 +255,11 @@ mod tests {
         let frame = outbound_rx.try_recv().expect("bubble-up frame emitted");
         match frame {
             EngineToHub::MailToHubSubstrate(f) => {
-                assert_eq!(f.recipient_mailbox_id, unknown.0);
-                assert_eq!(f.kind_id, kind.0);
+                assert_eq!(f.recipient_mailbox_id, unknown);
+                assert_eq!(f.kind_id, kind);
                 assert_eq!(f.payload, vec![1, 2, 3]);
                 assert_eq!(f.count, 1);
-                assert_eq!(f.source_mailbox_id, Some(sender.0));
+                assert_eq!(f.source_mailbox_id, Some(sender));
             }
             other => panic!("expected MailToHubSubstrate, got {other:?}"),
         }

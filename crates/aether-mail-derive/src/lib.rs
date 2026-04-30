@@ -183,10 +183,9 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // `&#labels_ident` see a stable `'static` reference.
         static #labels_ident: ::aether_mail::__derive_runtime::KindLabels =
             ::aether_mail::__derive_runtime::KindLabels {
-                // KindLabels.kind_id is wire-format `u64`; `Kind::ID` is
-                // typed `KindId` (issue 466) so we drop into the raw
-                // hash for the wire bytes.
-                kind_id: <#name as ::aether_mail::Kind>::ID.0,
+                // Issue 469: `KindLabels.kind_id` is now typed
+                // `KindId` (matches `Kind::ID`); pass through directly.
+                kind_id: <#name as ::aether_mail::Kind>::ID,
                 kind_label: ::aether_mail::__derive_runtime::Cow::Borrowed(
                     ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
                 ),
@@ -1291,9 +1290,9 @@ fn build_kinds_section_retention_statics(self_ty: &Type, handlers: &[HandlerFn])
             // Schema impls).
             static #labels_static_ident: ::aether_component::__macro_internals::KindLabels =
                 ::aether_component::__macro_internals::KindLabels {
-                    // KindLabels.kind_id is wire-format `u64`; drop into
-                    // `.0` from the typed `Kind::ID` (issue 466).
-                    kind_id: <#k as ::aether_component::__macro_internals::Kind>::ID.0,
+                    // Issue 469: `KindLabels.kind_id` is typed
+                    // `KindId` end-to-end; pass through directly.
+                    kind_id: <#k as ::aether_component::__macro_internals::Kind>::ID,
                     kind_label: ::aether_component::__macro_internals::Cow::Borrowed(
                         match <#k as ::aether_component::__macro_internals::Schema>::LABEL {
                             ::core::option::Option::Some(s) => s,

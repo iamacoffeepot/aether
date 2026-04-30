@@ -242,7 +242,7 @@ fn variant_to_shape(v: &EnumVariant) -> crate::types::VariantShape {
 /// other way around).
 pub(crate) const KIND_DOMAIN: &[u8] = b"kind:";
 
-use crate::tag_bits::{HASH_MASK, TAG_KIND, TAG_SHIFT};
+use aether_id::tag_bits::{HASH_MASK, TAG_KIND, TAG_SHIFT};
 
 /// Derive a `Kind::ID` from a `(name, schema)` pair at runtime. Matches
 /// the `#[derive(Kind)]` compile-time emission byte-for-byte:

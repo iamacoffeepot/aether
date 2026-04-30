@@ -18,7 +18,7 @@
 use alloc::string::String;
 use core::fmt;
 
-pub use aether_hub_protocol::tag_bits::{HASH_MASK, TAG_HANDLE, TAG_KIND, TAG_MAILBOX, TAG_SHIFT};
+pub use crate::tag_bits::{HASH_MASK, TAG_HANDLE, TAG_KIND, TAG_MAILBOX, TAG_SHIFT};
 
 /// Type tag identifying an id space. Encoded in the high 4 bits of
 /// every tagged id. `0x0` is reserved as an invalid sentinel — a
@@ -129,11 +129,6 @@ pub fn encode(id: u64) -> Option<String> {
     let body = body_of(id);
     let mut out = String::with_capacity(3 + 1 + 12 + 2);
     out.push_str(tag.prefix());
-    // Emit 12 base32 chars (60 bits / 5 bits per char), grouped
-    // into three 4-char chunks separated by `-`. The shift starts
-    // at bit 55 (the most significant of the 60 hash bits) and
-    // counts down by 5 each char so the leftmost chars carry the
-    // most significant bits — same convention as hex.
     for i in 0..12 {
         if i % 4 == 0 {
             out.push('-');
@@ -148,7 +143,6 @@ pub fn encode(id: u64) -> Option<String> {
 /// Decode a tagged-id string back to its `u64` form, or fail with a
 /// typed error. Case-insensitive.
 pub fn decode(s: &str) -> Result<u64, DecodeError> {
-    // Total length: 3 (prefix) + 1 (dash) + 4 + 1 + 4 + 1 + 4 = 18.
     if s.len() != 18 {
         return Err(DecodeError::Malformed);
     }
@@ -225,8 +219,6 @@ mod tests {
 
     #[test]
     fn alphabet_excludes_digit_lookalikes() {
-        // Body of all-1s should produce all `7`s (the highest base32
-        // char), exercising the high end of the alphabet.
         let id = with_tag(Tag::Kind, HASH_MASK);
         let s = encode(id).unwrap();
         assert_eq!(s, "knd-7777-7777-7777");
@@ -238,11 +230,7 @@ mod tests {
 
     #[test]
     fn decode_rejects_zero_tag() {
-        // 0x0 in the high nibble is reserved invalid. `encode(0u64)`
-        // should refuse rather than emit a string that decodes to a
-        // bogus id.
         assert!(encode(0u64).is_none());
-        // Hand-crafted "rsv-" prefix isn't in the table → Malformed.
         assert_eq!(decode("rsv-aaaa-aaaa-aaaa"), Err(DecodeError::Malformed));
     }
 
@@ -254,8 +242,6 @@ mod tests {
 
     #[test]
     fn decode_rejects_invalid_chars() {
-        // `0` and `1` are not in the base32 alphabet (they're the
-        // ones we deliberately skipped).
         assert_eq!(
             decode("mbx-0aaa-aaaa-aaaa"),
             Err(DecodeError::InvalidChar('0'))
@@ -290,10 +276,6 @@ mod tests {
 
     #[test]
     fn body_drops_high_bits() {
-        // Caller passes a "raw" hash with high bits set; with_tag
-        // masks them off before OR-ing the tag in. Critical that
-        // the natural FNV-1a high bits don't leak past the boundary
-        // and corrupt the tag.
         let id = with_tag(Tag::Mailbox, 0xFFFF_FFFF_FFFF_FFFF);
         assert_eq!(tag_of(id), Some(Tag::Mailbox));
         assert_eq!(body_of(id), HASH_MASK);

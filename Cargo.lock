@@ -128,9 +128,18 @@ dependencies = [
 name = "aether-hub-protocol"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-id",
  "postcard",
  "serde",
  "uuid",
+]
+
+[[package]]
+name = "aether-id"
+version = "0.2.0-alpha"
+dependencies = [
+ "bytemuck",
+ "serde",
 ]
 
 [[package]]
@@ -150,6 +159,7 @@ name = "aether-mail"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-hub-protocol",
+ "aether-id",
  "aether-mail-derive",
  "bytemuck",
  "inventory",

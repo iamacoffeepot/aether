@@ -107,12 +107,12 @@ pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
         }
     }
 
-    let labels_by_id: HashMap<u64, KindLabels> =
+    let labels_by_id: HashMap<aether_mail::KindId, KindLabels> =
         labels_list.into_iter().map(|l| (l.kind_id, l)).collect();
 
     let mut descriptors = Vec::with_capacity(kinds.len());
     for (shape, is_stream) in kinds {
-        let id = kind_id_from_shape(&shape);
+        let id = aether_mail::KindId(kind_id_from_shape(&shape));
         let label = labels_by_id.get(&id);
         descriptors.push(merge(shape, label, is_stream));
     }
@@ -190,7 +190,7 @@ pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, Stri
         match record {
             InputsRecord::Handler { id, name, doc } => {
                 caps.handlers.push(HandlerCapability {
-                    id: aether_mail::KindId(id),
+                    id,
                     name: name.into_owned(),
                     doc: doc.map(|d| d.into_owned()),
                 });
@@ -510,7 +510,7 @@ mod tests {
     /// merge finds it. Matches what the Kind derive emits into
     /// `aether.kinds.labels` (v0x03 adds `kind_id`).
     fn push_labels(labels_bytes: &mut Vec<u8>, shape: &KindShape, labels: &mut KindLabels) {
-        labels.kind_id = kind_id_from_shape(shape);
+        labels.kind_id = aether_mail::KindId(kind_id_from_shape(shape));
         labels_bytes.push(0x03);
         labels_bytes.extend(postcard::to_allocvec(labels).unwrap());
     }
@@ -525,7 +525,7 @@ mod tests {
             },
         };
         let mut labels = KindLabels {
-            kind_id: 0,
+            kind_id: aether_mail::KindId(0),
             kind_label: Cow::Borrowed("my_crate::TestKind"),
             root: LabelNode::Struct {
                 type_label: Some(Cow::Borrowed("my_crate::TestKind")),
@@ -565,12 +565,12 @@ mod tests {
             },
         ];
         let mut labels_a = KindLabels {
-            kind_id: 0,
+            kind_id: aether_mail::KindId(0),
             kind_label: Cow::Borrowed("my::A"),
             root: LabelNode::Anonymous,
         };
         let mut labels_b = KindLabels {
-            kind_id: 0,
+            kind_id: aether_mail::KindId(0),
             kind_label: Cow::Borrowed("my::B"),
             root: LabelNode::Anonymous,
         };
@@ -661,7 +661,7 @@ mod tests {
             },
         };
         let mut labels = KindLabels {
-            kind_id: 0,
+            kind_id: aether_mail::KindId(0),
             kind_label: Cow::Borrowed("my::Dup"),
             root: LabelNode::Struct {
                 type_label: Some(Cow::Borrowed("my::Dup")),
@@ -702,7 +702,7 @@ mod tests {
         };
         let mut orphan = KindLabels {
             // Deliberately a id that won't match `shape`.
-            kind_id: 0xDEADBEEF_DEADBEEF,
+            kind_id: aether_mail::KindId(0xDEADBEEF_DEADBEEF),
             kind_label: Cow::Borrowed("my::Missing"),
             root: LabelNode::Anonymous,
         };
@@ -768,7 +768,7 @@ mod tests {
             },
         };
         let mut labels = KindLabels {
-            kind_id: 0,
+            kind_id: aether_mail::KindId(0),
             kind_label: Cow::Borrowed("my::Outcome"),
             root: LabelNode::Enum {
                 type_label: Some(Cow::Borrowed("my::Outcome")),
@@ -844,7 +844,7 @@ mod tests {
         // Array's child goes through a LabelCell::Owned because we
         // build it at runtime here. Derive-time would use Static.
         let mut labels = KindLabels {
-            kind_id: 0,
+            kind_id: aether_mail::KindId(0),
             kind_label: Cow::Borrowed("my::Triangle"),
             root: LabelNode::Struct {
                 type_label: Some(Cow::Borrowed("my::Triangle")),
@@ -898,12 +898,12 @@ mod tests {
                 doc: "Draws triangles on tick.".into(),
             },
             InputsRecord::Handler {
-                id: 42,
+                id: aether_mail::KindId(42),
                 name: "aether.tick".into(),
                 doc: Some("substrate drives this".into()),
             },
             InputsRecord::Handler {
-                id: 0xff,
+                id: aether_mail::KindId(0xff),
                 name: "aether.ping".into(),
                 doc: None,
             },

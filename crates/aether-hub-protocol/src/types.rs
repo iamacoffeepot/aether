@@ -7,6 +7,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use aether_id::{KindId, MailboxId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
@@ -787,7 +788,7 @@ impl<'de> Deserialize<'de> for VariantLabel {
 /// in any order and the reader will rejoin them correctly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KindLabels {
-    pub kind_id: u64,
+    pub kind_id: KindId,
     pub kind_label: Cow<'static, str>,
     pub root: LabelNode,
 }
@@ -804,7 +805,7 @@ pub struct KindLabels {
 pub enum InputsRecord {
     /// A `#[handler]` method's advertised capability.
     Handler {
-        id: u64,
+        id: KindId,
         name: Cow<'static, str>,
         doc: Option<Cow<'static, str>>,
     },
@@ -941,11 +942,11 @@ pub enum LogLevel {
 /// component.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineMailToHubSubstrateFrame {
-    pub recipient_mailbox_id: u64,
-    pub kind_id: u64,
+    pub recipient_mailbox_id: MailboxId,
+    pub kind_id: KindId,
     pub payload: Vec<u8>,
     pub count: u32,
-    pub source_mailbox_id: Option<u64>,
+    pub source_mailbox_id: Option<MailboxId>,
     /// ADR-0042 correlation id the originating component's
     /// `SubstrateCtx::send` minted. Carried across the hub so a
     /// bubbled-up mail's reply (ADR-0037 Phase 2) can echo back
@@ -964,8 +965,8 @@ pub struct EngineMailToHubSubstrateFrame {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailToEngineMailboxFrame {
     pub target_engine_id: EngineId,
-    pub target_mailbox_id: u64,
-    pub kind_id: u64,
+    pub target_mailbox_id: MailboxId,
+    pub kind_id: KindId,
     pub payload: Vec<u8>,
     pub count: u32,
     /// ADR-0042 correlation echo. Set by the reply-emitting engine
@@ -984,8 +985,8 @@ pub struct MailToEngineMailboxFrame {
 /// `Mailer`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailByIdFrame {
-    pub recipient_mailbox_id: u64,
-    pub kind_id: u64,
+    pub recipient_mailbox_id: MailboxId,
+    pub kind_id: KindId,
     pub payload: Vec<u8>,
     pub count: u32,
     /// ADR-0042 correlation echo. Carries through from

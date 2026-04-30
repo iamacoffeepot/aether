@@ -14,6 +14,12 @@ default = ["std"]
 std = []
 
 [dependencies]
+# `aether-id` is a leaf crate (ADR-0064 / ADR-0065 typed-id newtypes
+# + tag-bit constants + FNV helpers). Living below `aether-mail`
+# lets the wire structs in this crate type their mailbox / kind /
+# handle fields without the `aether-mail → aether-hub-protocol`
+# dep cycle.
+aether-id = { path = "../aether-id" }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 uuid = { version = "1", default-features = false, features = ["serde"] }

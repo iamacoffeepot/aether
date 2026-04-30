@@ -329,7 +329,7 @@ fn load_component_registers_kinds_from_embedded_manifest() {
         },
     };
     let labels = aether_hub_protocol::KindLabels {
-        kind_id: aether_hub_protocol::canonical::kind_id_from_shape(&shape),
+        kind_id: aether_mail::KindId(aether_hub_protocol::canonical::kind_id_from_shape(&shape)),
         kind_label: std::borrow::Cow::Borrowed("demo::EmbeddedKind"),
         root: aether_hub_protocol::LabelNode::Struct {
             type_label: Some(std::borrow::Cow::Borrowed("demo::EmbeddedKind")),
@@ -412,7 +412,7 @@ fn load_component_with_same_name_different_schema_registers_distinct_kind() {
         schema: aether_hub_protocol::SchemaShape::Scalar(Primitive::U64),
     };
     let labels = aether_hub_protocol::KindLabels {
-        kind_id: aether_hub_protocol::canonical::kind_id_from_shape(&shape),
+        kind_id: aether_mail::KindId(aether_hub_protocol::canonical::kind_id_from_shape(&shape)),
         kind_label: std::borrow::Cow::Borrowed("demo::Conflict"),
         root: aether_hub_protocol::LabelNode::Anonymous,
     };

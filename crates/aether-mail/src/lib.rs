@@ -21,11 +21,20 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-pub mod ids;
 pub mod mailboxes;
-pub mod tagged_id;
-pub use ids::{HandleId, KindId, MailboxId, tag_for_type_id, type_name_for_type_id};
-pub use tagged_id::{Tag, with_tag};
+
+// Typed-id newtypes (ADR-0064 / ADR-0065) live in the `aether-id`
+// leaf crate so `aether-hub-protocol` can type its wire fields
+// without the `aether-mail → aether-hub-protocol` dep cycle. The
+// `Schema` and `CastEligible` impls for these types stay here
+// (orphan rules — those traits are owned by `aether-mail`). Module
+// re-exports preserve the historical `aether_mail::tagged_id::encode`
+// and `aether_mail::ids::MailboxId` call paths.
+pub use aether_id::{
+    HandleId, KIND_DOMAIN, KindId, MAILBOX_DOMAIN, MailboxId, TYPE_DOMAIN, Tag, fnv1a_64_bytes,
+    fnv1a_64_prefixed, hash, ids, mailbox_id_from_name, tag_bits, tag_for_type_id, tagged_id,
+    type_name_for_type_id, with_tag,
+};
 
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
 /// `"aether.tick"`, `"hello.npc_health"`) and a `u64` id derived from
@@ -118,6 +127,21 @@ macro_rules! cast_eligible_primitive {
 
 cast_eligible_primitive!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, bool);
 
+// Typed-id newtypes are `#[repr(transparent)]` over `u64`, so a
+// cast-shape struct field typed `MailboxId` / `KindId` / `HandleId`
+// is wire-identical to a `u64` field. The trait lives here, the
+// types live in `aether-id` — orphan rules let us write the impl
+// in `aether-mail`.
+impl CastEligible for MailboxId {
+    const ELIGIBLE: bool = true;
+}
+impl CastEligible for KindId {
+    const ELIGIBLE: bool = true;
+}
+impl CastEligible for HandleId {
+    const ELIGIBLE: bool = true;
+}
+
 impl<T: CastEligible, const N: usize> CastEligible for [T; N] {
     const ELIGIBLE: bool = T::ELIGIBLE;
 }
@@ -146,87 +170,6 @@ impl<K> CastEligible for Ref<K> {
 // parent struct from `repr_c`, same as `Vec`/`String`/`Option`.
 impl<K, V> CastEligible for alloc::collections::BTreeMap<K, V> {
     const ELIGIBLE: bool = false;
-}
-
-/// Deterministic 64-bit hash of a mailbox name (ADR-0029). Both the
-/// substrate registry and the guest SDK compute mailbox ids from names
-/// this way, which is how ids end up meaningful across processes and
-/// sessions without needing a host-fn resolve.
-///
-/// FNV-1a 64 is chosen for: (a) no dependencies — the algorithm is
-/// ~8 lines; (b) determinism across builds, platforms, and rust
-/// versions, without having to pin a third-party hasher; (c) the
-/// distribution is more than good enough at mailbox cardinality.
-/// At 64 bits the birthday bound is far past realistic mailbox
-/// counts — see ADR-0029 "Consequences" for the table.
-///
-/// The returned `MailboxId` is a `#[repr(transparent)]` newtype
-/// over `u64`; guests that need the raw scalar for FFI (`send_mail`'s
-/// `recipient`) call `.0`. `0` is reserved as the no-sender sentinel —
-/// callers should reject on the astronomical chance of a collision
-/// with it.
-///
-/// ADR-0064: the high 4 bits carry the `Tag::Mailbox` discriminator;
-/// the low 60 bits are the FNV-1a output masked by `HASH_MASK`. The
-/// `MAILBOX_DOMAIN` byte prefix still rides on the FNV input — the
-/// type ends up encoded twice (in the tag bits and avalanched into
-/// the hash via the domain prefix), and the two layers cross-check
-/// each other.
-pub const fn mailbox_id_from_name(name: &str) -> MailboxId {
-    MailboxId(with_tag(
-        Tag::Mailbox,
-        fnv1a_64_prefixed(MAILBOX_DOMAIN, name.as_bytes()),
-    ))
-}
-
-/// Domain tag prefixed to every mailbox-name hash so the `MailboxId`
-/// space is disjoint from `Kind::ID`. Both ids are 64-bit FNV-1a
-/// outputs; without a prefix the spaces overlap and a future bug that
-/// feeds a mailbox id into a kind-id slot (or vice versa) would
-/// misattribute silently. Prefixing makes the mis-attribution
-/// statistically impossible rather than relying on positional
-/// discipline at every call site.
-pub const MAILBOX_DOMAIN: &[u8] = b"mailbox:";
-
-/// Domain tag prefixed to every kind-id hash. See `MAILBOX_DOMAIN` for
-/// the rationale; the derive macro and `kind_id_from_parts` both
-/// prepend this before the canonical schema bytes.
-pub const KIND_DOMAIN: &[u8] = b"kind:";
-
-/// ADR-0065: domain prefix for type-id hashes. Hashed input is
-/// `TYPE_DOMAIN ++ canonical_type_name.as_bytes()` (e.g.
-/// `"type:aether.mailbox_id"`). Disjoint from mailbox / kind domains
-/// so a typed-id `TYPE_ID` cannot alias either space.
-pub const TYPE_DOMAIN: &[u8] = b"type:";
-
-/// FNV-1a 64 over a byte slice (ADR-0032). Retained for the few
-/// call sites that hash neither a mailbox name nor a kind schema.
-/// New callers should prefer `fnv1a_64_prefixed` with an explicit
-/// domain so the output id space doesn't collide with an existing
-/// domain by accident.
-pub const fn fnv1a_64_bytes(bytes: &[u8]) -> u64 {
-    fnv1a_64_prefixed(&[], bytes)
-}
-
-/// FNV-1a 64 over `prefix ++ payload` without allocating. Equivalent
-/// to `fnv1a_64_bytes(&[prefix, payload].concat())` but `const`-safe.
-/// Used by `mailbox_id_from_name` (prefix `MAILBOX_DOMAIN`) and by
-/// `#[derive(Kind)]` through the macro (prefix `KIND_DOMAIN`).
-pub const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    let mut i = 0;
-    while i < prefix.len() {
-        hash ^= prefix[i] as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-        i += 1;
-    }
-    let mut i = 0;
-    while i < payload.len() {
-        hash ^= payload[i] as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-        i += 1;
-    }
-    hash
 }
 
 /// ADR-0045 typed handle reference — wire form for fields that
@@ -520,6 +463,28 @@ mod schema {
         };
         const LABEL: Option<&'static str> = None;
         const LABEL_NODE: LabelNode = LabelNode::Array(LabelCell::Static(&T::LABEL_NODE));
+    }
+
+    // ADR-0064 / ADR-0065 typed-id newtypes. Bodies live in the
+    // `aether-id` leaf crate (so `aether-hub-protocol` can type its
+    // wire fields without a dep cycle); the `Schema` trait is owned
+    // here, so the impls also live here.
+    impl Schema for aether_id::MailboxId {
+        const SCHEMA: SchemaType = SchemaType::TypeId(aether_id::MailboxId::TYPE_ID);
+        const LABEL: Option<&'static str> = Some(aether_id::MailboxId::TYPE_NAME);
+        const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+    }
+
+    impl Schema for aether_id::KindId {
+        const SCHEMA: SchemaType = SchemaType::TypeId(aether_id::KindId::TYPE_ID);
+        const LABEL: Option<&'static str> = Some(aether_id::KindId::TYPE_NAME);
+        const LABEL_NODE: LabelNode = LabelNode::Anonymous;
+    }
+
+    impl Schema for aether_id::HandleId {
+        const SCHEMA: SchemaType = SchemaType::TypeId(aether_id::HandleId::TYPE_ID);
+        const LABEL: Option<&'static str> = Some(aether_id::HandleId::TYPE_NAME);
+        const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
     // ADR-0045 typed handle reference. `Ref<K>` exposes both the
