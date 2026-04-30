@@ -14,7 +14,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 
-use aether_mail::KindId;
+use aether_data::KindId;
 
 use crate::mail::MailboxId;
 

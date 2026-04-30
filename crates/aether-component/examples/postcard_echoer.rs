@@ -14,7 +14,7 @@
 //! `demo.postcard_request` to verify the dispatch.
 
 use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
-use aether_mail::{Kind, Schema};
+use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 

@@ -12,11 +12,9 @@ quote = "1"
 syn = { version = "2", features = ["full"] }
 
 [dev-dependencies]
-# Tests need the runtime traits and the macro re-exports. ADR-0032
-# dropped the `descriptors` feature — hub-protocol types are always
-# available now.
-aether-mail = { path = "../aether-mail", features = ["derive"] }
-aether-hub-protocol = { path = "../aether-hub-protocol" }
+# ADR-0069: tests need the runtime traits + schema vocab + macro
+# re-exports, all of which live in `aether-data`.
+aether-data = { path = "../aether-data", features = ["derive"] }
 # ADR-0033 wire-shape autodetect: the Kind derive emits
 # `decode_from_bytes` bodies that bound on either `bytemuck::AnyBitPattern`
 # (cast arm) or `serde::de::DeserializeOwned` (postcard arm). Test

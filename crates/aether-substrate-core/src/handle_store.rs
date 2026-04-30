@@ -30,10 +30,9 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
 
-use aether_hub_protocol::{EnumVariant, Primitive, SchemaType};
-use aether_mail::{HandleId, KindId};
-
 use crate::mail::Mail;
+use aether_data::{EnumVariant, Primitive, SchemaType};
+use aether_data::{HandleId, KindId};
 
 /// Default byte cap for the handle store.
 pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
@@ -180,7 +179,7 @@ impl HandleStore {
         if inner.next_ephemeral == 0 {
             inner.next_ephemeral = 1;
         }
-        HandleId(aether_mail::with_tag(aether_mail::Tag::Handle, counter))
+        HandleId(aether_data::with_tag(aether_data::Tag::Handle, counter))
     }
 
     /// Insert (or update) a handle. The same `(id, kind)` pair can
@@ -696,10 +695,9 @@ fn skip_primitive_postcard(state: &mut State<'_>, p: Primitive) -> Result<(), Wa
 mod tests {
     use std::sync::Arc;
 
-    use aether_hub_protocol::{NamedField, SchemaCell};
-    use aether_mail::{Kind, Ref};
-
     use crate::mail::{Mail, MailboxId};
+    use aether_data::{Kind, Ref};
+    use aether_data::{NamedField, SchemaCell};
 
     use super::*;
 
@@ -774,11 +772,11 @@ mod tests {
         // ADR-0064: counter occupies the low 60 bits; the high 4
         // bits carry `Tag::Handle`. Strip the tag to assert on the
         // raw counter value.
-        assert_eq!(aether_mail::tagged_id::body_of(a.0), 1);
-        assert_eq!(aether_mail::tagged_id::body_of(b.0), 2);
+        assert_eq!(aether_data::tagged_id::body_of(a.0), 1);
+        assert_eq!(aether_data::tagged_id::body_of(b.0), 2);
         assert_eq!(
-            aether_mail::tagged_id::tag_of(a.0),
-            Some(aether_mail::Tag::Handle)
+            aether_data::tagged_id::tag_of(a.0),
+            Some(aether_data::Tag::Handle)
         );
         assert_ne!(a, HandleId(0));
     }
@@ -890,7 +888,7 @@ mod tests {
     impl Kind for Note {
         const NAME: &'static str = "test.note";
         // Stable test sentinel — distinct from real schema-hashed kind ids.
-        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0002_0001);
+        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0002_0001);
     }
 
     fn note_schema() -> SchemaType {

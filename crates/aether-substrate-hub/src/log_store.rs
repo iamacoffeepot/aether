@@ -13,7 +13,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use aether_hub_protocol::{EngineId, LogEntry, LogLevel};
-
 /// Default cap on entries per engine. Quoted in ADR-0023.
 pub const DEFAULT_RING_ENTRIES: usize = 2_000;
 /// Default cap on bytes per engine (variable-length parts only).

@@ -16,15 +16,13 @@
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
-use aether_hub_protocol::{EngineMailToHubSubstrateFrame, EngineToHub};
-
-use aether_mail::{HandleId, KindId};
-
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::hub_client::HubOutbound;
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use crate::registry::{MailboxEntry, Registry};
 use crate::scheduler::ComponentTable;
+use aether_data::{HandleId, KindId};
+use aether_hub_protocol::{EngineMailToHubSubstrateFrame, EngineToHub};
 
 pub struct Mailer {
     /// Registry handle for resolving recipients on `push`. Wired once
@@ -168,7 +166,7 @@ impl Mailer {
     /// pointing at a sink that can't itself receive mail.
     pub fn send_reply<K>(&self, sender: ReplyTo, result: &K) -> bool
     where
-        K: aether_mail::Kind + serde::Serialize,
+        K: aether_data::Kind + serde::Serialize,
     {
         match sender.target {
             ReplyTarget::None => false,
@@ -402,13 +400,12 @@ mod tests {
     use std::sync::RwLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use aether_hub_protocol::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
-    use aether_mail::{Kind, Ref};
-
     use super::*;
     use crate::handle_store::HandleStore;
     use crate::mail::MailboxId;
     use crate::registry::SinkHandler;
+    use aether_data::{Kind, Ref};
+    use aether_data::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
 
     /// ADR-0037 Phase 1: a live outbound + unknown mailbox id
     /// forwards `MailToHubSubstrate` upstream instead of
@@ -471,7 +468,7 @@ mod tests {
     impl Kind for Note {
         const NAME: &'static str = "test.mailer_note";
         // Stable test sentinel — distinct from real schema-hashed kind ids.
-        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0003_0001);
+        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0003_0001);
     }
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
@@ -482,7 +479,7 @@ mod tests {
     impl Kind for HeldNote {
         const NAME: &'static str = "test.mailer_held_note";
         // Stable test sentinel — distinct from real schema-hashed kind ids.
-        const ID: ::aether_mail::KindId = ::aether_mail::KindId(0xDEAD_BEEF_0003_0002);
+        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0003_0002);
     }
 
     fn note_schema() -> SchemaType {

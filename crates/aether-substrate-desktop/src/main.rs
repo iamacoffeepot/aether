@@ -19,14 +19,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use aether_data::Kind;
+use aether_data::{encode, encode_empty};
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, Key,
     KeyRelease, MonitorInfo, MouseButton, MouseMove, NoteOff, NoteOn, OsInfo, PlatformInfoResult,
     SetMasterGain, SetMasterGainResult, SetWindowModeResult, SetWindowTitleResult, Tick, VideoMode,
     WindowInfo, WindowMode, WindowSize, keycode,
 };
-use aether_mail::Kind;
-use aether_mail::{encode, encode_empty};
 use aether_substrate_core::sinks::{RenderAccumulator, build_camera_sink, build_render_sink};
 use aether_substrate_desktop::{
     CaptureQueue, Chassis, ChassisCapabilities, HubClient, HubOutbound, InputSubscribers, Mailer,
@@ -109,13 +109,13 @@ struct App {
     /// boot state — mean the event is dropped at the source.
     input_subscribers: InputSubscribers,
     broadcast_mbox: MailboxId,
-    kind_tick: aether_mail::KindId,
-    kind_key: aether_mail::KindId,
-    kind_key_release: aether_mail::KindId,
-    kind_mouse_button: aether_mail::KindId,
-    kind_mouse_move: aether_mail::KindId,
-    kind_window_size: aether_mail::KindId,
-    kind_frame_stats: aether_mail::KindId,
+    kind_tick: aether_data::KindId,
+    kind_key: aether_data::KindId,
+    kind_key_release: aether_data::KindId,
+    kind_mouse_button: aether_data::KindId,
+    kind_mouse_move: aether_data::KindId,
+    kind_window_size: aether_data::KindId,
+    kind_frame_stats: aether_data::KindId,
     frame_vertices: Arc<Mutex<Vec<u8>>>,
     /// Latest `aether.camera` payload seen by the camera sink
     /// (column-major `view_proj` matrix). Read by the render loop
@@ -323,19 +323,19 @@ fn build_audio_pipeline() -> Option<audio::AudioPipeline> {
 /// sessions and substrate-internal pushes (which shouldn't reach the
 /// audio sink in practice) collapse to id `0`, sharing one voice
 /// slot per (instrument, pitch).
-fn sender_mailbox_id(sender: ReplyTo) -> aether_mail::MailboxId {
+fn sender_mailbox_id(sender: ReplyTo) -> aether_data::MailboxId {
     match sender.target {
         ReplyTarget::EngineMailbox { mailbox_id, .. } => mailbox_id,
-        _ => aether_mail::MailboxId(0),
+        _ => aether_data::MailboxId(0),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn handle_audio_mail(
-    kind: aether_mail::KindId,
-    kind_note_on: aether_mail::KindId,
-    kind_note_off: aether_mail::KindId,
-    kind_set_master_gain: aether_mail::KindId,
+    kind: aether_data::KindId,
+    kind_note_on: aether_data::KindId,
+    kind_note_off: aether_data::KindId,
+    kind_set_master_gain: aether_data::KindId,
     sender: ReplyTo,
     bytes: &[u8],
     audio_sender: Option<&AudioEventSender>,
@@ -1092,7 +1092,7 @@ fn main() -> wasmtime::Result<()> {
         boot.registry.register_sink(
             "aether.sink.audio",
             Arc::new(
-                move |kind: aether_mail::KindId,
+                move |kind: aether_data::KindId,
                       _kind_name: &str,
                       _origin: Option<&str>,
                       sender: ReplyTo,

@@ -26,14 +26,14 @@ use std::sync::{Arc, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aether_hub_protocol::{
-    ClaudeAddress, EngineId, EngineMailFrame, EngineToHub, Hello, HubToEngine, KindDescriptor,
-    MailByIdFrame, MailFrame, MailToEngineMailboxFrame, read_frame, write_frame,
-};
-
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use crate::mailer::Mailer;
 use crate::registry::Registry;
+use aether_data::KindDescriptor;
+use aether_hub_protocol::{
+    ClaudeAddress, EngineId, EngineMailFrame, EngineToHub, Hello, HubToEngine, MailByIdFrame,
+    MailFrame, MailToEngineMailboxFrame, read_frame, write_frame,
+};
 
 /// Cadence at which this client emits `Heartbeat` to the hub. Must be
 /// comfortably below the hub's read timeout (15s) so a single missed
@@ -94,7 +94,7 @@ impl HubOutbound {
     /// channel.
     pub fn send_reply<K>(&self, sender: ReplyTo, result: &K) -> bool
     where
-        K: aether_mail::Kind + serde::Serialize,
+        K: aether_data::Kind + serde::Serialize,
     {
         let payload = match postcard::to_allocvec(result) {
             Ok(b) => b,

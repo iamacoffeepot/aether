@@ -37,8 +37,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "aether-camera"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-hub-protocol",
- "aether-mail",
+ "aether-data",
  "inventory",
  "serde",
 ]
@@ -58,12 +57,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-codec"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-data",
+ "aether-kinds",
+ "bytemuck",
+ "postcard",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aether-component"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-data",
  "aether-hub-protocol",
  "aether-kinds",
- "aether-mail",
  "bytemuck",
  "inventory",
  "postcard",
@@ -72,13 +83,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-data"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-mail-derive",
+ "bytemuck",
+ "inventory",
+ "postcard",
+ "serde",
+]
+
+[[package]]
 name = "aether-demo-sokoban"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-camera",
  "aether-component",
+ "aether-data",
  "aether-kinds",
- "aether-mail",
  "aether-scenario",
  "aether-substrate-test-bench",
  "bytemuck",
@@ -91,7 +113,7 @@ dependencies = [
 name = "aether-demo-tic-tac-toe"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-mail",
+ "aether-data",
  "bytemuck",
  "inventory",
 ]
@@ -115,8 +137,8 @@ name = "aether-demo-tic-tac-toe-server"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-component",
+ "aether-data",
  "aether-demo-tic-tac-toe",
- "aether-mail",
  "aether-scenario",
  "aether-substrate-test-bench",
  "pollster",
@@ -128,39 +150,17 @@ dependencies = [
 name = "aether-hub-protocol"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-id",
+ "aether-data",
  "postcard",
  "serde",
  "uuid",
 ]
 
 [[package]]
-name = "aether-id"
-version = "0.2.0-alpha"
-dependencies = [
- "bytemuck",
- "serde",
-]
-
-[[package]]
 name = "aether-kinds"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-hub-protocol",
- "aether-mail",
- "bytemuck",
- "inventory",
- "postcard",
- "serde",
-]
-
-[[package]]
-name = "aether-mail"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-hub-protocol",
- "aether-id",
- "aether-mail-derive",
+ "aether-data",
  "bytemuck",
  "inventory",
  "postcard",
@@ -171,8 +171,7 @@ dependencies = [
 name = "aether-mail-derive"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-hub-protocol",
- "aether-mail",
+ "aether-data",
  "bytemuck",
  "inventory",
  "proc-macro2",
@@ -204,8 +203,7 @@ dependencies = [
 name = "aether-mesh-viewer"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-hub-protocol",
- "aether-mail",
+ "aether-data",
  "inventory",
  "serde",
 ]
@@ -226,25 +224,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-params-codec"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-hub-protocol",
- "aether-kinds",
- "aether-mail",
- "bytemuck",
- "postcard",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "aether-scenario"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-codec",
+ "aether-data",
  "aether-hub-protocol",
  "aether-kinds",
- "aether-params-codec",
  "aether-scenario-macros",
  "aether-substrate-test-bench",
  "png",
@@ -275,9 +261,9 @@ dependencies = [
 name = "aether-substrate-core"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-data",
  "aether-hub-protocol",
  "aether-kinds",
- "aether-mail",
  "bytemuck",
  "dirs",
  "log",
@@ -298,9 +284,9 @@ dependencies = [
 name = "aether-substrate-desktop"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-data",
  "aether-hub-protocol",
  "aether-kinds",
- "aether-mail",
  "aether-substrate-core",
  "bytemuck",
  "cpal",
@@ -321,9 +307,9 @@ dependencies = [
 name = "aether-substrate-headless"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-data",
  "aether-hub-protocol",
  "aether-kinds",
- "aether-mail",
  "aether-substrate-core",
  "tracing",
  "wasmtime",
@@ -333,10 +319,10 @@ dependencies = [
 name = "aether-substrate-hub"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-codec",
+ "aether-data",
  "aether-hub-protocol",
  "aether-kinds",
- "aether-mail",
- "aether-params-codec",
  "aether-substrate-core",
  "axum",
  "base64 0.22.1",
@@ -357,9 +343,9 @@ dependencies = [
 name = "aether-substrate-test-bench"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-data",
  "aether-hub-protocol",
  "aether-kinds",
- "aether-mail",
  "aether-scenario",
  "aether-substrate-core",
  "aether-test-fixture-probe",
@@ -378,8 +364,8 @@ name = "aether-test-fixture-probe"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-component",
+ "aether-data",
  "aether-kinds",
- "aether-mail",
  "bytemuck",
  "serde",
 ]

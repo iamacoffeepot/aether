@@ -42,10 +42,10 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use aether_data::Kind;
 use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
-use aether_mail::Kind;
 
 use crate::{raw, resolve_sink};
 

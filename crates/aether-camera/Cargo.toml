@@ -9,8 +9,7 @@ edition.workspace = true
 # crate never depends on `aether-component` and never emits FFI exports.
 
 [dependencies]
-aether-mail = { path = "../aether-mail", features = ["derive"] }
-aether-hub-protocol = { path = "../aether-hub-protocol", default-features = false }
+aether-data = { path = "../aether-data", features = ["derive"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 
 # Issue #243: every crate that derives `Kind` needs `inventory` reachable

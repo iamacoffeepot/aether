@@ -13,25 +13,25 @@
 //   - The `Vec<u8>` field-level specialization lands as `Bytes`, not
 //     `Vec(Scalar(U8))`.
 
-use aether_hub_protocol::{EnumVariant, NamedField, Primitive, SchemaCell, SchemaType};
-use aether_mail::{CastEligible, Kind, Ref, Schema};
+use aether_data::{CastEligible, Kind, Ref, Schema};
+use aether_data::{EnumVariant, NamedField, Primitive, SchemaCell, SchemaType};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.tick")]
 struct Tick;
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.key")]
 struct Key {
     code: u32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.vertex")]
 struct Vertex {
     x: f32,
@@ -39,13 +39,13 @@ struct Vertex {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.triangle")]
 struct Triangle {
     verts: [Vertex; 3],
 }
 
-#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.note")]
 #[allow(dead_code)]
 struct Note {
@@ -55,12 +55,12 @@ struct Note {
     blob: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.tuple")]
 #[allow(dead_code)]
 struct TupleStruct(u32, bool);
 
-#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.result")]
 #[allow(dead_code)]
 enum Outcome {
@@ -202,7 +202,7 @@ fn enum_emits_each_variant_shape_with_sequential_discriminants() {
 // flips to false (refs force postcard), and the wire roundtrips
 // for both Inline and Handle variants.
 
-#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.held_note")]
 #[allow(dead_code)]
 struct HeldNote {
@@ -270,7 +270,7 @@ fn ref_kind_id_differs_from_inline_kind_id() {
     // a kind boundary change), but pin it explicitly so a refactor
     // can't silently align the two ids and let mismatched
     // recipients silently consume each other's mail.
-    #[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
+    #[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
     #[kind(name = "test.inline_note_field")]
     #[allow(dead_code)]
     struct Inlined {
@@ -305,7 +305,7 @@ fn cast_eligible_blocked_by_non_pod_field_even_with_repr_c() {
     // user-side compile error is the correct outcome. This fixture
     // exercises Schema's AND-fold in isolation.
     #[repr(C)]
-    #[derive(aether_mail::Schema)]
+    #[derive(aether_data::Schema)]
     #[allow(dead_code)]
     struct ReprCButStrung {
         seq: u32,
@@ -325,14 +325,14 @@ fn cast_eligible_blocked_by_non_pod_field_even_with_repr_c() {
 // `SchemaType::Map`; the derive does no special-casing, so this is
 // trait-dispatch end-to-end.
 
-#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.headers")]
 #[allow(dead_code)]
 struct Headers {
     headers: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Serialize, Deserialize, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.lookup")]
 #[allow(dead_code)]
 struct Lookup {

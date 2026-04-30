@@ -6,8 +6,8 @@ edition.workspace = true
 [dependencies]
 aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-kinds = { path = "../aether-kinds" }
-aether-mail = { path = "../aether-mail" }
-aether-params-codec = { path = "../aether-params-codec" }
+aether-data = { path = "../aether-data" }
+aether-codec = { path = "../aether-codec" }
 aether-substrate-core = { path = "../aether-substrate-core" }
 axum = "0.8"
 base64 = "0.22"

@@ -1,18 +1,38 @@
-//! aether-mail: shared machinery for the mail typing system described in
-//! ADR-0005. No concrete kinds live here — each actor owns its kinds in
-//! its own crate (substrate in `aether-kinds`, components in
-//! `{component}-mail` crates as they define their own).
+//! aether-data: the universal data layer (ADR-0069).
 //!
-//! Two payload tiers:
+//! Single home for everything that describes typed bytes — what makes
+//! a kind a kind, what its schema looks like, how its identity is
+//! computed, how the bytes are walked. Used by mail dispatch (the
+//! original consumer), by the codec (`aether-codec`), and by any
+//! future schema-described data consumer (the prompt-system save
+//! format being the next).
+//!
+//! Two payload tiers (ADR-0005):
 //!   - POD: `#[repr(C)]` types implementing `bytemuck::NoUninit` /
 //!     `AnyBitPattern`. Encoded as their native byte layout; decoded
-//!     zero-copy to `&T` or `&[T]`. Used for vertex streams, fixed-layout
-//!     structs, anything where throughput or zero-copy matters.
+//!     zero-copy to `&T` or `&[T]`. Used for vertex streams, fixed-
+//!     layout structs, anything where throughput or zero-copy matters.
 //!   - Structural: `serde::Serialize + DeserializeOwned` types. Encoded
 //!     with postcard (Rust-native, varint-compact, no_std-friendly).
 //!     Used for small control messages with Option/Vec/enum shape.
 //!
 //! A type picks one tier — not both — as part of its contract.
+//!
+//! ## What lives here
+//!
+//! - **Typed-id newtypes** (ADR-0064 / ADR-0065): `MailboxId`, `KindId`,
+//!   `HandleId`, plus `Tag`, tag-bit constants, and FNV hashing.
+//! - **Schema vocabulary** (ADR-0019 / ADR-0031 / ADR-0032): `SchemaType`,
+//!   `LabelNode`, `KindShape`, `KindLabels`, `InputsRecord`, canonical
+//!   bytes encoders.
+//! - **Kind / Schema / CastEligible traits** (ADR-0030): the binding
+//!   between a Rust type and its wire form.
+//! - **`Ref<K>`** (ADR-0045): typed handle reference for fields that
+//!   may inline a value or carry a handle into the substrate's store.
+//! - **Encode / decode helpers**: the `encode` / `decode` family for
+//!   POD and postcard kinds.
+//! - **`__inventory`** (issue #243): native-only auto-collection of
+//!   `#[derive(Kind)]` types into the substrate's descriptor list.
 
 #![no_std]
 
@@ -21,20 +41,31 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-pub mod mailboxes;
+pub mod canonical;
+pub mod hash;
+pub mod ids;
+pub mod schema;
+pub mod tag_bits;
+pub mod tagged_id;
 
-// Typed-id newtypes (ADR-0064 / ADR-0065) live in the `aether-id`
-// leaf crate so `aether-hub-protocol` can type its wire fields
-// without the `aether-mail → aether-hub-protocol` dep cycle. The
-// `Schema` and `CastEligible` impls for these types stay here
-// (orphan rules — those traits are owned by `aether-mail`). Module
-// re-exports preserve the historical `aether_mail::tagged_id::encode`
-// and `aether_mail::ids::MailboxId` call paths.
-pub use aether_id::{
-    HandleId, KIND_DOMAIN, KindId, MAILBOX_DOMAIN, MailboxId, TYPE_DOMAIN, Tag, fnv1a_64_bytes,
-    fnv1a_64_prefixed, hash, ids, mailbox_id_from_name, tag_bits, tag_for_type_id, tagged_id,
-    type_name_for_type_id, with_tag,
+pub use hash::{
+    KIND_DOMAIN, MAILBOX_DOMAIN, TYPE_DOMAIN, fnv1a_64_bytes, fnv1a_64_prefixed,
+    mailbox_id_from_name,
 };
+pub use ids::{HandleId, KindId, MailboxId, tag_for_type_id, type_name_for_type_id};
+pub use schema::*;
+pub use tagged_id::{Tag, with_tag};
+
+/// Re-exported derive macros from `aether-mail-derive`. Behind the
+/// `derive` feature so `cargo build` on a guest that hand-writes
+/// `impl Kind` doesn't pay the proc-macro compile cost. The
+/// `#[handlers]` / `#[handler]` / `#[fallback]` attribute macros
+/// (ADR-0033) ride in the same crate because adding a second proc-
+/// macro crate would double consumer compile cost for no separation
+/// gain — both derives and attributes expand into the same runtime
+/// surface.
+#[cfg(feature = "derive")]
+pub use aether_mail_derive::{Kind, Schema, fallback, handler, handlers};
 
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
 /// `"aether.tick"`, `"hello.npc_health"`) and a `u64` id derived from
@@ -43,10 +74,10 @@ pub use aether_id::{
 /// substrate from the deserialized schema, the guest from the compile-
 /// time const — so routing stays in lockstep without a host-fn resolve.
 ///
-/// `IS_INPUT` marks the kind as a substrate-published input stream
+/// `IS_STREAM` marks the kind as a substrate-published input stream
 /// (`Tick`, `Key`, `MouseMove`, `MouseButton` — ADR-0021). Defaults
 /// to `false`; `#[handlers]` auto-subscribes a component's mailbox to
-/// every `K::IS_INPUT` handler kind before the user's `init` body
+/// every `K::IS_STREAM` handler kind before the user's `init` body
 /// runs (ADR-0033 phase 3), so components writing
 /// `#[handler] fn on_tick(..., tick: Tick)` don't need to send
 /// `subscribe_input` themselves. Non-input kinds never touch this —
@@ -98,7 +129,7 @@ pub trait Kind {
     /// send must override.
     fn encode_into_bytes(&self) -> Vec<u8> {
         panic!(
-            "aether-mail: Kind::encode_into_bytes called on `{}` whose impl does not override \
+            "aether-data: Kind::encode_into_bytes called on `{}` whose impl does not override \
              it. Use `#[derive(Kind)]` (which emits the body for cast or postcard kinds based \
              on `#[repr(C)]`) or hand-roll an override before sending.",
             Self::NAME,
@@ -129,9 +160,7 @@ cast_eligible_primitive!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, bool);
 
 // Typed-id newtypes are `#[repr(transparent)]` over `u64`, so a
 // cast-shape struct field typed `MailboxId` / `KindId` / `HandleId`
-// is wire-identical to a `u64` field. The trait lives here, the
-// types live in `aether-id` — orphan rules let us write the impl
-// in `aether-mail`.
+// is wire-identical to a `u64` field.
 impl CastEligible for MailboxId {
     const ELIGIBLE: bool = true;
 }
@@ -192,11 +221,6 @@ impl<K, V> CastEligible for alloc::collections::BTreeMap<K, V> {
 /// error, not a recoverable one. Use [`Ref::handle`] instead of
 /// constructing `Handle` directly to pull the id from the kind
 /// system rather than passing it by hand.
-///
-/// Phase 1 (this PR) ships the wire type and Schema integration
-/// only. The substrate-side dispatcher, handle store, and SDK
-/// `Handle<K>` newtype follow in subsequent PRs per the ADR's
-/// follow-up work plan.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Ref<K> {
     /// Inline value — the whole `K` payload is on the wire.
@@ -252,155 +276,42 @@ impl<K> Ref<K> {
     }
 }
 
-/// Re-exported derive macros from `aether-mail-derive`. Behind the
-/// `derive` feature so `cargo build` on a guest that hand-writes
-/// `impl Kind` doesn't pay the proc-macro compile cost. The
-/// `#[handlers]` / `#[handler]` / `#[fallback]` attribute macros
-/// (ADR-0033) ride in the same crate because adding a second proc-
-/// macro crate would double consumer compile cost for no separation
-/// gain — both derives and attributes expand into the same runtime
-/// surface.
-#[cfg(feature = "derive")]
-pub use aether_mail_derive::{Kind, Schema, fallback, handler, handlers};
-
-/// ADR-0019 schema producer. The substrate (and tooling that builds
-/// hub descriptors) reads `<T as Schema>::SCHEMA` — a compile-time
-/// const — to learn how a kind's payload is laid out. Wasm guests
-/// typically don't need this, so the trait sits behind the
-/// `descriptors` feature.
+/// ADR-0019 schema producer. Reads `<T as Schema>::SCHEMA` — a compile-
+/// time const — to learn how a kind's payload is laid out.
 ///
 /// Blanket impls cover the leaf types in the schema vocabulary
 /// (primitives, `String`, `[u8]`-shaped `Vec`s, fixed arrays,
 /// `Option`, generic `Vec`). User structs reach the trait via
 /// `#[derive(Schema)]`.
-pub use schema::Schema;
-
-/// Native-only auto-collection slot for `#[derive(Kind)]` types
-/// (issue #243). The Kind derive emits a `cfg(not(target_arch = "wasm32"))`-
-/// gated `inventory::submit! { DescriptorEntry { ... } }` against
-/// this module's slot; `aether-kinds::descriptors::all()` materializes
-/// the Hub-shipped `KindDescriptor` list by iterating the slot at
-/// boot. The wasm path (`aether.kinds` custom section, ADR-0032)
-/// is unchanged — wasm guests have no inventory dep at all (see
-/// the target-gated dependency in Cargo.toml).
 ///
-/// `DescriptorEntry` carries `&'static str` + `&'static SchemaType`
-/// so `inventory::submit!` (which requires the value be const-
-/// constructible at compile time) accepts it. The derive points
-/// `schema` at the per-type `__AETHER_SCHEMA_<NAME>` static it
-/// already emits, so no extra storage is required.
+/// ADR-0031: the schema is a compile-time `const` rather than a
+/// runtime `fn`. Taking a reference produces a `&'static SchemaType`
+/// which is what `SchemaCell::Static` holds, so nested types
+/// (`Vec<T>`, `Option<T>`, `[T; N]`, user structs) resolve by
+/// trait dispatch at compile time without a syntactic walker.
 ///
-/// Not part of the public API; the derive macro is the only
-/// intended caller.
-#[cfg(not(target_arch = "wasm32"))]
-#[doc(hidden)]
-pub mod __inventory {
-    pub use ::inventory;
-    use aether_hub_protocol::SchemaType;
-
-    /// Static-friendly mirror of `aether_hub_protocol::KindDescriptor`.
-    /// Owns nothing — every field is `'static` (or a `bool`) so the
-    /// value is const-constructible from `inventory::submit!`.
-    /// `descriptors::all()` materializes the owned `KindDescriptor`
-    /// form at iteration time. `is_stream` carries `<K as Kind>::IS_STREAM`
-    /// (ADR-0068) so the native descriptor list agrees with the wasm
-    /// `aether.kinds` v0x03 trailing byte the substrate reads from
-    /// guest binaries.
-    pub struct DescriptorEntry {
-        pub name: &'static str,
-        pub schema: &'static SchemaType,
-        pub is_stream: bool,
-    }
-
-    inventory::collect!(DescriptorEntry);
+/// ADR-0032: additionally exposes the Rust type path (`LABEL`) and
+/// the parallel labels tree (`LABEL_NODE`). The canonical schema
+/// bytes the `aether.kinds` section carries are positional-only
+/// (no field/variant/type names); `LABEL_NODE` is serialized into
+/// the `aether.kinds.labels` sidecar so the hub can reconstruct a
+/// named `SchemaType` for its encoder/decoder and `describe_kinds`
+/// output. Primitives, `String`, `Vec<T>`, `Option<T>`, `[T; N]`
+/// all carry `LABEL = None` — the containers have no nominal
+/// identity and primitives are uniquely determined by their
+/// `SchemaType::Scalar(_)` tag.
+pub trait Schema {
+    const SCHEMA: SchemaType;
+    const LABEL: Option<&'static str>;
+    const LABEL_NODE: LabelNode;
 }
 
-/// Internal re-exports the `#[derive(Schema)]` and `#[derive(Kind)]`
-/// macros point at so their output compiles in no_std + alloc
-/// consumer crates without those consumers needing `extern crate
-/// alloc;` or a direct `aether-hub-protocol` dep at the site.
-/// Not part of the public API; the macros are the only intended
-/// callers.
-#[doc(hidden)]
-pub mod __derive_runtime {
-    pub use aether_hub_protocol::{
-        EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, SchemaType, VariantLabel,
-        canonical,
-    };
-    pub use alloc::borrow::Cow;
-    pub use alloc::vec::Vec;
-
-    /// Cast-shape decode helper. Routes through `bytemuck::pod_read_unaligned`
-    /// after a length check so the Kind derive can emit a uniform call
-    /// without the user crate needing `bytemuck` in scope. `T` satisfies
-    /// `AnyBitPattern` via the user's `#[derive(Pod)]`; the bound is
-    /// enforced at the impl site rather than on `Kind` itself so non-
-    /// cast kinds aren't poisoned by a trait they can't satisfy.
-    pub fn decode_cast<T: bytemuck::AnyBitPattern>(bytes: &[u8]) -> Option<T> {
-        if bytes.len() != core::mem::size_of::<T>() {
-            return None;
-        }
-        Some(bytemuck::pod_read_unaligned(bytes))
-    }
-
-    /// Postcard-shape decode helper. Sibling of `decode_cast` for
-    /// schema-shaped kinds (anything carrying `Vec` / `String` /
-    /// `Option` / a tagged enum). `T` satisfies `DeserializeOwned`
-    /// via the user's `#[derive(Deserialize)]`; the bound lives on
-    /// this helper rather than on `Kind` so cast kinds stay
-    /// independent of `serde`.
-    pub fn decode_postcard<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
-        postcard::from_bytes(bytes).ok()
-    }
-
-    /// Cast-shape encode helper. Mirror of `decode_cast`. Routes
-    /// through `bytemuck::bytes_of` so the Kind derive emits a uniform
-    /// call without the user crate needing `bytemuck` in scope. The
-    /// `NoUninit` bound lives on the helper so non-cast kinds aren't
-    /// poisoned by a trait their `#[repr(C)]`-less layout can't satisfy.
-    pub fn encode_cast<T: bytemuck::NoUninit>(value: &T) -> alloc::vec::Vec<u8> {
-        ::bytemuck::bytes_of(value).to_vec()
-    }
-
-    /// Postcard-shape encode helper. Mirror of `decode_postcard`. The
-    /// `Serialize` bound lives here, not on `Kind`, so cast kinds stay
-    /// independent of `serde`.
-    pub fn encode_postcard<T: serde::Serialize>(value: &T) -> alloc::vec::Vec<u8> {
-        ::postcard::to_allocvec(value).expect("postcard encode to Vec is infallible")
-    }
-}
-
-mod schema {
+mod schema_impls {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use aether_hub_protocol::{LabelCell, LabelNode, Primitive, SchemaCell, SchemaType};
-
-    /// Produces the `SchemaType` describing how this type lays out as
-    /// a mail payload. Implemented by `#[derive(Schema)]` on user
-    /// structs, and by blanket impl on the schema-vocabulary leaves.
-    ///
-    /// ADR-0031: the schema is a compile-time `const` rather than a
-    /// runtime `fn`. Taking a reference produces a `&'static SchemaType`
-    /// which is what `SchemaCell::Static` holds, so nested types
-    /// (`Vec<T>`, `Option<T>`, `[T; N]`, user structs) resolve by
-    /// trait dispatch at compile time without a syntactic walker.
-    ///
-    /// ADR-0032: additionally exposes the Rust type path (`LABEL`) and
-    /// the parallel labels tree (`LABEL_NODE`). The canonical schema
-    /// bytes the `aether.kinds` section carries are positional-only
-    /// (no field/variant/type names); `LABEL_NODE` is serialized into
-    /// the `aether.kinds.labels` sidecar so the hub can reconstruct a
-    /// named `SchemaType` for its encoder/decoder and `describe_kinds`
-    /// output. Primitives, `String`, `Vec<T>`, `Option<T>`, `[T; N]`
-    /// all carry `LABEL = None` — the containers have no nominal
-    /// identity and primitives are uniquely determined by their
-    /// `SchemaType::Scalar(_)` tag.
-    pub trait Schema {
-        const SCHEMA: SchemaType;
-        const LABEL: Option<&'static str>;
-        const LABEL_NODE: LabelNode;
-    }
+    use crate::schema::{LabelCell, LabelNode, Primitive, SchemaCell, SchemaType};
+    use crate::{HandleId, KindId, MailboxId, Schema};
 
     macro_rules! scalar {
         ($t:ty, $p:ident) => {
@@ -465,25 +376,22 @@ mod schema {
         const LABEL_NODE: LabelNode = LabelNode::Array(LabelCell::Static(&T::LABEL_NODE));
     }
 
-    // ADR-0064 / ADR-0065 typed-id newtypes. Bodies live in the
-    // `aether-id` leaf crate (so `aether-hub-protocol` can type its
-    // wire fields without a dep cycle); the `Schema` trait is owned
-    // here, so the impls also live here.
-    impl Schema for aether_id::MailboxId {
-        const SCHEMA: SchemaType = SchemaType::TypeId(aether_id::MailboxId::TYPE_ID);
-        const LABEL: Option<&'static str> = Some(aether_id::MailboxId::TYPE_NAME);
+    // ADR-0064 / ADR-0065 typed-id newtypes.
+    impl Schema for MailboxId {
+        const SCHEMA: SchemaType = SchemaType::TypeId(MailboxId::TYPE_ID);
+        const LABEL: Option<&'static str> = Some(MailboxId::TYPE_NAME);
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
-    impl Schema for aether_id::KindId {
-        const SCHEMA: SchemaType = SchemaType::TypeId(aether_id::KindId::TYPE_ID);
-        const LABEL: Option<&'static str> = Some(aether_id::KindId::TYPE_NAME);
+    impl Schema for KindId {
+        const SCHEMA: SchemaType = SchemaType::TypeId(KindId::TYPE_ID);
+        const LABEL: Option<&'static str> = Some(KindId::TYPE_NAME);
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
-    impl Schema for aether_id::HandleId {
-        const SCHEMA: SchemaType = SchemaType::TypeId(aether_id::HandleId::TYPE_ID);
-        const LABEL: Option<&'static str> = Some(aether_id::HandleId::TYPE_NAME);
+    impl Schema for HandleId {
+        const SCHEMA: SchemaType = SchemaType::TypeId(HandleId::TYPE_ID);
+        const LABEL: Option<&'static str> = Some(HandleId::TYPE_NAME);
         const LABEL_NODE: LabelNode = LabelNode::Anonymous;
     }
 
@@ -522,6 +430,101 @@ mod schema {
     }
 }
 
+/// Native-only auto-collection slot for `#[derive(Kind)]` types
+/// (issue #243). The Kind derive emits a `cfg(not(target_arch = "wasm32"))`-
+/// gated `inventory::submit! { DescriptorEntry { ... } }` against
+/// this module's slot; `aether-kinds::descriptors::all()` materializes
+/// the Hub-shipped `KindDescriptor` list by iterating the slot at
+/// boot. The wasm path (`aether.kinds` custom section, ADR-0032)
+/// is unchanged — wasm guests have no inventory dep at all (see
+/// the target-gated dependency in Cargo.toml).
+///
+/// `DescriptorEntry` carries `&'static str` + `&'static SchemaType`
+/// so `inventory::submit!` (which requires the value be const-
+/// constructible at compile time) accepts it. The derive points
+/// `schema` at the per-type `__AETHER_SCHEMA_<NAME>` static it
+/// already emits, so no extra storage is required.
+///
+/// Not part of the public API; the derive macro is the only
+/// intended caller.
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub mod __inventory {
+    use crate::schema::SchemaType;
+    pub use ::inventory;
+
+    /// Static-friendly mirror of `KindDescriptor`. Owns nothing —
+    /// every field is `'static` (or a `bool`) so the value is
+    /// const-constructible from `inventory::submit!`.
+    /// `descriptors::all()` materializes the owned `KindDescriptor`
+    /// form at iteration time. `is_stream` carries
+    /// `<K as Kind>::IS_STREAM` (ADR-0068) so the native descriptor
+    /// list agrees with the wasm `aether.kinds` v0x03 trailing byte
+    /// the substrate reads from guest binaries.
+    pub struct DescriptorEntry {
+        pub name: &'static str,
+        pub schema: &'static SchemaType,
+        pub is_stream: bool,
+    }
+
+    inventory::collect!(DescriptorEntry);
+}
+
+/// Internal re-exports the `#[derive(Schema)]` and `#[derive(Kind)]`
+/// macros point at so their output compiles in no_std + alloc
+/// consumer crates without those consumers needing `extern crate
+/// alloc;` or a direct `aether-data` dep at the site.
+/// Not part of the public API; the macros are the only intended
+/// callers.
+#[doc(hidden)]
+pub mod __derive_runtime {
+    pub use crate::canonical;
+    pub use crate::schema::{
+        EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, SchemaType, VariantLabel,
+    };
+    pub use alloc::borrow::Cow;
+    pub use alloc::vec::Vec;
+
+    /// Cast-shape decode helper. Routes through `bytemuck::pod_read_unaligned`
+    /// after a length check so the Kind derive can emit a uniform call
+    /// without the user crate needing `bytemuck` in scope. `T` satisfies
+    /// `AnyBitPattern` via the user's `#[derive(Pod)]`; the bound is
+    /// enforced at the impl site rather than on `Kind` itself so non-
+    /// cast kinds aren't poisoned by a trait they can't satisfy.
+    pub fn decode_cast<T: bytemuck::AnyBitPattern>(bytes: &[u8]) -> Option<T> {
+        if bytes.len() != core::mem::size_of::<T>() {
+            return None;
+        }
+        Some(bytemuck::pod_read_unaligned(bytes))
+    }
+
+    /// Postcard-shape decode helper. Sibling of `decode_cast` for
+    /// schema-shaped kinds (anything carrying `Vec` / `String` /
+    /// `Option` / a tagged enum). `T` satisfies `DeserializeOwned`
+    /// via the user's `#[derive(Deserialize)]`; the bound lives on
+    /// this helper rather than on `Kind` so cast kinds stay
+    /// independent of `serde`.
+    pub fn decode_postcard<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
+        postcard::from_bytes(bytes).ok()
+    }
+
+    /// Cast-shape encode helper. Mirror of `decode_cast`. Routes
+    /// through `bytemuck::bytes_of` so the Kind derive emits a uniform
+    /// call without the user crate needing `bytemuck` in scope. The
+    /// `NoUninit` bound lives on the helper so non-cast kinds aren't
+    /// poisoned by a trait their `#[repr(C)]`-less layout can't satisfy.
+    pub fn encode_cast<T: bytemuck::NoUninit>(value: &T) -> alloc::vec::Vec<u8> {
+        ::bytemuck::bytes_of(value).to_vec()
+    }
+
+    /// Postcard-shape encode helper. Mirror of `decode_postcard`. The
+    /// `Serialize` bound lives here, not on `Kind`, so cast kinds stay
+    /// independent of `serde`.
+    pub fn encode_postcard<T: serde::Serialize>(value: &T) -> alloc::vec::Vec<u8> {
+        ::postcard::to_allocvec(value).expect("postcard encode to Vec is infallible")
+    }
+}
+
 /// Reason a decode failed. Encoding is infallible for the tiers we
 /// support, so there is no corresponding `EncodeError`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -541,10 +544,10 @@ impl fmt::Display for DecodeError {
             DecodeError::SizeMismatch { expected, actual } => {
                 write!(
                     f,
-                    "mail payload size mismatch: expected {expected}, got {actual}"
+                    "data payload size mismatch: expected {expected}, got {actual}"
                 )
             }
-            DecodeError::Alignment => f.write_str("mail payload alignment mismatch"),
+            DecodeError::Alignment => f.write_str("data payload alignment mismatch"),
             DecodeError::Postcard(e) => write!(f, "postcard decode failed: {e}"),
         }
     }
@@ -683,8 +686,6 @@ mod tests {
         let verts = [Vertex { x: 0.0, y: 0.5 }, Vertex { x: 1.0, y: -0.5 }];
         let bytes = encode_slice(&verts);
         assert_eq!(bytes.len(), 16);
-        // Alignment-preserving slice: we built `bytes` from `&[Vertex]`
-        // so it's aligned; use try_cast_slice for the real test.
         let decoded: &[Vertex] = decode_slice(&bytes).unwrap();
         assert_eq!(decoded, &verts);
     }
@@ -715,7 +716,6 @@ mod tests {
 
     #[test]
     fn struct_decode_malformed_rejected() {
-        // A deliberately truncated payload — postcard will reject.
         let err = decode_struct::<TestStruct>(&[0x00]).unwrap_err();
         assert!(matches!(err, DecodeError::Postcard(_)));
     }
@@ -733,9 +733,6 @@ mod tests {
         let c = mailbox_id_from_name("render");
         assert_eq!(a, b);
         assert_ne!(a, c);
-        // Empty name hashes the domain prefix alone. Pins both
-        // ADR-0029 (the domain prefix rides the FNV input) and
-        // ADR-0064 (the high 4 bits carry the `Tag::Mailbox` tag).
         assert_eq!(
             mailbox_id_from_name(""),
             MailboxId(with_tag(
@@ -812,11 +809,6 @@ mod tests {
 
     #[test]
     fn ref_inline_and_handle_have_distinct_wire_discriminants() {
-        // Pins the externally-tagged enum encoding: postcard writes
-        // a varint discriminant before the body, so Inline and
-        // Handle differ in their first byte. A regression that
-        // re-orders the Ref variants would silently flip what
-        // existing handle wires decode to.
         let inline: Ref<TestStruct> = Ref::Inline(TestStruct {
             tag: 1,
             label: alloc::string::String::from("x"),
@@ -830,18 +822,11 @@ mod tests {
 
     #[test]
     fn ref_is_cast_ineligible() {
-        // A field typed `Ref<K>` forces postcard wire — cast-shaped
-        // structs can't contain refs because the Inline arm's
-        // payload size isn't fixed. The CastEligible impl encodes
-        // this so the derive emits `repr_c: false` for parents.
         const { assert!(!<Ref<TestStruct> as CastEligible>::ELIGIBLE) };
     }
 
     #[test]
     fn mailbox_and_kind_domains_disjoin_identical_payloads() {
-        // The whole point of prefixing: even if a mailbox name and a
-        // kind's canonical bytes happened to be the same byte string,
-        // the resulting ids differ.
         let payload = b"collision.test";
         let as_mailbox = fnv1a_64_prefixed(MAILBOX_DOMAIN, payload);
         let as_kind = fnv1a_64_prefixed(KIND_DOMAIN, payload);

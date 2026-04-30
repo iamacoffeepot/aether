@@ -40,14 +40,12 @@ Re-cut the five-crate cluster along the universal-data-vs-transport seam:
 ```
 aether-data            (no_std + alloc; foundation for everything that describes typed bytes)
    ▲
-   ├── aether-codec    (universal: schema-driven encode/decode; future home for save-format adapters)
-   │
-   ├── aether-mail     (transport envelope only)
-   │      ▲
-   │      └── aether-hub-protocol  (one specific mail transport)
-   │
-   └── aether-kinds    (concrete substrate kinds)
+   ├── aether-codec        (universal: schema-driven encode/decode; future home for save-format adapters)
+   ├── aether-kinds        (substrate vocabulary: concrete kinds + well-known mailboxes registry)
+   └── aether-hub-protocol (one specific mail transport: hub channel frames + framing)
 ```
+
+> **Note (post-implementation correction).** The drafted layout retained an `aether-mail` crate as the "transport envelope." Implementation surfaced that the only types that belong to the envelope concept — `Mail<'_>` and `Sink<K>` — already live in `aether-component` (the guest SDK), tightly coupled to wasm host-fns and FFI lifetime parameters; they cannot move into a shared crate without dragging the wasm-only `raw` extern declarations with them. The remaining content of `aether-mail` was the well-known `MailboxId` registry (`mailboxes.rs`), which is substrate-vocabulary, not transport-envelope, and therefore folds into `aether-kinds`. `aether-mail` is **deleted entirely**, taking the crate count from 6 → 4 (one fewer than the original 5 → 4 plan). The "mail" concept is preserved by the host-side and guest-side envelope types in their respective owning crates; there is no shared envelope abstraction.
 
 ### Crate-by-crate
 
@@ -68,15 +66,9 @@ Contents:
 
 Same source files, deps re-pointed: `aether-data` (for `SchemaType` and id helpers) instead of `aether-hub-protocol` + `aether-mail`. Today's `encode_schema` / `decode_schema` keep their JSON ↔ bytes contract. Save-format adapters land here as siblings (`encode_record`, `decode_record`, etc.) — they reuse the same `SchemaType`-walking core.
 
-**`aether-mail`** *(slimmed to the transport envelope)*
+**`aether-mail`** *(deleted)*
 
-Contents after migration:
-
-- `Mail<'_>` (the wire-form receive struct: sender + kind id + payload bytes lifetime).
-- `Sink<K>` (an addressed sender, parameterised by kind).
-- `mailboxes` table (`DIAGNOSTICS`, etc. — reserved mailbox names that only matter when transporting).
-
-Deps: `aether-data`. Maybe ~200 LOC.
+No remaining content after migration. `Kind`, `Schema`, `CastEligible`, `Ref<K>`, encode/decode helpers, descriptor `inventory`, and the typed-id newtypes all move to `aether-data`. `Mail<'_>` and `Sink<K>` already live in `aether-component` (guest SDK). The well-known `MailboxId` registry (`mailboxes.rs`) moves to `aether-kinds`.
 
 **`aether-hub-protocol`** *(slimmed to the hub channel wire)*
 
@@ -86,11 +78,11 @@ Contents after migration:
 - Direction-typed enums: `EngineToHub`, `HubToEngine`.
 - Framing helpers: `encode_frame`, `read_frame`, `write_frame`, `FrameError`, `MAX_FRAME_SIZE`.
 
-Std-only (no more `default-features = false` gymnastics — this crate is unambiguously host-side). Deps: `aether-mail`, `serde`, `postcard`, `uuid`. Roughly half its current size.
+Std-only (no more `default-features = false` gymnastics — this crate is unambiguously host-side). Deps: `aether-data`, `serde`, `postcard`, `uuid`. Roughly half its current size.
 
-**`aether-kinds`** *(unchanged in shape; deps re-pointed)*
+**`aether-kinds`** *(absorbs the well-known mailboxes registry; deps re-pointed)*
 
-Drops `aether-hub-protocol` (no longer needed for `Schema`); depends on `aether-data`. Source files unchanged.
+Drops `aether-hub-protocol` (no longer needed for `Schema`) and `aether-mail`; depends on `aether-data` (with `derive` feature). Adds `pub mod mailboxes` containing the well-known `MailboxId` constants (`CONTROL`, `DIAGNOSTICS`, `SINK_RENDER`, `SINK_CAMERA`, `SINK_AUDIO`, `SINK_IO`, `SINK_NET`, `SINK_LOG`, `SINK_HANDLE`) — co-located with the kind vocabulary they target.
 
 ### Naming
 
@@ -106,13 +98,15 @@ Mechanical search-and-replace at every consumer site:
 - `aether_hub_protocol::canonical::*` → `aether_data::canonical::*`
 - `aether_hub_protocol::{KindShape, KindLabels, InputsRecord, INPUTS_SECTION{,_VERSION}}` → `aether_data::*`
 - `aether_hub_protocol::tag_bits` → `aether_data::tag_bits`
-- `aether_mail::{Kind, Schema, CastEligible}` → `aether_data::*`
+- `aether_mail::{Kind, Schema, CastEligible, Ref}` → `aether_data::*`
 - `aether_mail::{MailboxId, KindId, HandleId, Tag, tagged_id, tag_for_type_id, mailbox_id_from_name}` → `aether_data::*`
-- `aether_mail::{Mail, Sink, mailboxes}` → unchanged
+- `aether_mail::mailboxes::*` → `aether_kinds::mailboxes::*`
+- `aether_mail::{encode, decode, encode_struct, decode_struct, encode_slice, decode_slice, encode_empty, DecodeError}` → `aether_data::*`
+- `aether_id::*` → `aether_data::*`
 - `aether_params_codec::*` → `aether_codec::*`
 - `aether_mail_derive` macro emissions: `::aether_mail::SchemaType` → `::aether_data::SchemaType`, `::aether_hub_protocol::*` → `::aether_data::*`. (The proc-macro crate itself is not renamed; `#[derive(Kind)]` keeps importing from `aether_data` whose root re-exports the derive.)
 
-The `aether-id` crate is deleted. Its directory disappears from `crates/`. `aether-params-codec` is renamed to `aether-codec` (directory move + Cargo.toml `name` change + every consumer's `Cargo.toml`).
+The `aether-id` and `aether-mail` crates are both deleted. Their directories disappear from `crates/`. `aether-params-codec` is renamed to `aether-codec` (directory move + Cargo.toml `name` change + every consumer's `Cargo.toml`).
 
 Wire bytes do not change. Postcard's binary representation of `MailboxId` / `KindId` / `HandleId` (newtypes over `u64`) is byte-identical regardless of which crate the type lives in. The `aether.kinds` and `aether.kinds.labels` wasm custom sections keep their identical byte layout. Existing component wasms continue to load against a substrate built from the new layout.
 
@@ -122,14 +116,13 @@ Schema-hashed kind ids (ADR-0030) round-trip identically: the canonical-bytes en
 
 **Positive**
 
-- Crate names finally describe their roles: `aether-data` is the universal layer; `aether-mail` is a transport envelope; `aether-hub-protocol` is one specific mail transport; `aether-codec` is universal data ↔ format.
+- Crate names finally describe their roles: `aether-data` is the universal layer; `aether-hub-protocol` is one specific mail transport; `aether-codec` is universal data ↔ format; `aether-kinds` is substrate vocabulary.
 - The prompt-system save format depends on `aether-data` (for `Schema`) and `aether-codec` (for bytes ↔ on-disk encoding) — neither of which has any mail-shaped baggage. The forcing function lands cleanly.
-- A future second mail transport (peer-to-peer, in-process bridge) is a sibling of `aether-hub-protocol` under `aether-mail`, not a new fork of the schema vocabulary.
+- A future second mail transport (peer-to-peer, in-process bridge) is a sibling of `aether-hub-protocol`, depending on `aether-data` for the same envelope vocabulary; no new fork of schema or ids.
 - A future second codec (msgpack, CBOR, custom binary) is a sibling of `aether-codec` or an additional module within it.
-- `aether-mail` shrinks to ~200 LOC and matches its name — Mail, Sink, mailboxes. Nothing else.
 - `aether-hub-protocol` drops the `default-features = false` no_std gate; it is unambiguously std now.
-- The `aether-mail → aether-hub-protocol → aether-mail` historical cycle (the reason `aether-id` exists) is structurally impossible in the new layout — there is no edge from the foundation crate to anything above it.
-- One fewer crate. `aether-id` collapses into `aether-data`; that's a real reduction in directory and Cargo.toml count, not just a relabel.
+- The `aether-mail → aether-hub-protocol → aether-mail` historical cycle (the reason `aether-id` existed) is structurally impossible in the new layout — there is no edge from the foundation crate to anything above it.
+- Two crates collapse into the foundation: `aether-id` and `aether-mail`. Net reduction: 6 crates → 4. The original draft planned 5 → 4 retaining a slim `aether-mail`; implementation discovery (see Decision §note) showed the envelope abstraction had no shared content, so `aether-mail` deleted entirely.
 
 **Negative**
 

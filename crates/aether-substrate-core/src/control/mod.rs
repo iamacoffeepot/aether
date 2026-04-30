@@ -26,12 +26,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aether_hub_protocol::{EngineToHub, KindDescriptor};
+use aether_hub_protocol::EngineToHub;
+
+use aether_data::KindDescriptor;
+use aether_data::{Kind, KindId};
 use aether_kinds::{
     ComponentCapabilities, DropComponent, DropResult, LoadComponent, LoadResult, MailEnvelope,
     ReplaceComponent, ReplaceResult, SubscribeInput, SubscribeInputResult, UnsubscribeInput,
 };
-use aether_mail::{Kind, KindId};
 use wasmtime::{Engine, Linker, Module};
 
 use crate::component::Component;

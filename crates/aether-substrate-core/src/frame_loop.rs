@@ -27,8 +27,8 @@
 
 use std::time::Duration;
 
+use aether_data::encode;
 use aether_kinds::FrameStats;
-use aether_mail::encode;
 
 use crate::hub_client::HubOutbound;
 use crate::lifecycle;
@@ -129,7 +129,7 @@ pub fn emit_frame_stats(
     queue: &Mailer,
     broadcast_mbox: MailboxId,
     sender: MailboxId,
-    kind_frame_stats: aether_mail::KindId,
+    kind_frame_stats: aether_data::KindId,
     frame: u64,
     triangles: u64,
 ) {
@@ -151,8 +151,8 @@ mod tests {
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
+    use aether_data::Kind;
     use aether_kinds::FrameStats;
-    use aether_mail::Kind;
 
     use super::*;
     use crate::component::Component;
@@ -393,7 +393,7 @@ mod tests {
         );
         let frames = captured.read().unwrap();
         assert_eq!(frames.len(), 1, "one delivery on the boundary");
-        let stats: FrameStats = aether_mail::decode(&frames[0]).expect("decode FrameStats");
+        let stats: FrameStats = aether_data::decode(&frames[0]).expect("decode FrameStats");
         assert_eq!(stats.frame, LOG_EVERY_FRAMES);
         assert_eq!(stats.triangles, 42);
     }

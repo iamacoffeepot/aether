@@ -18,17 +18,17 @@
 #![allow(dead_code)]
 
 use aether_component::{Component, Ctx, DropCtx, InitCtx, handlers};
-use aether_hub_protocol::{INPUTS_SECTION_VERSION, InputsRecord};
-use aether_mail::Kind;
+use aether_data::Kind;
+use aether_data::{INPUTS_SECTION_VERSION, InputsRecord};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.tick")]
 struct Tick;
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Copy, Clone, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.ping")]
 struct Ping {
     seq: u32,

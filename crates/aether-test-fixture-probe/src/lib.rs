@@ -24,7 +24,7 @@ use bytemuck::{Pod, Zeroable};
 /// loopback decoder can record the kind name without the test
 /// pre-registering anything.
 #[derive(
-    aether_mail::Kind, aether_mail::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
 )]
 #[kind(name = "aether.test_fixture.tick_observed")]
 pub struct TickObserved {
@@ -37,7 +37,7 @@ pub struct TickObserved {
 /// bytes — keeps the test-side `MailEnvelope.payload` construction
 /// trivial.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.test_fixture.set_render")]
 pub struct SetRender {
     pub r: u8,

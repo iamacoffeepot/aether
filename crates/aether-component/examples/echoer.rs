@@ -8,7 +8,7 @@
 //! `Mail<'_>` directly.
 
 use aether_component::{Component, Ctx, InitCtx, KindId, handlers};
-use aether_mail::{Kind, Schema};
+use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]

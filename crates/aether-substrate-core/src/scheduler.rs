@@ -31,8 +31,8 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use aether_data::Kind;
 use aether_kinds::ComponentDied;
-use aether_mail::Kind;
 
 use crate::component::{Component, DISPATCH_UNKNOWN_KIND};
 use crate::mail::{Mail, MailboxId, ReplyTo};
@@ -842,7 +842,7 @@ mod tests {
         let entry = spawn_entry();
         assert!(entry.send(Mail::new(
             MailboxId(0),
-            aether_mail::KindId(0xBB),
+            aether_data::KindId(0xBB),
             vec![1],
             1
         )));
@@ -861,13 +861,13 @@ mod tests {
         let mut component = minimal_component();
         component.push_overflow_for_test(Mail::new(
             MailboxId(0),
-            aether_mail::KindId(0xCC),
+            aether_data::KindId(0xCC),
             vec![9],
             1,
         ));
         // next_mail should pop from overflow without touching mpsc.
         let mail = component.next_mail().expect("overflow pops first");
-        assert_eq!(mail.kind, aether_mail::KindId(0xCC));
+        assert_eq!(mail.kind, aether_data::KindId(0xCC));
     }
 
     /// ADR-0042 §5: `close_and_join` drops the mpsc Sender; a
@@ -964,7 +964,7 @@ mod tests {
         // marks state Dead, emits ComponentDied broadcast, exits.
         assert!(entry.send(Mail::new(
             MailboxId(0),
-            aether_mail::KindId(0xDD),
+            aether_data::KindId(0xDD),
             vec![1],
             1
         )));
@@ -989,7 +989,7 @@ mod tests {
         assert!(
             !entry.send(Mail::new(
                 MailboxId(0),
-                aether_mail::KindId(0xDD),
+                aether_data::KindId(0xDD),
                 vec![2],
                 1
             )),
@@ -1036,7 +1036,7 @@ mod tests {
             mailbox,
         ));
 
-        assert!(entry.send(Mail::new(mailbox, aether_mail::KindId(0xDD), vec![], 1)));
+        assert!(entry.send(Mail::new(mailbox, aether_data::KindId(0xDD), vec![], 1)));
         entry.drain();
 
         let died = captured.lock().unwrap();
@@ -1082,7 +1082,7 @@ mod tests {
 
         assert!(entry.send(Mail::new(
             MailboxId(0),
-            aether_mail::KindId(0xDD),
+            aether_data::KindId(0xDD),
             vec![],
             1
         )));
@@ -1106,7 +1106,7 @@ mod tests {
         for i in 0..16u32 {
             assert!(entry.send(Mail::new(
                 MailboxId(0),
-                aether_mail::KindId(0xCC),
+                aether_data::KindId(0xCC),
                 vec![i as u8],
                 1
             )));
@@ -1145,7 +1145,7 @@ mod tests {
         let entry = spawn_entry();
         assert!(entry.send(Mail::new(
             MailboxId(0),
-            aether_mail::KindId(0xBB),
+            aether_data::KindId(0xBB),
             vec![1],
             1
         )));
@@ -1180,7 +1180,7 @@ mod tests {
             mailbox,
         ));
 
-        assert!(entry.send(Mail::new(mailbox, aether_mail::KindId(0xDD), vec![], 1)));
+        assert!(entry.send(Mail::new(mailbox, aether_data::KindId(0xDD), vec![], 1)));
         let outcome = entry.drain_with_budget(Duration::from_secs(2));
         match outcome {
             DrainOutcome::Died(d) => {
@@ -1260,10 +1260,10 @@ mod tests {
             .insert(mailbox_dies, Arc::clone(&entry_dies));
 
         // Send to both: one quiesces cleanly, the other traps.
-        assert!(entry_ok.send(Mail::new(mailbox_ok, aether_mail::KindId(0xBB), vec![], 1)));
+        assert!(entry_ok.send(Mail::new(mailbox_ok, aether_data::KindId(0xBB), vec![], 1)));
         assert!(entry_dies.send(Mail::new(
             mailbox_dies,
-            aether_mail::KindId(0xDD),
+            aether_data::KindId(0xDD),
             vec![],
             1
         )));
@@ -1295,7 +1295,7 @@ mod tests {
         ));
 
         // Trigger a death.
-        assert!(entry.send(Mail::new(mailbox, aether_mail::KindId(0xDD), vec![], 1)));
+        assert!(entry.send(Mail::new(mailbox, aether_data::KindId(0xDD), vec![], 1)));
         match entry.drain_with_budget(Duration::from_secs(2)) {
             DrainOutcome::Died(_) => {}
             other => panic!("expected Died after trap, got {other:?}"),

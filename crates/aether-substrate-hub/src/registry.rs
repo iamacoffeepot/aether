@@ -12,7 +12,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use aether_hub_protocol::{EngineId, HubToEngine, KindDescriptor};
+use aether_hub_protocol::{EngineId, HubToEngine};
+
+use aether_data::KindDescriptor;
 use tokio::process::Child;
 use tokio::sync::mpsc;
 
@@ -45,7 +47,7 @@ pub struct EngineRecord {
     /// substrate-assigned `mailbox_id`. Clonable as a snapshot; the
     /// authoritative write path goes through
     /// `EngineRegistry::upsert_component`.
-    pub components: HashMap<aether_mail::MailboxId, ComponentRecord>,
+    pub components: HashMap<aether_data::MailboxId, ComponentRecord>,
     pub mail_tx: mpsc::Sender<HubToEngine>,
     /// `true` if this engine was spawned by the hub (ADR-0009).
     /// `false` for externally connected substrates. Purely informational
@@ -142,7 +144,7 @@ impl EngineRegistry {
     pub fn upsert_component(
         &self,
         id: &EngineId,
-        mailbox: aether_mail::MailboxId,
+        mailbox: aether_data::MailboxId,
         record: ComponentRecord,
     ) {
         if let Some(engine) = self.inner.lock().unwrap().records.get_mut(id) {
@@ -153,7 +155,7 @@ impl EngineRegistry {
     /// Drop the component record for `(engine, mailbox)`. Called after
     /// a successful `drop_component`. No-op if the engine or mailbox
     /// is unknown.
-    pub fn drop_component(&self, id: &EngineId, mailbox: aether_mail::MailboxId) {
+    pub fn drop_component(&self, id: &EngineId, mailbox: aether_data::MailboxId) {
         if let Some(engine) = self.inner.lock().unwrap().records.get_mut(id) {
             engine.components.remove(&mailbox);
         }
@@ -165,7 +167,7 @@ impl EngineRegistry {
     pub fn get_component(
         &self,
         id: &EngineId,
-        mailbox: aether_mail::MailboxId,
+        mailbox: aether_data::MailboxId,
     ) -> Option<ComponentRecord> {
         self.inner
             .lock()
@@ -251,7 +253,7 @@ mod tests {
 
     #[test]
     fn update_kinds_replaces_cached_descriptors() {
-        use aether_hub_protocol::{KindDescriptor, SchemaType};
+        use aether_data::{KindDescriptor, SchemaType};
         let reg = EngineRegistry::new();
         let r = record(3);
         let id = r.id;

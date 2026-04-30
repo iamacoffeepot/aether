@@ -1,7 +1,7 @@
 use super::*;
-use aether_hub_protocol::{Primitive, SchemaType};
+use aether_data::KindId;
+use aether_data::{Primitive, SchemaType};
 use aether_kinds::{HandlerCapability, Key, KeyRelease, MouseButton, MouseMove, Tick, WindowSize};
-use aether_mail::KindId;
 
 #[test]
 fn load_payload_roundtrip() {
@@ -321,20 +321,20 @@ fn load_component_registers_kinds_from_embedded_manifest() {
     let plane = make_plane();
 
     // Hand-roll the v0x03 records (ADR-0068 trailing is_stream byte) the derive would emit.
-    let shape = aether_hub_protocol::KindShape {
+    let shape = aether_data::KindShape {
         name: std::borrow::Cow::Borrowed("demo.embedded.kind"),
-        schema: aether_hub_protocol::SchemaShape::Struct {
-            fields: vec![aether_hub_protocol::SchemaShape::Scalar(Primitive::U32)],
+        schema: aether_data::SchemaShape::Struct {
+            fields: vec![aether_data::SchemaShape::Scalar(Primitive::U32)],
             repr_c: true,
         },
     };
-    let labels = aether_hub_protocol::KindLabels {
-        kind_id: aether_mail::KindId(aether_hub_protocol::canonical::kind_id_from_shape(&shape)),
+    let labels = aether_data::KindLabels {
+        kind_id: aether_data::KindId(aether_data::canonical::kind_id_from_shape(&shape)),
         kind_label: std::borrow::Cow::Borrowed("demo::EmbeddedKind"),
-        root: aether_hub_protocol::LabelNode::Struct {
+        root: aether_data::LabelNode::Struct {
             type_label: Some(std::borrow::Cow::Borrowed("demo::EmbeddedKind")),
             field_names: std::borrow::Cow::Owned(vec![std::borrow::Cow::Borrowed("code")]),
-            fields: std::borrow::Cow::Owned(vec![aether_hub_protocol::LabelNode::Anonymous]),
+            fields: std::borrow::Cow::Owned(vec![aether_data::LabelNode::Anonymous]),
         },
     };
     let mut canonical = vec![0x03u8];
@@ -407,14 +407,14 @@ fn load_component_with_same_name_different_schema_registers_distinct_kind() {
         })
         .unwrap();
 
-    let shape = aether_hub_protocol::KindShape {
+    let shape = aether_data::KindShape {
         name: std::borrow::Cow::Borrowed("demo.conflict"),
-        schema: aether_hub_protocol::SchemaShape::Scalar(Primitive::U64),
+        schema: aether_data::SchemaShape::Scalar(Primitive::U64),
     };
-    let labels = aether_hub_protocol::KindLabels {
-        kind_id: aether_mail::KindId(aether_hub_protocol::canonical::kind_id_from_shape(&shape)),
+    let labels = aether_data::KindLabels {
+        kind_id: aether_data::KindId(aether_data::canonical::kind_id_from_shape(&shape)),
         kind_label: std::borrow::Cow::Borrowed("demo::Conflict"),
-        root: aether_hub_protocol::LabelNode::Anonymous,
+        root: aether_data::LabelNode::Anonymous,
     };
     let mut canonical = vec![0x03u8];
     canonical.extend(postcard::to_allocvec(&shape).unwrap());
@@ -446,7 +446,7 @@ fn load_component_with_same_name_different_schema_registers_distinct_kind() {
         "load should succeed under hashed ids, got {result:?}"
     );
 
-    let new_id = aether_mail::KindId(aether_hub_protocol::canonical::kind_id_from_parts(
+    let new_id = aether_data::KindId(aether_data::canonical::kind_id_from_parts(
         "demo.conflict",
         &SchemaType::Scalar(Primitive::U64),
     ));
@@ -747,7 +747,7 @@ fn dispatch_unrecognised_kind_is_silent_drop() {
     // No panic; no outbound reply. Unknown kind arriving at the
     // control mailbox just logs and moves on.
     plane.dispatch(
-        aether_mail::KindId(0xdead_beef_dead_beef),
+        aether_data::KindId(0xdead_beef_dead_beef),
         "aether.control.does_not_exist",
         crate::mail::ReplyTo::NONE,
         &[],
@@ -799,7 +799,7 @@ const WAT_REHYDRATES_AND_SNAPSHOT: &str = r#"
 /// follow-up.
 #[test]
 fn replace_migrates_state_observable_via_snapshot_sink() {
-    use aether_hub_protocol::{KindDescriptor, SchemaType};
+    use aether_data::{KindDescriptor, SchemaType};
     use std::sync::Mutex as StdMutex;
 
     let plane = make_plane();
@@ -1168,7 +1168,7 @@ fn auto_subscribe_inputs_wires_known_streams_from_capabilities() {
         .registry
         .register_kind_with_descriptor(KindDescriptor {
             name: Tick::NAME.into(),
-            schema: <Tick as aether_mail::Schema>::SCHEMA,
+            schema: <Tick as aether_data::Schema>::SCHEMA,
             is_stream: true,
         })
         .unwrap();
@@ -1176,7 +1176,7 @@ fn auto_subscribe_inputs_wires_known_streams_from_capabilities() {
         .registry
         .register_kind_with_descriptor(KindDescriptor {
             name: WindowSize::NAME.into(),
-            schema: <WindowSize as aether_mail::Schema>::SCHEMA,
+            schema: <WindowSize as aether_data::Schema>::SCHEMA,
             is_stream: true,
         })
         .unwrap();

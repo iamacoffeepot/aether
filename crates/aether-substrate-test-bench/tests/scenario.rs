@@ -24,11 +24,11 @@
 
 use std::path::Path;
 
+use aether_data::{Kind, mailbox_id_from_name};
 use aether_kinds::{
     Delete, DeleteResult, DropComponent, IoError, List, ListResult, LoadComponent, MailEnvelope,
     Read, ReadResult, ReplaceComponent, Write, WriteResult,
 };
-use aether_mail::{Kind, mailbox_id_from_name};
 use aether_scenario::test_helpers::{
     has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots,
 };

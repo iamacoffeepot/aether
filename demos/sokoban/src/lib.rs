@@ -13,8 +13,8 @@
 
 use aether_camera::{CameraTopdownSet, TopdownParams};
 use aether_component::{Component, Ctx, InitCtx, KindId, Sink, handlers};
+use aether_data::{Kind, Schema};
 use aether_kinds::{DrawTriangle, Key, Tick, Vertex, keycode};
-use aether_mail::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
 const PLAYER_HALF: f32 = 0.25;

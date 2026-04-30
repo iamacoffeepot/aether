@@ -31,8 +31,8 @@
 
 use std::fmt;
 
-use aether_hub_protocol::{EnumVariant, NamedField, Primitive, SchemaType};
-use aether_mail::tagged_id;
+use aether_data::tagged_id;
+use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::Value;
 
 #[derive(Debug)]
@@ -359,7 +359,7 @@ fn encode_postcard(
 /// `UnsupportedSchema` if the schema's `type_id` doesn't correspond
 /// to a typed-id newtype the codec knows how to translate.
 fn decode_type_id_value(value: &Value, type_id: u64, path: &str) -> Result<u64, EncodeError> {
-    let expected = aether_mail::tag_for_type_id(type_id)
+    let expected = aether_data::tag_for_type_id(type_id)
         .ok_or(EncodeError::UnsupportedSchema("unknown TypeId in schema"))?;
     match value {
         Value::String(s) => {
@@ -847,7 +847,7 @@ fn oor(name: &str, ty: &str) -> EncodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_hub_protocol::SchemaCell;
+    use aether_data::SchemaCell;
     use serde_json::json;
 
     fn scalar(name: &str, ty: Primitive) -> NamedField {
@@ -1439,10 +1439,10 @@ mod tests {
         // a postcard u64 varint — wire-identical to a raw `u64` field.
         let schema = postcard_struct(vec![NamedField {
             name: "mailbox".into(),
-            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+            ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let mailbox = aether_mail::MailboxId::from_name("aether.control");
-        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        let mailbox = aether_data::MailboxId::from_name("aether.control");
+        let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
         let bytes = encode_schema(&json!({ "mailbox": s }), &schema).unwrap();
         let mut expected = Vec::new();
         write_varint_u64(&mut expected, mailbox.0);
@@ -1455,9 +1455,9 @@ mod tests {
         // codec falls through to the back-compat `as_unsigned` path.
         let schema = postcard_struct(vec![NamedField {
             name: "mailbox".into(),
-            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+            ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let mailbox = aether_mail::MailboxId::from_name("aether.control");
+        let mailbox = aether_data::MailboxId::from_name("aether.control");
         let bytes = encode_schema(&json!({ "mailbox": mailbox.0 }), &schema).unwrap();
         let mut expected = Vec::new();
         write_varint_u64(&mut expected, mailbox.0);
@@ -1471,10 +1471,10 @@ mod tests {
         // expected `mbx-...` rather than corrupting the wire.
         let schema = postcard_struct(vec![NamedField {
             name: "mailbox".into(),
-            ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+            ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let knd_string = aether_mail::tagged_id::encode(aether_mail::with_tag(
-            aether_mail::Tag::Kind,
+        let knd_string = aether_data::tagged_id::encode(aether_data::with_tag(
+            aether_data::Tag::Kind,
             0xdeadbeef,
         ))
         .unwrap();
@@ -1492,11 +1492,11 @@ mod tests {
             scalar("stream", Primitive::U8),
             NamedField {
                 name: "mailbox".into(),
-                ty: SchemaType::TypeId(aether_mail::MailboxId::TYPE_ID),
+                ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
             },
         ]);
-        let mailbox = aether_mail::MailboxId::from_name("aether.control");
-        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        let mailbox = aether_data::MailboxId::from_name("aether.control");
+        let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
         let bytes = encode_schema(&json!({ "stream": 1, "mailbox": s }), &schema).unwrap();
         assert_eq!(bytes.len(), 16);
         assert_eq!(bytes[0], 1);

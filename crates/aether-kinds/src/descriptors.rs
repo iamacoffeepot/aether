@@ -28,13 +28,13 @@
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use aether_hub_protocol::KindDescriptor;
+use aether_data::KindDescriptor;
 
 /// Every kind the substrate exposes. Order is unspecified — names are
 /// the contract; downstream callers (`Registry::register_kind_with_descriptor`,
 /// hub `Hello` handshake) are order-independent.
 pub fn all() -> Vec<KindDescriptor> {
-    inventory::iter::<aether_mail::__inventory::DescriptorEntry>()
+    inventory::iter::<aether_data::__inventory::DescriptorEntry>()
         .map(|e| KindDescriptor {
             name: e.name.to_string(),
             schema: e.schema.clone(),
@@ -46,8 +46,8 @@ pub fn all() -> Vec<KindDescriptor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_hub_protocol::{Primitive, SchemaType};
-    use aether_mail::Kind;
+    use aether_data::Kind;
+    use aether_data::{Primitive, SchemaType};
 
     use crate::{
         Delete, DeleteResult, DrawTriangle, DropComponent, DropResult, Fetch, FetchResult,

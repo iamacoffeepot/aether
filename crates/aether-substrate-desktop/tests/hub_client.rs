@@ -101,7 +101,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     let recipient = registry.register_sink(
         "hello",
         Arc::new(
-            move |_kind_id: aether_mail::KindId,
+            move |_kind_id: aether_data::KindId,
                   _kind: &str,
                   _origin: Option<&str>,
                   sender: ReplyTo,

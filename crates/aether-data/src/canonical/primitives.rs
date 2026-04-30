@@ -10,7 +10,7 @@
 
 use alloc::borrow::Cow;
 
-use crate::types::{EnumVariant, LabelNode, NamedField, SchemaType, VariantLabel};
+use crate::schema::{EnumVariant, LabelNode, NamedField, SchemaType, VariantLabel};
 
 // `Cow::Borrowed::deref` isn't const, so `&cow[i]` / `&cow.as_str()`
 // can't be called from a const fn. Hand-roll a `match` per concrete

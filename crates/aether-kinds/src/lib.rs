@@ -15,6 +15,7 @@ extern crate alloc;
 
 pub mod descriptors;
 pub mod keycode;
+pub mod mailboxes;
 
 use bytemuck::{Pod, Zeroable};
 
@@ -43,8 +44,8 @@ use bytemuck::{Pod, Zeroable};
     Eq,
     Pod,
     Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "aether.tick", stream)]
 pub struct Tick;
@@ -63,8 +64,8 @@ pub struct Tick;
     Eq,
     Pod,
     Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "aether.key", stream)]
 pub struct Key {
@@ -85,8 +86,8 @@ pub struct Key {
     Eq,
     Pod,
     Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "aether.key_release", stream)]
 pub struct KeyRelease {
@@ -106,8 +107,8 @@ pub struct KeyRelease {
     Eq,
     Pod,
     Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "aether.mouse_button", stream)]
 pub struct MouseButton;
@@ -115,7 +116,7 @@ pub struct MouseButton;
 /// Cursor position in window coordinates, as logical pixels cast to f32.
 #[repr(C)]
 #[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.mouse_move", stream)]
 pub struct MouseMove {
@@ -141,8 +142,8 @@ pub struct MouseMove {
     Eq,
     Pod,
     Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "aether.window_size", stream)]
 pub struct WindowSize {
@@ -157,7 +158,7 @@ pub struct WindowSize {
 /// space. Not a kind on its own — only addressable as the element
 /// type inside `DrawTriangle.verts`.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Schema)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Schema)]
 pub struct Vertex {
     pub x: f32,
     pub y: f32,
@@ -172,7 +173,7 @@ pub struct Vertex {
 /// sent as a slice.
 #[repr(C)]
 #[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.draw_triangle")]
 pub struct DrawTriangle {
@@ -198,7 +199,7 @@ pub const DRAW_TRIANGLE_BYTES: usize = core::mem::size_of::<DrawTriangle>();
 /// in clip-space 1:1 (the pre-camera behaviour).
 #[repr(C)]
 #[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.camera")]
 pub struct Camera {
@@ -231,8 +232,8 @@ pub struct Camera {
     Eq,
     Pod,
     Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "aether.audio.note_on")]
 pub struct NoteOn {
@@ -257,8 +258,8 @@ pub struct NoteOn {
     Eq,
     Pod,
     Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "aether.audio.note_off")]
 pub struct NoteOff {
@@ -275,7 +276,7 @@ pub struct NoteOff {
 /// `unsupported on <chassis>` error. Fire-and-forget in the happy path.
 #[repr(C)]
 #[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_mail::Kind, aether_mail::Schema,
+    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.audio.set_master_gain")]
 pub struct SetMasterGain {
@@ -296,8 +297,8 @@ pub struct SetMasterGain {
     Eq,
     Pod,
     Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "aether.ping")]
 pub struct Ping {
@@ -317,8 +318,8 @@ pub struct Ping {
     Eq,
     Pod,
     Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "aether.pong")]
 pub struct Pong {
@@ -340,8 +341,8 @@ pub struct Pong {
     Eq,
     Pod,
     Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "aether.observation.frame_stats")]
 pub struct FrameStats {
@@ -364,11 +365,11 @@ pub struct FrameStats {
 /// (panic payload, trap message). String fields make this postcard-
 /// shaped on the wire (cast eligibility is false for non-`Pod` types).
 #[derive(
-    aether_mail::Kind, aether_mail::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
 )]
 #[kind(name = "aether.observation.component_died")]
 pub struct ComponentDied {
-    pub mailbox_id: aether_mail::MailboxId,
+    pub mailbox_id: aether_data::MailboxId,
     pub mailbox_name: alloc::string::String,
     pub last_kind: alloc::string::String,
     pub reason: alloc::string::String,
@@ -387,7 +388,7 @@ pub struct ComponentDied {
 /// waited=5s"`). Receivers should treat this as the engine's last
 /// word — the TCP connection drops moments later.
 #[derive(
-    aether_mail::Kind, aether_mail::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
 )]
 #[kind(name = "aether.observation.substrate_dying")]
 pub struct SubstrateDying {
@@ -415,13 +416,13 @@ pub struct SubstrateDying {
     Eq,
     Pod,
     Zeroable,
-    aether_mail::Kind,
-    aether_mail::Schema,
+    aether_data::Kind,
+    aether_data::Schema,
 )]
 #[kind(name = "aether.mail.unresolved")]
 pub struct UnresolvedMail {
-    pub recipient_mailbox_id: aether_mail::MailboxId,
-    pub kind_id: aether_mail::KindId,
+    pub recipient_mailbox_id: aether_data::MailboxId,
+    pub kind_id: aether_data::KindId,
 }
 
 // Reserved control-plane vocabulary (ADR-0010). The substrate handles
@@ -453,7 +454,7 @@ mod control_plane {
     /// `aether.kinds` custom section (ADR-0028) — the substrate
     /// reads it directly and the loader doesn't need to declare
     /// anything. Substrate replies with `LoadResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.load_component")]
     pub struct LoadComponent {
         pub wasm: Vec<u8>,
@@ -466,11 +467,11 @@ mod control_plane {
     /// receive-side capabilities parsed from `aether.kinds.inputs`
     /// (ADR-0033). `Err` carries the failure reason — kind-descriptor
     /// conflict, invalid WASM, name conflict, etc.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.load_result")]
     pub enum LoadResult {
         Ok {
-            mailbox_id: aether_mail::MailboxId,
+            mailbox_id: aether_data::MailboxId,
             name: String,
             capabilities: ComponentCapabilities,
         },
@@ -488,7 +489,7 @@ mod control_plane {
     /// fallback + `None` doc describes a component that shipped
     /// without the `#[handlers]` macro (ADR-0027 shape) — the hub can
     /// tell those apart from a truly empty receive surface.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
     pub struct ComponentCapabilities {
         pub handlers: Vec<HandlerCapability>,
         pub fallback: Option<FallbackCapability>,
@@ -499,9 +500,9 @@ mod control_plane {
     /// compile-time `<K as Kind>::ID` (ADR-0030); `name` is `K::NAME`;
     /// `doc` carries the author's rustdoc filtered through the
     /// `# Agent` section convention when present, else the full doc.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct HandlerCapability {
-        pub id: aether_mail::KindId,
+        pub id: aether_data::KindId,
         pub name: String,
         pub doc: Option<String>,
     }
@@ -510,22 +511,22 @@ mod control_plane {
     /// Components without a fallback are strict receivers; absence of
     /// this field on `ComponentCapabilities` means "no catchall — mail
     /// for unhandled kinds will land as `DISPATCH_UNKNOWN_KIND`".
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct FallbackCapability {
         pub doc: Option<String>,
     }
 
     /// `aether.control.drop_component` — remove a component from the
     /// substrate and invalidate its mailbox id. Reply: `DropResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.drop_component")]
     pub struct DropComponent {
-        pub mailbox_id: aether_mail::MailboxId,
+        pub mailbox_id: aether_data::MailboxId,
     }
 
     /// Reply to `DropComponent`. `Ok` on success; `Err` if the
     /// mailbox was unknown, wasn't a component, or already dropped.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.drop_result")]
     pub enum DropResult {
         Ok,
@@ -540,10 +541,10 @@ mod control_plane {
     /// `ReplaceResult::Err` and the old instance stays bound. Kind
     /// vocabulary rides in the wasm's `aether.kinds` custom section
     /// (ADR-0028). Reply: `ReplaceResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.replace_component")]
     pub struct ReplaceComponent {
-        pub mailbox_id: aether_mail::MailboxId,
+        pub mailbox_id: aether_data::MailboxId,
         pub wasm: Vec<u8>,
         pub drain_timeout_ms: Option<u32>,
     }
@@ -551,7 +552,7 @@ mod control_plane {
     /// Reply to `ReplaceComponent`. Carries the new component's
     /// advertised capabilities on `Ok` so the hub's cached state
     /// reflects the swapped binary; `Err` carries a free-form reason.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.replace_result")]
     pub enum ReplaceResult {
         Ok { capabilities: ComponentCapabilities },
@@ -571,28 +572,28 @@ mod control_plane {
     /// subscriber set for `kind`. Idempotent: subscribing a mailbox
     /// already in the set is still `Ok` (subscriptions are a set, not
     /// a counter). Reply: `SubscribeInputResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.subscribe_input")]
     pub struct SubscribeInput {
-        pub kind: aether_mail::KindId,
-        pub mailbox: aether_mail::MailboxId,
+        pub kind: aether_data::KindId,
+        pub mailbox: aether_data::MailboxId,
     }
 
     /// `aether.control.unsubscribe_input` — remove `mailbox` from the
     /// subscriber set for `kind`. Idempotent: unsubscribing a mailbox
     /// that isn't subscribed is still `Ok`. Reply:
     /// `SubscribeInputResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.unsubscribe_input")]
     pub struct UnsubscribeInput {
-        pub kind: aether_mail::KindId,
-        pub mailbox: aether_mail::MailboxId,
+        pub kind: aether_data::KindId,
+        pub mailbox: aether_data::MailboxId,
     }
 
     /// Reply to both subscribe and unsubscribe (ADR-0021 §2). Only
     /// failure mode: the target mailbox id doesn't name a live
     /// component (unknown, a sink, or already dropped).
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.subscribe_input_result")]
     pub enum SubscribeInputResult {
         Ok,
@@ -618,7 +619,7 @@ mod control_plane {
     /// whole request aborts before touching the queue.
     ///
     /// Reply: `CaptureFrameResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.capture_frame")]
     pub struct CaptureFrame {
         pub mails: Vec<MailEnvelope>,
@@ -626,13 +627,13 @@ mod control_plane {
     }
 
     /// One mail in a `CaptureFrame.mails` bundle. Structurally mirrors
-    /// `aether_hub_protocol::MailFrame` — a pre-encoded payload plus
+    /// `aether_data::MailFrame` — a pre-encoded payload plus
     /// the name-level addressing the substrate uses to resolve it.
     /// The hub encodes each envelope's `payload` via the kind's
     /// descriptor before wrapping it into the bundle, so the
     /// substrate side just pushes `Mail::new(mailbox, kind_id,
     /// payload, count)` directly.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct MailEnvelope {
         pub recipient_name: String,
         pub kind_name: String,
@@ -645,7 +646,7 @@ mod control_plane {
     /// supported on this surface, map failed, encode failed, or a
     /// bundle-resolution failure (unknown kind / mailbox) aborting
     /// before any mail was dispatched.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.capture_frame_result")]
     pub enum CaptureFrameResult {
         Ok { png: Vec<u8> },
@@ -662,7 +663,7 @@ mod control_plane {
     /// that mutate state (`set_window_mode`) get the new state in the
     /// mutation's reply, so polling `platform_info` after every
     /// change isn't necessary.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.platform_info")]
     pub struct PlatformInfo;
 
@@ -677,7 +678,7 @@ mod control_plane {
     /// serialized, and dropped, so the in-memory enum-tag cost is
     /// not a concern.
     #[allow(clippy::large_enum_variant)]
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.platform_info_result")]
     pub enum PlatformInfoResult {
         Ok {
@@ -700,7 +701,7 @@ mod control_plane {
     /// `"linux"`, `"windows"`; `"aarch64"` / `"x86_64"`); `version`
     /// is sourced from the `os_info` crate and is platform-formatted
     /// (e.g. `"14.5"`, `"22.04"`).
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct OsInfo {
         pub name: String,
         pub version: String,
@@ -712,7 +713,7 @@ mod control_plane {
     /// configured worker count; `kinds_count` is the number of kinds
     /// registered at boot (ADR-0010 load-time additions aren't
     /// included — this is a static boot-time fingerprint).
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct EngineInfo {
         pub version: String,
         pub workers: u32,
@@ -723,7 +724,7 @@ mod control_plane {
     /// for when planning work. Values are the ones wgpu reports; ids
     /// are the raw `AdapterInfo::vendor` / `device` integers (PCI
     /// ids on desktop GPUs, zero on software adapters).
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct GpuInfo {
         pub name: String,
         pub vendor_id: u32,
@@ -740,7 +741,7 @@ mod control_plane {
     /// Mirror of `wgpu::DeviceType`. Kept as its own enum so the
     /// kind's schema doesn't depend on wgpu version churn and so
     /// agents see the same variant names on every platform.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
     pub enum GpuDeviceType {
         Other,
         IntegratedGpu,
@@ -751,7 +752,7 @@ mod control_plane {
 
     /// Mirror of `wgpu::Backend`. Like `GpuDeviceType`, independent
     /// of wgpu's enum so the wire shape is stable.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
     pub enum GpuBackend {
         Noop,
         Vulkan,
@@ -767,7 +768,7 @@ mod control_plane {
     /// pixels. `current_mode` is `None` if winit couldn't determine
     /// the active mode. `modes` is the full list winit reported —
     /// callers pick one for `FullscreenExclusive`.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct MonitorInfo {
         pub name: Option<String>,
         pub is_primary: bool,
@@ -783,7 +784,7 @@ mod control_plane {
     /// A single video mode a monitor supports. `refresh_mhz` is
     /// winit's millihertz unit (exact rational — divide by 1000 for
     /// Hz). `bit_depth` is the per-channel count winit reports.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
     pub struct VideoMode {
         pub width: u32,
         pub height: u32,
@@ -794,7 +795,7 @@ mod control_plane {
     /// Current window state. `monitor_index` points into the
     /// `monitors` vec on the same reply; `None` if winit couldn't
     /// resolve a current monitor (rare).
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct WindowInfo {
         pub mode: WindowMode,
         pub width: u32,
@@ -809,7 +810,7 @@ mod control_plane {
     /// substrate matches against the active monitor's supported modes
     /// and fails the request if none matches (loud rather than
     /// silently falling back).
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub enum WindowMode {
         Windowed,
         FullscreenBorderless,
@@ -831,7 +832,7 @@ mod control_plane {
     /// `VideoMode` on the current monitor matches the `(width,
     /// height, refresh_mhz)` triple exactly. Use `platform_info`
     /// first to enumerate supported modes.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.set_window_mode")]
     pub struct SetWindowMode {
         pub mode: WindowMode,
@@ -843,7 +844,7 @@ mod control_plane {
     /// after the mode change applied; `Err` carries the reason the
     /// request was rejected (unknown video mode, window not ready,
     /// etc.) with no state change.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.set_window_mode_result")]
     pub enum SetWindowModeResult {
         Ok {
@@ -863,7 +864,7 @@ mod control_plane {
     /// chassis reply `Err { error: "unsupported on headless..." }`.
     /// Boot-time default comes from `AETHER_WINDOW_TITLE`; unset falls
     /// back to the substrate's name.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.set_window_title")]
     pub struct SetWindowTitle {
         pub title: String,
@@ -874,7 +875,7 @@ mod control_plane {
     /// see the resulting state in one place. `Err` is reserved for
     /// chassis that don't own a window (headless, hub) or for a
     /// pre-window-ready request.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.control.set_window_title_result")]
     pub enum SetWindowTitleResult {
         Ok { title: String },
@@ -886,7 +887,7 @@ mod control_plane {
     /// callers that sent `1.5` learn they got `1.0`. `Err` fires on
     /// chassis without an audio device (headless, hub) or when audio
     /// was disabled at boot via `AETHER_AUDIO_DISABLE`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.audio.set_master_gain_result")]
     pub enum SetMasterGainResult {
         Ok { applied_gain: f32 },
@@ -913,7 +914,7 @@ mod control_plane {
     /// permission-denied text from the OS, an HTTP status from a
     /// future cloud adapter — without locking the enum shape to any
     /// one backend.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub enum IoError {
         NotFound,
         Forbidden,
@@ -924,7 +925,7 @@ mod control_plane {
     /// `aether.io.read` — request the substrate read a file and reply
     /// with its bytes. Mailed to the `"aether.sink.io"` sink; reply
     /// lands via `reply_mail` as `ReadResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.io.read")]
     pub struct Read {
         pub namespace: String,
@@ -938,7 +939,7 @@ mod control_plane {
     /// reply kind itself (`aether.io.read_result`), target identity
     /// from the echoed fields. `Ok` carries the full file contents;
     /// `Err` carries an `IoError` variant.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.io.read_result")]
     pub enum ReadResult {
         Ok {
@@ -958,7 +959,7 @@ mod control_plane {
     /// temporary sibling and `rename`s on success so a crash
     /// mid-write leaves either the old contents or the new, never a
     /// torn file. Reply: `WriteResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.io.write")]
     pub struct Write {
         pub namespace: String,
@@ -973,7 +974,7 @@ mod control_plane {
     /// `Err` carries an `IoError` — `Forbidden` for read-only
     /// namespaces (e.g. `assets://`), `AdapterError` for disk-full /
     /// permission / rename failures.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.io.write_result")]
     pub enum WriteResult {
         Ok {
@@ -991,7 +992,7 @@ mod control_plane {
     /// Missing files surface as `NotFound` (not silent success) so
     /// callers that care about the distinction can tell; callers
     /// that don't ignore it. Reply: `DeleteResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.io.delete")]
     pub struct Delete {
         pub namespace: String,
@@ -1002,7 +1003,7 @@ mod control_plane {
     /// correlation. `Ok` on successful removal; `Err` on any
     /// adapter-reported failure, including `NotFound` for a file that
     /// wasn't there to delete.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.io.delete_result")]
     pub enum DeleteResult {
         Ok {
@@ -1020,7 +1021,7 @@ mod control_plane {
     /// `namespace`. Shallow (no recursion) and prefix-filtered —
     /// callers that want a tree walk paginate themselves. Empty
     /// `prefix` lists the namespace root. Reply: `ListResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.io.list")]
     pub struct List {
         pub namespace: String,
@@ -1034,7 +1035,7 @@ mod control_plane {
     /// into a read. Empty `entries` means "namespace exists, nothing
     /// matched"; `Err { UnknownNamespace }` means the namespace itself
     /// wasn't registered.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.io.list_result")]
     pub enum ListResult {
         Ok {
@@ -1068,7 +1069,7 @@ mod control_plane {
     /// layer keeps `"get"` / `"GET"` / `"Get"` from disagreeing
     /// across guests; the substrate maps each variant to its
     /// canonical uppercase name when calling the HTTP backend.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
     pub enum HttpMethod {
         Get,
         Post,
@@ -1081,10 +1082,10 @@ mod control_plane {
 
     /// One HTTP header on a `Fetch` request or `FetchResult`
     /// response. Expressed as a named-field struct because
-    /// `aether_mail::Schema` has no blanket impl for tuples — if
+    /// `aether_data::Schema` has no blanket impl for tuples — if
     /// that lands later the wire shape here is source-compatible
     /// (same two fields in the same order).
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct HttpHeader {
         pub name: String,
         pub value: String,
@@ -1098,7 +1099,7 @@ mod control_plane {
     /// URL text; `AdapterError` is the catchall preserving backend-
     /// specific detail (DNS failure, TLS handshake, connection
     /// refused, etc.) as free-form text.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub enum NetError {
         InvalidUrl(String),
         Timeout,
@@ -1115,7 +1116,7 @@ mod control_plane {
     /// `timeout_ms` overrides the chassis default
     /// (`AETHER_NET_TIMEOUT_MS`, default 30000) when set; `None`
     /// uses the default.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.net.fetch")]
     pub struct Fetch {
         pub url: String,
@@ -1135,7 +1136,7 @@ mod control_plane {
     /// headers, and response body (bounded by
     /// `AETHER_NET_MAX_BODY_BYTES`, default 16MB); `Err` carries a
     /// `NetError` variant.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.net.fetch_result")]
     pub enum FetchResult {
         Ok {
@@ -1174,7 +1175,7 @@ mod control_plane {
     /// Structured failure reason for a handle operation. Mirrors
     /// `IoError` / `NetError`'s tagged-enum shape so guests can
     /// pattern-match on the variant rather than parsing strings.
-    #[derive(aether_mail::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub enum HandleError {
         /// No handle entry under the requested id. Surfaces from
         /// `release` / `pin` / `unpin` against an id the substrate
@@ -1198,10 +1199,10 @@ mod control_plane {
     /// `bytes` in the handle store under `kind_id` and reply with
     /// a fresh ephemeral id. Mailed to the `"aether.sink.handle"` sink;
     /// reply lands as `HandlePublishResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.publish")]
     pub struct HandlePublish {
-        pub kind_id: aether_mail::KindId,
+        pub kind_id: aether_data::KindId,
         pub bytes: Vec<u8>,
     }
 
@@ -1209,15 +1210,15 @@ mod control_plane {
     /// `kind_id` for correlation; `Ok` carries the minted `id`.
     /// The request's `bytes` aren't echoed — correlation needs the
     /// identity of the publish, not its contents.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.publish_result")]
     pub enum HandlePublishResult {
         Ok {
-            kind_id: aether_mail::KindId,
-            id: aether_mail::HandleId,
+            kind_id: aether_data::KindId,
+            id: aether_data::HandleId,
         },
         Err {
-            kind_id: aether_mail::KindId,
+            kind_id: aether_data::KindId,
             error: HandleError,
         },
     }
@@ -1226,43 +1227,43 @@ mod control_plane {
     /// `HandleReleaseResult`. The substrate's `dec_ref` saturates
     /// at zero, so calling release on an already-released handle
     /// is a no-op success rather than `UnknownHandle`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.release")]
     pub struct HandleRelease {
-        pub id: aether_mail::HandleId,
+        pub id: aether_data::HandleId,
     }
 
     /// Reply to `HandleRelease`. Both arms echo the originating
     /// `id`. `Err` only fires when no entry exists at that id.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.release_result")]
     pub enum HandleReleaseResult {
         Ok {
-            id: aether_mail::HandleId,
+            id: aether_data::HandleId,
         },
         Err {
-            id: aether_mail::HandleId,
+            id: aether_data::HandleId,
             error: HandleError,
         },
     }
 
     /// `aether.handle.pin` — protect `id` from LRU eviction even
     /// when its refcount drops to zero. Reply: `HandlePinResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.pin")]
     pub struct HandlePin {
-        pub id: aether_mail::HandleId,
+        pub id: aether_data::HandleId,
     }
 
     /// Reply to `HandlePin`. Both arms echo the originating `id`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.pin_result")]
     pub enum HandlePinResult {
         Ok {
-            id: aether_mail::HandleId,
+            id: aether_data::HandleId,
         },
         Err {
-            id: aether_mail::HandleId,
+            id: aether_data::HandleId,
             error: HandleError,
         },
     }
@@ -1270,21 +1271,21 @@ mod control_plane {
     /// `aether.handle.unpin` — clear the pinned flag on `id`.
     /// Doesn't drop the entry; only makes it eligible for LRU
     /// eviction once `refcount == 0`. Reply: `HandleUnpinResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.unpin")]
     pub struct HandleUnpin {
-        pub id: aether_mail::HandleId,
+        pub id: aether_data::HandleId,
     }
 
     /// Reply to `HandleUnpin`. Both arms echo the originating `id`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.unpin_result")]
     pub enum HandleUnpinResult {
         Ok {
-            id: aether_mail::HandleId,
+            id: aether_data::HandleId,
         },
         Err {
-            id: aether_mail::HandleId,
+            id: aether_data::HandleId,
             error: HandleError,
         },
     }
@@ -1306,7 +1307,7 @@ mod control_plane {
     /// the message body in fields-first form (e.g.
     /// `"error=<Display> count=3 parse failed"`), capped at 4096 bytes
     /// by the SDK with a `" [truncated]"` suffix on overflow.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.log")]
     pub struct LogEvent {
         pub level: u8,
@@ -1340,7 +1341,7 @@ mod control_plane {
     /// fail fast.
     ///
     /// Reply: `AdvanceResult`.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.test_bench.advance")]
     pub struct Advance {
         pub ticks: u32,
@@ -1352,7 +1353,7 @@ mod control_plane {
     /// outcome can extend it without widening the kind). `Err`
     /// carries a free-form reason: chassis doesn't support advance,
     /// dispatcher wedged mid-advance, etc.
-    #[derive(aether_mail::Kind, aether_mail::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.test_bench.advance_result")]
     pub enum AdvanceResult {
         Ok { ticks_completed: u32 },
@@ -1363,8 +1364,7 @@ mod control_plane {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_mail::{Kind, decode, decode_slice, encode, encode_slice};
-
+    use aether_data::{Kind, decode, decode_slice, encode, encode_slice};
     #[test]
     fn key_roundtrip() {
         let k = Key { code: 42 };
@@ -1488,9 +1488,8 @@ mod tests {
     // kinds.
     mod schema {
         use super::*;
-        use aether_hub_protocol::{Primitive, SchemaType};
-        use aether_mail::{CastEligible, Schema};
-
+        use aether_data::{CastEligible, Schema};
+        use aether_data::{Primitive, SchemaType};
         #[test]
         fn unit_kinds_emit_schema_unit() {
             assert!(matches!(<Tick as Schema>::SCHEMA, SchemaType::Unit));

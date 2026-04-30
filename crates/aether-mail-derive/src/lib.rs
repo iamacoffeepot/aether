@@ -6,7 +6,7 @@
 //! through the proc-macro toolchain even when they just want the
 //! runtime traits.
 //!
-//! `Kind` emits the `aether_mail::Kind` impl (`const NAME`, `const ID`,
+//! `Kind` emits the `aether_data::Kind` impl (`const NAME`, `const ID`,
 //! optional `const IS_INPUT`) plus the `#[link_section]` statics for
 //! both `aether.kinds` (canonical schema bytes) and
 //! `aether.kinds.labels` (nominal sidecar). The ID is
@@ -90,18 +90,18 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // Deserialize bounds are disjoint.
     let has_repr_c = struct_has_repr_c(&input.attrs);
     let decode_body = if has_repr_c {
-        quote! { ::aether_mail::__derive_runtime::decode_cast::<Self>(bytes) }
+        quote! { ::aether_data::__derive_runtime::decode_cast::<Self>(bytes) }
     } else {
-        quote! { ::aether_mail::__derive_runtime::decode_postcard::<Self>(bytes) }
+        quote! { ::aether_data::__derive_runtime::decode_postcard::<Self>(bytes) }
     };
     // Issue #240: encode mirror. Same `#[repr(C)]` autodetect as
     // `decode_body` — a single `Sink::send` call site routes through
     // `Kind::encode_into_bytes`, picking cast or postcard at the
     // kind's derive instead of at every send site.
     let encode_body = if has_repr_c {
-        quote! { ::aether_mail::__derive_runtime::encode_cast::<Self>(self) }
+        quote! { ::aether_data::__derive_runtime::encode_cast::<Self>(self) }
     } else {
-        quote! { ::aether_mail::__derive_runtime::encode_postcard::<Self>(self) }
+        quote! { ::aether_data::__derive_runtime::encode_postcard::<Self>(self) }
     };
 
     // ADR-0032 section emission goes through trait dispatch, not a
@@ -127,7 +127,7 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // the bytes out of native test executables where they'd just
     // bloat the binary with no reader.
     Ok(quote! {
-        impl ::aether_mail::Kind for #name {
+        impl ::aether_data::Kind for #name {
             const NAME: &'static str = #kind_name;
             // ADR-0064: tag the high 4 bits with `Tag::Kind` so kind
             // ids are distinguishable from mailbox / handle ids by
@@ -138,11 +138,11 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
             // wraps the raw `u64` hash. Wire-format sites that need
             // raw bytes call `.0`; dispatch sites compare `KindId` to
             // `KindId` directly.
-            const ID: ::aether_mail::KindId = ::aether_mail::KindId(
-                ::aether_mail::with_tag(
-                    ::aether_mail::Tag::Kind,
-                    ::aether_mail::fnv1a_64_prefixed(
-                        ::aether_mail::KIND_DOMAIN,
+            const ID: ::aether_data::KindId = ::aether_data::KindId(
+                ::aether_data::with_tag(
+                    ::aether_data::Tag::Kind,
+                    ::aether_data::fnv1a_64_prefixed(
+                        ::aether_data::KIND_DOMAIN,
                         &#canonical_bytes_ident,
                     ),
                 ),
@@ -153,7 +153,7 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 #decode_body
             }
 
-            fn encode_into_bytes(&self) -> ::aether_mail::__derive_runtime::Vec<u8> {
+            fn encode_into_bytes(&self) -> ::aether_data::__derive_runtime::Vec<u8> {
                 #encode_body
             }
         }
@@ -163,15 +163,15 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // materializes a temporary whose non-trivial Drop can't run
         // at compile time. Taking `&SCHEMA_STATIC` sidesteps that
         // (statics live for the whole program; destructor never runs).
-        static #schema_static_ident: ::aether_mail::__derive_runtime::SchemaType =
-            <#name as ::aether_mail::Schema>::SCHEMA;
+        static #schema_static_ident: ::aether_data::__derive_runtime::SchemaType =
+            <#name as ::aether_data::Schema>::SCHEMA;
         const #canonical_len_ident: usize =
-            ::aether_mail::__derive_runtime::canonical::canonical_len_kind(
+            ::aether_data::__derive_runtime::canonical::canonical_len_kind(
                 #kind_name,
                 &#schema_static_ident,
             );
         const #canonical_bytes_ident: [u8; #canonical_len_ident] =
-            ::aether_mail::__derive_runtime::canonical::canonical_serialize_kind::<#canonical_len_ident>(
+            ::aether_data::__derive_runtime::canonical::canonical_serialize_kind::<#canonical_len_ident>(
                 #kind_name,
                 &#schema_static_ident,
             );
@@ -181,20 +181,20 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // Statics have program-wide lifetime so the destructor never
         // needs to run at compile time; const-fn serializers reading
         // `&#labels_ident` see a stable `'static` reference.
-        static #labels_ident: ::aether_mail::__derive_runtime::KindLabels =
-            ::aether_mail::__derive_runtime::KindLabels {
+        static #labels_ident: ::aether_data::__derive_runtime::KindLabels =
+            ::aether_data::__derive_runtime::KindLabels {
                 // Issue 469: `KindLabels.kind_id` is now typed
                 // `KindId` (matches `Kind::ID`); pass through directly.
-                kind_id: <#name as ::aether_mail::Kind>::ID,
-                kind_label: ::aether_mail::__derive_runtime::Cow::Borrowed(
+                kind_id: <#name as ::aether_data::Kind>::ID,
+                kind_label: ::aether_data::__derive_runtime::Cow::Borrowed(
                     ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
                 ),
-                root: <#name as ::aether_mail::Schema>::LABEL_NODE,
+                root: <#name as ::aether_data::Schema>::LABEL_NODE,
             };
         const #labels_len_ident: usize =
-            ::aether_mail::__derive_runtime::canonical::canonical_len_labels(&#labels_ident);
+            ::aether_data::__derive_runtime::canonical::canonical_len_labels(&#labels_ident);
         const #labels_bytes_ident: [u8; #labels_len_ident] =
-            ::aether_mail::__derive_runtime::canonical::canonical_serialize_labels::<#labels_len_ident>(
+            ::aether_data::__derive_runtime::canonical::canonical_serialize_labels::<#labels_len_ident>(
                 &#labels_ident,
             );
 
@@ -241,11 +241,11 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // Cfg-gated to non-wasm targets because `inventory` doesn't
         // link on `wasm32-unknown-unknown`.
         #[cfg(not(target_arch = "wasm32"))]
-        ::aether_mail::__inventory::inventory::submit! {
-            ::aether_mail::__inventory::DescriptorEntry {
-                name: <#name as ::aether_mail::Kind>::NAME,
+        ::aether_data::__inventory::inventory::submit! {
+            ::aether_data::__inventory::DescriptorEntry {
+                name: <#name as ::aether_data::Kind>::NAME,
                 schema: &#schema_static_ident,
-                is_stream: <#name as ::aether_mail::Kind>::IS_STREAM,
+                is_stream: <#name as ::aether_data::Kind>::IS_STREAM,
             }
         }
     })
@@ -260,7 +260,7 @@ fn cast_eligible_expr_for_struct(has_repr_c: bool, fields: &[FieldInfo]) -> Toke
     }
     let parts = fields.iter().map(|f| {
         let ty = &f.ty;
-        quote! { <#ty as ::aether_mail::CastEligible>::ELIGIBLE }
+        quote! { <#ty as ::aether_data::CastEligible>::ELIGIBLE }
     });
     quote! { #(#parts)&&* }
 }
@@ -291,15 +291,15 @@ fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     };
     Ok(quote! {
-        impl ::aether_mail::Schema for #name {
-            const SCHEMA: ::aether_mail::__derive_runtime::SchemaType = #body;
+        impl ::aether_data::Schema for #name {
+            const SCHEMA: ::aether_data::__derive_runtime::SchemaType = #body;
             const LABEL: ::core::option::Option<&'static str> = ::core::option::Option::Some(
                 ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
             );
-            const LABEL_NODE: ::aether_mail::__derive_runtime::LabelNode = #label_node_body;
+            const LABEL_NODE: ::aether_data::__derive_runtime::LabelNode = #label_node_body;
         }
 
-        impl ::aether_mail::CastEligible for #name {
+        impl ::aether_data::CastEligible for #name {
             const ELIGIBLE: bool = #cast_eligible_expr;
         }
     })
@@ -317,20 +317,20 @@ fn expand_label_node_struct(type_ident: &str, fields: &[FieldInfo]) -> TokenStre
         None => idx.to_string(),
     });
     let field_name_entries = field_names.map(|n| {
-        quote! { ::aether_mail::__derive_runtime::Cow::Borrowed(#n) }
+        quote! { ::aether_data::__derive_runtime::Cow::Borrowed(#n) }
     });
     let field_node_exprs = fields.iter().map(|f| field_label_node_expr(&f.ty));
     quote! {
-        ::aether_mail::__derive_runtime::LabelNode::Struct {
+        ::aether_data::__derive_runtime::LabelNode::Struct {
             type_label: ::core::option::Option::Some(
-                ::aether_mail::__derive_runtime::Cow::Borrowed(
+                ::aether_data::__derive_runtime::Cow::Borrowed(
                     ::core::concat!(::core::module_path!(), "::", #type_ident),
                 ),
             ),
-            field_names: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+            field_names: ::aether_data::__derive_runtime::Cow::Borrowed(&[
                 #( #field_name_entries ),*
             ]),
-            fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+            fields: ::aether_data::__derive_runtime::Cow::Borrowed(&[
                 #( #field_node_exprs ),*
             ]),
         }
@@ -342,16 +342,16 @@ fn expand_label_node_enum(type_ident: &str, data: &DataEnum) -> TokenStream2 {
         let vname = v.ident.to_string();
         match &v.fields {
             Fields::Unit => quote! {
-                ::aether_mail::__derive_runtime::VariantLabel::Unit {
-                    name: ::aether_mail::__derive_runtime::Cow::Borrowed(#vname),
+                ::aether_data::__derive_runtime::VariantLabel::Unit {
+                    name: ::aether_data::__derive_runtime::Cow::Borrowed(#vname),
                 }
             },
             Fields::Unnamed(unnamed) => {
                 let field_exprs = unnamed.unnamed.iter().map(|f| field_label_node_expr(&f.ty));
                 quote! {
-                    ::aether_mail::__derive_runtime::VariantLabel::Tuple {
-                        name: ::aether_mail::__derive_runtime::Cow::Borrowed(#vname),
-                        fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+                    ::aether_data::__derive_runtime::VariantLabel::Tuple {
+                        name: ::aether_data::__derive_runtime::Cow::Borrowed(#vname),
+                        fields: ::aether_data::__derive_runtime::Cow::Borrowed(&[
                             #( #field_exprs ),*
                         ]),
                     }
@@ -360,16 +360,16 @@ fn expand_label_node_enum(type_ident: &str, data: &DataEnum) -> TokenStream2 {
             Fields::Named(named) => {
                 let field_name_entries = named.named.iter().map(|f| {
                     let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
-                    quote! { ::aether_mail::__derive_runtime::Cow::Borrowed(#fname) }
+                    quote! { ::aether_data::__derive_runtime::Cow::Borrowed(#fname) }
                 });
                 let field_node_exprs = named.named.iter().map(|f| field_label_node_expr(&f.ty));
                 quote! {
-                    ::aether_mail::__derive_runtime::VariantLabel::Struct {
-                        name: ::aether_mail::__derive_runtime::Cow::Borrowed(#vname),
-                        field_names: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+                    ::aether_data::__derive_runtime::VariantLabel::Struct {
+                        name: ::aether_data::__derive_runtime::Cow::Borrowed(#vname),
+                        field_names: ::aether_data::__derive_runtime::Cow::Borrowed(&[
                             #( #field_name_entries ),*
                         ]),
-                        fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+                        fields: ::aether_data::__derive_runtime::Cow::Borrowed(&[
                             #( #field_node_exprs ),*
                         ]),
                     }
@@ -378,13 +378,13 @@ fn expand_label_node_enum(type_ident: &str, data: &DataEnum) -> TokenStream2 {
         }
     });
     quote! {
-        ::aether_mail::__derive_runtime::LabelNode::Enum {
+        ::aether_data::__derive_runtime::LabelNode::Enum {
             type_label: ::core::option::Option::Some(
-                ::aether_mail::__derive_runtime::Cow::Borrowed(
+                ::aether_data::__derive_runtime::Cow::Borrowed(
                     ::core::concat!(::core::module_path!(), "::", #type_ident),
                 ),
             ),
-            variants: ::aether_mail::__derive_runtime::Cow::Borrowed(&[
+            variants: ::aether_data::__derive_runtime::Cow::Borrowed(&[
                 #( #variant_entries ),*
             ]),
         }
@@ -398,15 +398,15 @@ fn expand_label_node_enum(type_ident: &str, data: &DataEnum) -> TokenStream2 {
 /// structural children to label.
 fn field_label_node_expr(ty: &Type) -> TokenStream2 {
     if is_vec_u8(ty) {
-        quote! { ::aether_mail::__derive_runtime::LabelNode::Anonymous }
+        quote! { ::aether_data::__derive_runtime::LabelNode::Anonymous }
     } else {
-        quote! { <#ty as ::aether_mail::Schema>::LABEL_NODE }
+        quote! { <#ty as ::aether_data::Schema>::LABEL_NODE }
     }
 }
 
 fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
     if fields.is_empty() {
-        return Ok(quote! { ::aether_mail::__derive_runtime::SchemaType::Unit });
+        return Ok(quote! { ::aether_data::__derive_runtime::SchemaType::Unit });
     }
 
     for f in fields {
@@ -423,17 +423,17 @@ fn expand_schema_struct(fields: &[FieldInfo]) -> syn::Result<TokenStream2> {
         };
         let ty_expr = field_type_schema_expr(&f.ty);
         quote! {
-            ::aether_mail::__derive_runtime::NamedField {
-                name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
+            ::aether_data::__derive_runtime::NamedField {
+                name: ::aether_data::__derive_runtime::Cow::Borrowed(#name),
                 ty: #ty_expr,
             }
         }
     });
 
     Ok(quote! {
-        ::aether_mail::__derive_runtime::SchemaType::Struct {
-            fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #entries ),* ]),
-            repr_c: <Self as ::aether_mail::CastEligible>::ELIGIBLE,
+        ::aether_data::__derive_runtime::SchemaType::Struct {
+            fields: ::aether_data::__derive_runtime::Cow::Borrowed(&[ #( #entries ),* ]),
+            repr_c: <Self as ::aether_data::CastEligible>::ELIGIBLE,
         }
     })
 }
@@ -450,8 +450,8 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
         let discriminant = idx as u32;
         match &v.fields {
             Fields::Unit => quote! {
-                ::aether_mail::__derive_runtime::EnumVariant::Unit {
-                    name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
+                ::aether_data::__derive_runtime::EnumVariant::Unit {
+                    name: ::aether_data::__derive_runtime::Cow::Borrowed(#name),
                     discriminant: #discriminant,
                 }
             },
@@ -461,10 +461,10 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
                     .iter()
                     .map(|f| field_type_schema_expr(&f.ty));
                 quote! {
-                    ::aether_mail::__derive_runtime::EnumVariant::Tuple {
-                        name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
+                    ::aether_data::__derive_runtime::EnumVariant::Tuple {
+                        name: ::aether_data::__derive_runtime::Cow::Borrowed(#name),
                         discriminant: #discriminant,
-                        fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #field_exprs ),* ]),
+                        fields: ::aether_data::__derive_runtime::Cow::Borrowed(&[ #( #field_exprs ),* ]),
                     }
                 }
             }
@@ -473,17 +473,17 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
                     let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
                     let ty_expr = field_type_schema_expr(&f.ty);
                     quote! {
-                        ::aether_mail::__derive_runtime::NamedField {
-                            name: ::aether_mail::__derive_runtime::Cow::Borrowed(#fname),
+                        ::aether_data::__derive_runtime::NamedField {
+                            name: ::aether_data::__derive_runtime::Cow::Borrowed(#fname),
                             ty: #ty_expr,
                         }
                     }
                 });
                 quote! {
-                    ::aether_mail::__derive_runtime::EnumVariant::Struct {
-                        name: ::aether_mail::__derive_runtime::Cow::Borrowed(#name),
+                    ::aether_data::__derive_runtime::EnumVariant::Struct {
+                        name: ::aether_data::__derive_runtime::Cow::Borrowed(#name),
                         discriminant: #discriminant,
-                        fields: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #field_exprs ),* ]),
+                        fields: ::aether_data::__derive_runtime::Cow::Borrowed(&[ #( #field_exprs ),* ]),
                     }
                 }
             }
@@ -491,8 +491,8 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
     });
 
     Ok(quote! {
-        ::aether_mail::__derive_runtime::SchemaType::Enum {
-            variants: ::aether_mail::__derive_runtime::Cow::Borrowed(&[ #( #variant_entries ),* ]),
+        ::aether_data::__derive_runtime::SchemaType::Enum {
+            variants: ::aether_data::__derive_runtime::Cow::Borrowed(&[ #( #variant_entries ),* ]),
         }
     })
 }
@@ -504,9 +504,9 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
 // const-constructible.
 fn field_type_schema_expr(ty: &Type) -> TokenStream2 {
     if is_vec_u8(ty) {
-        quote! { ::aether_mail::__derive_runtime::SchemaType::Bytes }
+        quote! { ::aether_data::__derive_runtime::SchemaType::Bytes }
     } else {
-        quote! { <#ty as ::aether_mail::Schema>::SCHEMA }
+        quote! { <#ty as ::aether_data::Schema>::SCHEMA }
     }
 }
 

@@ -38,7 +38,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use aether_hub_protocol::{
+use aether_data::{
     EnumVariant, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KindDescriptor, KindLabels,
     KindShape, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType, VariantLabel,
     canonical::kind_id_from_shape,
@@ -107,12 +107,12 @@ pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
         }
     }
 
-    let labels_by_id: HashMap<aether_mail::KindId, KindLabels> =
+    let labels_by_id: HashMap<aether_data::KindId, KindLabels> =
         labels_list.into_iter().map(|l| (l.kind_id, l)).collect();
 
     let mut descriptors = Vec::with_capacity(kinds.len());
     for (shape, is_stream) in kinds {
-        let id = aether_mail::KindId(kind_id_from_shape(&shape));
+        let id = aether_data::KindId(kind_id_from_shape(&shape));
         let label = labels_by_id.get(&id);
         descriptors.push(merge(shape, label, is_stream));
     }
@@ -396,12 +396,9 @@ fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>) -> SchemaType {
     }
 }
 
-fn merge_variant(
-    shape: &aether_hub_protocol::VariantShape,
-    label: Option<&VariantLabel>,
-) -> EnumVariant {
+fn merge_variant(shape: &aether_data::VariantShape, label: Option<&VariantLabel>) -> EnumVariant {
     match shape {
-        aether_hub_protocol::VariantShape::Unit { discriminant } => {
+        aether_data::VariantShape::Unit { discriminant } => {
             let name = match label {
                 Some(VariantLabel::Unit { name }) => name.clone(),
                 _ => Cow::Owned(String::new()),
@@ -411,7 +408,7 @@ fn merge_variant(
                 discriminant: *discriminant,
             }
         }
-        aether_hub_protocol::VariantShape::Tuple {
+        aether_data::VariantShape::Tuple {
             discriminant,
             fields,
         } => {
@@ -430,7 +427,7 @@ fn merge_variant(
                 fields: Cow::Owned(merged),
             }
         }
-        aether_hub_protocol::VariantShape::Struct {
+        aether_data::VariantShape::Struct {
             discriminant,
             fields,
         } => {
@@ -468,8 +465,7 @@ fn merge_variant(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_hub_protocol::{LabelCell, LabelNode, Primitive, SchemaShape, VariantShape};
-
+    use aether_data::{LabelCell, LabelNode, Primitive, SchemaShape, VariantShape};
     fn wasm_with_section(section_name: &str, section: &[u8]) -> Vec<u8> {
         let escaped: String = section.iter().map(|b| format!("\\{b:02x}")).collect();
         let wat =
@@ -510,7 +506,7 @@ mod tests {
     /// merge finds it. Matches what the Kind derive emits into
     /// `aether.kinds.labels` (v0x03 adds `kind_id`).
     fn push_labels(labels_bytes: &mut Vec<u8>, shape: &KindShape, labels: &mut KindLabels) {
-        labels.kind_id = aether_mail::KindId(kind_id_from_shape(shape));
+        labels.kind_id = aether_data::KindId(kind_id_from_shape(shape));
         labels_bytes.push(0x03);
         labels_bytes.extend(postcard::to_allocvec(labels).unwrap());
     }
@@ -525,7 +521,7 @@ mod tests {
             },
         };
         let mut labels = KindLabels {
-            kind_id: aether_mail::KindId(0),
+            kind_id: aether_data::KindId(0),
             kind_label: Cow::Borrowed("my_crate::TestKind"),
             root: LabelNode::Struct {
                 type_label: Some(Cow::Borrowed("my_crate::TestKind")),
@@ -565,12 +561,12 @@ mod tests {
             },
         ];
         let mut labels_a = KindLabels {
-            kind_id: aether_mail::KindId(0),
+            kind_id: aether_data::KindId(0),
             kind_label: Cow::Borrowed("my::A"),
             root: LabelNode::Anonymous,
         };
         let mut labels_b = KindLabels {
-            kind_id: aether_mail::KindId(0),
+            kind_id: aether_data::KindId(0),
             kind_label: Cow::Borrowed("my::B"),
             root: LabelNode::Anonymous,
         };
@@ -661,7 +657,7 @@ mod tests {
             },
         };
         let mut labels = KindLabels {
-            kind_id: aether_mail::KindId(0),
+            kind_id: aether_data::KindId(0),
             kind_label: Cow::Borrowed("my::Dup"),
             root: LabelNode::Struct {
                 type_label: Some(Cow::Borrowed("my::Dup")),
@@ -702,7 +698,7 @@ mod tests {
         };
         let mut orphan = KindLabels {
             // Deliberately a id that won't match `shape`.
-            kind_id: aether_mail::KindId(0xDEADBEEF_DEADBEEF),
+            kind_id: aether_data::KindId(0xDEADBEEF_DEADBEEF),
             kind_label: Cow::Borrowed("my::Missing"),
             root: LabelNode::Anonymous,
         };
@@ -768,7 +764,7 @@ mod tests {
             },
         };
         let mut labels = KindLabels {
-            kind_id: aether_mail::KindId(0),
+            kind_id: aether_data::KindId(0),
             kind_label: Cow::Borrowed("my::Outcome"),
             root: LabelNode::Enum {
                 type_label: Some(Cow::Borrowed("my::Outcome")),
@@ -844,7 +840,7 @@ mod tests {
         // Array's child goes through a LabelCell::Owned because we
         // build it at runtime here. Derive-time would use Static.
         let mut labels = KindLabels {
-            kind_id: aether_mail::KindId(0),
+            kind_id: aether_data::KindId(0),
             kind_label: Cow::Borrowed("my::Triangle"),
             root: LabelNode::Struct {
                 type_label: Some(Cow::Borrowed("my::Triangle")),
@@ -898,12 +894,12 @@ mod tests {
                 doc: "Draws triangles on tick.".into(),
             },
             InputsRecord::Handler {
-                id: aether_mail::KindId(42),
+                id: aether_data::KindId(42),
                 name: "aether.tick".into(),
                 doc: Some("substrate drives this".into()),
             },
             InputsRecord::Handler {
-                id: aether_mail::KindId(0xff),
+                id: aether_data::KindId(0xff),
                 name: "aether.ping".into(),
                 doc: None,
             },
@@ -912,13 +908,13 @@ mod tests {
         let caps = read_inputs_from_bytes(&wasm).unwrap();
         assert_eq!(caps.doc.as_deref(), Some("Draws triangles on tick."));
         assert_eq!(caps.handlers.len(), 2);
-        assert_eq!(caps.handlers[0].id, aether_mail::KindId(42));
+        assert_eq!(caps.handlers[0].id, aether_data::KindId(42));
         assert_eq!(caps.handlers[0].name, "aether.tick");
         assert_eq!(
             caps.handlers[0].doc.as_deref(),
             Some("substrate drives this")
         );
-        assert_eq!(caps.handlers[1].id, aether_mail::KindId(0xff));
+        assert_eq!(caps.handlers[1].id, aether_data::KindId(0xff));
         assert_eq!(caps.handlers[1].name, "aether.ping");
         assert!(caps.handlers[1].doc.is_none());
         assert!(caps.fallback.is_none());

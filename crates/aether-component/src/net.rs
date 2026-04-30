@@ -35,8 +35,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use aether_data::Kind;
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
-use aether_mail::Kind;
 
 use crate::{raw, resolve_sink};
 

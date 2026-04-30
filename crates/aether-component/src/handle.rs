@@ -42,11 +42,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+use aether_data::{Kind, Ref};
 use aether_kinds::{
     HandleError, HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
     HandleReleaseResult, HandleUnpin, HandleUnpinResult,
 };
-use aether_mail::{Kind, Ref};
 use serde::Serialize;
 
 use crate::{raw, resolve_sink};
@@ -157,7 +157,7 @@ impl<K> Drop for Handle<K> {
         // The substrate's release dispatch is idempotent — calling
         // it on an already-released id saturates harmlessly.
         let req = HandleRelease {
-            id: ::aether_mail::HandleId(self.id),
+            id: ::aether_data::HandleId(self.id),
         };
         resolve_sink::<HandleRelease>(HANDLE_SINK_NAME).send(&req);
     }
@@ -190,7 +190,7 @@ pub fn publish<K: Kind + Serialize>(value: &K) -> Result<Handle<K>, SyncHandleEr
 
 fn sync_release(id: u64) -> Result<(), SyncHandleError> {
     let req = HandleRelease {
-        id: ::aether_mail::HandleId(id),
+        id: ::aether_data::HandleId(id),
     };
     resolve_sink::<HandleRelease>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
@@ -203,7 +203,7 @@ fn sync_release(id: u64) -> Result<(), SyncHandleError> {
 
 fn sync_pin(id: u64) -> Result<(), SyncHandleError> {
     let req = HandlePin {
-        id: ::aether_mail::HandleId(id),
+        id: ::aether_data::HandleId(id),
     };
     resolve_sink::<HandlePin>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
@@ -216,7 +216,7 @@ fn sync_pin(id: u64) -> Result<(), SyncHandleError> {
 
 fn sync_unpin(id: u64) -> Result<(), SyncHandleError> {
     let req = HandleUnpin {
-        id: ::aether_mail::HandleId(id),
+        id: ::aether_data::HandleId(id),
     };
     resolve_sink::<HandleUnpin>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
@@ -282,28 +282,27 @@ mod tests {
         seq: u32,
     }
 
-    use aether_mail::{Kind, Schema};
-
+    use aether_data::{Kind, Schema};
     #[test]
     fn publish_request_bytes_decode_to_handle_publish() {
         let req = HandlePublish {
-            kind_id: ::aether_mail::KindId(0xCAFE),
+            kind_id: ::aether_data::KindId(0xCAFE),
             bytes: vec![1, 2, 3, 4, 5],
         };
         let encoded = postcard::to_allocvec(&req).unwrap();
         let decoded: HandlePublish = postcard::from_bytes(&encoded).unwrap();
-        assert_eq!(decoded.kind_id, ::aether_mail::KindId(0xCAFE));
+        assert_eq!(decoded.kind_id, ::aether_data::KindId(0xCAFE));
         assert_eq!(decoded.bytes, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn release_request_bytes_decode_to_handle_release() {
         let req = HandleRelease {
-            id: ::aether_mail::HandleId(0xDEAD),
+            id: ::aether_data::HandleId(0xDEAD),
         };
         let encoded = postcard::to_allocvec(&req).unwrap();
         let decoded: HandleRelease = postcard::from_bytes(&encoded).unwrap();
-        assert_eq!(decoded.id, ::aether_mail::HandleId(0xDEAD));
+        assert_eq!(decoded.id, ::aether_data::HandleId(0xDEAD));
     }
 
     #[test]
