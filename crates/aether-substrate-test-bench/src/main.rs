@@ -21,8 +21,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use aether_kinds::{AdvanceResult, CaptureFrameResult, FrameStats, InputStream, Tick};
-use aether_mail::{Kind, encode_empty};
+use aether_kinds::{AdvanceResult, CaptureFrameResult, FrameStats, Tick};
+use aether_mail::{Kind, KindId, encode_empty};
 use aether_substrate_core::{
     Chassis, ChassisCapabilities, HubOutbound, InputSubscribers, Mailer, Scheduler, SubstrateBoot,
     capture::CaptureQueue,
@@ -118,7 +118,7 @@ impl TestBenchChassis {
     /// aborts the chassis cleanly via `lifecycle::fatal_abort`.
     fn run_frame(&mut self, frame: u64, started: Instant, dispatch_tick: bool) {
         if dispatch_tick {
-            let subs = subscribers_for(&self.input_subscribers, InputStream::Tick);
+            let subs = subscribers_for(&self.input_subscribers, KindId(Tick::ID));
             for mbox in subs {
                 self.queue
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));

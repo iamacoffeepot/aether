@@ -44,7 +44,13 @@ pub use tagged_id::{Tag, with_tag};
 pub trait Kind {
     const NAME: &'static str;
     const ID: u64;
-    const IS_INPUT: bool = false;
+    /// `true` when the kind is a substrate-published event stream
+    /// (Tick, Key, MouseMove, etc.) that components subscribe to via
+    /// the per-kind subscriber set. Drives `auto_subscribe_inputs` on
+    /// the substrate side: handlers whose kind is a stream get wired
+    /// into the subscriber set the moment the component is loaded.
+    /// Set by `#[kind(name = "...", stream)]` on the type declaration.
+    const IS_STREAM: bool = false;
 
     /// Decode a single instance from substrate-supplied bytes. The
     /// `Kind` derive auto-implements this with the right body for the
@@ -346,12 +352,17 @@ pub mod __inventory {
     use aether_hub_protocol::SchemaType;
 
     /// Static-friendly mirror of `aether_hub_protocol::KindDescriptor`.
-    /// Owns nothing — both fields are `'static` so the value is const-
-    /// constructible from `inventory::submit!`. `descriptors::all()`
-    /// materializes the owned `KindDescriptor` form at iteration time.
+    /// Owns nothing — every field is `'static` (or a `bool`) so the
+    /// value is const-constructible from `inventory::submit!`.
+    /// `descriptors::all()` materializes the owned `KindDescriptor`
+    /// form at iteration time. `is_stream` carries `<K as Kind>::IS_STREAM`
+    /// (ADR-0068) so the native descriptor list agrees with the wasm
+    /// `aether.kinds` v0x03 trailing byte the substrate reads from
+    /// guest binaries.
     pub struct DescriptorEntry {
         pub name: &'static str,
         pub schema: &'static SchemaType,
+        pub is_stream: bool,
     }
 
     inventory::collect!(DescriptorEntry);

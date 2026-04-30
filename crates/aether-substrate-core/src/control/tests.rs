@@ -1,6 +1,7 @@
 use super::*;
 use aether_hub_protocol::{Primitive, SchemaType};
-use aether_kinds::{DrawTriangle, HandlerCapability};
+use aether_kinds::{HandlerCapability, Key, KeyRelease, MouseButton, MouseMove, Tick, WindowSize};
+use aether_mail::KindId;
 
 #[test]
 fn load_payload_roundtrip() {
@@ -319,7 +320,7 @@ fn load_component_missing_import_does_not_reserve_name() {
 fn load_component_registers_kinds_from_embedded_manifest() {
     let plane = make_plane();
 
-    // Hand-roll the v0x02 records the derive would emit.
+    // Hand-roll the v0x03 records (ADR-0068 trailing is_stream byte) the derive would emit.
     let shape = aether_hub_protocol::KindShape {
         name: std::borrow::Cow::Borrowed("demo.embedded.kind"),
         schema: aether_hub_protocol::SchemaShape::Struct {
@@ -336,8 +337,9 @@ fn load_component_registers_kinds_from_embedded_manifest() {
             fields: std::borrow::Cow::Owned(vec![aether_hub_protocol::LabelNode::Anonymous]),
         },
     };
-    let mut canonical = vec![0x02u8];
+    let mut canonical = vec![0x03u8];
     canonical.extend(postcard::to_allocvec(&shape).unwrap());
+    canonical.push(0u8); // is_stream=false trailing byte (ADR-0068)
     let mut labels_bytes = vec![0x03u8];
     labels_bytes.extend(postcard::to_allocvec(&labels).unwrap());
     let esc = |bs: &[u8]| -> String { bs.iter().map(|b| format!("\\{b:02x}")).collect() };
@@ -401,6 +403,7 @@ fn load_component_with_same_name_different_schema_registers_distinct_kind() {
         .register_kind_with_descriptor(KindDescriptor {
             name: "demo.conflict".into(),
             schema: SchemaType::Scalar(Primitive::U32),
+            is_stream: false,
         })
         .unwrap();
 
@@ -413,8 +416,9 @@ fn load_component_with_same_name_different_schema_registers_distinct_kind() {
         kind_label: std::borrow::Cow::Borrowed("demo::Conflict"),
         root: aether_hub_protocol::LabelNode::Anonymous,
     };
-    let mut canonical = vec![0x02u8];
+    let mut canonical = vec![0x03u8];
     canonical.extend(postcard::to_allocvec(&shape).unwrap());
+    canonical.push(0u8); // is_stream=false trailing byte (ADR-0068)
     let mut labels_bytes = vec![0x03u8];
     labels_bytes.extend(postcard::to_allocvec(&labels).unwrap());
     let esc = |bs: &[u8]| -> String { bs.iter().map(|b| format!("\\{b:02x}")).collect() };
@@ -811,6 +815,7 @@ fn replace_migrates_state_observable_via_snapshot_sink() {
         .register_kind_with_descriptor(KindDescriptor {
             name: "test.snapshot".into(),
             schema: SchemaType::Bytes,
+            is_stream: false,
         })
         .expect("register snapshot kind");
 
@@ -960,21 +965,18 @@ fn replace_with_no_save_does_not_invoke_rehydrate() {
     assert_eq!(new.read_u32(400), 0);
 }
 
-// ADR-0021: per-stream subscribe / unsubscribe, drop cleanup,
-// replace-preserves-subscriptions. `make_plane` already threads an
-// empty `InputSubscribers` into the handler, so these tests only
-// need to load a component and exercise the subscribe surface.
-// (The types these tests use — `InputStream`, `SubscribeInput`,
-// `SubscribeInputResult`, `UnsubscribeInput` — come in via the
-// top-level `use aether_kinds::{...}` plus the test mod's
-// `use super::*;`; no inline import needed.)
+// ADR-0021 + ADR-0068: per-kind subscribe / unsubscribe, drop
+// cleanup, replace-preserves-subscriptions. Subscriber sets are
+// keyed by `KindId` directly — `make_plane` threads an empty
+// `InputSubscribers` into the handler, so these tests only need to
+// load a component and exercise the subscribe surface.
 
-fn subs(plane: &ControlPlane, stream: InputStream) -> std::collections::BTreeSet<MailboxId> {
+fn subs(plane: &ControlPlane, kind: KindId) -> std::collections::BTreeSet<MailboxId> {
     plane
         .input_subscribers
         .read()
         .unwrap()
-        .get(&stream)
+        .get(&kind)
         .cloned()
         .unwrap_or_default()
 }
@@ -994,20 +996,20 @@ fn load_blank(plane: &ControlPlane, name: &str) -> u64 {
     mailbox_id.0
 }
 
-fn do_subscribe(plane: &ControlPlane, mailbox: u64, stream: InputStream) -> SubscribeInputResult {
+fn do_subscribe(plane: &ControlPlane, mailbox: u64, kind: KindId) -> SubscribeInputResult {
     plane.handle_subscribe(
         &postcard::to_allocvec(&SubscribeInput {
-            stream,
+            kind,
             mailbox: MailboxId(mailbox),
         })
         .unwrap(),
     )
 }
 
-fn do_unsubscribe(plane: &ControlPlane, mailbox: u64, stream: InputStream) -> SubscribeInputResult {
+fn do_unsubscribe(plane: &ControlPlane, mailbox: u64, kind: KindId) -> SubscribeInputResult {
     plane.handle_unsubscribe(
         &postcard::to_allocvec(&UnsubscribeInput {
-            stream,
+            kind,
             mailbox: MailboxId(mailbox),
         })
         .unwrap(),
@@ -1019,10 +1021,10 @@ fn subscribe_adds_mailbox_to_stream_set() {
     let plane = make_plane();
     let id = load_blank(&plane, "listener");
     assert!(matches!(
-        do_subscribe(&plane, id, InputStream::Tick),
+        do_subscribe(&plane, id, KindId(Tick::ID)),
         SubscribeInputResult::Ok
     ));
-    let set = subs(&plane, InputStream::Tick);
+    let set = subs(&plane, KindId(Tick::ID));
     assert!(set.contains(&MailboxId(id)));
     assert_eq!(set.len(), 1);
 }
@@ -1033,11 +1035,11 @@ fn subscribe_is_idempotent() {
     let id = load_blank(&plane, "listener");
     for _ in 0..3 {
         assert!(matches!(
-            do_subscribe(&plane, id, InputStream::Key),
+            do_subscribe(&plane, id, KindId(Key::ID)),
             SubscribeInputResult::Ok
         ));
     }
-    assert_eq!(subs(&plane, InputStream::Key).len(), 1);
+    assert_eq!(subs(&plane, KindId(Key::ID)).len(), 1);
 }
 
 #[test]
@@ -1046,14 +1048,14 @@ fn subscribe_two_components_fan_out_to_both() {
     let a = load_blank(&plane, "a");
     let b = load_blank(&plane, "b");
     assert!(matches!(
-        do_subscribe(&plane, a, InputStream::Tick),
+        do_subscribe(&plane, a, KindId(Tick::ID)),
         SubscribeInputResult::Ok
     ));
     assert!(matches!(
-        do_subscribe(&plane, b, InputStream::Tick),
+        do_subscribe(&plane, b, KindId(Tick::ID)),
         SubscribeInputResult::Ok
     ));
-    let set = subs(&plane, InputStream::Tick);
+    let set = subs(&plane, KindId(Tick::ID));
     assert_eq!(set.len(), 2);
     assert!(set.contains(&MailboxId(a)));
     assert!(set.contains(&MailboxId(b)));
@@ -1063,12 +1065,12 @@ fn subscribe_two_components_fan_out_to_both() {
 fn unsubscribe_removes_from_set() {
     let plane = make_plane();
     let id = load_blank(&plane, "listener");
-    do_subscribe(&plane, id, InputStream::MouseMove);
+    do_subscribe(&plane, id, KindId(MouseMove::ID));
     assert!(matches!(
-        do_unsubscribe(&plane, id, InputStream::MouseMove),
+        do_unsubscribe(&plane, id, KindId(MouseMove::ID)),
         SubscribeInputResult::Ok
     ));
-    assert!(subs(&plane, InputStream::MouseMove).is_empty());
+    assert!(subs(&plane, KindId(MouseMove::ID)).is_empty());
 }
 
 #[test]
@@ -1078,7 +1080,7 @@ fn unsubscribe_not_subscribed_is_ok() {
     let plane = make_plane();
     let id = load_blank(&plane, "listener");
     assert!(matches!(
-        do_unsubscribe(&plane, id, InputStream::Tick),
+        do_unsubscribe(&plane, id, KindId(Tick::ID)),
         SubscribeInputResult::Ok
     ));
 }
@@ -1087,7 +1089,7 @@ fn unsubscribe_not_subscribed_is_ok() {
 fn subscribe_unknown_mailbox_is_err() {
     let plane = make_plane();
     assert!(matches!(
-        do_subscribe(&plane, 9999, InputStream::Tick),
+        do_subscribe(&plane, 9999, KindId(Tick::ID)),
         SubscribeInputResult::Err { .. }
     ));
 }
@@ -1101,7 +1103,7 @@ fn subscribe_sink_mailbox_is_err() {
         .registry
         .register_sink("some.sink", Arc::new(|_, _, _, _, _, _| {}));
     assert!(matches!(
-        do_subscribe(&plane, sink.0, InputStream::Tick),
+        do_subscribe(&plane, sink.0, KindId(Tick::ID)),
         SubscribeInputResult::Err { .. }
     ));
 }
@@ -1117,7 +1119,7 @@ fn subscribe_dropped_mailbox_is_err() {
         .unwrap(),
     );
     assert!(matches!(
-        do_subscribe(&plane, id, InputStream::Tick),
+        do_subscribe(&plane, id, KindId(Tick::ID)),
         SubscribeInputResult::Err { .. }
     ));
 }
@@ -1128,9 +1130,9 @@ fn drop_component_removes_from_every_subscriber_set() {
     // stream's subscriber set, not just the ones currently held.
     let plane = make_plane();
     let id = load_blank(&plane, "listener");
-    do_subscribe(&plane, id, InputStream::Tick);
-    do_subscribe(&plane, id, InputStream::Key);
-    do_subscribe(&plane, id, InputStream::MouseButton);
+    do_subscribe(&plane, id, KindId(Tick::ID));
+    do_subscribe(&plane, id, KindId(Key::ID));
+    do_subscribe(&plane, id, KindId(MouseButton::ID));
     let dropped = plane.handle_drop(
         &postcard::to_allocvec(&DropComponent {
             mailbox_id: MailboxId(id),
@@ -1139,10 +1141,10 @@ fn drop_component_removes_from_every_subscriber_set() {
     );
     assert!(matches!(dropped, DropResult::Ok));
     for s in [
-        InputStream::Tick,
-        InputStream::Key,
-        InputStream::MouseMove,
-        InputStream::MouseButton,
+        KindId(Tick::ID),
+        KindId(Key::ID),
+        KindId(MouseMove::ID),
+        KindId(MouseButton::ID),
     ] {
         assert!(
             !subs(&plane, s).contains(&MailboxId(id)),
@@ -1157,8 +1159,8 @@ fn replace_component_preserves_subscriptions() {
     // are keyed by mailbox, so the new instance inherits them.
     let plane = make_plane();
     let id = load_blank(&plane, "listener");
-    do_subscribe(&plane, id, InputStream::Tick);
-    do_subscribe(&plane, id, InputStream::Key);
+    do_subscribe(&plane, id, KindId(Tick::ID));
+    do_subscribe(&plane, id, KindId(Key::ID));
     let result = plane.handle_replace(
         &postcard::to_allocvec(&ReplaceComponent {
             mailbox_id: MailboxId(id),
@@ -1168,8 +1170,8 @@ fn replace_component_preserves_subscriptions() {
         .unwrap(),
     );
     assert!(matches!(result, ReplaceResult::Ok { .. }));
-    assert!(subs(&plane, InputStream::Tick).contains(&MailboxId(id)));
-    assert!(subs(&plane, InputStream::Key).contains(&MailboxId(id)));
+    assert!(subs(&plane, KindId(Tick::ID)).contains(&MailboxId(id)));
+    assert!(subs(&plane, KindId(Key::ID)).contains(&MailboxId(id)));
 }
 
 #[test]
@@ -1183,6 +1185,35 @@ fn auto_subscribe_inputs_wires_known_streams_from_capabilities() {
     // the unknown id — silently. The substrate now derives the
     // subscriptions from the manifest after registering, and this
     // test pins that wiring.
+    let plane = make_plane();
+    // Auto-subscribe consults the registry for `is_stream` per kind
+    // (ADR-0068), so prime it with descriptors matching what a guest's
+    // wasm `aether.kinds` v0x03 section would carry: Tick + WindowSize
+    // are streams; the user-space kind is not.
+    plane
+        .registry
+        .register_kind_with_descriptor(KindDescriptor {
+            name: Tick::NAME.into(),
+            schema: <Tick as aether_mail::Schema>::SCHEMA,
+            is_stream: true,
+        })
+        .unwrap();
+    plane
+        .registry
+        .register_kind_with_descriptor(KindDescriptor {
+            name: WindowSize::NAME.into(),
+            schema: <WindowSize as aether_mail::Schema>::SCHEMA,
+            is_stream: true,
+        })
+        .unwrap();
+    plane
+        .registry
+        .register_kind_with_descriptor(KindDescriptor {
+            name: "user.custom.event".into(),
+            schema: SchemaType::Unit,
+            is_stream: false,
+        })
+        .unwrap();
     let mailbox = MailboxId(0xdead_beef);
     let subscribers = input::new_subscribers();
     let capabilities = ComponentCapabilities {
@@ -1197,8 +1228,10 @@ fn auto_subscribe_inputs_wires_known_streams_from_capabilities() {
                 name: WindowSize::NAME.into(),
                 doc: None,
             },
-            // User-space kinds fall through — the runtime API
-            // (`ctx.subscribe_input::<K>()`) handles those.
+            // User-space kinds fall through — `is_stream = false` on
+            // the registry descriptor keeps `auto_subscribe_inputs`
+            // from wiring them in. The runtime API
+            // (`ctx.subscribe_input::<K>()`) is the explicit path.
             HandlerCapability {
                 id: KindId(0xdeadbeef_cafef00d),
                 name: "user.custom.event".into(),
@@ -1208,25 +1241,25 @@ fn auto_subscribe_inputs_wires_known_streams_from_capabilities() {
         fallback: None,
         doc: None,
     };
-    auto_subscribe_inputs(&subscribers, mailbox, &capabilities);
+    auto_subscribe_inputs(&subscribers, &plane.registry, mailbox, &capabilities);
     let snapshot = subscribers.read().unwrap();
     assert!(
         snapshot
-            .get(&InputStream::Tick)
+            .get(&KindId(Tick::ID))
             .is_some_and(|set| set.contains(&mailbox)),
         "Tick handler should auto-subscribe the mailbox",
     );
     assert!(
         snapshot
-            .get(&InputStream::WindowSize)
+            .get(&KindId(WindowSize::ID))
             .is_some_and(|set| set.contains(&mailbox)),
         "WindowSize handler should auto-subscribe the mailbox",
     );
     for stream in [
-        InputStream::Key,
-        InputStream::KeyRelease,
-        InputStream::MouseMove,
-        InputStream::MouseButton,
+        KindId(Key::ID),
+        KindId(KeyRelease::ID),
+        KindId(MouseMove::ID),
+        KindId(MouseButton::ID),
     ] {
         assert!(
             snapshot
@@ -1236,35 +1269,6 @@ fn auto_subscribe_inputs_wires_known_streams_from_capabilities() {
                  doesn't declare its handler",
         );
     }
-}
-
-#[test]
-fn input_stream_for_kind_id_covers_six_substrate_streams() {
-    let cases = [
-        (Tick::ID, InputStream::Tick),
-        (Key::ID, InputStream::Key),
-        (KeyRelease::ID, InputStream::KeyRelease),
-        (MouseMove::ID, InputStream::MouseMove),
-        (MouseButton::ID, InputStream::MouseButton),
-        (WindowSize::ID, InputStream::WindowSize),
-    ];
-    for (id, expected) in cases {
-        assert_eq!(input_stream_for_kind_id(KindId(id)), Some(expected));
-    }
-    // Non-input substrate kinds and user-space ids must return None
-    // so the runtime API stays the only path for non-stream
-    // subscriptions. `DrawTriangle::ID` covers the substrate-side
-    // ringer; the literal handles the user-space case.
-    assert_eq!(
-        input_stream_for_kind_id(KindId(DrawTriangle::ID)),
-        None,
-        "non-input substrate kinds must not auto-subscribe",
-    );
-    assert_eq!(
-        input_stream_for_kind_id(KindId(0xdeadbeef_cafef00d)),
-        None,
-        "user-space ids must not auto-subscribe",
-    );
 }
 
 #[test]
@@ -1287,7 +1291,7 @@ fn subscribe_dispatch_replies_with_result_kind() {
         SubscribeInput::NAME,
         crate::mail::ReplyTo::NONE,
         &postcard::to_allocvec(&SubscribeInput {
-            stream: InputStream::Tick,
+            kind: KindId(Tick::ID),
             mailbox: MailboxId(id),
         })
         .unwrap(),
@@ -1297,12 +1301,12 @@ fn subscribe_dispatch_replies_with_result_kind() {
         UnsubscribeInput::NAME,
         crate::mail::ReplyTo::NONE,
         &postcard::to_allocvec(&UnsubscribeInput {
-            stream: InputStream::Tick,
+            kind: KindId(Tick::ID),
             mailbox: MailboxId(id),
         })
         .unwrap(),
     );
-    assert!(!subs(&plane, InputStream::Tick).contains(&MailboxId(id)));
+    assert!(!subs(&plane, KindId(Tick::ID)).contains(&MailboxId(id)));
 }
 
 // ADR-0022's `drain_pending` / `pending` / `frozen` / `parked`

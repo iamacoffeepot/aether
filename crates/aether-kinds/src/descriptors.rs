@@ -38,6 +38,7 @@ pub fn all() -> Vec<KindDescriptor> {
         .map(|e| KindDescriptor {
             name: e.name.to_string(),
             schema: e.schema.clone(),
+            is_stream: e.is_stream,
         })
         .collect()
 }

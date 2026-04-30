@@ -1081,14 +1081,18 @@ mod tests {
     fn subscribe_input_kind_round_trips_with_tagged_mailbox() {
         // End-to-end through the `SubscribeInput` kind's actual
         // schema — mirrors the worked example in ADR-0065's Context
-        // section. An agent receives a tagged-string mailbox id from
-        // `load_component`, drops it directly into `subscribe_input.
-        // mailbox`, and the wire bytes match what the substrate
-        // expects.
+        // section. ADR-0068: the field is now `kind: KindId` (tagged
+        // string on the JSON side), keying subscriber sets by kind id
+        // directly. An agent receives the tagged ids from
+        // `load_component` / `describe_kinds`, drops them straight
+        // into `subscribe_input.{kind, mailbox}`, and the wire bytes
+        // match what the substrate expects.
         use aether_mail::Kind;
         let mailbox = aether_mail::MailboxId::from_name("aether.control");
-        let s = aether_mail::tagged_id::encode(mailbox.0).unwrap();
-        let json_in = json!({ "stream": "Tick", "mailbox": s });
+        let mailbox_str = aether_mail::tagged_id::encode(mailbox.0).unwrap();
+        let kind_id = aether_mail::KindId(aether_kinds::Tick::ID);
+        let kind_str = aether_mail::tagged_id::encode(kind_id.0).unwrap();
+        let json_in = json!({ "kind": kind_str, "mailbox": mailbox_str });
 
         let bytes = encode_schema(
             &json_in,
@@ -1100,7 +1104,7 @@ mod tests {
         // hand-postcard'd `SubscribeInput`.
         let decoded: aether_kinds::SubscribeInput = postcard::from_bytes(&bytes)
             .expect("postcard decode subscribe_input from hub-encoded bytes");
-        assert_eq!(decoded.stream, aether_kinds::InputStream::Tick);
+        assert_eq!(decoded.kind, kind_id);
         assert_eq!(decoded.mailbox, mailbox);
 
         // And the kind's id is sensitive to the typed identity —
