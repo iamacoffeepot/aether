@@ -309,6 +309,36 @@ impl TestBench {
         Ok(())
     }
 
+    /// Send `mail` to `recipient_name` with this bench's session as
+    /// the reply target, then pump until a matching reply arrives and
+    /// decode it as `R`. The reply must be postcard-encoded — true
+    /// for every standard reply kind (`*Result` variants in
+    /// `aether-kinds`). Use this for any sink/component whose reply
+    /// pattern is "send → await → decode" — e.g. the `aether.sink.io`
+    /// `Read`/`Write`/`Delete`/`List` round trips. `advance` and
+    /// `capture` are specialisations of this same shape against the
+    /// `aether.control` mailbox.
+    pub fn send_and_await_reply<K, R>(
+        &mut self,
+        recipient_name: &str,
+        mail: &K,
+    ) -> Result<R, TestBenchError>
+    where
+        K: Kind + serde::Serialize,
+        R: serde::de::DeserializeOwned,
+    {
+        let mailbox = self
+            .registry
+            .lookup(recipient_name)
+            .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
+        let cid = self.fresh_correlation_id();
+        let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
+        let payload = encode_struct(mail);
+        self.queue
+            .push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
+        self.pump_until_reply::<R>(cid, std::any::type_name::<R>())
+    }
+
     /// Run `ticks` complete frames synchronously. Each frame
     /// dispatches `Tick` to subscribers, drains the queue, and
     /// renders. Returns once the substrate has replied with

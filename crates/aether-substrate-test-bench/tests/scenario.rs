@@ -1,23 +1,28 @@
 //! Phase 3 substrate-feature scenarios (issue 430). Each test boots
-//! a `TestBench`, loads `aether-test-fixture-probe`'s wasm, and
-//! exercises one substrate primitive (input subscription, drop,
-//! capture_frame round-trip, replace_component) by either counting
-//! fixture-emitted broadcasts on the bench loopback or inspecting
-//! the captured frame.
+//! a `TestBench` and exercises one substrate primitive — input
+//! subscription, drop, capture_frame round-trip, replace_component
+//! (all via `aether-test-fixture-probe`), or the IO sink's
+//! read/write/delete/list round trips (which talk directly to the
+//! chassis `aether.sink.io` via `TestBench::send_and_await_reply`).
 //!
 //! Skipped when:
 //! - No wgpu adapter is available (driverless Linux runners without
 //!   `mesa-vulkan-drivers`).
-//! - The fixture's wasm hasn't been built — tests read
-//!   `target/wasm32-unknown-unknown/{debug,release}/aether_test_fixture_probe.wasm`
-//!   and skip with an `eprintln!` when it's absent. CI builds the
-//!   fixture wasm before invoking `cargo test`. Setting
+//! - The fixture's wasm hasn't been built — fixture-loading tests
+//!   read `target/wasm32-unknown-unknown/{debug,release}/aether_test_fixture_probe.wasm`
+//!   and skip with an `eprintln!` when it's absent. IO scenarios
+//!   don't load the fixture, so they only need wgpu. CI builds the
+//!   fixture wasm before invoking `cargo test`; setting
 //!   `AETHER_REQUIRE_RUNTIME=1` (CI does) flips both skip points
 //!   into hard panics so a missing pre-build is loud.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use aether_kinds::{DropComponent, LoadComponent, MailEnvelope, ReplaceComponent};
+use aether_kinds::{
+    Delete, DeleteResult, DropComponent, IoError, List, ListResult, LoadComponent, MailEnvelope,
+    Read, ReadResult, ReplaceComponent, Write, WriteResult,
+};
 use aether_mail::{Kind, MailboxId, mailbox_id_from_name};
 use aether_scenario::{decode_png, differs_from_background};
 use aether_substrate_test_bench::TestBench;
@@ -315,6 +320,237 @@ fn replace_component_preserves_mailbox_identity() {
          observed kinds: {:?}",
         bench.observed_kinds(),
     );
+}
+
+/// Process-wide `save://` sandbox. `NamespaceRoots::from_env`
+/// reads `AETHER_SAVE_DIR` once per chassis boot, so the env var
+/// must be set before any TestBench boot. `OnceLock` linearises
+/// the set; tests gate through `init_test_save_dir()` first.
+static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Create the per-process sandbox (idempotent) and point
+/// `AETHER_SAVE_DIR` at it. Subsequent `TestBench::start()` calls
+/// see the env var and wire `save://` to this dir.
+///
+/// `set_var` is racy with concurrent `getenv` on POSIX, but
+/// `OnceLock` linearises the set, and every IO test gates through
+/// this helper before booting a TestBench — so by the time any
+/// test thread reads env, the set has completed.
+fn init_test_save_dir() -> &'static Path {
+    TEST_SAVE_DIR.get_or_init(|| {
+        let dir = std::env::temp_dir()
+            .join(format!("aether-test-bench-io-tests-{}", std::process::id(),));
+        std::fs::create_dir_all(&dir).expect("create test save dir");
+        unsafe { std::env::set_var("AETHER_SAVE_DIR", &dir) };
+        dir
+    })
+}
+
+/// IO scenarios need wgpu (the bench unconditionally builds a
+/// `Gpu` at boot) but not the fixture wasm. Skips on wgpu-less
+/// runners and panics under `AETHER_REQUIRE_RUNTIME` so a
+/// CI-side regression is loud.
+fn require_wgpu_only() -> bool {
+    if has_wgpu_adapter() {
+        return true;
+    }
+    let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
+    assert!(
+        !strict,
+        "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",
+    );
+    eprintln!("skipping: no wgpu adapter available");
+    false
+}
+
+const IO_SINK: &str = "aether.sink.io";
+const IO_NAMESPACE_SAVE: &str = "save";
+
+/// `aether.io.write` followed by `aether.io.read` round-trips the
+/// bytes through the local-file adapter (ADR-0041). Both replies
+/// echo the originating namespace + path for correlation; the read
+/// reply also carries the bytes verbatim.
+#[test]
+fn io_write_then_read_round_trips_in_save_namespace() {
+    if !require_wgpu_only() {
+        return;
+    }
+    init_test_save_dir();
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+
+    let path = "io-roundtrip.bin".to_owned();
+    let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
+
+    let write_reply: WriteResult = bench
+        .send_and_await_reply(
+            IO_SINK,
+            &Write {
+                namespace: IO_NAMESPACE_SAVE.to_owned(),
+                path: path.clone(),
+                bytes: payload.clone(),
+            },
+        )
+        .expect("write reply");
+    match write_reply {
+        WriteResult::Ok {
+            namespace,
+            path: echoed_path,
+        } => {
+            assert_eq!(namespace, IO_NAMESPACE_SAVE);
+            assert_eq!(echoed_path, path);
+        }
+        WriteResult::Err { error, .. } => panic!("write failed: {error:?}"),
+    }
+
+    let read_reply: ReadResult = bench
+        .send_and_await_reply(
+            IO_SINK,
+            &Read {
+                namespace: IO_NAMESPACE_SAVE.to_owned(),
+                path: path.clone(),
+            },
+        )
+        .expect("read reply");
+    match read_reply {
+        ReadResult::Ok {
+            namespace,
+            path: echoed_path,
+            bytes,
+        } => {
+            assert_eq!(namespace, IO_NAMESPACE_SAVE);
+            assert_eq!(echoed_path, path);
+            assert_eq!(bytes, payload);
+        }
+        ReadResult::Err { error, .. } => panic!("read failed: {error:?}"),
+    }
+}
+
+/// `aether.io.delete` removes a previously-written file; a
+/// follow-up `aether.io.read` of the same path returns
+/// `Err { NotFound }`.
+#[test]
+fn io_delete_removes_written_file() {
+    if !require_wgpu_only() {
+        return;
+    }
+    init_test_save_dir();
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+
+    let path = "io-delete.bin".to_owned();
+    let _: WriteResult = bench
+        .send_and_await_reply(
+            IO_SINK,
+            &Write {
+                namespace: IO_NAMESPACE_SAVE.to_owned(),
+                path: path.clone(),
+                bytes: vec![1, 2, 3],
+            },
+        )
+        .expect("write reply");
+
+    let delete_reply: DeleteResult = bench
+        .send_and_await_reply(
+            IO_SINK,
+            &Delete {
+                namespace: IO_NAMESPACE_SAVE.to_owned(),
+                path: path.clone(),
+            },
+        )
+        .expect("delete reply");
+    match delete_reply {
+        DeleteResult::Ok { .. } => {}
+        DeleteResult::Err { error, .. } => panic!("delete failed: {error:?}"),
+    }
+
+    let read_after_delete: ReadResult = bench
+        .send_and_await_reply(
+            IO_SINK,
+            &Read {
+                namespace: IO_NAMESPACE_SAVE.to_owned(),
+                path: path.clone(),
+            },
+        )
+        .expect("read-after-delete reply");
+    match read_after_delete {
+        ReadResult::Ok { .. } => panic!("read should not have found a deleted file"),
+        ReadResult::Err {
+            error: IoError::NotFound,
+            ..
+        } => {}
+        ReadResult::Err { error, .. } => panic!("expected NotFound, got {error:?}"),
+    }
+}
+
+/// `aether.io.list` enumerates entries under a prefix. After a
+/// write to `<sandbox>/probe-list.bin`, listing the empty prefix
+/// in `save` returns an entry list containing the bare filename.
+#[test]
+fn io_list_returns_written_path() {
+    if !require_wgpu_only() {
+        return;
+    }
+    init_test_save_dir();
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+
+    let path = "probe-list.bin".to_owned();
+    let _: WriteResult = bench
+        .send_and_await_reply(
+            IO_SINK,
+            &Write {
+                namespace: IO_NAMESPACE_SAVE.to_owned(),
+                path: path.clone(),
+                bytes: vec![0],
+            },
+        )
+        .expect("write reply");
+
+    let list_reply: ListResult = bench
+        .send_and_await_reply(
+            IO_SINK,
+            &List {
+                namespace: IO_NAMESPACE_SAVE.to_owned(),
+                prefix: String::new(),
+            },
+        )
+        .expect("list reply");
+    match list_reply {
+        ListResult::Ok { entries, .. } => {
+            assert!(
+                entries.iter().any(|e| e == &path),
+                "expected entries to include {path:?}; got {entries:?}",
+            );
+        }
+        ListResult::Err { error, .. } => panic!("list failed: {error:?}"),
+    }
+}
+
+/// Reading a path that was never written returns
+/// `Err { NotFound }`. Negative companion to the round-trip test.
+#[test]
+fn io_read_unknown_path_returns_not_found() {
+    if !require_wgpu_only() {
+        return;
+    }
+    init_test_save_dir();
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+
+    let read_reply: ReadResult = bench
+        .send_and_await_reply(
+            IO_SINK,
+            &Read {
+                namespace: IO_NAMESPACE_SAVE.to_owned(),
+                path: "nonexistent-do-not-create.bin".to_owned(),
+            },
+        )
+        .expect("read reply");
+    match read_reply {
+        ReadResult::Ok { .. } => panic!("read should not have found a never-written file"),
+        ReadResult::Err {
+            error: IoError::NotFound,
+            ..
+        } => {}
+        ReadResult::Err { error, .. } => panic!("expected NotFound, got {error:?}"),
+    }
 }
 
 /// `aether.observation.frame_stats` is broadcast every 120 frames
