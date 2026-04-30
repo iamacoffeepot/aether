@@ -15,15 +15,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use aether_kinds::DRAW_TRIANGLE_BYTES;
+
 use crate::registry::SinkHandler;
 use crate::render::IDENTITY_VIEW_PROJ;
-
-/// Wire size of one `aether.draw_triangle` mail item: three vertices,
-/// each `f32 x,y,z + f32 r,g,b` (24 bytes). The render sink clamps at
-/// whole-triangle multiples so a truncated frame never writes a half-
-/// triangle into the GPU vertex buffer. Lives here pending issue 427's
-/// move to `aether-kinds` alongside the kind definition itself.
-const DRAW_TRIANGLE_BYTES: usize = 72;
 
 /// State the desktop / test-bench frame loop reads from each frame.
 /// `frame_vertices` is the consolidated vertex buffer (drained at

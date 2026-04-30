@@ -179,6 +179,14 @@ pub struct DrawTriangle {
     pub verts: [Vertex; 3],
 }
 
+/// Wire size of one `aether.draw_triangle` item: three `Vertex`es.
+/// Property of the wire shape, lives next to `DrawTriangle` so any
+/// chassis / sink that needs to clamp at whole-triangle boundaries
+/// has one canonical source. `repr(C)` + `Pod` + `[Vertex; 3]` packs
+/// without padding, so `size_of::<DrawTriangle>()` is exactly the
+/// per-triangle wire footprint.
+pub const DRAW_TRIANGLE_BYTES: usize = core::mem::size_of::<DrawTriangle>();
+
 /// Camera state: column-major `view_proj` matrix (world → clip). The
 /// desktop chassis's `camera` sink writes the latest payload into the
 /// GPU uniform every frame; the WGSL vertex shader multiplies each

@@ -203,6 +203,24 @@ impl ComponentEntry {
         self.state.load(Ordering::Acquire) == STATE_DEAD
     }
 
+    /// Test-only: bump `pending` without queueing a matching mail.
+    /// Simulates a stuck dispatcher (mail in flight, dispatcher
+    /// never wakes / decrements) so `drain_all_with_budget` exposes
+    /// the wedge path. The `frame_loop` tests reach for this
+    /// directly because it's in the same module.
+    #[cfg(test)]
+    pub fn bump_pending_for_test(&self) {
+        self.gate.pending.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Test-only complement to `bump_pending_for_test`: clear a
+    /// previously-bumped counter so test teardown doesn't trip the
+    /// dispatcher's drain assertions on shutdown.
+    #[cfg(test)]
+    pub fn clear_pending_for_test(&self) {
+        self.gate.pending.store(0, Ordering::Release);
+    }
+
     /// Forward `mail` to this component's inbox. Returns `false` if
     /// the inbox is closed OR the mailbox transitioned to Dead
     /// (issue 321 Phase 2; callers that want to differentiate use

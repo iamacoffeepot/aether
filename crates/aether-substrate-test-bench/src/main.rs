@@ -19,13 +19,14 @@ mod render;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use aether_kinds::{AdvanceResult, CaptureFrameResult, FrameStats, InputStream, Tick};
-use aether_mail::{Kind, encode, encode_empty};
+use aether_mail::{Kind, encode_empty};
 use aether_substrate_core::{
     Chassis, ChassisCapabilities, HubOutbound, InputSubscribers, Mailer, Scheduler, SubstrateBoot,
     capture::CaptureQueue,
+    frame_loop,
     mail::{Mail, MailboxId},
     sinks::{RenderAccumulator, build_camera_sink, build_render_sink},
     subscribers_for,
@@ -34,8 +35,12 @@ use aether_substrate_core::{
 use crate::events::{ChassisEvent, EventReceiver};
 use crate::render::{Gpu, VERTEX_BUFFER_BYTES};
 
+/// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
+/// component, the scheduler doesn't read this — it's retained on the
+/// hub-protocol wire for compatibility). The shared frame-loop
+/// policy (drain budget, frame-stats cadence) lives in
+/// `aether_substrate_core::frame_loop`.
 const WORKERS: usize = 2;
-const LOG_EVERY_FRAMES: u64 = 120;
 
 /// Default offscreen target size when `AETHER_TEST_BENCH_SIZE` is
 /// unset. 800x600 matches the scenario harness convention — large
@@ -43,10 +48,6 @@ const LOG_EVERY_FRAMES: u64 = 120;
 /// enough that capture readback is cheap.
 const DEFAULT_WIDTH: u32 = 800;
 const DEFAULT_HEIGHT: u32 = 600;
-
-/// ADR-0063 fail-fast budget for the per-tick drain barrier. Same
-/// 5-second value desktop and headless use — same dispatcher kernel.
-const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
 /// Test-bench chassis. Owns the event loop, the GPU, the shared
 /// frame state (vertex buffer, camera matrix), and the capture
@@ -123,32 +124,7 @@ impl TestBenchChassis {
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
             }
         }
-        let summary = self.queue.drain_all_with_budget(DRAIN_BUDGET);
-        if let Some((mailbox, waited)) = summary.wedged {
-            aether_substrate_core::lifecycle::fatal_abort(
-                &self.outbound,
-                format!("dispatcher wedged: mailbox={mailbox} waited={waited:?}"),
-            );
-        }
-        if let Some(first) = summary.deaths.first() {
-            for d in &summary.deaths {
-                tracing::error!(
-                    target: "aether_substrate::lifecycle",
-                    mailbox = %d.mailbox,
-                    mailbox_name = %d.mailbox_name,
-                    last_kind = %d.last_kind,
-                    reason = %d.reason,
-                    "component died; substrate aborting (ADR-0063)",
-                );
-            }
-            aether_substrate_core::lifecycle::fatal_abort(
-                &self.outbound,
-                format!(
-                    "component died: {} (kind {}) — {}",
-                    first.mailbox_name, first.last_kind, first.reason,
-                ),
-            );
-        }
+        frame_loop::drain_or_abort(&self.queue, &self.outbound);
 
         // Drain accumulated vertices and the latest camera. Replace
         // the vertex buffer with an empty same-capacity Vec so the
@@ -175,15 +151,16 @@ impl TestBenchChassis {
             }
         }
 
-        if frame.is_multiple_of(LOG_EVERY_FRAMES) {
+        if frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
             let triangles = self.triangles_rendered.load(Ordering::Relaxed);
-            let stats = FrameStats { frame, triangles };
-            self.queue.push(Mail::new(
+            frame_loop::emit_frame_stats(
+                &self.queue,
+                self.broadcast_mbox,
                 self.broadcast_mbox,
                 self.kind_frame_stats,
-                encode(&stats),
-                1,
-            ));
+                frame,
+                triangles,
+            );
             let elapsed = started.elapsed().as_secs_f64().max(0.001);
             tracing::info!(
                 target: "aether_substrate::frame_loop",
