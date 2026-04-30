@@ -12,58 +12,37 @@
 
 use std::sync::Arc;
 
-use aether_kinds::{
-    Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, PlatformInfo, SetWindowMode,
-    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
-};
+use aether_kinds::{Advance, CaptureFrame, PlatformInfo, SetWindowMode, SetWindowTitle};
 use aether_mail::Kind;
-use aether_substrate_core::{ChassisControlHandler, HubOutbound, ReplyTo};
+use aether_substrate_core::{
+    ChassisControlHandler, HubOutbound, ReplyTo,
+    capture::{
+        reply_unsupported_advance, reply_unsupported_capture_frame,
+        reply_unsupported_platform_info, reply_unsupported_window_mode,
+        reply_unsupported_window_title,
+    },
+};
 
 const UNSUPPORTED: &str = "unsupported on headless chassis — no GPU or window peripherals";
+const UNSUPPORTED_ADVANCE: &str =
+    "unsupported on headless chassis — aether.test_bench.advance is test-bench-only (ADR-0067)";
 
 pub fn chassis_control_handler(outbound: Arc<HubOutbound>) -> ChassisControlHandler {
     Arc::new(
         move |kind_id: u64, kind_name: &str, sender: ReplyTo, _bytes: &[u8]| {
             if kind_id == CaptureFrame::ID {
-                outbound.send_reply(
-                    sender,
-                    &CaptureFrameResult::Err {
-                        error: UNSUPPORTED.to_owned(),
-                    },
-                );
+                reply_unsupported_capture_frame(&outbound, sender, UNSUPPORTED);
             } else if kind_id == SetWindowMode::ID {
-                outbound.send_reply(
-                    sender,
-                    &SetWindowModeResult::Err {
-                        error: UNSUPPORTED.to_owned(),
-                    },
-                );
+                reply_unsupported_window_mode(&outbound, sender, UNSUPPORTED);
             } else if kind_id == SetWindowTitle::ID {
-                outbound.send_reply(
-                    sender,
-                    &SetWindowTitleResult::Err {
-                        error: UNSUPPORTED.to_owned(),
-                    },
-                );
+                reply_unsupported_window_title(&outbound, sender, UNSUPPORTED);
             } else if kind_id == Advance::ID {
-                outbound.send_reply(
-                    sender,
-                    &AdvanceResult::Err {
-                        error: "unsupported on headless chassis — aether.test_bench.advance is \
-                                test-bench-only (ADR-0067)"
-                            .to_owned(),
-                    },
-                );
+                reply_unsupported_advance(&outbound, sender, UNSUPPORTED_ADVANCE);
             } else if kind_id == PlatformInfo::ID {
                 // PlatformInfoResult::Err also exists — future work
                 // could return a partial Ok (OS + engine info, empty
                 // GPU/monitors) once headless needs that detail.
-                outbound.send_reply(
-                    sender,
-                    &aether_kinds::PlatformInfoResult::Err {
-                        error: UNSUPPORTED.to_owned(),
-                    },
-                );
+                reply_unsupported_platform_info(&outbound, sender, UNSUPPORTED);
             } else {
                 tracing::warn!(
                     target: "aether_substrate::chassis",
