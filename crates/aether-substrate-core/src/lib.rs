@@ -26,6 +26,7 @@ pub mod chassis;
 pub mod component;
 pub mod control;
 pub mod ctx;
+pub mod frame_loop;
 pub mod handle_sink;
 pub mod handle_store;
 pub mod host_fns;

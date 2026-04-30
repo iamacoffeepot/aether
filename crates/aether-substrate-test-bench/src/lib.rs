@@ -25,8 +25,9 @@ pub use aether_substrate_core::{
     MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, Scheduler, SinkHandler, SubstrateBoot,
     SubstrateCtx,
     capture::{CaptureQueue, PendingCapture},
-    component, control, ctx, host_fns, hub_client, input, io, kind_manifest, log_capture, mail,
-    mailer, new_subscribers, registry, remove_from_all, reply_table, scheduler, subscribers_for,
+    component, control, ctx, frame_loop, host_fns, hub_client, input, io, kind_manifest,
+    log_capture, mail, mailer, new_subscribers, registry, remove_from_all, reply_table, scheduler,
+    subscribers_for,
 };
 
 pub use chassis::chassis_control_handler;
