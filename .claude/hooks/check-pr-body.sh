@@ -11,12 +11,15 @@
 #
 # To deliberately submit a body that looks like one of the patterns
 # (rare — usually the pattern means the body really is broken),
-# include `# pr-body-ok: <letters> — <reason>` in the command. The
-# letter list is one or more of a/b/c/d (comma-separated, e.g.
-# `# pr-body-ok: a,b — reason`); only listed patterns are skipped,
-# unlisted ones still fire. A bare `# pr-body-ok:` with no letter
-# list is rejected to force the author to think about which check
-# they're overriding.
+# include `<!-- pr-body-ok: <letters> — <reason> -->` in the command.
+# The letter list is one or more of a/b/c/d (comma-separated, e.g.
+# `<!-- pr-body-ok: a,b — reason -->`); only listed patterns are
+# skipped, unlisted ones still fire. A bare `pr-body-ok:` with no
+# letter list is rejected to force the author to think about which
+# check they're overriding. The legacy `# pr-body-ok: ...` form still
+# matches (the regex grabs `pr-body-ok:[^\n]*` regardless of leading
+# punctuation), but prefer the HTML-comment form because a `#` at line
+# start renders as an H1 heading on GitHub.
 
 set -u
 
@@ -40,7 +43,7 @@ if [[ -n "$override_line" ]]; then
     prefix=${rest%%[[:space:]—]*}
     allowed=$(printf '%s' "$prefix" | tr '[:upper:]' '[:lower:]' | grep -oE '[a-d]' | tr '\n' ',' | sed 's/,$//' || true)
     if [[ -z "$allowed" ]]; then
-        printf 'pr-body-ok override needs at least one pattern letter (a/b/c/d), e.g. `# pr-body-ok: b — reason`\n' >&2
+        printf 'pr-body-ok override needs at least one pattern letter (a/b/c/d), e.g. `<!-- pr-body-ok: b — reason -->`\n' >&2
         exit 2
     fi
 fi
@@ -110,7 +113,7 @@ if (( ${#issues[@]} )); then
             printf '  - %s\n' "$i"
         done
         printf '\nSee feedback_heredoc_no_backtick_escape.md (auto-memory) for context.\n'
-        printf 'To override deliberately, include `# pr-body-ok: <letters> — <reason>` (letters: a/b/c/d, comma-separated; only listed patterns are skipped).\n'
+        printf 'To override deliberately, include `<!-- pr-body-ok: <letters> — <reason> -->` (letters: a/b/c/d, comma-separated; only listed patterns are skipped).\n'
     } >&2
     exit 2
 fi
