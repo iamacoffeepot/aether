@@ -40,6 +40,8 @@ pub mod mailer;
 pub mod net;
 pub mod panic_hook;
 pub mod registry;
+#[cfg(feature = "render")]
+pub mod render;
 pub mod reply_table;
 pub mod scheduler;
 

@@ -243,6 +243,7 @@ dependencies = [
  "bytemuck",
  "dirs",
  "log",
+ "png",
  "postcard",
  "serde",
  "tracing",
@@ -252,6 +253,7 @@ dependencies = [
  "wasmparser 0.224.1",
  "wasmtime",
  "wat",
+ "wgpu",
 ]
 
 [[package]]
