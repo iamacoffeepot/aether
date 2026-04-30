@@ -7,14 +7,17 @@ use aether_hub_protocol::{EngineId, SessionToken};
 /// ADR-0065 hoisted the canonical home into `aether_mail`; this remains
 /// re-exported under the `aether_substrate_core::mail::MailboxId` path
 /// so existing call sites compile unchanged.
-pub use aether_mail::MailboxId;
+pub use aether_mail::{KindId, MailboxId};
 
 /// Host/guest contract tag for the payload layout. The substrate and the
 /// components that talk to it agree on a specific layout per kind. The
 /// typed facade over this is ADR-0005 (mail typing system) and ADR-0019
 /// (schema-described kinds). Widened to `u64` in ADR-0030 Phase 1 in
-/// preparation for hashed derivation (Phase 2).
-pub type MailKind = u64;
+/// preparation for hashed derivation (Phase 2); narrowed to the typed
+/// `KindId` newtype in issue 459 to disambiguate kind ids by bit
+/// pattern (`#[repr(transparent)]` over `u64`, so the wire shape is
+/// unchanged).
+pub type MailKind = KindId;
 
 /// Where a reply-bearing mail should route when the recipient
 /// answers. Strictly a routing hint: mail is pushed at a recipient,
@@ -36,7 +39,7 @@ pub enum ReplyTarget {
     Session(SessionToken),
     EngineMailbox {
         engine_id: EngineId,
-        mailbox_id: u64,
+        mailbox_id: MailboxId,
     },
     Component(MailboxId),
 }

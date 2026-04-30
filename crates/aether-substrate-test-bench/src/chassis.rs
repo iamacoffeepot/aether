@@ -20,7 +20,7 @@ use std::sync::Arc;
 use aether_kinds::{
     Advance, AdvanceResult, CaptureFrame, PlatformInfo, SetWindowMode, SetWindowTitle,
 };
-use aether_mail::Kind;
+use aether_mail::{Kind, KindId};
 use aether_substrate_core::{
     ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo,
     capture::{
@@ -43,8 +43,8 @@ pub fn chassis_control_handler(
     outbound: Arc<HubOutbound>,
 ) -> ChassisControlHandler {
     Arc::new(
-        move |kind_id: u64, kind_name: &str, sender: ReplyTo, bytes: &[u8]| {
-            if kind_id == CaptureFrame::ID {
+        move |kind: KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| {
+            if kind == KindId(CaptureFrame::ID) {
                 let events = events.clone();
                 begin_capture_request(
                     &queue,
@@ -59,13 +59,13 @@ pub fn chassis_control_handler(
                             .map_err(|_| "test-bench chassis shutting down — capture aborted")
                     },
                 );
-            } else if kind_id == Advance::ID {
+            } else if kind == KindId(Advance::ID) {
                 handle_advance(&events, &outbound, sender, bytes);
-            } else if kind_id == SetWindowMode::ID {
+            } else if kind == KindId(SetWindowMode::ID) {
                 reply_unsupported_window_mode(&outbound, sender, UNSUPPORTED_WINDOW);
-            } else if kind_id == SetWindowTitle::ID {
+            } else if kind == KindId(SetWindowTitle::ID) {
                 reply_unsupported_window_title(&outbound, sender, UNSUPPORTED_WINDOW);
-            } else if kind_id == PlatformInfo::ID {
+            } else if kind == KindId(PlatformInfo::ID) {
                 reply_unsupported_platform_info(&outbound, sender, UNSUPPORTED_WINDOW);
             } else {
                 tracing::warn!(

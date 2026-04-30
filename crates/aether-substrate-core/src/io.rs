@@ -18,7 +18,7 @@ use std::sync::Arc;
 use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
-use aether_mail::Kind;
+use aether_mail::{Kind, KindId};
 
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
@@ -318,13 +318,13 @@ pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, Namesp
 /// path for zero-copy streaming reads.
 pub fn io_sink_handler(registry: Arc<AdapterRegistry>, mailer: Arc<Mailer>) -> SinkHandler {
     Arc::new(
-        move |kind_id: u64,
+        move |kind: KindId,
               _kind_name: &str,
               _origin: Option<&str>,
               sender: ReplyTo,
               bytes: &[u8],
               _count: u32| {
-            dispatch_io_mail(&registry, &mailer, kind_id, sender, bytes);
+            dispatch_io_mail(&registry, &mailer, kind, sender, bytes);
         },
     )
 }
@@ -332,7 +332,7 @@ pub fn io_sink_handler(registry: Arc<AdapterRegistry>, mailer: Arc<Mailer>) -> S
 fn dispatch_io_mail(
     registry: &AdapterRegistry,
     mailer: &Mailer,
-    kind_id: u64,
+    kind: KindId,
     sender: ReplyTo,
     bytes: &[u8],
 ) {
@@ -341,7 +341,7 @@ fn dispatch_io_mail(
     // strings in the echo fields — the `AdapterError` text carries
     // the decode diagnostic, and empty-string echo is a loud signal
     // that the request itself was malformed.
-    if kind_id == <Read as Kind>::ID {
+    if kind == KindId(<Read as Kind>::ID) {
         let req: Read = match postcard::from_bytes(bytes) {
             Ok(r) => r,
             Err(e) => {
@@ -390,7 +390,7 @@ fn dispatch_io_mail(
                 },
             ),
         };
-    } else if kind_id == <Write as Kind>::ID {
+    } else if kind == KindId(<Write as Kind>::ID) {
         let req: Write = match postcard::from_bytes(bytes) {
             Ok(r) => r,
             Err(e) => {
@@ -438,7 +438,7 @@ fn dispatch_io_mail(
                 },
             ),
         };
-    } else if kind_id == <Delete as Kind>::ID {
+    } else if kind == KindId(<Delete as Kind>::ID) {
         let req: Delete = match postcard::from_bytes(bytes) {
             Ok(r) => r,
             Err(e) => {
@@ -486,7 +486,7 @@ fn dispatch_io_mail(
                 },
             ),
         };
-    } else if kind_id == <List as Kind>::ID {
+    } else if kind == KindId(<List as Kind>::ID) {
         let req: List = match postcard::from_bytes(bytes) {
             Ok(r) => r,
             Err(e) => {
@@ -538,7 +538,7 @@ fn dispatch_io_mail(
     } else {
         tracing::warn!(
             target: "aether_substrate::io",
-            kind_id,
+            kind = %kind,
             "io sink received unknown kind — dropping",
         );
     }
@@ -802,7 +802,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <Read as Kind>::ID,
+            KindId(<Read as Kind>::ID),
             Read::NAME,
             None,
             session_sender(),
@@ -836,7 +836,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <Read as Kind>::ID,
+            KindId(<Read as Kind>::ID),
             Read::NAME,
             None,
             session_sender(),
@@ -872,7 +872,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <Read as Kind>::ID,
+            KindId(<Read as Kind>::ID),
             Read::NAME,
             None,
             session_sender(),
@@ -902,7 +902,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <Write as Kind>::ID,
+            KindId(<Write as Kind>::ID),
             Write::NAME,
             None,
             session_sender(),
@@ -936,7 +936,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <Write as Kind>::ID,
+            KindId(<Write as Kind>::ID),
             Write::NAME,
             None,
             session_sender(),
@@ -966,7 +966,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <Delete as Kind>::ID,
+            KindId(<Delete as Kind>::ID),
             Delete::NAME,
             None,
             session_sender(),
@@ -1001,7 +1001,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <List as Kind>::ID,
+            KindId(<List as Kind>::ID),
             List::NAME,
             None,
             session_sender(),
@@ -1032,7 +1032,14 @@ mod tests {
         let reg = build_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
-        handler(0xdead_beef, "some.other", None, session_sender(), &[], 1);
+        handler(
+            KindId(0xdead_beef),
+            "some.other",
+            None,
+            session_sender(),
+            &[],
+            1,
+        );
         assert!(rx.try_recv().is_err(), "unexpected reply on unknown kind");
         cleanup(&root);
     }
@@ -1128,7 +1135,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <Read as Kind>::ID,
+            KindId(<Read as Kind>::ID),
             Read::NAME,
             Some("test_caller"),
             ReplyTo::to(crate::mail::ReplyTarget::Component(caller_mailbox)),
@@ -1166,7 +1173,7 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         handler(
-            <Read as Kind>::ID,
+            KindId(<Read as Kind>::ID),
             Read::NAME,
             None,
             session_sender(),

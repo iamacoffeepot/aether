@@ -129,7 +129,7 @@ pub fn emit_frame_stats(
     queue: &Mailer,
     broadcast_mbox: MailboxId,
     sender: MailboxId,
-    kind_frame_stats: u64,
+    kind_frame_stats: aether_mail::KindId,
     frame: u64,
     triangles: u64,
 ) {
@@ -357,7 +357,7 @@ mod tests {
         let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
         mailer.wire(Arc::clone(&registry), components);
 
-        let kind_id = FrameStats::ID;
+        let kind_id = aether_mail::KindId(FrameStats::ID);
         emit_frame_stats(&mailer, broadcast, MailboxId(0), kind_id, 1, 0);
         emit_frame_stats(&mailer, broadcast, MailboxId(0), kind_id, 119, 0);
         assert!(captured.read().unwrap().is_empty());
@@ -387,7 +387,7 @@ mod tests {
             &mailer,
             broadcast,
             MailboxId(0),
-            FrameStats::ID,
+            aether_mail::KindId(FrameStats::ID),
             LOG_EVERY_FRAMES,
             42,
         );

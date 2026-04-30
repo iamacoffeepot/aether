@@ -11,7 +11,7 @@ use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use wasmtime::{Caller, Linker};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
-use crate::mail::{MailboxId, ReplyTarget};
+use crate::mail::{KindId, MailboxId, ReplyTarget};
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
 /// `0` is success; non-zero values distinguish call-site errors
@@ -85,7 +85,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
             let payload = data[start..end].to_vec();
 
             let ctx = caller.data();
-            ctx.send(MailboxId(recipient), kind, payload, count);
+            ctx.send(MailboxId(recipient), KindId(kind), payload, count);
             0
         },
     )?;
@@ -180,6 +180,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
             // path so a parked `wait_reply_p32` on the originator
             // can filter its own reply out of a busy inbox.
             let correlation = entry.correlation_id;
+            let kind = KindId(kind);
             match entry.target {
                 ReplyTarget::Session(token) => {
                     let Some(kind_name) = ctx.registry.kind_name(kind) else {
@@ -221,8 +222,8 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                     ctx.outbound.send(EngineToHub::MailToEngineMailbox(
                         aether_hub_protocol::MailToEngineMailboxFrame {
                             target_engine_id: engine_id,
-                            target_mailbox_id: mailbox_id,
-                            kind_id: kind,
+                            target_mailbox_id: mailbox_id.0,
+                            kind_id: kind.0,
                             payload,
                             count,
                             correlation_id: correlation,
@@ -268,6 +269,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
          timeout_ms: u32,
          expected_correlation: u64|
          -> i32 {
+            let expected_kind = KindId(expected_kind);
             let clamped = timeout_ms.min(MAX_WAIT_TIMEOUT_MS);
             let deadline = Instant::now() + Duration::from_millis(clamped as u64);
 

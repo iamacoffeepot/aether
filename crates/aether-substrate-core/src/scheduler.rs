@@ -447,7 +447,7 @@ fn dispatcher_loop(
         // paths) the warn / error / broadcast payloads.
         let kind_name = registry
             .kind_name(mail.kind)
-            .unwrap_or_else(|| format!("kind#{:#x}", mail.kind));
+            .unwrap_or_else(|| format!("kind#{:#x}", mail.kind.0));
 
         // Issue 321 Phase 2: wrap `deliver` in `catch_unwind` so a
         // host-side Rust panic (a panicking host fn, a poisoned
@@ -601,7 +601,7 @@ fn kill_actor(
     let broadcast_mbox = MailboxId::from_name(crate::HUB_CLAUDE_BROADCAST);
     let mail = Mail {
         recipient: broadcast_mbox,
-        kind: ComponentDied::ID,
+        kind: aether_mail::KindId(ComponentDied::ID),
         payload,
         count: 1,
         from_component: Some(mailbox),
@@ -840,7 +840,12 @@ mod tests {
     #[test]
     fn send_delivers_through_dispatcher_and_drains_pending() {
         let entry = spawn_entry();
-        assert!(entry.send(Mail::new(MailboxId(0), 0xBB, vec![1], 1)));
+        assert!(entry.send(Mail::new(
+            MailboxId(0),
+            aether_mail::KindId(0xBB),
+            vec![1],
+            1
+        )));
         entry.drain();
         assert_eq!(entry.gate.pending.load(Ordering::Acquire), 0);
     }
@@ -854,10 +859,15 @@ mod tests {
         // Build a component directly so we can seed its overflow
         // before handing it to a dispatcher.
         let mut component = minimal_component();
-        component.push_overflow_for_test(Mail::new(MailboxId(0), 0xCC, vec![9], 1));
+        component.push_overflow_for_test(Mail::new(
+            MailboxId(0),
+            aether_mail::KindId(0xCC),
+            vec![9],
+            1,
+        ));
         // next_mail should pop from overflow without touching mpsc.
         let mail = component.next_mail().expect("overflow pops first");
-        assert_eq!(mail.kind, 0xCC);
+        assert_eq!(mail.kind, aether_mail::KindId(0xCC));
     }
 
     /// ADR-0042 §5: `close_and_join` drops the mpsc Sender; a
@@ -952,7 +962,12 @@ mod tests {
 
         // Send mail; guest traps on receive_p32. Phase 2 dispatcher
         // marks state Dead, emits ComponentDied broadcast, exits.
-        assert!(entry.send(Mail::new(MailboxId(0), 0xDD, vec![1], 1)));
+        assert!(entry.send(Mail::new(
+            MailboxId(0),
+            aether_mail::KindId(0xDD),
+            vec![1],
+            1
+        )));
         entry.drain();
         assert_eq!(
             entry.gate.pending.load(Ordering::Acquire),
@@ -972,7 +987,12 @@ mod tests {
         // Send to dead mailbox: returns false, doesn't queue, doesn't
         // increment pending.
         assert!(
-            !entry.send(Mail::new(MailboxId(0), 0xDD, vec![2], 1)),
+            !entry.send(Mail::new(
+                MailboxId(0),
+                aether_mail::KindId(0xDD),
+                vec![2],
+                1
+            )),
             "send to dead mailbox must fail-fast",
         );
         assert_eq!(entry.gate.pending.load(Ordering::Acquire), 0);
@@ -998,8 +1018,8 @@ mod tests {
         let cap = Arc::clone(&captured);
         registry.register_sink(
             crate::HUB_CLAUDE_BROADCAST,
-            Arc::new(move |kind_id, _, _, _, bytes, _| {
-                if kind_id == ComponentDied::ID
+            Arc::new(move |kind, _, _, _, bytes, _| {
+                if kind == aether_mail::KindId(ComponentDied::ID)
                     && let Ok(d) = postcard::from_bytes::<ComponentDied>(bytes)
                 {
                     cap.lock().unwrap().push(d);
@@ -1016,7 +1036,7 @@ mod tests {
             mailbox,
         ));
 
-        assert!(entry.send(Mail::new(mailbox, 0xDD, vec![], 1)));
+        assert!(entry.send(Mail::new(mailbox, aether_mail::KindId(0xDD), vec![], 1)));
         entry.drain();
 
         let died = captured.lock().unwrap();
@@ -1060,7 +1080,12 @@ mod tests {
         ));
         assert!(!entry.is_dead(), "freshly spawned entry must be Live");
 
-        assert!(entry.send(Mail::new(MailboxId(0), 0xDD, vec![], 1)));
+        assert!(entry.send(Mail::new(
+            MailboxId(0),
+            aether_mail::KindId(0xDD),
+            vec![],
+            1
+        )));
         entry.drain();
         assert!(entry.is_dead(), "post-trap entry must be Dead");
 
@@ -1079,7 +1104,12 @@ mod tests {
             MailboxId(0),
         ));
         for i in 0..16u32 {
-            assert!(entry.send(Mail::new(MailboxId(0), 0xCC, vec![i as u8], 1)));
+            assert!(entry.send(Mail::new(
+                MailboxId(0),
+                aether_mail::KindId(0xCC),
+                vec![i as u8],
+                1
+            )));
         }
         entry.drain();
         assert!(!entry.is_dead());
@@ -1113,7 +1143,12 @@ mod tests {
     #[test]
     fn drain_with_budget_returns_quiesced_on_clean_delivery() {
         let entry = spawn_entry();
-        assert!(entry.send(Mail::new(MailboxId(0), 0xBB, vec![1], 1)));
+        assert!(entry.send(Mail::new(
+            MailboxId(0),
+            aether_mail::KindId(0xBB),
+            vec![1],
+            1
+        )));
         match entry.drain_with_budget(Duration::from_secs(1)) {
             DrainOutcome::Quiesced => {}
             other => panic!("expected Quiesced, got {other:?}"),
@@ -1145,7 +1180,7 @@ mod tests {
             mailbox,
         ));
 
-        assert!(entry.send(Mail::new(mailbox, 0xDD, vec![], 1)));
+        assert!(entry.send(Mail::new(mailbox, aether_mail::KindId(0xDD), vec![], 1)));
         let outcome = entry.drain_with_budget(Duration::from_secs(2));
         match outcome {
             DrainOutcome::Died(d) => {
@@ -1225,8 +1260,13 @@ mod tests {
             .insert(mailbox_dies, Arc::clone(&entry_dies));
 
         // Send to both: one quiesces cleanly, the other traps.
-        assert!(entry_ok.send(Mail::new(mailbox_ok, 0xBB, vec![], 1)));
-        assert!(entry_dies.send(Mail::new(mailbox_dies, 0xDD, vec![], 1)));
+        assert!(entry_ok.send(Mail::new(mailbox_ok, aether_mail::KindId(0xBB), vec![], 1)));
+        assert!(entry_dies.send(Mail::new(
+            mailbox_dies,
+            aether_mail::KindId(0xDD),
+            vec![],
+            1
+        )));
 
         let summary = drain_all_with_budget(&components, Duration::from_secs(2));
         assert!(summary.wedged.is_none(), "no entry should be wedged");
@@ -1255,7 +1295,7 @@ mod tests {
         ));
 
         // Trigger a death.
-        assert!(entry.send(Mail::new(mailbox, 0xDD, vec![], 1)));
+        assert!(entry.send(Mail::new(mailbox, aether_mail::KindId(0xDD), vec![], 1)));
         match entry.drain_with_budget(Duration::from_secs(2)) {
             DrainOutcome::Died(_) => {}
             other => panic!("expected Died after trap, got {other:?}"),

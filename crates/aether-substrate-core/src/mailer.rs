@@ -18,6 +18,8 @@ use std::sync::{Arc, OnceLock};
 
 use aether_hub_protocol::{EngineMailToHubSubstrateFrame, EngineToHub};
 
+use aether_mail::{HandleId, KindId};
+
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::hub_client::HubOutbound;
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
@@ -135,15 +137,15 @@ impl Mailer {
     /// don't expose handles never park mail in the first place.
     pub fn resolve_handle(
         &self,
-        handle_id: u64,
-        kind_id: u64,
+        handle: HandleId,
+        kind: KindId,
         bytes: Vec<u8>,
     ) -> Result<(), PutError> {
         let Some(store) = self.handle_store.get() else {
             return Ok(());
         };
-        store.put(handle_id, kind_id, bytes)?;
-        let parked = store.take_parked(handle_id);
+        store.put(handle, kind, bytes)?;
+        let parked = store.take_parked(handle);
         let registry = self.registry.get().expect("Mailer not wired");
         let components = self.components.get().expect("Mailer not wired");
         let outbound = self.outbound.get();
@@ -194,7 +196,7 @@ impl Mailer {
                 // correlation picks the right reply out of the mpsc.
                 // Reply target is None — nobody replies to a reply.
                 let reply_to = ReplyTo::with_correlation(ReplyTarget::None, sender.correlation_id);
-                self.push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
+                self.push(Mail::new(mailbox, KindId(K::ID), payload, 1).with_reply_to(reply_to));
                 true
             }
         }
@@ -261,21 +263,21 @@ fn route_mail(
                 // Cow::Borrowed: mail.payload already matches the
                 // resolved bytes (no substitutions happened).
             }
-            Ok(WalkOutcome::Parked { handle_id, kind_id }) => {
+            Ok(WalkOutcome::Parked { handle, kind }) => {
                 tracing::debug!(
                     target: "aether_substrate::handle_store",
-                    handle_id = format_args!("{handle_id:#x}"),
-                    kind_id = format_args!("{kind_id:#x}"),
+                    handle = %handle,
+                    kind = %kind,
                     recipient = ?mail.recipient,
                     "parking mail on missing handle",
                 );
-                store.park(handle_id, mail);
+                store.park(handle, mail);
                 return;
             }
             Err(e) => {
                 tracing::warn!(
                     target: "aether_substrate::handle_store",
-                    kind = format_args!("{:#x}", mail.kind),
+                    kind = %mail.kind,
                     error = ?e,
                     recipient = ?mail.recipient,
                     "ref-walk failed against registered schema; mail dropped",
@@ -369,7 +371,7 @@ fn route_mail(
                 let sent = outbound.send(EngineToHub::MailToHubSubstrate(
                     EngineMailToHubSubstrateFrame {
                         recipient_mailbox_id: recipient.0,
-                        kind_id: mail.kind,
+                        kind_id: mail.kind.0,
                         payload: mail.payload,
                         count: mail.count,
                         source_mailbox_id,
@@ -423,7 +425,7 @@ mod tests {
         mailer.wire_outbound(Arc::clone(&outbound));
 
         let unknown = MailboxId(0xDEADBEEF_u64);
-        let kind: u64 = 0xABCD_u64;
+        let kind = KindId(0xABCD_u64);
         let payload = vec![1, 2, 3];
         mailer.push(Mail::new(unknown, kind, payload.clone(), 1));
 
@@ -431,7 +433,7 @@ mod tests {
         match frame {
             EngineToHub::MailToHubSubstrate(f) => {
                 assert_eq!(f.recipient_mailbox_id, unknown.0);
-                assert_eq!(f.kind_id, kind);
+                assert_eq!(f.kind_id, kind.0);
                 assert_eq!(f.payload, payload);
                 assert_eq!(f.count, 1);
             }
@@ -453,7 +455,7 @@ mod tests {
         // Deliberately no wire_outbound.
 
         let unknown = MailboxId(0xDEADBEEF_u64);
-        mailer.push(Mail::new(unknown, 0xABCD, vec![], 0));
+        mailer.push(Mail::new(unknown, KindId(0xABCD), vec![], 0));
         // No panic is the test; the warn path logs and returns.
     }
 
@@ -530,7 +532,7 @@ mod tests {
             let captured = Arc::clone(&self.captured);
             let count = Arc::clone(&self.delivery_count);
             Arc::new(
-                move |_kind_id: u64,
+                move |_kind_id: KindId,
                       _kind_name: &str,
                       _origin: Option<&str>,
                       _sender: ReplyTo,
@@ -612,7 +614,7 @@ mod tests {
         let outer = HeldNote {
             held: Ref::Handle {
                 id: 7,
-                kind_id: inner_kind_id,
+                kind_id: inner_kind_id.0,
             },
             seq: 11,
         };
@@ -623,7 +625,7 @@ mod tests {
             0,
             "mail must not dispatch until handle resolves",
         );
-        assert_eq!(store.parked_count(7), 1);
+        assert_eq!(store.parked_count(HandleId(7)), 1);
 
         // Resolve handle 7. The mail should now flow to the sink
         // with the inner Note bytes spliced inline.
@@ -633,9 +635,9 @@ mod tests {
         };
         let inner_bytes = postcard::to_allocvec(&inner).unwrap();
         mailer
-            .resolve_handle(7, inner_kind_id, inner_bytes)
+            .resolve_handle(HandleId(7), inner_kind_id, inner_bytes)
             .unwrap();
-        assert_eq!(store.parked_count(7), 0);
+        assert_eq!(store.parked_count(HandleId(7)), 0);
         assert_eq!(sink.delivery_count.load(Ordering::SeqCst), 1);
 
         let captured = sink.captured.read().unwrap();
@@ -660,7 +662,9 @@ mod tests {
         let mailer = Mailer::new();
         mailer.wire(Arc::clone(&registry), components);
         // No wire_handle_store call.
-        mailer.resolve_handle(1, 2, vec![3]).unwrap();
+        mailer
+            .resolve_handle(HandleId(1), KindId(2), vec![3])
+            .unwrap();
     }
 
     /// Mail whose payload is malformed against the registered

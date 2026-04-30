@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
-use aether_mail::Kind;
+use aether_mail::{Kind, KindId};
 
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
@@ -331,7 +331,7 @@ fn parse_default_timeout() -> Duration {
 pub fn net_sink_handler(adapter: Arc<dyn NetAdapter>, mailer: Arc<Mailer>) -> SinkHandler {
     let default_timeout = parse_default_timeout();
     Arc::new(
-        move |kind_id: u64,
+        move |kind: KindId,
               _kind_name: &str,
               _origin: Option<&str>,
               sender: ReplyTo,
@@ -340,7 +340,7 @@ pub fn net_sink_handler(adapter: Arc<dyn NetAdapter>, mailer: Arc<Mailer>) -> Si
             dispatch_net_mail(
                 adapter.as_ref(),
                 &mailer,
-                kind_id,
+                kind,
                 sender,
                 bytes,
                 default_timeout,
@@ -352,15 +352,15 @@ pub fn net_sink_handler(adapter: Arc<dyn NetAdapter>, mailer: Arc<Mailer>) -> Si
 fn dispatch_net_mail(
     adapter: &dyn NetAdapter,
     mailer: &Mailer,
-    kind_id: u64,
+    kind: KindId,
     sender: ReplyTo,
     bytes: &[u8],
     default_timeout: Duration,
 ) {
-    if kind_id != <Fetch as Kind>::ID {
+    if kind != KindId(<Fetch as Kind>::ID) {
         tracing::warn!(
             target: "aether_substrate::net",
-            kind_id,
+            kind = %kind,
             "net sink received unknown kind — dropping",
         );
         return;
@@ -493,7 +493,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <Fetch as Kind>::ID,
+            KindId(<Fetch as Kind>::ID),
             Fetch::NAME,
             None,
             session_sender(),
@@ -603,7 +603,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <Fetch as Kind>::ID,
+            KindId(<Fetch as Kind>::ID),
             Fetch::NAME,
             None,
             session_sender(),
@@ -640,7 +640,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <Fetch as Kind>::ID,
+            KindId(<Fetch as Kind>::ID),
             Fetch::NAME,
             None,
             session_sender(),
@@ -666,7 +666,7 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let handler = net_sink_handler(Arc::clone(&adapter), Arc::clone(&mailer));
         handler(
-            <Fetch as Kind>::ID,
+            KindId(<Fetch as Kind>::ID),
             Fetch::NAME,
             None,
             session_sender(),
@@ -689,7 +689,14 @@ mod tests {
         let adapter = StubAdapter::with(Err(NetError::Disabled)) as Arc<dyn NetAdapter>;
         let (mailer, rx) = test_mailer_and_rx();
         let handler = net_sink_handler(Arc::clone(&adapter), Arc::clone(&mailer));
-        handler(0xdead_beef, "some.other", None, session_sender(), &[], 1);
+        handler(
+            KindId(0xdead_beef),
+            "some.other",
+            None,
+            session_sender(),
+            &[],
+            1,
+        );
         assert!(rx.try_recv().is_err(), "unexpected reply on unknown kind");
     }
 
@@ -717,7 +724,7 @@ mod tests {
         })
         .unwrap();
         handler(
-            <Fetch as Kind>::ID,
+            KindId(<Fetch as Kind>::ID),
             Fetch::NAME,
             None,
             session_sender(),

@@ -167,7 +167,7 @@ impl Component {
         let byte_len = mail.payload.len() as u32;
         self.receive.call(
             &mut self.store,
-            (mail.kind, MAIL_OFFSET, byte_len, mail.count, handle),
+            (mail.kind.0, MAIL_OFFSET, byte_len, mail.count, handle),
         )
     }
 
@@ -550,7 +550,7 @@ mod tests {
 
         let mut component = instantiate(WAT_STORES_SENDER);
         // Mail::new defaults sender to SessionToken::NIL.
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1);
+        let mail = SubstrateMail::new(M(0), aether_mail::KindId(0), vec![], 1);
         component.deliver(&mail).expect("deliver");
         assert_eq!(component.read_u32(500), NO_REPLY_HANDLE);
     }
@@ -564,7 +564,7 @@ mod tests {
 
         let mut component = instantiate(WAT_STORES_SENDER);
         let token = SessionToken(Uuid::from_u128(0xaaaa));
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1)
+        let mail = SubstrateMail::new(M(0), aether_mail::KindId(0), vec![], 1)
             .with_reply_to(ReplyTo::to(ReplyTarget::Session(token)));
         component.deliver(&mail).expect("deliver");
         let observed = component.read_u32(500);
@@ -583,7 +583,7 @@ mod tests {
         let mut component = instantiate(WAT_STORES_SENDER);
         // ADR-0017: component-origin mail (no session token, but a
         // populated `from_component`) gets a Component-variant handle.
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_origin(M(7));
+        let mail = SubstrateMail::new(M(0), aether_mail::KindId(0), vec![], 1).with_origin(M(7));
         component.deliver(&mail).expect("deliver");
         let observed = component.read_u32(500);
         assert_ne!(observed, NO_REPLY_HANDLE);
@@ -606,7 +606,7 @@ mod tests {
 
         let mut component = instantiate(WAT_STORES_SENDER);
         let token = SessionToken(Uuid::from_u128(0xbbbb));
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1)
+        let mail = SubstrateMail::new(M(0), aether_mail::KindId(0), vec![], 1)
             .with_reply_to(ReplyTo::to(ReplyTarget::Session(token)))
             .with_origin(M(99));
         component.deliver(&mail).expect("deliver");
@@ -623,7 +623,7 @@ mod tests {
     fn plane_ctx_for_reply() -> (
         SubstrateCtx,
         std::sync::mpsc::Receiver<aether_hub_protocol::EngineToHub>,
-        u64,
+        aether_mail::KindId,
     ) {
         use aether_hub_protocol::{KindDescriptor, SchemaType};
 
@@ -665,10 +665,10 @@ mod tests {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
 
         let (ctx, rx, pong_id) = plane_ctx_for_reply();
-        let mut component = instantiate_with_ctx(&wat_replies(pong_id), ctx);
+        let mut component = instantiate_with_ctx(&wat_replies(pong_id.0), ctx);
 
         let token = SessionToken(Uuid::from_u128(0xbeef));
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1)
+        let mail = SubstrateMail::new(M(0), aether_mail::KindId(0), vec![], 1)
             .with_reply_to(ReplyTo::to(ReplyTarget::Session(token)));
         component.deliver(&mail).expect("deliver");
 
@@ -685,11 +685,11 @@ mod tests {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
 
         let (ctx, rx, pong_id) = plane_ctx_for_reply();
-        let mut component = instantiate_with_ctx(&wat_replies(pong_id), ctx);
+        let mut component = instantiate_with_ctx(&wat_replies(pong_id.0), ctx);
 
         // NIL sender → NO_REPLY_HANDLE reaches the guest → reply_mail
         // returns REPLY_UNKNOWN_HANDLE and outbound stays quiet.
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1);
+        let mail = SubstrateMail::new(M(0), aether_mail::KindId(0), vec![], 1);
         component.deliver(&mail).expect("deliver");
         assert!(rx.try_recv().is_err(), "no frame should have been sent");
     }
@@ -706,7 +706,7 @@ mod tests {
         std::sync::mpsc::Receiver<aether_hub_protocol::EngineToHub>,
         Arc<Mailer>,
         crate::mail::MailboxId,
-        u64,
+        aether_mail::KindId,
     ) {
         use aether_hub_protocol::{KindDescriptor, SchemaType};
 
@@ -748,12 +748,12 @@ mod tests {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
 
         let (ctx, rx_outbound, queue, caller, pong_id) = plane_ctx_with_caller_mailbox();
-        let mut component = instantiate_with_ctx(&wat_replies(pong_id), ctx);
+        let mut component = instantiate_with_ctx(&wat_replies(pong_id.0), ctx);
 
         // Inbound mail from "caller" — substrate allocates a
         // Component-variant handle. The guest's reply_mail call
         // routes through SubstrateCtx::send to the local queue.
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_origin(caller);
+        let mail = SubstrateMail::new(M(0), aether_mail::KindId(0), vec![], 1).with_origin(caller);
         component.deliver(&mail).expect("deliver");
 
         // Outbound stayed quiet — no hub frame for component replies.
@@ -778,9 +778,9 @@ mod tests {
         // still completes successfully from the receiving guest's
         // perspective.
         ctx.registry.drop_mailbox(caller).expect("drop caller");
-        let mut component = instantiate_with_ctx(&wat_replies(pong_id), ctx);
+        let mut component = instantiate_with_ctx(&wat_replies(pong_id.0), ctx);
 
-        let mail = SubstrateMail::new(M(0), 0, vec![], 1).with_origin(caller);
+        let mail = SubstrateMail::new(M(0), aether_mail::KindId(0), vec![], 1).with_origin(caller);
         component.deliver(&mail).expect("deliver");
 
         assert!(rx_outbound.try_recv().is_err());
@@ -814,7 +814,7 @@ mod tests {
                 i32.const 0))
     "#;
 
-    const SYNC_WAIT_EXPECTED_KIND: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+    const SYNC_WAIT_EXPECTED_KIND: aether_mail::KindId = aether_mail::KindId(0xAAAA_AAAA_AAAA_AAAA);
 
     /// Helper: build a trigger mail whose `count` field carries the
     /// timeout_ms argument into the WAT. The `kind` is irrelevant —
@@ -822,7 +822,12 @@ mod tests {
     /// the host fn.
     fn trigger_wait(timeout_ms: u32) -> Mail {
         use crate::mail::MailboxId;
-        Mail::new(MailboxId(0), 0xBEEF, vec![], timeout_ms)
+        Mail::new(
+            MailboxId(0),
+            aether_mail::KindId(0xBEEF),
+            vec![],
+            timeout_ms,
+        )
     }
 
     /// Build a sync-wait component with an installed inbox so
@@ -928,8 +933,13 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
 
         // Non-match first; then the real reply.
-        tx.send(Mail::new(M(0), 0xDEAD_BEEF, vec![42], 1))
-            .expect("send non-match");
+        tx.send(Mail::new(
+            M(0),
+            aether_mail::KindId(0xDEAD_BEEF),
+            vec![42],
+            1,
+        ))
+        .expect("send non-match");
         tx.send(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, vec![7], 1))
             .expect("send match");
 
@@ -1086,7 +1096,12 @@ mod tests {
         let (mut component, tx) = instantiate_sync_wait_with_inbox();
 
         // Park a non-matching mail on overflow (different kind).
-        component.push_overflow_for_test(Mail::new(M(0), 0xDEAD_BEEF, vec![9, 9, 9], 1));
+        component.push_overflow_for_test(Mail::new(
+            M(0),
+            aether_mail::KindId(0xDEAD_BEEF),
+            vec![9, 9, 9],
+            1,
+        ));
 
         // Push the matching mail on the rx.
         let payload = vec![1, 2, 3];
@@ -1103,7 +1118,7 @@ mod tests {
         // the wait scanned past it without consuming it.
         let overflow = component.store.data().inbox_overflow.lock().unwrap();
         assert_eq!(overflow.len(), 1, "non-match must stay parked on overflow");
-        assert_eq!(overflow[0].kind, 0xDEAD_BEEF);
+        assert_eq!(overflow[0].kind, aether_mail::KindId(0xDEAD_BEEF));
     }
 
     /// Issue 357: a matching mail already on overflow short-circuits
@@ -1127,8 +1142,13 @@ mod tests {
 
         // Pre-queue an unrelated mail on the rx — the wait must NOT
         // consume this; the dispatcher should see it on its next pass.
-        tx.send(Mail::new(M(0), 0xCAFE_BABE, vec![0xFF], 1))
-            .expect("send rx-side filler");
+        tx.send(Mail::new(
+            M(0),
+            aether_mail::KindId(0xCAFE_BABE),
+            vec![0xFF],
+            1,
+        ))
+        .expect("send rx-side filler");
 
         // Use poll mode (timeout = 0) so the test fails loudly if the
         // host fn falls into the rx-blocking path despite a hit on
@@ -1144,7 +1164,7 @@ mod tests {
         let overflow_len = component.store.data().inbox_overflow.lock().unwrap().len();
         assert_eq!(overflow_len, 0, "matching overflow entry was removed");
         let next = component.next_mail().expect("rx mail still queued");
-        assert_eq!(next.kind, 0xCAFE_BABE);
+        assert_eq!(next.kind, aether_mail::KindId(0xCAFE_BABE));
     }
 
     /// Issue 357: simulate a `WAIT_BUFFER_TOO_SMALL` retry. A wait

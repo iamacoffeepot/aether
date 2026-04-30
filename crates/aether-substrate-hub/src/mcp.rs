@@ -478,7 +478,7 @@ mod tests {
         let mailbox_id = with_tag(Tag::Mailbox, 7);
         engines.upsert_component(
             &id,
-            mailbox_id,
+            aether_mail::MailboxId(mailbox_id),
             ComponentRecord {
                 name: "hello".into(),
                 capabilities: capabilities.clone(),

@@ -249,14 +249,14 @@ mod tests {
         );
 
         let unknown = MailboxId(0xDEADBEEF_u64);
-        let kind: u64 = 0xABCD_u64;
+        let kind = aether_mail::KindId(0xABCD_u64);
         ctx.send(unknown, kind, vec![1, 2, 3], 1);
 
         let frame = outbound_rx.try_recv().expect("bubble-up frame emitted");
         match frame {
             EngineToHub::MailToHubSubstrate(f) => {
                 assert_eq!(f.recipient_mailbox_id, unknown.0);
-                assert_eq!(f.kind_id, kind);
+                assert_eq!(f.kind_id, kind.0);
                 assert_eq!(f.payload, vec![1, 2, 3]);
                 assert_eq!(f.count, 1);
                 assert_eq!(f.source_mailbox_id, Some(sender.0));
@@ -286,7 +286,12 @@ mod tests {
             crate::input::new_subscribers(),
         );
 
-        ctx.send(MailboxId(0xDEADBEEF_u64), 0xABCD, vec![], 0);
+        ctx.send(
+            MailboxId(0xDEADBEEF_u64),
+            aether_mail::KindId(0xABCD),
+            vec![],
+            0,
+        );
         assert!(
             outbound_rx.try_recv().is_err(),
             "no bubble-up without a wired outbound"

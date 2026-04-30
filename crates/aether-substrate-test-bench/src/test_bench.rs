@@ -118,8 +118,8 @@ pub struct TestBench {
 
     input_subscribers: InputSubscribers,
     broadcast_mbox: MailboxId,
-    kind_tick: u64,
-    kind_frame_stats: u64,
+    kind_tick: KindId,
+    kind_frame_stats: KindId,
 
     started: Instant,
     frame: u64,
@@ -285,26 +285,27 @@ impl TestBench {
             .lookup(recipient_name)
             .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
         let payload = encode_struct(mail);
-        self.queue.push(Mail::new(mailbox, K::ID, payload, 1));
+        self.queue
+            .push(Mail::new(mailbox, KindId(K::ID), payload, 1));
         Ok(())
     }
 
     /// Bytes-level send for callers that resolve kind+payload at
     /// runtime (the scenario library's descriptor-driven path). Same
     /// recipient lookup as `send_mail` but takes a pre-encoded
-    /// `(kind_id, bytes)` tuple — the typed `send_mail<K>` is the
+    /// `(kind, bytes)` tuple — the typed `send_mail<K>` is the
     /// preferred path when `K` is known statically.
     pub fn send_bytes(
         &self,
         recipient_name: &str,
-        kind_id: u64,
+        kind: KindId,
         bytes: Vec<u8>,
     ) -> Result<(), TestBenchError> {
         let mailbox = self
             .registry
             .lookup(recipient_name)
             .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
-        self.queue.push(Mail::new(mailbox, kind_id, bytes, 1));
+        self.queue.push(Mail::new(mailbox, kind, bytes, 1));
         Ok(())
     }
 
@@ -334,7 +335,7 @@ impl TestBench {
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
         let payload = encode_struct(mail);
         self.queue
-            .push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
+            .push(Mail::new(mailbox, KindId(K::ID), payload, 1).with_reply_to(reply_to));
         self.pump_until_reply::<R>(cid, std::any::type_name::<R>())
     }
 
@@ -398,7 +399,7 @@ impl TestBench {
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
         let payload = encode_struct(mail);
         self.queue
-            .push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
+            .push(Mail::new(mailbox, KindId(K::ID), payload, 1).with_reply_to(reply_to));
     }
 
     fn fresh_correlation_id(&self) -> u64 {
@@ -594,7 +595,7 @@ fn register_render_sink(
     boot.registry.register_sink(
         "aether.sink.render",
         Arc::new(
-            move |_kind_id: u64,
+            move |_kind: KindId,
                   kind_name: &str,
                   _origin: Option<&str>,
                   _sender: ReplyTo,
@@ -634,7 +635,7 @@ fn register_camera_sink(
     boot.registry.register_sink(
         "aether.sink.camera",
         Arc::new(
-            move |_kind_id: u64,
+            move |_kind: KindId,
                   kind_name: &str,
                   _origin: Option<&str>,
                   _sender: ReplyTo,

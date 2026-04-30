@@ -26,7 +26,7 @@ use aether_kinds::{
     HandleError, HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
     HandleReleaseResult, HandleUnpin, HandleUnpinResult,
 };
-use aether_mail::Kind;
+use aether_mail::{HandleId, Kind, KindId};
 
 use crate::handle_store::{HandleStore, PutError};
 use crate::mail::ReplyTo;
@@ -41,25 +41,25 @@ use crate::registry::SinkHandler;
 /// `mailer.send_reply` — see module docs for the per-kind contract.
 pub fn handle_sink_handler(store: Arc<HandleStore>, mailer: Arc<Mailer>) -> SinkHandler {
     Arc::new(
-        move |kind_id: u64,
+        move |kind: KindId,
               _kind_name: &str,
               _origin: Option<&str>,
               sender: ReplyTo,
               bytes: &[u8],
               _count: u32| {
-            dispatch(&store, &mailer, kind_id, sender, bytes);
+            dispatch(&store, &mailer, kind, sender, bytes);
         },
     )
 }
 
-fn dispatch(store: &HandleStore, mailer: &Mailer, kind_id: u64, sender: ReplyTo, bytes: &[u8]) {
-    if kind_id == <HandlePublish as Kind>::ID {
+fn dispatch(store: &HandleStore, mailer: &Mailer, kind: KindId, sender: ReplyTo, bytes: &[u8]) {
+    if kind == KindId(<HandlePublish as Kind>::ID) {
         dispatch_publish(store, mailer, sender, bytes);
-    } else if kind_id == <HandleRelease as Kind>::ID {
+    } else if kind == KindId(<HandleRelease as Kind>::ID) {
         dispatch_release(store, mailer, sender, bytes);
-    } else if kind_id == <HandlePin as Kind>::ID {
+    } else if kind == KindId(<HandlePin as Kind>::ID) {
         dispatch_pin(store, mailer, sender, bytes);
-    } else if kind_id == <HandleUnpin as Kind>::ID {
+    } else if kind == KindId(<HandleUnpin as Kind>::ID) {
         dispatch_unpin(store, mailer, sender, bytes);
     } else {
         // Unknown kind on this sink — warn and drop. The sender's
@@ -68,7 +68,7 @@ fn dispatch(store: &HandleStore, mailer: &Mailer, kind_id: u64, sender: ReplyTo,
         // handle sink doesn't know about."
         tracing::warn!(
             target: "aether_substrate::handle_sink",
-            kind_id = format_args!("{kind_id:#x}"),
+            kind = %kind,
             "handle sink received unknown kind",
         );
     }
@@ -86,7 +86,7 @@ fn dispatch_publish(store: &HandleStore, mailer: &Mailer, sender: ReplyTo, bytes
             mailer.send_reply(
                 sender,
                 &HandlePublishResult::Err {
-                    kind_id: aether_mail::KindId(0),
+                    kind_id: KindId(0),
                     error: HandleError::AdapterError(format!("decode failed: {e}")),
                 },
             );
@@ -94,7 +94,7 @@ fn dispatch_publish(store: &HandleStore, mailer: &Mailer, sender: ReplyTo, bytes
         }
     };
     let id = store.next_ephemeral();
-    match store.put(id, req.kind_id.0, req.bytes) {
+    match store.put(id, req.kind_id, req.bytes) {
         Ok(()) => {
             // Hold a reference on behalf of the publishing
             // component. Drop / explicit release decrements; on
@@ -105,7 +105,7 @@ fn dispatch_publish(store: &HandleStore, mailer: &Mailer, sender: ReplyTo, bytes
                 sender,
                 &HandlePublishResult::Ok {
                     kind_id: req.kind_id,
-                    id: aether_mail::HandleId(id),
+                    id,
                 },
             );
         }
@@ -133,14 +133,14 @@ fn dispatch_release(store: &HandleStore, mailer: &Mailer, sender: ReplyTo, bytes
             mailer.send_reply(
                 sender,
                 &HandleReleaseResult::Err {
-                    id: aether_mail::HandleId(0),
+                    id: HandleId(0),
                     error: HandleError::AdapterError(format!("decode failed: {e}")),
                 },
             );
             return;
         }
     };
-    if store.dec_ref(req.id.0) {
+    if store.dec_ref(req.id) {
         mailer.send_reply(sender, &HandleReleaseResult::Ok { id: req.id });
     } else {
         mailer.send_reply(
@@ -165,14 +165,14 @@ fn dispatch_pin(store: &HandleStore, mailer: &Mailer, sender: ReplyTo, bytes: &[
             mailer.send_reply(
                 sender,
                 &HandlePinResult::Err {
-                    id: aether_mail::HandleId(0),
+                    id: HandleId(0),
                     error: HandleError::AdapterError(format!("decode failed: {e}")),
                 },
             );
             return;
         }
     };
-    if store.pin(req.id.0) {
+    if store.pin(req.id) {
         mailer.send_reply(sender, &HandlePinResult::Ok { id: req.id });
     } else {
         mailer.send_reply(
@@ -197,14 +197,14 @@ fn dispatch_unpin(store: &HandleStore, mailer: &Mailer, sender: ReplyTo, bytes: 
             mailer.send_reply(
                 sender,
                 &HandleUnpinResult::Err {
-                    id: aether_mail::HandleId(0),
+                    id: HandleId(0),
                     error: HandleError::AdapterError(format!("decode failed: {e}")),
                 },
             );
             return;
         }
     };
-    if store.unpin(req.id.0) {
+    if store.unpin(req.id) {
         mailer.send_reply(sender, &HandleUnpinResult::Ok { id: req.id });
     } else {
         mailer.send_reply(
@@ -221,10 +221,10 @@ fn put_error_to_handle_error(e: PutError) -> HandleError {
     match e {
         PutError::EvictionFailed { .. } => HandleError::EvictionFailed,
         PutError::KindMismatch {
-            existing_kind_id,
-            requested_kind_id,
+            existing_kind,
+            requested_kind,
         } => HandleError::AdapterError(format!(
-            "kind id mismatch: existing={existing_kind_id:#x} requested={requested_kind_id:#x}"
+            "kind id mismatch: existing={existing_kind} requested={requested_kind}"
         )),
     }
 }
@@ -288,12 +288,12 @@ mod tests {
     fn publish_replies_with_fresh_id_and_initial_refcount() {
         let (store, _mailer, _registry, rx, handler) = build_harness();
         let req = HandlePublish {
-            kind_id: aether_mail::KindId(0xCAFE),
+            kind_id: KindId(0xCAFE),
             bytes: vec![1, 2, 3, 4, 5],
         };
         let bytes = postcard::to_allocvec(&req).unwrap();
         handler(
-            <HandlePublish as Kind>::ID,
+            KindId(<HandlePublish as Kind>::ID),
             "aether.handle.publish",
             None,
             session_reply_to(),
@@ -307,15 +307,15 @@ mod tests {
         let HandlePublishResult::Ok { kind_id, id } = result else {
             panic!("expected Ok, got {result:?}");
         };
-        assert_eq!(kind_id, aether_mail::KindId(0xCAFE));
+        assert_eq!(kind_id, KindId(0xCAFE));
         assert!(
             id.0 > 0,
             "id must be a real handle, not the failure sentinel"
         );
         // Bytes landed in the store with refcount=1 (so eviction
         // pressure can't drop them silently).
-        let (stored_kind, stored_bytes) = store.get(id.0).unwrap();
-        assert_eq!(stored_kind, 0xCAFE);
+        let (stored_kind, stored_bytes) = store.get(id).unwrap();
+        assert_eq!(stored_kind, KindId(0xCAFE));
         assert_eq!(stored_bytes, vec![1, 2, 3, 4, 5]);
     }
 
@@ -323,11 +323,11 @@ mod tests {
     fn release_unknown_id_replies_err_unknown_handle() {
         let (_store, _mailer, _registry, rx, handler) = build_harness();
         let req = HandleRelease {
-            id: aether_mail::HandleId(0xBAD),
+            id: HandleId(0xBAD),
         };
         let bytes = postcard::to_allocvec(&req).unwrap();
         handler(
-            <HandleRelease as Kind>::ID,
+            KindId(<HandleRelease as Kind>::ID),
             "aether.handle.release",
             None,
             session_reply_to(),
@@ -339,7 +339,7 @@ mod tests {
         let result: HandleReleaseResult = postcard::from_bytes(&payload).unwrap();
         match result {
             HandleReleaseResult::Err { id, error } => {
-                assert_eq!(id, aether_mail::HandleId(0xBAD));
+                assert_eq!(id, HandleId(0xBAD));
                 assert_eq!(error, HandleError::UnknownHandle);
             }
             other => panic!("expected Err(UnknownHandle), got {other:?}"),
@@ -351,11 +351,11 @@ mod tests {
         let (store, _mailer, _registry, rx, handler) = build_harness();
         // Publish first to mint an id.
         let publish_req = HandlePublish {
-            kind_id: aether_mail::KindId(0xCAFE),
+            kind_id: KindId(0xCAFE),
             bytes: vec![1, 2, 3],
         };
         handler(
-            <HandlePublish as Kind>::ID,
+            KindId(<HandlePublish as Kind>::ID),
             "aether.handle.publish",
             None,
             session_reply_to(),
@@ -371,7 +371,7 @@ mod tests {
         // Pin.
         let pin_req = HandlePin { id };
         handler(
-            <HandlePin as Kind>::ID,
+            KindId(<HandlePin as Kind>::ID),
             "aether.handle.pin",
             None,
             session_reply_to(),
@@ -384,7 +384,7 @@ mod tests {
         // Unpin.
         let unpin_req = HandleUnpin { id };
         handler(
-            <HandleUnpin as Kind>::ID,
+            KindId(<HandleUnpin as Kind>::ID),
             "aether.handle.unpin",
             None,
             session_reply_to(),
@@ -395,7 +395,7 @@ mod tests {
         let result: HandleUnpinResult = postcard::from_bytes(&extract_payload(frame)).unwrap();
         assert!(matches!(result, HandleUnpinResult::Ok { id: r } if r == id));
         // Sanity-check the store actually has the entry.
-        assert!(store.contains(id.0));
+        assert!(store.contains(id));
     }
 
     /// Decode failure: send malformed bytes claiming to be a publish
@@ -407,7 +407,7 @@ mod tests {
         // Truncated postcard bytes — a `HandlePublish` is at least
         // a u64 + a varint length, so 1 byte is malformed.
         handler(
-            <HandlePublish as Kind>::ID,
+            KindId(<HandlePublish as Kind>::ID),
             "aether.handle.publish",
             None,
             session_reply_to(),
@@ -418,7 +418,7 @@ mod tests {
         let result: HandlePublishResult = postcard::from_bytes(&extract_payload(frame)).unwrap();
         match result {
             HandlePublishResult::Err { kind_id, error } => {
-                assert_eq!(kind_id, aether_mail::KindId(0));
+                assert_eq!(kind_id, KindId(0));
                 assert!(matches!(error, HandleError::AdapterError(_)));
             }
             other => panic!("expected Err, got {other:?}"),
@@ -432,7 +432,7 @@ mod tests {
     fn unknown_kind_on_handle_sink_drops_without_reply() {
         let (_store, _mailer, _registry, rx, handler) = build_harness();
         handler(
-            0xDEAD,
+            KindId(0xDEAD),
             "test.unknown",
             None,
             session_reply_to(),
@@ -464,11 +464,11 @@ mod tests {
         );
 
         let publish_req = HandlePublish {
-            kind_id: aether_mail::KindId(0xCAFE),
+            kind_id: KindId(0xCAFE),
             bytes: vec![9, 9, 9],
         };
         handler(
-            <HandlePublish as Kind>::ID,
+            KindId(<HandlePublish as Kind>::ID),
             "aether.handle.publish",
             None,
             ReplyTo::to(ReplyTarget::Component(component_mbox)),

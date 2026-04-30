@@ -199,7 +199,7 @@ impl<'a> SubstrateBootBuilder<'a> {
             registry.register_sink(
                 HUB_CLAUDE_BROADCAST,
                 Arc::new(
-                    move |_kind_id: u64,
+                    move |_kind: aether_mail::KindId,
                           kind_name: &str,
                           origin: Option<&str>,
                           sender: crate::mail::ReplyTo,
@@ -241,7 +241,7 @@ impl<'a> SubstrateBootBuilder<'a> {
         registry.register_sink(
             AETHER_DIAGNOSTICS,
             Arc::new(
-                |_kind_id: u64,
+                |_kind: aether_mail::KindId,
                  kind_name: &str,
                  _origin: Option<&str>,
                  _sender,

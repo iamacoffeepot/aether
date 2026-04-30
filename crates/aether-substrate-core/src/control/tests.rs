@@ -446,10 +446,10 @@ fn load_component_with_same_name_different_schema_registers_distinct_kind() {
         "load should succeed under hashed ids, got {result:?}"
     );
 
-    let new_id = aether_hub_protocol::canonical::kind_id_from_parts(
+    let new_id = aether_mail::KindId(aether_hub_protocol::canonical::kind_id_from_parts(
         "demo.conflict",
         &SchemaType::Scalar(Primitive::U64),
-    );
+    ));
     assert_ne!(
         existing_id, new_id,
         "u32 and u64 schemas under the same name must hash to distinct ids"
@@ -747,7 +747,7 @@ fn dispatch_unrecognised_kind_is_silent_drop() {
     // No panic; no outbound reply. Unknown kind arriving at the
     // control mailbox just logs and moves on.
     plane.dispatch(
-        0xdead_beef_dead_beef,
+        aether_mail::KindId(0xdead_beef_dead_beef),
         "aether.control.does_not_exist",
         crate::mail::ReplyTo::NONE,
         &[],
@@ -981,7 +981,7 @@ fn subs(plane: &ControlPlane, kind: KindId) -> std::collections::BTreeSet<Mailbo
         .unwrap_or_default()
 }
 
-fn load_blank(plane: &ControlPlane, name: &str) -> u64 {
+fn load_blank(plane: &ControlPlane, name: &str) -> MailboxId {
     let wasm = wat::parse_str(WAT).unwrap();
     let result = plane.handle_load(
         &postcard::to_allocvec(&LoadComponent {
@@ -993,27 +993,15 @@ fn load_blank(plane: &ControlPlane, name: &str) -> u64 {
     let LoadResult::Ok { mailbox_id, .. } = result else {
         panic!("load should succeed: {result:?}");
     };
-    mailbox_id.0
+    mailbox_id
 }
 
-fn do_subscribe(plane: &ControlPlane, mailbox: u64, kind: KindId) -> SubscribeInputResult {
-    plane.handle_subscribe(
-        &postcard::to_allocvec(&SubscribeInput {
-            kind,
-            mailbox: MailboxId(mailbox),
-        })
-        .unwrap(),
-    )
+fn do_subscribe(plane: &ControlPlane, mailbox: MailboxId, kind: KindId) -> SubscribeInputResult {
+    plane.handle_subscribe(&postcard::to_allocvec(&SubscribeInput { kind, mailbox }).unwrap())
 }
 
-fn do_unsubscribe(plane: &ControlPlane, mailbox: u64, kind: KindId) -> SubscribeInputResult {
-    plane.handle_unsubscribe(
-        &postcard::to_allocvec(&UnsubscribeInput {
-            kind,
-            mailbox: MailboxId(mailbox),
-        })
-        .unwrap(),
-    )
+fn do_unsubscribe(plane: &ControlPlane, mailbox: MailboxId, kind: KindId) -> SubscribeInputResult {
+    plane.handle_unsubscribe(&postcard::to_allocvec(&UnsubscribeInput { kind, mailbox }).unwrap())
 }
 
 #[test]
@@ -1025,7 +1013,7 @@ fn subscribe_adds_mailbox_to_stream_set() {
         SubscribeInputResult::Ok
     ));
     let set = subs(&plane, KindId(Tick::ID));
-    assert!(set.contains(&MailboxId(id)));
+    assert!(set.contains(&id));
     assert_eq!(set.len(), 1);
 }
 
@@ -1057,8 +1045,8 @@ fn subscribe_two_components_fan_out_to_both() {
     ));
     let set = subs(&plane, KindId(Tick::ID));
     assert_eq!(set.len(), 2);
-    assert!(set.contains(&MailboxId(a)));
-    assert!(set.contains(&MailboxId(b)));
+    assert!(set.contains(&a));
+    assert!(set.contains(&b));
 }
 
 #[test]
@@ -1089,7 +1077,7 @@ fn unsubscribe_not_subscribed_is_ok() {
 fn subscribe_unknown_mailbox_is_err() {
     let plane = make_plane();
     assert!(matches!(
-        do_subscribe(&plane, 9999, KindId(Tick::ID)),
+        do_subscribe(&plane, MailboxId(9999), KindId(Tick::ID)),
         SubscribeInputResult::Err { .. }
     ));
 }
@@ -1103,7 +1091,7 @@ fn subscribe_sink_mailbox_is_err() {
         .registry
         .register_sink("some.sink", Arc::new(|_, _, _, _, _, _| {}));
     assert!(matches!(
-        do_subscribe(&plane, sink.0, KindId(Tick::ID)),
+        do_subscribe(&plane, sink, KindId(Tick::ID)),
         SubscribeInputResult::Err { .. }
     ));
 }
@@ -1112,12 +1100,7 @@ fn subscribe_sink_mailbox_is_err() {
 fn subscribe_dropped_mailbox_is_err() {
     let plane = make_plane();
     let id = load_blank(&plane, "victim");
-    plane.handle_drop(
-        &postcard::to_allocvec(&DropComponent {
-            mailbox_id: MailboxId(id),
-        })
-        .unwrap(),
-    );
+    plane.handle_drop(&postcard::to_allocvec(&DropComponent { mailbox_id: id }).unwrap());
     assert!(matches!(
         do_subscribe(&plane, id, KindId(Tick::ID)),
         SubscribeInputResult::Err { .. }
@@ -1133,12 +1116,8 @@ fn drop_component_removes_from_every_subscriber_set() {
     do_subscribe(&plane, id, KindId(Tick::ID));
     do_subscribe(&plane, id, KindId(Key::ID));
     do_subscribe(&plane, id, KindId(MouseButton::ID));
-    let dropped = plane.handle_drop(
-        &postcard::to_allocvec(&DropComponent {
-            mailbox_id: MailboxId(id),
-        })
-        .unwrap(),
-    );
+    let dropped =
+        plane.handle_drop(&postcard::to_allocvec(&DropComponent { mailbox_id: id }).unwrap());
     assert!(matches!(dropped, DropResult::Ok));
     for s in [
         KindId(Tick::ID),
@@ -1147,7 +1126,7 @@ fn drop_component_removes_from_every_subscriber_set() {
         KindId(MouseButton::ID),
     ] {
         assert!(
-            !subs(&plane, s).contains(&MailboxId(id)),
+            !subs(&plane, s).contains(&id),
             "stream {s:?} still contains dropped id"
         );
     }
@@ -1163,15 +1142,15 @@ fn replace_component_preserves_subscriptions() {
     do_subscribe(&plane, id, KindId(Key::ID));
     let result = plane.handle_replace(
         &postcard::to_allocvec(&ReplaceComponent {
-            mailbox_id: MailboxId(id),
+            mailbox_id: id,
             wasm: wat::parse_str(WAT).unwrap(),
             drain_timeout_ms: None,
         })
         .unwrap(),
     );
     assert!(matches!(result, ReplaceResult::Ok { .. }));
-    assert!(subs(&plane, KindId(Tick::ID)).contains(&MailboxId(id)));
-    assert!(subs(&plane, KindId(Key::ID)).contains(&MailboxId(id)));
+    assert!(subs(&plane, KindId(Tick::ID)).contains(&id));
+    assert!(subs(&plane, KindId(Key::ID)).contains(&id));
 }
 
 #[test]
@@ -1287,26 +1266,26 @@ fn subscribe_dispatch_replies_with_result_kind() {
     let plane = make_plane();
     let id = load_blank(&plane, "listener");
     plane.dispatch(
-        SubscribeInput::ID,
+        KindId(SubscribeInput::ID),
         SubscribeInput::NAME,
         crate::mail::ReplyTo::NONE,
         &postcard::to_allocvec(&SubscribeInput {
             kind: KindId(Tick::ID),
-            mailbox: MailboxId(id),
+            mailbox: id,
         })
         .unwrap(),
     );
     plane.dispatch(
-        UnsubscribeInput::ID,
+        KindId(UnsubscribeInput::ID),
         UnsubscribeInput::NAME,
         crate::mail::ReplyTo::NONE,
         &postcard::to_allocvec(&UnsubscribeInput {
             kind: KindId(Tick::ID),
-            mailbox: MailboxId(id),
+            mailbox: id,
         })
         .unwrap(),
     );
-    assert!(!subs(&plane, KindId(Tick::ID)).contains(&MailboxId(id)));
+    assert!(!subs(&plane, KindId(Tick::ID)).contains(&id));
 }
 
 // ADR-0022's `drain_pending` / `pending` / `frozen` / `parked`
@@ -1322,13 +1301,7 @@ fn subscribe_dispatch_replies_with_result_kind() {
 fn drain_pending_returns_true_when_count_drops_in_time() {
     let plane = make_plane();
     let id = load_blank(&plane, "drainable");
-    let entry = plane
-        .components
-        .read()
-        .unwrap()
-        .get(&MailboxId(id))
-        .unwrap()
-        .clone();
+    let entry = plane.components.read().unwrap().get(&id).unwrap().clone();
     entry.pending.store(2, Ordering::SeqCst);
     let entry_for_drainer = Arc::clone(&entry);
     let drainer = std::thread::spawn(move || {
@@ -1344,13 +1317,7 @@ fn drain_pending_returns_true_when_count_drops_in_time() {
 fn replace_drain_timeout_keeps_old_bound() {
     let plane = make_plane();
     let id = load_blank(&plane, "victim");
-    let entry_before = plane
-        .components
-        .read()
-        .unwrap()
-        .get(&MailboxId(id))
-        .unwrap()
-        .clone();
+    let entry_before = plane.components.read().unwrap().get(&id).unwrap().clone();
     // Pin pending above zero so drain never completes within the
     // tight per-replace timeout.
     entry_before.pending.store(1, Ordering::SeqCst);
@@ -1372,13 +1339,7 @@ fn replace_drain_timeout_keeps_old_bound() {
     );
 
     // Same Arc still bound — no swap happened.
-    let entry_after = plane
-        .components
-        .read()
-        .unwrap()
-        .get(&MailboxId(id))
-        .unwrap()
-        .clone();
+    let entry_after = plane.components.read().unwrap().get(&id).unwrap().clone();
     assert!(Arc::ptr_eq(&entry_before, &entry_after));
     // Frozen flag cleared so future mail flows through again.
     assert!(!entry_after.frozen.load(Ordering::SeqCst));
@@ -1483,13 +1444,7 @@ fn replace_drain_timeout_flushes_parked_to_old() {
         panic!("load failed");
     };
 
-    let entry = plane
-        .components
-        .read()
-        .unwrap()
-        .get(&MailboxId(id))
-        .unwrap()
-        .clone();
+    let entry = plane.components.read().unwrap().get(&id).unwrap().clone();
     entry.pending.store(1, Ordering::SeqCst);
     entry.frozen.store(true, Ordering::SeqCst);
     for n in 1..=2u32 {
@@ -1520,13 +1475,7 @@ fn replace_drain_timeout_flushes_parked_to_old() {
     assert_eq!(counter.load(Ordering::SeqCst), 3);
 
     // Same entry still bound; parked empty, frozen cleared.
-    let entry_after = plane
-        .components
-        .read()
-        .unwrap()
-        .get(&MailboxId(id))
-        .unwrap()
-        .clone();
+    let entry_after = plane.components.read().unwrap().get(&id).unwrap().clone();
     assert!(Arc::ptr_eq(&entry, &entry_after));
     assert!(entry_after.parked.lock().unwrap().is_empty());
     assert!(!entry_after.frozen.load(Ordering::SeqCst));

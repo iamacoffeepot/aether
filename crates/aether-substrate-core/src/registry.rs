@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 use aether_hub_protocol::canonical::{canonical_kind_bytes, kind_id_from_parts};
 use aether_hub_protocol::{KindDescriptor, SchemaType};
 
-use crate::mail::{MailboxId, ReplyTo};
+use crate::mail::{KindId, MailboxId, ReplyTo};
 
 /// Handler invoked when mail is delivered to a substrate-owned sink.
 /// Called on a scheduler worker thread; must be `Send + Sync`.
@@ -31,7 +31,7 @@ use crate::mail::{MailboxId, ReplyTo};
 /// bubbled-up, `ReplyTo::NONE` for substrate-local), payload bytes,
 /// and the kind-implied count.
 pub type SinkHandler =
-    Arc<dyn Fn(u64, &str, Option<&str>, ReplyTo, &[u8], u32) + Send + Sync + 'static>;
+    Arc<dyn Fn(KindId, &str, Option<&str>, ReplyTo, &[u8], u32) + Send + Sync + 'static>;
 
 /// What a given mailbox actually is. The registry records this so the
 /// scheduler can dispatch appropriately without a per-mail type check.
@@ -79,13 +79,13 @@ struct Inner {
     /// (name, schema) maps to the same id everywhere it's ever
     /// computed — derive-emitted `K::ID`, hub re-derived from
     /// `KindDescriptor`, substrate boot from `descriptors::all()`.
-    kinds: HashMap<u64, KindSlot>,
+    kinds: HashMap<KindId, KindSlot>,
     /// O(1) name → id reverse lookup. Kept as a parallel map rather
     /// than scanning `kinds` because the dispatch path (reply_mail kind
     /// validation, hub_client inbound-mail name→id) runs on every mail.
     /// Every insert into `kinds` mirrors into `name_index`; every slot
     /// has exactly one entry here.
-    name_index: HashMap<String, u64>,
+    name_index: HashMap<String, KindId>,
 }
 
 /// Rejected-load error returned when a runtime kind registration
@@ -295,7 +295,7 @@ impl Registry {
     /// `register_kind_with_descriptor` so the descriptor stored here
     /// matches the type definition and the derived id agrees with
     /// `<K as Kind>::ID` on the guest side.
-    pub fn register_kind(&self, name: impl Into<String>) -> u64 {
+    pub fn register_kind(&self, name: impl Into<String>) -> KindId {
         let name = name.into();
         let descriptor = KindDescriptor {
             name: name.clone(),
@@ -325,7 +325,7 @@ impl Registry {
     pub fn register_kind_with_descriptor(
         &self,
         descriptor: KindDescriptor,
-    ) -> Result<u64, KindConflict> {
+    ) -> Result<KindId, KindConflict> {
         self.register_kind_internal(descriptor, /*reject_conflict=*/ true)
     }
 
@@ -333,8 +333,8 @@ impl Registry {
         &self,
         descriptor: KindDescriptor,
         reject_conflict: bool,
-    ) -> Result<u64, KindConflict> {
-        let id = kind_id_from_parts(&descriptor.name, &descriptor.schema);
+    ) -> Result<KindId, KindConflict> {
+        let id = KindId(kind_id_from_parts(&descriptor.name, &descriptor.schema));
         let mut inner = self.inner.write().unwrap();
         if let Some(slot) = inner.kinds.get(&id) {
             if reject_conflict
@@ -373,31 +373,31 @@ impl Registry {
     /// exact descriptor the caller is thinking of. Primarily used by
     /// the hub-inbound dispatch path, which needs to convert an
     /// incoming `kind_name` back to the registered id.
-    pub fn kind_id(&self, name: &str) -> Option<u64> {
+    pub fn kind_id(&self, name: &str) -> Option<KindId> {
         self.inner.read().unwrap().name_index.get(name).copied()
     }
 
     /// Reverse of `kind_id`: name for a given id, or `None` if the id
     /// isn't registered. Used by the scheduler to hand sink handlers
     /// a kind name without them keeping their own map.
-    pub fn kind_name(&self, id: u64) -> Option<String> {
+    pub fn kind_name(&self, kind: KindId) -> Option<String> {
         self.inner
             .read()
             .unwrap()
             .kinds
-            .get(&id)
+            .get(&kind)
             .map(|s| s.name.clone())
     }
 
     /// The descriptor stored for a given kind id, or `None` if the id
     /// isn't registered. Returned as an owned clone so callers don't
     /// hold the read lock while inspecting the encoding.
-    pub fn kind_descriptor(&self, id: u64) -> Option<KindDescriptor> {
+    pub fn kind_descriptor(&self, kind: KindId) -> Option<KindDescriptor> {
         self.inner
             .read()
             .unwrap()
             .kinds
-            .get(&id)
+            .get(&kind)
             .map(|s| s.descriptor.clone())
     }
 
@@ -465,8 +465,15 @@ mod tests {
             panic!("expected sink")
         };
         // Test-side id is irrelevant — the handler ignores it.
-        h(0, "aether.tick", None, ReplyTo::NONE, &[], 7);
-        h(0, "aether.tick", Some("physics"), ReplyTo::NONE, &[], 3);
+        h(KindId(0), "aether.tick", None, ReplyTo::NONE, &[], 7);
+        h(
+            KindId(0),
+            "aether.tick",
+            Some("physics"),
+            ReplyTo::NONE,
+            &[],
+            3,
+        );
         assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
 
@@ -524,7 +531,10 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(b, c);
         assert_ne!(a, c);
-        assert_eq!(a, kind_id_from_parts("aether.tick", &SchemaType::Bytes));
+        assert_eq!(
+            a,
+            KindId(kind_id_from_parts("aether.tick", &SchemaType::Bytes))
+        );
     }
 
     #[test]
@@ -553,7 +563,7 @@ mod tests {
         let b = r.register_kind("aether.key");
         assert_eq!(r.kind_name(a).as_deref(), Some("aether.tick"));
         assert_eq!(r.kind_name(b).as_deref(), Some("aether.key"));
-        assert!(r.kind_name(999).is_none());
+        assert!(r.kind_name(KindId(999)).is_none());
     }
 
     fn unit_desc(name: &str) -> KindDescriptor {

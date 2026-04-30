@@ -121,7 +121,7 @@ impl HubOutbound {
                 mailbox_id,
             } => self.send(EngineToHub::MailToEngineMailbox(MailToEngineMailboxFrame {
                 target_engine_id: engine_id,
-                target_mailbox_id: mailbox_id,
+                target_mailbox_id: mailbox_id.0,
                 kind_id: K::ID,
                 payload,
                 count: 1,
@@ -297,7 +297,8 @@ pub fn dispatch_hub_to_engine_mail(frame: MailFrame, registry: &Registry, queue:
 /// up. Public so the hub-chassis's engine read loop can call the
 /// same helper from its own side of the wire.
 pub fn dispatch_hub_mail_by_id(frame: MailByIdFrame, registry: &Registry, queue: &Mailer) {
-    if registry.kind_name(frame.kind_id).is_none() {
+    let kind = aether_mail::KindId(frame.kind_id);
+    if registry.kind_name(kind).is_none() {
         tracing::warn!(
             target: "aether_substrate::hub_client",
             kind_id = frame.kind_id,
@@ -308,7 +309,7 @@ pub fn dispatch_hub_mail_by_id(frame: MailByIdFrame, registry: &Registry, queue:
     }
     queue.push(Mail::new(
         crate::mail::MailboxId(frame.recipient_mailbox_id),
-        frame.kind_id,
+        kind,
         frame.payload,
         frame.count,
     ));

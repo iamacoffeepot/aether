@@ -109,13 +109,13 @@ struct App {
     /// boot state — mean the event is dropped at the source.
     input_subscribers: InputSubscribers,
     broadcast_mbox: MailboxId,
-    kind_tick: u64,
-    kind_key: u64,
-    kind_key_release: u64,
-    kind_mouse_button: u64,
-    kind_mouse_move: u64,
-    kind_window_size: u64,
-    kind_frame_stats: u64,
+    kind_tick: aether_mail::KindId,
+    kind_key: aether_mail::KindId,
+    kind_key_release: aether_mail::KindId,
+    kind_mouse_button: aether_mail::KindId,
+    kind_mouse_move: aether_mail::KindId,
+    kind_window_size: aether_mail::KindId,
+    kind_frame_stats: aether_mail::KindId,
     frame_vertices: Arc<Mutex<Vec<u8>>>,
     /// Latest `aether.camera` payload seen by the camera sink
     /// (column-major `view_proj` matrix). Read by the render loop
@@ -323,25 +323,25 @@ fn build_audio_pipeline() -> Option<audio::AudioPipeline> {
 /// sessions and substrate-internal pushes (which shouldn't reach the
 /// audio sink in practice) collapse to id `0`, sharing one voice
 /// slot per (instrument, pitch).
-fn sender_mailbox_id(sender: ReplyTo) -> u64 {
+fn sender_mailbox_id(sender: ReplyTo) -> aether_mail::MailboxId {
     match sender.target {
         ReplyTarget::EngineMailbox { mailbox_id, .. } => mailbox_id,
-        _ => 0,
+        _ => aether_mail::MailboxId(0),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn handle_audio_mail(
-    kind_id: u64,
-    kind_note_on: u64,
-    kind_note_off: u64,
-    kind_set_master_gain: u64,
+    kind: aether_mail::KindId,
+    kind_note_on: aether_mail::KindId,
+    kind_note_off: aether_mail::KindId,
+    kind_set_master_gain: aether_mail::KindId,
     sender: ReplyTo,
     bytes: &[u8],
     audio_sender: Option<&AudioEventSender>,
     outbound: &HubOutbound,
 ) {
-    if kind_id == kind_note_on {
+    if kind == kind_note_on {
         // Hub-delivered payloads arrive as un-aligned `Vec<u8>` slices
         // from the reader thread's decode; `try_pod_read_unaligned`
         // copies bytes rather than reinterpreting in place, matching
@@ -368,7 +368,7 @@ fn handle_audio_mail(
                 );
             }
         }
-    } else if kind_id == kind_note_off {
+    } else if kind == kind_note_off {
         let Ok(n) = bytemuck::try_pod_read_unaligned::<NoteOff>(bytes) else {
             tracing::warn!(
                 target: "aether_substrate::audio",
@@ -390,7 +390,7 @@ fn handle_audio_mail(
                 );
             }
         }
-    } else if kind_id == kind_set_master_gain {
+    } else if kind == kind_set_master_gain {
         // f32 payload requires 4-byte alignment under `try_from_bytes`;
         // hub-delivered Vec<u8> payloads have no alignment guarantee,
         // so use the unaligned-read helper to avoid a spurious decode
@@ -439,7 +439,7 @@ fn handle_audio_mail(
     } else {
         tracing::warn!(
             target: "aether_substrate::audio",
-            kind_id,
+            kind = %kind,
             "audio sink received unknown kind — dropping",
         );
     }
@@ -1083,14 +1083,14 @@ fn main() -> wasmtime::Result<()> {
         boot.registry.register_sink(
             "aether.sink.audio",
             Arc::new(
-                move |kind_id: u64,
+                move |kind: aether_mail::KindId,
                       _kind_name: &str,
                       _origin: Option<&str>,
                       sender: ReplyTo,
                       bytes: &[u8],
                       _count: u32| {
                     handle_audio_mail(
-                        kind_id,
+                        kind,
                         kind_note_on,
                         kind_note_off,
                         kind_set_master_gain,

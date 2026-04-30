@@ -555,7 +555,7 @@ impl Hub {
             } => {
                 self.state.engines.upsert_component(
                     engine_id,
-                    mailbox_id,
+                    aether_mail::MailboxId(mailbox_id),
                     ComponentRecord {
                         name: name.clone(),
                         capabilities: capabilities.clone(),
@@ -674,13 +674,14 @@ impl Hub {
                 // so `describe_component` reflects what's actually
                 // bound now. Name is preserved — `replace_component`
                 // keeps the existing mailbox + name by design.
-                let existing = self.state.engines.get_component(&id, mailbox_id);
+                let mailbox = aether_mail::MailboxId(mailbox_id);
+                let existing = self.state.engines.get_component(&id, mailbox);
                 let name = existing
                     .map(|r| r.name)
                     .unwrap_or_else(|| format!("mailbox_{}", args.mailbox_id));
                 self.state.engines.upsert_component(
                     &id,
-                    mailbox_id,
+                    mailbox,
                     ComponentRecord {
                         name,
                         capabilities: capabilities.clone(),
@@ -713,7 +714,11 @@ impl Hub {
         // Decode here so the registry lookup uses the raw u64.
         let mailbox_id = tagged_id::decode_with_tag(&args.mailbox_id, Tag::Mailbox)
             .map_err(|e| McpError::invalid_params(format!("mailbox_id: {e}"), None))?;
-        let Some(component) = self.state.engines.get_component(&id, mailbox_id) else {
+        let Some(component) = self
+            .state
+            .engines
+            .get_component(&id, aether_mail::MailboxId(mailbox_id))
+        else {
             return Err(McpError::invalid_params(
                 format!(
                     "no component at mailbox_id {} on engine {}",

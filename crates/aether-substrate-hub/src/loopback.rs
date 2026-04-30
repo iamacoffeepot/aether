@@ -134,10 +134,11 @@ impl LoopbackHandle {
             source_mailbox_id,
             correlation_id,
         } = frame;
+        let kind = aether_mail::KindId(kind_id);
         // Kind lookup guards against an engine bubbling up a kind
         // the hub substrate doesn't know — without it the mail
         // would reach a component expecting a different layout.
-        if self.registry.kind_name(kind_id).is_none() {
+        if self.registry.kind_name(kind).is_none() {
             eprintln!(
                 "aether-substrate-hub: bubbled-up mail of unknown kind_id={kind_id} \
                  mailbox_id={recipient_mailbox_id} — dropped"
@@ -160,22 +161,26 @@ impl LoopbackHandle {
                  unknown mailbox_id={recipient_mailbox_id:#x} kind_id={kind_id:#x} — returning \
                  `aether.mail.unresolved` diagnostic to originator"
             );
-            send_unresolved_diagnostic(engines, source_engine_id, recipient_mailbox_id, kind_id);
+            send_unresolved_diagnostic(
+                engines,
+                source_engine_id,
+                MailboxId(recipient_mailbox_id),
+                kind,
+            );
             return;
         }
         let sender = match source_mailbox_id {
             Some(mailbox_id) => ReplyTo::with_correlation(
                 ReplyTarget::EngineMailbox {
                     engine_id: source_engine_id,
-                    mailbox_id,
+                    mailbox_id: MailboxId(mailbox_id),
                 },
                 correlation_id,
             ),
             None => ReplyTo::with_correlation(ReplyTarget::None, correlation_id),
         };
         self.queue.push(
-            Mail::new(MailboxId(recipient_mailbox_id), kind_id, payload, count)
-                .with_reply_to(sender),
+            Mail::new(MailboxId(recipient_mailbox_id), kind, payload, count).with_reply_to(sender),
         );
     }
 }
@@ -190,15 +195,15 @@ impl LoopbackHandle {
 fn send_unresolved_diagnostic(
     engines: &EngineRegistry,
     source_engine_id: EngineId,
-    recipient_mailbox_id: u64,
-    kind_id: u64,
+    recipient_mailbox: aether_mail::MailboxId,
+    kind: aether_mail::KindId,
 ) {
     let Some(record) = engines.get(&source_engine_id) else {
         return;
     };
     let payload = bytemuck::bytes_of(&UnresolvedMail {
-        recipient_mailbox_id: aether_mail::MailboxId(recipient_mailbox_id),
-        kind_id: aether_mail::KindId(kind_id),
+        recipient_mailbox_id: recipient_mailbox,
+        kind_id: kind,
     })
     .to_vec();
     let frame = HubToEngine::MailById(MailByIdFrame {

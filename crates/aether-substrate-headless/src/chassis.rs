@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use aether_kinds::{Advance, CaptureFrame, PlatformInfo, SetWindowMode, SetWindowTitle};
-use aether_mail::Kind;
+use aether_mail::{Kind, KindId};
 use aether_substrate_core::{
     ChassisControlHandler, HubOutbound, ReplyTo,
     capture::{
@@ -29,16 +29,16 @@ const UNSUPPORTED_ADVANCE: &str =
 
 pub fn chassis_control_handler(outbound: Arc<HubOutbound>) -> ChassisControlHandler {
     Arc::new(
-        move |kind_id: u64, kind_name: &str, sender: ReplyTo, _bytes: &[u8]| {
-            if kind_id == CaptureFrame::ID {
+        move |kind: KindId, kind_name: &str, sender: ReplyTo, _bytes: &[u8]| {
+            if kind == KindId(CaptureFrame::ID) {
                 reply_unsupported_capture_frame(&outbound, sender, UNSUPPORTED);
-            } else if kind_id == SetWindowMode::ID {
+            } else if kind == KindId(SetWindowMode::ID) {
                 reply_unsupported_window_mode(&outbound, sender, UNSUPPORTED);
-            } else if kind_id == SetWindowTitle::ID {
+            } else if kind == KindId(SetWindowTitle::ID) {
                 reply_unsupported_window_title(&outbound, sender, UNSUPPORTED);
-            } else if kind_id == Advance::ID {
+            } else if kind == KindId(Advance::ID) {
                 reply_unsupported_advance(&outbound, sender, UNSUPPORTED_ADVANCE);
-            } else if kind_id == PlatformInfo::ID {
+            } else if kind == KindId(PlatformInfo::ID) {
                 // PlatformInfoResult::Err also exists — future work
                 // could return a partial Ok (OS + engine info, empty
                 // GPU/monitors) once headless needs that detail.
