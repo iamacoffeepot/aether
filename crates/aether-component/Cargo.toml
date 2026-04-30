@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 # ADR-0033 attribute macros (`#[handlers]` / `#[handler]` / `#[fallback]`)
-# live in `aether-mail-derive` and are re-exported through `aether-mail`'s
+# live in `aether-data-derive` and are re-exported through `aether-data`'s
 # `derive` feature. The SDK forwards them to consumers so they can
 # `use aether_component::{handlers, handler, fallback};` alongside the
 # rest of the component vocabulary.

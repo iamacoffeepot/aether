@@ -5,12 +5,12 @@ edition.workspace = true
 
 [features]
 # Re-export `#[derive(Kind)]` and `#[derive(Schema)]` from
-# `aether-mail-derive`. Off by default so guests that hand-write
+# `aether-data-derive`. Off by default so guests that hand-write
 # `impl Kind for ...` don't pay the proc-macro compile cost.
-derive = ["dep:aether-mail-derive"]
+derive = ["dep:aether-data-derive"]
 
 [dependencies]
-aether-mail-derive = { path = "../aether-mail-derive", optional = true }
+aether-data-derive = { path = "../aether-data-derive", optional = true }
 bytemuck = { version = "1.19", features = ["derive"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }

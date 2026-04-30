@@ -877,7 +877,7 @@ mod tests {
     /// Tiny postcard kind for walker tests. Kept here rather than
     /// pulling the derive macro into substrate-core's dev-deps:
     /// the derive expansion is exercised end-to-end in
-    /// aether-mail-derive's tests; here we just need a payload that
+    /// aether-data-derive's tests; here we just need a payload that
     /// matches the schema we hand the walker.
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Debug, Clone)]
     struct Note {

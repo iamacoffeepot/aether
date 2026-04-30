@@ -76,7 +76,7 @@ pub use handle::{Handle, SyncHandleError};
 /// ADR-0033 attribute macros. Applied to `impl Component for C`
 /// blocks: `#[handlers]` at the impl level; `#[handler]` on each
 /// typed handler method; `#[fallback]` on an optional catchall.
-/// Forwarded from `aether-mail-derive` so the full component
+/// Forwarded from `aether-data-derive` so the full component
 /// vocabulary sits behind one `use aether_component::*` line.
 pub use aether_data::{fallback, handler, handlers};
 /// Return code the `#[handlers]`-synthesized dispatcher sends back up

@@ -21,7 +21,7 @@ members = [
     "crates/aether-mesh-viewer-component",
     "crates/aether-test-fixture-probe",
     "crates/aether-hub-protocol",
-    "crates/aether-mail-derive",
+    "crates/aether-data-derive",
     "demos/sokoban",
     "demos/tic-tac-toe",
     "demos/tic-tac-toe-server",

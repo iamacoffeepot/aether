@@ -56,7 +56,7 @@ pub use ids::{HandleId, KindId, MailboxId, tag_for_type_id, type_name_for_type_i
 pub use schema::*;
 pub use tagged_id::{Tag, with_tag};
 
-/// Re-exported derive macros from `aether-mail-derive`. Behind the
+/// Re-exported derive macros from `aether-data-derive`. Behind the
 /// `derive` feature so `cargo build` on a guest that hand-writes
 /// `impl Kind` doesn't pay the proc-macro compile cost. The
 /// `#[handlers]` / `#[handler]` / `#[fallback]` attribute macros
@@ -65,7 +65,7 @@ pub use tagged_id::{Tag, with_tag};
 /// gain — both derives and attributes expand into the same runtime
 /// surface.
 #[cfg(feature = "derive")]
-pub use aether_mail_derive::{Kind, Schema, fallback, handler, handlers};
+pub use aether_data_derive::{Kind, Schema, fallback, handler, handlers};
 
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
 /// `"aether.tick"`, `"hello.npc_health"`) and a `u64` id derived from
