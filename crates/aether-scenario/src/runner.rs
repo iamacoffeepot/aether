@@ -15,7 +15,7 @@ use std::fs;
 use aether_hub_protocol::{KindDescriptor, canonical::kind_id_from_parts};
 use aether_kinds::{LoadComponent, descriptors};
 use aether_params_codec::encode_schema;
-use aether_substrate_test_bench::TestBench;
+use aether_substrate_test_bench::{KindId, TestBench};
 use thiserror::Error;
 
 use crate::report::{RunReport, StepReport, StepStatus};
@@ -200,7 +200,7 @@ fn encode_send_mail(
     descriptors_by_name: &HashMap<&str, &KindDescriptor>,
     kind: &str,
     params: &serde_yml::Value,
-) -> Result<(u64, Vec<u8>), String> {
+) -> Result<(KindId, Vec<u8>), String> {
     let desc = descriptors_by_name
         .get(kind)
         .ok_or_else(|| format!("unknown kind: {kind}"))?;
@@ -212,7 +212,7 @@ fn encode_send_mail(
     let json: serde_json::Value =
         serde_json::to_value(params).map_err(|e| format!("yaml→json {kind}: {e}"))?;
     let bytes = encode_schema(&json, &desc.schema).map_err(|e| format!("encode {kind}: {e}"))?;
-    let kind_id = kind_id_from_parts(&desc.name, &desc.schema);
+    let kind_id = KindId(kind_id_from_parts(&desc.name, &desc.schema));
     Ok((kind_id, bytes))
 }
 

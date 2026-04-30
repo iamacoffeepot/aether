@@ -31,7 +31,7 @@ use aether_kinds::{
     ComponentCapabilities, DropComponent, DropResult, LoadComponent, LoadResult, MailEnvelope,
     ReplaceComponent, ReplaceResult, SubscribeInput, SubscribeInputResult, UnsubscribeInput,
 };
-use aether_mail::Kind;
+use aether_mail::{Kind, KindId};
 use wasmtime::{Engine, Linker, Module};
 
 use crate::component::Component;
@@ -108,7 +108,7 @@ fn auto_subscribe_inputs(
     let mut subs = input_subscribers.write().unwrap();
     for handler in &capabilities.handlers {
         if registry
-            .kind_descriptor(handler.id.0)
+            .kind_descriptor(handler.id)
             .is_some_and(|d| d.is_stream)
         {
             subs.entry(handler.id).or_default().insert(mailbox);
@@ -197,11 +197,12 @@ pub struct ControlPlane {
 }
 
 /// Closure contract for a chassis-registered control-plane handler.
-/// Called with `(kind_name, sender, bytes)` for every mail arriving
-/// at `aether.control` that core's ControlPlane doesn't recognise.
-/// The chassis is responsible for decoding, replying (via the
-/// outbound it constructed with), and any mail orchestration.
-pub type ChassisControlHandler = Arc<dyn Fn(u64, &str, crate::mail::ReplyTo, &[u8]) + Send + Sync>;
+/// Called with `(kind, kind_name, sender, bytes)` for every mail
+/// arriving at `aether.control` that core's ControlPlane doesn't
+/// recognise. The chassis is responsible for decoding, replying (via
+/// the outbound it constructed with), and any mail orchestration.
+pub type ChassisControlHandler =
+    Arc<dyn Fn(KindId, &str, crate::mail::ReplyTo, &[u8]) + Send + Sync>;
 
 impl ControlPlane {
     /// Build the sink handler that should be registered against the
@@ -210,35 +211,35 @@ impl ControlPlane {
     /// the caller can discard the `ControlPlane` after registration.
     pub fn into_sink_handler(self) -> SinkHandler {
         Arc::new(
-            move |kind_id: u64,
+            move |kind: KindId,
                   kind_name: &str,
                   _origin: Option<&str>,
                   sender: crate::mail::ReplyTo,
                   bytes: &[u8],
                   _count: u32| {
-                self.dispatch(kind_id, kind_name, sender, bytes);
+                self.dispatch(kind, kind_name, sender, bytes);
             },
         )
     }
 
-    fn dispatch(&self, kind_id: u64, kind_name: &str, sender: crate::mail::ReplyTo, bytes: &[u8]) {
-        if kind_id == LoadComponent::ID {
+    fn dispatch(&self, kind: KindId, kind_name: &str, sender: crate::mail::ReplyTo, bytes: &[u8]) {
+        if kind == KindId(LoadComponent::ID) {
             let result = self.handle_load(bytes);
             self.outbound.send_reply(sender, &result);
-        } else if kind_id == DropComponent::ID {
+        } else if kind == KindId(DropComponent::ID) {
             let result = self.handle_drop(bytes);
             self.outbound.send_reply(sender, &result);
-        } else if kind_id == ReplaceComponent::ID {
+        } else if kind == KindId(ReplaceComponent::ID) {
             let result = self.handle_replace(bytes);
             self.outbound.send_reply(sender, &result);
-        } else if kind_id == SubscribeInput::ID {
+        } else if kind == KindId(SubscribeInput::ID) {
             let result = self.handle_subscribe(bytes);
             self.outbound.send_reply(sender, &result);
-        } else if kind_id == UnsubscribeInput::ID {
+        } else if kind == KindId(UnsubscribeInput::ID) {
             let result = self.handle_unsubscribe(bytes);
             self.outbound.send_reply(sender, &result);
         } else if let Some(handler) = &self.chassis_handler {
-            handler(kind_id, kind_name, sender, bytes);
+            handler(kind, kind_name, sender, bytes);
         } else {
             tracing::warn!(
                 target: "aether_substrate::control",

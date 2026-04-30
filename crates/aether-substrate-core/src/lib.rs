@@ -58,7 +58,7 @@ pub use hub_client::{
     HubClient, HubOutbound, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail,
 };
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
-pub use mail::{Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
+pub use mail::{KindId, Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 pub use mailer::Mailer;
 pub use panic_hook::init_panic_hook;
 pub use registry::{MailboxEntry, Registry, SinkHandler};

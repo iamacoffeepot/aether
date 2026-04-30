@@ -31,6 +31,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
 
 use aether_hub_protocol::{EnumVariant, Primitive, SchemaType};
+use aether_mail::{HandleId, KindId};
 
 use crate::mail::Mail;
 
@@ -42,16 +43,12 @@ pub const DEFAULT_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// or unparseable values fall back to the default.
 pub const ENV_MAX_BYTES: &str = "AETHER_HANDLE_STORE_MAX_BYTES";
 
-/// 64-bit handle identifier. Ephemeral counter today; content-
-/// addressed in Phase 3 per ADR-0045 §3.
-pub type HandleId = u64;
-
 /// Per-entry store record. Bytes are the postcard-encoded `K` body
 /// (the same shape `Ref::Inline` would carry), kept owned because the
 /// walker copies them into spliced output during dispatch.
 #[derive(Debug)]
 struct HandleEntry {
-    kind_id: u64,
+    kind: KindId,
     bytes: Vec<u8>,
     refcount: u32,
     pinned: bool,
@@ -86,13 +83,13 @@ pub struct HandleStore {
 pub enum PutError {
     /// An entry already exists at `id` under a different kind id.
     /// Updates that match the existing kind go through; mismatches
-    /// are loud because the `(id, kind_id)` pair is part of the wire
+    /// are loud because the `(id, kind)` pair is part of the wire
     /// contract — silently rebinding the same id to a new type would
     /// let a stale `Ref::Handle { kind_id }` decode against bytes
     /// that aren't shaped like its claimed type.
     KindMismatch {
-        existing_kind_id: u64,
-        requested_kind_id: u64,
+        existing_kind: KindId,
+        requested_kind: KindId,
     },
     /// Eviction couldn't free enough room. Every remaining entry is
     /// pinned or refcounted, so the requested insert can't fit even
@@ -110,12 +107,12 @@ pub enum WalkOutcome<'a> {
     /// more handle bodies into the output.
     Resolved { payload: Cow<'a, [u8]> },
     /// Walker hit a handle id with no matching entry in the store.
-    /// The mailer parks the original mail on `handle_id`; the next
-    /// `put(handle_id, ...)` drains and re-routes. `kind_id` is the
+    /// The mailer parks the original mail on `handle`; the next
+    /// `put(handle, ...)` drains and re-routes. `kind` is the
     /// expected inner kind id, kept for diagnostic logging — the
     /// re-route walks the schema again and pulls the same id either
     /// way.
-    Parked { handle_id: HandleId, kind_id: u64 },
+    Parked { handle: HandleId, kind: KindId },
 }
 
 /// Reasons a wire walk can fail. The mailer treats any of these as
@@ -183,21 +180,21 @@ impl HandleStore {
         if inner.next_ephemeral == 0 {
             inner.next_ephemeral = 1;
         }
-        aether_mail::with_tag(aether_mail::Tag::Handle, counter)
+        HandleId(aether_mail::with_tag(aether_mail::Tag::Handle, counter))
     }
 
-    /// Insert (or update) a handle. The same `(id, kind_id)` pair can
-    /// be re-put with new bytes; mismatched `kind_id` against an
+    /// Insert (or update) a handle. The same `(id, kind)` pair can
+    /// be re-put with new bytes; mismatched `kind` against an
     /// existing entry is a `KindMismatch` error. Refcount and pinned
     /// state survive a same-kind re-put — the publisher updating
     /// bytes shouldn't silently break references held by other code.
-    pub fn put(&self, id: HandleId, kind_id: u64, bytes: Vec<u8>) -> Result<(), PutError> {
+    pub fn put(&self, id: HandleId, kind: KindId, bytes: Vec<u8>) -> Result<(), PutError> {
         let mut inner = self.inner.write().unwrap();
         let (prior_size, refcount, pinned) = match inner.entries.get(&id) {
-            Some(e) if e.kind_id != kind_id => {
+            Some(e) if e.kind != kind => {
                 return Err(PutError::KindMismatch {
-                    existing_kind_id: e.kind_id,
-                    requested_kind_id: kind_id,
+                    existing_kind: e.kind,
+                    requested_kind: kind,
                 });
             }
             Some(e) => (e.bytes.len(), e.refcount, e.pinned),
@@ -219,7 +216,7 @@ impl HandleStore {
         inner.entries.insert(
             id,
             HandleEntry {
-                kind_id,
+                kind,
                 bytes,
                 refcount,
                 pinned,
@@ -274,16 +271,16 @@ impl HandleStore {
         }
     }
 
-    /// Look up an entry. Returns `(kind_id, bytes_clone)` so the
+    /// Look up an entry. Returns `(kind, bytes_clone)` so the
     /// caller can drop the lock before extending its output buffer.
     /// Bumps `last_access` so dispatch usage protects an entry from
     /// LRU eviction.
-    pub fn get(&self, id: HandleId) -> Option<(u64, Vec<u8>)> {
+    pub fn get(&self, id: HandleId) -> Option<(KindId, Vec<u8>)> {
         let mut inner = self.inner.write().unwrap();
         let access = bump_clock(&mut inner);
         let entry = inner.entries.get_mut(&id)?;
         entry.last_access = access;
-        Some((entry.kind_id, entry.bytes.clone()))
+        Some((entry.kind, entry.bytes.clone()))
     }
 
     /// Park a `Mail` under `handle_id`. The mailer calls this when
@@ -437,8 +434,8 @@ pub fn walk_and_resolve<'a>(
     };
     if let Some(parked) = walk(schema, &mut state, store)? {
         return Ok(WalkOutcome::Parked {
-            handle_id: parked.0,
-            kind_id: parked.1,
+            handle: parked.0,
+            kind: parked.1,
         });
     }
     let payload = state.finalize();
@@ -520,14 +517,14 @@ impl<'a> State<'a> {
 }
 
 /// Walk one `schema` node, advancing `state.pos` past its postcard
-/// wire. Returns `Ok(Some((id, kind_id)))` to signal "park on this
+/// wire. Returns `Ok(Some((handle, kind)))` to signal "park on this
 /// handle", `Ok(None)` for fully-walked, `Err(...)` for malformed
 /// wire.
 fn walk(
     schema: &SchemaType,
     state: &mut State<'_>,
     store: &HandleStore,
-) -> Result<Option<(HandleId, u64)>, WalkError> {
+) -> Result<Option<(HandleId, KindId)>, WalkError> {
     match schema {
         SchemaType::Unit => Ok(None),
         SchemaType::Bool => {
@@ -635,14 +632,14 @@ fn walk(
             match disc {
                 0 => walk(inner, state, store),
                 1 => {
-                    let id = state.read_varint()?;
-                    let kind_id = state.read_varint()?;
+                    let id = HandleId(state.read_varint()?);
+                    let kind = KindId(state.read_varint()?);
                     let after_handle = state.pos;
                     let Some((stored_kind, bytes)) = store.get(id) else {
-                        return Ok(Some((id, kind_id)));
+                        return Ok(Some((id, kind)));
                     };
                     debug_assert_eq!(
-                        stored_kind, kind_id,
+                        stored_kind, kind,
                         "handle store kind id disagrees with wire kind id; \
                          put() validates this so reaching here means the \
                          entry was rebound after the wire reference was \
@@ -653,9 +650,7 @@ fn walk(
                     // bubble up so the *outer* mail parks on that id.
                     let resolved_inner = walk_and_resolve(inner, &bytes, store)?;
                     match resolved_inner {
-                        WalkOutcome::Parked { handle_id, kind_id } => {
-                            Ok(Some((handle_id, kind_id)))
-                        }
+                        WalkOutcome::Parked { handle, kind } => Ok(Some((handle, kind))),
                         WalkOutcome::Resolved { payload } => {
                             // Splice: flush prefix, write Inline arm,
                             // skip past the Handle wire bytes.
@@ -715,18 +710,24 @@ mod tests {
     #[test]
     fn put_then_get_round_trips_bytes_and_kind() {
         let store = HandleStore::new(1024);
-        store.put(7, 100, b"hello".to_vec()).unwrap();
-        let (kind, bytes) = store.get(7).expect("entry present");
-        assert_eq!(kind, 100);
+        store
+            .put(HandleId(7), KindId(100), b"hello".to_vec())
+            .unwrap();
+        let (kind, bytes) = store.get(HandleId(7)).expect("entry present");
+        assert_eq!(kind, KindId(100));
         assert_eq!(&bytes, b"hello");
     }
 
     #[test]
     fn put_replacing_same_id_with_matching_kind_overwrites_bytes() {
         let store = HandleStore::new(1024);
-        store.put(1, 100, b"old".to_vec()).unwrap();
-        store.put(1, 100, b"newer".to_vec()).unwrap();
-        let (_, bytes) = store.get(1).unwrap();
+        store
+            .put(HandleId(1), KindId(100), b"old".to_vec())
+            .unwrap();
+        store
+            .put(HandleId(1), KindId(100), b"newer".to_vec())
+            .unwrap();
+        let (_, bytes) = store.get(HandleId(1)).unwrap();
         assert_eq!(&bytes, b"newer");
         assert_eq!(store.entry_count(), 1);
         assert_eq!(store.total_bytes(), 5);
@@ -738,26 +739,30 @@ mod tests {
         // zero a refcount that other code depends on. (Phase 1 has
         // no host-fns yet, but pin the contract before they land.)
         let store = HandleStore::new(1024);
-        store.put(1, 100, b"old".to_vec()).unwrap();
-        store.pin(1);
-        store.inc_ref(1);
-        store.put(1, 100, b"newer".to_vec()).unwrap();
+        store
+            .put(HandleId(1), KindId(100), b"old".to_vec())
+            .unwrap();
+        store.pin(HandleId(1));
+        store.inc_ref(HandleId(1));
+        store
+            .put(HandleId(1), KindId(100), b"newer".to_vec())
+            .unwrap();
         // Stays pinned (proof: an attempt to evict it under pressure
         // fails).
-        store.put(2, 100, b"AA".to_vec()).unwrap();
-        store.put(3, 100, b"BB".to_vec()).unwrap();
-        assert!(store.contains(1));
+        store.put(HandleId(2), KindId(100), b"AA".to_vec()).unwrap();
+        store.put(HandleId(3), KindId(100), b"BB".to_vec()).unwrap();
+        assert!(store.contains(HandleId(1)));
     }
 
     #[test]
     fn put_with_mismatched_kind_id_errors() {
         let store = HandleStore::new(1024);
-        store.put(1, 100, vec![1, 2, 3]).unwrap();
-        let err = store.put(1, 200, vec![4]).unwrap_err();
+        store.put(HandleId(1), KindId(100), vec![1, 2, 3]).unwrap();
+        let err = store.put(HandleId(1), KindId(200), vec![4]).unwrap_err();
         assert!(matches!(err, PutError::KindMismatch { .. }));
         // Original entry untouched.
-        let (kind, bytes) = store.get(1).unwrap();
-        assert_eq!(kind, 100);
+        let (kind, bytes) = store.get(HandleId(1)).unwrap();
+        assert_eq!(kind, KindId(100));
         assert_eq!(bytes, vec![1, 2, 3]);
     }
 
@@ -769,13 +774,13 @@ mod tests {
         // ADR-0064: counter occupies the low 60 bits; the high 4
         // bits carry `Tag::Handle`. Strip the tag to assert on the
         // raw counter value.
-        assert_eq!(aether_mail::tagged_id::body_of(a), 1);
-        assert_eq!(aether_mail::tagged_id::body_of(b), 2);
+        assert_eq!(aether_mail::tagged_id::body_of(a.0), 1);
+        assert_eq!(aether_mail::tagged_id::body_of(b.0), 2);
         assert_eq!(
-            aether_mail::tagged_id::tag_of(a),
+            aether_mail::tagged_id::tag_of(a.0),
             Some(aether_mail::Tag::Handle)
         );
-        assert_ne!(a, 0);
+        assert_ne!(a, HandleId(0));
     }
 
     #[test]
@@ -783,85 +788,87 @@ mod tests {
         // Two entries that just fit, then add a third that forces
         // eviction. The least-recently-accessed must go first.
         let store = HandleStore::new(8);
-        store.put(1, 0, b"AAAA".to_vec()).unwrap();
-        store.put(2, 0, b"BBBB".to_vec()).unwrap();
+        store.put(HandleId(1), KindId(0), b"AAAA".to_vec()).unwrap();
+        store.put(HandleId(2), KindId(0), b"BBBB".to_vec()).unwrap();
         // Touch entry 1 so entry 2 is now the LRU.
-        let _ = store.get(1);
+        let _ = store.get(HandleId(1));
         // Insert entry 3 — should evict entry 2.
-        store.put(3, 0, b"CCCC".to_vec()).unwrap();
-        assert!(store.contains(1), "MRU survived");
-        assert!(!store.contains(2), "LRU evicted");
-        assert!(store.contains(3));
+        store.put(HandleId(3), KindId(0), b"CCCC".to_vec()).unwrap();
+        assert!(store.contains(HandleId(1)), "MRU survived");
+        assert!(!store.contains(HandleId(2)), "LRU evicted");
+        assert!(store.contains(HandleId(3)));
     }
 
     #[test]
     fn pinned_entry_skips_eviction() {
         let store = HandleStore::new(8);
-        store.put(1, 0, b"AAAA".to_vec()).unwrap();
-        store.put(2, 0, b"BBBB".to_vec()).unwrap();
-        store.pin(1);
+        store.put(HandleId(1), KindId(0), b"AAAA".to_vec()).unwrap();
+        store.put(HandleId(2), KindId(0), b"BBBB".to_vec()).unwrap();
+        store.pin(HandleId(1));
         // Entry 1 is pinned, so entry 2 (the only evictable one)
         // must be dropped — even though it's MRU.
-        store.put(3, 0, b"CCCC".to_vec()).unwrap();
-        assert!(store.contains(1), "pinned entry stays");
-        assert!(!store.contains(2));
-        assert!(store.contains(3));
+        store.put(HandleId(3), KindId(0), b"CCCC".to_vec()).unwrap();
+        assert!(store.contains(HandleId(1)), "pinned entry stays");
+        assert!(!store.contains(HandleId(2)));
+        assert!(store.contains(HandleId(3)));
     }
 
     #[test]
     fn refcounted_entry_skips_eviction() {
         let store = HandleStore::new(8);
-        store.put(1, 0, b"AAAA".to_vec()).unwrap();
-        store.put(2, 0, b"BBBB".to_vec()).unwrap();
-        store.inc_ref(1);
-        store.put(3, 0, b"CCCC".to_vec()).unwrap();
-        assert!(store.contains(1), "refcounted entry stays");
-        assert!(!store.contains(2));
+        store.put(HandleId(1), KindId(0), b"AAAA".to_vec()).unwrap();
+        store.put(HandleId(2), KindId(0), b"BBBB".to_vec()).unwrap();
+        store.inc_ref(HandleId(1));
+        store.put(HandleId(3), KindId(0), b"CCCC".to_vec()).unwrap();
+        assert!(store.contains(HandleId(1)), "refcounted entry stays");
+        assert!(!store.contains(HandleId(2)));
     }
 
     #[test]
     fn put_fails_if_no_eligible_eviction_targets() {
         let store = HandleStore::new(8);
-        store.put(1, 0, b"AAAA".to_vec()).unwrap();
-        store.put(2, 0, b"BBBB".to_vec()).unwrap();
-        store.pin(1);
-        store.pin(2);
-        let err = store.put(3, 0, b"CCCC".to_vec()).unwrap_err();
+        store.put(HandleId(1), KindId(0), b"AAAA".to_vec()).unwrap();
+        store.put(HandleId(2), KindId(0), b"BBBB".to_vec()).unwrap();
+        store.pin(HandleId(1));
+        store.pin(HandleId(2));
+        let err = store
+            .put(HandleId(3), KindId(0), b"CCCC".to_vec())
+            .unwrap_err();
         assert!(matches!(err, PutError::EvictionFailed { .. }));
     }
 
     #[test]
     fn dec_ref_below_zero_saturates() {
         let store = HandleStore::new(64);
-        store.put(1, 0, b"x".to_vec()).unwrap();
+        store.put(HandleId(1), KindId(0), b"x".to_vec()).unwrap();
         // Calling dec_ref past zero saturates rather than underflowing.
-        assert!(store.dec_ref(1));
-        assert!(store.dec_ref(1));
-        assert!(store.contains(1));
+        assert!(store.dec_ref(HandleId(1)));
+        assert!(store.dec_ref(HandleId(1)));
+        assert!(store.contains(HandleId(1)));
     }
 
     #[test]
     fn park_and_take_round_trip() {
         let store = HandleStore::new(64);
-        let mail1 = Mail::new(MailboxId(0xAA), 1, vec![1], 0);
-        let mail2 = Mail::new(MailboxId(0xBB), 2, vec![2], 0);
-        store.park(42, mail1);
-        store.park(42, mail2);
-        assert_eq!(store.parked_count(42), 2);
-        let drained = store.take_parked(42);
+        let mail1 = Mail::new(MailboxId(0xAA), KindId(1), vec![1], 0);
+        let mail2 = Mail::new(MailboxId(0xBB), KindId(2), vec![2], 0);
+        store.park(HandleId(42), mail1);
+        store.park(HandleId(42), mail2);
+        assert_eq!(store.parked_count(HandleId(42)), 2);
+        let drained = store.take_parked(HandleId(42));
         assert_eq!(drained.len(), 2);
         // FIFO: first-parked first-out.
-        assert_eq!(drained[0].kind, 1);
-        assert_eq!(drained[1].kind, 2);
-        assert_eq!(store.parked_count(42), 0);
+        assert_eq!(drained[0].kind, KindId(1));
+        assert_eq!(drained[1].kind, KindId(2));
+        assert_eq!(store.parked_count(HandleId(42)), 0);
     }
 
     #[test]
     fn arc_shared_writes_are_visible() {
         let a = Arc::new(HandleStore::new(64));
         let b = Arc::clone(&a);
-        a.put(1, 0, vec![1, 2, 3]).unwrap();
-        let (_, bytes) = b.get(1).unwrap();
+        a.put(HandleId(1), KindId(0), vec![1, 2, 3]).unwrap();
+        let (_, bytes) = b.get(HandleId(1)).unwrap();
         assert_eq!(bytes, vec![1, 2, 3]);
     }
 
@@ -998,9 +1005,9 @@ mod tests {
         let bytes = postcard::to_allocvec(&outer).unwrap();
         let outcome = walk_and_resolve(&held_note_schema(), &bytes, &store).unwrap();
         match outcome {
-            WalkOutcome::Parked { handle_id, kind_id } => {
-                assert_eq!(handle_id, 0xCAFE);
-                assert_eq!(kind_id, Note::ID);
+            WalkOutcome::Parked { handle, kind } => {
+                assert_eq!(handle, HandleId(0xCAFE));
+                assert_eq!(kind, KindId(Note::ID));
             }
             WalkOutcome::Resolved { .. } => panic!("expected park on missing handle"),
         }
@@ -1014,7 +1021,9 @@ mod tests {
             seq: 99,
         };
         let inner_bytes = postcard::to_allocvec(&inner).unwrap();
-        store.put(0xCAFE, Note::ID, inner_bytes).unwrap();
+        store
+            .put(HandleId(0xCAFE), KindId(Note::ID), inner_bytes)
+            .unwrap();
 
         let outer = HeldNote {
             held: Ref::handle(0xCAFE),
@@ -1058,10 +1067,18 @@ mod tests {
             seq: 2,
         };
         store
-            .put(1, Note::ID, postcard::to_allocvec(&stored_a).unwrap())
+            .put(
+                HandleId(1),
+                KindId(Note::ID),
+                postcard::to_allocvec(&stored_a).unwrap(),
+            )
             .unwrap();
         store
-            .put(2, Note::ID, postcard::to_allocvec(&stored_b).unwrap())
+            .put(
+                HandleId(2),
+                KindId(Note::ID),
+                postcard::to_allocvec(&stored_b).unwrap(),
+            )
             .unwrap();
 
         let outer: Vec<Ref<Note>> = vec![
@@ -1098,15 +1115,19 @@ mod tests {
             seq: 1,
         };
         store
-            .put(1, Note::ID, postcard::to_allocvec(&stored).unwrap())
+            .put(
+                HandleId(1),
+                KindId(Note::ID),
+                postcard::to_allocvec(&stored).unwrap(),
+            )
             .unwrap();
 
         let outer: Vec<Ref<Note>> = vec![Ref::handle(1), Ref::handle(99)];
         let bytes = postcard::to_allocvec(&outer).unwrap();
         let outcome = walk_and_resolve(&schema, &bytes, &store).unwrap();
         match outcome {
-            WalkOutcome::Parked { handle_id, .. } => {
-                assert_eq!(handle_id, 99, "should park on first missing handle");
+            WalkOutcome::Parked { handle, .. } => {
+                assert_eq!(handle, HandleId(99), "should park on first missing handle");
             }
             WalkOutcome::Resolved { .. } => panic!("expected park"),
         }
@@ -1169,7 +1190,9 @@ mod tests {
             seq: 7,
         };
         let inner_bytes = postcard::to_allocvec(&inner_note).unwrap();
-        store.put(20, Note::ID, inner_bytes).unwrap();
+        store
+            .put(HandleId(20), KindId(Note::ID), inner_bytes)
+            .unwrap();
 
         // Mid-level HeldNote, with held = Handle(Y), goes under X.
         let mid = HeldNote {
@@ -1180,7 +1203,7 @@ mod tests {
         // Use a synthetic kind id for HeldNote — the walker only uses
         // the kind id to validate against the wire, and the test
         // schemas don't go through registry registration.
-        store.put(10, 0xBEEF, mid_bytes).unwrap();
+        store.put(HandleId(10), KindId(0xBEEF), mid_bytes).unwrap();
 
         // Top-level wire: Ref<HeldNote>::Handle { id: 10, kind_id: 0xBEEF }.
         let top: Ref<HeldNote> = Ref::Handle {

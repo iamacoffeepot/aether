@@ -38,8 +38,8 @@ struct HeadlessChassis {
     queue: Arc<Mailer>,
     input_subscribers: InputSubscribers,
     broadcast_mbox: MailboxId,
-    kind_tick: u64,
-    kind_frame_stats: u64,
+    kind_tick: KindId,
+    kind_frame_stats: KindId,
     tick_period: Duration,
     /// ADR-0063: passed to `lifecycle::fatal_abort` for the final
     /// `SubstrateDying` broadcast before exit.
@@ -144,7 +144,7 @@ fn main() -> wasmtime::Result<()> {
     boot.registry.register_sink(
         "aether.sink.render",
         Arc::new(
-            |_kind_id: u64,
+            |_kind: KindId,
              _kind_name: &str,
              _origin: Option<&str>,
              _sender,
@@ -158,7 +158,7 @@ fn main() -> wasmtime::Result<()> {
     boot.registry.register_sink(
         "aether.sink.camera",
         Arc::new(
-            |_kind_id: u64,
+            |_kind: KindId,
              _kind_name: &str,
              _origin: Option<&str>,
              _sender,
@@ -180,13 +180,13 @@ fn main() -> wasmtime::Result<()> {
     boot.registry.register_sink(
         "aether.sink.audio",
         Arc::new(
-            move |kind_id: u64,
+            move |kind: KindId,
                   _kind_name: &str,
                   _origin: Option<&str>,
                   sender,
                   _bytes: &[u8],
                   _count: u32| {
-                if kind_id == kind_set_master_gain {
+                if kind == kind_set_master_gain {
                     outbound_for_audio_sink.send_reply(
                         sender,
                         &aether_kinds::SetMasterGainResult::Err {

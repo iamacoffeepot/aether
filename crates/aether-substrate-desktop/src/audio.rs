@@ -42,13 +42,13 @@ pub const MAX_VOICES: usize = 64;
 #[derive(Copy, Clone, Debug)]
 pub enum AudioEvent {
     NoteOn {
-        sender_mailbox: u64,
+        sender_mailbox: aether_mail::MailboxId,
         pitch: u8,
         velocity: u8,
         instrument_id: u8,
     },
     NoteOff {
-        sender_mailbox: u64,
+        sender_mailbox: aether_mail::MailboxId,
         pitch: u8,
         instrument_id: u8,
     },
@@ -217,7 +217,7 @@ enum EnvelopeStage {
 /// touched per sample, so keeping the struct compact helps cache.
 #[derive(Copy, Clone, Debug)]
 struct Voice {
-    sender_mailbox: u64,
+    sender_mailbox: aether_mail::MailboxId,
     instrument_id: u8,
     pitch: u8,
     /// Oscillator phase in turns (`[0.0, 1.0)`), incremented by
@@ -235,7 +235,7 @@ struct Voice {
 
 impl Voice {
     fn new(
-        sender_mailbox: u64,
+        sender_mailbox: aether_mail::MailboxId,
         instrument_id: u8,
         pitch: u8,
         velocity: u8,
@@ -624,7 +624,7 @@ mod tests {
         let mut synth = Synth::new(queue, 48_000.0);
         sender
             .push(AudioEvent::NoteOn {
-                sender_mailbox: 1,
+                sender_mailbox: aether_mail::MailboxId(1),
                 pitch: 60,
                 velocity: 100,
                 instrument_id: 0,
@@ -640,7 +640,7 @@ mod tests {
 
         sender
             .push(AudioEvent::NoteOff {
-                sender_mailbox: 1,
+                sender_mailbox: aether_mail::MailboxId(1),
                 pitch: 60,
                 instrument_id: 0,
             })
@@ -659,7 +659,7 @@ mod tests {
         for _ in 0..3 {
             sender
                 .push(AudioEvent::NoteOn {
-                    sender_mailbox: 1,
+                    sender_mailbox: aether_mail::MailboxId(1),
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,
@@ -678,7 +678,7 @@ mod tests {
         for mailbox in 1..=3 {
             sender
                 .push(AudioEvent::NoteOn {
-                    sender_mailbox: mailbox,
+                    sender_mailbox: aether_mail::MailboxId(mailbox),
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,
@@ -714,7 +714,7 @@ mod tests {
         let mut synth = Synth::new(queue, 48_000.0);
         sender
             .push(AudioEvent::NoteOn {
-                sender_mailbox: 1,
+                sender_mailbox: aether_mail::MailboxId(1),
                 pitch: 60,
                 velocity: 100,
                 instrument_id: 99,
@@ -732,7 +732,7 @@ mod tests {
         for i in 0..(MAX_VOICES as u64 + 10) {
             sender
                 .push(AudioEvent::NoteOn {
-                    sender_mailbox: i + 1,
+                    sender_mailbox: aether_mail::MailboxId(i + 1),
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,

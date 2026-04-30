@@ -71,8 +71,8 @@ pub fn chassis_control_handler(
     outbound: Arc<HubOutbound>,
 ) -> ChassisControlHandler {
     Arc::new(
-        move |kind_id: u64, kind_name: &str, sender: ReplyTo, bytes: &[u8]| {
-            if kind_id == CaptureFrame::ID {
+        move |kind: aether_mail::KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| {
+            if kind == aether_mail::KindId(CaptureFrame::ID) {
                 let proxy = proxy.clone();
                 begin_capture_request(
                     &queue,
@@ -90,16 +90,16 @@ pub fn chassis_control_handler(
                         Ok(())
                     },
                 );
-            } else if kind_id == PlatformInfo::ID {
+            } else if kind == aether_mail::KindId(PlatformInfo::ID) {
                 // Empty payload; forward the sender straight to the
                 // event loop and let it snapshot + reply on its own
                 // thread (winit monitor / scale-factor APIs require it).
                 let _ = proxy.send_event(UserEvent::PlatformInfo { reply_to: sender });
-            } else if kind_id == SetWindowMode::ID {
+            } else if kind == aether_mail::KindId(SetWindowMode::ID) {
                 handle_set_window_mode(&proxy, &outbound, sender, bytes);
-            } else if kind_id == SetWindowTitle::ID {
+            } else if kind == aether_mail::KindId(SetWindowTitle::ID) {
                 handle_set_window_title(&proxy, &outbound, sender, bytes);
-            } else if kind_id == Advance::ID {
+            } else if kind == aether_mail::KindId(Advance::ID) {
                 reply_unsupported_advance(
                     &outbound,
                     sender,

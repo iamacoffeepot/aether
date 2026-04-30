@@ -23,6 +23,7 @@
 use std::sync::Arc;
 
 use aether_kinds::LogEvent;
+use aether_mail::KindId;
 
 use crate::mail::ReplyTo;
 use crate::registry::{Registry, SinkHandler};
@@ -32,7 +33,7 @@ use crate::registry::{Registry, SinkHandler};
 /// against `"aether.sink.log"`.
 pub fn log_sink_handler() -> SinkHandler {
     Arc::new(
-        move |_kind_id: u64,
+        move |_kind: KindId,
               _kind_name: &str,
               _origin: Option<&str>,
               _sender: ReplyTo,

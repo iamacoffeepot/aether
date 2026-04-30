@@ -21,9 +21,9 @@ pub use test_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TestBench, TestBenchError};
 
 pub use aether_substrate_core::{
     AETHER_CONTROL, Chassis, ChassisCapabilities, ChassisControlHandler, Component, ControlPlane,
-    HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, Mail, MailKind, MailboxEntry,
-    MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, Scheduler, SinkHandler, SubstrateBoot,
-    SubstrateCtx,
+    HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, KindId, Mail, MailKind,
+    MailboxEntry, MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, Scheduler, SinkHandler,
+    SubstrateBoot, SubstrateCtx,
     capture::{CaptureQueue, PendingCapture},
     component, control, ctx, frame_loop, host_fns, hub_client, input, io, kind_manifest,
     log_capture, mail, mailer, new_subscribers, registry, remove_from_all, reply_table, scheduler,

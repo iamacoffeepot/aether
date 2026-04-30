@@ -45,7 +45,7 @@ pub struct EngineRecord {
     /// substrate-assigned `mailbox_id`. Clonable as a snapshot; the
     /// authoritative write path goes through
     /// `EngineRegistry::upsert_component`.
-    pub components: HashMap<u64, ComponentRecord>,
+    pub components: HashMap<aether_mail::MailboxId, ComponentRecord>,
     pub mail_tx: mpsc::Sender<HubToEngine>,
     /// `true` if this engine was spawned by the hub (ADR-0009).
     /// `false` for externally connected substrates. Purely informational
@@ -139,32 +139,41 @@ impl EngineRegistry {
     /// Insert or replace the component record for `(engine, mailbox)`.
     /// Called after a successful `load_component` or
     /// `replace_component` (ADR-0033). No-op if the engine is unknown.
-    pub fn upsert_component(&self, id: &EngineId, mailbox_id: u64, record: ComponentRecord) {
+    pub fn upsert_component(
+        &self,
+        id: &EngineId,
+        mailbox: aether_mail::MailboxId,
+        record: ComponentRecord,
+    ) {
         if let Some(engine) = self.inner.lock().unwrap().records.get_mut(id) {
-            engine.components.insert(mailbox_id, record);
+            engine.components.insert(mailbox, record);
         }
     }
 
     /// Drop the component record for `(engine, mailbox)`. Called after
     /// a successful `drop_component`. No-op if the engine or mailbox
     /// is unknown.
-    pub fn drop_component(&self, id: &EngineId, mailbox_id: u64) {
+    pub fn drop_component(&self, id: &EngineId, mailbox: aether_mail::MailboxId) {
         if let Some(engine) = self.inner.lock().unwrap().records.get_mut(id) {
-            engine.components.remove(&mailbox_id);
+            engine.components.remove(&mailbox);
         }
     }
 
     /// Snapshot the component record for `(engine, mailbox)`. Used by
     /// the `describe_component` MCP tool. Returns `None` for unknown
     /// engine / mailbox pairs.
-    pub fn get_component(&self, id: &EngineId, mailbox_id: u64) -> Option<ComponentRecord> {
+    pub fn get_component(
+        &self,
+        id: &EngineId,
+        mailbox: aether_mail::MailboxId,
+    ) -> Option<ComponentRecord> {
         self.inner
             .lock()
             .unwrap()
             .records
             .get(id)?
             .components
-            .get(&mailbox_id)
+            .get(&mailbox)
             .cloned()
     }
 

@@ -84,7 +84,12 @@ fn tick_roundtrip_component_to_sink() {
 
     // Drive three "frames" — each frame, enqueue one tick mail and wait.
     for frame in 1..=3u32 {
-        queue.push(Mail::new(component_mbox, 1, vec![], frame));
+        queue.push(Mail::new(
+            component_mbox,
+            aether_mail::KindId(1),
+            vec![],
+            frame,
+        ));
         queue.drain_all();
     }
 
@@ -148,7 +153,7 @@ fn batched_mail_preserves_fifo_per_mailbox() {
     scheduler.add_component(component_mbox, component);
 
     for i in 1..=N {
-        queue.push(Mail::new(component_mbox, 1, vec![], i));
+        queue.push(Mail::new(component_mbox, aether_mail::KindId(1), vec![], i));
     }
     queue.drain_all();
 

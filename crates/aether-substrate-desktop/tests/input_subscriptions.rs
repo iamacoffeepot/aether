@@ -15,9 +15,7 @@ use aether_kinds::{DropComponent, LoadComponent, SubscribeInput, Tick, Unsubscri
 use aether_mail::{Kind, KindId};
 use aether_substrate_desktop::{
     ControlPlane, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
-    host_fns,
-    mail::{Mail, MailboxId},
-    new_subscribers, subscribers_for,
+    host_fns, mail::Mail, new_subscribers, subscribers_for,
 };
 use wasmtime::{Engine, Linker};
 
@@ -49,7 +47,7 @@ struct Harness {
     queue: Arc<Mailer>,
     input_subscribers: InputSubscribers,
     counter: Arc<AtomicU32>,
-    kind_tick: u64,
+    kind_tick: KindId,
     wat: String,
     _scheduler: Scheduler,
 }
@@ -113,7 +111,7 @@ fn dispatch<K: aether_mail::Kind + serde::Serialize>(plane: &ControlPlane, paylo
     let bytes = postcard::to_allocvec(payload).unwrap();
     let handler = plane.clone().into_sink_handler();
     handler(
-        K::ID,
+        aether_mail::KindId(K::ID),
         K::NAME,
         None,
         aether_substrate_desktop::ReplyTo::NONE,
@@ -122,14 +120,9 @@ fn dispatch<K: aether_mail::Kind + serde::Serialize>(plane: &ControlPlane, paylo
     );
 }
 
-fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> u64 {
-    let before: std::collections::HashSet<u64> = plane
-        .components
-        .read()
-        .unwrap()
-        .keys()
-        .map(|m| m.0)
-        .collect();
+fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> aether_mail::MailboxId {
+    let before: std::collections::HashSet<aether_mail::MailboxId> =
+        plane.components.read().unwrap().keys().copied().collect();
     dispatch(
         plane,
         &LoadComponent {
@@ -137,46 +130,24 @@ fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> u64 {
             name: Some(name.into()),
         },
     );
-    let after: std::collections::HashSet<u64> = plane
-        .components
-        .read()
-        .unwrap()
-        .keys()
-        .map(|m| m.0)
-        .collect();
+    let after: std::collections::HashSet<aether_mail::MailboxId> =
+        plane.components.read().unwrap().keys().copied().collect();
     *after
         .difference(&before)
         .next()
         .expect("load inserted a new component")
 }
 
-fn subscribe(plane: &ControlPlane, kind: KindId, mailbox: u64) {
-    dispatch(
-        plane,
-        &SubscribeInput {
-            kind,
-            mailbox: aether_mail::MailboxId(mailbox),
-        },
-    );
+fn subscribe(plane: &ControlPlane, kind: KindId, mailbox: aether_mail::MailboxId) {
+    dispatch(plane, &SubscribeInput { kind, mailbox });
 }
 
-fn unsubscribe(plane: &ControlPlane, kind: KindId, mailbox: u64) {
-    dispatch(
-        plane,
-        &UnsubscribeInput {
-            kind,
-            mailbox: aether_mail::MailboxId(mailbox),
-        },
-    );
+fn unsubscribe(plane: &ControlPlane, kind: KindId, mailbox: aether_mail::MailboxId) {
+    dispatch(plane, &UnsubscribeInput { kind, mailbox });
 }
 
-fn drop_component(plane: &ControlPlane, mailbox_id: u64) {
-    dispatch(
-        plane,
-        &DropComponent {
-            mailbox_id: aether_mail::MailboxId(mailbox_id),
-        },
-    );
+fn drop_component(plane: &ControlPlane, mailbox_id: aether_mail::MailboxId) {
+    dispatch(plane, &DropComponent { mailbox_id });
 }
 
 /// Publish one Tick exactly as `App::window_event` does: snapshot the
@@ -205,7 +176,7 @@ fn subscribed_component_receives_published_ticks() {
     subscribe(&h.plane, KindId(Tick::ID), id);
     assert_eq!(
         subscribers_for(&h.input_subscribers, KindId(Tick::ID)),
-        vec![MailboxId(id)]
+        vec![id]
     );
     for _ in 0..3 {
         publish_tick(&h);

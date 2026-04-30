@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use aether_kinds::DRAW_TRIANGLE_BYTES;
+use aether_mail::KindId;
 
 use crate::registry::SinkHandler;
 use crate::render::IDENTITY_VIEW_PROJ;
@@ -44,7 +45,7 @@ pub fn build_render_sink(cap: usize) -> (RenderAccumulator, SinkHandler) {
     let verts_for_sink = Arc::clone(&frame_vertices);
     let tris_for_sink = Arc::clone(&triangles_rendered);
     let handler: SinkHandler = Arc::new(
-        move |_kind_id: u64,
+        move |_kind_id: KindId,
               _kind_name: &str,
               _origin: Option<&str>,
               _sender,
@@ -96,7 +97,7 @@ pub fn build_camera_sink() -> (Arc<Mutex<[f32; 16]>>, SinkHandler) {
     let camera_state = Arc::new(Mutex::new(IDENTITY_VIEW_PROJ));
     let cam_for_sink = Arc::clone(&camera_state);
     let handler: SinkHandler = Arc::new(
-        move |_kind_id: u64,
+        move |_kind_id: KindId,
               _kind_name: &str,
               _origin: Option<&str>,
               _sender,
