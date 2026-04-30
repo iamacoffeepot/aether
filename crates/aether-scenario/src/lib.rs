@@ -16,6 +16,7 @@
 mod report;
 mod runner;
 mod script;
+pub mod test_helpers;
 mod visual;
 
 pub use aether_scenario_macros::scenario_dir;

@@ -24,7 +24,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yml = "0.0.12"
 thiserror = "1"
-
-[dev-dependencies]
+# `test_helpers::has_wgpu_adapter` probes for a wgpu adapter so per-
+# component scenario tests can skip cleanly on driverless dev boxes.
+# `pollster` blocks on the adapter request future without dragging in
+# a full async runtime. Both used to be dev-deps; promoted to runtime
+# deps so consumers can call the helpers from their own integration
+# tests via `pub mod test_helpers` (issue 460).
 pollster = "0.4.0"
 wgpu = "29.0.1"

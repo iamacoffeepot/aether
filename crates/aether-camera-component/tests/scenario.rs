@@ -11,10 +11,13 @@
 //!   `target/wasm32-unknown-unknown/{debug,release}/aether_camera_component.wasm`
 //!   and skip with an `eprintln!` when both paths are absent. CI
 //!   builds the wasm before invoking `cargo test`.
+//!
+//! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
+//! gate, `Runner::run` + assert postscript) live in
+//! `aether_scenario::test_helpers` (issue 460).
 
-use std::path::{Path, PathBuf};
-
-use aether_scenario::{Check, Runner, Script, Step};
+use aether_scenario::test_helpers::{require_runtime, run_or_panic};
+use aether_scenario::{Check, Script, Step};
 use aether_substrate_test_bench::TestBench;
 
 // Force linkage of `aether-camera` so its `inventory::submit!`
@@ -26,78 +29,9 @@ use aether_substrate_test_bench::TestBench;
 // "unknown kind".
 use aether_camera as _;
 
-/// Probe for any usable wgpu adapter.
-fn has_wgpu_adapter() -> bool {
-    let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::default(),
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .is_ok()
-}
-
-/// Common setup: skip-if-no-adapter / skip-if-no-wasm. Returns the
-/// wasm path on success.
-///
-/// `AETHER_REQUIRE_RUNTIME=1` flips both skip points into a panic so
-/// CI catches a forgotten pre-build entry instead of passing a 30ms
-/// vacuous test. CI sets this; local devs leave it unset and keep the
-/// existing skip behavior.
-fn require_runtime() -> Option<PathBuf> {
-    let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    if !has_wgpu_adapter() {
-        assert!(
-            !strict,
-            "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",
-        );
-        eprintln!("skipping: no wgpu adapter available");
-        return None;
-    }
-    match camera_component_wasm() {
-        Some(path) => Some(path),
-        None => {
-            assert!(
-                !strict,
-                "AETHER_REQUIRE_RUNTIME set but aether_camera_component.wasm not pre-built; \
-                 CI's `Pre-build component wasm for scenario tests` step is missing this crate",
-            );
-            eprintln!(
-                "skipping: aether_camera_component.wasm not built; \
-                 run `cargo build --target wasm32-unknown-unknown -p aether-camera-component`",
-            );
-            None
-        }
-    }
-}
-
-/// Locate this crate's wasm artifact. Tries `release` then `debug`
-/// so either build profile satisfies the test. Returns `None` if
-/// neither exists — the caller skips the test. `CARGO_MANIFEST_DIR`
-/// is `crates/aether-camera-component`; the workspace target dir
-/// is two levels up.
-fn camera_component_wasm() -> Option<PathBuf> {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root reachable from CARGO_MANIFEST_DIR");
-    for profile in ["release", "debug"] {
-        let path = workspace
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join(profile)
-            .join("aether_camera_component.wasm");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
-}
-
 #[test]
 fn camera_component_lifecycle() {
-    let Some(wasm_path) = require_runtime() else {
+    let Some(wasm_path) = require_runtime("aether_camera_component") else {
         return;
     };
 
@@ -122,14 +56,7 @@ fn camera_component_lifecycle() {
     };
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    let report = Runner::run(&mut bench, &script);
-    assert!(
-        report.passed,
-        "camera-component lifecycle failed:\n{:#?}",
-        report.steps,
-    );
-    // Sanity: every step ran (no premature short-circuit).
-    assert_eq!(report.steps.len(), 4);
+    run_or_panic(&mut bench, &script);
 }
 
 /// Phase 2 Phase 1-asserts smoke test: the camera component publishes
@@ -141,7 +68,7 @@ fn camera_component_lifecycle() {
 /// `TestBench::count_observed`.
 #[test]
 fn camera_default_orbit_publishes_view_proj() {
-    let Some(wasm_path) = require_runtime() else {
+    let Some(wasm_path) = require_runtime("aether_camera_component") else {
         return;
     };
 
@@ -167,12 +94,7 @@ fn camera_default_orbit_publishes_view_proj() {
     };
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    let report = Runner::run(&mut bench, &script);
-    assert!(
-        report.passed,
-        "camera publish scenario failed:\n{:#?}",
-        report.steps,
-    );
+    run_or_panic(&mut bench, &script);
 }
 
 /// Destroy the active default camera ("main") and confirm the
@@ -185,7 +107,7 @@ fn camera_default_orbit_publishes_view_proj() {
 /// shouldn't take down the chassis.
 #[test]
 fn camera_destroy_main_keeps_substrate_alive() {
-    let Some(wasm_path) = require_runtime() else {
+    let Some(wasm_path) = require_runtime("aether_camera_component") else {
         return;
     };
 
@@ -223,10 +145,5 @@ fn camera_destroy_main_keeps_substrate_alive() {
     };
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    let report = Runner::run(&mut bench, &script);
-    assert!(
-        report.passed,
-        "camera destroy scenario failed:\n{:#?}",
-        report.steps,
-    );
+    run_or_panic(&mut bench, &script);
 }

@@ -3,21 +3,9 @@
 //! by probing for a wgpu adapter — same gating pattern as the
 //! TestBench unit test (ADR-0067).
 
+use aether_scenario::test_helpers::has_wgpu_adapter;
 use aether_scenario::{Runner, parse_script};
 use aether_substrate_test_bench::TestBench;
-
-/// Probe for any usable wgpu adapter. Headless Linux runners without
-/// `mesa-vulkan-drivers` skip the test rather than panic.
-fn has_wgpu_adapter() -> bool {
-    let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::default(),
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .is_ok()
-}
 
 #[test]
 fn empty_script_passes_with_no_steps() {

@@ -12,11 +12,15 @@
 //!   `target/wasm32-unknown-unknown/{debug,release}/aether_mesh_viewer_component.wasm`
 //!   and skip with an `eprintln!` when both paths are absent. CI
 //!   builds the wasm before invoking `cargo test`.
+//!
+//! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
+//! gate, `AETHER_SAVE_DIR` sandbox, `tick_to`, `Runner::run` + assert
+//! postscript) live in `aether_scenario::test_helpers` (issue 460).
 
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-
-use aether_scenario::{Check, Runner, Script, Step};
+use aether_scenario::test_helpers::{
+    init_save_sandbox, require_runtime, run_or_panic, tick_to, write_fixture,
+};
+use aether_scenario::{Check, Script, Step};
 use aether_substrate_test_bench::TestBench;
 
 // Force linkage of `aether-mesh-viewer` so its `inventory::submit!`
@@ -28,108 +32,6 @@ use aether_substrate_test_bench::TestBench;
 // "unknown kind".
 use aether_mesh_viewer as _;
 
-/// Process-wide test sandbox for `save://` reads. Each test seeds its
-/// fixtures here under unique filenames so parallel test threads don't
-/// step on each other. The env var must be set before any TestBench
-/// boot — `NamespaceRoots::from_env` reads it once per chassis boot —
-/// so we gate all tests through `init_test_save_dir()` first.
-static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
-
-/// Create the per-process sandbox (idempotent) and point
-/// `AETHER_SAVE_DIR` at it. Returns the resolved sandbox path.
-///
-/// `set_var` is racy with concurrent `getenv` on POSIX, but
-/// `OnceLock` linearizes the set, and every test that boots a
-/// TestBench gates through this helper first — so by the time any
-/// test thread reads env, the set has completed.
-fn init_test_save_dir() -> &'static Path {
-    TEST_SAVE_DIR.get_or_init(|| {
-        let dir =
-            std::env::temp_dir().join(format!("aether-mesh-viewer-tests-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create test save dir");
-        unsafe { std::env::set_var("AETHER_SAVE_DIR", &dir) };
-        dir
-    })
-}
-
-/// Write `contents` into the sandbox at `name`, returning the
-/// `save://` path string the scenario uses (the bare filename — the
-/// substrate resolves it relative to the namespace root).
-fn write_fixture(name: &str, contents: &[u8]) -> String {
-    let dir = init_test_save_dir();
-    std::fs::write(dir.join(name), contents).expect("write fixture");
-    name.to_owned()
-}
-
-/// Probe for any usable wgpu adapter.
-fn has_wgpu_adapter() -> bool {
-    let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::default(),
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .is_ok()
-}
-
-/// Locate this crate's wasm artifact. Tries `release` then `debug`
-/// so either build profile satisfies the test. Returns `None` if
-/// neither exists — the caller skips the test. `CARGO_MANIFEST_DIR`
-/// is `crates/aether-mesh-viewer-component`; the workspace target
-/// dir is two levels up.
-fn mesh_viewer_wasm() -> Option<PathBuf> {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root reachable from CARGO_MANIFEST_DIR");
-    for profile in ["release", "debug"] {
-        let path = workspace
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join(profile)
-            .join("aether_mesh_viewer_component.wasm");
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    None
-}
-
-/// Common setup: skip-if-no-adapter / skip-if-no-wasm. Returns the
-/// wasm path on success.
-///
-/// `AETHER_REQUIRE_RUNTIME=1` flips both skip points into a panic so
-/// CI catches a forgotten pre-build entry instead of passing a 30ms
-/// vacuous test. CI sets this; local devs leave it unset and keep the
-/// existing skip behavior.
-fn require_runtime() -> Option<PathBuf> {
-    let strict = std::env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    if !has_wgpu_adapter() {
-        assert!(
-            !strict,
-            "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",
-        );
-        eprintln!("skipping: no wgpu adapter available");
-        return None;
-    }
-    match mesh_viewer_wasm() {
-        Some(path) => Some(path),
-        None => {
-            assert!(
-                !strict,
-                "AETHER_REQUIRE_RUNTIME set but aether_mesh_viewer_component.wasm not pre-built; \
-                 CI's `Pre-build component wasm for scenario tests` step is missing this crate",
-            );
-            eprintln!(
-                "skipping: aether_mesh_viewer_component.wasm not built; \
-                 run `cargo build --target wasm32-unknown-unknown -p aether-mesh-viewer-component`",
-            );
-            None
-        }
-    }
-}
-
 const BOX_DSL: &[u8] = b"(box 1 1 1 :color 0)\n";
 const QUAD_OBJ: &[u8] = b"\
 v -0.5 -0.5 0
@@ -140,27 +42,6 @@ f 1 2 3 4
 ";
 const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 
-/// Build a `SendMail` step that fires a direct `aether.tick` to
-/// `mailbox` so the next `Capture` frame sees fresh render-sink
-/// emissions.
-///
-/// Background: `TestBench::capture` runs its frame with
-/// `dispatch_tick=false` (capture is a state snapshot, not a tick
-/// advance). The render sink's vert buffer is consumed-and-replaced
-/// every frame, so a component that only emits geometry on
-/// `on_tick` will paint nothing during the capture frame even though
-/// the previous `Advance` ticked it. Pushing a `aether.tick` to the
-/// component's mailbox right before `Capture` queues a tick that
-/// drains alongside the capture request, populating the buffer
-/// before the offscreen render reads it.
-fn tick_to(mailbox: &str) -> Step {
-    Step::SendMail {
-        recipient: mailbox.to_owned(),
-        kind: "aether.tick".to_owned(),
-        params: serde_yml::Value::Null,
-    }
-}
-
 /// Smoke test: load a `.dsl` box → triangles flow to the render sink
 /// every tick → the captured frame contains pixels that diverge from
 /// the chassis clear color. Validates the entire DSL load path: the
@@ -168,9 +49,10 @@ fn tick_to(mailbox: &str) -> Step {
 /// emission, and the per-tick render-sink replay.
 #[test]
 fn dsl_box_loads_and_renders() {
-    let Some(wasm_path) = require_runtime() else {
+    let Some(wasm_path) = require_runtime("aether_mesh_viewer_component") else {
         return;
     };
+    init_save_sandbox("mesh-viewer");
     let path = write_fixture("dsl_box.dsl", BOX_DSL);
 
     let script = Script {
@@ -206,12 +88,7 @@ fn dsl_box_loads_and_renders() {
     };
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    let report = Runner::run(&mut bench, &script);
-    assert!(
-        report.passed,
-        "dsl box scenario failed:\n{:#?}",
-        report.steps,
-    );
+    run_or_panic(&mut bench, &script);
 }
 
 /// `.obj` parser smoke. The OBJ path doesn't go through `aether-mesh`'s
@@ -220,9 +97,10 @@ fn dsl_box_loads_and_renders() {
 /// regressing while the DSL branch keeps working.
 #[test]
 fn obj_quad_loads_and_renders() {
-    let Some(wasm_path) = require_runtime() else {
+    let Some(wasm_path) = require_runtime("aether_mesh_viewer_component") else {
         return;
     };
+    init_save_sandbox("mesh-viewer");
     let path = write_fixture("obj_quad.obj", QUAD_OBJ);
 
     let script = Script {
@@ -255,12 +133,7 @@ fn obj_quad_loads_and_renders() {
     };
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    let report = Runner::run(&mut bench, &script);
-    assert!(
-        report.passed,
-        "obj quad scenario failed:\n{:#?}",
-        report.steps,
-    );
+    run_or_panic(&mut bench, &script);
 }
 
 /// Parse-failure resilience: a known-bad DSL after a known-good DSL
@@ -271,9 +144,10 @@ fn obj_quad_loads_and_renders() {
 /// diverges from the clear color.
 #[test]
 fn parse_failure_keeps_prior_mesh() {
-    let Some(wasm_path) = require_runtime() else {
+    let Some(wasm_path) = require_runtime("aether_mesh_viewer_component") else {
         return;
     };
+    init_save_sandbox("mesh-viewer");
     let good = write_fixture("good.dsl", BOX_DSL);
     let bad = write_fixture("bad.dsl", BAD_DSL);
 
@@ -318,10 +192,5 @@ fn parse_failure_keeps_prior_mesh() {
     };
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    let report = Runner::run(&mut bench, &script);
-    assert!(
-        report.passed,
-        "parse-failure scenario failed:\n{:#?}",
-        report.steps,
-    );
+    run_or_panic(&mut bench, &script);
 }

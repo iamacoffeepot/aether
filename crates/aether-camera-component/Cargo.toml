@@ -34,6 +34,4 @@ tracing = { version = "0.1", default-features = false }
 aether-camera = { path = "../aether-camera" }
 aether-scenario = { path = "../aether-scenario" }
 aether-substrate-test-bench = { path = "../aether-substrate-test-bench" }
-pollster = "0.4.0"
 serde_yml = "0.0.12"
-wgpu = "29.0.1"
