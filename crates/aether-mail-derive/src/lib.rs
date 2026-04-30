@@ -678,10 +678,20 @@ fn to_screaming_snake_case(s: &str) -> String {
 //       Guarded by `if <K as Kind>::IS_INPUT` so non-input kinds
 //       compile down to no-ops.
 //
-//   (c) Per-method `aether.kinds.inputs` custom-section statics — one
-//       per `#[handler]`, one per `#[fallback]` (when present), one
-//       for the component-level doc (when present) — read by the hub
-//       at load_component for MCP capability surfacing.
+//   (c) Two associated consts on `C`'s inherent impl —
+//       `__AETHER_INPUTS_MANIFEST_LEN: usize` and
+//       `__AETHER_INPUTS_MANIFEST: [u8; …LEN]` — carrying the
+//       concatenated `aether.kinds.inputs` record bytes (one record per
+//       `#[handler]`, one per `#[fallback]` if present, one for the
+//       component-level doc if present, each prefixed with the section
+//       version byte). The `#[link_section]` static that pins these
+//       bytes into the wasm custom section is emitted by
+//       `aether_component::export!()` in the cdylib root crate, NOT
+//       here. Sections only land where `export!()` runs (the cdylib
+//       root); transitive rlib pulls of a `#[handlers]`-using crate
+//       carry only the const data and contribute no section bytes —
+//       which is what keeps duplicate Component records from stacking
+//       when a cdylib deps on a sibling cdylib's rlib output.
 //
 // The user's handler methods ride as inherent methods on `C` (since
 // `impl Trait for C` can't host non-trait items); helpers go the same
@@ -869,8 +879,8 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
     let fallback_method_tokens = fallback.as_ref().map(|f| &f.method);
     let helper_methods_tokens = helpers.iter();
 
-    let statics =
-        build_inputs_section_statics(self_ty, &handlers, fallback.as_ref(), &component_doc);
+    let inputs_manifest_consts =
+        build_inputs_manifest_consts(&handlers, fallback.as_ref(), &component_doc);
     let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers);
 
     Ok(quote! {
@@ -890,12 +900,13 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
                 #dispatch_body
             }
 
+            #inputs_manifest_consts
+
             #(#handler_methods_tokens)*
             #fallback_method_tokens
             #(#helper_methods_tokens)*
         }
 
-        #statics
         #kind_retention_statics
     })
 }
@@ -1003,127 +1014,129 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
     }
 }
 
-/// Emit the `#[link_section = "aether.kinds.inputs"]` statics — one
-/// per `#[handler]`, one for `#[fallback]` (when present), and one
-/// for the component-level doc (when present). Each static's bytes
-/// are `[INPUTS_SECTION_VERSION, ..postcard(InputsRecord)..]`
+/// Emit two associated consts inside the component's inherent impl —
+/// `__AETHER_INPUTS_MANIFEST_LEN: usize` and
+/// `__AETHER_INPUTS_MANIFEST: [u8; …LEN]` — carrying the
+/// concatenated `aether.kinds.inputs` record bytes. Each record is
+/// `[INPUTS_SECTION_VERSION (0x01), ..postcard(InputsRecord)..]`,
 /// assembled at const-eval via the hub-protocol const-fn encoders.
-/// Statics are gated to `target_arch = "wasm32"` to keep the bytes
-/// out of native test executables (same pattern as the existing
-/// `aether.kinds` emission in the `Kind` derive).
-fn build_inputs_section_statics(
-    self_ty: &Type,
+/// `aether_component::export!()` reads these consts and emits the
+/// `#[unsafe(link_section = "aether.kinds.inputs")]` static in the
+/// cdylib root crate. Keeping the section emission out of this macro
+/// is what prevents the section from stacking when a `#[handlers]`-
+/// using crate is pulled in as a wasm32 rlib by another cdylib (a
+/// rlib that doesn't call `export!()` contributes no section bytes).
+fn build_inputs_manifest_consts(
     handlers: &[HandlerFn],
     fallback: Option<&FallbackFn>,
     component_doc: &Option<String>,
 ) -> TokenStream2 {
-    let self_ty_hint = type_hint(self_ty);
+    let mut len_terms: Vec<TokenStream2> = Vec::new();
+    let mut copy_blocks: Vec<TokenStream2> = Vec::new();
 
-    let handler_statics = handlers.iter().enumerate().map(|(idx, h)| {
-        let len_ident = quote::format_ident!(
-            "__AETHER_INPUT_HANDLER_{}_{}_LEN",
-            self_ty_hint,
-            idx
-        );
-        let bytes_ident = quote::format_ident!(
-            "__AETHER_INPUT_HANDLER_{}_{}_BYTES",
-            self_ty_hint,
-            idx
-        );
-        let section_ident = quote::format_ident!(
-            "__AETHER_INPUT_HANDLER_{}_{}_SECTION",
-            self_ty_hint,
-            idx
-        );
+    for h in handlers {
         let k = &h.kind_ty;
         let doc_expr = option_str_token(&h.agent_doc);
-        quote! {
-            const #len_ident: usize =
-                ::aether_component::__macro_internals::canonical::inputs_handler_len(
-                    <#k as ::aether_component::__macro_internals::Kind>::ID,
-                    <#k as ::aether_component::__macro_internals::Kind>::NAME,
-                    #doc_expr,
-                );
-            const #bytes_ident: [u8; #len_ident] =
-                ::aether_component::__macro_internals::canonical::write_inputs_handler::<#len_ident>(
-                    <#k as ::aether_component::__macro_internals::Kind>::ID,
-                    <#k as ::aether_component::__macro_internals::Kind>::NAME,
-                    #doc_expr,
-                );
-            #[cfg(target_arch = "wasm32")]
-            #[used]
-            #[unsafe(link_section = "aether.kinds.inputs")]
-            static #section_ident: [u8; #len_ident + 1] = {
-                let mut out = [0u8; #len_ident + 1];
-                out[0] = 0x01;
+        len_terms.push(quote! {
+            (1 + ::aether_component::__macro_internals::canonical::inputs_handler_len(
+                <#k as ::aether_component::__macro_internals::Kind>::ID,
+                <#k as ::aether_component::__macro_internals::Kind>::NAME,
+                #doc_expr,
+            ))
+        });
+        copy_blocks.push(quote! {
+            {
+                const REC_LEN: usize =
+                    ::aether_component::__macro_internals::canonical::inputs_handler_len(
+                        <#k as ::aether_component::__macro_internals::Kind>::ID,
+                        <#k as ::aether_component::__macro_internals::Kind>::NAME,
+                        #doc_expr,
+                    );
+                const REC_BYTES: [u8; REC_LEN] =
+                    ::aether_component::__macro_internals::canonical::write_inputs_handler::<REC_LEN>(
+                        <#k as ::aether_component::__macro_internals::Kind>::ID,
+                        <#k as ::aether_component::__macro_internals::Kind>::NAME,
+                        #doc_expr,
+                    );
+                out[pos] = 0x01;
+                pos += 1;
                 let mut i = 0;
-                while i < #len_ident {
-                    out[i + 1] = #bytes_ident[i];
+                while i < REC_LEN {
+                    out[pos] = REC_BYTES[i];
+                    pos += 1;
                     i += 1;
                 }
-                out
-            };
-        }
-    });
+            }
+        });
+    }
 
-    let fallback_static = fallback.map(|f| {
-        let len_ident = quote::format_ident!("__AETHER_INPUT_FALLBACK_{}_LEN", self_ty_hint);
-        let bytes_ident = quote::format_ident!("__AETHER_INPUT_FALLBACK_{}_BYTES", self_ty_hint);
-        let section_ident =
-            quote::format_ident!("__AETHER_INPUT_FALLBACK_{}_SECTION", self_ty_hint);
+    if let Some(f) = fallback {
         let doc_expr = option_str_token(&f.agent_doc);
-        quote! {
-            const #len_ident: usize =
-                ::aether_component::__macro_internals::canonical::inputs_fallback_len(#doc_expr);
-            const #bytes_ident: [u8; #len_ident] =
-                ::aether_component::__macro_internals::canonical::write_inputs_fallback::<#len_ident>(#doc_expr);
-            #[cfg(target_arch = "wasm32")]
-            #[used]
-            #[unsafe(link_section = "aether.kinds.inputs")]
-            static #section_ident: [u8; #len_ident + 1] = {
-                let mut out = [0u8; #len_ident + 1];
-                out[0] = 0x01;
+        len_terms.push(quote! {
+            (1 + ::aether_component::__macro_internals::canonical::inputs_fallback_len(#doc_expr))
+        });
+        copy_blocks.push(quote! {
+            {
+                const REC_LEN: usize =
+                    ::aether_component::__macro_internals::canonical::inputs_fallback_len(#doc_expr);
+                const REC_BYTES: [u8; REC_LEN] =
+                    ::aether_component::__macro_internals::canonical::write_inputs_fallback::<REC_LEN>(#doc_expr);
+                out[pos] = 0x01;
+                pos += 1;
                 let mut i = 0;
-                while i < #len_ident {
-                    out[i + 1] = #bytes_ident[i];
+                while i < REC_LEN {
+                    out[pos] = REC_BYTES[i];
+                    pos += 1;
                     i += 1;
                 }
-                out
-            };
-        }
-    });
+            }
+        });
+    }
 
-    let component_static = component_doc.as_ref().map(|doc| {
-        let len_ident = quote::format_ident!("__AETHER_INPUT_COMPONENT_{}_LEN", self_ty_hint);
-        let bytes_ident = quote::format_ident!("__AETHER_INPUT_COMPONENT_{}_BYTES", self_ty_hint);
-        let section_ident =
-            quote::format_ident!("__AETHER_INPUT_COMPONENT_{}_SECTION", self_ty_hint);
+    if let Some(doc) = component_doc.as_ref() {
         let doc_lit = doc.as_str();
-        quote! {
-            const #len_ident: usize =
-                ::aether_component::__macro_internals::canonical::inputs_component_len(#doc_lit);
-            const #bytes_ident: [u8; #len_ident] =
-                ::aether_component::__macro_internals::canonical::write_inputs_component::<#len_ident>(#doc_lit);
-            #[cfg(target_arch = "wasm32")]
-            #[used]
-            #[unsafe(link_section = "aether.kinds.inputs")]
-            static #section_ident: [u8; #len_ident + 1] = {
-                let mut out = [0u8; #len_ident + 1];
-                out[0] = 0x01;
+        len_terms.push(quote! {
+            (1 + ::aether_component::__macro_internals::canonical::inputs_component_len(#doc_lit))
+        });
+        copy_blocks.push(quote! {
+            {
+                const REC_LEN: usize =
+                    ::aether_component::__macro_internals::canonical::inputs_component_len(#doc_lit);
+                const REC_BYTES: [u8; REC_LEN] =
+                    ::aether_component::__macro_internals::canonical::write_inputs_component::<REC_LEN>(#doc_lit);
+                out[pos] = 0x01;
+                pos += 1;
                 let mut i = 0;
-                while i < #len_ident {
-                    out[i + 1] = #bytes_ident[i];
+                while i < REC_LEN {
+                    out[pos] = REC_BYTES[i];
+                    pos += 1;
                     i += 1;
                 }
-                out
-            };
-        }
-    });
+            }
+        });
+    }
+
+    let len_expr = if len_terms.is_empty() {
+        // Unreachable in practice — `handlers_impl` rejects the empty
+        // case earlier — but keep the const arithmetic well-typed so
+        // a stripped-down macro test with no records still compiles.
+        quote! { 0usize }
+    } else {
+        quote! { #(#len_terms)+* }
+    };
 
     quote! {
-        #(#handler_statics)*
-        #fallback_static
-        #component_static
+        #[doc(hidden)]
+        pub const __AETHER_INPUTS_MANIFEST_LEN: usize = #len_expr;
+
+        #[doc(hidden)]
+        pub const __AETHER_INPUTS_MANIFEST: [u8; Self::__AETHER_INPUTS_MANIFEST_LEN] = {
+            let mut out = [0u8; Self::__AETHER_INPUTS_MANIFEST_LEN];
+            let mut pos: usize = 0usize;
+            #(#copy_blocks)*
+            let _ = pos;
+            out
+        };
     }
 }
 

@@ -63,6 +63,7 @@ dependencies = [
 name = "aether-component"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-hub-protocol",
  "aether-kinds",
  "aether-mail",
  "bytemuck",
