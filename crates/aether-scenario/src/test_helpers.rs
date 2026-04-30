@@ -4,7 +4,9 @@
 //! - probe for a wgpu adapter (skip otherwise),
 //! - locate their own pre-built wasm artifact under
 //!   `target/wasm32-unknown-unknown/{release,debug}/`,
-//! - sandbox `AETHER_SAVE_DIR` to a per-process tempdir,
+//! - sandbox `save://` to a per-process tempdir (per issue 464,
+//!   passed to `TestBench::builder().namespace_roots(...)` instead
+//!   of via env mutation),
 //! - and close every `Script` invocation with a `Runner::run` +
 //!   `assert!(report.passed, …)` postscript.
 //!
@@ -34,11 +36,15 @@
 //!     let Some(wasm_path) = require_runtime("aether_my_component") else {
 //!         return;
 //!     };
+//!     let sandbox = init_save_sandbox("my-component");
 //!     let script = Script {
 //!         name: "smoke".to_owned(),
 //!         steps: vec![/* … */],
 //!     };
-//!     let mut bench = aether_substrate_test_bench::TestBench::start_with_size(64, 48)
+//!     let mut bench = aether_substrate_test_bench::TestBench::builder()
+//!         .size(64, 48)
+//!         .namespace_roots(test_namespace_roots(sandbox))
+//!         .build()
 //!         .expect("boot");
 //!     run_or_panic(&mut bench, &script);
 //! }
@@ -48,17 +54,18 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use aether_substrate_test_bench::TestBench;
+use aether_substrate_test_bench::io::NamespaceRoots;
 
 use crate::{Runner, Script, Step};
 
-/// Process-wide test sandbox. Single `OnceLock` linearises the
-/// `AETHER_SAVE_DIR` env-var write so concurrent `getenv` from a
-/// freshly-booting `TestBench` sees a stable value.
+/// Process-wide test sandbox. Single `OnceLock` so repeat calls
+/// across a binary's tests resolve to the same dir — handy for
+/// `write_fixture` consumers that look up the sandbox by label.
 ///
-/// First call wins; the label baked into the dirname makes the
-/// tempdir self-describing for debugging. Each integration test
-/// binary is its own process and only ever calls `init_save_sandbox`
-/// with one label, so "first wins" collapses to "the binary's label".
+/// Per issue 464, the sandbox is just a directory; `TestBench`
+/// receives it via `TestBench::builder().namespace_roots(...)`, not
+/// via env-var mutation. The `OnceLock` no longer linearises a
+/// `set_var` call — it just memoises the path.
 static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Probe for any usable wgpu adapter. Used by `require_runtime` and
@@ -139,20 +146,17 @@ pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
     }
 }
 
-/// Process-wide `save://` sandbox under `AETHER_SAVE_DIR`. Idempotent;
-/// the dir is created on the first call and `AETHER_SAVE_DIR` points
-/// at it for the remainder of the process. Returns the resolved path.
+/// Process-wide `save://` sandbox dir. Idempotent; the dir is created
+/// on the first call and the same path is returned on every
+/// subsequent call. Per issue 464, this helper no longer mutates
+/// process env — callers pass the returned path to
+/// `TestBench::builder().namespace_roots(test_namespace_roots(path))`.
 ///
 /// `label` is baked into the dirname so the tempdir is self-describing
 /// (`/tmp/aether-<label>-tests-<pid>`); pass a stable per-crate label
 /// like `"mesh-viewer"` or `"test-bench-io"`. Each integration test
 /// binary is its own process, so the label is only ever set once per
 /// process and collisions across binaries don't arise.
-///
-/// Concurrency: `set_var` is racy with concurrent `getenv` on POSIX,
-/// but `OnceLock` linearises the set, and every test that boots a
-/// `TestBench` is expected to gate through this helper first — so by
-/// the time any test thread reads env, the set has completed.
 pub fn init_save_sandbox(label: &str) -> &'static Path {
     TEST_SAVE_DIR.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!(
@@ -160,13 +164,25 @@ pub fn init_save_sandbox(label: &str) -> &'static Path {
             pid = std::process::id(),
         ));
         std::fs::create_dir_all(&dir).expect("create test save dir");
-        // SAFETY: `set_var` is racy with concurrent `getenv` on POSIX;
-        // see the rustdoc above — `OnceLock` linearises the set and
-        // every test gates through this helper before booting a
-        // `TestBench`, so no concurrent `getenv` runs during the set.
-        unsafe { std::env::set_var("AETHER_SAVE_DIR", &dir) };
         dir
     })
+}
+
+/// Build a [`NamespaceRoots`] suitable for a per-process test
+/// sandbox. The supplied `save_dir` (typically the path returned by
+/// [`init_save_sandbox`]) backs the `save://` namespace; `assets://`
+/// and `config://` reuse the same dir so writes that target either
+/// don't escape the sandbox. Pass the result to
+/// `TestBench::builder().namespace_roots(...)`.
+///
+/// Per issue 464, this is the no-env replacement for the old
+/// `init_save_sandbox`-sets-`AETHER_SAVE_DIR` pattern.
+pub fn test_namespace_roots(save_dir: &Path) -> NamespaceRoots {
+    NamespaceRoots {
+        save: save_dir.to_path_buf(),
+        assets: save_dir.to_path_buf(),
+        config: save_dir.to_path_buf(),
+    }
 }
 
 /// Write `bytes` into the sandbox at filename `name`, returning the

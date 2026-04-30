@@ -14,11 +14,14 @@
 //!   builds the wasm before invoking `cargo test`.
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
-//! gate, `AETHER_SAVE_DIR` sandbox, `tick_to`, `Runner::run` + assert
+//! gate, `save://` sandbox, `tick_to`, `Runner::run` + assert
 //! postscript) live in `aether_scenario::test_helpers` (issue 460).
+//! Per issue 464, the sandbox is plumbed via
+//! `TestBench::builder().namespace_roots(...)` rather than env-var
+//! mutation.
 
 use aether_scenario::test_helpers::{
-    init_save_sandbox, require_runtime, run_or_panic, tick_to, write_fixture,
+    init_save_sandbox, require_runtime, run_or_panic, test_namespace_roots, tick_to, write_fixture,
 };
 use aether_scenario::{Check, Script, Step};
 use aether_substrate_test_bench::TestBench;
@@ -52,7 +55,7 @@ fn dsl_box_loads_and_renders() {
     let Some(wasm_path) = require_runtime("aether_mesh_viewer_component") else {
         return;
     };
-    init_save_sandbox("mesh-viewer");
+    let sandbox = init_save_sandbox("mesh-viewer");
     let path = write_fixture("dsl_box.dsl", BOX_DSL);
 
     let script = Script {
@@ -87,7 +90,11 @@ fn dsl_box_loads_and_renders() {
         ],
     };
 
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
     run_or_panic(&mut bench, &script);
 }
 
@@ -100,7 +107,7 @@ fn obj_quad_loads_and_renders() {
     let Some(wasm_path) = require_runtime("aether_mesh_viewer_component") else {
         return;
     };
-    init_save_sandbox("mesh-viewer");
+    let sandbox = init_save_sandbox("mesh-viewer");
     let path = write_fixture("obj_quad.obj", QUAD_OBJ);
 
     let script = Script {
@@ -132,7 +139,11 @@ fn obj_quad_loads_and_renders() {
         ],
     };
 
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
     run_or_panic(&mut bench, &script);
 }
 
@@ -147,7 +158,7 @@ fn parse_failure_keeps_prior_mesh() {
     let Some(wasm_path) = require_runtime("aether_mesh_viewer_component") else {
         return;
     };
-    init_save_sandbox("mesh-viewer");
+    let sandbox = init_save_sandbox("mesh-viewer");
     let good = write_fixture("good.dsl", BOX_DSL);
     let bad = write_fixture("bad.dsl", BAD_DSL);
 
@@ -191,6 +202,10 @@ fn parse_failure_keeps_prior_mesh() {
         ],
     };
 
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
     run_or_panic(&mut bench, &script);
 }

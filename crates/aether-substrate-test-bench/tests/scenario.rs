@@ -17,8 +17,10 @@
 //!   into hard panics so a missing pre-build is loud.
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
-//! gate, `AETHER_SAVE_DIR` sandbox) live in
-//! `aether_scenario::test_helpers` (issue 460).
+//! gate, `save://` sandbox) live in `aether_scenario::test_helpers`
+//! (issue 460). Per issue 464, the sandbox flows in via
+//! `TestBench::builder().namespace_roots(...)` rather than env-var
+//! mutation.
 
 use std::path::Path;
 
@@ -27,7 +29,9 @@ use aether_kinds::{
     Read, ReadResult, ReplaceComponent, Write, WriteResult,
 };
 use aether_mail::{Kind, MailboxId, mailbox_id_from_name};
-use aether_scenario::test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime};
+use aether_scenario::test_helpers::{
+    has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots,
+};
 use aether_scenario::{decode_png, differs_from_background};
 use aether_substrate_test_bench::TestBench;
 use aether_test_fixture_probe::SetRender;
@@ -293,8 +297,12 @@ fn io_write_then_read_round_trips_in_save_namespace() {
     if !require_wgpu_only() {
         return;
     }
-    init_save_sandbox("test-bench-io");
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let sandbox = init_save_sandbox("test-bench-io");
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
 
     let path = "io-roundtrip.bin".to_owned();
     let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
@@ -351,8 +359,12 @@ fn io_delete_removes_written_file() {
     if !require_wgpu_only() {
         return;
     }
-    init_save_sandbox("test-bench-io");
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let sandbox = init_save_sandbox("test-bench-io");
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
 
     let path = "io-delete.bin".to_owned();
     let _: WriteResult = bench
@@ -407,8 +419,12 @@ fn io_list_returns_written_path() {
     if !require_wgpu_only() {
         return;
     }
-    init_save_sandbox("test-bench-io");
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let sandbox = init_save_sandbox("test-bench-io");
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
 
     let path = "probe-list.bin".to_owned();
     let _: WriteResult = bench
@@ -449,8 +465,12 @@ fn io_read_unknown_path_returns_not_found() {
     if !require_wgpu_only() {
         return;
     }
-    init_save_sandbox("test-bench-io");
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    let sandbox = init_save_sandbox("test-bench-io");
+    let mut bench = TestBench::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(sandbox))
+        .build()
+        .expect("boot");
 
     let read_reply: ReadResult = bench
         .send_and_await_reply(

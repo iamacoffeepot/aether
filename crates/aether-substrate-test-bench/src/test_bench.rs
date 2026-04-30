@@ -35,6 +35,7 @@ use aether_substrate_core::{
     HubOutbound, InputSubscribers, Mailer, ReplyTarget, ReplyTo, SubstrateBoot,
     capture::CaptureQueue,
     frame_loop,
+    io::NamespaceRoots,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -156,7 +157,67 @@ pub struct TestBench {
 /// so the boot path is reproducible and the value shows up in logs.
 const TESTBENCH_SESSION_UUID: u128 = 0x7E57_BE7C_C0FF_EE15_AE7E_7BE7_5E55_1077;
 
+/// Builder for [`TestBench`]. Holds the optional config a test wants
+/// to override (offscreen target size, ADR-0041 namespace roots).
+/// Tests that want full default behaviour skip the builder and call
+/// [`TestBench::start`] / [`TestBench::start_with_size`] directly.
+///
+/// Per issue 464, the `namespace_roots` override lets a test redirect
+/// `save://` / `assets://` / `config://` at a tempdir without touching
+/// process env. Pair with `tempfile::TempDir` to scope the redirect to
+/// a single test.
+pub struct TestBenchBuilder {
+    width: u32,
+    height: u32,
+    namespace_roots: Option<NamespaceRoots>,
+}
+
+impl Default for TestBenchBuilder {
+    fn default() -> Self {
+        Self {
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
+            namespace_roots: None,
+        }
+    }
+}
+
+impl TestBenchBuilder {
+    /// Set the offscreen target size. Width / height are clamped to a
+    /// minimum of 1 inside `Gpu::new`.
+    pub fn size(mut self, width: u32, height: u32) -> Self {
+        self.width = width;
+        self.height = height;
+        self
+    }
+
+    /// Override the ADR-0041 namespace roots. Forwarded to
+    /// `SubstrateBootBuilder::namespace_roots` at boot, so the
+    /// `aether.sink.io` adapter wired by the bench resolves
+    /// `save://` / `assets://` / `config://` against these paths
+    /// instead of [`NamespaceRoots::from_env`].
+    pub fn namespace_roots(mut self, roots: NamespaceRoots) -> Self {
+        self.namespace_roots = Some(roots);
+        self
+    }
+
+    /// Boot the bench. Equivalent to `TestBench::start_with_size` for
+    /// the default builder; overrides applied via the builder methods
+    /// flow through to `SubstrateBoot::builder` and the chassis-side
+    /// IO sink wiring.
+    pub fn build(self) -> Result<TestBench, TestBenchError> {
+        TestBench::start_inner(self.width, self.height, self.namespace_roots)
+    }
+}
+
 impl TestBench {
+    /// Begin a `TestBench` boot. Default size 800x600, no
+    /// `NamespaceRoots` override — chained methods on the returned
+    /// builder set those.
+    pub fn builder() -> TestBenchBuilder {
+        TestBenchBuilder::default()
+    }
+
     /// Boot a TestBench at the default 800x600 offscreen size.
     pub fn start() -> Result<Self, TestBenchError> {
         Self::start_with_size(DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -165,10 +226,18 @@ impl TestBench {
     /// Boot a TestBench with a specific offscreen target size.
     /// Width / height are clamped to a minimum of 1 inside `Gpu::new`.
     pub fn start_with_size(width: u32, height: u32) -> Result<Self, TestBenchError> {
+        Self::start_inner(width, height, None)
+    }
+
+    fn start_inner(
+        width: u32,
+        height: u32,
+        namespace_roots: Option<NamespaceRoots>,
+    ) -> Result<Self, TestBenchError> {
         let capture_queue = CaptureQueue::new();
         let (events_tx, events_rx) = event_channel();
 
-        let boot = SubstrateBoot::builder("test-bench", env!("CARGO_PKG_VERSION"))
+        let mut builder = SubstrateBoot::builder("test-bench", env!("CARGO_PKG_VERSION"))
             .workers(WORKERS)
             .chassis_handler({
                 let cq = capture_queue.clone();
@@ -182,7 +251,11 @@ impl TestBench {
                         Arc::clone(ctx.outbound),
                     ))
                 }
-            })
+            });
+        if let Some(roots) = namespace_roots {
+            builder = builder.namespace_roots(roots);
+        }
+        let boot = builder
             .build()
             .map_err(|e| TestBenchError::Boot(e.to_string()))?;
 
@@ -206,7 +279,14 @@ impl TestBench {
         let camera_state = Arc::new(Mutex::new(IDENTITY_VIEW_PROJ));
         register_camera_sink(&boot, &camera_state, &observed_kinds);
 
-        if let Ok((reg, _roots)) = aether_substrate_core::io::build_default_registry() {
+        // Build the IO adapter registry against the boot's namespace
+        // roots — either the override the caller supplied via
+        // `TestBench::builder().namespace_roots(...)` or the env-
+        // derived defaults. Per issue 464, this path no longer reads
+        // env directly.
+        if let Ok((reg, _roots)) =
+            aether_substrate_core::io::build_registry(boot.namespace_roots.clone())
+        {
             boot.registry.register_sink(
                 "aether.sink.io",
                 aether_substrate_core::io::io_sink_handler(reg, Arc::clone(&boot.queue)),

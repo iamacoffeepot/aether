@@ -999,6 +999,14 @@ fn main() -> wasmtime::Result<()> {
     event_loop.set_control_flow(ControlFlow::Poll);
     let capture_queue = CaptureQueue::new();
 
+    // Per issue 464, this `main()` is the env-reading edge. Read every
+    // chassis-relevant env var into a config struct and thread it
+    // through the substrate-core APIs explicitly. Substrate-core
+    // itself never reads env from now on.
+    let hub_url = std::env::var("AETHER_HUB_URL").ok();
+    let net_config = aether_substrate_core::net::NetConfig::from_env();
+    let namespace_roots = aether_substrate_core::io::NamespaceRoots::from_env();
+
     // Shared runtime bring-up: log capture, registry + kind descriptors,
     // broadcast sink, scheduler, control plane, optional hub connect.
     // The chassis handler closure is invoked during build() once
@@ -1006,6 +1014,7 @@ fn main() -> wasmtime::Result<()> {
     // plane is wired, so it can `Arc::clone` what it needs to own.
     let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
         .workers(WORKERS)
+        .namespace_roots(namespace_roots)
         .chassis_handler({
             let proxy = event_loop.create_proxy();
             let capture_queue = capture_queue.clone();
@@ -1114,14 +1123,15 @@ fn main() -> wasmtime::Result<()> {
     boot.registry
         .register_sink("aether.sink.camera", camera_handler);
 
-    // `aether.io.*`: ADR-0041 substrate file I/O. Build the default
-    // adapter registry (save/assets/config roots from env vars or
-    // dirs-crate defaults) and wire the `"aether.sink.io"` sink. If the
-    // boot-time filesystem setup fails (usually a perms issue on one of
-    // the root directories), log loud and skip the sink — components
+    // `aether.io.*`: ADR-0041 substrate file I/O. Wire the
+    // `"aether.sink.io"` sink against the namespace roots resolved at
+    // boot (`boot.namespace_roots` — supplied via the builder
+    // override or `NamespaceRoots::from_env`, per issue 464). If the
+    // boot-time filesystem setup fails (usually a perms issue on one
+    // of the root directories), log loud and skip the sink — components
     // mailing `aether.sink.io` then warn-drop as "unknown mailbox" so
     // failure is visible rather than silent.
-    match aether_substrate_desktop::io::build_default_registry() {
+    match aether_substrate_desktop::io::build_registry(boot.namespace_roots.clone()) {
         Ok((registry, roots)) => {
             tracing::info!(
                 target: "aether_substrate::io",
@@ -1150,10 +1160,15 @@ fn main() -> wasmtime::Result<()> {
     // circuits to a nop adapter that replies `Disabled`. The sink
     // always registers so mail isn't silently bubble-dropped — the
     // adapter carries the gating.
-    let net_adapter = aether_substrate_core::net::build_default_adapter();
+    let net_default_timeout = net_config.default_timeout;
+    let net_adapter = aether_substrate_core::net::build_net_adapter(net_config);
     boot.registry.register_sink(
         "aether.sink.net",
-        aether_substrate_core::net::net_sink_handler(net_adapter, Arc::clone(&boot.queue)),
+        aether_substrate_core::net::net_sink_handler(
+            net_adapter,
+            Arc::clone(&boot.queue),
+            net_default_timeout,
+        ),
     );
 
     // `aether.sink.log`: ADR-0060 guest-side logging. Decode `LogEvent`
@@ -1198,8 +1213,9 @@ fn main() -> wasmtime::Result<()> {
     // Before this returns no hub-driven `load_component` can race
     // ahead of the chassis's setup and bind a chassis sink name to a
     // component (issue #262). Must happen before moving fields out of
-    // `boot` into `App` below — connect_hub_from_env borrows `&boot`.
-    let hub = boot.connect_hub_from_env()?;
+    // `boot` into `App` below — connect_hub borrows `&boot`. Per
+    // issue 464, `hub_url` was read from env at the top of `main`.
+    let hub = boot.connect_hub(hub_url.as_deref())?;
 
     let app = App {
         queue: boot.queue,

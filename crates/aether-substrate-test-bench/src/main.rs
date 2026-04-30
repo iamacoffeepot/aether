@@ -201,8 +201,15 @@ fn main() -> wasmtime::Result<()> {
     let capture_queue = CaptureQueue::new();
     let (events_tx, events_rx) = events::channel();
 
+    // Per issue 464, this `main()` is the env-reading edge. Read
+    // `AETHER_HUB_URL` and the namespace roots once and thread them
+    // through substrate-core's APIs explicitly.
+    let hub_url = std::env::var("AETHER_HUB_URL").ok();
+    let namespace_roots = aether_substrate_core::io::NamespaceRoots::from_env();
+
     let boot = SubstrateBoot::builder("test-bench", env!("CARGO_PKG_VERSION"))
         .workers(WORKERS)
+        .namespace_roots(namespace_roots)
         .chassis_handler({
             let cq = capture_queue.clone();
             let tx = events_tx.clone();
@@ -247,10 +254,12 @@ fn main() -> wasmtime::Result<()> {
         .register_sink("aether.sink.camera", camera_handler);
 
     // `aether.sink.io` per ADR-0041. Test-bench gets the same sink
-    // as desktop / headless — the io path is purely I/O. Boot-time
-    // filesystem failure logs loud and skips the sink (same policy
-    // as the other chassis) rather than failing the whole chassis.
-    match aether_substrate_core::io::build_default_registry() {
+    // as desktop / headless — the io path is purely I/O. The
+    // namespace roots come from `boot.namespace_roots` (built from
+    // env at the top of `main`, per issue 464). Boot-time filesystem
+    // failure logs loud and skips the sink (same policy as the other
+    // chassis) rather than failing the whole chassis.
+    match aether_substrate_core::io::build_registry(boot.namespace_roots.clone()) {
         Ok((registry, roots)) => {
             tracing::info!(
                 target: "aether_substrate::io",
@@ -296,7 +305,7 @@ fn main() -> wasmtime::Result<()> {
         "test-bench componentless boot — drive ticks via aether.test_bench.advance",
     );
 
-    let hub = boot.connect_hub_from_env()?;
+    let hub = boot.connect_hub(hub_url.as_deref())?;
 
     // The chassis owns its receiver; the chassis-control handler
     // already holds a clone of the sender (captured into the boot

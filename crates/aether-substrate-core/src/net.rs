@@ -238,56 +238,117 @@ fn ureq_error_to_net_error(e: ureq::Error) -> NetError {
     }
 }
 
-/// Build the default adapter from environment variables per
-/// ADR-0043 §5/§8. `AETHER_NET_DISABLE=1` short-circuits to a
-/// `DisabledNetAdapter`; otherwise reads the allowlist, body cap,
-/// and https flag and returns a `UreqNetAdapter`.
+/// Resolved configuration for the substrate's net adapter. Chassis
+/// mains read env vars (`AETHER_NET_DISABLE`, `AETHER_NET_ALLOWLIST`,
+/// `AETHER_NET_REQUIRE_HTTPS`, `AETHER_NET_MAX_BODY_BYTES`,
+/// `AETHER_NET_TIMEOUT_MS`) into a `NetConfig` and pass it to
+/// [`build_net_adapter`] / [`net_sink_handler`]. Tests build a
+/// `NetConfig` directly, never touching process env (issue 464).
+#[derive(Clone, Debug)]
+pub struct NetConfig {
+    /// `AETHER_NET_DISABLE=1` swaps the `UreqNetAdapter` for a
+    /// `DisabledNetAdapter` that replies `NetError::Disabled` to
+    /// every fetch.
+    pub disabled: bool,
+    /// Hostnames the adapter will dial. Empty = deny all
+    /// (deny-by-default per ADR-0043).
+    pub allowlist: HashSet<String>,
+    /// `AETHER_NET_REQUIRE_HTTPS=1` rejects `http://` URLs with
+    /// `NetError::InvalidUrl`.
+    pub require_https: bool,
+    /// Cap on inbound and outbound body bytes. Defaults to
+    /// [`DEFAULT_MAX_BODY_BYTES`] (16 MB).
+    pub max_body_bytes: usize,
+    /// Default per-request timeout when `Fetch.timeout_ms` is
+    /// `None`. Defaults to [`DEFAULT_TIMEOUT_MS`] (30 s).
+    pub default_timeout: Duration,
+}
+
+impl Default for NetConfig {
+    /// Conservative default: enabled, empty allowlist (deny all),
+    /// no require-https, default body cap and timeout. Tests that
+    /// want a closed adapter typically construct
+    /// `NetConfig { disabled: true, ..Default::default() }`.
+    fn default() -> Self {
+        Self {
+            disabled: false,
+            allowlist: HashSet::new(),
+            require_https: false,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            default_timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
+        }
+    }
+}
+
+impl NetConfig {
+    /// Resolve every field from the corresponding `AETHER_NET_*`
+    /// environment variable. Used by `build_default_adapter` and by
+    /// chassis mains; tests build `NetConfig` directly so they
+    /// never read process env.
+    pub fn from_env() -> Self {
+        Self {
+            disabled: disable_flag_env(),
+            allowlist: parse_allowlist_env(),
+            require_https: https_flag_env(),
+            max_body_bytes: parse_max_body_bytes_env(),
+            default_timeout: parse_default_timeout_env(),
+        }
+    }
+}
+
+/// Build a net adapter from explicit configuration. `disabled`
+/// short-circuits to a `DisabledNetAdapter`; otherwise constructs a
+/// `UreqNetAdapter` with the supplied allowlist / https-flag /
+/// body-cap. Per issue 464, this is the explicit-config entry point.
+pub fn build_net_adapter(config: NetConfig) -> Arc<dyn NetAdapter> {
+    if config.disabled {
+        tracing::info!(
+            target: "aether_substrate::net",
+            "net adapter disabled — every fetch replies Disabled",
+        );
+        return Arc::new(DisabledNetAdapter);
+    }
+
+    tracing::info!(
+        target: "aether_substrate::net",
+        allowlist_size = config.allowlist.len(),
+        require_https = config.require_https,
+        max_body_bytes = config.max_body_bytes,
+        "net adapter configured",
+    );
+
+    Arc::new(UreqNetAdapter::new(
+        config.allowlist,
+        config.require_https,
+        config.max_body_bytes,
+    ))
+}
+
+/// Env-driven wrapper around [`build_net_adapter`]. Resolves
+/// [`NetConfig::from_env`] then delegates. Kept for callers that
+/// don't need to thread config through their own struct.
 ///
 /// Deny-by-default: unset or empty `AETHER_NET_ALLOWLIST` means the
 /// allowlist is empty, and every fetch replies `AllowlistDenied`.
 /// Set the var to a comma-separated list of hostnames to allow
 /// those hosts.
 pub fn build_default_adapter() -> Arc<dyn NetAdapter> {
-    if disable_flag() {
-        tracing::info!(
-            target: "aether_substrate::net",
-            "AETHER_NET_DISABLE=1 — net sink replies Disabled for every fetch",
-        );
-        return Arc::new(DisabledNetAdapter);
-    }
-
-    let allowlist = parse_allowlist();
-    let require_https = https_flag();
-    let max_body_bytes = parse_max_body_bytes();
-
-    tracing::info!(
-        target: "aether_substrate::net",
-        allowlist_size = allowlist.len(),
-        require_https,
-        max_body_bytes,
-        "net adapter configured",
-    );
-
-    Arc::new(UreqNetAdapter::new(
-        allowlist,
-        require_https,
-        max_body_bytes,
-    ))
+    build_net_adapter(NetConfig::from_env())
 }
 
-fn disable_flag() -> bool {
+fn disable_flag_env() -> bool {
     std::env::var("AETHER_NET_DISABLE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
-fn https_flag() -> bool {
+fn https_flag_env() -> bool {
     std::env::var("AETHER_NET_REQUIRE_HTTPS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
 
-fn parse_allowlist() -> HashSet<String> {
+fn parse_allowlist_env() -> HashSet<String> {
     std::env::var("AETHER_NET_ALLOWLIST")
         .ok()
         .map(|s| {
@@ -300,14 +361,14 @@ fn parse_allowlist() -> HashSet<String> {
         .unwrap_or_default()
 }
 
-fn parse_max_body_bytes() -> usize {
+fn parse_max_body_bytes_env() -> usize {
     std::env::var("AETHER_NET_MAX_BODY_BYTES")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_MAX_BODY_BYTES)
 }
 
-fn parse_default_timeout() -> Duration {
+fn parse_default_timeout_env() -> Duration {
     let ms = std::env::var("AETHER_NET_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
@@ -316,7 +377,7 @@ fn parse_default_timeout() -> Duration {
 }
 
 /// Build the `"aether.sink.net"` sink handler. The chassis calls this
-/// at boot after `build_default_adapter` and passes the result to
+/// at boot after `build_net_adapter` and passes the result to
 /// `registry.register_sink("aether.sink.net", handler)`. The returned closure
 /// decodes incoming `Fetch` mail, hands it to the adapter, and
 /// replies with the paired `FetchResult` via `mailer.send_reply`.
@@ -325,11 +386,19 @@ fn parse_default_timeout() -> Duration {
 /// mailbox / local-component replies all funnel through one path —
 /// identical to the io sink.
 ///
+/// `default_timeout` is the fallback applied when an incoming
+/// `Fetch` has `timeout_ms: None`. Chassis mains source it from
+/// [`NetConfig::default_timeout`]; in practice the same `NetConfig`
+/// fed to `build_net_adapter` flows here.
+///
 /// Fetches run synchronously on the sink dispatch thread — ADR-0043
 /// §2 flags this as the head-of-line blocking source to fix via a
 /// multi-threaded dispatcher ADR.
-pub fn net_sink_handler(adapter: Arc<dyn NetAdapter>, mailer: Arc<Mailer>) -> SinkHandler {
-    let default_timeout = parse_default_timeout();
+pub fn net_sink_handler(
+    adapter: Arc<dyn NetAdapter>,
+    mailer: Arc<Mailer>,
+    default_timeout: Duration,
+) -> SinkHandler {
     Arc::new(
         move |kind: KindId,
               _kind_name: &str,
@@ -483,7 +552,11 @@ mod tests {
     fn disabled_adapter_replies_disabled() {
         let adapter: Arc<dyn NetAdapter> = Arc::new(DisabledNetAdapter);
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(Arc::clone(&adapter), Arc::clone(&mailer));
+        let handler = net_sink_handler(
+            Arc::clone(&adapter),
+            Arc::clone(&mailer),
+            Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
+        );
         let req = postcard::to_allocvec(&Fetch {
             url: "https://api.example.com/".to_string(),
             method: HttpMethod::Get,
@@ -593,7 +666,11 @@ mod tests {
             body: b"{}".to_vec(),
         })) as Arc<dyn NetAdapter>;
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(Arc::clone(&adapter), Arc::clone(&mailer));
+        let handler = net_sink_handler(
+            Arc::clone(&adapter),
+            Arc::clone(&mailer),
+            Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
+        );
         let req = postcard::to_allocvec(&Fetch {
             url: "https://api.example.com/v1".to_string(),
             method: HttpMethod::Get,
@@ -630,7 +707,11 @@ mod tests {
     fn dispatch_fetch_err_echoes_url_and_error() {
         let adapter = StubAdapter::with(Err(NetError::Timeout)) as Arc<dyn NetAdapter>;
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(Arc::clone(&adapter), Arc::clone(&mailer));
+        let handler = net_sink_handler(
+            Arc::clone(&adapter),
+            Arc::clone(&mailer),
+            Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
+        );
         let req = postcard::to_allocvec(&Fetch {
             url: "https://slow.example.com/".to_string(),
             method: HttpMethod::Get,
@@ -664,7 +745,11 @@ mod tests {
             body: vec![],
         })) as Arc<dyn NetAdapter>;
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(Arc::clone(&adapter), Arc::clone(&mailer));
+        let handler = net_sink_handler(
+            Arc::clone(&adapter),
+            Arc::clone(&mailer),
+            Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
+        );
         handler(
             KindId(<Fetch as Kind>::ID),
             Fetch::NAME,
@@ -688,7 +773,11 @@ mod tests {
     fn dispatch_unknown_kind_does_not_reply() {
         let adapter = StubAdapter::with(Err(NetError::Disabled)) as Arc<dyn NetAdapter>;
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(Arc::clone(&adapter), Arc::clone(&mailer));
+        let handler = net_sink_handler(
+            Arc::clone(&adapter),
+            Arc::clone(&mailer),
+            Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
+        );
         handler(
             KindId(0xdead_beef),
             "some.other",
@@ -702,11 +791,12 @@ mod tests {
 
     #[test]
     fn dispatch_fetch_uses_default_timeout_when_none_provided() {
-        // StubAdapter captures the request; we just need to confirm
-        // the dispatcher picks a reasonable default when
-        // `timeout_ms: None` arrives on the wire. Default path
-        // resolves to `parse_default_timeout()` which honours
-        // `AETHER_NET_TIMEOUT_MS` at closure construction time.
+        // The dispatcher should fall back to the default timeout
+        // baked into the handler closure when an incoming `Fetch`
+        // arrives with `timeout_ms: None`. Per issue 464, that
+        // default is now an explicit handler argument; this test
+        // builds it from `NetConfig::default` so no env read is
+        // involved.
         let adapter_stub = StubAdapter::with(Ok(FetchResponse {
             status: 200,
             headers: vec![],
@@ -714,7 +804,7 @@ mod tests {
         }));
         let adapter: Arc<dyn NetAdapter> = Arc::clone(&adapter_stub) as Arc<dyn NetAdapter>;
         let (mailer, _rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(adapter, mailer);
+        let handler = net_sink_handler(adapter, mailer, NetConfig::default().default_timeout);
         let req = postcard::to_allocvec(&Fetch {
             url: "https://api.example.com/".to_string(),
             method: HttpMethod::Get,
@@ -737,22 +827,22 @@ mod tests {
             .unwrap()
             .take()
             .expect("adapter was not called");
-        // Default is 30s unless AETHER_NET_TIMEOUT_MS was set; a
-        // nonzero timeout is enough to prove the closure handed a
-        // default through, without coupling the test to the exact
-        // env state.
+        // Default is 30s; a nonzero timeout is enough to prove the
+        // closure handed the default through, without pinning to
+        // the exact value.
         assert!(observed.timeout > Duration::ZERO);
     }
 
     #[test]
-    fn build_default_adapter_with_disable_returns_disabled() {
-        // Set the env var only for this test; clear after. Running
-        // single-threaded is the safe path (cargo test --test-threads=1)
-        // but we scope the mutation tightly regardless.
-        // SAFETY: std::env::set_var in Rust 2024 is `unsafe` because
-        // of POSIX getenv thread-safety.
-        unsafe { std::env::set_var("AETHER_NET_DISABLE", "1") };
-        let a = build_default_adapter();
+    fn build_net_adapter_with_disable_returns_disabled() {
+        // Per issue 464, env mutation is the chassis main's concern.
+        // Tests build a `NetConfig` directly so this path stays env-
+        // free and thread-safe under cargo's default parallel runner.
+        let cfg = NetConfig {
+            disabled: true,
+            ..NetConfig::default()
+        };
+        let a = build_net_adapter(cfg);
         let resp = a.fetch(FetchRequest {
             url: "https://example.com/".to_string(),
             method: HttpMethod::Get,
@@ -760,7 +850,6 @@ mod tests {
             body: vec![],
             timeout: Duration::from_secs(30),
         });
-        unsafe { std::env::remove_var("AETHER_NET_DISABLE") };
         assert!(matches!(resp, Err(NetError::Disabled)));
     }
 }
