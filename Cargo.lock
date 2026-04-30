@@ -80,7 +80,12 @@ dependencies = [
  "aether-component",
  "aether-kinds",
  "aether-mail",
+ "aether-scenario",
+ "aether-substrate-test-bench",
  "bytemuck",
+ "pollster",
+ "serde_yml",
+ "wgpu",
 ]
 
 [[package]]
