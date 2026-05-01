@@ -19,7 +19,7 @@ mod test_bench;
 
 pub use test_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TestBench, TestBenchBuilder, TestBenchError};
 
-pub use aether_hub::{HubClient, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail};
+pub use aether_substrate::hub::{HubClient, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail};
 pub use aether_substrate_core::{
     AETHER_CONTROL, Chassis, ChassisControlHandler, Component, ControlPlane, HUB_CLAUDE_BROADCAST,
     HubOutbound, InputSubscribers, KindId, Mail, MailKind, MailboxEntry, MailboxId, Mailer,

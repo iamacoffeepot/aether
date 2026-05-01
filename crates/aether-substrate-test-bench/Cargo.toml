@@ -22,7 +22,7 @@ path = "src/lib.rs"
 
 [dependencies]
 aether-substrate-core = { path = "../aether-substrate-core", features = ["render"] }
-aether-hub = { path = "../aether-hub" }
+aether-substrate = { path = "../aether-substrate" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"

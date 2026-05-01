@@ -2,9 +2,7 @@
 resolver = "3"
 members = [
     "crates/aether-substrate-core",
-    "crates/aether-substrate-desktop",
-    "crates/aether-substrate-headless",
-    "crates/aether-substrate-hub",
+    "crates/aether-substrate",
     "crates/aether-substrate-test-bench",
     "crates/aether-scenario",
     "crates/aether-scenario-cli",
@@ -20,7 +18,6 @@ members = [
     "crates/aether-camera-component",
     "crates/aether-mesh-viewer-component",
     "crates/aether-test-fixture-probe",
-    "crates/aether-hub",
     "crates/aether-data-derive",
     "demos/sokoban",
     "demos/tic-tac-toe",
