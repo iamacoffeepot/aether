@@ -223,17 +223,11 @@ fn main() -> wasmtime::Result<()> {
     // shape as desktop. Deny-by-default via `AETHER_NET_ALLOWLIST`;
     // `AETHER_NET_DISABLE=1` swaps to a nop adapter that replies
     // `Disabled`. The `NetConfig` was built from env at the top of
-    // `main` (issue 464).
-    let net_default_timeout = net_config.default_timeout;
-    let net_adapter = aether_substrate_core::net::build_net_adapter(net_config);
-    boot.registry.register_sink(
-        "aether.sink.net",
-        aether_substrate_core::net::net_sink_handler(
-            net_adapter,
-            Arc::clone(&boot.queue),
-            net_default_timeout,
-        ),
-    );
+    // `main` (issue 464). ADR-0070 phase 3 wraps it as a native
+    // capability with its own dispatcher thread.
+    boot.add_capability(aether_substrate_core::capabilities::NetCapability::new(
+        net_config,
+    ))?;
 
     // `aether.sink.log`: ADR-0060. Same capability as desktop — guest
     // log mail is independent of GPU / windowing, so headless wires

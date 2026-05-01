@@ -1137,17 +1137,11 @@ fn main() -> wasmtime::Result<()> {
     // fetch replies `AllowlistDenied`. `AETHER_NET_DISABLE=1` short-
     // circuits to a nop adapter that replies `Disabled`. The sink
     // always registers so mail isn't silently bubble-dropped — the
-    // adapter carries the gating.
-    let net_default_timeout = net_config.default_timeout;
-    let net_adapter = aether_substrate_core::net::build_net_adapter(net_config);
-    boot.registry.register_sink(
-        "aether.sink.net",
-        aether_substrate_core::net::net_sink_handler(
-            net_adapter,
-            Arc::clone(&boot.queue),
-            net_default_timeout,
-        ),
-    );
+    // adapter carries the gating. ADR-0070 phase 3 wraps it as a
+    // native capability with its own dispatcher thread.
+    boot.add_capability(aether_substrate_core::capabilities::NetCapability::new(
+        net_config,
+    ))?;
 
     // `aether.sink.log`: ADR-0060 guest-side logging. Decode `LogEvent`
     // mail and re-emit through the host `log` facade; the existing
