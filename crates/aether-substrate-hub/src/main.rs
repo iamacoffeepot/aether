@@ -2,7 +2,7 @@
 //!
 //! Reads chassis-relevant env vars into a [`HubEnv`], asks the
 //! [`HubChassis`] to build itself (engine + session + spawn + log
-//! stores, in-process loopback substrate, [`HubServerCapability`]
+//! stores, in-process loopback substrate, [`HubServerDriverCapability`]
 //! driver), and blocks on the resulting chassis until either listener
 //! exits or a SIGINT/SIGTERM arrives. ADR-0071 phase 7d collapsed
 //! every step the prior `main()` body did inline (and the further

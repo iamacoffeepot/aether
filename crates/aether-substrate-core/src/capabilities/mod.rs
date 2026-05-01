@@ -11,7 +11,7 @@
 //!   feature), `render` + `camera` (gated by `render` feature). All
 //!   chassis-conditional; chassis mains call
 //!   [`crate::SubstrateBoot::add_capability`] after boot.
-//! - Phase 4–5: `HubClientCapability` and `HubServerCapability` land
+//! - Phase 4–5: `HubClientCapability` and `HubServerDriverCapability` land
 //!   in the new `aether-hub` crate, not here, so the substrate ends
 //!   with zero hub knowledge.
 //!
