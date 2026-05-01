@@ -41,7 +41,7 @@ use aether_substrate_core::{
 
 use crate::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
 use crate::events::{ChassisEvent, EventReceiver, channel as event_channel};
-use crate::render::{Gpu, VERTEX_BUFFER_BYTES};
+use crate::render::Gpu;
 
 /// Default offscreen target dimensions when the caller picks
 /// `start()` (no explicit size). 800x600 matches the scenario harness
@@ -109,8 +109,10 @@ pub struct TestBench {
     events_rx: EventReceiver,
 
     gpu: Gpu,
-    frame_vertices: Arc<Mutex<Vec<u8>>>,
-    camera_state: Arc<Mutex<[f32; 16]>>,
+    /// `triangles_rendered` is read on the FrameStats emit path; the
+    /// other accumulator handles (`frame_vertices` / `camera_state`)
+    /// retired post-C2 because `RenderRunning::record_frame` drains
+    /// them internally.
     triangles_rendered: Arc<AtomicU64>,
 
     input_subscribers: InputSubscribers,
@@ -262,6 +264,7 @@ impl TestBench {
             passive,
             mut boot,
             render_handles,
+            render_running,
             kind_tick,
             kind_frame_stats,
             hub: _hub,
@@ -287,7 +290,7 @@ impl TestBench {
             );
         }
 
-        let gpu = Gpu::new(width, height);
+        let gpu = Gpu::new(width, height, render_running);
 
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
@@ -303,8 +306,6 @@ impl TestBench {
             capture_queue,
             events_rx,
             gpu,
-            frame_vertices: render_handles.frame_vertices,
-            camera_state: render_handles.camera_state,
             triangles_rendered: render_handles.triangles_rendered,
             input_subscribers,
             broadcast_mbox,
@@ -615,15 +616,9 @@ impl TestBench {
         }
         frame_loop::drain_or_abort(&self.queue, &self.outbound);
 
-        let verts = std::mem::replace(
-            &mut *self.frame_vertices.lock().unwrap(),
-            Vec::with_capacity(VERTEX_BUFFER_BYTES),
-        );
-        let view_proj = *self.camera_state.lock().unwrap();
-
         match self.capture_queue.take() {
             Some(req) => {
-                let result = match self.gpu.render_and_capture(&verts, &view_proj) {
+                let result = match self.gpu.render_and_capture() {
                     Ok(png) => CaptureFrameResult::Ok { png },
                     Err(error) => CaptureFrameResult::Err { error },
                 };
@@ -633,7 +628,7 @@ impl TestBench {
                 self.outbound.send_reply(req.reply_to, &result);
             }
             None => {
-                self.gpu.render(&verts, &view_proj);
+                self.gpu.render();
             }
         }
 

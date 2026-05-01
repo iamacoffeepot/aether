@@ -1,28 +1,21 @@
-// wgpu plumbing for the desktop chassis. Owns the device/queue/surface
-// plus the shared `core::render::Pipeline` + `Targets` (issue 421);
-// each frame the main thread hands in a byte blob drained from the
-// render sink plus the latest camera view_proj. The render path goes
-// through `core::render::record_main_pass` which uploads + draws into
-// the offscreen target; we then optionally blit the offscreen into
-// the swapchain and present.
-//
-// Capture path: `prepare_capture_copy` reads from the offscreen
-// texture (not the swapchain), so captures are independent of window
-// state. Non-capture frames pay nothing beyond the one extra texture
-// copy per frame.
+// Desktop wgpu plumbing. ADR-0071 phase C2: pipeline + targets moved
+// into core's `RenderRunning` (via `RenderGpu` + `install_gpu`); this
+// file now owns only the desktop-specific surface + swapchain config
+// + optional wireframe overlay pipeline. Each frame creates an
+// encoder, asks `render_running.record_frame(...)` to record the
+// shared offscreen pass, optionally records a capture copy, copies
+// offscreen → swapchain, submits, and presents.
 //
 // Wireframe (`AETHER_WIREFRAME=line|overlay`) is desktop-only — a
 // dev-affordance for inspecting triangulation on the windowed
-// chassis. `Line` re-builds the main pipeline with `PolygonMode::Line`;
-// `Overlay` keeps filled rendering and adds a second draw inside the
-// same pass via `record_main_pass`'s `extra_pipelines` slice.
+// chassis. `Line` builds RenderGpu with `PolygonMode::Line` so the
+// main pipeline draws as wires; `Overlay` keeps Fill and adds a
+// second pipeline as an extra in `record_frame`.
 
 use std::sync::Arc;
 
-use aether_substrate_core::render::{
-    self, CaptureMeta, Pipeline, RenderError, Targets, build_main_pipeline, finish_capture,
-    prepare_capture_copy, record_main_pass, vertex_buffer_layout,
-};
+use aether_substrate_core::capabilities::{RenderGpu, RenderRunning};
+use aether_substrate_core::render::{self, RenderError, vertex_buffer_layout};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
@@ -58,8 +51,6 @@ fn fs_main() -> @location(0) vec4<f32> {
 
 pub struct Gpu {
     pub surface: wgpu::Surface<'static>,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     /// Snapshot of the adapter chosen at `new()` — `AdapterInfo` plus
     /// the resolved `Limits`. Retained so `platform_info` can report
@@ -68,13 +59,16 @@ pub struct Gpu {
     /// anyway).
     pub adapter_info: wgpu::AdapterInfo,
     pub limits: wgpu::Limits,
-    pipeline: Pipeline,
-    targets: Targets,
+    /// Cloned out of [`RenderGpu`] at install for ergonomic access on
+    /// the surface/submit path. Source of truth lives inside
+    /// `RenderRunning` post-install.
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     /// Wireframe overlay pipeline. `Some` only when `AETHER_WIREFRAME`
-    /// is set to `1` / `overlay`. The main pipeline always draws
-    /// first; this one then redraws the same vertex buffer in
-    /// `PolygonMode::Line` over the top so geometry is legible.
+    /// is `1` / `overlay`. `record_frame` draws this after the main
+    /// pipeline as an extra inside the same render pass.
     wire_pipeline: Option<wgpu::RenderPipeline>,
+    render_running: Arc<RenderRunning>,
 }
 
 /// Wireframe rendering mode, set at boot via `AETHER_WIREFRAME`.
@@ -104,7 +98,7 @@ impl WireframeMode {
 }
 
 impl Gpu {
-    pub fn new(window: Arc<Window>) -> Self {
+    pub fn new(window: Arc<Window>, render_running: Arc<RenderRunning>) -> Self {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance
@@ -155,6 +149,9 @@ impl Gpu {
         }))
         .expect("request_device");
 
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
         // Prefer sRGB so the clear color matches intuition.
@@ -179,20 +176,28 @@ impl Gpu {
         };
         surface.configure(&device, &config);
 
-        let targets = Targets::new(&device, format, config.width, config.height);
         let polygon_mode = if wireframe_mode == WireframeMode::Line {
             wgpu::PolygonMode::Line
         } else {
             wgpu::PolygonMode::Fill
         };
-        let pipeline = build_main_pipeline(&device, &queue, format, polygon_mode);
+        render_running.install_gpu(RenderGpu::new(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            format,
+            config.width,
+            config.height,
+            polygon_mode,
+        ));
 
         // Wireframe overlay pipeline: same vertex/uniform layout, but
         // `PolygonMode::Line` and a flat dark fragment color so the
-        // wires read against any filled color underneath. A small
-        // negative depth bias lifts the lines toward the camera so
-        // they aren't z-fought by the filled triangles they trace.
+        // wires read against any filled color underneath. Built post-
+        // install so it can borrow the bind group + pipeline layouts
+        // from the installed RenderGpu's pipeline.
         let wire_pipeline = if wireframe_mode == WireframeMode::Overlay {
+            let installed = render_running.gpu().expect("install_gpu just succeeded");
+            let pipeline_layout = &installed.pipeline.pipeline_layout;
             let wire_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("wireframe shader"),
                 source: wgpu::ShaderSource::Wgsl(WIREFRAME_WGSL.into()),
@@ -201,7 +206,7 @@ impl Gpu {
             Some(
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("wireframe overlay pipeline"),
-                    layout: Some(&pipeline.pipeline_layout),
+                    layout: Some(pipeline_layout),
                     vertex: wgpu::VertexState {
                         module: &wire_shader,
                         entry_point: Some("vs_main"),
@@ -249,14 +254,13 @@ impl Gpu {
 
         Self {
             surface,
-            device,
-            queue,
             config,
             adapter_info,
             limits,
-            pipeline,
-            targets,
+            device,
+            queue,
             wire_pipeline,
+            render_running,
         }
     }
 
@@ -267,12 +271,12 @@ impl Gpu {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
-        self.targets
-            .resize(&self.device, self.config.width, self.config.height);
+        self.render_running
+            .resize(self.config.width, self.config.height);
     }
 
-    pub fn render(&mut self, vertices: &[u8], view_proj: &[f32; 16]) {
-        let _ = self.render_impl(vertices, view_proj, false);
+    pub fn render(&mut self) {
+        let _ = self.render_impl(false);
     }
 
     /// Variant of `render` that also copies the offscreen texture into
@@ -280,28 +284,19 @@ impl Gpu {
     /// capture-path failure, returns `Err(reason)`; the frame itself
     /// still renders and (if the surface is available) presents, since
     /// capture is a side channel.
-    pub fn render_and_capture(
-        &mut self,
-        vertices: &[u8],
-        view_proj: &[f32; 16],
-    ) -> Result<Vec<u8>, String> {
-        self.render_impl(vertices, view_proj, true)
+    pub fn render_and_capture(&mut self) -> Result<Vec<u8>, String> {
+        self.render_impl(true)
             .ok_or_else(|| "capture did not produce a result".to_owned())?
     }
 
-    /// Draw `vertices` into the offscreen target with `view_proj` as
-    /// the camera uniform, optionally encode a capture copy, then
-    /// best-effort blit to the swapchain and present. Returns
-    /// `Some(Ok(png))` / `Some(Err(reason))` when `capture` is set;
-    /// `None` when `capture` is false or the capture path couldn't
-    /// allocate. Surface unavailability does *not* prevent capture —
-    /// offscreen is the source of truth.
-    fn render_impl(
-        &mut self,
-        vertices: &[u8],
-        view_proj: &[f32; 16],
-        capture: bool,
-    ) -> Option<Result<Vec<u8>, String>> {
+    /// Draw the current accumulator vertices into the offscreen target
+    /// with the latest camera view-proj, optionally encode a capture
+    /// copy, then best-effort blit to the swapchain and present.
+    /// Returns `Some(Ok(png))` / `Some(Err(reason))` when `capture` is
+    /// set; `None` when `capture` is false or the capture path
+    /// couldn't allocate. Surface unavailability does *not* prevent
+    /// capture — offscreen is the source of truth.
+    fn render_impl(&mut self, capture: bool) -> Option<Result<Vec<u8>, String>> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -317,15 +312,10 @@ impl Gpu {
             }
             None => &[],
         };
-        match record_main_pass(
-            &self.queue,
-            &mut encoder,
-            &self.pipeline,
-            &self.targets,
-            vertices,
-            view_proj,
-            extra_pipelines,
-        ) {
+        match self
+            .render_running
+            .record_frame(&mut encoder, extra_pipelines)
+        {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => return None,
         }
@@ -333,12 +323,8 @@ impl Gpu {
         // Capture path: the copy runs against the offscreen texture,
         // which is unaffected by whether a swapchain image is available
         // this frame. That decouples capture from window visibility.
-        let capture_meta: Option<CaptureMeta> = if capture {
-            Some(prepare_capture_copy(
-                &self.device,
-                &mut self.targets,
-                &mut encoder,
-            ))
+        let capture_meta = if capture {
+            Some(self.render_running.record_capture_copy(&mut encoder))
         } else {
             None
         };
@@ -349,25 +335,28 @@ impl Gpu {
         // still resolve.
         let surface_tex = self.acquire_surface_texture();
         if let Some(tex) = surface_tex.as_ref() {
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: self.targets.color_texture(),
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &tex.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: self.targets.width(),
-                    height: self.targets.height(),
-                    depth_or_array_layers: 1,
-                },
-            );
+            let (w, h) = self.render_running.color_size();
+            self.render_running.with_color_texture(|src| {
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: src,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            });
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -375,7 +364,7 @@ impl Gpu {
             tex.present();
         }
 
-        capture_meta.map(|meta| finish_capture(&self.device, &self.targets, &meta))
+        capture_meta.map(|meta| self.render_running.finish_capture(&meta))
     }
 
     /// Try to get the current swapchain texture. Reconfigures the

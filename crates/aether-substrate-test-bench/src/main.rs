@@ -25,7 +25,7 @@ use aether_substrate_core::{
 use aether_substrate_test_bench::{
     TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
     events::{self, ChassisEvent},
-    render::{Gpu, VERTEX_BUFFER_BYTES},
+    render::Gpu,
 };
 
 /// Parse `AETHER_TEST_BENCH_SIZE=WxH`. Falls back to defaults on
@@ -83,6 +83,7 @@ fn main() -> wasmtime::Result<()> {
         passive,
         mut boot,
         render_handles,
+        render_running,
         kind_tick,
         kind_frame_stats,
         hub,
@@ -94,7 +95,7 @@ fn main() -> wasmtime::Result<()> {
     boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))?;
 
     let (width, height) = parse_size_env();
-    let gpu = Gpu::new(width, height);
+    let gpu = Gpu::new(width, height, render_running);
     tracing::info!(
         target: "aether_substrate::boot",
         adapter = %gpu.adapter_info.name,
@@ -223,15 +224,9 @@ fn run_frame(
     }
     frame_loop::drain_or_abort(queue, outbound);
 
-    let verts = std::mem::replace(
-        &mut *render_handles.frame_vertices.lock().unwrap(),
-        Vec::with_capacity(VERTEX_BUFFER_BYTES),
-    );
-    let view_proj = *render_handles.camera_state.lock().unwrap();
-
     match capture_queue.take() {
         Some(req) => {
-            let result = match gpu.render_and_capture(&verts, &view_proj) {
+            let result = match gpu.render_and_capture() {
                 Ok(png) => CaptureFrameResult::Ok { png },
                 Err(error) => CaptureFrameResult::Err { error },
             };
@@ -241,7 +236,7 @@ fn run_frame(
             outbound.send_reply(req.reply_to, &result);
         }
         None => {
-            gpu.render(&verts, &view_proj);
+            gpu.render();
         }
     }
 
