@@ -208,35 +208,15 @@ fn main() -> wasmtime::Result<()> {
         ),
     );
 
-    // `aether.io.*` per ADR-0041. Headless gets the same sink as
-    // desktop — the io path is purely I/O, no GPU or window surface,
-    // so there's nothing chassis-specific to diverge on. The
-    // namespace roots come from `boot.namespace_roots` (built from
-    // env at the top of `main`, per issue 464). Boot-time filesystem
-    // failure logs loud and skips the sink (same policy as desktop)
-    // rather than failing the whole chassis.
-    match aether_substrate_core::io::build_registry(boot.namespace_roots.clone()) {
-        Ok((registry, roots)) => {
-            tracing::info!(
-                target: "aether_substrate::io",
-                save = %roots.save.display(),
-                assets = %roots.assets.display(),
-                config = %roots.config.display(),
-                "io adapters registered",
-            );
-            boot.registry.register_sink(
-                "aether.sink.io",
-                aether_substrate_core::io::io_sink_handler(registry, Arc::clone(&boot.queue)),
-            );
-        }
-        Err(e) => {
-            tracing::error!(
-                target: "aether_substrate::io",
-                error = %e,
-                "io adapter init failed — `io` sink not registered",
-            );
-        }
-    }
+    // `aether.io.*` per ADR-0041. Same capability as desktop —
+    // the io path is purely I/O, no GPU or window surface, so
+    // there's nothing chassis-specific to diverge on. ADR-0070
+    // phase 3 wraps it as a native capability with fail-fast boot
+    // semantics (ADR-0063); pre-phase-3 behavior was log-and-skip
+    // on adapter init failure.
+    boot.add_capability(aether_substrate_core::capabilities::IoCapability::new(
+        boot.namespace_roots.clone(),
+    ))?;
 
     // `aether.net.fetch`: ADR-0043 substrate HTTP egress. Headless
     // runs the asset pipeline, so net is first-class here — same

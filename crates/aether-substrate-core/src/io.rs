@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
-use crate::registry::SinkHandler;
 use aether_data::{Kind, KindId};
 use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
@@ -320,13 +319,12 @@ pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, Namesp
     build_registry(NamespaceRoots::from_env())
 }
 
-/// Build the `"aether.sink.io"` sink handler. The chassis calls this
-/// at boot after populating `registry` with adapters and passes the
-/// result to `registry.register_sink("aether.sink.io", handler)`. The
-/// returned closure
-/// demultiplexes by `kind_id` (Read / Write / Delete / List, all
-/// postcard-decoded), drives the adapter, and replies with the
-/// paired `*Result` kind via `mailer.send_reply`.
+/// Demultiplex one envelope's payload to the matching per-kind
+/// adapter call. ADR-0070 Phase 3 (part 2) moved the wrapping
+/// `aether.sink.io` mailbox dispatch out of an inline
+/// `register_sink` call and into [`crate::capabilities::io`] —
+/// this function is what the capability's dispatcher thread invokes
+/// for each envelope it receives.
 ///
 /// The reply router is `Mailer::send_reply`, not
 /// `HubOutbound::send_reply`, so session / engine-mailbox /
@@ -335,24 +333,11 @@ pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, Namesp
 /// into the requesting component's inbox; session / engine mail
 /// hands off to the hub outbound as before.
 ///
-/// Adapter calls run synchronously on the sink dispatch thread —
+/// Adapter calls run synchronously on the dispatcher thread —
 /// fine for save/config (KB-MB files). Asset-sized workloads
 /// should not ride this path; ADR-0041 flags a future host-fn fast
 /// path for zero-copy streaming reads.
-pub fn io_sink_handler(registry: Arc<AdapterRegistry>, mailer: Arc<Mailer>) -> SinkHandler {
-    Arc::new(
-        move |kind: KindId,
-              _kind_name: &str,
-              _origin: Option<&str>,
-              sender: ReplyTo,
-              bytes: &[u8],
-              _count: u32| {
-            dispatch_io_mail(&registry, &mailer, kind, sender, bytes);
-        },
-    )
-}
-
-fn dispatch_io_mail(
+pub(crate) fn dispatch_io_mail(
     registry: &AdapterRegistry,
     mailer: &Mailer,
     kind: KindId,
@@ -823,20 +808,12 @@ mod tests {
             .unwrap()
             .write("slot.bin", &[9, 9, 9])
             .unwrap();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Read {
             namespace: "save".to_string(),
             path: "slot.bin".to_string(),
         })
         .unwrap();
-        handler(
-            <Read as Kind>::ID,
-            Read::NAME,
-            None,
-            session_sender(),
-            &req,
-            1,
-        );
+        dispatch_io_mail(&reg, &mailer, <Read as Kind>::ID, session_sender(), &req);
         match decode_reply::<ReadResult>(&rx) {
             ReadResult::Ok {
                 namespace,
@@ -857,20 +834,12 @@ mod tests {
         let root = scratch_root("dispatch-ns");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Read {
             namespace: "nope".to_string(),
             path: "x.bin".to_string(),
         })
         .unwrap();
-        handler(
-            <Read as Kind>::ID,
-            Read::NAME,
-            None,
-            session_sender(),
-            &req,
-            1,
-        );
+        dispatch_io_mail(&reg, &mailer, <Read as Kind>::ID, session_sender(), &req);
         match decode_reply::<ReadResult>(&rx) {
             ReadResult::Err {
                 namespace,
@@ -893,20 +862,12 @@ mod tests {
         let root = scratch_root("dispatch-nf");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Read {
             namespace: "save".to_string(),
             path: "ghost.bin".to_string(),
         })
         .unwrap();
-        handler(
-            <Read as Kind>::ID,
-            Read::NAME,
-            None,
-            session_sender(),
-            &req,
-            1,
-        );
+        dispatch_io_mail(&reg, &mailer, <Read as Kind>::ID, session_sender(), &req);
         assert!(matches!(
             decode_reply::<ReadResult>(&rx),
             ReadResult::Err {
@@ -922,21 +883,13 @@ mod tests {
         let root = scratch_root("dispatch-write");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Write {
             namespace: "save".to_string(),
             path: "slot.bin".to_string(),
             bytes: vec![1, 2, 3],
         })
         .unwrap();
-        handler(
-            <Write as Kind>::ID,
-            Write::NAME,
-            None,
-            session_sender(),
-            &req,
-            1,
-        );
+        dispatch_io_mail(&reg, &mailer, <Write as Kind>::ID, session_sender(), &req);
         match decode_reply::<WriteResult>(&rx) {
             WriteResult::Ok { namespace, path } => {
                 assert_eq!(namespace, "save");
@@ -956,21 +909,13 @@ mod tests {
         let root = scratch_root("dispatch-ro");
         let reg = build_save_only_registry(&root, false);
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Write {
             namespace: "save".to_string(),
             path: "slot.bin".to_string(),
             bytes: vec![],
         })
         .unwrap();
-        handler(
-            <Write as Kind>::ID,
-            Write::NAME,
-            None,
-            session_sender(),
-            &req,
-            1,
-        );
+        dispatch_io_mail(&reg, &mailer, <Write as Kind>::ID, session_sender(), &req);
         assert!(matches!(
             decode_reply::<WriteResult>(&rx),
             WriteResult::Err {
@@ -987,20 +932,12 @@ mod tests {
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("x.bin", b"x").unwrap();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Delete {
             namespace: "save".to_string(),
             path: "x.bin".to_string(),
         })
         .unwrap();
-        handler(
-            <Delete as Kind>::ID,
-            Delete::NAME,
-            None,
-            session_sender(),
-            &req,
-            1,
-        );
+        dispatch_io_mail(&reg, &mailer, <Delete as Kind>::ID, session_sender(), &req);
         match decode_reply::<DeleteResult>(&rx) {
             DeleteResult::Ok { namespace, path } => {
                 assert_eq!(namespace, "save");
@@ -1022,20 +959,12 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("b.bin", b"").unwrap();
         reg.get("save").unwrap().write("a.bin", b"").unwrap();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&List {
             namespace: "save".to_string(),
             prefix: "".to_string(),
         })
         .unwrap();
-        handler(
-            <List as Kind>::ID,
-            List::NAME,
-            None,
-            session_sender(),
-            &req,
-            1,
-        );
+        dispatch_io_mail(&reg, &mailer, <List as Kind>::ID, session_sender(), &req);
         match decode_reply::<ListResult>(&rx) {
             ListResult::Ok {
                 namespace,
@@ -1059,15 +988,7 @@ mod tests {
         let root = scratch_root("dispatch-unknown");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
-        handler(
-            KindId(0xdead_beef),
-            "some.other",
-            None,
-            session_sender(),
-            &[],
-            1,
-        );
+        dispatch_io_mail(&reg, &mailer, KindId(0xdead_beef), session_sender(), &[]);
         assert!(rx.try_recv().is_err(), "unexpected reply on unknown kind");
         cleanup(&root);
     }
@@ -1156,19 +1077,17 @@ mod tests {
             .insert(caller_mailbox, Arc::clone(&entry));
 
         // Dispatch a Read with sender = Component(caller_mailbox).
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
         let req = postcard::to_allocvec(&Read {
             namespace: "save".to_string(),
             path: "slot.bin".to_string(),
         })
         .unwrap();
-        handler(
+        dispatch_io_mail(
+            &reg,
+            &mailer,
             <Read as Kind>::ID,
-            Read::NAME,
-            Some("test_caller"),
             ReplyTo::to(crate::mail::ReplyTarget::Component(caller_mailbox)),
             &req,
-            1,
         );
 
         // Wait for the reply to reach receive.
@@ -1199,14 +1118,12 @@ mod tests {
         let root = scratch_root("dispatch-mal");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = io_sink_handler(Arc::clone(&reg), Arc::clone(&mailer));
-        handler(
+        dispatch_io_mail(
+            &reg,
+            &mailer,
             <Read as Kind>::ID,
-            Read::NAME,
-            None,
             session_sender(),
             &[0xffu8; 4],
-            1,
         );
         match decode_reply::<ReadResult>(&rx) {
             ReadResult::Err {

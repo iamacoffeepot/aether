@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use aether_data::{Kind, KindId, encode_empty, encode_struct};
 use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
@@ -279,17 +279,21 @@ impl TestBench {
         let camera_state = Arc::new(Mutex::new(IDENTITY_VIEW_PROJ));
         register_camera_sink(&boot, &camera_state, &observed_kinds);
 
-        // Build the IO adapter registry against the boot's namespace
+        // Build the IO capability against the boot's namespace
         // roots — either the override the caller supplied via
         // `TestBench::builder().namespace_roots(...)` or the env-
         // derived defaults. Per issue 464, this path no longer reads
-        // env directly.
-        if let Ok((reg, _roots)) =
-            aether_substrate_core::io::build_registry(boot.namespace_roots.clone())
-        {
-            boot.registry.register_sink(
-                "aether.sink.io",
-                aether_substrate_core::io::io_sink_handler(reg, Arc::clone(&boot.queue)),
+        // env directly. Silent-skip on adapter init failure preserves
+        // pre-Phase-3 behavior so tests on systems without writable
+        // default roots don't fail at the harness layer; tests that
+        // care about io supply tempdir roots via the builder.
+        if let Err(e) = boot.add_capability(aether_substrate_core::capabilities::IoCapability::new(
+            boot.namespace_roots.clone(),
+        )) {
+            tracing::warn!(
+                target: "aether_substrate::io",
+                error = %e,
+                "io capability boot failed in TestBench (expected on systems without writable default roots)",
             );
         }
         boot.add_capability(aether_substrate_core::capabilities::LogCapability::new())
@@ -494,20 +498,33 @@ impl TestBench {
 
     /// Pump the event channel and the loopback receiver until a
     /// reply with `cid` arrives, decoded as `R`. Each iteration
-    /// fully drains the queue and processes any pending events,
-    /// so even multi-tick advances finish in one or two iterations.
+    /// fully drains the queue and processes any pending events.
+    /// Quiet iterations (no events surfaced, no reply on loopback)
+    /// sleep briefly to give ADR-0070 capability dispatcher threads
+    /// time to wake up — `IoCapability` and friends poll their mpsc
+    /// receivers on a 100ms `recv_timeout`, so without this sleep a
+    /// capability-mediated reply (e.g. `aether.io.write` →
+    /// `WriteResult`) can't beat the bail-out check.
     fn pump_until_reply<R>(&mut self, cid: u64, expected: &'static str) -> Result<R, TestBenchError>
     where
         R: serde::de::DeserializeOwned,
     {
         const MAX_ITERATIONS: u32 = 256;
+        // Sleep per quiet iteration. 10 ms × QUIET_BUDGET caps total
+        // wait around 1 s, well under any realistic test timeout but
+        // long enough that the slowest-polling capability (100 ms
+        // recv_timeout) gets ~10 wakeups.
+        const QUIET_SLEEP: Duration = Duration::from_millis(10);
+        // How many consecutive quiet iterations to tolerate before
+        // giving up.
+        const QUIET_BUDGET: u32 = 100;
 
         // Check the stash first.
         if let Some(frame) = self.stashed_replies.remove(&cid) {
             return Self::decode_reply::<R>(frame, expected);
         }
 
-        let mut events_processed = 0u32;
+        let mut quiet_iterations = 0u32;
         for iteration in 0..MAX_ITERATIONS {
             // Settle the queue. The control mail we pushed flows
             // through the dispatcher → control plane → chassis
@@ -517,13 +534,16 @@ impl TestBench {
 
             // Drain any pending chassis events. Each invocation
             // potentially produces a reply on `outbound`.
+            let mut found_event = false;
             while let Ok(event) = self.events_rx.try_recv() {
                 self.dispatch_event(event);
-                events_processed += 1;
+                found_event = true;
             }
 
             // Look for our reply on the loopback.
+            let mut found_reply = false;
             while let Ok(frame) = self.loopback_rx.try_recv() {
+                found_reply = true;
                 if let Some(frame_cid) = correlation_of(&frame) {
                     if frame_cid == cid {
                         return Self::decode_reply::<R>(frame, expected);
@@ -543,16 +563,19 @@ impl TestBench {
                 }
             }
 
-            if iteration > 0 && events_processed == 0 {
-                // No events surfaced this iteration AND no events
-                // last iteration; the chassis is idle. The reply
-                // isn't coming.
-                return Err(TestBenchError::Timeout {
-                    expected,
-                    pumped_iterations: iteration + 1,
-                });
+            if found_event || found_reply {
+                quiet_iterations = 0;
+            } else {
+                quiet_iterations += 1;
+                if quiet_iterations >= QUIET_BUDGET {
+                    return Err(TestBenchError::Timeout {
+                        expected,
+                        pumped_iterations: iteration + 1,
+                    });
+                }
+                // Yield to capability dispatcher threads (ADR-0070).
+                std::thread::sleep(QUIET_SLEEP);
             }
-            events_processed = 0;
         }
         Err(TestBenchError::Timeout {
             expected,

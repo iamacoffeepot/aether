@@ -253,34 +253,13 @@ fn main() -> wasmtime::Result<()> {
     boot.registry
         .register_sink("aether.sink.camera", camera_handler);
 
-    // `aether.sink.io` per ADR-0041. Test-bench gets the same sink
-    // as desktop / headless — the io path is purely I/O. The
-    // namespace roots come from `boot.namespace_roots` (built from
-    // env at the top of `main`, per issue 464). Boot-time filesystem
-    // failure logs loud and skips the sink (same policy as the other
-    // chassis) rather than failing the whole chassis.
-    match aether_substrate_core::io::build_registry(boot.namespace_roots.clone()) {
-        Ok((registry, roots)) => {
-            tracing::info!(
-                target: "aether_substrate::io",
-                save = %roots.save.display(),
-                assets = %roots.assets.display(),
-                config = %roots.config.display(),
-                "io adapters registered",
-            );
-            boot.registry.register_sink(
-                "aether.sink.io",
-                aether_substrate_core::io::io_sink_handler(registry, Arc::clone(&boot.queue)),
-            );
-        }
-        Err(e) => {
-            tracing::error!(
-                target: "aether_substrate::io",
-                error = %e,
-                "io adapter init failed — `io` sink not registered",
-            );
-        }
-    }
+    // `aether.sink.io` per ADR-0041. Same capability as desktop and
+    // headless — io is purely I/O, no GPU or window surface to
+    // diverge on. ADR-0070 phase 3 wraps it as a native capability
+    // with fail-fast boot semantics (ADR-0063).
+    boot.add_capability(aether_substrate_core::capabilities::IoCapability::new(
+        boot.namespace_roots.clone(),
+    ))?;
 
     // `aether.sink.log` per ADR-0060. Same capability as desktop and
     // headless — guest log mail is independent of GPU / windowing.
