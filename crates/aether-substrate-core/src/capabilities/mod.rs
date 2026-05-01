@@ -33,6 +33,6 @@ pub use log::{LOG_SINK_NAME, LogCapability, LogRunning};
 pub use net::{NET_SINK_NAME, NetCapability, NetRunning};
 #[cfg(feature = "render")]
 pub use render::{
-    CAMERA_SINK_NAME, RENDER_SINK_NAME, RenderCapability, RenderConfig, RenderHandles,
+    CAMERA_SINK_NAME, RENDER_SINK_NAME, RenderCapability, RenderConfig, RenderGpu, RenderHandles,
     RenderRunning,
 };
