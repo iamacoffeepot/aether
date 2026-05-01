@@ -342,12 +342,28 @@ impl BootedChassis {
         self.running.is_empty()
     }
 
-    /// Tear down every capability in reverse boot order.
-    pub fn shutdown(self) {
-        let BootedChassis { mut running, .. } = self;
-        while let Some(c) = running.pop() {
+    /// Tear down every capability in reverse boot order. Idempotent
+    /// with [`Drop`] — calling `shutdown` first leaves [`Drop`] with
+    /// nothing to do.
+    pub fn shutdown(mut self) {
+        self.shutdown_in_place();
+    }
+
+    fn shutdown_in_place(&mut self) {
+        while let Some(c) = self.running.pop() {
             c.shutdown();
         }
+    }
+}
+
+impl Drop for BootedChassis {
+    fn drop(&mut self) {
+        // Forgotten-shutdown safety net: the chassis owner can drop
+        // a `BootedChassis` without calling `shutdown` and still
+        // get its capability dispatcher threads joined. Phase 2's
+        // `HandleCapability` polls a flag every 100ms, so worst-case
+        // drop latency is one poll interval per capability.
+        self.shutdown_in_place();
     }
 }
 

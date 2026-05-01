@@ -1,14 +1,19 @@
-//! Native capabilities (ADR-0070). Phase 1 lands the empty module;
-//! phases 2–5 populate it one submodule per extracted sink:
+//! Native capabilities (ADR-0070). Each submodule extracts one of
+//! the substrate's chassis-policy sinks into a [`Capability`]
+//! implementation owning its mailbox(es), state, dispatcher thread,
+//! and lifecycle.
 //!
-//! - `handle.rs` (Phase 2 — least state, validates the trait shape)
-//! - `log.rs`
-//! - `io.rs`
-//! - `net.rs`
-//! - `audio.rs` (gated by `audio` feature)
-//! - `render.rs` (gated by `render` feature; owns `aether.sink.render`
-//!   and `aether.sink.camera`)
+//! Phasing:
+//! - Phase 2 (this PR): `handle` — least-state validator of the
+//!   trait shape end-to-end.
+//! - Phase 3: `log`, `io`, `net`, `audio` (gated by `audio` feature),
+//!   `render` + `camera` (gated by `render` feature). One PR per
+//!   sink.
+//! - Phase 4–5: `HubClientCapability` and `HubServerCapability` land
+//!   in the new `aether-hub` crate, not here, so the kernel ends with
+//!   zero hub knowledge.
 //!
-//! `HubClientCapability` and `HubServerCapability` live in the
-//! `aether-hub` crate (Phase 4–5), not here, so the kernel ends with
-//! zero hub knowledge.
+//! [`Capability`]: crate::capability::Capability
+
+pub mod handle;
+pub use handle::{HANDLE_SINK_NAME, HandleCapability, HandleRunning};
