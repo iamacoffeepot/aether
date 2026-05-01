@@ -45,15 +45,22 @@ const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// the maximum bytes the render accumulator will hold before
 /// truncating with a warn — desktop and test-bench both pass
 /// [`crate::render::VERTEX_BUFFER_BYTES`].
-#[derive(Clone, Copy, Debug)]
+///
+/// `observed_kinds`, when set, has every inbound mail's kind name
+/// pushed to it from both the render and camera dispatchers — used
+/// by the in-process test-bench to assert what kinds the sinks
+/// have seen. Production chassis leave it `None` (zero overhead).
+#[derive(Clone)]
 pub struct RenderConfig {
     pub vertex_buffer_bytes: usize,
+    pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
 }
 
 impl Default for RenderConfig {
     fn default() -> Self {
         Self {
             vertex_buffer_bytes: crate::render::VERTEX_BUFFER_BYTES,
+            observed_kinds: None,
         }
     }
 }
@@ -134,12 +141,16 @@ impl Capability for RenderCapability {
             let cap = config.vertex_buffer_bytes;
             let receiver = render_claim.receiver;
             let flag = Arc::clone(&shutdown_flag);
+            let observed = config.observed_kinds.clone();
             thread::Builder::new()
                 .name("aether-render-sink".into())
                 .spawn(move || {
                     while !flag.load(Ordering::Relaxed) {
                         match receiver.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
                             Ok(env) => {
+                                if let Some(obs) = &observed {
+                                    obs.lock().unwrap().push(env.kind_name.clone());
+                                }
                                 dispatch_render_envelope(
                                     &frame_vertices,
                                     &triangles_rendered,
@@ -159,12 +170,16 @@ impl Capability for RenderCapability {
             let camera_state = Arc::clone(&handles.camera_state);
             let receiver = camera_claim.receiver;
             let flag = Arc::clone(&shutdown_flag);
+            let observed = config.observed_kinds.clone();
             thread::Builder::new()
                 .name("aether-camera-sink".into())
                 .spawn(move || {
                     while !flag.load(Ordering::Relaxed) {
                         match receiver.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
                             Ok(env) => {
+                                if let Some(obs) = &observed {
+                                    obs.lock().unwrap().push(env.kind_name.clone());
+                                }
                                 dispatch_camera_envelope(&camera_state, &env);
                             }
                             Err(RecvTimeoutError::Timeout) => {}
@@ -324,6 +339,7 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         let cap = RenderCapability::new(RenderConfig {
             vertex_buffer_bytes: DRAW_TRIANGLE_BYTES * 2,
+            ..RenderConfig::default()
         });
         let handles = cap.handles();
 

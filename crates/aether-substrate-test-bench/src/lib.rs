@@ -30,4 +30,6 @@ pub use aether_substrate_core::{
     subscribers_for,
 };
 
-pub use chassis::chassis_control_handler;
+pub use chassis::{
+    TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS, chassis_control_handler,
+};

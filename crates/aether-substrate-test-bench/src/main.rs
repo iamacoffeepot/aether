@@ -1,262 +1,97 @@
-// Test-bench chassis binary (ADR-0067). GPU-capable, no window, no
-// winit. wgpu initialises without a presentation surface; every
-// frame renders into an offscreen color target paired with a depth
-// target; capture_frame reads back from that same offscreen.
+// Test-bench chassis binary entry point.
 //
-// Tick driver is control-mail (ADR-0067): the chassis loop blocks
-// waiting for `aether.test_bench.advance { ticks }` events from the
-// chassis-control handler. Each Advance runs `ticks` complete
-// frames (Tick fanout → drain → render-or-capture), then replies
-// with `AdvanceResult::Ok`. Capture-frame requests wake the loop
-// for one drain → render-with-capture cycle without dispatching
-// Tick (capture observes; advance ticks). With no Advance, the
-// world doesn't tick — the chassis is fully deterministic.
-
-mod chassis;
-mod events;
-mod render;
+// Reads chassis-relevant env vars into a `TestBenchEnv`, asks
+// `TestBenchChassis::build_passive` to assemble the substrate +
+// passive capabilities (Log + Render) via the chassis_builder
+// `Builder`, adds the io capability on the legacy
+// `boot.add_capability` path, creates the offscreen `Gpu`, then
+// drives the events_rx loop on the main thread. The chassis is
+// embedder-driven (no `DriverCapability`) — `main()` IS the driver.
+//
+// In-process counterpart lives in `aether-substrate-test-bench::TestBench`
+// (the `TestBench::start()` API ADR-0067 introduced); both paths
+// share `TestBenchChassis::build_passive`.
 
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use aether_data::{Kind, encode_empty};
-use aether_kinds::{AdvanceResult, CaptureFrameResult, FrameStats, Tick};
+use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
 use aether_substrate_core::{
-    Chassis, HubOutbound, InputSubscribers, Mailer, Scheduler, SubstrateBoot,
-    capabilities::{RenderCapability, RenderConfig},
-    capture::CaptureQueue,
-    frame_loop,
-    mail::{Mail, MailboxId},
+    Chassis, capabilities::IoCapability, capture::CaptureQueue, frame_loop, mail::Mail,
     subscribers_for,
 };
-
-use crate::events::{ChassisEvent, EventReceiver};
-use crate::render::{Gpu, VERTEX_BUFFER_BYTES};
-
-/// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
-/// component, the scheduler doesn't read this — it's retained on the
-/// hub-protocol wire for compatibility). The shared frame-loop
-/// policy (drain budget, frame-stats cadence) lives in
-/// `aether_substrate_core::frame_loop`.
-const WORKERS: usize = 2;
-
-/// Default offscreen target size when `AETHER_TEST_BENCH_SIZE` is
-/// unset. 800x600 matches the scenario harness convention — large
-/// enough that `min_non_bg_pixels` thresholds discriminate, small
-/// enough that capture readback is cheap.
-const DEFAULT_WIDTH: u32 = 800;
-const DEFAULT_HEIGHT: u32 = 600;
-
-/// Test-bench chassis. Owns the event loop, the GPU, the shared
-/// frame state (vertex buffer, camera matrix), and the capture
-/// queue. `run(self)` blocks on the event receiver — the loop
-/// returns only when every sender has been dropped (chassis
-/// shutdown). Process exit on SIGTERM (hub-spawned) is caught by
-/// the chassis-control handler dropping its sender; SIGINT (manual
-/// run) terminates the process directly.
-struct TestBenchChassis {
-    queue: Arc<Mailer>,
-    input_subscribers: InputSubscribers,
-    broadcast_mbox: MailboxId,
-    kind_tick: aether_data::KindId,
-    kind_frame_stats: aether_data::KindId,
-    gpu: Gpu,
-    frame_vertices: Arc<Mutex<Vec<u8>>>,
-    camera_state: Arc<Mutex<[f32; 16]>>,
-    triangles_rendered: Arc<AtomicU64>,
-    capture_queue: CaptureQueue,
-    outbound: Arc<HubOutbound>,
-    events_rx: EventReceiver,
-    _scheduler: Scheduler,
-    _hub: Option<aether_substrate_core::HubClient>,
-}
-
-impl Chassis for TestBenchChassis {
-    const PROFILE: &'static str = "test-bench";
-
-    fn run(mut self) -> wasmtime::Result<()> {
-        let started = Instant::now();
-        let mut frame: u64 = 0;
-        // `recv()` returns Err only when every sender has been
-        // dropped — that's chassis shutdown, exit the loop cleanly.
-        while let Ok(event) = self.events_rx.recv() {
-            match event {
-                ChassisEvent::Advance { reply_to, ticks } => {
-                    for _ in 0..ticks {
-                        frame += 1;
-                        self.run_frame(frame, started, /* dispatch_tick */ true);
-                    }
-                    self.outbound.send_reply(
-                        reply_to,
-                        &AdvanceResult::Ok {
-                            ticks_completed: ticks,
-                        },
-                    );
-                }
-                ChassisEvent::CaptureRequested => {
-                    frame += 1;
-                    self.run_frame(frame, started, /* dispatch_tick */ false);
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-impl TestBenchChassis {
-    /// Run one frame: optionally dispatch `Tick` to subscribers,
-    /// drain the queue with the ADR-0063 budget, take any pending
-    /// capture and render-with-capture (otherwise plain render),
-    /// emit periodic frame_stats. Any death or wedge mid-drain
-    /// aborts the chassis cleanly via `lifecycle::fatal_abort`.
-    fn run_frame(&mut self, frame: u64, started: Instant, dispatch_tick: bool) {
-        if dispatch_tick {
-            let subs = subscribers_for(&self.input_subscribers, Tick::ID);
-            for mbox in subs {
-                self.queue
-                    .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
-            }
-        }
-        frame_loop::drain_or_abort(&self.queue, &self.outbound);
-
-        // Drain accumulated vertices and the latest camera. Replace
-        // the vertex buffer with an empty same-capacity Vec so the
-        // 4 MiB allocation isn't rebuilt every frame.
-        let verts = std::mem::replace(
-            &mut *self.frame_vertices.lock().unwrap(),
-            Vec::with_capacity(VERTEX_BUFFER_BYTES),
-        );
-        let view_proj = *self.camera_state.lock().unwrap();
-
-        match self.capture_queue.take() {
-            Some(req) => {
-                let result = match self.gpu.render_and_capture(&verts, &view_proj) {
-                    Ok(png) => CaptureFrameResult::Ok { png },
-                    Err(error) => CaptureFrameResult::Err { error },
-                };
-                for mail in req.after_mails {
-                    self.queue.push(mail);
-                }
-                self.outbound.send_reply(req.reply_to, &result);
-            }
-            None => {
-                self.gpu.render(&verts, &view_proj);
-            }
-        }
-
-        if frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
-            let triangles = self.triangles_rendered.load(Ordering::Relaxed);
-            frame_loop::emit_frame_stats(
-                &self.queue,
-                self.broadcast_mbox,
-                self.broadcast_mbox,
-                self.kind_frame_stats,
-                frame,
-                triangles,
-            );
-            let elapsed = started.elapsed().as_secs_f64().max(0.001);
-            tracing::info!(
-                target: "aether_substrate::frame_loop",
-                frame = frame,
-                fps = frame as f64 / elapsed,
-                triangles,
-                "test-bench frame",
-            );
-        }
-    }
-}
+use aether_substrate_test_bench::{
+    TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
+    events::{self, ChassisEvent},
+    render::{Gpu, VERTEX_BUFFER_BYTES},
+};
 
 /// Parse `AETHER_TEST_BENCH_SIZE=WxH`. Falls back to defaults on
 /// missing/unparseable input with a warn log so scenario scripts can
 /// see what dimensions they actually got.
 fn parse_size_env() -> (u32, u32) {
+    use aether_substrate_test_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
     let raw = match std::env::var("AETHER_TEST_BENCH_SIZE") {
         Ok(s) => s,
         Err(_) => return (DEFAULT_WIDTH, DEFAULT_HEIGHT),
     };
-    let trimmed = raw.trim();
-    if let Some((w, h)) = trimmed.split_once('x')
-        && let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>())
-        && w > 0
-        && h > 0
-    {
-        return (w, h);
+    match raw.split_once('x') {
+        Some((w, h)) => match (w.parse::<u32>(), h.parse::<u32>()) {
+            (Ok(w), Ok(h)) if w > 0 && h > 0 => (w, h),
+            _ => {
+                tracing::warn!(
+                    target: "aether_substrate::boot",
+                    value = %raw,
+                    "AETHER_TEST_BENCH_SIZE unparseable — falling back to default",
+                );
+                (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+            }
+        },
+        None => {
+            tracing::warn!(
+                target: "aether_substrate::boot",
+                value = %raw,
+                "AETHER_TEST_BENCH_SIZE missing 'x' separator — falling back to default",
+            );
+            (DEFAULT_WIDTH, DEFAULT_HEIGHT)
+        }
     }
-    tracing::warn!(
-        target: "aether_substrate::boot",
-        value = %raw,
-        "AETHER_TEST_BENCH_SIZE unparseable — falling back to default 800x600",
-    );
-    (DEFAULT_WIDTH, DEFAULT_HEIGHT)
 }
 
 fn main() -> wasmtime::Result<()> {
     let capture_queue = CaptureQueue::new();
     let (events_tx, events_rx) = events::channel();
 
-    // Per issue 464, this `main()` is the env-reading edge. Read
-    // `AETHER_HUB_URL` and the namespace roots once and thread them
-    // through substrate-core's APIs explicitly.
+    // Per issue 464, this `main()` is the env-reading edge.
     let hub_url = std::env::var("AETHER_HUB_URL").ok();
     let namespace_roots = aether_substrate_core::capabilities::io::NamespaceRoots::from_env();
 
-    let mut boot = SubstrateBoot::builder("test-bench", env!("CARGO_PKG_VERSION"))
-        .workers(WORKERS)
-        .namespace_roots(namespace_roots)
-        .chassis_handler({
-            let cq = capture_queue.clone();
-            let tx = events_tx.clone();
-            move |ctx| {
-                Some(chassis::chassis_control_handler(
-                    cq,
-                    tx,
-                    Arc::clone(ctx.registry),
-                    Arc::clone(ctx.queue),
-                    Arc::clone(ctx.outbound),
-                ))
-            }
-        })
-        .build()?;
+    let env = TestBenchEnv {
+        name: "test-bench".to_owned(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        workers: WORKERS,
+        namespace_roots: Some(namespace_roots),
+        hub_url,
+        observed_kinds: None,
+        events_tx,
+        capture_queue: capture_queue.clone(),
+    };
 
-    let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
-    let kind_frame_stats = boot
-        .registry
-        .kind_id(FrameStats::NAME)
-        .expect("FrameStats registered");
+    let TestBenchBuild {
+        passive,
+        mut boot,
+        render_handles,
+        kind_tick,
+        kind_frame_stats,
+        hub,
+    } = TestBenchChassis::build_passive(env)?;
 
-    // Render + camera sinks (ADR-0071 phase 4 / Option B). One
-    // capability owns both mailboxes + the accumulator state shared
-    // with the test-bench frame loop. Pull the handles before the
-    // capability moves into boot — chassis_builder typed lookup
-    // hooks up once render migrates onto `.with()` in a later phase.
-    let render_cap = RenderCapability::new(RenderConfig {
-        vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
-    });
-    let render_handles = render_cap.handles();
-    boot.add_capability(render_cap)?;
-    let frame_vertices = render_handles.frame_vertices;
-    let camera_state = render_handles.camera_state;
-    let triangles_rendered = render_handles.triangles_rendered;
-
-    // `aether.sink.io` per ADR-0041. Same capability as desktop and
-    // headless — io is purely I/O, no GPU or window surface to
-    // diverge on. ADR-0070 phase 3 wraps it as a native capability
-    // with fail-fast boot semantics (ADR-0063).
-    boot.add_capability(aether_substrate_core::capabilities::IoCapability::new(
-        boot.namespace_roots.clone(),
-    ))?;
-
-    // `aether.sink.log` per ADR-0060. Same capability as desktop and
-    // headless — guest log mail is independent of GPU / windowing.
-    boot.add_capability(aether_substrate_core::capabilities::LogCapability::new())?;
-
-    // ADR-0067 sink set is render + camera + io + log. Audio is
-    // skipped (no cpal — scenarios don't need audio output and
-    // skipping it removes a flaky-driver surface on CI runners).
-    // Net is also out for v1 — scenarios don't need network
-    // egress, and including it would add a real I/O side channel.
+    // Io capability on the legacy `boot.add_capability` path —
+    // the binary fails fast on adapter init failure (the in-process
+    // API silent-skips for systems without writable default roots).
+    boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))?;
 
     let (width, height) = parse_size_env();
     let gpu = Gpu::new(width, height);
@@ -268,38 +103,165 @@ fn main() -> wasmtime::Result<()> {
         width,
         height,
         workers = WORKERS,
+        profile = TestBenchChassis::PROFILE,
         "test-bench componentless boot — drive ticks via aether.test_bench.advance",
     );
 
-    let hub = boot.connect_hub(hub_url.as_deref())?;
-
-    // The chassis owns its receiver; the chassis-control handler
-    // already holds a clone of the sender (captured into the boot
-    // closure above). Drop the local `events_tx` so the receiver
-    // hangs up cleanly when every chassis_control_handler clone is
-    // released — matches the ADR-0063 lifecycle.
-    drop(events_tx);
-
-    let chassis = TestBenchChassis {
-        queue: boot.queue,
-        input_subscribers: boot.input_subscribers,
-        broadcast_mbox: boot.broadcast_mbox,
+    drive_events_loop(
+        events_rx,
+        capture_queue,
+        boot,
+        passive,
+        render_handles,
+        gpu,
         kind_tick,
         kind_frame_stats,
-        gpu,
-        frame_vertices,
-        camera_state,
-        triangles_rendered,
-        capture_queue,
-        outbound: boot.outbound,
-        events_rx,
-        _scheduler: boot.scheduler,
-        _hub: hub,
-    };
-    tracing::info!(
-        target: "aether_substrate::boot",
-        profile = TestBenchChassis::PROFILE,
-        "chassis initialised",
+        hub,
+    )
+}
+
+/// Drive the chassis event loop on the main thread. Embedder is the
+/// driver — runs until every `EventSender` clone drops (clean
+/// shutdown via the chassis_control handler clones being released)
+/// or a fatal abort tears the process down.
+#[allow(clippy::too_many_arguments)]
+fn drive_events_loop(
+    events_rx: events::EventReceiver,
+    capture_queue: CaptureQueue,
+    boot: aether_substrate_core::SubstrateBoot,
+    passive: aether_substrate_core::PassiveChassis<TestBenchChassis>,
+    render_handles: aether_substrate_core::capabilities::RenderHandles,
+    mut gpu: Gpu,
+    kind_tick: aether_data::KindId,
+    kind_frame_stats: aether_data::KindId,
+    hub: Option<aether_substrate_core::HubClient>,
+) -> wasmtime::Result<()> {
+    let queue = Arc::clone(&boot.queue);
+    let outbound = Arc::clone(&boot.outbound);
+    let input_subscribers = Arc::clone(&boot.input_subscribers);
+    let broadcast_mbox = boot.broadcast_mbox;
+    let started = Instant::now();
+    let mut frame: u64 = 0;
+
+    while let Ok(event) = events_rx.recv() {
+        match event {
+            ChassisEvent::Advance { reply_to, ticks } => {
+                for _ in 0..ticks {
+                    frame += 1;
+                    run_frame(
+                        frame,
+                        started,
+                        true,
+                        &queue,
+                        &outbound,
+                        &input_subscribers,
+                        broadcast_mbox,
+                        kind_tick,
+                        kind_frame_stats,
+                        &capture_queue,
+                        &render_handles,
+                        &mut gpu,
+                    );
+                }
+                outbound.send_reply(
+                    reply_to,
+                    &AdvanceResult::Ok {
+                        ticks_completed: ticks,
+                    },
+                );
+            }
+            ChassisEvent::CaptureRequested => {
+                frame += 1;
+                run_frame(
+                    frame,
+                    started,
+                    false,
+                    &queue,
+                    &outbound,
+                    &input_subscribers,
+                    broadcast_mbox,
+                    kind_tick,
+                    kind_frame_stats,
+                    &capture_queue,
+                    &render_handles,
+                    &mut gpu,
+                );
+            }
+        }
+    }
+
+    // Drop ordering: passive (chassis_builder Log + Render shut
+    // down) → boot (legacy capabilities + scheduler join) → hub
+    // (reader + heartbeat threads). Listed last-first since locals
+    // drop in reverse declaration order.
+    drop(passive);
+    drop(boot);
+    drop(hub);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_frame(
+    frame: u64,
+    started: Instant,
+    dispatch_tick: bool,
+    queue: &Arc<aether_substrate_core::Mailer>,
+    outbound: &Arc<aether_substrate_core::HubOutbound>,
+    input_subscribers: &aether_substrate_core::InputSubscribers,
+    broadcast_mbox: aether_substrate_core::MailboxId,
+    kind_tick: aether_data::KindId,
+    kind_frame_stats: aether_data::KindId,
+    capture_queue: &CaptureQueue,
+    render_handles: &aether_substrate_core::capabilities::RenderHandles,
+    gpu: &mut Gpu,
+) {
+    if dispatch_tick {
+        let subs = subscribers_for(input_subscribers, Tick::ID);
+        for mbox in subs {
+            queue.push(Mail::new(mbox, kind_tick, encode_empty::<Tick>(), 1));
+        }
+    }
+    frame_loop::drain_or_abort(queue, outbound);
+
+    let verts = std::mem::replace(
+        &mut *render_handles.frame_vertices.lock().unwrap(),
+        Vec::with_capacity(VERTEX_BUFFER_BYTES),
     );
-    chassis.run()
+    let view_proj = *render_handles.camera_state.lock().unwrap();
+
+    match capture_queue.take() {
+        Some(req) => {
+            let result = match gpu.render_and_capture(&verts, &view_proj) {
+                Ok(png) => CaptureFrameResult::Ok { png },
+                Err(error) => CaptureFrameResult::Err { error },
+            };
+            for mail in req.after_mails {
+                queue.push(mail);
+            }
+            outbound.send_reply(req.reply_to, &result);
+        }
+        None => {
+            gpu.render(&verts, &view_proj);
+        }
+    }
+
+    if frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
+        let triangles = render_handles.triangles_rendered.load(Ordering::Relaxed);
+        frame_loop::emit_frame_stats(
+            queue,
+            broadcast_mbox,
+            broadcast_mbox,
+            kind_frame_stats,
+            frame,
+            triangles,
+        );
+        let elapsed = started.elapsed().as_secs_f64().max(0.001);
+        tracing::info!(
+            target: "aether_substrate::frame_loop",
+            frame = frame,
+            fps = frame as f64 / elapsed,
+            triangles,
+            "test-bench frame",
+        );
+    }
 }
