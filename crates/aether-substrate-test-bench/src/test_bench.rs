@@ -26,26 +26,21 @@ use std::time::{Duration, Instant};
 
 use aether_data::{Kind, KindId, encode_empty, encode_struct};
 use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
-use aether_kinds::{
-    Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, DRAW_TRIANGLE_BYTES, FrameStats, Tick,
-};
+use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tick};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use aether_substrate_core::{
-    HubOutbound, InputSubscribers, Mailer, ReplyTarget, ReplyTo, SubstrateBoot,
-    capabilities::io::NamespaceRoots,
+    HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
+    capabilities::{IoCapability, io::NamespaceRoots},
     capture::CaptureQueue,
     frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
 
-use crate::chassis;
+use crate::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
 use crate::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use crate::render::{Gpu, VERTEX_BUFFER_BYTES};
-use aether_substrate_core::render::IDENTITY_VIEW_PROJ;
-
-const WORKERS: usize = 2;
 
 /// Default offscreen target dimensions when the caller picks
 /// `start()` (no explicit size). 800x600 matches the scenario harness
@@ -149,6 +144,13 @@ pub struct TestBench {
     /// Lifetime guard. Boot owns the scheduler; dropping the
     /// TestBench drops the boot which joins the worker threads.
     _boot: SubstrateBoot,
+
+    /// `PassiveChassis<TestBenchChassis>` holding the booted Log +
+    /// Render passives via the chassis_builder typed map. Held for
+    /// the bench's lifetime so the passives' dispatcher threads
+    /// stay alive; drops in reverse declaration order before
+    /// `_boot`, so render+log shut down before the scheduler joins.
+    _passive: PassiveChassis<TestBenchChassis>,
 }
 
 /// Fixed UUID used as the `SessionToken` for in-process replies.
@@ -236,27 +238,33 @@ impl TestBench {
     ) -> Result<Self, TestBenchError> {
         let capture_queue = CaptureQueue::new();
         let (events_tx, events_rx) = event_channel();
+        let observed_kinds = Arc::new(Mutex::new(Vec::<String>::new()));
 
-        let mut builder = SubstrateBoot::builder("test-bench", env!("CARGO_PKG_VERSION"))
-            .workers(WORKERS)
-            .chassis_handler({
-                let cq = capture_queue.clone();
-                let tx = events_tx.clone();
-                move |ctx| {
-                    Some(chassis::chassis_control_handler(
-                        cq,
-                        tx,
-                        Arc::clone(ctx.registry),
-                        Arc::clone(ctx.queue),
-                        Arc::clone(ctx.outbound),
-                    ))
-                }
-            });
-        if let Some(roots) = namespace_roots {
-            builder = builder.namespace_roots(roots);
-        }
-        let mut boot = builder
-            .build()
+        // ADR-0071 phase 6: substrate boot + Log + Render passives go
+        // through `TestBenchChassis::build_passive` — the same path
+        // the binary uses. The build hands back the SubstrateBoot for
+        // io / further capability adds plus the render handles the
+        // bench's frame loop reads each tick.
+        let env = TestBenchEnv {
+            name: "test-bench".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            workers: WORKERS,
+            namespace_roots,
+            // In-process bench doesn't dial a hub; replies route to
+            // the loopback attached below.
+            hub_url: None,
+            observed_kinds: Some(Arc::clone(&observed_kinds)),
+            events_tx,
+            capture_queue: capture_queue.clone(),
+        };
+        let TestBenchBuild {
+            passive,
+            mut boot,
+            render_handles,
+            kind_tick,
+            kind_frame_stats,
+            hub: _hub,
+        } = TestBenchChassis::build_passive(env)
             .map_err(|e| TestBenchError::Boot(e.to_string()))?;
 
         // Attach a loopback to the boot's outbound. Replies the
@@ -264,46 +272,20 @@ impl TestBench {
         let (loopback_tx, loopback_rx) = mpsc::channel::<EngineToHub>();
         boot.outbound.attach(loopback_tx);
 
-        let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
-        let kind_frame_stats = boot
-            .registry
-            .kind_id(FrameStats::NAME)
-            .expect("FrameStats registered");
-
-        let observed_kinds = Arc::new(Mutex::new(Vec::<String>::new()));
-
-        let frame_vertices = Arc::new(Mutex::new(Vec::<u8>::with_capacity(VERTEX_BUFFER_BYTES)));
-        let triangles_rendered = Arc::new(AtomicU64::new(0));
-        register_render_sink(&boot, &frame_vertices, &triangles_rendered, &observed_kinds);
-
-        let camera_state = Arc::new(Mutex::new(IDENTITY_VIEW_PROJ));
-        register_camera_sink(&boot, &camera_state, &observed_kinds);
-
-        // Build the IO capability against the boot's namespace
-        // roots — either the override the caller supplied via
-        // `TestBench::builder().namespace_roots(...)` or the env-
-        // derived defaults. Per issue 464, this path no longer reads
-        // env directly. Silent-skip on adapter init failure preserves
-        // pre-Phase-3 behavior so tests on systems without writable
-        // default roots don't fail at the harness layer; tests that
-        // care about io supply tempdir roots via the builder.
-        if let Err(e) = boot.add_capability(aether_substrate_core::capabilities::IoCapability::new(
-            boot.namespace_roots.clone(),
-        )) {
+        // Io capability on the legacy `boot.add_capability` path.
+        // Silent-skip on adapter init failure preserves pre-Phase-3
+        // behavior so tests on systems without writable default roots
+        // don't fail at the harness layer; tests that care about io
+        // supply tempdir roots via the builder.
+        if let Err(e) = boot.add_capability(IoCapability::new(boot.namespace_roots.clone())) {
             tracing::warn!(
                 target: "aether_substrate::io",
                 error = %e,
                 "io capability boot failed in TestBench (expected on systems without writable default roots)",
             );
         }
-        boot.add_capability(aether_substrate_core::capabilities::LogCapability::new())
-            .expect("log capability boot");
 
         let gpu = Gpu::new(width, height);
-
-        // Drop the local events_tx so events_rx hangs up cleanly
-        // once every chassis_control_handler clone is released.
-        drop(events_tx);
 
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
@@ -319,9 +301,9 @@ impl TestBench {
             capture_queue,
             events_rx,
             gpu,
-            frame_vertices,
-            camera_state,
-            triangles_rendered,
+            frame_vertices: render_handles.frame_vertices,
+            camera_state: render_handles.camera_state,
+            triangles_rendered: render_handles.triangles_rendered,
             input_subscribers,
             broadcast_mbox,
             kind_tick,
@@ -333,6 +315,7 @@ impl TestBench {
             stashed_replies: HashMap::new(),
             observed_kinds,
             _boot: boot,
+            _passive: passive,
         })
     }
 
@@ -684,87 +667,6 @@ fn correlation_of(frame: &EngineToHub) -> Option<u64> {
         }
         _ => None,
     }
-}
-
-fn register_render_sink(
-    boot: &SubstrateBoot,
-    frame_vertices: &Arc<Mutex<Vec<u8>>>,
-    triangles_rendered: &Arc<AtomicU64>,
-    observed_kinds: &Arc<Mutex<Vec<String>>>,
-) {
-    let verts_for_sink = Arc::clone(frame_vertices);
-    let tris_for_sink = Arc::clone(triangles_rendered);
-    let observed_for_sink = Arc::clone(observed_kinds);
-    boot.registry.register_sink(
-        "aether.sink.render",
-        Arc::new(
-            move |_kind: KindId,
-                  kind_name: &str,
-                  _origin: Option<&str>,
-                  _sender: ReplyTo,
-                  bytes: &[u8],
-                  _count: u32| {
-                observed_for_sink.lock().unwrap().push(kind_name.to_owned());
-                let mut verts = verts_for_sink.lock().unwrap();
-                let available = VERTEX_BUFFER_BYTES.saturating_sub(verts.len());
-                let write_len = bytes.len().min(available);
-                let write_len = write_len - (write_len % DRAW_TRIANGLE_BYTES);
-                if write_len > 0 {
-                    verts.extend_from_slice(&bytes[..write_len]);
-                    tris_for_sink
-                        .fetch_add((write_len / DRAW_TRIANGLE_BYTES) as u64, Ordering::Relaxed);
-                }
-                if write_len < bytes.len() {
-                    tracing::warn!(
-                        target: "aether_substrate::render",
-                        accepted_bytes = write_len,
-                        dropped_bytes = bytes.len() - write_len,
-                        cap = VERTEX_BUFFER_BYTES,
-                        "render sink dropped triangles beyond fixed vertex buffer",
-                    );
-                }
-            },
-        ),
-    );
-}
-
-fn register_camera_sink(
-    boot: &SubstrateBoot,
-    camera_state: &Arc<Mutex<[f32; 16]>>,
-    observed_kinds: &Arc<Mutex<Vec<String>>>,
-) {
-    let cam_for_sink = Arc::clone(camera_state);
-    let observed_for_sink = Arc::clone(observed_kinds);
-    boot.registry.register_sink(
-        "aether.sink.camera",
-        Arc::new(
-            move |_kind: KindId,
-                  kind_name: &str,
-                  _origin: Option<&str>,
-                  _sender: ReplyTo,
-                  bytes: &[u8],
-                  _count: u32| {
-                observed_for_sink.lock().unwrap().push(kind_name.to_owned());
-                if bytes.len() != 64 {
-                    tracing::warn!(
-                        target: "aether_substrate::camera",
-                        got = bytes.len(),
-                        expected = 64,
-                        "camera sink: payload length mismatch, dropping",
-                    );
-                    return;
-                }
-                match bytemuck::try_pod_read_unaligned::<[f32; 16]>(bytes) {
-                    Ok(mat) => *cam_for_sink.lock().unwrap() = mat,
-                    Err(e) => tracing::warn!(
-                        target: "aether_substrate::camera",
-                        error = %e,
-                        "camera sink: cast failed, dropping",
-                    ),
-                }
-            },
-        ),
-    );
 }
 
 #[cfg(test)]
