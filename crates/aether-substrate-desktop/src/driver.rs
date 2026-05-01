@@ -17,7 +17,6 @@
 //! every passive in reverse boot order via `BootedPassives::Drop`.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -49,7 +48,7 @@ use winit::monitor::{MonitorHandle, VideoModeHandle};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::chassis::UserEvent;
-use crate::render::{Gpu, VERTEX_BUFFER_BYTES};
+use crate::render::Gpu;
 
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
 /// component, the scheduler doesn't read this — it's retained on the
@@ -74,13 +73,11 @@ pub struct App {
     kind_mouse_move: aether_data::KindId,
     kind_window_size: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
-    frame_vertices: Arc<Mutex<Vec<u8>>>,
-    /// Latest `aether.camera` payload seen by the camera sink
-    /// (column-major `view_proj` matrix). Read by the render loop
-    /// each frame and uploaded to the GPU uniform before drawing.
-    /// Initialised to identity so components that emit
-    /// clip-space-ish world coords render pre-camera.
-    camera_state: Arc<Mutex<[f32; 16]>>,
+    /// Cloned out of `RenderRunning` at driver boot. Source-of-truth
+    /// lives in core's `RenderCapability`; the app holds a clone so
+    /// `Gpu::new` can install wgpu state and the per-frame loop can
+    /// call `record_frame` / `record_capture_copy` / `finish_capture`.
+    render_running: Arc<RenderRunning>,
     triangles_rendered: Arc<AtomicU64>,
     /// Shared single-slot queue with the control plane. On each
     /// redraw we `take()` any pending capture and, if present, use
@@ -525,7 +522,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("create_window"));
-        self.gpu = Some(Gpu::new(Arc::clone(&window)));
+        self.gpu = Some(Gpu::new(
+            Arc::clone(&window),
+            Arc::clone(&self.render_running),
+        ));
         window.request_redraw();
         let initial_size = window.inner_size();
         self.window = Some(window);
@@ -565,15 +565,10 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 frame_loop::drain_or_abort(&self.queue, &self.outbound);
-                let verts = std::mem::replace(
-                    &mut *self.frame_vertices.lock().unwrap(),
-                    Vec::with_capacity(VERTEX_BUFFER_BYTES),
-                );
-                let view_proj = *self.camera_state.lock().unwrap();
                 if let Some(gpu) = self.gpu.as_mut() {
                     match pending_capture {
                         Some(req) => {
-                            let result = match gpu.render_and_capture(&verts, &view_proj) {
+                            let result = match gpu.render_and_capture() {
                                 Ok(png) => CaptureFrameResult::Ok { png },
                                 Err(error) => CaptureFrameResult::Err { error },
                             };
@@ -583,7 +578,7 @@ impl ApplicationHandler<UserEvent> for App {
                             self.outbound.send_reply(req.reply_to, &result);
                         }
                         None => {
-                            gpu.render(&verts, &view_proj);
+                            gpu.render();
                         }
                     }
                 } else if let Some(req) = pending_capture {
@@ -738,12 +733,12 @@ impl DriverCapability for DesktopDriverCapability {
         // this driver, so its `RenderRunning` is in the typed map;
         // pull the accumulator handles for the per-frame loop to
         // read.
-        let render: Arc<RenderRunning> = ctx.expect();
+        let render_running: Arc<RenderRunning> = ctx.expect();
         let RenderHandles {
-            frame_vertices,
-            camera_state,
+            frame_vertices: _,
+            camera_state: _,
             triangles_rendered,
-        } = render.handles();
+        } = render_running.handles();
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_key = boot.registry.kind_id(Key::NAME).expect("Key registered");
@@ -779,8 +774,7 @@ impl DriverCapability for DesktopDriverCapability {
             kind_mouse_move,
             kind_window_size,
             kind_frame_stats,
-            frame_vertices,
-            camera_state,
+            render_running: Arc::clone(&render_running),
             triangles_rendered: Arc::clone(&triangles_rendered),
             capture_queue,
             outbound: Arc::clone(&boot.outbound),

@@ -1,16 +1,15 @@
-// wgpu plumbing for the test-bench chassis. Owns the device/queue
-// plus the shared `core::render::Pipeline` + `Targets` (issue 421);
-// no surface, no presentation. Each frame the main thread hands in
-// a byte blob drained from the render sink plus the latest camera
-// view_proj; render() forwards both to `core::render::record_main_pass`
-// which uploads them and emits one draw call into the offscreen.
+// Test-bench wgpu shim. ADR-0071 phase C2: pipeline + targets moved
+// into core's `RenderRunning` (via `RenderGpu` + `install_gpu`); this
+// file is now a thin wrapper that acquires the wgpu device/queue at
+// construction and drives encoder creation + submit on each frame
+// against `RenderRunning`'s encoder-level methods.
 
-use aether_substrate_core::render::{
-    self, CaptureMeta, Pipeline, RenderError, Targets, build_main_pipeline, finish_capture,
-    prepare_capture_copy, record_main_pass,
-};
+use std::sync::Arc;
 
-pub use render::VERTEX_BUFFER_BYTES;
+use aether_substrate_core::capabilities::{RenderGpu, RenderRunning};
+use aether_substrate_core::render::RenderError;
+
+pub use aether_substrate_core::render::VERTEX_BUFFER_BYTES;
 
 /// Render target format. Test-bench commits to RGBA at init since
 /// there's no surface to query, which keeps the readback path swizzle-
@@ -18,30 +17,26 @@ pub use render::VERTEX_BUFFER_BYTES;
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 pub struct Gpu {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    /// Snapshot of the adapter chosen at `new()`. Kept for
-    /// diagnostics — desktop also exposes this for `platform_info`,
-    /// which test-bench replies `Err` to (window-only operation), but
-    /// the field is cheap and lets the boot log report adapter info.
     pub adapter_info: wgpu::AdapterInfo,
     /// Resolved adapter limits. Kept for diagnostics; desktop uses
     /// the equivalent for `platform_info` which test-bench replies
     /// `Err` to.
     #[allow(dead_code)]
     pub limits: wgpu::Limits,
-    pipeline: Pipeline,
-    targets: Targets,
+    /// Cloned out of [`RenderGpu`] at install for ergonomic access on
+    /// the submit path; the source-of-truth lives inside `RenderRunning`.
+    queue: Arc<wgpu::Queue>,
+    device: Arc<wgpu::Device>,
+    render_running: Arc<RenderRunning>,
 }
 
 impl Gpu {
-    /// Initialise wgpu with no presentation surface. `width` and
-    /// `height` size the offscreen color + depth targets — they're
-    /// the dimensions every captured frame will report. wgpu picks
-    /// an adapter via `request_adapter` with `compatible_surface:
-    /// None`; on CI runners this resolves to whatever Vulkan/Metal/
-    /// DX12 driver is available (ADR-0067 driver fallback policy).
-    pub fn new(width: u32, height: u32) -> Self {
+    /// Initialise wgpu with no presentation surface, build the shared
+    /// pipeline + targets via [`RenderGpu::new`], install them on
+    /// `render_running` so encoder methods on the running can read
+    /// them. `width` and `height` size the offscreen color + depth
+    /// targets — the dimensions every captured frame will report.
+    pub fn new(width: u32, height: u32, render_running: Arc<RenderRunning>) -> Self {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -63,89 +58,70 @@ impl Gpu {
         }))
         .expect("request_device");
 
-        let targets = Targets::new(&device, COLOR_FORMAT, width, height);
-        let pipeline = build_main_pipeline(&device, &queue, COLOR_FORMAT, wgpu::PolygonMode::Fill);
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+
+        render_running.install_gpu(RenderGpu::new(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            COLOR_FORMAT,
+            width,
+            height,
+            wgpu::PolygonMode::Fill,
+        ));
 
         Self {
-            device,
-            queue,
             adapter_info,
             limits,
-            pipeline,
-            targets,
+            queue,
+            device,
+            render_running,
         }
     }
 
     /// Resize the offscreen target. Test-bench has no surface, so a
     /// resize just reallocates the offscreen color + depth textures
-    /// and invalidates the readback buffer. Scenario scripts that
-    /// need a different aspect ratio can mail an advance-style
-    /// control to trigger this — for v1 the size is fixed at boot.
+    /// and invalidates the readback buffer.
     #[allow(dead_code)] // wired in PR2 alongside test_bench.advance kinds
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.targets.resize(&self.device, width, height);
+        self.render_running.resize(width, height);
     }
 
-    pub fn render(&mut self, vertices: &[u8], view_proj: &[f32; 16]) {
-        let _ = self.render_impl(vertices, view_proj, false);
+    /// Draw the current accumulator's vertices into the offscreen
+    /// target with the latest camera view-proj. No presentation step
+    /// — desktop's swapchain blit is omitted because there's no
+    /// surface.
+    pub fn render(&mut self) {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame encoder"),
+            });
+        match self.render_running.record_frame(&mut encoder, &[]) {
+            Ok(()) => {}
+            Err(RenderError::VertexBufferOverflow { .. }) => return,
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Variant of `render` that also copies the offscreen texture
     /// into a readback buffer, maps it, and returns an encoded PNG.
     /// On any capture-path failure, returns `Err(reason)`; the frame
     /// still rendered to the offscreen — capture is a side channel.
-    pub fn render_and_capture(
-        &mut self,
-        vertices: &[u8],
-        view_proj: &[f32; 16],
-    ) -> Result<Vec<u8>, String> {
-        self.render_impl(vertices, view_proj, true)
-            .ok_or_else(|| "capture did not produce a result".to_owned())?
-    }
-
-    /// Draw `vertices` into the offscreen target with `view_proj` as
-    /// the camera uniform, optionally encode a capture copy. Returns
-    /// `Some(Ok(png))` / `Some(Err(reason))` when `capture` is set;
-    /// `None` when `capture` is false or the capture path couldn't
-    /// allocate. There is no presentation step — desktop's swapchain
-    /// blit is omitted because there's no surface.
-    fn render_impl(
-        &mut self,
-        vertices: &[u8],
-        view_proj: &[f32; 16],
-        capture: bool,
-    ) -> Option<Result<Vec<u8>, String>> {
+    pub fn render_and_capture(&mut self) -> Result<Vec<u8>, String> {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
-
-        match record_main_pass(
-            &self.queue,
-            &mut encoder,
-            &self.pipeline,
-            &self.targets,
-            vertices,
-            view_proj,
-            &[],
-        ) {
+        match self.render_running.record_frame(&mut encoder, &[]) {
             Ok(()) => {}
-            Err(RenderError::VertexBufferOverflow { .. }) => return None,
+            Err(RenderError::VertexBufferOverflow { .. }) => {
+                return Err("vertex buffer overflow — capture skipped".to_owned());
+            }
         }
-
-        let capture_meta: Option<CaptureMeta> = if capture {
-            Some(prepare_capture_copy(
-                &self.device,
-                &mut self.targets,
-                &mut encoder,
-            ))
-        } else {
-            None
-        };
-
+        let meta = self.render_running.record_capture_copy(&mut encoder);
         self.queue.submit(std::iter::once(encoder.finish()));
-
-        capture_meta.map(|meta| finish_capture(&self.device, &self.targets, &meta))
+        self.render_running.finish_capture(&meta)
     }
 }

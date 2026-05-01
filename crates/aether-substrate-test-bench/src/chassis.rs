@@ -31,7 +31,8 @@ use aether_substrate_core::chassis_builder::{Builder, BuiltChassis, NeverDriver,
 use aether_substrate_core::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
-        LogCapability, RenderCapability, RenderConfig, RenderHandles, io::NamespaceRoots,
+        LogCapability, RenderCapability, RenderConfig, RenderHandles, RenderRunning,
+        io::NamespaceRoots,
     },
     capture::{
         CaptureQueue, begin_capture_request, reply_unsupported_platform_info,
@@ -217,6 +218,11 @@ pub struct TestBenchBuild {
     pub passive: PassiveChassis<TestBenchChassis>,
     pub boot: SubstrateBoot,
     pub render_handles: RenderHandles,
+    /// The [`RenderRunning`] handle the embedder calls
+    /// [`RenderRunning::install_gpu`] on once it has a wgpu device +
+    /// queue, plus encoder-level methods (`record_frame`, etc.)
+    /// thereafter. Cloned out of `passive` for ergonomic access.
+    pub render_running: Arc<RenderRunning>,
     pub kind_tick: KindId,
     pub kind_frame_stats: KindId,
     pub hub: Option<HubClient>,
@@ -282,6 +288,7 @@ impl TestBenchChassis {
                 .build_passive()
                 .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
 
+        let render_running: Arc<RenderRunning> = passive.capability();
         let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())?;
 
         // The chassis-control closure already cloned `events_tx`;
@@ -296,6 +303,7 @@ impl TestBenchChassis {
             passive,
             boot,
             render_handles,
+            render_running,
             kind_tick,
             kind_frame_stats,
             hub,

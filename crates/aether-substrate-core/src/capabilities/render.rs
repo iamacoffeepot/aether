@@ -34,7 +34,10 @@ use std::time::Duration;
 use aether_kinds::DRAW_TRIANGLE_BYTES;
 
 use crate::capability::{BootError, Capability, ChassisCtx, Envelope, RunningCapability};
-use crate::render::{IDENTITY_VIEW_PROJ, Pipeline, Targets};
+use crate::render::{
+    CaptureMeta, IDENTITY_VIEW_PROJ, Pipeline, RenderError, Targets, build_main_pipeline,
+    finish_capture, prepare_capture_copy, record_main_pass,
+};
 
 pub const RENDER_SINK_NAME: &str = "aether.sink.render";
 pub const CAMERA_SINK_NAME: &str = "aether.sink.camera";
@@ -136,6 +139,33 @@ pub struct RenderGpu {
     pub color_format: wgpu::TextureFormat,
 }
 
+impl RenderGpu {
+    /// Build the standard render pipeline + offscreen targets at the
+    /// given size and pass [`Self`] to [`RenderRunning::install_gpu`].
+    /// `polygon_mode` is `Fill` for the normal case; desktop's
+    /// `AETHER_WIREFRAME=line` chassis env passes `Line` so the main
+    /// pipeline draws as wireframe instead of building a separate
+    /// overlay pipeline.
+    pub fn new(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        color_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        polygon_mode: wgpu::PolygonMode,
+    ) -> Self {
+        let pipeline = build_main_pipeline(&device, &queue, color_format, polygon_mode);
+        let targets = Targets::new(&device, color_format, width, height);
+        Self {
+            device,
+            queue,
+            pipeline,
+            targets: Mutex::new(targets),
+            color_format,
+        }
+    }
+}
+
 impl RenderRunning {
     /// Post-boot accessor for the accumulator state. Used by drivers
     /// reading via the chassis_builder typed lookup once render
@@ -161,11 +191,121 @@ impl RenderRunning {
     }
 
     /// Returns the installed [`RenderGpu`], or `None` if `install_gpu`
-    /// hasn't been called yet. Encoder-level methods (added in
-    /// ADR-0071 phase C2) use this; today only the chassis-side glue
-    /// reaches in.
+    /// hasn't been called yet. Chassis-side glue that needs raw
+    /// access to the pipeline's bind group layouts (e.g. desktop's
+    /// wireframe overlay pipeline construction) reaches in here.
     pub fn gpu(&self) -> Option<&RenderGpu> {
         self.gpu.get()
+    }
+
+    fn expect_gpu(&self) -> &RenderGpu {
+        self.gpu.get().expect(
+            "RenderRunning::install_gpu must be called before encoder-level methods. \
+             Desktop installs in winit's resumed; test-bench installs after build_passive.",
+        )
+    }
+
+    /// Drain the current frame's accumulated vertices, read the
+    /// latest camera view-proj, and record the main render pass into
+    /// `encoder`. Each call consumes the accumulator (subsequent
+    /// inbound mail builds the next frame). `extra_pipelines` are
+    /// drawn after the main pipeline inside the same render pass —
+    /// desktop passes a wireframe overlay pipeline here when
+    /// `AETHER_WIREFRAME=overlay`; test-bench passes `&[]`.
+    pub fn record_frame(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        extra_pipelines: &[&wgpu::RenderPipeline],
+    ) -> Result<(), RenderError> {
+        let gpu = self.expect_gpu();
+        let cap = self.handles.frame_vertices.lock().unwrap().capacity();
+        let vertices = std::mem::replace(
+            &mut *self.handles.frame_vertices.lock().unwrap(),
+            Vec::with_capacity(cap),
+        );
+        let view_proj = *self.handles.camera_state.lock().unwrap();
+        let targets = gpu.targets.lock().unwrap();
+        record_main_pass(
+            &gpu.queue,
+            encoder,
+            &gpu.pipeline,
+            &targets,
+            &vertices,
+            &view_proj,
+            extra_pipelines,
+        )
+    }
+
+    /// Encode a copy of the offscreen color target into a readback
+    /// buffer. Pair with [`Self::finish_capture`] after submit. The
+    /// readback buffer is reallocated on size mismatch with the
+    /// current offscreen, so any sequence of resize → record_frame →
+    /// record_capture_copy → submit → finish_capture works.
+    pub fn record_capture_copy(&self, encoder: &mut wgpu::CommandEncoder) -> CaptureMeta {
+        let gpu = self.expect_gpu();
+        let mut targets = gpu.targets.lock().unwrap();
+        prepare_capture_copy(&gpu.device, &mut targets, encoder)
+    }
+
+    /// Map the readback buffer prepared by [`Self::record_capture_copy`]
+    /// and return the encoded PNG. Call after the encoder containing
+    /// the matching `record_capture_copy` has been submitted.
+    pub fn finish_capture(&self, meta: &CaptureMeta) -> Result<Vec<u8>, String> {
+        let gpu = self.expect_gpu();
+        let targets = gpu.targets.lock().unwrap();
+        finish_capture(&gpu.device, &targets, meta)
+    }
+
+    /// Resize the offscreen color + depth targets. Idempotent on
+    /// zero dimensions (matches winit's `Resized(0, 0)` on minimize).
+    pub fn resize(&self, width: u32, height: u32) {
+        let gpu = self.expect_gpu();
+        let mut targets = gpu.targets.lock().unwrap();
+        targets.resize(&gpu.device, width, height);
+    }
+
+    /// Cloned `Arc<wgpu::Device>`. Drivers that need the device for
+    /// their own pipelines (e.g. desktop's wireframe overlay pipeline,
+    /// swapchain blit) clone here.
+    pub fn device(&self) -> Arc<wgpu::Device> {
+        Arc::clone(&self.expect_gpu().device)
+    }
+
+    /// Cloned `Arc<wgpu::Queue>`. Drivers submit through this; the
+    /// shared queue means render's `record_frame` writes and the
+    /// driver's swapchain submit go through the same submission
+    /// order.
+    pub fn queue(&self) -> Arc<wgpu::Queue> {
+        Arc::clone(&self.expect_gpu().queue)
+    }
+
+    /// Format the offscreen color target was created with. Capture's
+    /// BGRA-vs-RGBA decision keys on this; desktop's swapchain blit
+    /// matches its surface format against this to pick a direct copy
+    /// vs a manual swizzle.
+    pub fn color_format(&self) -> wgpu::TextureFormat {
+        self.expect_gpu().color_format
+    }
+
+    /// Current offscreen color target dimensions. Drivers reading
+    /// after a `resize` see the new dimensions immediately.
+    pub fn color_size(&self) -> (u32, u32) {
+        let targets = self.expect_gpu().targets.lock().unwrap();
+        (targets.width(), targets.height())
+    }
+
+    /// Run `f` with a borrow of the offscreen color texture. Used by
+    /// desktop's swapchain blit: the closure body holds the targets
+    /// mutex, so any encoder commands recorded inside are sequenced
+    /// against any concurrent resize. Test-bench reaches the
+    /// offscreen via the capture path and doesn't need this.
+    pub fn with_color_texture<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&wgpu::Texture) -> R,
+    {
+        let gpu = self.expect_gpu();
+        let targets = gpu.targets.lock().unwrap();
+        f(targets.color_texture())
     }
 }
 
