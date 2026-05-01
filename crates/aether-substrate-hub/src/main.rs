@@ -10,7 +10,7 @@
 //! this binary is now the env-reading edge plus a logging line plus
 //! the run call.
 
-use aether_substrate_hub::{Chassis, HubChassis, HubEnv};
+use aether_hub::{Chassis, HubChassis, HubEnv};
 
 fn main() -> wasmtime::Result<()> {
     let chassis = HubChassis::build(HubEnv::from_env())?;

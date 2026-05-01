@@ -1,5 +1,5 @@
-//! aether-hub: substrate-side hub client + capability (ADR-0070 phase 4 /
-//! ADR-0071 phase 7).
+//! aether-hub: substrate-side hub client + capability + the hub
+//! coordinator itself (ADR-0070 phases 4-5 / ADR-0071 phase 7).
 //!
 //! Houses everything that needs to know the `aether-hub-protocol` wire
 //! format on the substrate side:
@@ -20,12 +20,26 @@
 //!   inbound-frame resolvers shared by [`HubClient`]'s reader and the
 //!   hub-chassis's loopback drainer.
 //!
-//! Per ADR-0006's "substrate stays sync" note, this crate uses
-//! `std::sync::mpsc` and the sync framing helpers from
-//! `aether-hub-protocol`.
+//! Plus the hub coordinator itself (ADR-0071 phase 7d-2 relocated
+//! these from the `aether-substrate-hub` binary crate):
+//!
+//! - [`HubChassis`] / [`HubServerCapability`] — Chassis marker +
+//!   driver capability that owns the tokio runtime + listeners.
+//! - [`run_engine_listener`] — the engine-facing TCP listener loop.
+//! - [`run_mcp_server`] — the rmcp-driven MCP transport on
+//!   [`DEFAULT_MCP_PORT`].
+//! - [`EngineRegistry`] / [`SessionRegistry`] / [`PendingSpawns`] /
+//!   [`LogStore`] — the in-process state the coordinator wires
+//!   together.
+//! - [`spawn_substrate`] / [`terminate_substrate`] — child-process
+//!   lifecycle for the `spawn_substrate` MCP tool.
+//!
+//! Per ADR-0006's "substrate stays sync" note, the hub-client
+//! machinery uses `std::sync::mpsc` and the sync framing helpers from
+//! `aether-hub-protocol`. The coordinator itself is async (tokio).
 
 use std::io;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::process;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -43,6 +57,68 @@ use aether_substrate_core::{
     LogLevel as SubstrateLogLevel, Mail, Mailer, Registry, ReplyTarget, ReplyTo, RunningCapability,
     SubstrateBoot,
 };
+use tokio::net::TcpListener;
+
+mod chassis;
+mod engine;
+mod log_store;
+mod loopback;
+mod mcp;
+mod registry;
+mod session;
+mod spawn;
+
+pub use aether_codec::{DecodeError, EncodeError, decode_schema, encode_schema};
+pub use aether_substrate_core::Chassis;
+pub use chassis::{HubChassis, HubEnv, HubServerCapability, HubServerRunning};
+pub use engine::READ_TIMEOUT;
+pub use log_store::{LogStore, ReadResult as LogReadResult};
+pub use loopback::{HUB_SELF_ENGINE_ID, LoopbackEngine, LoopbackHandle};
+pub use mcp::{DEFAULT_MCP_PORT, HubState, run_mcp_server};
+pub use registry::{EngineRecord, EngineRegistry};
+pub use session::{
+    QueuedMail, SESSION_CHANNEL_CAPACITY, SessionHandle, SessionRecord, SessionRegistry,
+};
+pub use spawn::{
+    DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, PendingSpawns, SpawnError, SpawnOpts,
+    TerminateOutcome, spawn_substrate, terminate_substrate,
+};
+
+/// Default port the hub binds for engine TCP clients. ADR-0006 V0
+/// fixes this; `AETHER_ENGINE_PORT` overrides.
+pub const DEFAULT_ENGINE_PORT: u16 = 8889;
+
+/// Run the engine listener loop on `addr`, dispatching each accepted
+/// connection to a per-connection task. Returns on listener error
+/// only; individual connection failures are logged and isolated.
+pub async fn run_engine_listener(
+    addr: SocketAddr,
+    registry: EngineRegistry,
+    sessions: SessionRegistry,
+    pending: PendingSpawns,
+    logs: LogStore,
+    loopback: loopback::LoopbackHandle,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    eprintln!("aether-substrate-hub: engine listener bound on {bound}");
+
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let registry = registry.clone();
+        let sessions = sessions.clone();
+        let pending = pending.clone();
+        let logs = logs.clone();
+        let loopback = loopback.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                engine::handle_connection(stream, registry, sessions, pending, logs, loopback).await
+            {
+                eprintln!("aether-substrate-hub: engine {peer} dropped: {e}");
+            }
+        });
+    }
+}
 
 /// Cadence at which this client emits `Heartbeat` to the hub. Must be
 /// comfortably below the hub's read timeout (15s) so a single missed

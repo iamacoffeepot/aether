@@ -164,10 +164,24 @@ dependencies = [
 name = "aether-hub"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-codec",
  "aether-data",
  "aether-hub-protocol",
+ "aether-kinds",
  "aether-substrate-core",
+ "axum",
+ "base64 0.22.1",
+ "bytemuck",
+ "libc",
+ "postcard",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
  "tracing",
+ "uuid",
  "wasmtime",
 ]
 
@@ -332,24 +346,7 @@ dependencies = [
 name = "aether-substrate-hub"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-codec",
- "aether-data",
  "aether-hub",
- "aether-hub-protocol",
- "aether-kinds",
- "aether-substrate-core",
- "axum",
- "base64 0.22.1",
- "bytemuck",
- "libc",
- "postcard",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "uuid",
  "wasmtime",
 ]
 

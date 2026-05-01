@@ -38,7 +38,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aether_data::Kind;
-use aether_hub::{HubProtocolBackend, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail};
 use aether_hub_protocol::{
     EngineId, EngineMailToHubSubstrateFrame, EngineToHub, HubToEngine, MailByIdFrame, Uuid,
 };
@@ -49,6 +48,7 @@ use tokio::sync::mpsc;
 use crate::log_store::LogStore;
 use crate::registry::{EngineRecord, EngineRegistry};
 use crate::session::SessionRegistry;
+use crate::{HubProtocolBackend, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail};
 
 /// Reserved `EngineId` for the hub's own loopback engine. A nil UUID
 /// is externally unreachable (engines minted by the TCP handshake
