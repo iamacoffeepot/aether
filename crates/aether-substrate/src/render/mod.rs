@@ -13,8 +13,8 @@
 //! desktop's wireframe overlay stay desktop-side; the offscreen
 //! pipeline + capture readback live here.
 //!
-//! Gated by the `render` feature on `aether-substrate-core`. Headless
-//! and hub don't enable the feature so wgpu stays out of their build.
+//! Gated by the `render` feature on `aether-substrate`. Headless and
+//! hub don't enable the feature so wgpu stays out of their build.
 
 mod capture;
 mod pipeline;

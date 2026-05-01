@@ -42,7 +42,7 @@ use crate::hub::wire::{
 };
 use aether_data::Kind;
 use aether_kinds::UnresolvedMail;
-use aether_substrate_core::{Mail, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot};
+use aether_substrate::{Mail, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot};
 use tokio::sync::mpsc;
 
 use crate::hub::log_store::LogStore;
@@ -258,8 +258,8 @@ impl LoopbackEngine {
 /// is handled by runtime shutdown rather than a frame.
 pub async fn run_inbound_drainer(
     mut inbound_rx: mpsc::Receiver<HubToEngine>,
-    registry: Arc<aether_substrate_core::Registry>,
-    queue: Arc<aether_substrate_core::Mailer>,
+    registry: Arc<aether_substrate::Registry>,
+    queue: Arc<aether_substrate::Mailer>,
 ) {
     while let Some(frame) = inbound_rx.recv().await {
         match frame {

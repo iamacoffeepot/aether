@@ -7,10 +7,10 @@
 
 use std::sync::Arc;
 
-use aether_substrate_core::capabilities::{RenderGpu, RenderRunning};
-use aether_substrate_core::render::RenderError;
+use aether_substrate::capabilities::{RenderGpu, RenderRunning};
+use aether_substrate::render::RenderError;
 
-pub use aether_substrate_core::render::VERTEX_BUFFER_BYTES;
+pub use aether_substrate::render::VERTEX_BUFFER_BYTES;
 
 /// Render target format. Test-bench commits to RGBA at init since
 /// there's no surface to query, which keeps the readback path swizzle-

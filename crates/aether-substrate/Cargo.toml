@@ -3,64 +3,63 @@ name = "aether-substrate"
 version.workspace = true
 edition.workspace = true
 
-# Multi-binary chassis crate. Holds the desktop, headless, and hub
-# chassis source as submodules (`src/<chassis>/`), plus the hub
-# library (substrate-side client, wire types, MCP coordinator)
-# under `src/hub/`. Each chassis produces a binary via
-# `src/bin/<chassis>.rs`. The shared substrate runtime stays in
-# `aether-substrate-core`; this crate is the per-deployment chassis
-# layer.
-#
-# `aether-substrate-test-bench` stays as its own crate because it
-# exposes a `TestBench` library API that components, the scenario
-# runner, and demos depend on.
+# ADR-0035 Phase 1: runtime (wasmtime host, mail scheduler, kind
+# manifest, registry, control-plane dispatch, hub client) for the
+# substrate. Powers every chassis (desktop, headless, hub, test-bench)
+# from `aether-substrate-bundle`. Winit + pollster stay bundle-side;
+# wgpu + png are gated behind the optional `render` feature so
+# chassis that don't render (headless, hub) skip the wgpu/png
+# compile entirely.
 
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "aether-substrate"
-path = "src/bin/desktop.rs"
-
-[[bin]]
-name = "aether-substrate-headless"
-path = "src/bin/headless.rs"
-
-[[bin]]
-name = "aether-substrate-hub"
-path = "src/bin/hub.rs"
+[features]
+# Issue 421: chassis that draw enable `render` to pull in the shared
+# offscreen pipeline + capture path. Headless and hub leave it off
+# and never link wgpu.
+render = ["dep:wgpu", "dep:png"]
+# ADR-0070 phase 3 (part 4): chassis with an audio device enable
+# `audio` to pull in the cpal-backed synth + the `aether.sink.audio`
+# capability. Headless and hub leave it off; desktop turns it on.
+audio = ["dep:cpal", "dep:crossbeam-queue"]
 
 [dependencies]
-aether-substrate-core = { path = "../aether-substrate-core", features = ["render", "audio"] }
 aether-data = { path = "../aether-data" }
-aether-codec = { path = "../aether-codec" }
 aether-kinds = { path = "../aether-kinds" }
-axum = "0.8"
-base64 = "0.22"
-bytemuck = { version = "1.19", features = ["derive"] }
-os_info = { version = "3", default-features = false }
-png = "0.17"
-pollster = "0.4.0"
-postcard = { version = "1.1", default-features = false, features = ["alloc"] }
-rmcp = { version = "0.8", features = [
-    "server",
-    "macros",
-    "transport-streamable-http-server",
-] }
-schemars = "1"
+bytemuck = "1.19"
+postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "process", "fs"] }
-tokio-util = "0.7"
 tracing = "0.1"
-uuid = { version = "1", features = ["v4", "serde"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# ADR-0060 guest-side logging: the `aether.sink.log` handler bridges
+# decoded `LogEvent` payloads back into the host tracing pipeline.
+# `log::log!(target: dyn, lvl, ...)` accepts a dynamic target the
+# `tracing-log` integration in `tracing-subscriber` (default feature)
+# lifts into a tracing event, so the chassis EnvFilter sees the
+# guest's reported target without us hand-rolling a Metadata cache.
+log = "0.4"
+# ADR-0041 I/O namespace defaults. `dirs` resolves XDG on Linux,
+# Application Support on macOS, AppData on Windows without reimple-
+# menting platform-specific path logic per chassis.
+dirs = "5"
+# ADR-0043 net sink — blocking HTTP client with rustls TLS, no
+# tokio. `ureq` 3.x pulls rustls + webpki-roots transitively;
+# `url` parses URLs for allowlist host extraction.
+ureq = { version = "3", features = ["rustls"] }
+url = "2"
 wasmtime = "30"
-wgpu = "29.0.1"
-winit = "0.30.13"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+# Render-only deps; gated by the `render` feature. Headless + hub
+# don't enable the feature, so wgpu's transitive graph stays out of
+# their builds.
+wgpu = { version = "29.0.1", optional = true }
+png = { version = "0.17", optional = true }
+# Audio-only deps; gated by the `audio` feature. Desktop enables it,
+# headless and hub do not.
+cpal = { version = "0.15", optional = true }
+crossbeam-queue = { version = "0.3", optional = true }
+# Wasmtime 30 doesn't expose `custom_sections` on `Module`; use
+# wasmparser directly to walk the raw wasm bytes for the ADR-0028
+# `aether.kinds` section. Pin to the version wasmtime re-exports
+# transitively so we stay on a single compiled copy.
+wasmparser = "0.224"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 wat = "1"

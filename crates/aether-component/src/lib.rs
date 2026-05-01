@@ -89,7 +89,7 @@ pub const DISPATCH_HANDLED: u32 = 0;
 /// — the strict-receiver miss. Propagated through the FFI so the
 /// substrate's scheduler can emit a `tracing::warn!` naming the
 /// mailbox + kind (ADR-0033 §Strict receivers, issue #142). Matches
-/// `aether_substrate::component::DISPATCH_UNKNOWN_KIND` by value.
+/// `aether_substrate_bundle::component::DISPATCH_UNKNOWN_KIND` by value.
 pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 
 /// Re-exports the `#[handlers]` macro relies on at expansion sites

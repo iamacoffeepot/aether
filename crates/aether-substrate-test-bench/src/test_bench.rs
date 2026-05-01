@@ -26,11 +26,10 @@ use std::time::{Duration, Instant};
 
 use aether_data::{Kind, KindId, encode_empty, encode_struct};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tick};
-use aether_substrate::hub::wire::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
+use aether_substrate_bundle::hub::wire::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
-use aether_substrate::hub::HubProtocolBackend;
-use aether_substrate_core::{
+use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
     capabilities::{IoCapability, io::NamespaceRoots},
     capture::CaptureQueue,
@@ -38,6 +37,7 @@ use aether_substrate_core::{
     mail::{Mail, MailboxId},
     subscribers_for,
 };
+use aether_substrate_bundle::hub::HubProtocolBackend;
 
 use crate::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
 use crate::events::{ChassisEvent, EventReceiver, channel as event_channel};
@@ -101,7 +101,7 @@ impl std::error::Error for TestBenchError {}
 /// supported.
 pub struct TestBench {
     queue: Arc<Mailer>,
-    registry: Arc<aether_substrate_core::Registry>,
+    registry: Arc<aether_substrate::Registry>,
     outbound: Arc<HubOutbound>,
     loopback_rx: mpsc::Receiver<EngineToHub>,
 

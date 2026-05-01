@@ -1,8 +1,8 @@
 //! Desktop substrate binary entry point. See
-//! `aether_substrate::desktop` for the chassis impl.
+//! `aether_substrate_bundle::desktop` for the chassis impl.
 
-use aether_substrate::desktop::{DesktopChassis, DesktopEnv};
-use aether_substrate_core::Chassis;
+use aether_substrate::Chassis;
+use aether_substrate_bundle::desktop::{DesktopChassis, DesktopEnv};
 
 fn main() -> wasmtime::Result<()> {
     let env = DesktopEnv::from_env()?;

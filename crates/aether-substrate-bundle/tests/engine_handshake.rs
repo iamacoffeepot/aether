@@ -5,8 +5,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use aether_codec::frame::encode_frame;
-use aether_substrate::hub::wire::{EngineToHub, Goodbye, Hello, HubToEngine};
-use aether_substrate::hub::{
+use aether_substrate_bundle::hub::wire::{EngineToHub, Goodbye, Hello, HubToEngine};
+use aether_substrate_bundle::hub::{
     EngineRegistry, HUB_SELF_ENGINE_ID, LogStore, LoopbackEngine, LoopbackHandle, PendingSpawns,
     SessionRegistry, run_engine_listener,
 };

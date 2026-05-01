@@ -132,7 +132,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p aether-substrate --all-targets
+      - run: cargo test -p aether-substrate-bundle --all-targets
 
   ci-pass:
     name: CI pass
