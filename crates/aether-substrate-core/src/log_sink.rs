@@ -1,8 +1,8 @@
-// ADR-0060 guest-side logging via mail sink. Counterpart to the
-// `MailSubscriber` in `aether-component`: decodes `aether.log` mail
-// the guest sent to `"aether.sink.log"` and re-emits the event through
-// the host's existing tracing pipeline so it shows up in `engine_logs`
-// (ADR-0023) and on stderr alongside native-side logs.
+// ADR-0060 guest-side log dispatch. ADR-0070 Phase 3 moved the
+// `aether.sink.log` mailbox out of inline registration in chassis
+// mains and into [`crate::capabilities::log`] — this module retains
+// the per-payload decode + log-facade emit, called from the
+// capability's dispatcher thread for each envelope it receives.
 //
 // We bridge via the `log` crate facade rather than `tracing::event!`
 // because `tracing::event!` requires a `&'static str` target — the
@@ -14,37 +14,20 @@
 // applies the operator's `AETHER_LOG_FILTER` directives without us
 // maintaining a leaked-target cache.
 //
-// The handler is intentionally chassis-agnostic — desktop and
-// headless wire the same closure. Hub doesn't (no shipped chassis
-// hosts components on the hub today; the kinds bubble back to the
-// child substrate via ADR-0037 if a guest-bound component were ever
-// loaded there).
+// The capability is intentionally chassis-conditional — desktop,
+// headless, and the test bench wire it; hub doesn't (no shipped
+// chassis hosts components on the hub today; the kinds bubble back
+// to the child substrate via ADR-0037 if a guest-bound component
+// were ever loaded there).
 
-use std::sync::Arc;
-
-use aether_data::KindId;
 use aether_kinds::LogEvent;
 
-use crate::mail::ReplyTo;
-use crate::registry::{Registry, SinkHandler};
-
-/// Build the `SinkHandler` closure that decodes `LogEvent` mail and
-/// emits the event through the `log` facade. Caller registers it
-/// against `"aether.sink.log"`.
-pub fn log_sink_handler() -> SinkHandler {
-    Arc::new(
-        move |_kind: KindId,
-              _kind_name: &str,
-              _origin: Option<&str>,
-              _sender: ReplyTo,
-              bytes: &[u8],
-              _count: u32| {
-            handle_log_mail(bytes);
-        },
-    )
-}
-
-fn handle_log_mail(bytes: &[u8]) {
+/// Decode a single `aether.log` payload and emit through the
+/// `log::log!` facade. Called by
+/// [`crate::capabilities::log::LogCapability`]'s dispatcher thread;
+/// tests can call it directly to exercise the decode path without
+/// spinning up a capability.
+pub(crate) fn handle_log_mail(bytes: &[u8]) {
     let event: LogEvent = match postcard::from_bytes(bytes) {
         Ok(e) => e,
         Err(err) => {
@@ -73,13 +56,6 @@ fn handle_log_mail(bytes: &[u8]) {
         }
     };
     log::log!(target: event.target.as_str(), level, "{}", event.message);
-}
-
-/// Convenience: register the log sink against the canonical mailbox
-/// name `"aether.sink.log"`. Returned `MailboxId` is normally ignored;
-/// callers keep it only to assert against in tests.
-pub fn register_log_sink(registry: &Registry) {
-    registry.register_sink("aether.sink.log", log_sink_handler());
 }
 
 #[cfg(test)]

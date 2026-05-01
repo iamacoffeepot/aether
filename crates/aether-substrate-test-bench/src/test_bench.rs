@@ -255,7 +255,7 @@ impl TestBench {
         if let Some(roots) = namespace_roots {
             builder = builder.namespace_roots(roots);
         }
-        let boot = builder
+        let mut boot = builder
             .build()
             .map_err(|e| TestBenchError::Boot(e.to_string()))?;
 
@@ -292,7 +292,8 @@ impl TestBench {
                 aether_substrate_core::io::io_sink_handler(reg, Arc::clone(&boot.queue)),
             );
         }
-        aether_substrate_core::log_sink::register_log_sink(&boot.registry);
+        boot.add_capability(aether_substrate_core::capabilities::LogCapability::new())
+            .expect("log capability boot");
 
         let gpu = Gpu::new(width, height);
 

@@ -207,7 +207,7 @@ fn main() -> wasmtime::Result<()> {
     let hub_url = std::env::var("AETHER_HUB_URL").ok();
     let namespace_roots = aether_substrate_core::io::NamespaceRoots::from_env();
 
-    let boot = SubstrateBoot::builder("test-bench", env!("CARGO_PKG_VERSION"))
+    let mut boot = SubstrateBoot::builder("test-bench", env!("CARGO_PKG_VERSION"))
         .workers(WORKERS)
         .namespace_roots(namespace_roots)
         .chassis_handler({
@@ -282,9 +282,9 @@ fn main() -> wasmtime::Result<()> {
         }
     }
 
-    // `aether.sink.log` per ADR-0060. Same handler as desktop and
+    // `aether.sink.log` per ADR-0060. Same capability as desktop and
     // headless — guest log mail is independent of GPU / windowing.
-    aether_substrate_core::log_sink::register_log_sink(&boot.registry);
+    boot.add_capability(aether_substrate_core::capabilities::LogCapability::new())?;
 
     // ADR-0067 sink set is render + camera + io + log. Audio is
     // skipped (no cpal — scenarios don't need audio output and

@@ -342,6 +342,33 @@ impl BootedChassis {
         self.running.is_empty()
     }
 
+    /// Boot one more capability into an already-built chassis. The
+    /// capability sees the same `ChassisCtx` shape as those booted
+    /// through [`ChassisBuilder::with`] — the same registry, the
+    /// same mail-send handle, and (crucially) the same fallback-
+    /// router slot, so the single-claim invariant still holds across
+    /// the build-time and post-build sets.
+    ///
+    /// Used by chassis mains to compose chassis-conditional
+    /// capabilities (`LogCapability`, `IoCapability`, etc.) on top
+    /// of the universal capabilities `SubstrateBoot::build` already
+    /// installed. Boots run in call order; shutdown tears down in
+    /// reverse, exactly like the build-time path.
+    pub fn add<C>(
+        &mut self,
+        registry: &Arc<Registry>,
+        mailer: &Arc<Mailer>,
+        cap: C,
+    ) -> Result<(), BootError>
+    where
+        C: Capability,
+    {
+        let mut ctx = ChassisCtx::new(registry, mailer, &mut self._fallback);
+        let running = cap.boot(&mut ctx)?;
+        self.running.push(Box::new(running));
+        Ok(())
+    }
+
     /// Tear down every capability in reverse boot order. Idempotent
     /// with [`Drop`] — calling `shutdown` first leaves [`Drop`] with
     /// nothing to do.
