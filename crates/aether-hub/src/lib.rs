@@ -24,7 +24,7 @@
 //! Plus the hub coordinator itself (ADR-0071 phase 7d-2 relocated
 //! these from the `aether-substrate-hub` binary crate):
 //!
-//! - [`HubChassis`] / [`HubServerCapability`] — Chassis marker +
+//! - [`HubChassis`] / [`HubServerDriverCapability`] — Chassis marker +
 //!   driver capability that owns the tokio runtime + listeners.
 //! - [`run_engine_listener`] — the engine-facing TCP listener loop.
 //! - [`run_mcp_server`] — the rmcp-driven MCP transport on
@@ -74,7 +74,7 @@ pub mod wire;
 
 pub use aether_codec::{DecodeError, EncodeError, decode_schema, encode_schema};
 pub use aether_substrate_core::Chassis;
-pub use chassis::{HubChassis, HubEnv, HubServerCapability, HubServerRunning};
+pub use chassis::{HubChassis, HubEnv, HubServerDriverCapability, HubServerDriverRunning};
 pub use engine::READ_TIMEOUT;
 pub use log_store::{LogStore, ReadResult as LogReadResult};
 pub use loopback::{HUB_SELF_ENGINE_ID, LoopbackEngine, LoopbackHandle};

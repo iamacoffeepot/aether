@@ -2,7 +2,7 @@
 //!
 //! Builder-shape adoption: [`HubChassis`] is a `Chassis` marker,
 //! [`HubEnv`] carries resolved listener addresses, and
-//! [`HubServerCapability`] is the driver. [`HubChassis::build`]
+//! [`HubServerDriverCapability`] is the driver. [`HubChassis::build`]
 //! returns a `BuiltChassis<HubChassis>` whose `run()` blocks the
 //! calling thread on the tokio coordinator.
 //!
@@ -16,7 +16,7 @@
 //! and test-bench.
 //!
 //! ADR-0070 phase 5 / ADR-0071 phase 7d-2 will move
-//! [`HubServerCapability`] (and the underlying engine / mcp /
+//! [`HubServerDriverCapability`] (and the underlying engine / mcp /
 //! session / registry / log_store / loopback / spawn modules) out of
 //! this binary crate into a new `aether-hub` library crate. This PR
 //! lands the Capability shape in place; the relocation is mechanical
@@ -57,15 +57,11 @@ pub struct HubChassis;
 
 impl Chassis for HubChassis {
     const PROFILE: &'static str = "hub";
+    type Driver = HubServerDriverCapability;
+    type Env = HubEnv;
 
-    /// Inert by design: callers must build via [`HubChassis::build`]
-    /// to construct a [`BuiltChassis<HubChassis>`] and call
-    /// [`BuiltChassis::run`] on it. Keeps the trait satisfied without
-    /// re-introducing the pre-Builder direct-`run` shape.
-    fn run(self) -> wasmtime::Result<()> {
-        Err(wasmtime::Error::msg(
-            "HubChassis is built via HubChassis::build(env); use the returned BuiltChassis::run()",
-        ))
+    fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        Self::build_inner(env)
     }
 }
 
@@ -100,13 +96,14 @@ impl HubChassis {
     /// Build a hub chassis: stand up the engine / session / spawn /
     /// log stores, boot the in-process [`LoopbackEngine`] (which
     /// constructs its own `SubstrateBoot` and registers it under
-    /// `HUB_SELF_ENGINE_ID`), build the [`HubServerCapability`]
+    /// `HUB_SELF_ENGINE_ID`), build the [`HubServerDriverCapability`]
     /// driver, and assemble a [`BuiltChassis<HubChassis>`] via the
     /// chassis_builder [`Builder`]. The hub chassis has no passive
     /// capabilities of its own today; future passives (an in-process
     /// log capability, etc.) compose via `Builder::with` between
-    /// `new()` and `driver()`.
-    pub fn build(env: HubEnv) -> wasmtime::Result<BuiltChassis<HubChassis>> {
+    /// `new()` and `driver()`. The trait method [`Chassis::build`]
+    /// forwards here.
+    fn build_inner(env: HubEnv) -> Result<BuiltChassis<HubChassis>, BootError> {
         let HubEnv {
             engine_addr,
             mcp_addr,
@@ -132,7 +129,7 @@ impl HubChassis {
         let registry_arc = Arc::clone(&loopback.boot.registry);
         let mailer_arc = Arc::clone(&loopback.boot.queue);
 
-        let driver = HubServerCapability {
+        let driver = HubServerDriverCapability {
             engine_addr,
             mcp_addr,
             registry,
@@ -146,7 +143,6 @@ impl HubChassis {
         Builder::<HubChassis, NoDriver>::new(registry_arc, mailer_arc)
             .driver(driver)
             .build()
-            .map_err(|e: BootError| wasmtime::Error::msg(format!("hub chassis build: {e}")))
     }
 }
 
@@ -157,7 +153,7 @@ impl HubChassis {
 /// `rt.block_on(coordinator)` and returns when either listener exits
 /// or a shutdown signal arrives, after running the children-cleanup
 /// + boot-drop sequence.
-pub struct HubServerCapability {
+pub struct HubServerDriverCapability {
     engine_addr: SocketAddr,
     mcp_addr: SocketAddr,
     registry: EngineRegistry,
@@ -168,10 +164,10 @@ pub struct HubServerCapability {
     loopback: LoopbackEngine,
 }
 
-/// Post-boot handle for [`HubServerCapability`]. Holds the constructed
+/// Post-boot handle for [`HubServerDriverCapability`]. Holds the constructed
 /// tokio runtime + every state handle the coordinator needs. `run`
 /// drains the runtime and returns once shutdown completes.
-pub struct HubServerRunning {
+pub struct HubServerDriverRunning {
     rt: Runtime,
     engine_addr: SocketAddr,
     mcp_addr: SocketAddr,
@@ -183,15 +179,15 @@ pub struct HubServerRunning {
     loopback: LoopbackEngine,
 }
 
-impl DriverCapability for HubServerCapability {
-    type Running = HubServerRunning;
+impl DriverCapability for HubServerDriverCapability {
+    type Running = HubServerDriverRunning;
 
     fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| BootError::Other(Box::new(e)))?;
-        let HubServerCapability {
+        let HubServerDriverCapability {
             engine_addr,
             mcp_addr,
             registry,
@@ -201,7 +197,7 @@ impl DriverCapability for HubServerCapability {
             state,
             loopback,
         } = self;
-        Ok(HubServerRunning {
+        Ok(HubServerDriverRunning {
             rt,
             engine_addr,
             mcp_addr,
@@ -215,9 +211,9 @@ impl DriverCapability for HubServerCapability {
     }
 }
 
-impl DriverRunning for HubServerRunning {
+impl DriverRunning for HubServerDriverRunning {
     fn run(self: Box<Self>) -> Result<(), RunError> {
-        let HubServerRunning {
+        let HubServerDriverRunning {
             rt,
             engine_addr,
             mcp_addr,

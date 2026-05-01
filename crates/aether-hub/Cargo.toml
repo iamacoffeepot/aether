@@ -15,7 +15,7 @@ edition.workspace = true
 # - the engine-facing TCP listener and per-connection read-loop,
 # - the rmcp-driven MCP transport + tool surface,
 # - the engine / session / spawn / log registries the hub coordinates,
-# - the `HubServerCapability` driver and `HubChassis` builder shape.
+# - the `HubServerDriverCapability` driver and `HubChassis` builder shape.
 #
 # Generic length-prefixed framing helpers live in `aether-codec::frame`
 # — they're codec-shaped machinery, not hub-specific. The

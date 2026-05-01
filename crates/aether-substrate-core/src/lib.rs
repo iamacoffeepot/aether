@@ -56,7 +56,7 @@ pub use capability::{
 pub use chassis::Chassis;
 pub use chassis_builder::{
     Builder, BuilderState, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, HasDriver,
-    NoDriver, PassiveChassis, RunError,
+    NeverDriver, NeverDriverRunning, NoDriver, PassiveChassis, RunError,
 };
 pub use component::Component;
 pub use control::{AETHER_CONTROL, ChassisControlHandler, ControlPlane};

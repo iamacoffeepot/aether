@@ -2,7 +2,7 @@
 //!
 //! Reads chassis-relevant env vars into a [`HubEnv`], asks the
 //! [`HubChassis`] to build itself (engine + session + spawn + log
-//! stores, in-process loopback substrate, [`HubServerCapability`]
+//! stores, in-process loopback substrate, [`HubServerDriverCapability`]
 //! driver), and blocks on the resulting chassis until either listener
 //! exits or a SIGINT/SIGTERM arrives. ADR-0071 phase 7d collapsed
 //! every step the prior `main()` body did inline (and the further
@@ -13,7 +13,8 @@
 use aether_hub::{Chassis, HubChassis, HubEnv};
 
 fn main() -> wasmtime::Result<()> {
-    let chassis = HubChassis::build(HubEnv::from_env())?;
+    let chassis = HubChassis::build(HubEnv::from_env())
+        .map_err(|e| wasmtime::Error::msg(format!("chassis build: {e}")))?;
     eprintln!(
         "aether-substrate-hub: chassis initialised (profile={})",
         HubChassis::PROFILE,

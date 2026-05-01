@@ -78,11 +78,11 @@ pub struct HeadlessChassis;
 
 impl Chassis for HeadlessChassis {
     const PROFILE: &'static str = "headless";
+    type Driver = crate::driver::HeadlessTimerCapability;
+    type Env = HeadlessEnv;
 
-    fn run(self) -> wasmtime::Result<()> {
-        Err(wasmtime::Error::msg(
-            "HeadlessChassis is built via build(env) — call run() on the BuiltChassis<HeadlessChassis> instead",
-        ))
+    fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        Self::build_inner(env)
     }
 }
 
@@ -125,8 +125,9 @@ impl HeadlessChassis {
     /// `boot.add_capability` path, connect the hub, then wrap the
     /// timer in a [`HeadlessTimerCapability`] and hand it to the
     /// chassis_builder [`Builder`]. Returns a [`BuiltChassis`] whose
-    /// [`BuiltChassis::run`] blocks on the tick loop.
-    pub fn build(env: HeadlessEnv) -> wasmtime::Result<BuiltChassis<HeadlessChassis>> {
+    /// [`BuiltChassis::run`] blocks on the tick loop. The trait
+    /// method [`Chassis::build`] forwards here.
+    fn build_inner(env: HeadlessEnv) -> Result<BuiltChassis<HeadlessChassis>, BootError> {
         let HeadlessEnv {
             hub_url,
             namespace_roots,
@@ -233,6 +234,5 @@ impl HeadlessChassis {
         Builder::<HeadlessChassis, NoDriver>::new(registry, mailer)
             .driver(driver)
             .build()
-            .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))
     }
 }

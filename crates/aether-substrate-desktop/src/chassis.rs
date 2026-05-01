@@ -186,18 +186,11 @@ pub struct DesktopChassis;
 
 impl Chassis for DesktopChassis {
     const PROFILE: &'static str = "desktop";
+    type Driver = crate::driver::DesktopDriverCapability;
+    type Env = DesktopEnv;
 
-    fn run(self) -> wasmtime::Result<()> {
-        // ADR-0071 phase 3: the `DesktopChassis` is constructed via
-        // `Self::build(env)?.run()`. The legacy `Chassis::run` slot
-        // stays on the trait until every chassis migrates so the
-        // existing test-bench / headless / hub paths keep working;
-        // hitting it on `DesktopChassis` means `main()` (or a test)
-        // tried to call the legacy run path on the marker struct
-        // rather than `BuiltChassis::run`.
-        Err(wasmtime::Error::msg(
-            "DesktopChassis is built via build(env) — call run() on the BuiltChassis<DesktopChassis> instead",
-        ))
+    fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        Self::build_inner(env)
     }
 }
 
@@ -280,8 +273,9 @@ impl DesktopChassis {
     /// winit event loop.
     ///
     /// Phase 3 keeps capabilities on the `boot.add_capability` path;
-    /// phase 4+ migrate them to chassis_builder `.with()`.
-    pub fn build(env: DesktopEnv) -> wasmtime::Result<BuiltChassis<DesktopChassis>> {
+    /// phase 4+ migrate them to chassis_builder `.with()`. The
+    /// trait method [`Chassis::build`] forwards here.
+    fn build_inner(env: DesktopEnv) -> Result<BuiltChassis<DesktopChassis>, BootError> {
         let DesktopEnv {
             event_loop,
             capture_queue,
@@ -368,6 +362,5 @@ impl DesktopChassis {
         Builder::<DesktopChassis, NoDriver>::new(registry, mailer)
             .driver(driver)
             .build()
-            .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))
     }
 }

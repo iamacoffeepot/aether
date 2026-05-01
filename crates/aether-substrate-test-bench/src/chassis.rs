@@ -27,7 +27,9 @@ use aether_kinds::{
     Tick,
 };
 use aether_substrate_core::capability::BootError;
-use aether_substrate_core::chassis_builder::{Builder, NoDriver, PassiveChassis};
+use aether_substrate_core::chassis_builder::{
+    Builder, BuiltChassis, NeverDriver, NoDriver, PassiveChassis,
+};
 use aether_substrate_core::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
@@ -137,12 +139,24 @@ pub struct TestBenchChassis;
 
 impl Chassis for TestBenchChassis {
     const PROFILE: &'static str = "test-bench";
+    /// Phantom driver — test-bench is passive (the embedder is the
+    /// driver). Declaring [`NeverDriver`] satisfies the trait bound;
+    /// the value is never instantiated because TestBench's build
+    /// path goes through `Builder::<_, NoDriver>::build_passive`.
+    type Driver = NeverDriver;
+    type Env = TestBenchEnv;
 
-    fn run(self) -> wasmtime::Result<()> {
-        Err(wasmtime::Error::msg(
-            "TestBenchChassis is built via build_passive(env); the embedder drives the loop \
-             (binary main() loops on events_rx; in-process TestBench dispatches per-call)",
-        ))
+    /// Inert by design — test-bench is a passive chassis. Callers
+    /// that try to drive it through the trait method get an error
+    /// pointing at [`TestBenchChassis::build_passive`], which is
+    /// the actual entry point. The trait method exists so
+    /// `Builder<TestBenchChassis, _>` can still parameterise over
+    /// `Chassis` per ADR-0071.
+    fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        Err(BootError::Other(Box::new(std::io::Error::other(
+            "TestBenchChassis has no driver; use TestBenchChassis::build_passive(env) instead \
+             (the binary main() loops on events_rx; the in-process TestBench dispatches per-call)",
+        ))))
     }
 }
 

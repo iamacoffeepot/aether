@@ -119,6 +119,17 @@ impl From<NameConflict> for BootError {
     }
 }
 
+/// Forward wasmtime errors raised during chassis boot
+/// (`SubstrateBoot::build`, `add_capability`, hub-client connect, etc.)
+/// into [`BootError::Other`]. Any wasmtime error during boot is
+/// definitionally a boot error — chassis trait impls can `?` the
+/// wasmtime call directly without per-call `.map_err` glue.
+impl From<wasmtime::Error> for BootError {
+    fn from(e: wasmtime::Error) -> Self {
+        BootError::Other(Box::new(std::io::Error::other(format!("{e}"))))
+    }
+}
+
 /// A native capability: chassis-policy code that owns one or more
 /// mailboxes plus the state behind them. Each capability is
 /// `boot()`-ed once during chassis startup and `shutdown()`-ed once
