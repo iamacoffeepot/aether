@@ -1,8 +1,9 @@
-// Test-bench wgpu shim. ADR-0071 phase C2: pipeline + targets moved
-// into core's `RenderRunning` (via `RenderGpu` + `install_gpu`); this
-// file is now a thin wrapper that acquires the wgpu device/queue at
-// construction and drives encoder creation + submit on each frame
-// against `RenderRunning`'s encoder-level methods.
+// Test-bench wgpu shim. ADR-0071 phase C3: pipeline + targets +
+// device + queue ownership all live inside core's `RenderRunning`
+// (via `RenderGpu` + `install_gpu`). What's left in this file is the
+// thinnest reasonable wrapper: device acquisition (offscreen, no
+// surface), and per-frame helpers that wrap encoder lifecycle around
+// `RenderRunning`'s encoder-level methods.
 
 use std::sync::Arc;
 
@@ -23,10 +24,6 @@ pub struct Gpu {
     /// `Err` to.
     #[allow(dead_code)]
     pub limits: wgpu::Limits,
-    /// Cloned out of [`RenderGpu`] at install for ergonomic access on
-    /// the submit path; the source-of-truth lives inside `RenderRunning`.
-    queue: Arc<wgpu::Queue>,
-    device: Arc<wgpu::Device>,
     render_running: Arc<RenderRunning>,
 }
 
@@ -58,12 +55,9 @@ impl Gpu {
         }))
         .expect("request_device");
 
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
         render_running.install_gpu(RenderGpu::new(
-            Arc::clone(&device),
-            Arc::clone(&queue),
+            Arc::new(device),
+            Arc::new(queue),
             COLOR_FORMAT,
             width,
             height,
@@ -73,8 +67,6 @@ impl Gpu {
         Self {
             adapter_info,
             limits,
-            queue,
-            device,
             render_running,
         }
     }
@@ -92,16 +84,16 @@ impl Gpu {
     /// — desktop's swapchain blit is omitted because there's no
     /// surface.
     pub fn render(&mut self) {
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame encoder"),
-            });
+        let device = self.render_running.device();
+        let queue = self.render_running.queue();
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frame encoder"),
+        });
         match self.render_running.record_frame(&mut encoder, &[]) {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => return,
         }
-        self.queue.submit(std::iter::once(encoder.finish()));
+        queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Variant of `render` that also copies the offscreen texture
@@ -109,11 +101,11 @@ impl Gpu {
     /// On any capture-path failure, returns `Err(reason)`; the frame
     /// still rendered to the offscreen — capture is a side channel.
     pub fn render_and_capture(&mut self) -> Result<Vec<u8>, String> {
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame encoder"),
-            });
+        let device = self.render_running.device();
+        let queue = self.render_running.queue();
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frame encoder"),
+        });
         match self.render_running.record_frame(&mut encoder, &[]) {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => {
@@ -121,7 +113,7 @@ impl Gpu {
             }
         }
         let meta = self.render_running.record_capture_copy(&mut encoder);
-        self.queue.submit(std::iter::once(encoder.finish()));
+        queue.submit(std::iter::once(encoder.finish()));
         self.render_running.finish_capture(&meta)
     }
 }

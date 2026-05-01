@@ -59,11 +59,6 @@ pub struct Gpu {
     /// anyway).
     pub adapter_info: wgpu::AdapterInfo,
     pub limits: wgpu::Limits,
-    /// Cloned out of [`RenderGpu`] at install for ergonomic access on
-    /// the surface/submit path. Source of truth lives inside
-    /// `RenderRunning` post-install.
-    device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
     /// Wireframe overlay pipeline. `Some` only when `AETHER_WIREFRAME`
     /// is `1` / `overlay`. `record_frame` draws this after the main
     /// pipeline as an extra inside the same render pass.
@@ -257,8 +252,6 @@ impl Gpu {
             config,
             adapter_info,
             limits,
-            device,
-            queue,
             wire_pipeline,
             render_running,
         }
@@ -270,7 +263,8 @@ impl Gpu {
         }
         self.config.width = size.width;
         self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
+        self.surface
+            .configure(&self.render_running.device(), &self.config);
         self.render_running
             .resize(self.config.width, self.config.height);
     }
@@ -297,11 +291,11 @@ impl Gpu {
     /// couldn't allocate. Surface unavailability does *not* prevent
     /// capture — offscreen is the source of truth.
     fn render_impl(&mut self, capture: bool) -> Option<Result<Vec<u8>, String>> {
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame encoder"),
-            });
+        let device = self.render_running.device();
+        let queue = self.render_running.queue();
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frame encoder"),
+        });
 
         let wire_ref = self.wire_pipeline.as_ref();
         let extras_storage: [&wgpu::RenderPipeline; 1];
@@ -359,7 +353,7 @@ impl Gpu {
             });
         }
 
-        self.queue.submit(std::iter::once(encoder.finish()));
+        queue.submit(std::iter::once(encoder.finish()));
         if let Some(tex) = surface_tex {
             tex.present();
         }
@@ -375,11 +369,13 @@ impl Gpu {
         match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => Some(t),
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
-                self.surface.configure(&self.device, &self.config);
+                self.surface
+                    .configure(&self.render_running.device(), &self.config);
                 Some(t)
             }
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
+                self.surface
+                    .configure(&self.render_running.device(), &self.config);
                 None
             }
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => None,
