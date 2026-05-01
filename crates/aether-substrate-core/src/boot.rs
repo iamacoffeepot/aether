@@ -42,20 +42,11 @@ use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::{
-    AETHER_CONTROL, AETHER_DIAGNOSTICS, ChassisControlHandler, ControlPlane, HUB_CLAUDE_BROADCAST,
-    HubClient, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
-    handle_sink::handle_sink_handler, handle_store::HandleStore, host_fns, input::new_subscribers,
-    log_capture, mail::MailboxId,
+    AETHER_CONTROL, AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ChassisControlHandler,
+    ControlPlane, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, Mailer, Registry,
+    Scheduler, SubstrateCtx, capabilities::HandleCapability, handle_store::HandleStore, host_fns,
+    input::new_subscribers, log_capture, mail::MailboxId,
 };
-
-/// Well-known mailbox name for the ADR-0045 typed-handle sink. The
-/// SDK's `Ctx::publish` mails `aether.handle.publish` to this name;
-/// the substrate's `handle_sink_handler` decodes the request,
-/// drives the `HandleStore`, and replies with the paired `*Result`
-/// kind via `Mailer::send_reply`. Lives under `aether.sink.*` per
-/// ADR-0058 — same as `"aether.sink.io"`, `"aether.sink.net"`,
-/// `"aether.sink.audio"`, etc.
-pub const HANDLE_SINK_NAME: &str = "aether.sink.handle";
 
 /// Everything a chassis needs after shared boot setup. Fields are
 /// `pub` so chassis code destructures and takes ownership of the
@@ -89,6 +80,15 @@ pub struct SubstrateBoot {
     /// set. Chassis mains pass this to `crate::io::build_registry`
     /// when wiring the `aether.sink.io` sink.
     pub namespace_roots: crate::io::NamespaceRoots,
+    /// ADR-0070 native capabilities booted during shared bring-up.
+    /// Phase 2: holds the [`HandleCapability`] dispatcher thread.
+    /// Phases 3-5 grow this as more sinks migrate. Drop runs
+    /// shutdown on every booted capability in reverse boot order, so
+    /// the chassis doesn't need to call `shutdown` explicitly unless
+    /// it wants to bound shutdown latency. Exposed publicly so
+    /// chassis binaries that want explicit control can `take()` and
+    /// call [`BootedChassis::shutdown`] themselves.
+    pub chassis: Option<BootedChassis>,
     /// Substrate identity for the hub `Hello` handshake. Owned so
     /// `connect_hub` / `connect_hub_from_env` can use them after
     /// `build()` returns.
@@ -326,16 +326,17 @@ impl<'a> SubstrateBootBuilder<'a> {
         queue.wire_outbound(Arc::clone(&outbound));
         let handle_store = Arc::new(HandleStore::from_env());
         queue.wire_handle_store(Arc::clone(&handle_store));
-        // ADR-0045 handle sink: components mail
-        // `aether.handle.{publish,release,pin,unpin}` to this
-        // well-known name, the sink drives `HandleStore` and replies
-        // via `Mailer::send_reply`. Registered before the control
-        // plane so any control-side code that wants to publish at
-        // load can reach it.
-        registry.register_sink(
-            HANDLE_SINK_NAME,
-            handle_sink_handler(Arc::clone(&handle_store), Arc::clone(&queue)),
-        );
+        // ADR-0045 handle sink. ADR-0070 Phase 2 moved this out of an
+        // inline `register_sink` call and into a native capability;
+        // booting the chassis here registers the sink + spawns the
+        // dispatcher thread before the control plane is wired so any
+        // control-side code that wants to publish at load can reach
+        // it. Future phases extend this builder with one `.with()`
+        // line per extracted sink.
+        let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&queue))
+            .with(HandleCapability::new(Arc::clone(&handle_store)))
+            .build()
+            .map_err(|e| wasmtime::Error::msg(format!("chassis capability boot: {e}")))?;
 
         let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
         host_fns::register(&mut linker)?;
@@ -383,6 +384,7 @@ impl<'a> SubstrateBootBuilder<'a> {
             handle_store,
             boot_descriptors,
             namespace_roots,
+            chassis: Some(chassis),
             name: self.name.to_owned(),
             version: self.version.to_owned(),
         })

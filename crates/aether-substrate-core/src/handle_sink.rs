@@ -1,6 +1,11 @@
-//! ADR-0045 typed-handle sink. The `"aether.sink.handle"` sink owns
-//! `Arc<HandleStore>` and dispatches the four request kinds defined
-//! in `aether-kinds`:
+//! ADR-0045 typed-handle sink dispatch logic. ADR-0070 Phase 2
+//! moved the `aether.sink.handle` mailbox out of `SubstrateBoot`'s
+//! inline registration and into [`crate::capabilities::handle`] —
+//! this module retains the per-kind dispatch implementation, called
+//! from the capability's dispatcher thread for each envelope it
+//! receives.
+//!
+//! The four request kinds defined in `aether-kinds`:
 //!
 //! - `HandlePublish { kind_id, bytes }` → `HandlePublishResult { Ok { id } | Err }`
 //! - `HandleRelease { id }` → `HandleReleaseResult { Ok | Err }`
@@ -11,47 +16,31 @@
 //! `HandleStore` op, and replied with the paired `*Result` kind via
 //! `Mailer::send_reply` — the same dispatch path the io and net
 //! sinks use, so session / engine-mailbox / local-component replies
-//! all funnel through one router.
-//!
-//! The dispatcher runs synchronously on the sink dispatch thread —
-//! fine for handle ops, which are sub-microsecond `RwLock`
-//! acquisitions on the store. Components publish via the SDK's
+//! all funnel through one router. Components publish via the SDK's
 //! `Ctx::publish` (encode + `Sink::send` + `wait_reply`); the
 //! `Drop` impl on `Handle<K>` mails `HandleRelease` fire-and-forget
 //! to keep teardown safe.
 
-use std::sync::Arc;
-
 use crate::handle_store::{HandleStore, PutError};
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
-use crate::registry::SinkHandler;
 use aether_data::{HandleId, Kind, KindId};
 use aether_kinds::{
     HandleError, HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
     HandleReleaseResult, HandleUnpin, HandleUnpinResult,
 };
 
-/// Build the `"aether.sink.handle"` sink handler. Boot calls this
-/// after constructing the `HandleStore` and `Mailer`, and registers
-/// the returned closure under the `"aether.sink.handle"` mailbox name.
-/// The closure
-/// demultiplexes incoming mail by kind id and replies via
-/// `mailer.send_reply` — see module docs for the per-kind contract.
-pub fn handle_sink_handler(store: Arc<HandleStore>, mailer: Arc<Mailer>) -> SinkHandler {
-    Arc::new(
-        move |kind: KindId,
-              _kind_name: &str,
-              _origin: Option<&str>,
-              sender: ReplyTo,
-              bytes: &[u8],
-              _count: u32| {
-            dispatch(&store, &mailer, kind, sender, bytes);
-        },
-    )
-}
-
-fn dispatch(store: &HandleStore, mailer: &Mailer, kind: KindId, sender: ReplyTo, bytes: &[u8]) {
+/// Demultiplex one envelope's payload to the matching per-kind
+/// handler. Called by [`crate::capabilities::handle::HandleCapability`]'s
+/// dispatcher thread; tests call it directly to exercise the per-kind
+/// logic without spinning up a capability.
+pub(crate) fn dispatch(
+    store: &HandleStore,
+    mailer: &Mailer,
+    kind: KindId,
+    sender: ReplyTo,
+    bytes: &[u8],
+) {
     // Issue 466: `Kind::ID` is typed `KindId`, so the match arms read
     // each typed const directly.
     match kind {
@@ -231,6 +220,7 @@ fn put_error_to_handle_error(e: PutError) -> HandleError {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::sync::RwLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -245,12 +235,14 @@ mod tests {
     use crate::mail::{Mail, MailboxId, ReplyTarget, ReplyTo};
     use crate::registry::Registry;
 
+    /// Wires the substrate state `dispatch` reads from. Returns owned
+    /// handles so each test can call [`dispatch`] directly with the
+    /// store + mailer it constructs.
     fn build_harness() -> (
         Arc<HandleStore>,
         Arc<Mailer>,
         Arc<Registry>,
         std::sync::mpsc::Receiver<EngineToHub>,
-        SinkHandler,
     ) {
         let store = Arc::new(HandleStore::new(64 * 1024));
         let registry = Arc::new(Registry::new());
@@ -264,8 +256,7 @@ mod tests {
         mailer.wire(Arc::clone(&registry), Arc::new(RwLock::new(HashMap::new())));
         mailer.wire_outbound(outbound);
         mailer.wire_handle_store(Arc::clone(&store));
-        let handler = handle_sink_handler(Arc::clone(&store), Arc::clone(&mailer));
-        (store, mailer, registry, rx, handler)
+        (store, mailer, registry, rx)
     }
 
     /// Build a fake session-targeted ReplyTo so `send_reply` runs the
@@ -285,19 +276,18 @@ mod tests {
 
     #[test]
     fn publish_replies_with_fresh_id_and_initial_refcount() {
-        let (store, _mailer, _registry, rx, handler) = build_harness();
+        let (store, mailer, _registry, rx) = build_harness();
         let req = HandlePublish {
             kind_id: KindId(0xCAFE),
             bytes: vec![1, 2, 3, 4, 5],
         };
         let bytes = postcard::to_allocvec(&req).unwrap();
-        handler(
+        dispatch(
+            &store,
+            &mailer,
             <HandlePublish as Kind>::ID,
-            "aether.handle.publish",
-            None,
             session_reply_to(),
             &bytes,
-            1,
         );
 
         let frame = rx.try_recv().expect("publish_result frame");
@@ -320,18 +310,17 @@ mod tests {
 
     #[test]
     fn release_unknown_id_replies_err_unknown_handle() {
-        let (_store, _mailer, _registry, rx, handler) = build_harness();
+        let (store, mailer, _registry, rx) = build_harness();
         let req = HandleRelease {
             id: HandleId(0xBAD),
         };
         let bytes = postcard::to_allocvec(&req).unwrap();
-        handler(
+        dispatch(
+            &store,
+            &mailer,
             <HandleRelease as Kind>::ID,
-            "aether.handle.release",
-            None,
             session_reply_to(),
             &bytes,
-            1,
         );
         let frame = rx.try_recv().expect("release_result frame");
         let payload = extract_payload(frame);
@@ -347,19 +336,18 @@ mod tests {
 
     #[test]
     fn pin_then_unpin_round_trips_via_sink() {
-        let (store, _mailer, _registry, rx, handler) = build_harness();
+        let (store, mailer, _registry, rx) = build_harness();
         // Publish first to mint an id.
         let publish_req = HandlePublish {
             kind_id: KindId(0xCAFE),
             bytes: vec![1, 2, 3],
         };
-        handler(
+        dispatch(
+            &store,
+            &mailer,
             <HandlePublish as Kind>::ID,
-            "aether.handle.publish",
-            None,
             session_reply_to(),
             &postcard::to_allocvec(&publish_req).unwrap(),
-            1,
         );
         let publish_frame = rx.try_recv().unwrap();
         let HandlePublishResult::Ok { id, .. } =
@@ -369,26 +357,24 @@ mod tests {
         };
         // Pin.
         let pin_req = HandlePin { id };
-        handler(
+        dispatch(
+            &store,
+            &mailer,
             <HandlePin as Kind>::ID,
-            "aether.handle.pin",
-            None,
             session_reply_to(),
             &postcard::to_allocvec(&pin_req).unwrap(),
-            1,
         );
         let frame = rx.try_recv().unwrap();
         let result: HandlePinResult = postcard::from_bytes(&extract_payload(frame)).unwrap();
         assert!(matches!(result, HandlePinResult::Ok { id: r } if r == id));
         // Unpin.
         let unpin_req = HandleUnpin { id };
-        handler(
+        dispatch(
+            &store,
+            &mailer,
             <HandleUnpin as Kind>::ID,
-            "aether.handle.unpin",
-            None,
             session_reply_to(),
             &postcard::to_allocvec(&unpin_req).unwrap(),
-            1,
         );
         let frame = rx.try_recv().unwrap();
         let result: HandleUnpinResult = postcard::from_bytes(&extract_payload(frame)).unwrap();
@@ -402,16 +388,15 @@ mod tests {
     /// `AdapterError` carrying the diagnostic.
     #[test]
     fn publish_decode_failure_replies_adapter_error_with_zero_kind_id() {
-        let (_store, _mailer, _registry, rx, handler) = build_harness();
+        let (store, mailer, _registry, rx) = build_harness();
         // Truncated postcard bytes — a `HandlePublish` is at least
         // a u64 + a varint length, so 1 byte is malformed.
-        handler(
+        dispatch(
+            &store,
+            &mailer,
             <HandlePublish as Kind>::ID,
-            "aether.handle.publish",
-            None,
             session_reply_to(),
             &[0u8],
-            1,
         );
         let frame = rx.try_recv().expect("err frame");
         let result: HandlePublishResult = postcard::from_bytes(&extract_payload(frame)).unwrap();
@@ -429,14 +414,13 @@ mod tests {
     /// stays empty.
     #[test]
     fn unknown_kind_on_handle_sink_drops_without_reply() {
-        let (_store, _mailer, _registry, rx, handler) = build_harness();
-        handler(
+        let (store, mailer, _registry, rx) = build_harness();
+        dispatch(
+            &store,
+            &mailer,
             KindId(0xDEAD),
-            "test.unknown",
-            None,
             session_reply_to(),
             &[1, 2, 3],
-            1,
         );
         assert!(rx.try_recv().is_err(), "no reply for unknown kind");
     }
@@ -447,7 +431,7 @@ mod tests {
     /// captured-bytes sink masquerading as the target component.
     #[test]
     fn component_reply_path_pushes_into_component_inbox() {
-        let (_store, _mailer, registry, rx, handler) = build_harness();
+        let (store, mailer, registry, rx) = build_harness();
         let captured = Arc::new(RwLock::new(Vec::new()));
         let counter = Arc::new(AtomicUsize::new(0));
         let captured_inner = Arc::clone(&captured);
@@ -466,13 +450,12 @@ mod tests {
             kind_id: KindId(0xCAFE),
             bytes: vec![9, 9, 9],
         };
-        handler(
+        dispatch(
+            &store,
+            &mailer,
             <HandlePublish as Kind>::ID,
-            "aether.handle.publish",
-            None,
             ReplyTo::to(ReplyTarget::Component(component_mbox)),
             &postcard::to_allocvec(&publish_req).unwrap(),
-            1,
         );
         // Hub outbound stayed empty…
         assert!(rx.try_recv().is_err(), "component reply must not bubble");
