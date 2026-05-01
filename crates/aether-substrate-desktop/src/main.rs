@@ -1123,36 +1123,14 @@ fn main() -> wasmtime::Result<()> {
     boot.registry
         .register_sink("aether.sink.camera", camera_handler);
 
-    // `aether.io.*`: ADR-0041 substrate file I/O. Wire the
-    // `"aether.sink.io"` sink against the namespace roots resolved at
-    // boot (`boot.namespace_roots` — supplied via the builder
-    // override or `NamespaceRoots::from_env`, per issue 464). If the
-    // boot-time filesystem setup fails (usually a perms issue on one
-    // of the root directories), log loud and skip the sink — components
-    // mailing `aether.sink.io` then warn-drop as "unknown mailbox" so
-    // failure is visible rather than silent.
-    match aether_substrate_desktop::io::build_registry(boot.namespace_roots.clone()) {
-        Ok((registry, roots)) => {
-            tracing::info!(
-                target: "aether_substrate::io",
-                save = %roots.save.display(),
-                assets = %roots.assets.display(),
-                config = %roots.config.display(),
-                "io adapters registered",
-            );
-            boot.registry.register_sink(
-                "aether.sink.io",
-                aether_substrate_desktop::io::io_sink_handler(registry, Arc::clone(&boot.queue)),
-            );
-        }
-        Err(e) => {
-            tracing::error!(
-                target: "aether_substrate::io",
-                error = %e,
-                "io adapter init failed — `io` sink not registered",
-            );
-        }
-    }
+    // `aether.io.*`: ADR-0041 substrate file I/O. ADR-0070 phase 3
+    // wraps the sink as a native capability with its own dispatcher
+    // thread. Adapter init failure (usually a perms or path issue on
+    // one of the roots) now aborts the chassis via `BootError` per
+    // ADR-0063 fail-fast, instead of the prior log-and-skip.
+    boot.add_capability(aether_substrate_core::capabilities::IoCapability::new(
+        boot.namespace_roots.clone(),
+    ))?;
 
     // `aether.net.fetch`: ADR-0043 substrate HTTP egress. Deny-by-
     // default: if `AETHER_NET_ALLOWLIST` is unset or empty, every
