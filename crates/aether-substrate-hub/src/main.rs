@@ -13,7 +13,8 @@
 use aether_hub::{Chassis, HubChassis, HubEnv};
 
 fn main() -> wasmtime::Result<()> {
-    let chassis = HubChassis::build(HubEnv::from_env())?;
+    let chassis = HubChassis::build(HubEnv::from_env())
+        .map_err(|e| wasmtime::Error::msg(format!("chassis build: {e}")))?;
     eprintln!(
         "aether-substrate-hub: chassis initialised (profile={})",
         HubChassis::PROFILE,

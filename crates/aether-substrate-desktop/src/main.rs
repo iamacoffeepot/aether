@@ -16,7 +16,8 @@ use aether_substrate_desktop::{Chassis, DesktopChassis, DesktopEnv};
 
 fn main() -> wasmtime::Result<()> {
     let env = DesktopEnv::from_env()?;
-    let chassis = DesktopChassis::build(env)?;
+    let chassis = DesktopChassis::build(env)
+        .map_err(|e| wasmtime::Error::msg(format!("chassis build: {e}")))?;
     tracing::info!(
         target: "aether_substrate::boot",
         profile = DesktopChassis::PROFILE,

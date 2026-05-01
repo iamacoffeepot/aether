@@ -57,15 +57,11 @@ pub struct HubChassis;
 
 impl Chassis for HubChassis {
     const PROFILE: &'static str = "hub";
+    type Driver = HubServerCapability;
+    type Env = HubEnv;
 
-    /// Inert by design: callers must build via [`HubChassis::build`]
-    /// to construct a [`BuiltChassis<HubChassis>`] and call
-    /// [`BuiltChassis::run`] on it. Keeps the trait satisfied without
-    /// re-introducing the pre-Builder direct-`run` shape.
-    fn run(self) -> wasmtime::Result<()> {
-        Err(wasmtime::Error::msg(
-            "HubChassis is built via HubChassis::build(env); use the returned BuiltChassis::run()",
-        ))
+    fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        Self::build_inner(env)
     }
 }
 
@@ -105,8 +101,9 @@ impl HubChassis {
     /// chassis_builder [`Builder`]. The hub chassis has no passive
     /// capabilities of its own today; future passives (an in-process
     /// log capability, etc.) compose via `Builder::with` between
-    /// `new()` and `driver()`.
-    pub fn build(env: HubEnv) -> wasmtime::Result<BuiltChassis<HubChassis>> {
+    /// `new()` and `driver()`. The trait method [`Chassis::build`]
+    /// forwards here.
+    fn build_inner(env: HubEnv) -> Result<BuiltChassis<HubChassis>, BootError> {
         let HubEnv {
             engine_addr,
             mcp_addr,
@@ -115,7 +112,7 @@ impl HubChassis {
         let sessions = SessionRegistry::new();
         let pending = PendingSpawns::new();
         let logs = LogStore::new();
-        let loopback = LoopbackEngine::boot(&registry)?;
+        let loopback = LoopbackEngine::boot(&registry).map_err(wasmtime_to_boot_error)?;
         let state = HubState::new(
             registry.clone(),
             sessions.clone(),
@@ -146,8 +143,14 @@ impl HubChassis {
         Builder::<HubChassis, NoDriver>::new(registry_arc, mailer_arc)
             .driver(driver)
             .build()
-            .map_err(|e: BootError| wasmtime::Error::msg(format!("hub chassis build: {e}")))
     }
+}
+
+/// Wrap a `wasmtime::Error` (from `LoopbackEngine::boot`) into a
+/// [`BootError`] so the chassis trait method can return a uniform
+/// error type per ADR-0071.
+fn wasmtime_to_boot_error(e: wasmtime::Error) -> BootError {
+    BootError::Other(Box::new(std::io::Error::other(format!("{e}"))))
 }
 
 /// ADR-0071 driver capability for the hub chassis. Owns the tokio

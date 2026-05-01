@@ -81,6 +81,36 @@ pub trait DriverRunning: 'static {
     fn run(self: Box<Self>) -> Result<(), RunError>;
 }
 
+/// Phantom [`DriverCapability`] for passive chassis (test-bench, future
+/// embedder-driven chassis kinds). The [`Chassis`](crate::chassis::Chassis)
+/// trait requires `type Driver: DriverCapability`; passive chassis
+/// declare this as their driver to satisfy the bound, but the value is
+/// never instantiated (the `Builder<C, NoDriver>` path produces a
+/// [`PassiveChassis<C>`] without ever resolving `C::Driver`). Its `boot`
+/// is `unreachable!()` — reaching it implies someone tried to drive a
+/// chassis that has no driver, which is a programmer error rather than
+/// a runtime condition.
+pub struct NeverDriver;
+
+impl DriverCapability for NeverDriver {
+    type Running = NeverDriverRunning;
+    fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+        unreachable!(
+            "NeverDriver is a phantom for passive chassis; it should never be booted. \
+             Build the chassis via its inherent `build_passive(env)` instead."
+        );
+    }
+}
+
+/// Running-side of [`NeverDriver`]; same unreachability contract.
+pub struct NeverDriverRunning;
+
+impl DriverRunning for NeverDriverRunning {
+    fn run(self: Box<Self>) -> Result<(), RunError> {
+        unreachable!("NeverDriverRunning::run is never called by design");
+    }
+}
+
 /// Type-erased shutdown adapter for a passive [`Capability::Running`]
 /// stored in the builder's shutdown queue. Single-threaded path, so
 /// no `Send` bound — the adapter never crosses threads (the chassis
@@ -283,11 +313,11 @@ impl<C: Chassis> Builder<C, NoDriver> {
 
     /// Supply the chassis's driver. Transitions to [`HasDriver`] —
     /// further `.driver(_)` calls are forbidden by the type system.
-    pub fn driver<D>(mut self, driver: D) -> Builder<C, HasDriver>
-    where
-        D: DriverCapability,
-    {
-        self.driver = Some(make_driver_boot::<D>(driver));
+    /// Per ADR-0071 the driver type is fixed by `C::Driver`, so the
+    /// builder rejects mismatched driver types at the call site
+    /// rather than at boot.
+    pub fn driver(mut self, driver: C::Driver) -> Builder<C, HasDriver> {
+        self.driver = Some(make_driver_boot::<C::Driver>(driver));
         Builder {
             registry: self.registry,
             mailer: self.mailer,
@@ -489,12 +519,28 @@ mod tests {
     use crate::capability::Envelope;
     use std::sync::Mutex;
 
-    /// Fixture chassis used only by the tests in this module.
+    /// Fixture chassis for passive-build tests. `type Driver` is the
+    /// phantom [`NeverDriver`] since these tests use `build_passive`.
     struct TestChassis;
     impl Chassis for TestChassis {
         const PROFILE: &'static str = "test";
-        fn run(self) -> wasmtime::Result<()> {
-            Ok(())
+        type Driver = NeverDriver;
+        type Env = ();
+        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+            unreachable!("TestChassis is driven by Builder::new directly in unit tests");
+        }
+    }
+
+    /// Fixture chassis for driver-build tests. Generic over the
+    /// concrete `DriverCapability` so each test can pair the chassis
+    /// type with whatever driver it's exercising.
+    struct DrivenTestChassis<D: DriverCapability>(PhantomData<fn() -> D>);
+    impl<D: DriverCapability + 'static> Chassis for DrivenTestChassis<D> {
+        const PROFILE: &'static str = "test-driven";
+        type Driver = D;
+        type Env = ();
+        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+            unreachable!("DrivenTestChassis is driven by Builder::new directly in unit tests");
         }
     }
 
@@ -579,7 +625,7 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        let chassis = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+        let chassis = Builder::<DrivenTestChassis<EchoDriver>, NoDriver>::new(registry, mailer)
             .with(EchoCap { name: "test.echo" })
             .driver(EchoDriver {
                 ran: Arc::clone(&ran),
@@ -692,7 +738,7 @@ mod tests {
             }
         }
 
-        let chassis = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+        let chassis = Builder::<DrivenTestChassis<CaptureDriver>, NoDriver>::new(registry, mailer)
             .with(EchoCap { name: "test.echo" })
             .driver(CaptureDriver {
                 captured: Arc::clone(&captured),

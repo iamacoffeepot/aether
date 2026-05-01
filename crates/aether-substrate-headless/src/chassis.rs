@@ -78,11 +78,11 @@ pub struct HeadlessChassis;
 
 impl Chassis for HeadlessChassis {
     const PROFILE: &'static str = "headless";
+    type Driver = crate::driver::HeadlessTimerCapability;
+    type Env = HeadlessEnv;
 
-    fn run(self) -> wasmtime::Result<()> {
-        Err(wasmtime::Error::msg(
-            "HeadlessChassis is built via build(env) — call run() on the BuiltChassis<HeadlessChassis> instead",
-        ))
+    fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        Self::build_inner(env)
     }
 }
 
@@ -125,8 +125,9 @@ impl HeadlessChassis {
     /// `boot.add_capability` path, connect the hub, then wrap the
     /// timer in a [`HeadlessTimerCapability`] and hand it to the
     /// chassis_builder [`Builder`]. Returns a [`BuiltChassis`] whose
-    /// [`BuiltChassis::run`] blocks on the tick loop.
-    pub fn build(env: HeadlessEnv) -> wasmtime::Result<BuiltChassis<HeadlessChassis>> {
+    /// [`BuiltChassis::run`] blocks on the tick loop. The trait
+    /// method [`Chassis::build`] forwards here.
+    fn build_inner(env: HeadlessEnv) -> Result<BuiltChassis<HeadlessChassis>, BootError> {
         let HeadlessEnv {
             hub_url,
             namespace_roots,
@@ -138,7 +139,8 @@ impl HeadlessChassis {
             .workers(WORKERS)
             .namespace_roots(namespace_roots)
             .chassis_handler(|ctx| Some(chassis_control_handler(Arc::clone(ctx.outbound))))
-            .build()?;
+            .build()
+            .map_err(wasmtime_to_boot_error)?;
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_frame_stats = boot
@@ -203,9 +205,12 @@ impl HeadlessChassis {
         );
 
         // Legacy ADR-0070 capabilities — io / net / log.
-        boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))?;
-        boot.add_capability(NetCapability::new(net))?;
-        boot.add_capability(LogCapability::new())?;
+        boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))
+            .map_err(wasmtime_to_boot_error)?;
+        boot.add_capability(NetCapability::new(net))
+            .map_err(wasmtime_to_boot_error)?;
+        boot.add_capability(LogCapability::new())
+            .map_err(wasmtime_to_boot_error)?;
 
         let tick_hz = (Duration::from_secs(1).as_nanos() / tick_period.as_nanos().max(1)) as u32;
         tracing::info!(
@@ -217,7 +222,8 @@ impl HeadlessChassis {
 
         // Hub connect AFTER every chassis sink is registered (issue #262).
         // Post-ADR-0070 phase 4: hub client lives in `aether-hub`.
-        let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())?;
+        let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())
+            .map_err(wasmtime_to_boot_error)?;
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -233,6 +239,13 @@ impl HeadlessChassis {
         Builder::<HeadlessChassis, NoDriver>::new(registry, mailer)
             .driver(driver)
             .build()
-            .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))
     }
+}
+
+/// Wrap a `wasmtime::Error` (from `SubstrateBoot::build` /
+/// `connect_hub_client` / `boot.add_capability`) into a [`BootError`]
+/// so the chassis trait method can return a uniform error type per
+/// ADR-0071.
+fn wasmtime_to_boot_error(e: wasmtime::Error) -> BootError {
+    BootError::Other(Box::new(std::io::Error::other(format!("{e}"))))
 }

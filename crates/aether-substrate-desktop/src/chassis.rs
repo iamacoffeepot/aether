@@ -186,18 +186,11 @@ pub struct DesktopChassis;
 
 impl Chassis for DesktopChassis {
     const PROFILE: &'static str = "desktop";
+    type Driver = crate::driver::DesktopDriverCapability;
+    type Env = DesktopEnv;
 
-    fn run(self) -> wasmtime::Result<()> {
-        // ADR-0071 phase 3: the `DesktopChassis` is constructed via
-        // `Self::build(env)?.run()`. The legacy `Chassis::run` slot
-        // stays on the trait until every chassis migrates so the
-        // existing test-bench / headless / hub paths keep working;
-        // hitting it on `DesktopChassis` means `main()` (or a test)
-        // tried to call the legacy run path on the marker struct
-        // rather than `BuiltChassis::run`.
-        Err(wasmtime::Error::msg(
-            "DesktopChassis is built via build(env) — call run() on the BuiltChassis<DesktopChassis> instead",
-        ))
+    fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        Self::build_inner(env)
     }
 }
 
@@ -280,8 +273,9 @@ impl DesktopChassis {
     /// winit event loop.
     ///
     /// Phase 3 keeps capabilities on the `boot.add_capability` path;
-    /// phase 4+ migrate them to chassis_builder `.with()`.
-    pub fn build(env: DesktopEnv) -> wasmtime::Result<BuiltChassis<DesktopChassis>> {
+    /// phase 4+ migrate them to chassis_builder `.with()`. The
+    /// trait method [`Chassis::build`] forwards here.
+    fn build_inner(env: DesktopEnv) -> Result<BuiltChassis<DesktopChassis>, BootError> {
         let DesktopEnv {
             event_loop,
             capture_queue,
@@ -310,7 +304,8 @@ impl DesktopChassis {
                     ))
                 }
             })
-            .build()?;
+            .build()
+            .map_err(wasmtime_to_boot_error)?;
 
         // Render + camera sinks (ADR-0071 phase 4 / Option B): one
         // capability owning both mailboxes + accumulator state. The
@@ -321,15 +316,20 @@ impl DesktopChassis {
         // lookup hooks up once render migrates onto `.with()`.
         let render_cap = RenderCapability::new(RenderConfig::default());
         let render_handles = render_cap.handles();
-        boot.add_capability(render_cap)?;
+        boot.add_capability(render_cap)
+            .map_err(wasmtime_to_boot_error)?;
 
         // Legacy ADR-0070 capabilities — kept on the existing path
         // through phase 3 and 4 (Option B). Phase 4.5+ migrate them
         // (and render) to chassis_builder `.with()`.
-        boot.add_capability(AudioCapability::new(audio))?;
-        boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))?;
-        boot.add_capability(NetCapability::new(net))?;
-        boot.add_capability(LogCapability::new())?;
+        boot.add_capability(AudioCapability::new(audio))
+            .map_err(wasmtime_to_boot_error)?;
+        boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))
+            .map_err(wasmtime_to_boot_error)?;
+        boot.add_capability(NetCapability::new(net))
+            .map_err(wasmtime_to_boot_error)?;
+        boot.add_capability(LogCapability::new())
+            .map_err(wasmtime_to_boot_error)?;
 
         tracing::info!(
             target: "aether_substrate::boot",
@@ -346,7 +346,8 @@ impl DesktopChassis {
         // that prefer Builder-pipeline composition can swap in
         // `aether_hub::HubClientCapability` instead (the free fn is
         // a thin wrapper around the same path).
-        let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())?;
+        let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())
+            .map_err(wasmtime_to_boot_error)?;
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -368,6 +369,12 @@ impl DesktopChassis {
         Builder::<DesktopChassis, NoDriver>::new(registry, mailer)
             .driver(driver)
             .build()
-            .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))
     }
+}
+
+/// Wrap a `wasmtime::Error` (from `SubstrateBoot::build` /
+/// `connect_hub_client`) into a [`BootError`] so the chassis trait
+/// method can return a uniform error type per ADR-0071.
+fn wasmtime_to_boot_error(e: wasmtime::Error) -> BootError {
+    BootError::Other(Box::new(std::io::Error::other(format!("{e}"))))
 }
