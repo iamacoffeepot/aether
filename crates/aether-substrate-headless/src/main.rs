@@ -134,7 +134,7 @@ fn main() -> wasmtime::Result<()> {
     let net_config = aether_substrate_core::net::NetConfig::from_env();
     let namespace_roots = aether_substrate_core::io::NamespaceRoots::from_env();
 
-    let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION"))
+    let mut boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION"))
         .workers(WORKERS)
         .namespace_roots(namespace_roots)
         .chassis_handler(|ctx| Some(chassis::chassis_control_handler(Arc::clone(ctx.outbound))))
@@ -255,10 +255,10 @@ fn main() -> wasmtime::Result<()> {
         ),
     );
 
-    // `aether.sink.log`: ADR-0060. Same handler as desktop — guest
+    // `aether.sink.log`: ADR-0060. Same capability as desktop — guest
     // log mail is independent of GPU / windowing, so headless wires
     // it identically.
-    aether_substrate_core::log_sink::register_log_sink(&boot.registry);
+    boot.add_capability(aether_substrate_core::capabilities::LogCapability::new())?;
 
     let tick_hz = parse_tick_hz_env();
     let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));

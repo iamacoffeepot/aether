@@ -1012,7 +1012,7 @@ fn main() -> wasmtime::Result<()> {
     // The chassis handler closure is invoked during build() once
     // `registry` / `queue` / `outbound` exist but before the control
     // plane is wired, so it can `Arc::clone` what it needs to own.
-    let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
+    let mut boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
         .workers(WORKERS)
         .namespace_roots(namespace_roots)
         .chassis_handler({
@@ -1175,8 +1175,9 @@ fn main() -> wasmtime::Result<()> {
     // mail and re-emit through the host `log` facade; the existing
     // `tracing-log` bridge in `log_capture::init` lifts the record back
     // into the chassis EnvFilter + capture ring so guest events land
-    // in `engine_logs` alongside native logs.
-    aether_substrate_core::log_sink::register_log_sink(&boot.registry);
+    // in `engine_logs` alongside native logs. ADR-0070 phase 3 wraps
+    // the sink as a native capability with its own dispatcher thread.
+    boot.add_capability(aether_substrate_core::capabilities::LogCapability::new())?;
 
     tracing::info!(
         target: "aether_substrate::boot",

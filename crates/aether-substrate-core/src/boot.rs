@@ -151,6 +151,34 @@ impl SubstrateBoot {
     /// chassis main reads `AETHER_HUB_URL` from env and passes it
     /// through. `connect_hub_from_env` is a thin wrapper for callers
     /// that still want the env-driven behaviour inline.
+    /// Boot one more capability into the chassis the shared boot
+    /// already started. Wrapper around [`BootedChassis::add`] that
+    /// supplies the substrate's own registry + mailer handles, so
+    /// chassis mains compose chassis-conditional capabilities with
+    /// one line per capability:
+    ///
+    /// ```ignore
+    /// boot.add_capability(LogCapability::new())?;
+    /// boot.add_capability(IoCapability::new(boot.namespace_roots.clone(), Arc::clone(&boot.queue)))?;
+    /// ```
+    ///
+    /// Boot order is call order; shutdown order is the reverse, the
+    /// same as build-time capabilities. The fallback-router slot is
+    /// shared across build-time and post-build capabilities, so the
+    /// single-claim invariant holds.
+    pub fn add_capability<C>(&mut self, cap: C) -> wasmtime::Result<()>
+    where
+        C: crate::Capability,
+    {
+        let chassis = self
+            .chassis
+            .as_mut()
+            .expect("SubstrateBoot::build always installs a BootedChassis");
+        chassis
+            .add(&self.registry, &self.queue, cap)
+            .map_err(|e| wasmtime::Error::msg(format!("capability boot failed: {e}")))
+    }
+
     pub fn connect_hub(&self, url: Option<&str>) -> wasmtime::Result<Option<HubClient>> {
         let url = match url {
             Some(u) if !u.is_empty() => u,
