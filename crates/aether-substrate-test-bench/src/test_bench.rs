@@ -33,9 +33,9 @@ use aether_kinds::{
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use aether_substrate_core::{
     HubOutbound, InputSubscribers, Mailer, ReplyTarget, ReplyTo, SubstrateBoot,
+    capabilities::io::NamespaceRoots,
     capture::CaptureQueue,
     frame_loop,
-    io::NamespaceRoots,
     mail::{Mail, MailboxId},
     subscribers_for,
 };

@@ -1005,7 +1005,7 @@ fn main() -> wasmtime::Result<()> {
     // itself never reads env from now on.
     let hub_url = std::env::var("AETHER_HUB_URL").ok();
     let net_config = aether_substrate_core::capabilities::net::NetConfig::from_env();
-    let namespace_roots = aether_substrate_core::io::NamespaceRoots::from_env();
+    let namespace_roots = aether_substrate_core::capabilities::io::NamespaceRoots::from_env();
 
     // Shared runtime bring-up: log capture, registry + kind descriptors,
     // broadcast sink, scheduler, control plane, optional hub connect.

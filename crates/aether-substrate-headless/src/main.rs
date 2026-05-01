@@ -132,7 +132,7 @@ fn main() -> wasmtime::Result<()> {
     // itself never reads env from now on.
     let hub_url = std::env::var("AETHER_HUB_URL").ok();
     let net_config = aether_substrate_core::capabilities::net::NetConfig::from_env();
-    let namespace_roots = aether_substrate_core::io::NamespaceRoots::from_env();
+    let namespace_roots = aether_substrate_core::capabilities::io::NamespaceRoots::from_env();
 
     let mut boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION"))
         .workers(WORKERS)

@@ -205,7 +205,7 @@ fn main() -> wasmtime::Result<()> {
     // `AETHER_HUB_URL` and the namespace roots once and thread them
     // through substrate-core's APIs explicitly.
     let hub_url = std::env::var("AETHER_HUB_URL").ok();
-    let namespace_roots = aether_substrate_core::io::NamespaceRoots::from_env();
+    let namespace_roots = aether_substrate_core::capabilities::io::NamespaceRoots::from_env();
 
     let mut boot = SubstrateBoot::builder("test-bench", env!("CARGO_PKG_VERSION"))
         .workers(WORKERS)
