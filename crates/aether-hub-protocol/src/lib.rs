@@ -17,8 +17,6 @@
 //! itself — frames + framing helpers — and is unambiguously host-side
 //! std code.
 
-pub use uuid::Uuid;
-
 mod types;
 pub use types::*;
 

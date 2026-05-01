@@ -571,7 +571,7 @@ mod tests {
         }
     }
 
-    use aether_hub_protocol::{SessionToken, Uuid};
+    use aether_data::{SessionToken, Uuid};
 
     use crate::outbound::EgressEvent;
 

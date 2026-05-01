@@ -47,6 +47,7 @@ pub mod ids;
 pub mod schema;
 pub mod tag_bits;
 pub mod tagged_id;
+pub mod wire_id;
 
 pub use hash::{
     KIND_DOMAIN, MAILBOX_DOMAIN, TYPE_DOMAIN, fnv1a_64_bytes, fnv1a_64_prefixed,
@@ -55,6 +56,7 @@ pub use hash::{
 pub use ids::{HandleId, KindId, MailboxId, tag_for_type_id, type_name_for_type_id};
 pub use schema::*;
 pub use tagged_id::{Tag, with_tag};
+pub use wire_id::{EngineId, SessionToken, Uuid};
 
 /// Re-exported derive macros from `aether-data-derive`. Behind the
 /// `derive` feature so `cargo build` on a guest that hand-writes

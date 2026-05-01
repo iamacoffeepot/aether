@@ -23,7 +23,6 @@ audio = ["dep:cpal", "dep:crossbeam-queue"]
 
 [dependencies]
 aether-data = { path = "../aether-data" }
-aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"
 postcard = { version = "1.1", features = ["alloc"] }

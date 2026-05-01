@@ -10,21 +10,22 @@
 // no longer constructs hub frames; the translation lives in the
 // `aether-hub` crate's `HubProtocolBackend`.
 //
-// Identity types (`SessionToken`, `EngineId`) are still imported from
-// `aether-hub-protocol` for now — moving those out of the substrate's
-// public API is its own subsequent refactor (ADR-0070 phase 4 follow-up).
+// Identity types (`SessionToken`, `EngineId`) live in `aether-data`
+// (ADR-0071 phase 7c) so substrate-core describes egress targets
+// without depending on the hub-protocol framing crate. ADR-0070's
+// "substrate-core has no hub knowledge" invariant is now satisfied:
+// no `aether-hub-protocol` dep remains in `Cargo.toml`.
 
 use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
 
-use aether_data::{KindDescriptor, KindId, MailboxId};
-use aether_hub_protocol::{EngineId, SessionToken};
+use aether_data::{EngineId, KindDescriptor, KindId, MailboxId, SessionToken};
 
 use crate::mail::{ReplyTarget, ReplyTo};
 
 /// Substrate-side mirror of the hub-protocol log entry shape (ADR-0023).
 /// Held by the log-capture ring and handed to the egress backend
-/// in batches; the hub backend converts to `aether_hub_protocol::LogEntry`
+/// in batches; the hub backend converts to `aether_data::LogEntry`
 /// at the wire boundary. Field shape matches the wire type so the
 /// conversion is a struct copy.
 #[derive(Clone, Debug, PartialEq, Eq)]

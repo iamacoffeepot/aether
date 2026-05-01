@@ -559,7 +559,7 @@ mod tests {
     fn deliver_with_real_token_allocates_session_handle() {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
         use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
-        use aether_hub_protocol::{SessionToken, Uuid};
+        use aether_data::{SessionToken, Uuid};
 
         let mut component = instantiate(WAT_STORES_SENDER);
         let token = SessionToken(Uuid::from_u128(0xaaaa));
@@ -600,7 +600,7 @@ mod tests {
         // session is the more specific reply target.
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
         use crate::reply_table::ReplyEntry;
-        use aether_hub_protocol::{SessionToken, Uuid};
+        use aether_data::{SessionToken, Uuid};
 
         let mut component = instantiate(WAT_STORES_SENDER);
         let token = SessionToken(Uuid::from_u128(0xbbbb));
@@ -658,7 +658,7 @@ mod tests {
     fn reply_mail_emits_session_addressed_frame() {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
         use crate::outbound::EgressEvent;
-        use aether_hub_protocol::{SessionToken, Uuid};
+        use aether_data::{SessionToken, Uuid};
 
         let (ctx, rx, pong_id) = plane_ctx_for_reply();
         let mut component = instantiate_with_ctx(&wat_replies(pong_id.0), ctx);

@@ -8,27 +8,13 @@
 
 use aether_data::{KindDescriptor, KindId, MailboxId};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-/// Hub-assigned stable identity for an engine connection. Fresh per
-/// connect; not preserved across reconnects (resume-with-id is a V1
-/// concern per ADR-0006).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EngineId(pub Uuid);
-
-/// Hub-minted routing handle for a Claude MCP session. The engine
-/// treats it as opaque bytes: it only echoes tokens the hub handed it
-/// on inbound mail back as the address on a reply. The hub validates
-/// on receipt; unknown/expired tokens produce an undeliverable status
-/// (per ADR-0008).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SessionToken(pub Uuid);
-
-impl SessionToken {
-    /// Placeholder used before session tracking lands at the hub.
-    /// Always treated as expired by the hub's validator.
-    pub const NIL: SessionToken = SessionToken(Uuid::nil());
-}
+// ADR-0071 phase 7c: identity types moved into `aether-data` so
+// substrate-core can drop its dep on this crate. Re-exported here so
+// the wire format and existing callers (the hub binary, MCP tooling,
+// integration tests) keep their `aether_hub_protocol::EngineId`
+// import paths working unchanged.
+pub use aether_data::{EngineId, SessionToken, Uuid};
 
 /// First frame the engine sends after the TCP connection is open.
 /// The hub replies with a `Welcome` carrying the assigned `EngineId`.

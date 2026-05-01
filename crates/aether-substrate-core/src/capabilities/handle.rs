@@ -133,7 +133,7 @@ mod tests {
     use std::time::Instant;
 
     use aether_data::{HandleId, Kind, KindId};
-    use aether_hub_protocol::{SessionToken, Uuid};
+    use aether_data::{SessionToken, Uuid};
     use aether_kinds::{HandlePublish, HandlePublishResult};
 
     use super::*;

@@ -262,7 +262,7 @@ mod tests {
     /// hub-outbound path, which lands a typed `EngineMailFrame` we
     /// can decode in the test.
     fn session_reply_to() -> ReplyTo {
-        use aether_hub_protocol::{SessionToken, Uuid};
+        use aether_data::{SessionToken, Uuid};
         ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(0xfeed))))
     }
 
