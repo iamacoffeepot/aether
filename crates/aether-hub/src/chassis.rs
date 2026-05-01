@@ -29,7 +29,7 @@ use std::time::Duration;
 use aether_substrate_core::Chassis;
 use aether_substrate_core::capability::BootError;
 use aether_substrate_core::chassis_builder::{
-    Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, NoDriver, RunError,
+    Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError,
 };
 use tokio::runtime::Runtime;
 
@@ -140,7 +140,7 @@ impl HubChassis {
             loopback,
         };
 
-        Builder::<HubChassis, NoDriver>::new(registry_arc, mailer_arc)
+        Builder::<HubChassis>::new(registry_arc, mailer_arc)
             .driver(driver)
             .build()
     }

@@ -5,10 +5,10 @@
 //! the chassis needs to read its own state, and the
 //! `AETHER_WINDOW_MODE` parser. Wraps everything in a
 //! [`DesktopDriverCapability`] so [`crate::chassis::DesktopChassis`]
-//! composes one driver alongside its passive capabilities (LogCapability,
-//! IoCapability, NetCapability, AudioCapability, HandleCapability —
-//! kept on the existing `boot.add_capability` path through phase 3,
-//! migrated to `chassis_builder::Builder::with` in a later phase).
+//! composes one driver alongside its passive capabilities
+//! (LogCapability, IoCapability, NetCapability, AudioCapability,
+//! RenderCapability — composed via `chassis_builder::Builder::with`
+//! per ADR-0071 phase B).
 //!
 //! `DesktopDriverRunning::run` blocks on `event_loop.run_app(&mut app)`
 //! and emits the shutdown telemetry the previous `DesktopChassis::run`
@@ -35,7 +35,9 @@ use aether_substrate_core::chassis_builder::{
     DriverCapability, DriverCtx, DriverRunning, RunError,
 };
 use aether_substrate_core::{
-    HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop,
+    HubOutbound, InputSubscribers, Mailer, SubstrateBoot,
+    capabilities::{RenderHandles, RenderRunning},
+    frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -685,18 +687,16 @@ impl ApplicationHandler<UserEvent> for App {
 /// ADR-0071 driver capability for the desktop chassis. Owns the
 /// pieces the winit event-loop body needs at construction time, then
 /// `boot()`-builds the App + DriverRunning that drives the loop.
+/// `boot()` looks up [`RenderRunning`] via [`DriverCtx::expect`]
+/// (booted earlier in the `.with()` chain) and pulls the accumulator
+/// handles out of it.
 ///
-/// The substrate-core handles (`SubstrateBoot`) ride along on the
-/// running so the scheduler + auto-installed `BootedChassis` (which
-/// owns the legacy ADR-0070 capabilities added via
-/// `boot.add_capability`) stay alive for the chassis's lifetime.
+/// The substrate-core handle (`SubstrateBoot`) rides along on the
+/// running so the scheduler stays alive for the chassis's lifetime.
 pub struct DesktopDriverCapability {
     pub event_loop: EventLoop<UserEvent>,
     pub boot: SubstrateBoot,
     pub capture_queue: crate::CaptureQueue,
-    pub frame_vertices: Arc<Mutex<Vec<u8>>>,
-    pub camera_state: Arc<Mutex<[f32; 16]>>,
-    pub triangles_rendered: Arc<AtomicU64>,
     pub boot_kinds_count: u32,
     pub boot_mode: WindowMode,
     pub boot_size: Option<(u32, u32)>,
@@ -710,10 +710,10 @@ pub struct DesktopDriverRunning {
     app: App,
     event_loop: EventLoop<UserEvent>,
     triangles_rendered: Arc<AtomicU64>,
-    /// `SubstrateBoot` drops at the end of `run()` so its
-    /// `BootedChassis` (and the legacy capabilities it owns) tear down
-    /// in reverse boot order before the chassis_builder passive set
-    /// drops.
+    /// `SubstrateBoot` drops at the end of `run()`. The chassis_builder
+    /// `BootedPassives` (holding render/audio/io/net/log runnings)
+    /// drops just after, tearing down each passive in reverse boot
+    /// order via `RunningCapability::shutdown`.
     _boot: SubstrateBoot,
     _hub: Option<HubClient>,
 }
@@ -721,20 +721,29 @@ pub struct DesktopDriverRunning {
 impl DriverCapability for DesktopDriverCapability {
     type Running = DesktopDriverRunning;
 
-    fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+    fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
         let DesktopDriverCapability {
             event_loop,
             boot,
             capture_queue,
-            frame_vertices,
-            camera_state,
-            triangles_rendered,
             boot_kinds_count,
             boot_mode,
             boot_size,
             boot_title,
             hub,
         } = self;
+
+        // Look up RenderCapability's running via the chassis_builder
+        // typed-store (ADR-0071). The render passive booted before
+        // this driver, so its `RenderRunning` is in the typed map;
+        // pull the accumulator handles for the per-frame loop to
+        // read.
+        let render: Arc<RenderRunning> = ctx.expect();
+        let RenderHandles {
+            frame_vertices,
+            camera_state,
+            triangles_rendered,
+        } = render.handles();
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_key = boot.registry.kind_id(Key::NAME).expect("Key registered");

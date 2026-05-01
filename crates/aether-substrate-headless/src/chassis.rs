@@ -19,7 +19,7 @@ use aether_kinds::{
     SetWindowMode, SetWindowTitle, Tick,
 };
 use aether_substrate_core::capability::BootError;
-use aether_substrate_core::chassis_builder::{Builder, BuiltChassis, NoDriver};
+use aether_substrate_core::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate_core::{
     Chassis, ChassisControlHandler, HubOutbound, ReplyTo, SubstrateBoot,
     capabilities::{
@@ -120,13 +120,13 @@ impl HeadlessChassis {
     /// Build the headless chassis: stand up substrate-core internals,
     /// register the nop chassis sinks (render / camera / audio — they
     /// keep mailbox names resolvable so desktop-designed components
-    /// loaded on headless don't warn-storm), add the legacy
-    /// ADR-0070 capabilities (io, net, log) on the existing
-    /// `boot.add_capability` path, connect the hub, then wrap the
-    /// timer in a [`HeadlessTimerCapability`] and hand it to the
-    /// chassis_builder [`Builder`]. Returns a [`BuiltChassis`] whose
-    /// [`BuiltChassis::run`] blocks on the tick loop. The trait
-    /// method [`Chassis::build`] forwards here.
+    /// loaded on headless don't warn-storm), connect the hub, compose
+    /// the native passives (log, io, net) through the chassis_builder
+    /// `.with()` chain, then wrap the timer in a
+    /// [`HeadlessTimerCapability`] and hand it to the builder.
+    /// Returns a [`BuiltChassis`] whose [`BuiltChassis::run`] blocks
+    /// on the tick loop. The trait method [`Chassis::build`] forwards
+    /// here.
     fn build_inner(env: HeadlessEnv) -> Result<BuiltChassis<HeadlessChassis>, BootError> {
         let HeadlessEnv {
             hub_url,
@@ -135,7 +135,7 @@ impl HeadlessChassis {
             tick_period,
         } = env;
 
-        let mut boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION"))
+        let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION"))
             .workers(WORKERS)
             .namespace_roots(namespace_roots)
             .chassis_handler(|ctx| Some(chassis_control_handler(Arc::clone(ctx.outbound))))
@@ -203,11 +203,6 @@ impl HeadlessChassis {
             ),
         );
 
-        // Legacy ADR-0070 capabilities — io / net / log.
-        boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))?;
-        boot.add_capability(NetCapability::new(net))?;
-        boot.add_capability(LogCapability::new())?;
-
         let tick_hz = (Duration::from_secs(1).as_nanos() / tick_period.as_nanos().max(1)) as u32;
         tracing::info!(
             target: "aether_substrate::boot",
@@ -222,6 +217,7 @@ impl HeadlessChassis {
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
+        let namespace_roots = boot.namespace_roots.clone();
 
         let driver = HeadlessTimerCapability {
             boot,
@@ -231,7 +227,14 @@ impl HeadlessChassis {
             hub,
         };
 
-        Builder::<HeadlessChassis, NoDriver>::new(registry, mailer)
+        // ADR-0071 phase B: io / net / log compose through the
+        // chassis_builder `.with()` chain. Boot order is declaration
+        // order — log first so other capabilities' boot tracing routes
+        // through the log capture.
+        Builder::<HeadlessChassis>::new(registry, mailer)
+            .with(LogCapability::new())
+            .with(IoCapability::new(namespace_roots))
+            .with(NetCapability::new(net))
             .driver(driver)
             .build()
     }
