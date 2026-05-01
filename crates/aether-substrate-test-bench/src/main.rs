@@ -135,7 +135,7 @@ fn drive_events_loop(
     mut gpu: Gpu,
     kind_tick: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
-    hub: Option<aether_hub::HubClient>,
+    hub: Option<aether_substrate::hub::HubClient>,
 ) -> wasmtime::Result<()> {
     let queue = Arc::clone(&boot.queue);
     let outbound = Arc::clone(&boot.outbound);
