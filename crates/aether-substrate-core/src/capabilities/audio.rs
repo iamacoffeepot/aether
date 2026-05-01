@@ -1,29 +1,57 @@
-//! Desktop audio synth — ADR-0039 Phase 2.
+//! ADR-0070 Phase 3 (part 4): desktop audio synth as a native
+//! capability — ADR-0039 Phase 2.
 //!
-//! Turns `aether.audio.note_on` / `note_off` / `set_master_gain` mail
-//! into f32 PCM on a `cpal` output stream. One synth per substrate
-//! process; the chassis boot wires a bounded MPSC queue between the
-//! `audio` sink (producer — scheduler worker threads) and the cpal
-//! callback (consumer — realtime audio thread). The callback cannot
-//! block, so all cross-thread state flows through `crossbeam_queue::
-//! ArrayQueue`.
+//! Owns the full ADR-0039 stack — `cpal` output stream, hand-rolled
+//! synth (oscillator + ADSR per voice, voice-keyed by `(sender,
+//! instrument, pitch)`), built-in instrument registry, the
+//! `aether.sink.audio` mailbox claim, and the dispatcher thread that
+//! decodes inbound `NoteOn` / `NoteOff` / `SetMasterGain` mail.
 //!
 //! Synthesis is hand-rolled (no SoundFont, no DSP graph library): a
 //! waveform oscillator + ADSR envelope per voice, summed flat, scaled
-//! by master gain. 4 built-in instruments cover the common shapes
-//! (sine / square / triangle / saw); a pluck-flavoured sawtooth with
-//! fast-decay ADSR rounds out the v1 registry.
-//!
+//! by master gain. 5 built-in instruments cover the common shapes
+//! (sine / square / triangle / saw + a pluck-flavoured sawtooth).
 //! Per-source / bus-level mixing is deliberately not here — ADR-0039
 //! commits to composing that in user-space via mixer components.
+//!
+//! Threading: the capability spawns one OS thread that builds the
+//! `cpal::Stream` and runs the mail-dispatch loop. cpal's `Stream`
+//! is `!Send` on macOS, so the stream is constructed on, owned by,
+//! and dropped from the same thread; only `JoinHandle<()>` and
+//! `Arc<AtomicBool>` (both `Send`) cross thread boundaries.
+//!
+//! Boot error policy: cpal init failure is **not** fatal. Audio is
+//! a peripheral, not infrastructure — a CI machine without an audio
+//! device should still boot. If cpal fails (no device, rate
+//! unsupported, `AETHER_AUDIO_DISABLE=1`), the capability falls back
+//! to a nop pipeline: `NoteOn` / `NoteOff` are dropped silently and
+//! `SetMasterGain` replies `Err` so agents fail fast instead of
+//! hanging.
 
 use std::f32::consts::TAU;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
-/// Capacity of the event queue between the sink producers and the
+use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability};
+use crate::mail::{ReplyTarget, ReplyTo};
+use crate::mailer::Mailer;
+use aether_data::{Kind, KindId, MailboxId};
+use aether_kinds::{NoteOff, NoteOn, SetMasterGain, SetMasterGainResult};
+
+/// Recipient name the audio capability claims. ADR-0058 places
+/// chassis-owned sinks under `aether.sink.*`.
+pub const AUDIO_SINK_NAME: &str = "aether.sink.audio";
+
+/// Polling interval for the dispatcher's shutdown check.
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Capacity of the event queue between the sink dispatcher and the
 /// audio-callback consumer. 1024 slots hold ~10 seconds of a dense
 /// 100-note-per-second stream; overflow is warn-dropped, which the
 /// ADR-0039 timing-quantization section already documents as a v1
@@ -36,19 +64,50 @@ pub const EVENT_QUEUE_CAPACITY: usize = 1024;
 /// glitches.
 pub const MAX_VOICES: usize = 64;
 
-/// Event a sink handler pushes into the audio callback's queue. The
-/// `sender_mailbox` is baked in here (not re-derived on the callback
-/// side) so the callback stays branch-minimal.
+/// Resolved configuration for the audio synth. Chassis mains read
+/// env vars (`AETHER_AUDIO_DISABLE`, `AETHER_AUDIO_SAMPLE_RATE`)
+/// into an `AudioConfig` and pass it to [`AudioCapability::new`]
+/// (issue 464). Tests build an `AudioConfig` directly.
+#[derive(Clone, Debug, Default)]
+pub struct AudioConfig {
+    /// `AETHER_AUDIO_DISABLE=1` skips cpal init entirely. The sink
+    /// still claims its mailbox and replies `Err` to `SetMasterGain`
+    /// so agents fail fast instead of hanging.
+    pub disabled: bool,
+    /// `AETHER_AUDIO_SAMPLE_RATE=<hz>` requests a specific rate. If
+    /// the device doesn't support it, boot falls back to nop
+    /// (ADR-0039 — non-fatal).
+    pub requested_sample_rate: Option<u32>,
+}
+
+impl AudioConfig {
+    pub fn from_env() -> Self {
+        let disabled = std::env::var("AETHER_AUDIO_DISABLE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let requested_sample_rate = std::env::var("AETHER_AUDIO_SAMPLE_RATE")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok());
+        Self {
+            disabled,
+            requested_sample_rate,
+        }
+    }
+}
+
+/// Event a sink dispatcher pushes into the audio callback's queue.
+/// The `sender_mailbox` is baked in here (not re-derived on the
+/// callback side) so the callback stays branch-minimal.
 #[derive(Copy, Clone, Debug)]
-pub enum AudioEvent {
+enum AudioEvent {
     NoteOn {
-        sender_mailbox: aether_data::MailboxId,
+        sender_mailbox: MailboxId,
         pitch: u8,
         velocity: u8,
         instrument_id: u8,
     },
     NoteOff {
-        sender_mailbox: aether_data::MailboxId,
+        sender_mailbox: MailboxId,
         pitch: u8,
         instrument_id: u8,
     },
@@ -57,23 +116,21 @@ pub enum AudioEvent {
     },
 }
 
-/// Handle to the event queue the sink handler writes to. Cloneable so
-/// multiple sinks / chassis code paths can share the producer end.
+/// Producer side of the audio event queue. The dispatcher thread
+/// holds one (after building the pipeline) and pushes events on
+/// every inbound `NoteOn` / `NoteOff` / `SetMasterGain`.
 #[derive(Clone)]
-pub struct AudioEventSender {
+struct AudioEventSender {
     queue: Arc<ArrayQueue<AudioEvent>>,
 }
 
 impl AudioEventSender {
-    /// Push an event. Returns the event back on full (QoS: drop).
-    pub fn push(&self, event: AudioEvent) -> Result<(), AudioEvent> {
+    fn push(&self, event: AudioEvent) -> Result<(), AudioEvent> {
         self.queue.push(event)
     }
 }
 
-/// Build the producer/consumer pair. The producer is handed to sinks;
-/// the consumer belongs to the synth on the audio thread.
-pub fn new_event_channel() -> (AudioEventSender, Arc<ArrayQueue<AudioEvent>>) {
+fn new_event_channel() -> (AudioEventSender, Arc<ArrayQueue<AudioEvent>>) {
     let queue = Arc::new(ArrayQueue::new(EVENT_QUEUE_CAPACITY));
     (
         AudioEventSender {
@@ -85,8 +142,7 @@ pub fn new_event_channel() -> (AudioEventSender, Arc<ArrayQueue<AudioEvent>>) {
 
 /// Primitive waveform the oscillator shapes. `Saw` is a downward ramp
 /// scaled to ±1; `Pluck` reuses `Saw` geometry but pairs with a
-/// fast-decay envelope — kept as its own variant to make patches
-/// read naturally at the call site.
+/// fast-decay envelope — kept implicit by the patch table.
 #[derive(Copy, Clone, Debug)]
 enum Wave {
     Sine,
@@ -179,22 +235,17 @@ const BUILTINS: &[InstrumentDef] = &[
     },
 ];
 
-/// Resolve a registry index; returns `None` if the id doesn't map to
-/// a built-in (which is how the synth guards against malformed or
-/// version-mismatched `NoteOn` mail).
 fn instrument_by_id(id: u8) -> Option<&'static InstrumentDef> {
     BUILTINS.get(id as usize)
 }
 
-/// Number of built-in instruments. Exposed so the chassis can log
-/// the registry size at boot for MCP agents to cross-reference.
+/// Number of built-in instruments. Used by the boot log so MCP
+/// agents can cross-reference.
 pub fn builtin_count() -> usize {
     BUILTINS.len()
 }
 
-/// Names of the built-in instruments, in id order. Used by the boot
-/// log and eventually by a `resolve_instrument` control kind (parked
-/// ADR-0039 follow-up).
+/// Names of the built-in instruments, in id order.
 pub fn builtin_names() -> Vec<&'static str> {
     BUILTINS.iter().map(|d| d.name).collect()
 }
@@ -217,7 +268,7 @@ enum EnvelopeStage {
 /// touched per sample, so keeping the struct compact helps cache.
 #[derive(Copy, Clone, Debug)]
 struct Voice {
-    sender_mailbox: aether_data::MailboxId,
+    sender_mailbox: MailboxId,
     instrument_id: u8,
     pitch: u8,
     /// Oscillator phase in turns (`[0.0, 1.0)`), incremented by
@@ -235,7 +286,7 @@ struct Voice {
 
 impl Voice {
     fn new(
-        sender_mailbox: aether_data::MailboxId,
+        sender_mailbox: MailboxId,
         instrument_id: u8,
         pitch: u8,
         velocity: u8,
@@ -364,8 +415,8 @@ impl Voice {
 }
 
 /// Whole-process synth state. Lives on the cpal callback thread;
-/// sinks communicate via the event queue.
-pub struct Synth {
+/// the dispatcher communicates via the event queue.
+struct Synth {
     events: Arc<ArrayQueue<AudioEvent>>,
     voices: Vec<Voice>,
     sample_rate: f32,
@@ -373,7 +424,7 @@ pub struct Synth {
 }
 
 impl Synth {
-    pub fn new(events: Arc<ArrayQueue<AudioEvent>>, sample_rate: f32) -> Self {
+    fn new(events: Arc<ArrayQueue<AudioEvent>>, sample_rate: f32) -> Self {
         Self {
             events,
             voices: Vec::with_capacity(MAX_VOICES),
@@ -454,7 +505,7 @@ impl Synth {
     /// Fill a cpal output buffer. `channels` is typically 2 for stereo
     /// desktop output; the synth is mono-summed, broadcast to every
     /// channel per sample.
-    pub fn fill(&mut self, buffer: &mut [f32], channels: usize) {
+    fn fill(&mut self, buffer: &mut [f32], channels: usize) {
         self.drain_events();
         let dt = 1.0 / self.sample_rate;
         let frames = buffer.len() / channels.max(1);
@@ -487,37 +538,52 @@ impl Synth {
     }
 
     #[cfg(test)]
-    pub fn voice_count(&self) -> usize {
+    fn voice_count(&self) -> usize {
         self.voices.len()
     }
 
     #[cfg(test)]
-    pub fn master_gain(&self) -> f32 {
+    fn master_gain_value(&self) -> f32 {
         self.master_gain
     }
 }
 
-/// Handle to a running audio pipeline. Keep it alive for the process
-/// lifetime — dropping it stops the cpal stream and silences every
-/// voice. `sender` is the producer end the audio sink uses; `_stream`
-/// is held solely to prevent Drop.
-pub struct AudioPipeline {
-    pub sender: AudioEventSender,
-    pub sample_rate: u32,
-    pub channels: u16,
+/// Handle to a running cpal pipeline. Lives on the audio dispatcher
+/// thread for the entire run — `cpal::Stream` is `!Send` on macOS,
+/// so the stream is constructed on, owned by, and dropped from the
+/// same thread. Dropping the pipeline silences every voice and tears
+/// down the cpal stream.
+struct AudioPipeline {
+    sender: AudioEventSender,
     _stream: cpal::Stream,
 }
 
-/// Try to build a cpal output stream + synth. Returns `None` if the
-/// host has no default output device, if the requested sample rate
-/// isn't supported (and no fallback exists), or if cpal itself
-/// refuses to build the stream. Callers treat `None` as "audio not
-/// available" and fall back to a nop sink — the substrate still
-/// boots, just silent.
-///
-/// `requested_sample_rate` is the `AETHER_AUDIO_SAMPLE_RATE` override;
-/// pass `None` to take the device's default.
-pub fn try_build_pipeline(
+#[derive(Debug)]
+enum AudioBuildError {
+    NoDevice,
+    RateUnsupported(u32),
+    ConfigQuery(String),
+    StreamBuild(String),
+    StreamPlay(String),
+}
+
+impl core::fmt::Display for AudioBuildError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoDevice => write!(f, "no default audio output device"),
+            Self::RateUnsupported(r) => write!(f, "requested sample rate {r} Hz unsupported"),
+            Self::ConfigQuery(e) => write!(f, "config query failed: {e}"),
+            Self::StreamBuild(e) => write!(f, "stream build failed: {e}"),
+            Self::StreamPlay(e) => write!(f, "stream play failed: {e}"),
+        }
+    }
+}
+
+/// Try to build a cpal output stream + synth. Returns `Err` if the
+/// host has no default output device, the requested sample rate
+/// isn't supported, or cpal refuses to build the stream. Callers
+/// treat `Err` as "audio not available" and fall back to a nop sink.
+fn try_build_pipeline(
     requested_sample_rate: Option<u32>,
 ) -> Result<AudioPipeline, AudioBuildError> {
     let host = cpal::default_host();
@@ -525,10 +591,6 @@ pub fn try_build_pipeline(
         .default_output_device()
         .ok_or(AudioBuildError::NoDevice)?;
 
-    // Pick a config. If the caller requested a specific rate and the
-    // device supports it (in any config range), honour that; else
-    // take `default_output_config` which is what the OS would pick
-    // for a media app.
     let config = match requested_sample_rate {
         Some(rate) => {
             find_config_for_rate(&device, rate).ok_or(AudioBuildError::RateUnsupported(rate))?
@@ -566,10 +628,17 @@ pub fn try_build_pipeline(
         .play()
         .map_err(|e| AudioBuildError::StreamPlay(e.to_string()))?;
 
-    Ok(AudioPipeline {
-        sender,
+    tracing::info!(
+        target: "aether_substrate::audio",
         sample_rate,
         channels,
+        instruments = builtin_count(),
+        builtin_names = ?builtin_names(),
+        "audio pipeline started",
+    );
+
+    Ok(AudioPipeline {
+        sender,
         _stream: stream,
     })
 }
@@ -586,23 +655,235 @@ fn find_config_for_rate(device: &cpal::Device, rate: u32) -> Option<cpal::Stream
     None
 }
 
-#[derive(Debug)]
-pub enum AudioBuildError {
-    NoDevice,
-    RateUnsupported(u32),
-    ConfigQuery(String),
-    StreamBuild(String),
-    StreamPlay(String),
+/// Extract the sender's mailbox id for voice-table keying. Component
+/// senders come through as `EngineMailbox { mailbox_id }`; Claude
+/// sessions and substrate-internal pushes (which shouldn't reach the
+/// audio sink in practice) collapse to id `0`, sharing one voice
+/// slot per (instrument, pitch).
+fn sender_mailbox_id(sender: ReplyTo) -> MailboxId {
+    match sender.target {
+        ReplyTarget::EngineMailbox { mailbox_id, .. } => mailbox_id,
+        _ => MailboxId(0),
+    }
 }
 
-impl core::fmt::Display for AudioBuildError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::NoDevice => write!(f, "no default audio output device"),
-            Self::RateUnsupported(r) => write!(f, "requested sample rate {r} Hz unsupported"),
-            Self::ConfigQuery(e) => write!(f, "config query failed: {e}"),
-            Self::StreamBuild(e) => write!(f, "stream build failed: {e}"),
-            Self::StreamPlay(e) => write!(f, "stream play failed: {e}"),
+/// Demultiplex one envelope's payload to the matching audio event
+/// (or reply, in the case of `SetMasterGain`). Pushed events ride
+/// the queue to the cpal callback thread; replies route through
+/// `Mailer::send_reply`. Called from inside the dispatcher thread.
+fn dispatch_audio_mail(
+    mailer: &Mailer,
+    audio_sender: Option<&AudioEventSender>,
+    kind: KindId,
+    sender: ReplyTo,
+    bytes: &[u8],
+) {
+    match kind {
+        <NoteOn as Kind>::ID => {
+            // Hub-delivered payloads arrive as un-aligned `Vec<u8>`
+            // slices from the reader thread's decode;
+            // `try_pod_read_unaligned` copies bytes rather than
+            // reinterpreting in place, matching how the camera sink
+            // reads its [f32; 16] payload.
+            let Ok(n) = bytemuck::try_pod_read_unaligned::<NoteOn>(bytes) else {
+                tracing::warn!(
+                    target: "aether_substrate::audio",
+                    got = bytes.len(),
+                    "note_on: bad payload length, dropping",
+                );
+                return;
+            };
+            if let Some(s) = audio_sender {
+                let ev = AudioEvent::NoteOn {
+                    sender_mailbox: sender_mailbox_id(sender),
+                    pitch: n.pitch,
+                    velocity: n.velocity,
+                    instrument_id: n.instrument_id,
+                };
+                if s.push(ev).is_err() {
+                    tracing::warn!(
+                        target: "aether_substrate::audio",
+                        "event queue full — dropping note_on",
+                    );
+                }
+            }
+        }
+        <NoteOff as Kind>::ID => {
+            let Ok(n) = bytemuck::try_pod_read_unaligned::<NoteOff>(bytes) else {
+                tracing::warn!(
+                    target: "aether_substrate::audio",
+                    got = bytes.len(),
+                    "note_off: bad payload length, dropping",
+                );
+                return;
+            };
+            if let Some(s) = audio_sender {
+                let ev = AudioEvent::NoteOff {
+                    sender_mailbox: sender_mailbox_id(sender),
+                    pitch: n.pitch,
+                    instrument_id: n.instrument_id,
+                };
+                if s.push(ev).is_err() {
+                    tracing::warn!(
+                        target: "aether_substrate::audio",
+                        "event queue full — dropping note_off",
+                    );
+                }
+            }
+        }
+        <SetMasterGain as Kind>::ID => {
+            // f32 payload requires 4-byte alignment under
+            // `try_from_bytes`; hub-delivered Vec<u8> payloads have no
+            // alignment guarantee, so use the unaligned-read helper to
+            // avoid a spurious decode failure on non-aligned source
+            // bytes.
+            let Ok(g) = bytemuck::try_pod_read_unaligned::<SetMasterGain>(bytes) else {
+                tracing::warn!(
+                    target: "aether_substrate::audio",
+                    got = bytes.len(),
+                    "set_master_gain: bad payload length, replying Err",
+                );
+                mailer.send_reply(
+                    sender,
+                    &SetMasterGainResult::Err {
+                        error: format!("bad payload length {}, expected 4", bytes.len()),
+                    },
+                );
+                return;
+            };
+            let applied = g.gain.clamp(0.0, 1.0);
+            match audio_sender {
+                Some(s) => {
+                    let _ = s.push(AudioEvent::SetMasterGain { gain: applied });
+                    mailer.send_reply(
+                        sender,
+                        &SetMasterGainResult::Ok {
+                            applied_gain: applied,
+                        },
+                    );
+                    tracing::info!(
+                        target: "aether_substrate::audio",
+                        requested = g.gain,
+                        applied,
+                        "master gain set",
+                    );
+                }
+                None => {
+                    mailer.send_reply(
+                        sender,
+                        &SetMasterGainResult::Err {
+                            error: "audio pipeline not initialised on this desktop substrate"
+                                .to_owned(),
+                        },
+                    );
+                }
+            }
+        }
+        _ => {
+            tracing::warn!(
+                target: "aether_substrate::audio",
+                kind = %kind,
+                "audio sink received unknown kind — dropping",
+            );
+        }
+    }
+}
+
+/// Native capability owning the ADR-0039 audio sink. Constructor
+/// takes an [`AudioConfig`] (resolved from env or built explicitly
+/// by the chassis main per issue 464).
+pub struct AudioCapability {
+    config: AudioConfig,
+}
+
+impl AudioCapability {
+    pub fn new(config: AudioConfig) -> Self {
+        Self { config }
+    }
+}
+
+/// Running handle returned by [`AudioCapability::boot`]. Holds only
+/// `Send` types — the cpal pipeline (with its `!Send`-on-macOS
+/// `Stream`) lives entirely on the dispatcher thread.
+pub struct AudioRunning {
+    thread: Option<JoinHandle<()>>,
+    shutdown_flag: Arc<AtomicBool>,
+}
+
+impl Capability for AudioCapability {
+    type Running = AudioRunning;
+
+    fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+        let claim = ctx.claim_mailbox(AUDIO_SINK_NAME)?;
+        let mailer = ctx.mail_send_handle();
+        let receiver = claim.receiver;
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        let thread_flag = Arc::clone(&shutdown_flag);
+        let config = self.config;
+
+        let thread = thread::Builder::new()
+            .name("aether-audio-sink".into())
+            .spawn(move || {
+                // Build the pipeline ON this thread. cpal::Stream is
+                // !Send on macOS — constructing it here keeps it from
+                // crossing thread boundaries.
+                let pipeline: Option<AudioPipeline> = if config.disabled {
+                    tracing::info!(
+                        target: "aether_substrate::audio",
+                        "AETHER_AUDIO_DISABLE=1 — skipping cpal init",
+                    );
+                    None
+                } else {
+                    match try_build_pipeline(config.requested_sample_rate) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "aether_substrate::audio",
+                                error = %e,
+                                "audio pipeline init failed — NoteOn/NoteOff will be nop, SetMasterGain will reply Err",
+                            );
+                            None
+                        }
+                    }
+                };
+                let audio_sender = pipeline.as_ref().map(|p| p.sender.clone());
+
+                while !thread_flag.load(Ordering::Relaxed) {
+                    match receiver.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
+                        Ok(env) => {
+                            dispatch_audio_mail(
+                                &mailer,
+                                audio_sender.as_ref(),
+                                env.kind,
+                                env.sender,
+                                &env.payload,
+                            );
+                        }
+                        Err(RecvTimeoutError::Timeout) => {}
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                // pipeline drops here, cpal stream tears down on thread exit.
+                drop(pipeline);
+            })
+            .map_err(|e| BootError::Other(Box::new(e)))?;
+
+        Ok(AudioRunning {
+            thread: Some(thread),
+            shutdown_flag,
+        })
+    }
+}
+
+impl RunningCapability for AudioRunning {
+    fn shutdown(self: Box<Self>) {
+        let AudioRunning {
+            mut thread,
+            shutdown_flag,
+        } = *self;
+        shutdown_flag.store(true, Ordering::Relaxed);
+        if let Some(t) = thread.take() {
+            let _ = t.join();
         }
     }
 }
@@ -610,6 +891,16 @@ impl core::fmt::Display for AudioBuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability::ChassisBuilder;
+    use crate::registry::Registry;
+
+    fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
+        let registry = Arc::new(Registry::new());
+        for d in aether_kinds::descriptors::all() {
+            let _ = registry.register_kind_with_descriptor(d);
+        }
+        (registry, Arc::new(Mailer::new()))
+    }
 
     #[test]
     fn builtin_registry_covers_five_patches() {
@@ -624,7 +915,7 @@ mod tests {
         let mut synth = Synth::new(queue, 48_000.0);
         sender
             .push(AudioEvent::NoteOn {
-                sender_mailbox: aether_data::MailboxId(1),
+                sender_mailbox: MailboxId(1),
                 pitch: 60,
                 velocity: 100,
                 instrument_id: 0,
@@ -640,7 +931,7 @@ mod tests {
 
         sender
             .push(AudioEvent::NoteOff {
-                sender_mailbox: aether_data::MailboxId(1),
+                sender_mailbox: MailboxId(1),
                 pitch: 60,
                 instrument_id: 0,
             })
@@ -659,7 +950,7 @@ mod tests {
         for _ in 0..3 {
             sender
                 .push(AudioEvent::NoteOn {
-                    sender_mailbox: aether_data::MailboxId(1),
+                    sender_mailbox: MailboxId(1),
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,
@@ -678,7 +969,7 @@ mod tests {
         for mailbox in 1..=3 {
             sender
                 .push(AudioEvent::NoteOn {
-                    sender_mailbox: aether_data::MailboxId(mailbox),
+                    sender_mailbox: MailboxId(mailbox),
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,
@@ -699,13 +990,13 @@ mod tests {
             .unwrap();
         let mut buf = vec![0.0f32; 64];
         synth.fill(&mut buf, 1);
-        assert!((synth.master_gain() - 1.0).abs() < f32::EPSILON);
+        assert!((synth.master_gain_value() - 1.0).abs() < f32::EPSILON);
 
         sender
             .push(AudioEvent::SetMasterGain { gain: -0.2 })
             .unwrap();
         synth.fill(&mut buf, 1);
-        assert!(synth.master_gain().abs() < f32::EPSILON);
+        assert!(synth.master_gain_value().abs() < f32::EPSILON);
     }
 
     #[test]
@@ -714,7 +1005,7 @@ mod tests {
         let mut synth = Synth::new(queue, 48_000.0);
         sender
             .push(AudioEvent::NoteOn {
-                sender_mailbox: aether_data::MailboxId(1),
+                sender_mailbox: MailboxId(1),
                 pitch: 60,
                 velocity: 100,
                 instrument_id: 99,
@@ -732,7 +1023,7 @@ mod tests {
         for i in 0..(MAX_VOICES as u64 + 10) {
             sender
                 .push(AudioEvent::NoteOn {
-                    sender_mailbox: aether_data::MailboxId(i + 1),
+                    sender_mailbox: MailboxId(i + 1),
                     pitch: 60,
                     velocity: 100,
                     instrument_id: 0,
@@ -742,5 +1033,45 @@ mod tests {
         let mut buf = vec![0.0f32; 64];
         synth.fill(&mut buf, 1);
         assert_eq!(synth.voice_count(), MAX_VOICES);
+    }
+
+    /// Boot the capability against a disabled config and confirm the
+    /// sink mailbox is registered. The dispatch path itself is
+    /// exercised by the synth tests above; this validates wiring.
+    #[test]
+    fn capability_boots_and_registers_sink() {
+        let (registry, mailer) = fresh_substrate();
+        let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with(AudioCapability::new(AudioConfig {
+                disabled: true,
+                ..AudioConfig::default()
+            }))
+            .build()
+            .expect("audio capability boots");
+        assert!(
+            registry.lookup(AUDIO_SINK_NAME).is_some(),
+            "sink mailbox registered"
+        );
+        chassis.shutdown();
+    }
+
+    /// Builder rejects a duplicate claim. Same protection as the
+    /// other capabilities.
+    #[test]
+    fn duplicate_claim_rejects_with_typed_error() {
+        let (registry, mailer) = fresh_substrate();
+        registry.register_sink(AUDIO_SINK_NAME, Arc::new(|_, _, _, _, _, _| {}));
+
+        let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with(AudioCapability::new(AudioConfig {
+                disabled: true,
+                ..AudioConfig::default()
+            }))
+            .build()
+            .expect_err("collision must surface as BootError");
+        assert!(matches!(
+            err,
+            BootError::MailboxAlreadyClaimed { ref name } if name == AUDIO_SINK_NAME
+        ));
     }
 }
