@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use aether_data::{Kind, KindId, encode_empty};
 use aether_kinds::{FrameStats, Tick};
 use aether_substrate_core::{
-    Chassis, ChassisCapabilities, InputSubscribers, Mailer, Scheduler, SubstrateBoot, frame_loop,
+    Chassis, InputSubscribers, Mailer, Scheduler, SubstrateBoot, frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -51,12 +51,7 @@ struct HeadlessChassis {
 }
 
 impl Chassis for HeadlessChassis {
-    const KIND: &'static str = "headless";
-    const CAPABILITIES: ChassisCapabilities = ChassisCapabilities {
-        has_gpu: false,
-        has_window: false,
-        has_tcp_listener: false,
-    };
+    const PROFILE: &'static str = "headless";
 
     fn run(self) -> wasmtime::Result<()> {
         let started = Instant::now();
@@ -264,10 +259,7 @@ fn main() -> wasmtime::Result<()> {
     };
     tracing::info!(
         target: "aether_substrate::boot",
-        kind = HeadlessChassis::KIND,
-        has_gpu = HeadlessChassis::CAPABILITIES.has_gpu,
-        has_window = HeadlessChassis::CAPABILITIES.has_window,
-        has_tcp_listener = HeadlessChassis::CAPABILITIES.has_tcp_listener,
+        profile = HeadlessChassis::PROFILE,
         "chassis initialised",
     );
     chassis.run()

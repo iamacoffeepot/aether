@@ -29,8 +29,8 @@ use aether_kinds::{
 };
 use aether_substrate_core::sinks::{RenderAccumulator, build_camera_sink, build_render_sink};
 use aether_substrate_desktop::{
-    CaptureQueue, Chassis, ChassisCapabilities, HubClient, HubOutbound, InputSubscribers, Mailer,
-    Scheduler, SubstrateBoot, UserEvent, chassis_control_handler, frame_loop,
+    CaptureQueue, Chassis, HubClient, HubOutbound, InputSubscribers, Mailer, Scheduler,
+    SubstrateBoot, UserEvent, chassis_control_handler, frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -67,12 +67,7 @@ struct DesktopChassis {
 }
 
 impl Chassis for DesktopChassis {
-    const KIND: &'static str = "desktop";
-    const CAPABILITIES: ChassisCapabilities = ChassisCapabilities {
-        has_gpu: true,
-        has_window: true,
-        has_tcp_listener: false,
-    };
+    const PROFILE: &'static str = "desktop";
 
     fn run(self) -> wasmtime::Result<()> {
         let DesktopChassis {
@@ -1017,10 +1012,7 @@ fn main() -> wasmtime::Result<()> {
     };
     tracing::info!(
         target: "aether_substrate::boot",
-        kind = DesktopChassis::KIND,
-        has_gpu = DesktopChassis::CAPABILITIES.has_gpu,
-        has_window = DesktopChassis::CAPABILITIES.has_window,
-        has_tcp_listener = DesktopChassis::CAPABILITIES.has_tcp_listener,
+        profile = DesktopChassis::PROFILE,
         "chassis initialised",
     );
     chassis.run()

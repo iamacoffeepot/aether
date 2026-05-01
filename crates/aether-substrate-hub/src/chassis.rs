@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_substrate_core::{Chassis, ChassisCapabilities};
+use aether_substrate_core::Chassis;
 
 use crate::loopback::{
     LoopbackEngine, LoopbackHandle, run_inbound_drainer, spawn_outbound_drainer,
@@ -253,12 +253,7 @@ async fn terminate_all_children(registry: &EngineRegistry) {
 }
 
 impl Chassis for HubChassis {
-    const KIND: &'static str = "hub";
-    const CAPABILITIES: ChassisCapabilities = ChassisCapabilities {
-        has_gpu: false,
-        has_window: false,
-        has_tcp_listener: true,
-    };
+    const PROFILE: &'static str = "hub";
 
     fn run(self) -> wasmtime::Result<()> {
         let rt = tokio::runtime::Builder::new_multi_thread()

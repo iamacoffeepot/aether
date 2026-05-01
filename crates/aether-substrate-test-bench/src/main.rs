@@ -24,7 +24,7 @@ use std::time::Instant;
 use aether_data::{Kind, encode_empty};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, FrameStats, Tick};
 use aether_substrate_core::{
-    Chassis, ChassisCapabilities, HubOutbound, InputSubscribers, Mailer, Scheduler, SubstrateBoot,
+    Chassis, HubOutbound, InputSubscribers, Mailer, Scheduler, SubstrateBoot,
     capture::CaptureQueue,
     frame_loop,
     mail::{Mail, MailboxId},
@@ -74,12 +74,7 @@ struct TestBenchChassis {
 }
 
 impl Chassis for TestBenchChassis {
-    const KIND: &'static str = "test-bench";
-    const CAPABILITIES: ChassisCapabilities = ChassisCapabilities {
-        has_gpu: true,
-        has_window: false,
-        has_tcp_listener: false,
-    };
+    const PROFILE: &'static str = "test-bench";
 
     fn run(mut self) -> wasmtime::Result<()> {
         let started = Instant::now();
@@ -311,10 +306,7 @@ fn main() -> wasmtime::Result<()> {
     };
     tracing::info!(
         target: "aether_substrate::boot",
-        kind = TestBenchChassis::KIND,
-        has_gpu = TestBenchChassis::CAPABILITIES.has_gpu,
-        has_window = TestBenchChassis::CAPABILITIES.has_window,
-        has_tcp_listener = TestBenchChassis::CAPABILITIES.has_tcp_listener,
+        profile = TestBenchChassis::PROFILE,
         "chassis initialised",
     );
     chassis.run()
