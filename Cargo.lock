@@ -91,6 +91,7 @@ dependencies = [
  "inventory",
  "postcard",
  "serde",
+ "uuid",
 ]
 
 [[package]]
@@ -273,7 +274,6 @@ name = "aether-substrate-core"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-data",
- "aether-hub-protocol",
  "aether-kinds",
  "bytemuck",
  "cpal",

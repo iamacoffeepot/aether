@@ -885,7 +885,7 @@ mod tests {
     // live.
 
     use crate::outbound::EgressEvent;
-    use aether_hub_protocol::{SessionToken, Uuid};
+    use aether_data::{SessionToken, Uuid};
     fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
         let adapter: Arc<dyn FileAdapter> =
             Arc::new(LocalFileAdapter::new(root.to_path_buf(), writable).unwrap());

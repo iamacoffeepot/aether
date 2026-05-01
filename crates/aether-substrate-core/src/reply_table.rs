@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use aether_hub_protocol::SessionToken;
+use aether_data::SessionToken;
 
 use crate::mail::{MailboxId, ReplyTarget};
 
@@ -108,7 +108,7 @@ impl ReplyTable {
 
 #[cfg(test)]
 mod tests {
-    use aether_hub_protocol::Uuid;
+    use aether_data::Uuid;
 
     use super::*;
 

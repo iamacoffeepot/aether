@@ -230,7 +230,7 @@ pub fn reply_unsupported_capture_frame(outbound: &HubOutbound, sender: ReplyTo, 
 mod tests {
     use super::*;
     use crate::ReplyTarget;
-    use aether_hub_protocol::{SessionToken, Uuid};
+    use aether_data::{SessionToken, Uuid};
 
     fn reply_to(u: u128) -> ReplyTo {
         ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(u))))
