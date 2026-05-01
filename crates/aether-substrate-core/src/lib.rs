@@ -41,7 +41,6 @@ pub mod log_capture;
 pub mod log_sink;
 pub mod mail;
 pub mod mailer;
-pub mod net;
 pub mod panic_hook;
 pub mod registry;
 #[cfg(feature = "render")]
