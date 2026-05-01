@@ -14,6 +14,8 @@
 //! existing tool scripts keep resolving it.
 
 pub mod chassis;
+pub mod driver;
+pub mod render;
 
 pub use aether_substrate_core::{
     AETHER_CONTROL, Chassis, ChassisControlHandler, Component, ControlPlane, HUB_CLAUDE_BROADCAST,
@@ -26,4 +28,5 @@ pub use aether_substrate_core::{
     subscribers_for,
 };
 
-pub use chassis::{UserEvent, chassis_control_handler};
+pub use chassis::{DesktopChassis, DesktopEnv, UserEvent, chassis_control_handler};
+pub use driver::{DesktopDriverCapability, DesktopDriverRunning};
