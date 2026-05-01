@@ -12,7 +12,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use aether_hub_protocol::{EngineId, LogEntry, LogLevel};
+use crate::wire::{EngineId, LogEntry, LogLevel};
 /// Default cap on entries per engine. Quoted in ADR-0023.
 pub const DEFAULT_RING_ENTRIES: usize = 2_000;
 /// Default cap on bytes per engine (variable-length parts only).
@@ -165,7 +165,7 @@ pub struct ReadResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_hub_protocol::Uuid;
+    use crate::wire::Uuid;
 
     fn id(n: u128) -> EngineId {
         EngineId(Uuid::from_u128(n))

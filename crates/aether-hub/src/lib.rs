@@ -1,8 +1,9 @@
 //! aether-hub: substrate-side hub client + capability + the hub
-//! coordinator itself (ADR-0070 phases 4-5 / ADR-0071 phase 7).
+//! coordinator itself (ADR-0070 phases 4-5 / ADR-0071 phase 7,
+//! ADR-0072 fold of `aether-hub-protocol`).
 //!
-//! Houses everything that needs to know the `aether-hub-protocol` wire
-//! format on the substrate side:
+//! Houses everything that needs to know the hub wire format on the
+//! substrate side:
 //!
 //! - [`HubProtocolBackend`] — `EgressBackend` impl that translates each
 //!   substrate egress intent into the matching `EngineToHub` frame and
@@ -36,7 +37,7 @@
 //!
 //! Per ADR-0006's "substrate stays sync" note, the hub-client
 //! machinery uses `std::sync::mpsc` and the sync framing helpers from
-//! `aether-hub-protocol`. The coordinator itself is async (tokio).
+//! [`aether_codec::frame`]. The coordinator itself is async (tokio).
 
 use std::io;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -46,18 +47,20 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{KindDescriptor, KindId, MailboxId};
-use aether_hub_protocol::{
-    ClaudeAddress, EngineId, EngineMailFrame, EngineMailToHubSubstrateFrame, EngineToHub, Hello,
-    HubToEngine, LogEntry as HubLogEntry, LogLevel as HubLogLevel, MailByIdFrame, MailFrame,
-    MailToEngineMailboxFrame, SessionToken, read_frame, write_frame,
-};
 use aether_substrate_core::{
     BootError, Capability, ChassisCtx, EgressBackend, HubOutbound, LogEntry as SubstrateLogEntry,
     LogLevel as SubstrateLogLevel, Mail, Mailer, Registry, ReplyTarget, ReplyTo, RunningCapability,
     SubstrateBoot,
 };
 use tokio::net::TcpListener;
+
+use crate::wire::{
+    ClaudeAddress, EngineId, EngineMailFrame, EngineMailToHubSubstrateFrame, EngineToHub, Hello,
+    HubToEngine, LogEntry as HubLogEntry, LogLevel as HubLogLevel, MailByIdFrame, MailFrame,
+    MailToEngineMailboxFrame, SessionToken,
+};
 
 mod chassis;
 mod engine;
@@ -67,6 +70,7 @@ mod mcp;
 mod registry;
 mod session;
 mod spawn;
+pub mod wire;
 
 pub use aether_codec::{DecodeError, EncodeError, decode_schema, encode_schema};
 pub use aether_substrate_core::Chassis;

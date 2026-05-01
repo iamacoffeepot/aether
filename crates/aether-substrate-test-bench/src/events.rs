@@ -77,7 +77,7 @@ pub fn channel() -> (EventSender, EventReceiver) {
 
 #[cfg(test)]
 mod tests {
-    use aether_hub_protocol::{SessionToken, Uuid};
+    use aether_hub::wire::{SessionToken, Uuid};
     use aether_substrate_core::ReplyTarget;
 
     use super::*;

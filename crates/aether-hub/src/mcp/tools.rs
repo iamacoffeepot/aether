@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::wire::{EngineId, LogLevel, Uuid};
 use aether_data::tagged_id::{self, Tag};
-use aether_hub_protocol::{EngineId, LogLevel, Uuid};
 use base64::Engine as _;
 use rmcp::{
     ErrorData as McpError, ServerHandler,

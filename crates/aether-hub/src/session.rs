@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use aether_hub_protocol::{EngineId, SessionToken, Uuid};
+use crate::wire::{EngineId, SessionToken, Uuid};
 use tokio::sync::{mpsc, oneshot};
 
 /// Bound on the per-session inbound observation queue. Back-pressure

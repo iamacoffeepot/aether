@@ -21,7 +21,6 @@ members = [
     "crates/aether-mesh-viewer-component",
     "crates/aether-test-fixture-probe",
     "crates/aether-hub",
-    "crates/aether-hub-protocol",
     "crates/aether-data-derive",
     "demos/sokoban",
     "demos/tic-tac-toe",

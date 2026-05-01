@@ -9,9 +9,10 @@ use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_hub_protocol::{
+use aether_codec::frame::{read_frame, write_frame};
+use aether_hub::wire::{
     ClaudeAddress, EngineId, EngineToHub, Goodbye, HubToEngine, MailFrame, SessionToken, Uuid,
-    Welcome, read_frame, write_frame,
+    Welcome,
 };
 use aether_substrate_desktop::{
     HubClient, HubOutbound, Mailer, Registry, ReplyTarget, ReplyTo, Scheduler, mail::MailboxId,

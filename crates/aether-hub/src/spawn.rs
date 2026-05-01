@@ -19,7 +19,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aether_hub_protocol::EngineId;
+use crate::wire::EngineId;
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
 
@@ -251,7 +251,7 @@ pub async fn terminate_substrate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_hub_protocol::Uuid;
+    use crate::wire::Uuid;
 
     fn engine_id(n: u128) -> EngineId {
         EngineId(Uuid::from_u128(n))

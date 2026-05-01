@@ -37,10 +37,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aether_data::Kind;
-use aether_hub_protocol::{
+use crate::wire::{
     EngineId, EngineMailToHubSubstrateFrame, EngineToHub, HubToEngine, MailByIdFrame, Uuid,
 };
+use aether_data::Kind;
 use aether_kinds::UnresolvedMail;
 use aether_substrate_core::{Mail, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot};
 use tokio::sync::mpsc;
@@ -391,7 +391,7 @@ mod tests {
     /// routing hop without needing a full component stand-up.
     #[tokio::test]
     async fn outbound_drainer_routes_engine_mailbox_reply() {
-        use aether_hub_protocol::MailToEngineMailboxFrame;
+        use crate::wire::MailToEngineMailboxFrame;
 
         use crate::registry::EngineRecord;
 

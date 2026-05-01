@@ -1,19 +1,27 @@
 //! Engine ↔ hub channel wire types per ADR-0006. Direction is enforced
-//! by the top-level enums `EngineToHub` / `HubToEngine`; the bodies are
-//! plain structs so they're ergonomic to construct and pattern-match.
+//! by the top-level enums [`EngineToHub`] / [`HubToEngine`]; the bodies
+//! are plain structs so they're ergonomic to construct and pattern-match.
 //!
-//! ADR-0069: schema vocabulary (`SchemaType`, `KindShape`, `KindLabels`,
-//! `InputsRecord`, canonical bytes encoders) lives in `aether-data` —
-//! this crate carries only the hub channel itself.
+//! ADR-0072 folded `aether-hub-protocol` into the hub crate. The wire
+//! vocabulary lives here next to the runtime that speaks it; the
+//! framing helpers ([`encode_frame`], [`read_frame`], [`write_frame`])
+//! moved to [`aether_codec::frame`] because length-prefixed postcard is
+//! generic codec-shaped machinery, reusable by any future protocol.
+//!
+//! ADR-0069 / ADR-0071 phase 7c earlier hoisted the schema vocabulary
+//! (`SchemaType`, `KindShape`, `KindLabels`, `InputsRecord`, canonical
+//! bytes, and the identity types `EngineId` / `SessionToken` / `Uuid`)
+//! into `aether-data`. They're re-exported below so call sites that
+//! used to write `aether_hub_protocol::EngineId` can switch to
+//! `aether_hub::wire::EngineId` without chasing through `aether-data`.
+//!
+//! [`encode_frame`]: aether_codec::frame::encode_frame
+//! [`read_frame`]: aether_codec::frame::read_frame
+//! [`write_frame`]: aether_codec::frame::write_frame
 
 use aether_data::{KindDescriptor, KindId, MailboxId};
 use serde::{Deserialize, Serialize};
 
-// ADR-0071 phase 7c: identity types moved into `aether-data` so
-// substrate-core can drop its dep on this crate. Re-exported here so
-// the wire format and existing callers (the hub binary, MCP tooling,
-// integration tests) keep their `aether_hub_protocol::EngineId`
-// import paths working unchanged.
 pub use aether_data::{EngineId, SessionToken, Uuid};
 
 /// First frame the engine sends after the TCP connection is open.
@@ -243,4 +251,223 @@ pub enum HubToEngine {
     Mail(MailFrame),
     Goodbye(Goodbye),
     MailById(MailByIdFrame),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_codec::frame::{encode_frame, read_frame, write_frame};
+    use aether_data::SchemaType;
+    use std::io::Cursor;
+
+    #[test]
+    fn hello_roundtrip() {
+        let hello = EngineToHub::Hello(Hello {
+            name: "hello-triangle".into(),
+            pid: 8910,
+            started_unix: 1_712_345_678,
+            version: "0.1.0".into(),
+            kinds: vec![],
+        });
+
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &hello).unwrap();
+
+        let mut r = Cursor::new(buf);
+        let back: EngineToHub = read_frame(&mut r).unwrap();
+        match back {
+            EngineToHub::Hello(h) => {
+                assert_eq!(h.name, "hello-triangle");
+                assert_eq!(h.pid, 8910);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn welcome_roundtrip() {
+        let id = EngineId(Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0));
+        let msg = HubToEngine::Welcome(Welcome { engine_id: id });
+
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: HubToEngine = read_frame(&mut Cursor::new(buf)).unwrap();
+        match back {
+            HubToEngine::Welcome(w) => assert_eq!(w.engine_id, id),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn mail_frame_roundtrip() {
+        let sender = SessionToken(Uuid::from_u128(0xa_b_c_d));
+        let msg = HubToEngine::Mail(MailFrame {
+            recipient_name: "hello".into(),
+            kind_name: "aether.tick".into(),
+            payload: vec![],
+            count: 1,
+            sender,
+            correlation_id: 0,
+        });
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: HubToEngine = read_frame(&mut Cursor::new(buf)).unwrap();
+        match back {
+            HubToEngine::Mail(m) => {
+                assert_eq!(m.recipient_name, "hello");
+                assert_eq!(m.kind_name, "aether.tick");
+                assert_eq!(m.count, 1);
+                assert_eq!(m.sender, sender);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn engine_mail_frame_session_roundtrip() {
+        let token = SessionToken(Uuid::from_u128(0x1));
+        let msg = EngineToHub::Mail(EngineMailFrame {
+            address: ClaudeAddress::Session(token),
+            kind_name: "aether.observation.ping".into(),
+            payload: vec![1, 2, 3],
+            origin: Some("physics".into()),
+            correlation_id: 0,
+        });
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
+        match back {
+            EngineToHub::Mail(m) => {
+                assert_eq!(m.address, ClaudeAddress::Session(token));
+                assert_eq!(m.kind_name, "aether.observation.ping");
+                assert_eq!(m.payload, vec![1, 2, 3]);
+                assert_eq!(m.origin.as_deref(), Some("physics"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn engine_mail_frame_broadcast_roundtrip() {
+        let msg = EngineToHub::Mail(EngineMailFrame {
+            address: ClaudeAddress::Broadcast,
+            kind_name: "aether.observation.world".into(),
+            payload: vec![],
+            origin: None,
+            correlation_id: 0,
+        });
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
+        match back {
+            EngineToHub::Mail(m) => {
+                assert_eq!(m.address, ClaudeAddress::Broadcast);
+                assert!(m.origin.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn kinds_changed_roundtrip() {
+        let msg = EngineToHub::KindsChanged(vec![
+            KindDescriptor {
+                name: "aether.tick".into(),
+                schema: SchemaType::Unit,
+                is_stream: false,
+            },
+            KindDescriptor {
+                name: "physics.contact".into(),
+                schema: SchemaType::Bytes,
+                is_stream: false,
+            },
+        ]);
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
+        match back {
+            EngineToHub::KindsChanged(k) => {
+                assert_eq!(k.len(), 2);
+                assert_eq!(k[0].name, "aether.tick");
+                assert_eq!(k[1].name, "physics.contact");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn log_batch_roundtrip() {
+        let msg = EngineToHub::LogBatch(vec![
+            LogEntry {
+                timestamp_unix_ms: 1_713_379_200_123,
+                level: LogLevel::Error,
+                target: "aether_substrate::component".into(),
+                message: "trap in deliver: unreachable".into(),
+                sequence: 47,
+            },
+            LogEntry {
+                timestamp_unix_ms: 1_713_379_200_456,
+                level: LogLevel::Info,
+                target: "aether_substrate::scheduler".into(),
+                message: "boot complete".into(),
+                sequence: 48,
+            },
+        ]);
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
+        match back {
+            EngineToHub::LogBatch(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].sequence, 47);
+                assert_eq!(entries[0].level, LogLevel::Error);
+                assert_eq!(entries[1].target, "aether_substrate::scheduler");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn log_level_ordering() {
+        assert!(LogLevel::Error > LogLevel::Warn);
+        assert!(LogLevel::Warn > LogLevel::Info);
+        assert!(LogLevel::Info > LogLevel::Debug);
+        assert!(LogLevel::Debug > LogLevel::Trace);
+    }
+
+    #[test]
+    fn heartbeat_both_directions() {
+        for buf in [
+            encode_frame(&EngineToHub::Heartbeat),
+            encode_frame(&HubToEngine::Heartbeat),
+        ] {
+            // Smallest possible frame: 4 byte prefix + 1 byte postcard tag.
+            assert_eq!(buf.len(), 5);
+        }
+    }
+
+    #[test]
+    fn multiple_frames_back_to_back() {
+        let a = EngineToHub::Hello(Hello {
+            name: "a".into(),
+            pid: 1,
+            started_unix: 0,
+            version: "0".into(),
+            kinds: vec![],
+        });
+        let b = EngineToHub::Heartbeat;
+        let c = EngineToHub::Goodbye(Goodbye {
+            reason: "done".into(),
+        });
+
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &a).unwrap();
+        write_frame(&mut buf, &b).unwrap();
+        write_frame(&mut buf, &c).unwrap();
+
+        let mut r = Cursor::new(buf);
+        let _: EngineToHub = read_frame(&mut r).unwrap();
+        let _: EngineToHub = read_frame(&mut r).unwrap();
+        let _: EngineToHub = read_frame(&mut r).unwrap();
+    }
 }

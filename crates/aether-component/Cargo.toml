@@ -46,10 +46,9 @@ inventory = "0.3"
 # Issue 442 regression test (`tests/handlers_manifest.rs`) decodes the
 # `aether.kinds.inputs` payload `#[handlers]` emits as a const on the
 # component type. The wire shape is `postcard(InputsRecord)` per
-# ADR-0033; pulling hub-protocol in as a dev-dep gives the test direct
-# access to that type without forcing it into the SDK's runtime
-# dependency surface.
-aether-hub-protocol = { path = "../aether-hub-protocol" }
+# ADR-0033; `InputsRecord` lives in `aether-data` (was relocated from
+# `aether-hub-protocol` per ADR-0069), pulled in transitively via the
+# regular `aether-data` dep above.
 postcard = { version = "1.1", features = ["alloc"] }
 
 # ADR-0017 (component-to-component reply) smoke pair: caller sends

@@ -25,7 +25,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use aether_data::{Kind, KindId, encode_empty, encode_struct};
-use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
+use aether_hub::wire::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tick};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.

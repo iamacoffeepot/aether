@@ -3,10 +3,13 @@ name = "aether-hub"
 version.workspace = true
 edition.workspace = true
 
-# ADR-0070 phase 4-5 / ADR-0071 phase 7: hub-protocol-aware substrate
-# code lives here so `aether-substrate-core` doesn't depend on hub
-# framing for chassis that don't bridge to a hub. Holds:
+# ADR-0070 phase 4-5 / ADR-0071 phase 7 / ADR-0072: the hub crate owns
+# everything that knows the engine ↔ hub channel — wire types
+# (`wire::EngineToHub` etc.), the substrate-side client, and the
+# coordinator itself. Holds:
 #
+# - the wire vocabulary (`wire` module — folded in from the retired
+#   `aether-hub-protocol` crate per ADR-0072),
 # - the substrate-side hub client + capability (`HubClient`,
 #   `HubProtocolBackend`, `HubClientCapability`),
 # - the engine-facing TCP listener and per-connection read-loop,
@@ -14,12 +17,13 @@ edition.workspace = true
 # - the engine / session / spawn / log registries the hub coordinates,
 # - the `HubServerCapability` driver and `HubChassis` builder shape.
 #
-# The `aether-substrate-hub` binary crate consumes this and shrinks to
+# Generic length-prefixed framing helpers live in `aether-codec::frame`
+# — they're codec-shaped machinery, not hub-specific. The
+# `aether-substrate-hub` binary crate consumes this and shrinks to
 # just `main.rs`.
 
 [dependencies]
 aether-data = { path = "../aether-data" }
-aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-codec = { path = "../aether-codec" }
 aether-kinds = { path = "../aether-kinds" }
 aether-substrate-core = { path = "../aether-substrate-core" }

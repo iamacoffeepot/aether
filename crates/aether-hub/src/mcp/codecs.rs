@@ -12,9 +12,9 @@
 //! business logic, no concurrency primitives beyond the outbound
 //! `mail_tx`.
 
+use crate::wire::{EngineId, HubToEngine, MailFrame, SessionToken, Uuid};
 use aether_codec::{decode_schema, encode_schema};
 use aether_data::{KindDescriptor, SchemaType};
-use aether_hub_protocol::{EngineId, HubToEngine, MailFrame, SessionToken, Uuid};
 
 use crate::registry::{EngineRecord, EngineRegistry};
 
