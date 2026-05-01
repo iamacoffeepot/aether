@@ -24,7 +24,8 @@ mod spawn;
 // same JSON ↔ wire-bytes path without depending on the hub binary
 // crate.
 pub use aether_codec::{DecodeError, EncodeError, decode_schema, encode_schema};
-pub use chassis::HubChassis;
+pub use aether_substrate_core::Chassis;
+pub use chassis::{HubChassis, HubEnv, HubServerCapability, HubServerRunning};
 pub use loopback::{HUB_SELF_ENGINE_ID, LoopbackEngine, LoopbackHandle};
 
 pub use engine::HEARTBEAT_INTERVAL;
