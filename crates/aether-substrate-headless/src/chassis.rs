@@ -139,8 +139,7 @@ impl HeadlessChassis {
             .workers(WORKERS)
             .namespace_roots(namespace_roots)
             .chassis_handler(|ctx| Some(chassis_control_handler(Arc::clone(ctx.outbound))))
-            .build()
-            .map_err(wasmtime_to_boot_error)?;
+            .build()?;
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_frame_stats = boot
@@ -205,12 +204,9 @@ impl HeadlessChassis {
         );
 
         // Legacy ADR-0070 capabilities — io / net / log.
-        boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))
-            .map_err(wasmtime_to_boot_error)?;
-        boot.add_capability(NetCapability::new(net))
-            .map_err(wasmtime_to_boot_error)?;
-        boot.add_capability(LogCapability::new())
-            .map_err(wasmtime_to_boot_error)?;
+        boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))?;
+        boot.add_capability(NetCapability::new(net))?;
+        boot.add_capability(LogCapability::new())?;
 
         let tick_hz = (Duration::from_secs(1).as_nanos() / tick_period.as_nanos().max(1)) as u32;
         tracing::info!(
@@ -222,8 +218,7 @@ impl HeadlessChassis {
 
         // Hub connect AFTER every chassis sink is registered (issue #262).
         // Post-ADR-0070 phase 4: hub client lives in `aether-hub`.
-        let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())
-            .map_err(wasmtime_to_boot_error)?;
+        let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())?;
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -240,12 +235,4 @@ impl HeadlessChassis {
             .driver(driver)
             .build()
     }
-}
-
-/// Wrap a `wasmtime::Error` (from `SubstrateBoot::build` /
-/// `connect_hub_client` / `boot.add_capability`) into a [`BootError`]
-/// so the chassis trait method can return a uniform error type per
-/// ADR-0071.
-fn wasmtime_to_boot_error(e: wasmtime::Error) -> BootError {
-    BootError::Other(Box::new(std::io::Error::other(format!("{e}"))))
 }

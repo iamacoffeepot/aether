@@ -112,7 +112,7 @@ impl HubChassis {
         let sessions = SessionRegistry::new();
         let pending = PendingSpawns::new();
         let logs = LogStore::new();
-        let loopback = LoopbackEngine::boot(&registry).map_err(wasmtime_to_boot_error)?;
+        let loopback = LoopbackEngine::boot(&registry)?;
         let state = HubState::new(
             registry.clone(),
             sessions.clone(),
@@ -144,13 +144,6 @@ impl HubChassis {
             .driver(driver)
             .build()
     }
-}
-
-/// Wrap a `wasmtime::Error` (from `LoopbackEngine::boot`) into a
-/// [`BootError`] so the chassis trait method can return a uniform
-/// error type per ADR-0071.
-fn wasmtime_to_boot_error(e: wasmtime::Error) -> BootError {
-    BootError::Other(Box::new(std::io::Error::other(format!("{e}"))))
 }
 
 /// ADR-0071 driver capability for the hub chassis. Owns the tokio

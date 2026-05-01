@@ -304,8 +304,7 @@ impl DesktopChassis {
                     ))
                 }
             })
-            .build()
-            .map_err(wasmtime_to_boot_error)?;
+            .build()?;
 
         // Render + camera sinks (ADR-0071 phase 4 / Option B): one
         // capability owning both mailboxes + accumulator state. The
@@ -316,20 +315,15 @@ impl DesktopChassis {
         // lookup hooks up once render migrates onto `.with()`.
         let render_cap = RenderCapability::new(RenderConfig::default());
         let render_handles = render_cap.handles();
-        boot.add_capability(render_cap)
-            .map_err(wasmtime_to_boot_error)?;
+        boot.add_capability(render_cap)?;
 
         // Legacy ADR-0070 capabilities — kept on the existing path
         // through phase 3 and 4 (Option B). Phase 4.5+ migrate them
         // (and render) to chassis_builder `.with()`.
-        boot.add_capability(AudioCapability::new(audio))
-            .map_err(wasmtime_to_boot_error)?;
-        boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))
-            .map_err(wasmtime_to_boot_error)?;
-        boot.add_capability(NetCapability::new(net))
-            .map_err(wasmtime_to_boot_error)?;
-        boot.add_capability(LogCapability::new())
-            .map_err(wasmtime_to_boot_error)?;
+        boot.add_capability(AudioCapability::new(audio))?;
+        boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))?;
+        boot.add_capability(NetCapability::new(net))?;
+        boot.add_capability(LogCapability::new())?;
 
         tracing::info!(
             target: "aether_substrate::boot",
@@ -346,8 +340,7 @@ impl DesktopChassis {
         // that prefer Builder-pipeline composition can swap in
         // `aether_hub::HubClientCapability` instead (the free fn is
         // a thin wrapper around the same path).
-        let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())
-            .map_err(wasmtime_to_boot_error)?;
+        let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())?;
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -370,11 +363,4 @@ impl DesktopChassis {
             .driver(driver)
             .build()
     }
-}
-
-/// Wrap a `wasmtime::Error` (from `SubstrateBoot::build` /
-/// `connect_hub_client`) into a [`BootError`] so the chassis trait
-/// method can return a uniform error type per ADR-0071.
-fn wasmtime_to_boot_error(e: wasmtime::Error) -> BootError {
-    BootError::Other(Box::new(std::io::Error::other(format!("{e}"))))
 }
