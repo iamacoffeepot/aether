@@ -131,7 +131,7 @@ fn main() -> wasmtime::Result<()> {
     // through the substrate-core APIs explicitly. Substrate-core
     // itself never reads env from now on.
     let hub_url = std::env::var("AETHER_HUB_URL").ok();
-    let net_config = aether_substrate_core::net::NetConfig::from_env();
+    let net_config = aether_substrate_core::capabilities::net::NetConfig::from_env();
     let namespace_roots = aether_substrate_core::io::NamespaceRoots::from_env();
 
     let mut boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION"))
