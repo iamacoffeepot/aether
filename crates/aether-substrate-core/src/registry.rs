@@ -245,6 +245,21 @@ impl Registry {
         }
     }
 
+    /// Non-panicking variant of `register_sink`. Returns
+    /// `NameConflict` on a collision so callers that legitimately
+    /// race (ADR-0070 capability boots, where the side-by-side
+    /// extraction period puts legacy `register_sink` and a new
+    /// capability claim against the same mailbox during the
+    /// transition diff) can surface the collision as a typed error
+    /// rather than aborting the chassis.
+    pub fn try_register_sink(
+        &self,
+        name: impl Into<String>,
+        handler: SinkHandler,
+    ) -> Result<MailboxId, NameConflict> {
+        self.insert(name.into(), MailboxEntry::Sink(handler))
+    }
+
     /// Does a live (non-`Dropped`) mailbox exist under `name`? Returns
     /// its id if so. The id itself is deterministic (ADR-0029) —
     /// callers that just want the id without a liveness check can use

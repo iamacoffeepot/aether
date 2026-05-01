@@ -21,6 +21,8 @@
 //! can validate mail bundles the same way core does.
 
 pub mod boot;
+pub mod capabilities;
+pub mod capability;
 pub mod capture;
 pub mod chassis;
 pub mod component;
@@ -50,6 +52,10 @@ pub mod scheduler;
 pub mod sinks;
 
 pub use boot::{ChassisHandlerContext, SubstrateBoot, SubstrateBootBuilder};
+pub use capability::{
+    BootError, BootedChassis, Capability, ChassisBuilder, ChassisCtx, Envelope, FallbackRouter,
+    MailboxClaim, RunningCapability,
+};
 pub use chassis::{Chassis, ChassisCapabilities};
 pub use component::Component;
 pub use control::{AETHER_CONTROL, ChassisControlHandler, ControlPlane};
