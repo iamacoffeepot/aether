@@ -76,10 +76,10 @@ pub struct SubstrateBoot {
     pub boot_descriptors: Vec<KindDescriptor>,
     /// Resolved ADR-0041 filesystem roots. Either the override
     /// supplied to `SubstrateBootBuilder::namespace_roots` or
-    /// [`crate::io::NamespaceRoots::from_env`] when no override was
-    /// set. Chassis mains pass this to `crate::io::build_registry`
+    /// [`crate::capabilities::io::NamespaceRoots::from_env`] when no override was
+    /// set. Chassis mains pass this to `crate::capabilities::io::build_registry`
     /// when wiring the `aether.sink.io` sink.
-    pub namespace_roots: crate::io::NamespaceRoots,
+    pub namespace_roots: crate::capabilities::io::NamespaceRoots,
     /// ADR-0070 native capabilities booted during shared bring-up.
     /// Phase 2: holds the [`HandleCapability`] dispatcher thread.
     /// Phases 3-5 grow this as more sinks migrate. Drop runs
@@ -114,7 +114,7 @@ pub struct SubstrateBootBuilder<'a> {
     name: &'a str,
     version: &'a str,
     workers: usize,
-    namespace_roots: Option<crate::io::NamespaceRoots>,
+    namespace_roots: Option<crate::capabilities::io::NamespaceRoots>,
     build_handler: ChassisHandlerFactory,
 }
 
@@ -219,17 +219,17 @@ impl<'a> SubstrateBootBuilder<'a> {
     }
 
     /// Override the ADR-0041 namespace roots used at boot. When not
-    /// set, the builder defaults to [`crate::io::NamespaceRoots::from_env`]
+    /// set, the builder defaults to [`crate::capabilities::io::NamespaceRoots::from_env`]
     /// — same behaviour as before issue 464. Tests and chassis-as-
     /// library embedders pass an explicit `NamespaceRoots` here so
     /// no env mutation is required to redirect `save://` / `config://`
     /// / `assets://` at a tempdir.
     ///
     /// The override doesn't itself wire the `aether.sink.io` sink —
-    /// the chassis still drives that via `crate::io::build_registry`,
+    /// the chassis still drives that via `crate::capabilities::io::build_registry`,
     /// reading [`SubstrateBoot::namespace_roots`] for the resolved
     /// paths.
-    pub fn namespace_roots(mut self, roots: crate::io::NamespaceRoots) -> Self {
+    pub fn namespace_roots(mut self, roots: crate::capabilities::io::NamespaceRoots) -> Self {
         self.namespace_roots = Some(roots);
         self
     }
@@ -398,7 +398,7 @@ impl<'a> SubstrateBootBuilder<'a> {
 
         let namespace_roots = self
             .namespace_roots
-            .unwrap_or_else(crate::io::NamespaceRoots::from_env);
+            .unwrap_or_else(crate::capabilities::io::NamespaceRoots::from_env);
 
         Ok(SubstrateBoot {
             engine,

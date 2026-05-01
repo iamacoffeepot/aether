@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use aether_substrate_test_bench::TestBench;
-use aether_substrate_test_bench::io::NamespaceRoots;
+use aether_substrate_test_bench::capabilities::io::NamespaceRoots;
 
 use crate::{Runner, Script, Step};
 
