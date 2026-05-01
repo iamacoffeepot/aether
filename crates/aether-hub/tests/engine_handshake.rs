@@ -4,11 +4,11 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use aether_hub_protocol::{EngineToHub, Goodbye, Hello, HubToEngine, encode_frame};
-use aether_substrate_hub::{
+use aether_hub::{
     EngineRegistry, HUB_SELF_ENGINE_ID, LogStore, LoopbackEngine, LoopbackHandle, PendingSpawns,
     SessionRegistry, run_engine_listener,
 };
+use aether_hub_protocol::{EngineToHub, Goodbye, Hello, HubToEngine, encode_frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
