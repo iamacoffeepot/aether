@@ -25,16 +25,16 @@
 //! `DriverCtx::expect::<RenderRunning>()` instead.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use aether_kinds::DRAW_TRIANGLE_BYTES;
 
 use crate::capability::{BootError, Capability, ChassisCtx, Envelope, RunningCapability};
-use crate::render::IDENTITY_VIEW_PROJ;
+use crate::render::{IDENTITY_VIEW_PROJ, Pipeline, Targets};
 
 pub const RENDER_SINK_NAME: &str = "aether.sink.render";
 pub const CAMERA_SINK_NAME: &str = "aether.sink.camera";
@@ -111,6 +111,29 @@ pub struct RenderRunning {
     render_thread: Option<JoinHandle<()>>,
     camera_thread: Option<JoinHandle<()>>,
     shutdown_flag: Arc<AtomicBool>,
+    /// wgpu state, installed post-boot by the driver via
+    /// [`Self::install_gpu`]. Boots empty because winit 0.30's
+    /// `ActiveEventLoop::create_window` only fires inside `resumed`,
+    /// after [`Capability::boot`] has returned. Test-bench (no
+    /// surface) installs immediately after `build_passive`; desktop
+    /// installs in its `resumed` handler. Encoder-level methods
+    /// (added in C2) panic if called before install — in practice
+    /// every code path that calls them runs after the install site.
+    gpu: OnceLock<RenderGpu>,
+}
+
+/// Bundle of wgpu resources `RenderRunning` owns post-install.
+/// Constructed by the driver from a wgpu device + queue obtained via
+/// `Adapter::request_device` (desktop: with surface compatibility;
+/// test-bench: offscreen-only). Holds the pipeline + offscreen
+/// targets so encoder-level methods can record draws and capture
+/// copies without the driver threading these through every call.
+pub struct RenderGpu {
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
+    pub pipeline: Pipeline,
+    pub targets: Mutex<Targets>,
+    pub color_format: wgpu::TextureFormat,
 }
 
 impl RenderRunning {
@@ -121,6 +144,28 @@ impl RenderRunning {
     /// instead.
     pub fn handles(&self) -> RenderHandles {
         self.handles.clone()
+    }
+
+    /// Install the wgpu resources the encoder-level methods read. The
+    /// driver constructs [`RenderGpu`] once it has a device + queue —
+    /// for desktop that's inside `resumed` after winit hands back a
+    /// window and surface; for test-bench it's right after
+    /// `build_passive` returns. Calling twice panics: install is the
+    /// chassis's promise that wgpu state is now ready and stable for
+    /// the chassis lifetime.
+    pub fn install_gpu(&self, gpu: RenderGpu) {
+        self.gpu
+            .set(gpu)
+            .ok()
+            .expect("RenderRunning::install_gpu called twice");
+    }
+
+    /// Returns the installed [`RenderGpu`], or `None` if `install_gpu`
+    /// hasn't been called yet. Encoder-level methods (added in
+    /// ADR-0071 phase C2) use this; today only the chassis-side glue
+    /// reaches in.
+    pub fn gpu(&self) -> Option<&RenderGpu> {
+        self.gpu.get()
     }
 }
 
@@ -195,6 +240,7 @@ impl Capability for RenderCapability {
             render_thread: Some(render_thread),
             camera_thread: Some(camera_thread),
             shutdown_flag,
+            gpu: OnceLock::new(),
         })
     }
 }
@@ -206,6 +252,7 @@ impl RunningCapability for RenderRunning {
             mut render_thread,
             mut camera_thread,
             shutdown_flag,
+            gpu: _,
         } = *self;
         shutdown_flag.store(true, Ordering::Relaxed);
         if let Some(t) = render_thread.take() {
@@ -214,6 +261,8 @@ impl RunningCapability for RenderRunning {
         if let Some(t) = camera_thread.take() {
             let _ = t.join();
         }
+        // gpu drops here; wgpu device/queue/pipeline/targets clean up
+        // via their own Drop impls.
     }
 }
 
