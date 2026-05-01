@@ -25,15 +25,16 @@ use aether_substrate_core::chassis_builder::{Builder, BuiltChassis, NoDriver};
 use aether_substrate_core::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
-        AudioCapability, IoCapability, LogCapability, NetCapability,
-        audio::AudioConfig as AudioConf, io::NamespaceRoots, net::NetConfig as NetConf,
+        AudioCapability, IoCapability, LogCapability, NetCapability, RenderCapability,
+        RenderConfig, audio::AudioConfig as AudioConf, io::NamespaceRoots,
+        net::NetConfig as NetConf,
     },
     capture::{CaptureQueue, begin_capture_request, reply_unsupported_advance},
     control::decode_payload,
 };
 use winit::event_loop::{EventLoop, EventLoopProxy};
 
-use crate::driver::{DesktopDriverCapability, WORKERS, build_chassis_sinks, parse_window_mode_env};
+use crate::driver::{DesktopDriverCapability, WORKERS, parse_window_mode_env};
 
 /// Event the event-loop thread consumes from the desktop chassis.
 /// Either a chassis-originated request for work that needs winit/wgpu
@@ -311,17 +312,20 @@ impl DesktopChassis {
             })
             .build()?;
 
-        // Inline render + camera sinks. Phase 4 promotes these into a
-        // `RenderCapability`; for now the helper builds the same
-        // accumulator pair the previous main() built inline.
-        let sinks = build_chassis_sinks();
-        boot.registry
-            .register_sink("aether.sink.render", sinks.render_handler);
-        boot.registry
-            .register_sink("aether.sink.camera", sinks.camera_handler);
+        // Render + camera sinks (ADR-0071 phase 4 / Option B): one
+        // capability owning both mailboxes + accumulator state. The
+        // dispatcher threads on the running drain inbound mail; the
+        // chassis frame loop reads `frame_vertices` / `camera_state` /
+        // `triangles_rendered` each tick. Pull the handles before
+        // moving the capability into boot — chassis_builder typed
+        // lookup hooks up once render migrates onto `.with()`.
+        let render_cap = RenderCapability::new(RenderConfig::default());
+        let render_handles = render_cap.handles();
+        boot.add_capability(render_cap)?;
 
-        // Legacy ADR-0070 capabilities — kept on the existing path for
-        // phase 3; phase 4+ migrate them to chassis_builder `.with()`.
+        // Legacy ADR-0070 capabilities — kept on the existing path
+        // through phase 3 and 4 (Option B). Phase 4.5+ migrate them
+        // (and render) to chassis_builder `.with()`.
         boot.add_capability(AudioCapability::new(audio))?;
         boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))?;
         boot.add_capability(NetCapability::new(net))?;
@@ -345,9 +349,9 @@ impl DesktopChassis {
             event_loop,
             boot,
             capture_queue,
-            frame_vertices: sinks.frame_vertices,
-            camera_state: sinks.camera_state,
-            triangles_rendered: sinks.triangles_rendered,
+            frame_vertices: render_handles.frame_vertices,
+            camera_state: render_handles.camera_state,
+            triangles_rendered: render_handles.triangles_rendered,
             boot_kinds_count,
             boot_mode,
             boot_size,
