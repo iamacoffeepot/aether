@@ -23,17 +23,15 @@ use aether_data::Kind;
 use aether_data::{encode, encode_empty};
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, Key,
-    KeyRelease, MonitorInfo, MouseButton, MouseMove, NoteOff, NoteOn, OsInfo, PlatformInfoResult,
-    SetMasterGain, SetMasterGainResult, SetWindowModeResult, SetWindowTitleResult, Tick, VideoMode,
-    WindowInfo, WindowMode, WindowSize, keycode,
+    KeyRelease, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult,
+    SetWindowModeResult, SetWindowTitleResult, Tick, VideoMode, WindowInfo, WindowMode, WindowSize,
+    keycode,
 };
 use aether_substrate_core::sinks::{RenderAccumulator, build_camera_sink, build_render_sink};
 use aether_substrate_desktop::{
     CaptureQueue, Chassis, ChassisCapabilities, HubClient, HubOutbound, InputSubscribers, Mailer,
-    Scheduler, SubstrateBoot, UserEvent,
-    audio::{self, AudioEvent, AudioEventSender},
-    chassis_control_handler, frame_loop,
-    mail::{Mail, MailboxId, ReplyTarget, ReplyTo},
+    Scheduler, SubstrateBoot, UserEvent, chassis_control_handler, frame_loop,
+    mail::{Mail, MailboxId},
     subscribers_for,
 };
 use render::{Gpu, VERTEX_BUFFER_BYTES};
@@ -273,178 +271,6 @@ fn map_backend(b: wgpu::Backend) -> GpuBackend {
 /// Refresh is integer Hz (converted to mhz by *1000); non-integer
 /// refresh isn't expressible from the env var today — runtime
 /// `set_window_mode` accepts full-precision mhz directly.
-/// Build the audio pipeline at boot. Returns `None` if audio is
-/// disabled via `AETHER_AUDIO_DISABLE=1` or if cpal fails to init (no
-/// device, rate unsupported, etc.). A `None` makes every `NoteOn` /
-/// `NoteOff` a nop and every `SetMasterGain` reply `Err`. Non-fatal
-/// on purpose — the user might be on a CI machine with no audio
-/// device, and we want the substrate to still boot.
-fn build_audio_pipeline() -> Option<audio::AudioPipeline> {
-    if std::env::var("AETHER_AUDIO_DISABLE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        tracing::info!(
-            target: "aether_substrate::audio",
-            "AETHER_AUDIO_DISABLE=1 — skipping cpal init",
-        );
-        return None;
-    }
-
-    let rate_override = std::env::var("AETHER_AUDIO_SAMPLE_RATE")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok());
-
-    match audio::try_build_pipeline(rate_override) {
-        Ok(p) => {
-            tracing::info!(
-                target: "aether_substrate::audio",
-                sample_rate = p.sample_rate,
-                channels = p.channels,
-                instruments = audio::builtin_count(),
-                builtin_names = ?audio::builtin_names(),
-                "audio pipeline started",
-            );
-            Some(p)
-        }
-        Err(e) => {
-            tracing::warn!(
-                target: "aether_substrate::audio",
-                error = %e,
-                "audio pipeline init failed — NoteOn/NoteOff will be nop, SetMasterGain will reply Err",
-            );
-            None
-        }
-    }
-}
-
-/// Extract the sender's mailbox id for voice-table keying. Component
-/// senders come through as `EngineMailbox { mailbox_id }`; Claude
-/// sessions and substrate-internal pushes (which shouldn't reach the
-/// audio sink in practice) collapse to id `0`, sharing one voice
-/// slot per (instrument, pitch).
-fn sender_mailbox_id(sender: ReplyTo) -> aether_data::MailboxId {
-    match sender.target {
-        ReplyTarget::EngineMailbox { mailbox_id, .. } => mailbox_id,
-        _ => aether_data::MailboxId(0),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn handle_audio_mail(
-    kind: aether_data::KindId,
-    kind_note_on: aether_data::KindId,
-    kind_note_off: aether_data::KindId,
-    kind_set_master_gain: aether_data::KindId,
-    sender: ReplyTo,
-    bytes: &[u8],
-    audio_sender: Option<&AudioEventSender>,
-    outbound: &HubOutbound,
-) {
-    if kind == kind_note_on {
-        // Hub-delivered payloads arrive as un-aligned `Vec<u8>` slices
-        // from the reader thread's decode; `try_pod_read_unaligned`
-        // copies bytes rather than reinterpreting in place, matching
-        // how the camera sink reads its [f32; 16] payload.
-        let Ok(n) = bytemuck::try_pod_read_unaligned::<NoteOn>(bytes) else {
-            tracing::warn!(
-                target: "aether_substrate::audio",
-                got = bytes.len(),
-                "note_on: bad payload length, dropping",
-            );
-            return;
-        };
-        if let Some(s) = audio_sender {
-            let ev = AudioEvent::NoteOn {
-                sender_mailbox: sender_mailbox_id(sender),
-                pitch: n.pitch,
-                velocity: n.velocity,
-                instrument_id: n.instrument_id,
-            };
-            if s.push(ev).is_err() {
-                tracing::warn!(
-                    target: "aether_substrate::audio",
-                    "event queue full — dropping note_on",
-                );
-            }
-        }
-    } else if kind == kind_note_off {
-        let Ok(n) = bytemuck::try_pod_read_unaligned::<NoteOff>(bytes) else {
-            tracing::warn!(
-                target: "aether_substrate::audio",
-                got = bytes.len(),
-                "note_off: bad payload length, dropping",
-            );
-            return;
-        };
-        if let Some(s) = audio_sender {
-            let ev = AudioEvent::NoteOff {
-                sender_mailbox: sender_mailbox_id(sender),
-                pitch: n.pitch,
-                instrument_id: n.instrument_id,
-            };
-            if s.push(ev).is_err() {
-                tracing::warn!(
-                    target: "aether_substrate::audio",
-                    "event queue full — dropping note_off",
-                );
-            }
-        }
-    } else if kind == kind_set_master_gain {
-        // f32 payload requires 4-byte alignment under `try_from_bytes`;
-        // hub-delivered Vec<u8> payloads have no alignment guarantee,
-        // so use the unaligned-read helper to avoid a spurious decode
-        // failure on non-aligned source bytes.
-        let Ok(g) = bytemuck::try_pod_read_unaligned::<SetMasterGain>(bytes) else {
-            tracing::warn!(
-                target: "aether_substrate::audio",
-                got = bytes.len(),
-                "set_master_gain: bad payload length, replying Err",
-            );
-            outbound.send_reply(
-                sender,
-                &SetMasterGainResult::Err {
-                    error: format!("bad payload length {}, expected 4", bytes.len()),
-                },
-            );
-            return;
-        };
-        let applied = g.gain.clamp(0.0, 1.0);
-        match audio_sender {
-            Some(s) => {
-                let _ = s.push(AudioEvent::SetMasterGain { gain: applied });
-                outbound.send_reply(
-                    sender,
-                    &SetMasterGainResult::Ok {
-                        applied_gain: applied,
-                    },
-                );
-                tracing::info!(
-                    target: "aether_substrate::audio",
-                    requested = g.gain,
-                    applied,
-                    "master gain set",
-                );
-            }
-            None => {
-                outbound.send_reply(
-                    sender,
-                    &SetMasterGainResult::Err {
-                        error: "audio pipeline not initialised on this desktop substrate"
-                            .to_owned(),
-                    },
-                );
-            }
-        }
-    } else {
-        tracing::warn!(
-            target: "aether_substrate::audio",
-            kind = %kind,
-            "audio sink received unknown kind — dropping",
-        );
-    }
-}
-
 fn parse_window_mode_env(s: &str) -> Result<(WindowMode, Option<(u32, u32)>), String> {
     let s = s.trim();
     if s == "windowed" {
@@ -1066,52 +892,16 @@ fn main() -> wasmtime::Result<()> {
     boot.registry
         .register_sink("aether.sink.render", render_handler);
 
-    // `aether.audio.*`: ADR-0039 Phase 2. Try to build a cpal stream;
-    // if it succeeds, register a sink that decodes inbound NoteOn /
-    // NoteOff / SetMasterGain and pushes them through an MPSC queue
-    // to the audio callback thread. If audio fails to init (no
-    // device, rate unsupported, `AETHER_AUDIO_DISABLE=1`), fall back
-    // to a nop sink so the substrate still boots and replies Err on
-    // SetMasterGain so agents fail fast instead of hanging.
-    let audio_pipeline = build_audio_pipeline();
-    let kind_note_on = boot
-        .registry
-        .kind_id(NoteOn::NAME)
-        .expect("NoteOn registered");
-    let kind_note_off = boot
-        .registry
-        .kind_id(NoteOff::NAME)
-        .expect("NoteOff registered");
-    let kind_set_master_gain = boot
-        .registry
-        .kind_id(SetMasterGain::NAME)
-        .expect("SetMasterGain registered");
-    {
-        let outbound_for_sink = Arc::clone(&boot.outbound);
-        let audio_sender = audio_pipeline.as_ref().map(|p| p.sender.clone());
-        boot.registry.register_sink(
-            "aether.sink.audio",
-            Arc::new(
-                move |kind: aether_data::KindId,
-                      _kind_name: &str,
-                      _origin: Option<&str>,
-                      sender: ReplyTo,
-                      bytes: &[u8],
-                      _count: u32| {
-                    handle_audio_mail(
-                        kind,
-                        kind_note_on,
-                        kind_note_off,
-                        kind_set_master_gain,
-                        sender,
-                        bytes,
-                        audio_sender.as_ref(),
-                        &outbound_for_sink,
-                    );
-                },
-            ),
-        );
-    }
+    // `aether.audio.*`: ADR-0039 Phase 2. ADR-0070 phase 3 (part 4)
+    // wraps the cpal synth + sink as a native capability with its
+    // own dispatcher thread. cpal init failure (no device, rate
+    // unsupported, `AETHER_AUDIO_DISABLE=1`) falls back to a nop
+    // pipeline so the substrate still boots; SetMasterGain replies
+    // Err on the nop path so agents fail fast.
+    let audio_config = aether_substrate_core::capabilities::audio::AudioConfig::from_env();
+    boot.add_capability(aether_substrate_core::capabilities::AudioCapability::new(
+        audio_config,
+    ))?;
 
     // `aether.camera`: latest-value-wins sink. One payload is 64
     // bytes (4x4 f32 column-major view_proj). The render loop reads
