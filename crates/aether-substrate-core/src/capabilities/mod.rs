@@ -20,6 +20,8 @@
 pub mod handle;
 pub mod io;
 pub mod log;
+pub mod net;
 pub use handle::{HANDLE_SINK_NAME, HandleCapability, HandleRunning};
 pub use io::{IO_SINK_NAME, IoCapability, IoRunning};
 pub use log::{LOG_SINK_NAME, LogCapability, LogRunning};
+pub use net::{NET_SINK_NAME, NetCapability, NetRunning};

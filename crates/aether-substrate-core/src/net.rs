@@ -1,8 +1,10 @@
 //! Substrate HTTP egress (ADR-0043). The `NetAdapter` trait is the
 //! extension point for HTTP backends — `ureq` today, anything else
-//! that implements the trait later. The chassis that wires the
-//! `"aether.sink.net"` sink builds an adapter from env config, hands it to
-//! `net_sink_handler`, and registers the result.
+//! that implements the trait later. ADR-0070 Phase 3 wraps the
+//! `"aether.sink.net"` mailbox as a native capability — see
+//! [`crate::capabilities::net`] for the dispatcher; this module
+//! retains the `Fetch`-decode-and-call-adapter implementation
+//! [`dispatch_net_mail`].
 //!
 //! v1 semantics:
 //! - Blocking on the sink dispatch thread (one request at a time).
@@ -23,7 +25,6 @@ use std::time::Duration;
 
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
-use crate::registry::SinkHandler;
 use aether_data::{Kind, KindId};
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
@@ -241,7 +242,7 @@ fn ureq_error_to_net_error(e: ureq::Error) -> NetError {
 /// mains read env vars (`AETHER_NET_DISABLE`, `AETHER_NET_ALLOWLIST`,
 /// `AETHER_NET_REQUIRE_HTTPS`, `AETHER_NET_MAX_BODY_BYTES`,
 /// `AETHER_NET_TIMEOUT_MS`) into a `NetConfig` and pass it to
-/// [`build_net_adapter`] / [`net_sink_handler`]. Tests build a
+/// [`build_net_adapter`] / [`crate::capabilities::net::NetCapability`]. Tests build a
 /// `NetConfig` directly, never touching process env (issue 464).
 #[derive(Clone, Debug)]
 pub struct NetConfig {
@@ -375,49 +376,24 @@ fn parse_default_timeout_env() -> Duration {
     Duration::from_millis(ms as u64)
 }
 
-/// Build the `"aether.sink.net"` sink handler. The chassis calls this
-/// at boot after `build_net_adapter` and passes the result to
-/// `registry.register_sink("aether.sink.net", handler)`. The returned closure
-/// decodes incoming `Fetch` mail, hands it to the adapter, and
-/// replies with the paired `FetchResult` via `mailer.send_reply`.
+/// Demultiplex one envelope's payload to `Fetch` dispatch. ADR-0070
+/// Phase 3 (part 3) moved the wrapping `aether.sink.net` mailbox
+/// dispatch out of an inline `register_sink` call and into
+/// [`crate::capabilities::net`] — this function is what the
+/// capability's dispatcher thread invokes for each envelope it
+/// receives.
 ///
 /// The reply router is `Mailer::send_reply`, so session / engine-
 /// mailbox / local-component replies all funnel through one path —
 /// identical to the io sink.
 ///
 /// `default_timeout` is the fallback applied when an incoming
-/// `Fetch` has `timeout_ms: None`. Chassis mains source it from
-/// [`NetConfig::default_timeout`]; in practice the same `NetConfig`
-/// fed to `build_net_adapter` flows here.
+/// `Fetch` has `timeout_ms: None`.
 ///
-/// Fetches run synchronously on the sink dispatch thread — ADR-0043
+/// Fetches run synchronously on the dispatcher thread — ADR-0043
 /// §2 flags this as the head-of-line blocking source to fix via a
 /// multi-threaded dispatcher ADR.
-pub fn net_sink_handler(
-    adapter: Arc<dyn NetAdapter>,
-    mailer: Arc<Mailer>,
-    default_timeout: Duration,
-) -> SinkHandler {
-    Arc::new(
-        move |kind: KindId,
-              _kind_name: &str,
-              _origin: Option<&str>,
-              sender: ReplyTo,
-              bytes: &[u8],
-              _count: u32| {
-            dispatch_net_mail(
-                adapter.as_ref(),
-                &mailer,
-                kind,
-                sender,
-                bytes,
-                default_timeout,
-            );
-        },
-    )
-}
-
-fn dispatch_net_mail(
+pub(crate) fn dispatch_net_mail(
     adapter: &dyn NetAdapter,
     mailer: &Mailer,
     kind: KindId,
@@ -550,11 +526,6 @@ mod tests {
     fn disabled_adapter_replies_disabled() {
         let adapter: Arc<dyn NetAdapter> = Arc::new(DisabledNetAdapter);
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(
-            Arc::clone(&adapter),
-            Arc::clone(&mailer),
-            Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
-        );
         let req = postcard::to_allocvec(&Fetch {
             url: "https://api.example.com/".to_string(),
             method: HttpMethod::Get,
@@ -563,13 +534,13 @@ mod tests {
             timeout_ms: None,
         })
         .unwrap();
-        handler(
+        dispatch_net_mail(
+            adapter.as_ref(),
+            &mailer,
             <Fetch as Kind>::ID,
-            Fetch::NAME,
-            None,
             session_sender(),
             &req,
-            1,
+            NetConfig::default().default_timeout,
         );
         match decode_reply::<FetchResult>(&rx) {
             FetchResult::Err {
@@ -664,11 +635,6 @@ mod tests {
             body: b"{}".to_vec(),
         })) as Arc<dyn NetAdapter>;
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(
-            Arc::clone(&adapter),
-            Arc::clone(&mailer),
-            Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
-        );
         let req = postcard::to_allocvec(&Fetch {
             url: "https://api.example.com/v1".to_string(),
             method: HttpMethod::Get,
@@ -677,13 +643,13 @@ mod tests {
             timeout_ms: Some(5000),
         })
         .unwrap();
-        handler(
+        dispatch_net_mail(
+            adapter.as_ref(),
+            &mailer,
             <Fetch as Kind>::ID,
-            Fetch::NAME,
-            None,
             session_sender(),
             &req,
-            1,
+            NetConfig::default().default_timeout,
         );
         match decode_reply::<FetchResult>(&rx) {
             FetchResult::Ok {
@@ -705,11 +671,6 @@ mod tests {
     fn dispatch_fetch_err_echoes_url_and_error() {
         let adapter = StubAdapter::with(Err(NetError::Timeout)) as Arc<dyn NetAdapter>;
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(
-            Arc::clone(&adapter),
-            Arc::clone(&mailer),
-            Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
-        );
         let req = postcard::to_allocvec(&Fetch {
             url: "https://slow.example.com/".to_string(),
             method: HttpMethod::Get,
@@ -718,13 +679,13 @@ mod tests {
             timeout_ms: None,
         })
         .unwrap();
-        handler(
+        dispatch_net_mail(
+            adapter.as_ref(),
+            &mailer,
             <Fetch as Kind>::ID,
-            Fetch::NAME,
-            None,
             session_sender(),
             &req,
-            1,
+            NetConfig::default().default_timeout,
         );
         match decode_reply::<FetchResult>(&rx) {
             FetchResult::Err { url, error } => {
@@ -743,18 +704,13 @@ mod tests {
             body: vec![],
         })) as Arc<dyn NetAdapter>;
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(
-            Arc::clone(&adapter),
-            Arc::clone(&mailer),
-            Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
-        );
-        handler(
+        dispatch_net_mail(
+            adapter.as_ref(),
+            &mailer,
             <Fetch as Kind>::ID,
-            Fetch::NAME,
-            None,
             session_sender(),
             &[0xffu8; 8],
-            1,
+            NetConfig::default().default_timeout,
         );
         match decode_reply::<FetchResult>(&rx) {
             FetchResult::Err {
@@ -771,18 +727,13 @@ mod tests {
     fn dispatch_unknown_kind_does_not_reply() {
         let adapter = StubAdapter::with(Err(NetError::Disabled)) as Arc<dyn NetAdapter>;
         let (mailer, rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(
-            Arc::clone(&adapter),
-            Arc::clone(&mailer),
-            Duration::from_millis(DEFAULT_TIMEOUT_MS as u64),
-        );
-        handler(
+        dispatch_net_mail(
+            adapter.as_ref(),
+            &mailer,
             KindId(0xdead_beef),
-            "some.other",
-            None,
             session_sender(),
             &[],
-            1,
+            NetConfig::default().default_timeout,
         );
         assert!(rx.try_recv().is_err(), "unexpected reply on unknown kind");
     }
@@ -802,7 +753,6 @@ mod tests {
         }));
         let adapter: Arc<dyn NetAdapter> = Arc::clone(&adapter_stub) as Arc<dyn NetAdapter>;
         let (mailer, _rx) = test_mailer_and_rx();
-        let handler = net_sink_handler(adapter, mailer, NetConfig::default().default_timeout);
         let req = postcard::to_allocvec(&Fetch {
             url: "https://api.example.com/".to_string(),
             method: HttpMethod::Get,
@@ -811,13 +761,13 @@ mod tests {
             timeout_ms: None,
         })
         .unwrap();
-        handler(
+        dispatch_net_mail(
+            adapter.as_ref(),
+            &mailer,
             <Fetch as Kind>::ID,
-            Fetch::NAME,
-            None,
             session_sender(),
             &req,
-            1,
+            NetConfig::default().default_timeout,
         );
         let observed = adapter_stub
             .last_request
