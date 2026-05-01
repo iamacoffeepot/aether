@@ -61,7 +61,14 @@ impl StdError for RunError {
 /// The driver's [`DriverRunning::run`] body holds whatever loop the
 /// chassis needs — winit on desktop, std-timer on headless, TCP
 /// accept on hub.
-pub trait DriverCapability: Send + 'static {
+///
+/// Not `Send`: the desktop driver's `winit::EventLoop` is `!Send` on
+/// macOS, so the driver and its running stay on the chassis main
+/// thread end-to-end. The `Builder` holds the driver capability and
+/// the resulting `Running` on a single-threaded code path between
+/// [`Builder::driver`] and [`BuiltChassis::run`], so neither needs
+/// to cross threads.
+pub trait DriverCapability: 'static {
     type Running: DriverRunning;
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError>;
 }
@@ -70,13 +77,15 @@ pub trait DriverCapability: Send + 'static {
 /// to [`BuiltChassis::run`], which calls [`DriverRunning::run`] on
 /// the calling thread. Returns when the underlying loop drains
 /// cleanly (window closed, accept loop done, shutdown signal).
-pub trait DriverRunning: Send + 'static {
+pub trait DriverRunning: 'static {
     fn run(self: Box<Self>) -> Result<(), RunError>;
 }
 
 /// Type-erased shutdown adapter for a passive [`Capability::Running`]
-/// stored in the builder's shutdown queue.
-trait DynShutdown: Send {
+/// stored in the builder's shutdown queue. Single-threaded path, so
+/// no `Send` bound — the adapter never crosses threads (the chassis
+/// runs on the main thread end-to-end).
+trait DynShutdown {
     fn shutdown_dyn(self: Box<Self>);
 }
 
@@ -205,11 +214,9 @@ impl BuilderState for NoDriver {}
 impl BuilderState for HasDriver {}
 
 type PassiveBoot = Box<
-    dyn FnOnce(&mut ChassisCtx<'_>, &mut TypedRunnings) -> Result<Box<dyn DynShutdown>, BootError>
-        + Send,
+    dyn FnOnce(&mut ChassisCtx<'_>, &mut TypedRunnings) -> Result<Box<dyn DynShutdown>, BootError>,
 >;
-type DriverBoot =
-    Box<dyn FnOnce(&mut DriverCtx<'_>) -> Result<Box<dyn DriverRunning>, BootError> + Send>;
+type DriverBoot = Box<dyn FnOnce(&mut DriverCtx<'_>) -> Result<Box<dyn DriverRunning>, BootError>>;
 
 fn make_passive_boot<P>(cap: P) -> PassiveBoot
 where
