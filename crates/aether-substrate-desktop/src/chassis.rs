@@ -264,17 +264,14 @@ impl DesktopEnv {
 
 impl DesktopChassis {
     /// Build the desktop chassis: stand up substrate-core internals,
-    /// register the inline render + camera sinks, add the legacy
-    /// ADR-0070 capabilities (audio, io, net, log) on the existing
-    /// `boot.add_capability` path, connect to the hub if requested,
-    /// then wrap everything in a [`DesktopDriverCapability`] and
-    /// hand it to the chassis_builder [`Builder`]. Returns a
-    /// [`BuiltChassis`] whose [`BuiltChassis::run`] blocks on the
-    /// winit event loop.
+    /// connect to the hub if requested, compose the native passives
+    /// (log, io, net, audio, render+camera) through the
+    /// chassis_builder `.with()` chain, then wrap everything in a
+    /// [`DesktopDriverCapability`] and hand it to the builder.
+    /// Returns a [`BuiltChassis`] whose [`BuiltChassis::run`] blocks
+    /// on the winit event loop.
     ///
-    /// Phase 3 keeps capabilities on the `boot.add_capability` path;
-    /// phase 4+ migrate them to chassis_builder `.with()`. The
-    /// trait method [`Chassis::build`] forwards here.
+    /// The trait method [`Chassis::build`] forwards here.
     fn build_inner(env: DesktopEnv) -> Result<BuiltChassis<DesktopChassis>, BootError> {
         let DesktopEnv {
             event_loop,
@@ -288,7 +285,7 @@ impl DesktopChassis {
             boot_title,
         } = env;
 
-        let mut boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
+        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
             .workers(WORKERS)
             .namespace_roots(namespace_roots)
             .chassis_handler({
@@ -305,25 +302,6 @@ impl DesktopChassis {
                 }
             })
             .build()?;
-
-        // Render + camera sinks (ADR-0071 phase 4 / Option B): one
-        // capability owning both mailboxes + accumulator state. The
-        // dispatcher threads on the running drain inbound mail; the
-        // chassis frame loop reads `frame_vertices` / `camera_state` /
-        // `triangles_rendered` each tick. Pull the handles before
-        // moving the capability into boot — chassis_builder typed
-        // lookup hooks up once render migrates onto `.with()`.
-        let render_cap = RenderCapability::new(RenderConfig::default());
-        let render_handles = render_cap.handles();
-        boot.add_capability(render_cap)?;
-
-        // Legacy ADR-0070 capabilities — kept on the existing path
-        // through phase 3 and 4 (Option B). Phase 4.5+ migrate them
-        // (and render) to chassis_builder `.with()`.
-        boot.add_capability(AudioCapability::new(audio))?;
-        boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))?;
-        boot.add_capability(NetCapability::new(net))?;
-        boot.add_capability(LogCapability::new())?;
 
         tracing::info!(
             target: "aether_substrate::boot",
@@ -344,14 +322,12 @@ impl DesktopChassis {
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
+        let namespace_roots = boot.namespace_roots.clone();
 
         let driver = DesktopDriverCapability {
             event_loop,
             boot,
             capture_queue,
-            frame_vertices: render_handles.frame_vertices,
-            camera_state: render_handles.camera_state,
-            triangles_rendered: render_handles.triangles_rendered,
             boot_kinds_count,
             boot_mode,
             boot_size,
@@ -359,7 +335,17 @@ impl DesktopChassis {
             hub,
         };
 
+        // ADR-0071 phase B: every native sink composes through the
+        // chassis_builder `.with()` chain. Boot order is declaration
+        // order — log first so other capabilities' boot tracing routes
+        // through the log capture; render last among passives so it
+        // claims its mailboxes after every other chassis sink.
         Builder::<DesktopChassis, NoDriver>::new(registry, mailer)
+            .with(LogCapability::new())
+            .with(IoCapability::new(namespace_roots))
+            .with(NetCapability::new(net))
+            .with(AudioCapability::new(audio))
+            .with(RenderCapability::new(RenderConfig::default()))
             .driver(driver)
             .build()
     }
