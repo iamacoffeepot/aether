@@ -25,10 +25,10 @@ use aether_data::{Kind, encode_empty};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, FrameStats, Tick};
 use aether_substrate_core::{
     Chassis, HubOutbound, InputSubscribers, Mailer, Scheduler, SubstrateBoot,
+    capabilities::{RenderCapability, RenderConfig},
     capture::CaptureQueue,
     frame_loop,
     mail::{Mail, MailboxId},
-    sinks::{RenderAccumulator, build_camera_sink, build_render_sink},
     subscribers_for,
 };
 
@@ -226,27 +226,19 @@ fn main() -> wasmtime::Result<()> {
         .kind_id(FrameStats::NAME)
         .expect("FrameStats registered");
 
-    // `aether.sink.render`: real renderer. The frame loop drains
-    // `frame_vertices` each frame, so every `DrawTriangle` emitted
-    // before the next frame is consolidated into one vertex buffer.
-    // Truncate at the sink boundary so a single oversized mesh
-    // degrades gracefully. Helper shared with desktop via
-    // `aether-substrate-core::sinks` (issue 428).
-    let (render_acc, render_handler) = build_render_sink(VERTEX_BUFFER_BYTES);
-    let RenderAccumulator {
-        frame_vertices,
-        triangles_rendered,
-    } = render_acc;
-    boot.registry
-        .register_sink("aether.sink.render", render_handler);
-
-    // `aether.sink.camera`: latest-value-wins. Decode the 64-byte
-    // column-major view_proj and store; the frame loop reads it
-    // each frame and uploads to the GPU uniform. Helper shared with
-    // desktop via `aether-substrate-core::sinks` (issue 428).
-    let (camera_state, camera_handler) = build_camera_sink();
-    boot.registry
-        .register_sink("aether.sink.camera", camera_handler);
+    // Render + camera sinks (ADR-0071 phase 4 / Option B). One
+    // capability owns both mailboxes + the accumulator state shared
+    // with the test-bench frame loop. Pull the handles before the
+    // capability moves into boot — chassis_builder typed lookup
+    // hooks up once render migrates onto `.with()` in a later phase.
+    let render_cap = RenderCapability::new(RenderConfig {
+        vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
+    });
+    let render_handles = render_cap.handles();
+    boot.add_capability(render_cap)?;
+    let frame_vertices = render_handles.frame_vertices;
+    let camera_state = render_handles.camera_state;
+    let triangles_rendered = render_handles.triangles_rendered;
 
     // `aether.sink.io` per ADR-0041. Same capability as desktop and
     // headless — io is purely I/O, no GPU or window surface to

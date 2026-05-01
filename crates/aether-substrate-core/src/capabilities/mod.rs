@@ -23,9 +23,16 @@ pub mod handle;
 pub mod io;
 pub mod log;
 pub mod net;
+#[cfg(feature = "render")]
+pub mod render;
 #[cfg(feature = "audio")]
 pub use audio::{AUDIO_SINK_NAME, AudioCapability, AudioConfig, AudioRunning};
 pub use handle::{HANDLE_SINK_NAME, HandleCapability, HandleRunning};
 pub use io::{IO_SINK_NAME, IoCapability, IoRunning};
 pub use log::{LOG_SINK_NAME, LogCapability, LogRunning};
 pub use net::{NET_SINK_NAME, NetCapability, NetRunning};
+#[cfg(feature = "render")]
+pub use render::{
+    CAMERA_SINK_NAME, RENDER_SINK_NAME, RenderCapability, RenderConfig, RenderHandles,
+    RenderRunning,
+};

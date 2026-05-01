@@ -33,7 +33,6 @@ use aether_substrate_core::capability::BootError;
 use aether_substrate_core::chassis_builder::{
     DriverCapability, DriverCtx, DriverRunning, RunError,
 };
-use aether_substrate_core::sinks::{RenderAccumulator, build_camera_sink, build_render_sink};
 use aether_substrate_core::{
     HubClient, HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop,
     mail::{Mail, MailboxId},
@@ -830,37 +829,6 @@ impl DriverRunning for DesktopDriverRunning {
         );
         Ok(())
     }
-}
-
-/// Convenience: build the per-frame render + camera sinks the desktop
-/// chassis registers inline. Returns `(frame_vertices, triangles_rendered,
-/// camera_state, render_handler, camera_handler)` so the caller can
-/// register the handlers on the substrate registry and stash the
-/// accumulator state on the driver capability. This is the
-/// drag-along surface from main()'s old inline `register_sink` calls;
-/// phase 4 promotes the render path to its own [`Capability`].
-pub fn build_chassis_sinks() -> ChassisSinks {
-    let (render_acc, render_handler) = build_render_sink(VERTEX_BUFFER_BYTES);
-    let RenderAccumulator {
-        frame_vertices,
-        triangles_rendered,
-    } = render_acc;
-    let (camera_state, camera_handler) = build_camera_sink();
-    ChassisSinks {
-        frame_vertices,
-        triangles_rendered,
-        camera_state,
-        render_handler,
-        camera_handler,
-    }
-}
-
-pub struct ChassisSinks {
-    pub frame_vertices: Arc<Mutex<Vec<u8>>>,
-    pub triangles_rendered: Arc<AtomicU64>,
-    pub camera_state: Arc<Mutex<[f32; 16]>>,
-    pub render_handler: aether_substrate_core::SinkHandler,
-    pub camera_handler: aether_substrate_core::SinkHandler,
 }
 
 #[cfg(test)]
