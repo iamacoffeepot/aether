@@ -10,7 +10,7 @@
 //!   `render` + `camera` (gated by `render` feature). One PR per
 //!   sink.
 //! - Phase 4–5: `HubClientCapability` and `HubServerCapability` land
-//!   in the new `aether-hub` crate, not here, so the kernel ends with
+//!   in the new `aether-hub` crate, not here, so the substrate ends with
 //!   zero hub knowledge.
 //!
 //! [`Capability`]: crate::capability::Capability

@@ -235,7 +235,7 @@ mod tests {
     use crate::mail::{Mail, MailboxId, ReplyTarget, ReplyTo};
     use crate::registry::Registry;
 
-    /// Wires the kernel state `dispatch` reads from. Returns owned
+    /// Wires the substrate state `dispatch` reads from. Returns owned
     /// handles so each test can call [`dispatch`] directly with the
     /// store + mailer it constructs.
     fn build_harness() -> (

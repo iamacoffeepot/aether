@@ -6,7 +6,7 @@
 //! the right place to validate the [`Capability`] trait shape end-to-
 //! end before extracting the heavier ones (io, net, audio, render).
 //!
-//! Behavior change vs the pre-Phase-2 sink: the kernel-side dispatch
+//! Behavior change vs the pre-Phase-2 sink: the substrate-side dispatch
 //! used to run the per-kind handlers synchronously on the calling
 //! thread (a component dispatcher under ADR-0038). The capability
 //! shape mandated by the trait is one-actor-thread, so handle ops
@@ -143,12 +143,12 @@ mod tests {
     use crate::mailer::Mailer;
     use crate::registry::{MailboxEntry, Registry};
 
-    /// Build a minimally-wired kernel for capability tests: registry
+    /// Build a minimally-wired substrate for capability tests: registry
     /// with every kind descriptor (so `send_reply` resolves names),
     /// mailer wired with a loopback hub outbound + the store. The
     /// returned receiver carries every reply the capability emits via
     /// `Mailer::send_reply` along the hub-outbound branch.
-    fn fresh_kernel() -> (
+    fn fresh_substrate() -> (
         Arc<HandleStore>,
         Arc<Mailer>,
         Arc<Registry>,
@@ -177,7 +177,7 @@ mod tests {
     /// hub-outbound channel.
     #[test]
     fn capability_routes_publish_through_dispatcher_thread() {
-        let (store, mailer, registry, rx) = fresh_kernel();
+        let (store, mailer, registry, rx) = fresh_substrate();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with(HandleCapability::new(Arc::clone(&store)))
@@ -241,7 +241,7 @@ mod tests {
     /// must return within ~SHUTDOWN_POLL_INTERVAL of the flag set.
     #[test]
     fn shutdown_joins_dispatcher_thread() {
-        let (store, mailer, registry, _rx) = fresh_kernel();
+        let (store, mailer, registry, _rx) = fresh_substrate();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with(HandleCapability::new(Arc::clone(&store)))
@@ -263,7 +263,7 @@ mod tests {
     /// `register_sink(HANDLE_SINK_NAME, ...)` call.
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
-        let (store, mailer, registry, _rx) = fresh_kernel();
+        let (store, mailer, registry, _rx) = fresh_substrate();
         registry.register_sink(HANDLE_SINK_NAME, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))

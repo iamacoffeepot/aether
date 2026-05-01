@@ -6,7 +6,7 @@
 //! (handle, log, io, net, audio, render+camera) into a submodule of
 //! `crate::capabilities` that implements [`Capability`]; Phase 4
 //! wires the dispatch path to consult [`ChassisCtx::claim_fallback_router`]
-//! and removes the kernel-side bubble-up in `Mailer`.
+//! and removes the substrate-side bubble-up in `Mailer`.
 //!
 //! The shape mirrors a wasm component (kinds + dispatcher + state +
 //! lifecycle) but compiled in: a native capability owns mailboxes,
@@ -22,7 +22,7 @@
 //!   receiver. The registered handler converts each borrowed sink
 //!   call into an owned [`Envelope`] and forwards it.
 //! - [`ChassisCtx::claim_fallback_router`] stores a single fallback
-//!   handler; kernel dispatch does not consult it yet (Phase 4).
+//!   handler; substrate dispatch does not consult it yet (Phase 4).
 //! - No sinks are migrated yet — `crate::capabilities` is an empty
 //!   submodule placeholder that future PRs populate.
 
@@ -61,13 +61,13 @@ pub struct MailboxClaim {
     pub receiver: mpsc::Receiver<Envelope>,
 }
 
-/// Generic fallback-router handler: invoked by kernel dispatch when a
+/// Generic fallback-router handler: invoked by substrate dispatch when a
 /// local mailbox lookup misses. Phase 1 stores the handler but does
 /// not call it; Phase 4 wires `Mailer::push` to consult the slot in
 /// place of today's hub-specific bubble-up.
 ///
-/// Returning `true` means "I handled this mail" (kernel does nothing
-/// further); `false` means "not mine" (kernel falls through to its
+/// Returning `true` means "I handled this mail" (substrate does nothing
+/// further); `false` means "not mine" (substrate falls through to its
 /// warn-drop path). Today only `HubClientCapability` will claim the
 /// slot; other implementations are possible (test routers, multi-hub
 /// fan-out).
@@ -212,7 +212,7 @@ impl<'a> ChassisCtx<'a> {
     /// their dispatcher state to send mail to other mailboxes
     /// (including other capabilities). Same `Arc<Mailer>` every
     /// capability sees, so an envelope sent here goes through the
-    /// kernel's routing table the same way component-originated mail
+    /// substrate's routing table the same way component-originated mail
     /// does.
     pub fn mail_send_handle(&self) -> Arc<Mailer> {
         Arc::clone(self.mailer)
@@ -222,7 +222,7 @@ impl<'a> ChassisCtx<'a> {
     /// may claim the slot; a second call returns
     /// [`BootError::FallbackRouterAlreadyClaimed`].
     ///
-    /// Phase 1 stores the handler but does not consult it from kernel
+    /// Phase 1 stores the handler but does not consult it from substrate
     /// dispatch. Phase 4 wires `Mailer::push` against this slot and
     /// removes today's hub-specific `Mailer.outbound` field, at
     /// which point `HubClientCapability` (in the new `aether-hub`
@@ -255,9 +255,9 @@ pub struct ChassisBuilder {
 }
 
 impl ChassisBuilder {
-    /// Construct a fresh builder against the given kernel handles.
+    /// Construct a fresh builder against the given substrate handles.
     /// Phase 1 leaves it to the caller to supply these — Phase 6
-    /// (TestBench rewrite) folds kernel construction into the
+    /// (TestBench rewrite) folds substrate construction into the
     /// builder; until then, the existing `SubstrateBoot::build` is
     /// the construction site.
     pub fn new(registry: Arc<Registry>, mailer: Arc<Mailer>) -> Self {
@@ -411,7 +411,7 @@ mod tests {
         }
     }
 
-    fn fresh_kernel() -> (Arc<Registry>, Arc<Mailer>) {
+    fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         (Arc::new(Registry::new()), Arc::new(Mailer::new()))
     }
 
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn capability_claims_mailbox_and_receives_mail() {
-        let (registry, mailer) = fresh_kernel();
+        let (registry, mailer) = fresh_substrate();
         let log = Arc::new(Mutex::new(Vec::new()));
         let flag = Arc::new(Mutex::new(false));
 
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn duplicate_mailbox_claim_fails_with_loud_error() {
-        let (registry, mailer) = fresh_kernel();
+        let (registry, mailer) = fresh_substrate();
         // Pre-register the name to simulate the side-by-side period
         // where legacy `register_sink` and a new capability would
         // both target the same mailbox.
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn boot_failure_shuts_down_already_booted_capabilities() {
-        let (registry, mailer) = fresh_kernel();
+        let (registry, mailer) = fresh_substrate();
         // First capability claims a fresh name; the second is set up
         // to fail by pre-registering its target name.
         registry.register_sink("test.fail.second", Arc::new(|_, _, _, _, _, _| {}));
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn fallback_router_slot_is_single_claim() {
-        let (registry, mailer) = fresh_kernel();
+        let (registry, mailer) = fresh_substrate();
 
         struct FallbackCap {
             should_succeed: bool,
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn mail_send_handle_clones_to_same_mailer() {
-        let (registry, mailer) = fresh_kernel();
+        let (registry, mailer) = fresh_substrate();
 
         struct ProbeCap {
             captured: Arc<Mutex<Option<Arc<Mailer>>>>,
