@@ -678,107 +678,114 @@ fn dispatch_audio_mail(
     sender: ReplyTo,
     bytes: &[u8],
 ) {
-    if kind == <NoteOn as Kind>::ID {
-        // Hub-delivered payloads arrive as un-aligned `Vec<u8>` slices
-        // from the reader thread's decode; `try_pod_read_unaligned`
-        // copies bytes rather than reinterpreting in place, matching
-        // how the camera sink reads its [f32; 16] payload.
-        let Ok(n) = bytemuck::try_pod_read_unaligned::<NoteOn>(bytes) else {
-            tracing::warn!(
-                target: "aether_substrate::audio",
-                got = bytes.len(),
-                "note_on: bad payload length, dropping",
-            );
-            return;
-        };
-        if let Some(s) = audio_sender {
-            let ev = AudioEvent::NoteOn {
-                sender_mailbox: sender_mailbox_id(sender),
-                pitch: n.pitch,
-                velocity: n.velocity,
-                instrument_id: n.instrument_id,
-            };
-            if s.push(ev).is_err() {
+    match kind {
+        <NoteOn as Kind>::ID => {
+            // Hub-delivered payloads arrive as un-aligned `Vec<u8>`
+            // slices from the reader thread's decode;
+            // `try_pod_read_unaligned` copies bytes rather than
+            // reinterpreting in place, matching how the camera sink
+            // reads its [f32; 16] payload.
+            let Ok(n) = bytemuck::try_pod_read_unaligned::<NoteOn>(bytes) else {
                 tracing::warn!(
                     target: "aether_substrate::audio",
-                    "event queue full — dropping note_on",
+                    got = bytes.len(),
+                    "note_on: bad payload length, dropping",
                 );
+                return;
+            };
+            if let Some(s) = audio_sender {
+                let ev = AudioEvent::NoteOn {
+                    sender_mailbox: sender_mailbox_id(sender),
+                    pitch: n.pitch,
+                    velocity: n.velocity,
+                    instrument_id: n.instrument_id,
+                };
+                if s.push(ev).is_err() {
+                    tracing::warn!(
+                        target: "aether_substrate::audio",
+                        "event queue full — dropping note_on",
+                    );
+                }
             }
         }
-    } else if kind == <NoteOff as Kind>::ID {
-        let Ok(n) = bytemuck::try_pod_read_unaligned::<NoteOff>(bytes) else {
-            tracing::warn!(
-                target: "aether_substrate::audio",
-                got = bytes.len(),
-                "note_off: bad payload length, dropping",
-            );
-            return;
-        };
-        if let Some(s) = audio_sender {
-            let ev = AudioEvent::NoteOff {
-                sender_mailbox: sender_mailbox_id(sender),
-                pitch: n.pitch,
-                instrument_id: n.instrument_id,
-            };
-            if s.push(ev).is_err() {
+        <NoteOff as Kind>::ID => {
+            let Ok(n) = bytemuck::try_pod_read_unaligned::<NoteOff>(bytes) else {
                 tracing::warn!(
                     target: "aether_substrate::audio",
-                    "event queue full — dropping note_off",
+                    got = bytes.len(),
+                    "note_off: bad payload length, dropping",
                 );
+                return;
+            };
+            if let Some(s) = audio_sender {
+                let ev = AudioEvent::NoteOff {
+                    sender_mailbox: sender_mailbox_id(sender),
+                    pitch: n.pitch,
+                    instrument_id: n.instrument_id,
+                };
+                if s.push(ev).is_err() {
+                    tracing::warn!(
+                        target: "aether_substrate::audio",
+                        "event queue full — dropping note_off",
+                    );
+                }
             }
         }
-    } else if kind == <SetMasterGain as Kind>::ID {
-        // f32 payload requires 4-byte alignment under `try_from_bytes`;
-        // hub-delivered Vec<u8> payloads have no alignment guarantee,
-        // so use the unaligned-read helper to avoid a spurious decode
-        // failure on non-aligned source bytes.
-        let Ok(g) = bytemuck::try_pod_read_unaligned::<SetMasterGain>(bytes) else {
-            tracing::warn!(
-                target: "aether_substrate::audio",
-                got = bytes.len(),
-                "set_master_gain: bad payload length, replying Err",
-            );
-            mailer.send_reply(
-                sender,
-                &SetMasterGainResult::Err {
-                    error: format!("bad payload length {}, expected 4", bytes.len()),
-                },
-            );
-            return;
-        };
-        let applied = g.gain.clamp(0.0, 1.0);
-        match audio_sender {
-            Some(s) => {
-                let _ = s.push(AudioEvent::SetMasterGain { gain: applied });
-                mailer.send_reply(
-                    sender,
-                    &SetMasterGainResult::Ok {
-                        applied_gain: applied,
-                    },
-                );
-                tracing::info!(
+        <SetMasterGain as Kind>::ID => {
+            // f32 payload requires 4-byte alignment under
+            // `try_from_bytes`; hub-delivered Vec<u8> payloads have no
+            // alignment guarantee, so use the unaligned-read helper to
+            // avoid a spurious decode failure on non-aligned source
+            // bytes.
+            let Ok(g) = bytemuck::try_pod_read_unaligned::<SetMasterGain>(bytes) else {
+                tracing::warn!(
                     target: "aether_substrate::audio",
-                    requested = g.gain,
-                    applied,
-                    "master gain set",
+                    got = bytes.len(),
+                    "set_master_gain: bad payload length, replying Err",
                 );
-            }
-            None => {
                 mailer.send_reply(
                     sender,
                     &SetMasterGainResult::Err {
-                        error: "audio pipeline not initialised on this desktop substrate"
-                            .to_owned(),
+                        error: format!("bad payload length {}, expected 4", bytes.len()),
                     },
                 );
+                return;
+            };
+            let applied = g.gain.clamp(0.0, 1.0);
+            match audio_sender {
+                Some(s) => {
+                    let _ = s.push(AudioEvent::SetMasterGain { gain: applied });
+                    mailer.send_reply(
+                        sender,
+                        &SetMasterGainResult::Ok {
+                            applied_gain: applied,
+                        },
+                    );
+                    tracing::info!(
+                        target: "aether_substrate::audio",
+                        requested = g.gain,
+                        applied,
+                        "master gain set",
+                    );
+                }
+                None => {
+                    mailer.send_reply(
+                        sender,
+                        &SetMasterGainResult::Err {
+                            error: "audio pipeline not initialised on this desktop substrate"
+                                .to_owned(),
+                        },
+                    );
+                }
             }
         }
-    } else {
-        tracing::warn!(
-            target: "aether_substrate::audio",
-            kind = %kind,
-            "audio sink received unknown kind — dropping",
-        );
+        _ => {
+            tracing::warn!(
+                target: "aether_substrate::audio",
+                kind = %kind,
+                "audio sink received unknown kind — dropping",
+            );
+        }
     }
 }
 
