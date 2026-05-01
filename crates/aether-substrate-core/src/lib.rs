@@ -25,6 +25,7 @@ pub mod capabilities;
 pub mod capability;
 pub mod capture;
 pub mod chassis;
+pub mod chassis_builder;
 pub mod component;
 pub mod control;
 pub mod ctx;
@@ -54,7 +55,11 @@ pub use capability::{
     BootError, BootedChassis, Capability, ChassisBuilder, ChassisCtx, Envelope, FallbackRouter,
     MailboxClaim, RunningCapability,
 };
-pub use chassis::{Chassis, ChassisCapabilities};
+pub use chassis::Chassis;
+pub use chassis_builder::{
+    Builder, BuilderState, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, HasDriver,
+    NoDriver, PassiveChassis, RunError,
+};
 pub use component::Component;
 pub use control::{AETHER_CONTROL, ChassisControlHandler, ControlPlane};
 pub use ctx::SubstrateCtx;

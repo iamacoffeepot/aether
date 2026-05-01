@@ -16,10 +16,10 @@
 pub mod chassis;
 
 pub use aether_substrate_core::{
-    AETHER_CONTROL, Chassis, ChassisCapabilities, ChassisControlHandler, Component, ControlPlane,
-    HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, Mail, MailKind, MailboxEntry,
-    MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, Scheduler, SinkHandler, SubstrateBoot,
-    SubstrateCtx, capabilities,
+    AETHER_CONTROL, Chassis, ChassisControlHandler, Component, ControlPlane, HUB_CLAUDE_BROADCAST,
+    HubClient, HubOutbound, InputSubscribers, Mail, MailKind, MailboxEntry, MailboxId, Mailer,
+    Registry, ReplyTarget, ReplyTo, Scheduler, SinkHandler, SubstrateBoot, SubstrateCtx,
+    capabilities,
     capture::{CaptureQueue, PendingCapture},
     component, control, ctx, frame_loop, host_fns, hub_client, input, kind_manifest, log_capture,
     mail, mailer, new_subscribers, registry, remove_from_all, reply_table, scheduler,

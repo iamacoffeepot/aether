@@ -152,8 +152,9 @@ pub struct ChassisCtx<'a> {
 }
 
 impl<'a> ChassisCtx<'a> {
-    /// Internal constructor used by [`ChassisBuilder::build`].
-    fn new(
+    /// Internal constructor used by [`ChassisBuilder::build`] and the
+    /// ADR-0071 [`crate::chassis_builder::Builder`].
+    pub(crate) fn new(
         registry: &'a Arc<Registry>,
         mailer: &'a Arc<Mailer>,
         fallback: &'a mut Option<FallbackRouter>,

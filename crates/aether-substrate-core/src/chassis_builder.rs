@@ -1,0 +1,699 @@
+//! ADR-0071 Phase 2A: driver-capability traits + chassis builder
+//! type-state.
+//!
+//! Sibling to ADR-0070's [`Capability`] / [`RunningCapability`]
+//! family. A chassis composes passive capabilities (dispatcher-thread
+//! sinks per ADR-0070) plus exactly one [`DriverCapability`] that
+//! owns the chassis main thread. The type-state [`Builder`] enforces
+//! "exactly one driver" structurally; embedders that drive manually
+//! (TestBench, future embedded harnesses) build a [`PassiveChassis`]
+//! via the no-driver path.
+//!
+//! # Phase 2A scope
+//!
+//! - Trait family + builder + ctx wiring.
+//! - The existing [`crate::capability::ChassisBuilder`] is unchanged
+//!   and remains the construction site for current chassis. Phases
+//!   3-7 (per ADR-0071) migrate each chassis to the new builder.
+//! - [`Chassis::Driver`] / [`Chassis::Env`] / [`Chassis::build`] are
+//!   not yet on the [`crate::chassis::Chassis`] trait — they land
+//!   alongside the first real driver extraction (phase 3) so every
+//!   chassis can nominate a real driver type rather than a stub.
+
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
+use std::error::Error as StdError;
+use std::fmt;
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+use crate::capability::{
+    BootError, Capability, ChassisCtx, FallbackRouter, MailboxClaim, RunningCapability,
+};
+use crate::chassis::Chassis;
+use crate::mailer::Mailer;
+use crate::registry::Registry;
+
+/// Failure mode raised by [`DriverRunning::run`].
+#[derive(Debug)]
+pub enum RunError {
+    Other(Box<dyn StdError + Send + Sync + 'static>),
+}
+
+impl fmt::Display for RunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RunError::Other(e) => write!(f, "driver run failed: {e}"),
+        }
+    }
+}
+
+impl StdError for RunError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            RunError::Other(e) => Some(&**e),
+        }
+    }
+}
+
+/// A driver capability owns the chassis main thread. Each chassis
+/// composes exactly one driver alongside its passive capabilities.
+/// The driver's [`DriverRunning::run`] body holds whatever loop the
+/// chassis needs — winit on desktop, std-timer on headless, TCP
+/// accept on hub.
+pub trait DriverCapability: Send + 'static {
+    type Running: DriverRunning;
+    fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError>;
+}
+
+/// Post-boot driver handle. Built once at chassis boot, then handed
+/// to [`BuiltChassis::run`], which calls [`DriverRunning::run`] on
+/// the calling thread. Returns when the underlying loop drains
+/// cleanly (window closed, accept loop done, shutdown signal).
+pub trait DriverRunning: Send + 'static {
+    fn run(self: Box<Self>) -> Result<(), RunError>;
+}
+
+/// Type-erased shutdown adapter for a passive [`Capability::Running`]
+/// stored in the builder's shutdown queue.
+trait DynShutdown: Send {
+    fn shutdown_dyn(self: Box<Self>);
+}
+
+/// Concrete adapter: holds the running as an [`Arc`] (so the same
+/// value can also live in the typed-running map for driver lookup)
+/// and on shutdown attempts to take exclusive ownership via
+/// [`Arc::try_unwrap`]. If outstanding clones remain — a driver
+/// retained one without dropping it before shutdown — the explicit
+/// `shutdown(Box<Self>)` call is skipped and the value tears down
+/// via Drop when refcounts hit zero.
+struct ArcShutdown<R: RunningCapability + Sync> {
+    arc: Arc<R>,
+    name: &'static str,
+}
+
+impl<R: RunningCapability + Sync> DynShutdown for ArcShutdown<R> {
+    fn shutdown_dyn(self: Box<Self>) {
+        let ArcShutdown { arc, name } = *self;
+        match Arc::try_unwrap(arc) {
+            Ok(running) => Box::new(running).shutdown(),
+            Err(_arc) => {
+                tracing::warn!(
+                    target: "aether_substrate::chassis_builder",
+                    capability = name,
+                    "skipped explicit shutdown — outstanding Arc clones; relying on Drop"
+                );
+            }
+        }
+    }
+}
+
+/// Internal: typed running store keyed by [`TypeId::of::<R>`].
+/// Populated as each passive boots; queried by drivers via
+/// [`DriverCtx::expect`] / [`DriverCtx::try_get`] and by embedders
+/// via [`PassiveChassis::capability`].
+#[derive(Default)]
+struct TypedRunnings {
+    by_type: HashMap<TypeId, Arc<dyn Any + Send + Sync + 'static>>,
+}
+
+impl TypedRunnings {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn insert<R: Send + Sync + 'static>(&mut self, running: Arc<R>) {
+        self.by_type.insert(TypeId::of::<R>(), running);
+    }
+
+    fn try_get<R: Send + Sync + 'static>(&self) -> Option<Arc<R>> {
+        self.by_type.get(&TypeId::of::<R>()).map(|arc| {
+            Arc::clone(arc)
+                .downcast::<R>()
+                .expect("TypeId match implies downcast success")
+        })
+    }
+
+    fn expect<R: Send + Sync + 'static>(&self) -> Arc<R> {
+        self.try_get::<R>().unwrap_or_else(|| {
+            panic!(
+                "DriverCtx::expect: running of type `{}` not booted",
+                std::any::type_name::<R>()
+            )
+        })
+    }
+}
+
+/// Boot-time context handed to a [`DriverCapability`]. Forwards the
+/// passive [`ChassisCtx`] surface plus typed access to passive
+/// runnings booted earlier in the same build.
+pub struct DriverCtx<'a> {
+    inner: ChassisCtx<'a>,
+    runnings: &'a TypedRunnings,
+}
+
+impl<'a> DriverCtx<'a> {
+    fn new(inner: ChassisCtx<'a>, runnings: &'a TypedRunnings) -> Self {
+        Self { inner, runnings }
+    }
+
+    pub fn claim_mailbox(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
+        self.inner.claim_mailbox(name)
+    }
+
+    pub fn mail_send_handle(&self) -> Arc<Mailer> {
+        self.inner.mail_send_handle()
+    }
+
+    pub fn claim_fallback_router(&mut self, handler: FallbackRouter) -> Result<(), BootError> {
+        self.inner.claim_fallback_router(handler)
+    }
+
+    /// Look up a previously-booted passive's [`Arc<R>`]. Panics if no
+    /// running of type `R` has been registered. Use [`Self::try_get`]
+    /// for soft lookup.
+    pub fn expect<R: Send + Sync + 'static>(&self) -> Arc<R> {
+        self.runnings.expect()
+    }
+
+    pub fn try_get<R: Send + Sync + 'static>(&self) -> Option<Arc<R>> {
+        self.runnings.try_get()
+    }
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Type-state marker tracking whether a driver has been supplied.
+/// Sealed: only [`NoDriver`] and [`HasDriver`] are valid.
+pub trait BuilderState: sealed::Sealed {}
+
+/// Builder state: no driver supplied yet. Accepts both `.with(_)`
+/// and `.driver(_)` (which transitions to [`HasDriver`]); also
+/// supports `.build_passive()` for the embedder-driven path.
+pub struct NoDriver;
+
+/// Builder state: driver supplied. Accepts `.with(_)` (passives
+/// declared after the driver still boot before the driver per the
+/// builder's invariant) and `.build()`.
+pub struct HasDriver;
+
+impl sealed::Sealed for NoDriver {}
+impl sealed::Sealed for HasDriver {}
+impl BuilderState for NoDriver {}
+impl BuilderState for HasDriver {}
+
+type PassiveBoot = Box<
+    dyn FnOnce(&mut ChassisCtx<'_>, &mut TypedRunnings) -> Result<Box<dyn DynShutdown>, BootError>
+        + Send,
+>;
+type DriverBoot =
+    Box<dyn FnOnce(&mut DriverCtx<'_>) -> Result<Box<dyn DriverRunning>, BootError> + Send>;
+
+fn make_passive_boot<P>(cap: P) -> PassiveBoot
+where
+    P: Capability,
+    P::Running: Sync,
+{
+    Box::new(move |ctx, runnings| {
+        let running = cap.boot(ctx)?;
+        let arc = Arc::new(running);
+        runnings.insert(Arc::clone(&arc));
+        Ok(Box::new(ArcShutdown {
+            arc,
+            name: std::any::type_name::<P::Running>(),
+        }) as Box<dyn DynShutdown>)
+    })
+}
+
+fn make_driver_boot<D: DriverCapability>(driver: D) -> DriverBoot {
+    Box::new(move |ctx| {
+        let running = driver.boot(ctx)?;
+        Ok(Box::new(running) as Box<dyn DriverRunning>)
+    })
+}
+
+/// Declarative chassis builder, parametric over the chassis kind `C`
+/// and a type-state `S` tracking whether a driver has been supplied.
+/// `Builder<C, NoDriver>` accepts both [`Self::with`] and either
+/// [`Self::driver`] or [`Self::build_passive`]; once `.driver(d)`
+/// runs the builder transitions to `Builder<C, HasDriver>` which
+/// only accepts further [`Self::with`] calls and [`Self::build`].
+pub struct Builder<C: Chassis, S: BuilderState> {
+    registry: Arc<Registry>,
+    mailer: Arc<Mailer>,
+    passives: Vec<PassiveBoot>,
+    driver: Option<DriverBoot>,
+    _chassis: PhantomData<fn() -> C>,
+    _state: PhantomData<fn() -> S>,
+}
+
+impl<C: Chassis> Builder<C, NoDriver> {
+    /// Construct a fresh builder against the given substrate handles.
+    pub fn new(registry: Arc<Registry>, mailer: Arc<Mailer>) -> Self {
+        Self {
+            registry,
+            mailer,
+            passives: Vec::new(),
+            driver: None,
+            _chassis: PhantomData,
+            _state: PhantomData,
+        }
+    }
+
+    /// Append a passive capability. Boot order is declaration order;
+    /// `.with` calls before and after `.driver(_)` boot together
+    /// before the driver.
+    pub fn with<P>(mut self, cap: P) -> Self
+    where
+        P: Capability,
+        P::Running: Sync,
+    {
+        self.passives.push(make_passive_boot::<P>(cap));
+        self
+    }
+
+    /// Supply the chassis's driver. Transitions to [`HasDriver`] —
+    /// further `.driver(_)` calls are forbidden by the type system.
+    pub fn driver<D>(mut self, driver: D) -> Builder<C, HasDriver>
+    where
+        D: DriverCapability,
+    {
+        self.driver = Some(make_driver_boot::<D>(driver));
+        Builder {
+            registry: self.registry,
+            mailer: self.mailer,
+            passives: self.passives,
+            driver: self.driver,
+            _chassis: PhantomData,
+            _state: PhantomData,
+        }
+    }
+
+    /// No-driver build path. Boots every passive in declaration order
+    /// and returns a [`PassiveChassis`] whose embedder is responsible
+    /// for driving the loop manually (TestBench).
+    pub fn build_passive(self) -> Result<PassiveChassis<C>, BootError> {
+        let booted = boot_passives(&self.registry, &self.mailer, self.passives)?;
+        Ok(PassiveChassis {
+            booted,
+            _chassis: PhantomData,
+        })
+    }
+}
+
+impl<C: Chassis> Builder<C, HasDriver> {
+    /// Append a passive capability after the driver was supplied.
+    /// Booted before the driver in declaration order.
+    pub fn with<P>(mut self, cap: P) -> Self
+    where
+        P: Capability,
+        P::Running: Sync,
+    {
+        self.passives.push(make_passive_boot::<P>(cap));
+        self
+    }
+
+    /// Boot every passive in declaration order, then boot the driver
+    /// against a [`DriverCtx`] that exposes the passives' typed
+    /// runnings. Any failure aborts the build and shuts down the
+    /// passives that already booted (via [`BootedPassives::Drop`])
+    /// before propagating the error.
+    pub fn build(self) -> Result<BuiltChassis<C>, BootError> {
+        let Builder {
+            registry,
+            mailer,
+            passives,
+            driver,
+            ..
+        } = self;
+        let driver_boot = driver.expect("HasDriver state implies driver was supplied");
+
+        let mut booted = boot_passives(&registry, &mailer, passives)?;
+        let driver_running = {
+            let chassis_ctx = ChassisCtx::new(&registry, &mailer, &mut booted.fallback);
+            let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.runnings);
+            driver_boot(&mut driver_ctx)?
+        };
+
+        Ok(BuiltChassis {
+            booted,
+            driver: driver_running,
+            _chassis: PhantomData,
+        })
+    }
+}
+
+/// Internal carrier for the result of booting every passive.
+struct BootedPassives {
+    shutdowns: Vec<Box<dyn DynShutdown>>,
+    runnings: TypedRunnings,
+    fallback: Option<FallbackRouter>,
+}
+
+impl BootedPassives {
+    fn shutdown_in_place(&mut self) {
+        // Clear the typed-runnings map before draining the shutdown
+        // queue: every passive's Arc lives in both stores, so leaving
+        // the map populated would force every `Arc::try_unwrap` in
+        // `ArcShutdown::shutdown_dyn` to fail (refcount ≥ 2). After
+        // this drain, the only remaining clone for each passive is
+        // the one inside its `ArcShutdown` wrapper, modulo any clones
+        // a driver or embedder retained via typed lookup.
+        self.runnings = TypedRunnings::new();
+        while let Some(s) = self.shutdowns.pop() {
+            s.shutdown_dyn();
+        }
+    }
+}
+
+impl Drop for BootedPassives {
+    fn drop(&mut self) {
+        self.shutdown_in_place();
+    }
+}
+
+fn boot_passives(
+    registry: &Arc<Registry>,
+    mailer: &Arc<Mailer>,
+    passives: Vec<PassiveBoot>,
+) -> Result<BootedPassives, BootError> {
+    let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
+    let mut runnings = TypedRunnings::new();
+    let mut fallback: Option<FallbackRouter> = None;
+    for boot in passives {
+        let mut ctx = ChassisCtx::new(registry, mailer, &mut fallback);
+        match boot(&mut ctx, &mut runnings) {
+            Ok(shutdown) => shutdowns.push(shutdown),
+            Err(e) => {
+                while let Some(s) = shutdowns.pop() {
+                    s.shutdown_dyn();
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(BootedPassives {
+        shutdowns,
+        runnings,
+        fallback,
+    })
+}
+
+/// A chassis built with a driver. [`Self::run`] delegates to the
+/// driver's [`DriverRunning::run`] on the calling thread; when that
+/// returns, every passive is shut down in reverse boot order.
+pub struct BuiltChassis<C: Chassis> {
+    booted: BootedPassives,
+    driver: Box<dyn DriverRunning>,
+    _chassis: PhantomData<fn() -> C>,
+}
+
+impl<C: Chassis> fmt::Debug for BuiltChassis<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BuiltChassis")
+            .field("profile", &C::PROFILE)
+            .field("passives", &self.booted.shutdowns.len())
+            .finish()
+    }
+}
+
+impl<C: Chassis> BuiltChassis<C> {
+    /// Block on the driver's run loop. On clean return, shut down
+    /// every passive in reverse boot order. Driver errors propagate
+    /// as [`RunError`]; passives still tear down before the error
+    /// returns to the caller.
+    pub fn run(self) -> Result<(), RunError> {
+        let BuiltChassis { booted, driver, .. } = self;
+        let result = driver.run();
+        // Passives drop here, triggering reverse-order shutdown via
+        // BootedPassives::Drop. Holding `booted` until after `result`
+        // is bound keeps shutdown ordering deterministic.
+        drop(booted);
+        result
+    }
+}
+
+/// A chassis built without a driver. The embedder (TestBench, future
+/// embedded harnesses) drives any loop manually. Passives are booted
+/// and accessible via [`Self::capability`]; they shut down when the
+/// `PassiveChassis` is dropped.
+pub struct PassiveChassis<C: Chassis> {
+    booted: BootedPassives,
+    _chassis: PhantomData<fn() -> C>,
+}
+
+impl<C: Chassis> fmt::Debug for PassiveChassis<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PassiveChassis")
+            .field("profile", &C::PROFILE)
+            .field("passives", &self.booted.shutdowns.len())
+            .finish()
+    }
+}
+
+impl<C: Chassis> PassiveChassis<C> {
+    /// Look up a booted passive's running by type. Panics if no
+    /// passive of type `R` was registered.
+    pub fn capability<R: RunningCapability + Sync + 'static>(&self) -> Arc<R> {
+        self.booted.runnings.expect()
+    }
+
+    /// Soft variant of [`Self::capability`].
+    pub fn try_capability<R: RunningCapability + Sync + 'static>(&self) -> Option<Arc<R>> {
+        self.booted.runnings.try_get()
+    }
+
+    /// Number of booted passives. Useful for tests; not expected to
+    /// vary at runtime.
+    pub fn len(&self) -> usize {
+        self.booted.shutdowns.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.booted.shutdowns.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::Envelope;
+    use std::sync::Mutex;
+
+    /// Fixture chassis used only by the tests in this module.
+    struct TestChassis;
+    impl Chassis for TestChassis {
+        const PROFILE: &'static str = "test";
+        fn run(self) -> wasmtime::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Test passive: claims one mailbox, records every envelope
+    /// received, exposes recorded envelopes via the typed lookup.
+    struct EchoCap {
+        name: &'static str,
+    }
+
+    struct EchoRunning {
+        receiver: Mutex<Option<std::sync::mpsc::Receiver<Envelope>>>,
+        log: Mutex<Vec<Envelope>>,
+        shutdown_flag: std::sync::atomic::AtomicBool,
+    }
+
+    impl Capability for EchoCap {
+        type Running = EchoRunning;
+        fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+            let claim = ctx.claim_mailbox(self.name)?;
+            Ok(EchoRunning {
+                receiver: Mutex::new(Some(claim.receiver)),
+                log: Mutex::new(Vec::new()),
+                shutdown_flag: std::sync::atomic::AtomicBool::new(false),
+            })
+        }
+    }
+
+    impl RunningCapability for EchoRunning {
+        fn shutdown(self: Box<Self>) {
+            if let Some(rx) = self.receiver.lock().unwrap().take() {
+                while let Ok(env) = rx.try_recv() {
+                    self.log.lock().unwrap().push(env);
+                }
+            }
+            self.shutdown_flag
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Test driver: records that it ran, then exits.
+    struct EchoDriver {
+        ran: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct EchoDriverRunning {
+        ran: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl DriverCapability for EchoDriver {
+        type Running = EchoDriverRunning;
+        fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+            Ok(EchoDriverRunning { ran: self.ran })
+        }
+    }
+
+    impl DriverRunning for EchoDriverRunning {
+        fn run(self: Box<Self>) -> Result<(), RunError> {
+            self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
+        (Arc::new(Registry::new()), Arc::new(Mailer::new()))
+    }
+
+    #[test]
+    fn passive_build_exposes_capabilities_via_typed_lookup() {
+        let (registry, mailer) = fresh_substrate();
+        let passive = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+            .with(EchoCap { name: "test.echo" })
+            .build_passive()
+            .expect("build_passive succeeds");
+
+        assert_eq!(passive.len(), 1);
+        let echo: Arc<EchoRunning> = passive.capability();
+        assert!(!echo.shutdown_flag.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn driver_build_runs_driver_and_tears_down_passives() {
+        let (registry, mailer) = fresh_substrate();
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let chassis = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+            .with(EchoCap { name: "test.echo" })
+            .driver(EchoDriver {
+                ran: Arc::clone(&ran),
+            })
+            .build()
+            .expect("build succeeds");
+
+        chassis.run().expect("driver run succeeds");
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn duplicate_passive_mailbox_aborts_build_and_shuts_down_prior() {
+        let (registry, mailer) = fresh_substrate();
+        registry.register_sink("test.collide", Arc::new(|_, _, _, _, _, _| {}));
+
+        let err = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+            .with(EchoCap { name: "test.fresh" })
+            .with(EchoCap {
+                name: "test.collide",
+            })
+            .build_passive()
+            .expect_err("second passive must fail");
+
+        assert!(matches!(err, BootError::MailboxAlreadyClaimed { .. }));
+    }
+
+    #[test]
+    fn passive_chassis_drop_runs_shutdowns() {
+        let (registry, mailer) = fresh_substrate();
+        let passive = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+            .with(EchoCap { name: "test.echo" })
+            .build_passive()
+            .expect("build_passive succeeds");
+
+        let echo: Arc<EchoRunning> = passive.capability();
+        // Drop the passive chassis. The internal Arc has refcount 2
+        // (chassis + our `echo` clone). The chassis-side shutdown
+        // call hits Arc::try_unwrap, sees an outstanding clone, and
+        // skips the explicit shutdown — the value drops when `echo`
+        // goes out of scope at end of test.
+        drop(passive);
+
+        assert!(!echo.shutdown_flag.load(std::sync::atomic::Ordering::SeqCst));
+        // The shared running survives until our clone drops.
+        drop(echo);
+    }
+
+    #[test]
+    fn passive_chassis_shutdown_calls_explicit_shutdown_when_arc_unique() {
+        // Capture the running's shutdown_flag externally so we can
+        // observe it after the chassis (and its Arc clone) drops.
+        let (registry, mailer) = fresh_substrate();
+
+        struct ProbeCap {
+            flag: Arc<std::sync::atomic::AtomicBool>,
+        }
+        struct ProbeRunning {
+            flag: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Capability for ProbeCap {
+            type Running = ProbeRunning;
+            fn boot(self, _ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+                Ok(ProbeRunning { flag: self.flag })
+            }
+        }
+        impl RunningCapability for ProbeRunning {
+            fn shutdown(self: Box<Self>) {
+                self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let passive = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+            .with(ProbeCap {
+                flag: Arc::clone(&flag),
+            })
+            .build_passive()
+            .expect("build_passive succeeds");
+
+        // Don't take a typed clone; the chassis owns the only Arc.
+        drop(passive);
+
+        assert!(
+            flag.load(std::sync::atomic::Ordering::SeqCst),
+            "explicit shutdown must run when the chassis holds the only Arc",
+        );
+    }
+
+    #[test]
+    fn driver_ctx_expect_returns_passive_running() {
+        let (registry, mailer) = fresh_substrate();
+        let captured: Arc<Mutex<Option<Arc<EchoRunning>>>> = Arc::new(Mutex::new(None));
+
+        struct CaptureDriver {
+            captured: Arc<Mutex<Option<Arc<EchoRunning>>>>,
+        }
+        struct CaptureDriverRunning;
+        impl DriverCapability for CaptureDriver {
+            type Running = CaptureDriverRunning;
+            fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+                let echo: Arc<EchoRunning> = ctx.expect();
+                *self.captured.lock().unwrap() = Some(echo);
+                Ok(CaptureDriverRunning)
+            }
+        }
+        impl DriverRunning for CaptureDriverRunning {
+            fn run(self: Box<Self>) -> Result<(), RunError> {
+                Ok(())
+            }
+        }
+
+        let chassis = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+            .with(EchoCap { name: "test.echo" })
+            .driver(CaptureDriver {
+                captured: Arc::clone(&captured),
+            })
+            .build()
+            .expect("build succeeds");
+
+        chassis.run().expect("driver run succeeds");
+        assert!(captured.lock().unwrap().is_some());
+    }
+}
