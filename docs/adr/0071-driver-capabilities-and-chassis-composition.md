@@ -1,7 +1,18 @@
 # ADR-0071: Driver Capabilities and Chassis Composition
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-30
+- **Status updated:** 2026-05-01
+
+## Status update (2026-05-01)
+
+All seven phases shipped (PRs #485 through #498 over two days). Three deviations from the *Decision* text are worth recording for future readers:
+
+1. **Trait redefinition shipped in PR #494 (post phase 7), not in phase 2A.** The original phase-2A landing (PR #484) shipped the driver-capability traits + builder type-state + `BuiltChassis<C>` / `PassiveChassis<C>` + the `KIND` → `PROFILE` rename + the `CAPABILITIES` const removal — but kept the legacy `fn run(self) -> wasmtime::Result<()>` on `Chassis`. PR #494 finished the trait surface to match this ADR's *Trait shapes* section: `Sized + 'static`, `type Driver: DriverCapability`, `type Env`, `fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError>`, no `fn run`. Test-bench (passive chassis with no driver) declares a phantom `NeverDriver` to satisfy the bound; its trait method `build` errors with a pointer to `build_passive`.
+2. **The render capability extraction uses post-boot wgpu install, not eager construction.** The *Render capability* section (lines 218-247) sketched `RenderCapability` as owning `device: Arc<wgpu::Device>`, `queue: Arc<wgpu::Queue>`, `targets: Mutex<Targets>` etc. at construction time. winit 0.30's idioms strongly prefer lazy window creation inside `resumed`, which fires after `Capability::boot` returns — desktop's wgpu device requires surface compatibility with that window, so eager device acquisition isn't reachable on desktop. What shipped (PRs #496–#498): `RenderRunning` carries an `OnceLock<RenderGpu>` populated by the driver via `install_gpu(...)` once it has a device + queue. Test-bench installs immediately after `build_passive`; desktop installs in `resumed`. Encoder-level methods (`record_frame`, `record_capture_copy`, `finish_capture`, `resize`, `device`, `queue`, `with_color_texture`, `color_format`, `color_size`) read the installed `RenderGpu` lock-free via `OnceLock::get()`. Same outcome (RenderCapability owns wgpu state; chassis-side `Gpu` wrappers shrink to chassis-specific bits — surface + wireframe on desktop, device acquisition only on test-bench); accommodates winit's lifecycle without forcing eager window creation.
+3. **The phantom Hello-frame wire slot doesn't exist.** Line 47 says "Hub protocol's `Hello` frame currently carries these flags — for this ADR's transition window the hub sends placeholder/zeroed values; the slot stays on the wire (preserving frame layout) but the data is not load-bearing until self-description lands." `git log -S 'has_gpu' -- crates/aether-hub-protocol/src/types.rs` returns no commits — the `Hello` frame never had a CAPABILITIES field on the wire. The `CAPABILITIES` const was Rust-side only (an associated const on the `Chassis` trait), not a wire slot. The const was removed in phase 2A; no wire-format change happened or was needed.
+
+Self-describing chassis introspection, layered config (CLI > env > TOML > defaults), `#[derive(Chassis)]`, and hot-reload of chassis Env all remain as parked follow-on issues per the *Follow-on work* section.
 
 ## Context
 

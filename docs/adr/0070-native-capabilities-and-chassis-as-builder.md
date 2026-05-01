@@ -1,7 +1,17 @@
 # ADR-0070: Native capabilities and chassis-as-builder
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-04-30
+- **Status updated:** 2026-05-01
+
+## Status update (2026-05-01)
+
+Every phase 1–6 PR shipped per the *Phasing* section. Two deviations from the *Decision* text are worth recording for future readers:
+
+1. **Bubble-up routing landed as `EgressBackend`, not as the `claim_fallback_router` slot.** The *Decision* text described a generic "fallback-router slot" — a single `fn(envelope) -> Routed | Dropped` callback the hub client claims so the substrate stays hub-agnostic. What actually shipped is `aether_substrate_core::EgressBackend`: a 7-method trait with named intents (`egress_to_session`, `egress_broadcast`, `egress_to_engine_mailbox`, `egress_unresolved_mail`, `egress_kinds_changed`, `egress_log_batch`, `is_connected`), implemented by `aether_hub::HubProtocolBackend`. Same outcome (substrate has zero hub knowledge; hub client provides the impl); cleaner shape (typed intents instead of one envelope callback). The `claim_fallback_router` slot in `ChassisCtx` is reachable but unused on the runtime path; a future cleanup ADR may retire it.
+2. **Hub crate framing dep retired by ADR-0072.** Line 87 says `aether-hub` "depends on `aether-hub-protocol` for framing." After ADR-0072, framing helpers live in `aether-codec::frame` and the hub channel wire vocabulary lives in `aether-hub::wire`. The `aether-hub-protocol` crate is retired; the dep edge described here doesn't exist anymore.
+
+Phase 7 ("sink kit ADR") remains explicitly deferred — to be picked up when a forcing function arrives.
 
 ## Context
 
