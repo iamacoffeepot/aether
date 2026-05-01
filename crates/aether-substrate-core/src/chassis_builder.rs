@@ -277,7 +277,7 @@ fn make_driver_boot<D: DriverCapability>(driver: D) -> DriverBoot {
 /// [`Self::driver`] or [`Self::build_passive`]; once `.driver(d)`
 /// runs the builder transitions to `Builder<C, HasDriver>` which
 /// only accepts further [`Self::with`] calls and [`Self::build`].
-pub struct Builder<C: Chassis, S: BuilderState> {
+pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     registry: Arc<Registry>,
     mailer: Arc<Mailer>,
     passives: Vec<PassiveBoot>,
@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn passive_build_exposes_capabilities_via_typed_lookup() {
         let (registry, mailer) = fresh_substrate();
-        let passive = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+        let passive = Builder::<TestChassis>::new(registry, mailer)
             .with(EchoCap { name: "test.echo" })
             .build_passive()
             .expect("build_passive succeeds");
@@ -625,7 +625,7 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        let chassis = Builder::<DrivenTestChassis<EchoDriver>, NoDriver>::new(registry, mailer)
+        let chassis = Builder::<DrivenTestChassis<EchoDriver>>::new(registry, mailer)
             .with(EchoCap { name: "test.echo" })
             .driver(EchoDriver {
                 ran: Arc::clone(&ran),
@@ -642,7 +642,7 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         registry.register_sink("test.collide", Arc::new(|_, _, _, _, _, _| {}));
 
-        let err = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+        let err = Builder::<TestChassis>::new(registry, mailer)
             .with(EchoCap { name: "test.fresh" })
             .with(EchoCap {
                 name: "test.collide",
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn passive_chassis_drop_runs_shutdowns() {
         let (registry, mailer) = fresh_substrate();
-        let passive = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+        let passive = Builder::<TestChassis>::new(registry, mailer)
             .with(EchoCap { name: "test.echo" })
             .build_passive()
             .expect("build_passive succeeds");
@@ -699,7 +699,7 @@ mod tests {
         }
 
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let passive = Builder::<TestChassis, NoDriver>::new(registry, mailer)
+        let passive = Builder::<TestChassis>::new(registry, mailer)
             .with(ProbeCap {
                 flag: Arc::clone(&flag),
             })
@@ -738,7 +738,7 @@ mod tests {
             }
         }
 
-        let chassis = Builder::<DrivenTestChassis<CaptureDriver>, NoDriver>::new(registry, mailer)
+        let chassis = Builder::<DrivenTestChassis<CaptureDriver>>::new(registry, mailer)
             .with(EchoCap { name: "test.echo" })
             .driver(CaptureDriver {
                 captured: Arc::clone(&captured),

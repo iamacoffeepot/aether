@@ -19,7 +19,7 @@ use aether_kinds::{
     SetWindowMode, SetWindowTitle, Tick,
 };
 use aether_substrate_core::capability::BootError;
-use aether_substrate_core::chassis_builder::{Builder, BuiltChassis, NoDriver};
+use aether_substrate_core::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate_core::{
     Chassis, ChassisControlHandler, HubOutbound, ReplyTo, SubstrateBoot,
     capabilities::{
@@ -231,7 +231,7 @@ impl HeadlessChassis {
         // chassis_builder `.with()` chain. Boot order is declaration
         // order — log first so other capabilities' boot tracing routes
         // through the log capture.
-        Builder::<HeadlessChassis, NoDriver>::new(registry, mailer)
+        Builder::<HeadlessChassis>::new(registry, mailer)
             .with(LogCapability::new())
             .with(IoCapability::new(namespace_roots))
             .with(NetCapability::new(net))

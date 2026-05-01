@@ -27,9 +27,7 @@ use aether_kinds::{
     Tick,
 };
 use aether_substrate_core::capability::BootError;
-use aether_substrate_core::chassis_builder::{
-    Builder, BuiltChassis, NeverDriver, NoDriver, PassiveChassis,
-};
+use aether_substrate_core::chassis_builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate_core::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
@@ -142,7 +140,7 @@ impl Chassis for TestBenchChassis {
     /// Phantom driver — test-bench is passive (the embedder is the
     /// driver). Declaring [`NeverDriver`] satisfies the trait bound;
     /// the value is never instantiated because TestBench's build
-    /// path goes through `Builder::<_, NoDriver>::build_passive`.
+    /// path goes through `Builder::<_>::build_passive`.
     type Driver = NeverDriver;
     type Env = TestBenchEnv;
 
@@ -277,14 +275,12 @@ impl TestBenchChassis {
         });
         let render_handles = render_cap.handles();
 
-        let passive = Builder::<TestBenchChassis, NoDriver>::new(
-            Arc::clone(&boot.registry),
-            Arc::clone(&boot.queue),
-        )
-        .with(LogCapability::new())
-        .with(render_cap)
-        .build_passive()
-        .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
+        let passive =
+            Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
+                .with(LogCapability::new())
+                .with(render_cap)
+                .build_passive()
+                .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
 
         let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())?;
 

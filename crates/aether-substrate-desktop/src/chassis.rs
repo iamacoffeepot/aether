@@ -21,7 +21,7 @@ use aether_kinds::{
     SetWindowTitleResult, WindowMode,
 };
 use aether_substrate_core::capability::BootError;
-use aether_substrate_core::chassis_builder::{Builder, BuiltChassis, NoDriver};
+use aether_substrate_core::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate_core::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
@@ -340,7 +340,7 @@ impl DesktopChassis {
         // order — log first so other capabilities' boot tracing routes
         // through the log capture; render last among passives so it
         // claims its mailboxes after every other chassis sink.
-        Builder::<DesktopChassis, NoDriver>::new(registry, mailer)
+        Builder::<DesktopChassis>::new(registry, mailer)
             .with(LogCapability::new())
             .with(IoCapability::new(namespace_roots))
             .with(NetCapability::new(net))
