@@ -73,7 +73,6 @@ name = "aether-component"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-data",
- "aether-hub-protocol",
  "aether-kinds",
  "bytemuck",
  "inventory",
@@ -166,7 +165,6 @@ version = "0.2.0-alpha"
 dependencies = [
  "aether-codec",
  "aether-data",
- "aether-hub-protocol",
  "aether-kinds",
  "aether-substrate-core",
  "axum",
@@ -183,16 +181,6 @@ dependencies = [
  "tracing",
  "uuid",
  "wasmtime",
-]
-
-[[package]]
-name = "aether-hub-protocol"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-data",
- "postcard",
- "serde",
- "uuid",
 ]
 
 [[package]]
@@ -255,7 +243,6 @@ version = "0.2.0-alpha"
 dependencies = [
  "aether-codec",
  "aether-data",
- "aether-hub-protocol",
  "aether-kinds",
  "aether-scenario-macros",
  "aether-substrate-test-bench",
@@ -311,9 +298,9 @@ dependencies = [
 name = "aether-substrate-desktop"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-codec",
  "aether-data",
  "aether-hub",
- "aether-hub-protocol",
  "aether-kinds",
  "aether-substrate-core",
  "bytemuck",
@@ -335,7 +322,6 @@ version = "0.2.0-alpha"
 dependencies = [
  "aether-data",
  "aether-hub",
- "aether-hub-protocol",
  "aether-kinds",
  "aether-substrate-core",
  "tracing",
@@ -356,7 +342,6 @@ version = "0.2.0-alpha"
 dependencies = [
  "aether-data",
  "aether-hub",
- "aether-hub-protocol",
  "aether-kinds",
  "aether-scenario",
  "aether-substrate-core",

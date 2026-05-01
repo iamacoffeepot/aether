@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use aether_hub_protocol::LogLevel;
+use crate::wire::LogLevel;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

@@ -12,9 +12,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use aether_hub_protocol::{EngineId, HubToEngine};
-
 use aether_data::KindDescriptor;
+
+use crate::wire::{EngineId, HubToEngine};
 use tokio::process::Child;
 use tokio::sync::mpsc;
 
@@ -213,7 +213,7 @@ impl EngineRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_hub_protocol::Uuid;
+    use crate::wire::Uuid;
 
     fn record(id_u128: u128) -> EngineRecord {
         let (tx, _rx) = mpsc::channel(1);

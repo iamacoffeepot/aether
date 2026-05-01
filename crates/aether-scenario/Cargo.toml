@@ -15,7 +15,6 @@ path = "src/lib.rs"
 
 [dependencies]
 aether-data = { path = "../aether-data" }
-aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-kinds = { path = "../aether-kinds" }
 aether-codec = { path = "../aether-codec" }
 aether-scenario-macros = { path = "../aether-scenario-macros" }

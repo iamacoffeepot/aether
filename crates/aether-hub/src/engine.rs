@@ -9,10 +9,11 @@
 
 use std::time::Duration;
 
-use aether_hub_protocol::{
-    ClaudeAddress, EngineId, EngineMailFrame, EngineToHub, FrameError, HubToEngine, MAX_FRAME_SIZE,
-    MailByIdFrame, Uuid, Welcome,
+use crate::wire::{
+    ClaudeAddress, EngineId, EngineMailFrame, EngineToHub, HubToEngine, MailByIdFrame, Uuid,
+    Welcome,
 };
+use aether_codec::frame::{FrameError, MAX_FRAME_SIZE, encode_frame};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -318,9 +319,9 @@ fn dispatch_session_mail(
     }
 }
 
-/// Async analogue of `aether_hub_protocol::read_frame`. Keeps the
-/// protocol crate tokio-free; the substrate client will grow a
-/// symmetrical helper next PR.
+/// Async analogue of [`aether_codec::frame::read_frame`]. Keeps the
+/// codec framing helpers tokio-free; tokio code that wants the same
+/// length-prefixed-postcard contract reaches for this.
 async fn read_frame_async<R, T>(r: &mut R) -> Result<T, FrameError>
 where
     R: AsyncReadExt + Unpin,
@@ -345,7 +346,7 @@ where
     W: AsyncWriteExt + Unpin,
     T: serde::Serialize,
 {
-    let bytes = aether_hub_protocol::encode_frame(msg);
+    let bytes = encode_frame(msg);
     w.write_all(&bytes).await?;
     Ok(())
 }
@@ -404,7 +405,7 @@ mod tests {
         let sessions = SessionRegistry::new();
         let (_a, mut rx_a) = SessionHandle::mint(&sessions);
 
-        let nobody = aether_hub_protocol::SessionToken(Uuid::from_u128(0xdead));
+        let nobody = crate::wire::SessionToken(Uuid::from_u128(0xdead));
         route_engine_mail(
             &sessions,
             engine_id(1),

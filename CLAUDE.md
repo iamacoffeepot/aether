@@ -8,14 +8,15 @@ Pre-1.0 Rust project (edition 2024). Vision: a game engine where Claude sits in 
 
 ## Infrastructure crates (ADR-0069)
 
-The non-component infrastructure cluster has four crates with role-distinct names:
+The non-component infrastructure cluster has three crates with role-distinct names:
 
-- **`aether-data`** — universal data layer. Typed-id newtypes (`MailboxId`, `KindId`, `HandleId`), schema vocabulary (`SchemaType`, `KindShape`, `KindLabels`, `InputsRecord`, canonical bytes), `Kind` / `Schema` / `CastEligible` traits, `Ref<K>`, encode/decode helpers, native descriptor inventory. `no_std` + `alloc`. Every consumer that describes typed bytes depends on this.
-- **`aether-codec`** — schema-driven JSON ↔ wire bytes (formerly `aether-params-codec`). Pure functions over `aether_data::SchemaType`; future home for non-JSON codecs (msgpack, save-format adapters).
-- **`aether-hub-protocol`** — engine ↔ hub channel wire only (frames + framing helpers). Std-only.
+- **`aether-data`** — universal data layer. Typed-id newtypes (`MailboxId`, `KindId`, `HandleId`), wire identity types (`EngineId`, `SessionToken`, `Uuid`), schema vocabulary (`SchemaType`, `KindShape`, `KindLabels`, `InputsRecord`, canonical bytes), `Kind` / `Schema` / `CastEligible` traits, `Ref<K>`, encode/decode helpers, native descriptor inventory. `no_std` + `alloc`. Every consumer that describes typed bytes depends on this.
+- **`aether-codec`** — byte-encoding toolkit (formerly `aether-params-codec`). Pure functions: schema-driven JSON ↔ wire bytes over `aether_data::SchemaType` (`encode_schema`, `decode_schema`) plus generic length-prefix postcard stream framing (`frame::encode_frame` / `read_frame` / `write_frame`, ADR-0072). Future home for non-JSON formats (msgpack, save-format adapters) and non-postcard framing variants.
 - **`aether-kinds`** — substrate vocabulary: concrete kind types (`Tick`, `Key`, `DrawTriangle`, `aether.audio.*`, `aether.io.*`, `aether.control.*`, `aether.observation.*`, `aether.camera`) plus the well-known mailboxes registry (`mailboxes::CONTROL`, `mailboxes::DIAGNOSTICS`, `mailboxes::SINK_*`).
 
-`aether-id`, `aether-mail`, and `aether-params-codec` are retired. `Mail<'_>` and `Sink<K>` live in `aether-component` (guest SDK); the host's dispatcher-side `Mail` lives in `aether-substrate-core`. The "transport envelope" abstraction is split between SDK and dispatcher rather than shared.
+The hub channel wire vocabulary (`EngineToHub`, `HubToEngine`, `Hello`, `MailFrame`, etc.) lives in `aether-hub::wire` next to the runtime that speaks it (ADR-0072). Future sibling stream protocols define their own frame-enum modules in their own crates and reuse `aether-codec::frame` for the generic helpers.
+
+`aether-id`, `aether-mail`, `aether-params-codec`, and `aether-hub-protocol` are retired. `Mail<'_>` and `Sink<K>` live in `aether-component` (guest SDK); the host's dispatcher-side `Mail` lives in `aether-substrate-core`. The "transport envelope" abstraction is split between SDK and dispatcher rather than shared.
 
 ## Workflow
 

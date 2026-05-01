@@ -41,7 +41,7 @@ mod tools;
 // helpers in `codecs` stay `pub(super)` and are reachable from
 // `tools` only.
 #[cfg(test)]
-use aether_hub_protocol::{HubToEngine, SessionToken, Uuid};
+use crate::wire::{HubToEngine, SessionToken, Uuid};
 #[cfg(test)]
 use args::{
     CaptureFrameArgs, DescribeKindsArgs, EngineInfo, MailSpec, MailStatus, ReceiveMailArgs,
@@ -133,7 +133,7 @@ pub async fn run_mcp_server(addr: SocketAddr, state: Arc<HubState>) -> std::io::
 mod tests {
     use super::*;
     use crate::registry::EngineRecord;
-    use aether_hub_protocol::EngineId;
+    use crate::wire::EngineId;
     use tokio::sync::mpsc;
 
     /// Build a `HubState` with spawn fields stubbed for tests that don't
