@@ -340,7 +340,13 @@ impl DesktopChassis {
         let boot_kinds_count = boot.boot_descriptors.len() as u32;
 
         // Hub connect AFTER every chassis sink is registered (issue #262).
-        let hub = boot.connect_hub(hub_url.as_deref())?;
+        // Post-ADR-0070 phase 4: the hub client lives in `aether-hub`;
+        // substrate-core has no hub knowledge. The free-function form
+        // matches the pre-refactor `boot.connect_hub` shape; chassis
+        // that prefer Builder-pipeline composition can swap in
+        // `aether_hub::HubClientCapability` instead (the free fn is
+        // a thin wrapper around the same path).
+        let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())?;
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);

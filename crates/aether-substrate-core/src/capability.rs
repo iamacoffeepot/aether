@@ -219,6 +219,22 @@ impl<'a> ChassisCtx<'a> {
         Arc::clone(self.mailer)
     }
 
+    /// Borrow the chassis's registry. Capabilities that resolve
+    /// names or descriptors at boot (today: the `aether-hub` client
+    /// capability cloning the registry into its TCP reader thread)
+    /// reach for this; most capabilities don't need it.
+    pub fn registry(&self) -> &Arc<Registry> {
+        self.registry
+    }
+
+    /// Borrow the chassis's mailer. Same shape as
+    /// [`Self::mail_send_handle`] but returns a borrow instead of a
+    /// clone — preferred when the capability is going to clone with
+    /// `Arc::clone` itself.
+    pub fn mailer(&self) -> &Arc<Mailer> {
+        self.mailer
+    }
+
     /// Install the fallback-router handler. At most one capability
     /// may claim the slot; a second call returns
     /// [`BootError::FallbackRouterAlreadyClaimed`].

@@ -31,9 +31,9 @@ use aether_kinds::{
 };
 
 use crate::control::{decode_payload, resolve_bundle};
-use crate::hub_client::HubOutbound;
 use crate::mail::{Mail, ReplyTo};
 use crate::mailer::Mailer;
+use crate::outbound::HubOutbound;
 use crate::registry::Registry;
 
 /// One pending capture request. Carries the reply handle so the

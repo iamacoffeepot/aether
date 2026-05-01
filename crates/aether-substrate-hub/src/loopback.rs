@@ -38,13 +38,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aether_data::Kind;
+use aether_hub::{HubProtocolBackend, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail};
 use aether_hub_protocol::{
     EngineId, EngineMailToHubSubstrateFrame, EngineToHub, HubToEngine, MailByIdFrame, Uuid,
 };
 use aether_kinds::UnresolvedMail;
-use aether_substrate_core::{
-    Mail, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot, dispatch_hub_to_engine_mail,
-};
+use aether_substrate_core::{Mail, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot};
 use tokio::sync::mpsc;
 
 use crate::log_store::LogStore;
@@ -223,7 +222,8 @@ impl LoopbackEngine {
             SubstrateBoot::builder("aether-substrate-hub", env!("CARGO_PKG_VERSION")).build()?;
 
         let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<EngineToHub>();
-        boot.outbound.attach(outbound_tx);
+        boot.outbound
+            .attach_backend(std::sync::Arc::new(HubProtocolBackend::new(outbound_tx)));
 
         let (inbound_tx, inbound_rx) = mpsc::channel::<HubToEngine>(INBOUND_CHANNEL_CAPACITY);
 
@@ -264,9 +264,7 @@ pub async fn run_inbound_drainer(
     while let Some(frame) = inbound_rx.recv().await {
         match frame {
             HubToEngine::Mail(mail) => dispatch_hub_to_engine_mail(mail, &registry, &queue),
-            HubToEngine::MailById(mail) => {
-                aether_substrate_core::dispatch_hub_mail_by_id(mail, &registry, &queue)
-            }
+            HubToEngine::MailById(mail) => dispatch_hub_mail_by_id(mail, &registry, &queue),
             HubToEngine::Heartbeat | HubToEngine::Welcome(_) | HubToEngine::Goodbye(_) => {}
         }
     }

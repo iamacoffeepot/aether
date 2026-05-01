@@ -13,10 +13,9 @@
 //! caller-side cleanup would race the hub's reaping of the engine
 //! anyway.
 
-use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use aether_kinds::SubstrateDying;
 
-use crate::hub_client::HubOutbound;
+use crate::outbound::HubOutbound;
 
 /// Process exit code on fatal abort. Distinct from `0` (clean exit)
 /// and `1` (which Rust uses for panics from `main`).
@@ -46,13 +45,12 @@ pub fn fatal_abort(outbound: &HubOutbound, reason: String) -> ! {
     if let Ok(payload) = postcard::to_allocvec(&SubstrateDying {
         reason: reason.clone(),
     }) {
-        outbound.send(EngineToHub::Mail(EngineMailFrame {
-            address: ClaudeAddress::Broadcast,
-            kind_name: <SubstrateDying as aether_data::Kind>::NAME.to_owned(),
+        outbound.egress_broadcast(
+            <SubstrateDying as aether_data::Kind>::NAME,
             payload,
-            origin: None,
-            correlation_id: 0,
-        }));
+            None,
+            0,
+        );
     }
 
     // Drain whatever's in the capture ring onto the engine TCP

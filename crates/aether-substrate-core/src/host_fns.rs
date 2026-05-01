@@ -7,7 +7,6 @@
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 
-use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
 use wasmtime::{Caller, Linker};
 
 use crate::ctx::{StateBundle, SubstrateCtx};
@@ -187,13 +186,8 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                         return REPLY_KIND_NOT_FOUND;
                     };
                     let origin = ctx.registry.mailbox_name(ctx.sender);
-                    ctx.outbound.send(EngineToHub::Mail(EngineMailFrame {
-                        address: ClaudeAddress::Session(token),
-                        kind_name,
-                        payload,
-                        origin,
-                        correlation_id: correlation,
-                    }));
+                    ctx.outbound
+                        .egress_to_session(token, &kind_name, payload, origin, correlation);
                 }
                 ReplyTarget::Component(mbox) => {
                     // Validate the kind id cheaply — the guest might
@@ -219,16 +213,14 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
                     if ctx.registry.kind_name(kind).is_none() {
                         return REPLY_KIND_NOT_FOUND;
                     }
-                    ctx.outbound.send(EngineToHub::MailToEngineMailbox(
-                        aether_hub_protocol::MailToEngineMailboxFrame {
-                            target_engine_id: engine_id,
-                            target_mailbox_id: mailbox_id,
-                            kind_id: kind,
-                            payload,
-                            count,
-                            correlation_id: correlation,
-                        },
-                    ));
+                    ctx.outbound.egress_to_engine_mailbox(
+                        engine_id,
+                        mailbox_id,
+                        kind,
+                        payload,
+                        count,
+                        correlation,
+                    );
                 }
                 ReplyTarget::None => {
                     // Shouldn't happen — `ReplyEntry`s only get

@@ -17,12 +17,11 @@ use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
-use crate::hub_client::HubOutbound;
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
+use crate::outbound::HubOutbound;
 use crate::registry::{MailboxEntry, Registry};
 use crate::scheduler::ComponentTable;
 use aether_data::{HandleId, KindId};
-use aether_hub_protocol::{EngineMailToHubSubstrateFrame, EngineToHub};
 
 pub struct Mailer {
     /// Registry handle for resolving recipients on `push`. Wired once
@@ -366,23 +365,14 @@ fn route_mail(
                 // up frame so a reply coming back via Phase-2 reply
                 // routing lands at the originator's `wait_reply_p32`.
                 let correlation_id = mail.reply_to.correlation_id;
-                let sent = outbound.send(EngineToHub::MailToHubSubstrate(
-                    EngineMailToHubSubstrateFrame {
-                        recipient_mailbox_id: recipient,
-                        kind_id: mail.kind,
-                        payload: mail.payload,
-                        count: mail.count,
-                        source_mailbox_id,
-                        correlation_id,
-                    },
-                ));
-                if !sent {
-                    tracing::warn!(
-                        target: "aether_substrate::queue",
-                        mailbox = %recipient,
-                        "bubbles-up failed (writer channel closed); mail dropped",
-                    );
-                }
+                outbound.egress_unresolved_mail(
+                    recipient,
+                    mail.kind,
+                    mail.payload,
+                    mail.count,
+                    source_mailbox_id,
+                    correlation_id,
+                );
                 return;
             }
             tracing::warn!(
@@ -403,6 +393,7 @@ mod tests {
     use super::*;
     use crate::handle_store::HandleStore;
     use crate::mail::MailboxId;
+    use crate::outbound::EgressEvent;
     use crate::registry::SinkHandler;
     use aether_data::{Kind, Ref};
     use aether_data::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
@@ -413,7 +404,7 @@ mod tests {
     /// mailbox id / kind / payload / count the caller pushed.
     #[test]
     fn unknown_mailbox_with_connected_outbound_bubbles_up() {
-        let (outbound, outbound_rx) = HubOutbound::attached_loopback();
+        let (outbound, outbound_rx) = crate::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let components = Arc::new(RwLock::new(HashMap::new()));
 
@@ -426,15 +417,21 @@ mod tests {
         let payload = vec![1, 2, 3];
         mailer.push(Mail::new(unknown, kind, payload.clone(), 1));
 
-        let frame = outbound_rx.try_recv().expect("bubble-up frame emitted");
-        match frame {
-            EngineToHub::MailToHubSubstrate(f) => {
-                assert_eq!(f.recipient_mailbox_id, unknown);
-                assert_eq!(f.kind_id, kind);
-                assert_eq!(f.payload, payload);
-                assert_eq!(f.count, 1);
+        let event = outbound_rx.try_recv().expect("bubble-up event emitted");
+        match event {
+            EgressEvent::UnresolvedMail {
+                recipient_mailbox_id,
+                kind_id,
+                payload: p,
+                count,
+                ..
+            } => {
+                assert_eq!(recipient_mailbox_id, unknown);
+                assert_eq!(kind_id, kind);
+                assert_eq!(p, payload);
+                assert_eq!(count, 1);
             }
-            other => panic!("expected MailToHubSubstrate, got {other:?}"),
+            other => panic!("expected UnresolvedMail, got {other:?}"),
         }
     }
 

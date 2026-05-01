@@ -14,10 +14,10 @@ use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
-use crate::hub_client::HubOutbound;
 use crate::input::InputSubscribers;
 use crate::mail::{Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 use crate::mailer::Mailer;
+use crate::outbound::HubOutbound;
 use crate::registry::{MailboxEntry, Registry};
 use crate::reply_table::ReplyTable;
 
@@ -221,7 +221,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::RwLock;
 
-    use aether_hub_protocol::EngineToHub;
+    use crate::outbound::EgressEvent;
 
     use super::*;
 
@@ -232,7 +232,7 @@ mod tests {
     /// `ReplyTo::EngineMailbox` for the receiving component.
     #[test]
     fn unknown_recipient_bubbles_up_with_sender_mailbox() {
-        let (outbound, outbound_rx) = HubOutbound::attached_loopback();
+        let (outbound, outbound_rx) = crate::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let sender = registry.register_component("client");
 
@@ -252,16 +252,23 @@ mod tests {
         let kind = aether_data::KindId(0xABCD_u64);
         ctx.send(unknown, kind, vec![1, 2, 3], 1);
 
-        let frame = outbound_rx.try_recv().expect("bubble-up frame emitted");
-        match frame {
-            EngineToHub::MailToHubSubstrate(f) => {
-                assert_eq!(f.recipient_mailbox_id, unknown);
-                assert_eq!(f.kind_id, kind);
-                assert_eq!(f.payload, vec![1, 2, 3]);
-                assert_eq!(f.count, 1);
-                assert_eq!(f.source_mailbox_id, Some(sender));
+        let event = outbound_rx.try_recv().expect("bubble-up event emitted");
+        match event {
+            EgressEvent::UnresolvedMail {
+                recipient_mailbox_id,
+                kind_id,
+                payload,
+                count,
+                source_mailbox_id,
+                ..
+            } => {
+                assert_eq!(recipient_mailbox_id, unknown);
+                assert_eq!(kind_id, kind);
+                assert_eq!(payload, vec![1, 2, 3]);
+                assert_eq!(count, 1);
+                assert_eq!(source_mailbox_id, Some(sender));
             }
-            other => panic!("expected MailToHubSubstrate, got {other:?}"),
+            other => panic!("expected UnresolvedMail egress, got {other:?}"),
         }
     }
 
@@ -270,7 +277,7 @@ mod tests {
     /// upstream frame.
     #[test]
     fn unknown_recipient_without_outbound_warn_drops() {
-        let (outbound, outbound_rx) = HubOutbound::attached_loopback();
+        let (outbound, outbound_rx) = crate::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let sender = registry.register_component("client");
 

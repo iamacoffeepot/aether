@@ -23,6 +23,7 @@ use std::time::Instant;
 
 use aether_data::Kind;
 use aether_data::{encode, encode_empty};
+use aether_hub::HubClient;
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, Key,
     KeyRelease, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult,
@@ -34,7 +35,7 @@ use aether_substrate_core::chassis_builder::{
     DriverCapability, DriverCtx, DriverRunning, RunError,
 };
 use aether_substrate_core::{
-    HubClient, HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop,
+    HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
 };

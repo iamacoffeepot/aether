@@ -224,15 +224,14 @@ mod tests {
     use std::sync::RwLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use aether_hub_protocol::EngineToHub;
     use aether_kinds::{
         HandleError, HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
         HandleReleaseResult, HandleUnpin, HandleUnpinResult,
     };
 
     use super::*;
-    use crate::hub_client::HubOutbound;
     use crate::mail::{Mail, MailboxId, ReplyTarget, ReplyTo};
+    use crate::outbound::EgressEvent;
     use crate::registry::Registry;
 
     /// Wires the substrate state `dispatch` reads from. Returns owned
@@ -242,7 +241,7 @@ mod tests {
         Arc<HandleStore>,
         Arc<Mailer>,
         Arc<Registry>,
-        std::sync::mpsc::Receiver<EngineToHub>,
+        std::sync::mpsc::Receiver<EgressEvent>,
     ) {
         let store = Arc::new(HandleStore::new(64 * 1024));
         let registry = Arc::new(Registry::new());
@@ -251,7 +250,7 @@ mod tests {
         for d in aether_kinds::descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let (outbound, rx) = HubOutbound::attached_loopback();
+        let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(Arc::clone(&registry), Arc::new(RwLock::new(HashMap::new())));
         mailer.wire_outbound(outbound);
@@ -267,10 +266,12 @@ mod tests {
         ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(0xfeed))))
     }
 
-    fn extract_payload(frame: EngineToHub) -> Vec<u8> {
-        match frame {
-            EngineToHub::Mail(m) => m.payload,
-            other => panic!("expected Mail frame, got {other:?}"),
+    fn extract_payload(event: EgressEvent) -> Vec<u8> {
+        match event {
+            EgressEvent::ToSession { payload, .. } | EgressEvent::Broadcast { payload, .. } => {
+                payload
+            }
+            other => panic!("expected ToSession/Broadcast egress, got {other:?}"),
         }
     }
 

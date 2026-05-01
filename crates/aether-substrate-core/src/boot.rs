@@ -36,15 +36,13 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use aether_hub_protocol::{ClaudeAddress, EngineMailFrame, EngineToHub};
-
 use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::{
     AETHER_CONTROL, AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ChassisControlHandler,
-    ControlPlane, HUB_CLAUDE_BROADCAST, HubClient, HubOutbound, InputSubscribers, Mailer, Registry,
-    Scheduler, SubstrateCtx, capabilities::HandleCapability, handle_store::HandleStore, host_fns,
+    ControlPlane, HUB_CLAUDE_BROADCAST, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler,
+    SubstrateCtx, capabilities::HandleCapability, handle_store::HandleStore, host_fns,
     input::new_subscribers, log_capture, mail::MailboxId,
 };
 
@@ -89,11 +87,11 @@ pub struct SubstrateBoot {
     /// chassis binaries that want explicit control can `take()` and
     /// call [`BootedChassis::shutdown`] themselves.
     pub chassis: Option<BootedChassis>,
-    /// Substrate identity for the hub `Hello` handshake. Owned so
-    /// `connect_hub` / `connect_hub_from_env` can use them after
-    /// `build()` returns.
-    name: String,
-    version: String,
+    /// Substrate identity passed to the boot builder. Chassis crates
+    /// thread these through to `aether_hub::HubClientCapability` (via
+    /// the `Hello` handshake) without re-reading their own config.
+    pub name: String,
+    pub version: String,
 }
 
 /// Handles the chassis handler closure closes over when building its
@@ -177,37 +175,6 @@ impl SubstrateBoot {
         chassis
             .add(&self.registry, &self.queue, cap)
             .map_err(|e| wasmtime::Error::msg(format!("capability boot failed: {e}")))
-    }
-
-    pub fn connect_hub(&self, url: Option<&str>) -> wasmtime::Result<Option<HubClient>> {
-        let url = match url {
-            Some(u) if !u.is_empty() => u,
-            _ => return Ok(None),
-        };
-        let client = HubClient::connect(
-            url,
-            &self.name,
-            &self.version,
-            self.boot_descriptors.clone(),
-            Arc::clone(&self.registry),
-            Arc::clone(&self.queue),
-            Arc::clone(&self.outbound),
-        )
-        .map_err(|e| wasmtime::Error::msg(format!("hub connect to {url:?} failed: {e}")))?;
-        Ok(Some(client))
-    }
-
-    /// Env-driven wrapper around [`SubstrateBoot::connect_hub`].
-    /// Reads `AETHER_HUB_URL` from the process env and forwards it
-    /// to `connect_hub`. Returns `Ok(None)` if the var is unset or
-    /// empty.
-    ///
-    /// Chassis mains should prefer reading the env once and calling
-    /// `connect_hub` directly — see issue 464. This wrapper is kept
-    /// for callers that don't need to thread env through their own
-    /// config struct.
-    pub fn connect_hub_from_env(&self) -> wasmtime::Result<Option<HubClient>> {
-        self.connect_hub(std::env::var("AETHER_HUB_URL").ok().as_deref())
     }
 }
 
@@ -299,13 +266,12 @@ impl<'a> SubstrateBootBuilder<'a> {
                         // originating sends if it wants to. Most
                         // broadcast uses are fire-and-forget and
                         // ignore it.
-                        outbound.send(EngineToHub::Mail(EngineMailFrame {
-                            address: ClaudeAddress::Broadcast,
-                            kind_name: kind_name.to_owned(),
-                            payload: bytes.to_vec(),
-                            origin: origin.map(str::to_owned),
-                            correlation_id: sender.correlation_id,
-                        }));
+                        outbound.egress_broadcast(
+                            kind_name,
+                            bytes.to_vec(),
+                            origin.map(str::to_owned),
+                            sender.correlation_id,
+                        );
                     },
                 ),
             )
@@ -427,13 +393,13 @@ mod tests {
     /// `load_component` running before the chassis registers its
     /// sinks can race ahead and bind a chassis sink name to a
     /// component, panicking the substrate when the chassis later
-    /// tries to install the real sink handler. The fix moved hub
-    /// connect out of `build()` into the explicit `connect_hub` (and
-    /// `connect_hub_from_env` wrapper) so the chassis controls the
-    /// timing. Per issue 464, the env-driven helper is the chassis's
-    /// edge — this test passes a bogus URL through `connect_hub`
-    /// directly to confirm `build()` itself never dials, without
-    /// touching process env.
+    /// tries to install the real sink handler. ADR-0070 phase 4 /
+    /// ADR-0071 phase 7 retired `boot.connect_hub` entirely — the
+    /// chassis composes `aether_hub::HubClientCapability` via the
+    /// `Builder::with()` path instead, so `build()` is structurally
+    /// incapable of reaching the hub. This test asserts the
+    /// substrate-core invariant: `build()` returns a fully-wired
+    /// boot whose `outbound` is disconnected.
     #[test]
     fn build_does_not_dial_hub() {
         let boot = SubstrateBoot::builder("test", env!("CARGO_PKG_VERSION"))
@@ -443,8 +409,9 @@ mod tests {
         // racing a hub-driven load.
         boot.registry
             .register_sink("test_chassis_sink", Arc::new(|_, _, _, _, _, _| {}));
-        // And `connect_hub(None)` short-circuits to `Ok(None)` —
-        // proving the env-free path.
-        assert!(boot.connect_hub(None).expect("connect_hub None").is_none());
+        // No backend attached → `is_connected()` is false. Chassis
+        // crates that want a hub bridge wire `HubClientCapability`
+        // themselves through their `Builder`.
+        assert!(!boot.outbound.is_connected());
     }
 }

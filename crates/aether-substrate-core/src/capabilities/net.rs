@@ -571,17 +571,19 @@ mod tests {
         }
     }
 
-    use crate::hub_client::HubOutbound;
-    use aether_hub_protocol::{EngineToHub, SessionToken, Uuid};
+    use aether_hub_protocol::{SessionToken, Uuid};
+
+    use crate::outbound::EgressEvent;
+
     fn session_sender() -> ReplyTo {
         ReplyTo::to(crate::mail::ReplyTarget::Session(SessionToken(Uuid::nil())))
     }
 
-    fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EngineToHub>) {
+    fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
         use std::collections::HashMap;
         use std::sync::RwLock;
 
-        let (outbound, rx) = HubOutbound::attached_loopback();
+        let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(
             Arc::new(crate::registry::Registry::new()),
@@ -592,14 +594,17 @@ mod tests {
     }
 
     fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
-        rx: &std::sync::mpsc::Receiver<EngineToHub>,
+        rx: &std::sync::mpsc::Receiver<EgressEvent>,
     ) -> K {
-        let frame = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
-        let EngineToHub::Mail(m) = frame else {
-            panic!("expected Mail frame, got {frame:?}");
+        let event = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        let EgressEvent::ToSession {
+            kind_name, payload, ..
+        } = event
+        else {
+            panic!("expected ToSession egress, got {event:?}");
         };
-        assert_eq!(m.kind_name, K::NAME);
-        postcard::from_bytes(&m.payload).unwrap()
+        assert_eq!(kind_name, K::NAME);
+        postcard::from_bytes(&payload).unwrap()
     }
 
     /// Boot the capability against a default disabled NetConfig and

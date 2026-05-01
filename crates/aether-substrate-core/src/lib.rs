@@ -33,7 +33,6 @@ pub mod frame_loop;
 pub mod handle_sink;
 pub mod handle_store;
 pub mod host_fns;
-pub mod hub_client;
 pub mod input;
 pub mod kind_manifest;
 pub mod lifecycle;
@@ -41,6 +40,7 @@ pub mod log_capture;
 pub mod log_sink;
 pub mod mail;
 pub mod mailer;
+pub mod outbound;
 pub mod panic_hook;
 pub mod registry;
 #[cfg(feature = "render")]
@@ -61,12 +61,12 @@ pub use chassis_builder::{
 pub use component::Component;
 pub use control::{AETHER_CONTROL, ChassisControlHandler, ControlPlane};
 pub use ctx::SubstrateCtx;
-pub use hub_client::{
-    HubClient, HubOutbound, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail,
-};
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
 pub use mail::{KindId, Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 pub use mailer::Mailer;
+pub use outbound::{
+    DroppingBackend, EgressBackend, EgressEvent, HubOutbound, LogEntry, LogLevel, RecordingBackend,
+};
 pub use panic_hook::init_panic_hook;
 pub use registry::{MailboxEntry, Registry, SinkHandler};
 pub use scheduler::Scheduler;

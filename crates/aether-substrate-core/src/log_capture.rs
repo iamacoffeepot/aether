@@ -26,7 +26,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aether_hub_protocol::{EngineToHub, LogEntry, LogLevel};
+use crate::outbound::{LogEntry, LogLevel};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::field::Visit;
@@ -35,7 +35,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, fmt as tsfmt};
 
-use crate::hub_client::HubOutbound;
+use crate::outbound::HubOutbound;
 
 /// Per-event message cap before truncation.
 const MESSAGE_CAP: usize = 16 * 1024;
@@ -125,7 +125,7 @@ fn flush_into(inner: &Inner) {
         take_batch(&mut s)
     };
     if !batch.is_empty() {
-        inner.outbound.send(EngineToHub::LogBatch(batch));
+        inner.outbound.egress_log_batch(batch);
     }
 }
 
@@ -216,7 +216,7 @@ fn flush_loop(inner: Arc<Inner>) {
             take_batch(&mut s)
         };
         if !batch.is_empty() {
-            inner.outbound.send(EngineToHub::LogBatch(batch));
+            inner.outbound.egress_log_batch(batch);
         }
     }
 }
@@ -336,9 +336,10 @@ impl Visit for MessageVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outbound::EgressEvent;
 
-    fn make_inner() -> (Arc<Inner>, std::sync::mpsc::Receiver<EngineToHub>) {
-        let (outbound, rx) = HubOutbound::attached_loopback();
+    fn make_inner() -> (Arc<Inner>, std::sync::mpsc::Receiver<EgressEvent>) {
+        let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
         (Arc::new(Inner::new(outbound)), rx)
     }
 
@@ -399,9 +400,9 @@ mod tests {
 
         flush_into(&inner);
 
-        let frame = rx.try_recv().expect("flush_into should send a batch");
-        let EngineToHub::LogBatch(batch) = frame else {
-            panic!("unexpected frame variant: {frame:?}");
+        let event = rx.try_recv().expect("flush_into should send a batch");
+        let EgressEvent::LogBatch { entries: batch } = event else {
+            panic!("unexpected egress variant: {event:?}");
         };
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].message, "abort msg");

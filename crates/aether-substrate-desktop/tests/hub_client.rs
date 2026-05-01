@@ -10,8 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_hub_protocol::{
-    ClaudeAddress, EngineId, EngineMailFrame, EngineToHub, Goodbye, HubToEngine, MailFrame,
-    SessionToken, Uuid, Welcome, read_frame, write_frame,
+    ClaudeAddress, EngineId, EngineToHub, Goodbye, HubToEngine, MailFrame, SessionToken, Uuid,
+    Welcome, read_frame, write_frame,
 };
 use aether_substrate_desktop::{
     HubClient, HubOutbound, Mailer, Registry, ReplyTarget, ReplyTo, Scheduler, mail::MailboxId,
@@ -348,14 +348,14 @@ fn outbound_sends_reach_the_hub_wire() {
 
     assert!(outbound.is_connected());
 
-    // Drive a broadcast out through the outbound handle.
-    assert!(outbound.send(EngineToHub::Mail(EngineMailFrame {
-        address: ClaudeAddress::Broadcast,
-        kind_name: "aether.observation.ping".into(),
-        payload: vec![1, 2, 3],
-        origin: Some("physics".into()),
-        correlation_id: 0,
-    })));
+    // Drive a broadcast out through the outbound handle. Post-ADR-0070
+    // phase 4: substrate-side egress is high-level (no `send(EngineToHub)`).
+    outbound.egress_broadcast(
+        "aether.observation.ping",
+        vec![1, 2, 3],
+        Some("physics".into()),
+        0,
+    );
 
     // Read it back on the server side. Heartbeats may arrive too —
     // skip over them until we see the Mail frame.
@@ -379,13 +379,10 @@ fn outbound_sends_reach_the_hub_wire() {
 fn outbound_send_without_attach_is_noop() {
     let outbound = HubOutbound::disconnected();
     assert!(!outbound.is_connected());
-    // No attach ever happened; send returns false and doesn't panic.
-    let ok = outbound.send(EngineToHub::Mail(EngineMailFrame {
-        address: ClaudeAddress::Broadcast,
-        kind_name: "aether.tick".into(),
-        payload: vec![],
-        origin: None,
-        correlation_id: 0,
-    }));
-    assert!(!ok);
+    // No attach ever happened; egress methods drop silently — no
+    // panic, `is_connected` stays false. Post-refactor the facade has
+    // no fallible boolean return; the behavior we care about is that
+    // the call doesn't crash and reports disconnected state.
+    outbound.egress_broadcast("aether.tick", vec![], None, 0);
+    assert!(!outbound.is_connected());
 }

@@ -777,8 +777,8 @@ mod tests {
 
     use super::*;
     use crate::ctx::SubstrateCtx;
-    use crate::hub_client::HubOutbound;
     use crate::input;
+    use crate::outbound::HubOutbound;
 
     /// Minimal guest: just exports `memory` and a no-op `receive_p32`.
     /// Enough to satisfy `Component::instantiate`; these tests only

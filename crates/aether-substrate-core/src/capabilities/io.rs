@@ -880,12 +880,12 @@ mod tests {
     // against a tempdir, pushes encoded mail bytes through the
     // dispatch function, and reads the outbound reply channel to
     // confirm the correct `*Result` variant was sent back. The
-    // outbound is built via `HubOutbound::attached_loopback` which
+    // outbound is built via `crate::outbound::HubOutbound::attached_loopback` which
     // skips the TCP plumbing but keeps `send_reply`'s encode path
     // live.
 
-    use crate::hub_client::HubOutbound;
-    use aether_hub_protocol::{EngineToHub, SessionToken, Uuid};
+    use crate::outbound::EgressEvent;
+    use aether_hub_protocol::{SessionToken, Uuid};
     fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
         let adapter: Arc<dyn FileAdapter> =
             Arc::new(LocalFileAdapter::new(root.to_path_buf(), writable).unwrap());
@@ -903,11 +903,11 @@ mod tests {
     /// component replies push into the mailer's component table,
     /// which is pre-wired with an empty registry + empty components
     /// table so `push` can route without panicking.
-    fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EngineToHub>) {
+    fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
         use std::collections::HashMap;
         use std::sync::RwLock;
 
-        let (outbound, rx) = HubOutbound::attached_loopback();
+        let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(
             Arc::new(Registry::new()),
@@ -918,16 +918,19 @@ mod tests {
     }
 
     fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
-        rx: &std::sync::mpsc::Receiver<EngineToHub>,
+        rx: &std::sync::mpsc::Receiver<EgressEvent>,
     ) -> K {
-        // The test channel gets `EngineToHub::Mail` frames from
+        // The test channel gets `EgressEvent::ToSession` events from
         // `send_reply`; pull the first one and decode its payload.
-        let frame = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
-        let EngineToHub::Mail(m) = frame else {
-            panic!("expected Mail frame, got {frame:?}");
+        let event = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        let EgressEvent::ToSession {
+            kind_name, payload, ..
+        } = event
+        else {
+            panic!("expected ToSession egress, got {event:?}");
         };
-        assert_eq!(m.kind_name, K::NAME);
-        postcard::from_bytes(&m.payload).unwrap()
+        assert_eq!(kind_name, K::NAME);
+        postcard::from_bytes(&payload).unwrap()
     }
 
     /// Boot the capability against a fresh tempdir; assert the sink
@@ -1237,7 +1240,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let caller_mailbox = registry.register_component("test_caller");
         let components: crate::scheduler::ComponentTable = Arc::new(RwLock::new(HashMap::new()));
-        let (outbound, _outbound_rx) = HubOutbound::attached_loopback();
+        let (outbound, _outbound_rx) = crate::outbound::HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(Arc::clone(&registry), Arc::clone(&components));
         mailer.wire_outbound(Arc::clone(&outbound));
