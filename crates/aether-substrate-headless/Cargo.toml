@@ -11,6 +11,7 @@ edition.workspace = true
 
 [dependencies]
 aether-substrate-core = { path = "../aether-substrate-core" }
+aether-hub = { path = "../aether-hub" }
 aether-hub-protocol = { path = "../aether-hub-protocol" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }

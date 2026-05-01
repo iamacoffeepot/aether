@@ -160,6 +160,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-hub"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-data",
+ "aether-hub-protocol",
+ "aether-substrate-core",
+ "tracing",
+ "wasmtime",
+]
+
+[[package]]
 name = "aether-hub-protocol"
 version = "0.2.0-alpha"
 dependencies = [
@@ -287,6 +298,7 @@ name = "aether-substrate-desktop"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-data",
+ "aether-hub",
  "aether-hub-protocol",
  "aether-kinds",
  "aether-substrate-core",
@@ -308,6 +320,7 @@ name = "aether-substrate-headless"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-data",
+ "aether-hub",
  "aether-hub-protocol",
  "aether-kinds",
  "aether-substrate-core",
@@ -321,6 +334,7 @@ version = "0.2.0-alpha"
 dependencies = [
  "aether-codec",
  "aether-data",
+ "aether-hub",
  "aether-hub-protocol",
  "aether-kinds",
  "aether-substrate-core",
@@ -344,6 +358,7 @@ name = "aether-substrate-test-bench"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-data",
+ "aether-hub",
  "aether-hub-protocol",
  "aether-kinds",
  "aether-scenario",

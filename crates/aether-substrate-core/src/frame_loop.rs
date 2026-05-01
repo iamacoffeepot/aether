@@ -30,10 +30,10 @@ use std::time::Duration;
 use aether_data::encode;
 use aether_kinds::FrameStats;
 
-use crate::hub_client::HubOutbound;
 use crate::lifecycle;
 use crate::mail::{Mail, MailboxId};
 use crate::mailer::Mailer;
+use crate::outbound::HubOutbound;
 use crate::scheduler::DrainSummary;
 
 /// Frame-stats emission cadence. Hardcoded for v1; an env knob is

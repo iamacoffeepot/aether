@@ -1,0 +1,17 @@
+[package]
+name = "aether-hub"
+version.workspace = true
+edition.workspace = true
+
+# ADR-0070 phase 4 / ADR-0071 phase 7: hub-protocol-aware components
+# (the substrate-side `HubClientCapability`, the engine-mailbox reader
+# / writer / heartbeat thread cluster, the future hub server) live
+# here so `aether-substrate-core` doesn't depend on hub framing for
+# chassis that don't bridge to a hub.
+
+[dependencies]
+aether-data = { path = "../aether-data" }
+aether-hub-protocol = { path = "../aether-hub-protocol" }
+aether-substrate-core = { path = "../aether-substrate-core" }
+tracing = "0.1"
+wasmtime = "30"

@@ -299,9 +299,9 @@ mod tests {
     use wasmtime::{Engine, Linker};
 
     use super::*;
-    use crate::hub_client::HubOutbound;
     use crate::mail::MailboxId;
     use crate::mailer::Mailer;
+    use crate::outbound::HubOutbound;
     use crate::registry::Registry;
 
     fn ctx() -> SubstrateCtx {
@@ -620,14 +620,13 @@ mod tests {
 
     fn plane_ctx_for_reply() -> (
         SubstrateCtx,
-        std::sync::mpsc::Receiver<aether_hub_protocol::EngineToHub>,
+        std::sync::mpsc::Receiver<crate::outbound::EgressEvent>,
         aether_data::KindId,
     ) {
-        use crate::hub_client::HubOutbound;
         use crate::mail::MailboxId as M;
         use aether_data::{KindDescriptor, SchemaType};
 
-        let (outbound, rx) = HubOutbound::attached_loopback();
+        let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let pong_id = registry
             .register_kind_with_descriptor(KindDescriptor {
@@ -658,7 +657,8 @@ mod tests {
     #[test]
     fn reply_mail_emits_session_addressed_frame() {
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
-        use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
+        use crate::outbound::EgressEvent;
+        use aether_hub_protocol::{SessionToken, Uuid};
 
         let (ctx, rx, pong_id) = plane_ctx_for_reply();
         let mut component = instantiate_with_ctx(&wat_replies(pong_id.0), ctx);
@@ -668,12 +668,15 @@ mod tests {
             .with_reply_to(ReplyTo::to(ReplyTarget::Session(token)));
         component.deliver(&mail).expect("deliver");
 
-        let frame = rx.try_recv().expect("outbound frame queued");
-        let EngineToHub::Mail(mail_frame) = frame else {
-            panic!("expected EngineToHub::Mail, got {frame:?}");
+        let event = rx.try_recv().expect("outbound egress queued");
+        let EgressEvent::ToSession {
+            session, kind_name, ..
+        } = event
+        else {
+            panic!("expected ToSession egress, got {event:?}");
         };
-        assert_eq!(mail_frame.address, ClaudeAddress::Session(token));
-        assert_eq!(mail_frame.kind_name, "test.pong");
+        assert_eq!(session, token);
+        assert_eq!(kind_name, "test.pong");
     }
 
     #[test]
@@ -699,16 +702,15 @@ mod tests {
     #[allow(dead_code)]
     fn plane_ctx_with_caller_mailbox() -> (
         SubstrateCtx,
-        std::sync::mpsc::Receiver<aether_hub_protocol::EngineToHub>,
+        std::sync::mpsc::Receiver<crate::outbound::EgressEvent>,
         Arc<Mailer>,
         crate::mail::MailboxId,
         aether_data::KindId,
     ) {
-        use crate::hub_client::HubOutbound;
         use crate::mail::MailboxId as M;
         use aether_data::{KindDescriptor, SchemaType};
 
-        let (outbound, rx) = HubOutbound::attached_loopback();
+        let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let caller = registry.register_component("caller");
         let pong_id = registry

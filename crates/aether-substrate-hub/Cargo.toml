@@ -9,6 +9,7 @@ aether-kinds = { path = "../aether-kinds" }
 aether-data = { path = "../aether-data" }
 aether-codec = { path = "../aether-codec" }
 aether-substrate-core = { path = "../aether-substrate-core" }
+aether-hub = { path = "../aether-hub" }
 axum = "0.8"
 base64 = "0.22"
 bytemuck = { version = "1.19", features = ["derive"] }

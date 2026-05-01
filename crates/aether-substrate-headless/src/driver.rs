@@ -19,13 +19,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_data::{Kind, KindId, encode_empty};
+use aether_hub::HubClient;
 use aether_kinds::Tick;
 use aether_substrate_core::capability::BootError;
 use aether_substrate_core::chassis_builder::{
     DriverCapability, DriverCtx, DriverRunning, RunError,
 };
 use aether_substrate_core::{
-    HubClient, HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop,
+    HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
 };

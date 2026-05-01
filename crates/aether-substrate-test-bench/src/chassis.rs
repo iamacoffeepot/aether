@@ -21,6 +21,7 @@
 use std::sync::{Arc, Mutex};
 
 use aether_data::{Kind, KindId};
+use aether_hub::HubClient;
 use aether_kinds::{
     Advance, AdvanceResult, CaptureFrame, FrameStats, PlatformInfo, SetWindowMode, SetWindowTitle,
     Tick,
@@ -28,8 +29,7 @@ use aether_kinds::{
 use aether_substrate_core::capability::BootError;
 use aether_substrate_core::chassis_builder::{Builder, NoDriver, PassiveChassis};
 use aether_substrate_core::{
-    Chassis, ChassisControlHandler, HubClient, HubOutbound, Mailer, Registry, ReplyTo,
-    SubstrateBoot,
+    Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
         LogCapability, RenderCapability, RenderConfig, RenderHandles, io::NamespaceRoots,
     },
@@ -272,7 +272,7 @@ impl TestBenchChassis {
         .build_passive()
         .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
 
-        let hub = boot.connect_hub(hub_url.as_deref())?;
+        let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())?;
 
         // The chassis-control closure already cloned `events_tx`;
         // dropping the local copy lets the receiver hang up cleanly

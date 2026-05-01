@@ -216,7 +216,8 @@ impl HeadlessChassis {
         );
 
         // Hub connect AFTER every chassis sink is registered (issue #262).
-        let hub = boot.connect_hub(hub_url.as_deref())?;
+        // Post-ADR-0070 phase 4: hub client lives in `aether-hub`.
+        let hub = aether_hub::connect_hub_client(&boot, hub_url.as_deref())?;
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);

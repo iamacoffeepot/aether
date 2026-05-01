@@ -29,6 +29,7 @@ use aether_hub_protocol::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tick};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
+use aether_hub::HubProtocolBackend;
 use aether_substrate_core::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
     capabilities::{IoCapability, io::NamespaceRoots},
@@ -270,7 +271,8 @@ impl TestBench {
         // Attach a loopback to the boot's outbound. Replies the
         // substrate emits via `outbound.send_reply` arrive here.
         let (loopback_tx, loopback_rx) = mpsc::channel::<EngineToHub>();
-        boot.outbound.attach(loopback_tx);
+        boot.outbound
+            .attach_backend(Arc::new(HubProtocolBackend::new(loopback_tx)));
 
         // Io capability on the legacy `boot.add_capability` path.
         // Silent-skip on adapter init failure preserves pre-Phase-3

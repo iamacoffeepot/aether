@@ -133,33 +133,34 @@ mod tests {
     use std::time::Instant;
 
     use aether_data::{HandleId, Kind, KindId};
-    use aether_hub_protocol::{EngineToHub, SessionToken, Uuid};
+    use aether_hub_protocol::{SessionToken, Uuid};
     use aether_kinds::{HandlePublish, HandlePublishResult};
 
     use super::*;
     use crate::capability::ChassisBuilder;
-    use crate::hub_client::HubOutbound;
     use crate::mail::{ReplyTarget, ReplyTo};
     use crate::mailer::Mailer;
+    use crate::outbound::EgressEvent;
     use crate::registry::{MailboxEntry, Registry};
 
     /// Build a minimally-wired substrate for capability tests: registry
     /// with every kind descriptor (so `send_reply` resolves names),
-    /// mailer wired with a loopback hub outbound + the store. The
-    /// returned receiver carries every reply the capability emits via
-    /// `Mailer::send_reply` along the hub-outbound branch.
+    /// mailer wired with a recording outbound + the store. The
+    /// returned receiver carries every egress the capability emits via
+    /// `Mailer::send_reply` along the hub-outbound branch (substrate-
+    /// side `EgressEvent` shape).
     fn fresh_substrate() -> (
         Arc<HandleStore>,
         Arc<Mailer>,
         Arc<Registry>,
-        mpsc::Receiver<EngineToHub>,
+        mpsc::Receiver<EgressEvent>,
     ) {
         let store = Arc::new(HandleStore::new(64 * 1024));
         let registry = Arc::new(Registry::new());
         for d in aether_kinds::descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let (outbound, rx) = HubOutbound::attached_loopback();
+        let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(Arc::clone(&registry), Arc::new(RwLock::new(HashMap::new())));
         mailer.wire_outbound(outbound);
@@ -217,8 +218,10 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         };
         let payload = match frame {
-            EngineToHub::Mail(m) => m.payload,
-            other => panic!("expected Mail frame, got {other:?}"),
+            EgressEvent::ToSession { payload, .. } | EgressEvent::Broadcast { payload, .. } => {
+                payload
+            }
+            other => panic!("expected ToSession/Broadcast egress, got {other:?}"),
         };
         let result: HandlePublishResult = postcard::from_bytes(&payload).unwrap();
         let HandlePublishResult::Ok {

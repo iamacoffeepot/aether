@@ -26,8 +26,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use aether_hub_protocol::EngineToHub;
-
 use aether_data::KindDescriptor;
 use aether_data::{Kind, KindId};
 use aether_kinds::{
@@ -38,11 +36,11 @@ use wasmtime::{Engine, Linker, Module};
 
 use crate::component::Component;
 use crate::ctx::SubstrateCtx;
-use crate::hub_client::HubOutbound;
 use crate::input::{self, InputSubscribers};
 use crate::kind_manifest;
 use crate::mail::{Mail, MailboxId};
 use crate::mailer::Mailer;
+use crate::outbound::HubOutbound;
 use crate::registry::{Registry, SinkHandler};
 use crate::scheduler::{ComponentEntry, ComponentTable, close_and_join};
 
@@ -665,7 +663,7 @@ impl ControlPlane {
     /// If no hub is attached the outbound silently drops — harmless.
     fn announce_kinds(&self) {
         let kinds = self.registry.list_kind_descriptors();
-        self.outbound.send(EngineToHub::KindsChanged(kinds));
+        self.outbound.egress_kinds_changed(kinds);
     }
 }
 
