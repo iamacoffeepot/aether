@@ -3,9 +3,9 @@
 
 use aether_data::{EngineId, SessionToken};
 /// Addressing token for any mailbox — component or substrate-owned sink.
-/// ADR-0065 hoisted the canonical home into `aether_mail`; this remains
-/// re-exported under the `aether_substrate::mail::MailboxId` path
-/// so existing call sites compile unchanged.
+/// ADR-0065 hoisted the canonical home into `aether_data` (per ADR-0069);
+/// this remains re-exported under the `aether_substrate::mail::MailboxId`
+/// path so existing call sites compile unchanged.
 pub use aether_data::{KindId, MailboxId};
 /// Host/guest contract tag for the payload layout. The substrate and the
 /// components that talk to it agree on a specific layout per kind. The

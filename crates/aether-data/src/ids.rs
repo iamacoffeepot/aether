@@ -3,7 +3,7 @@
 //! Each type is `#[repr(transparent)]` over a `u64` (postcard
 //! wire-identical to a raw u64; cast-shape kinds keep their
 //! `#[repr(C)]` layout) and exposes a `pub const TYPE_ID: u64`
-//! that downstream `Schema` impls (in `aether-mail`) emit as
+//! that downstream `Schema` impls (in `aether-data`) emit as
 //! `SchemaType::TypeId(Self::TYPE_ID)`. The hub's encoder/decoder
 //! dispatch on the `TYPE_ID` value to translate JSON (tagged-string
 //! form per ADR-0064) ↔ postcard (u64 varint) at the wire boundary.
@@ -136,7 +136,7 @@ pub struct MailboxId(pub u64);
 
 impl MailboxId {
     /// Stable type id — FNV-1a of `TYPE_DOMAIN ++ TYPE_NAME`. The
-    /// `Schema` impl (in `aether-mail`) emits this as
+    /// `Schema` impl (in `aether-data`) emits this as
     /// `SchemaType::TypeId(...)`; the hub's codec arms key on it to
     /// pick the JSON/postcard translation.
     pub const TYPE_ID: u64 = fnv1a_64_prefixed(TYPE_DOMAIN, b"aether.mailbox_id");

@@ -196,7 +196,7 @@ fn enum_emits_each_variant_shape_with_sequential_discriminants() {
 
 // ADR-0045 typed handle: the derive doesn't have to know about
 // `Ref<K>` syntactically — the hand-rolled `Schema` impl in
-// aether-mail dispatches through the existing trait. These tests
+// aether-data dispatches through the existing trait. These tests
 // pin that integration: a struct with a `Ref<K>` field gets a
 // `SchemaType::Ref` arm in its layout, the parent's CastEligible
 // flips to false (refs force postcard), and the wire roundtrips
@@ -321,7 +321,7 @@ fn cast_eligible_blocked_by_non_pod_field_even_with_repr_c() {
 }
 
 // Issue #232 — `BTreeMap<K, V>` is the deterministic map type for
-// derived kind schemas. The Schema impl in `aether-mail` lands a
+// derived kind schemas. The Schema impl in `aether-data` lands a
 // `SchemaType::Map`; the derive does no special-casing, so this is
 // trait-dispatch end-to-end.
 

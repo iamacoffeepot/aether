@@ -237,9 +237,10 @@ fn variant_to_shape(v: &EnumVariant) -> crate::schema::VariantShape {
 
 /// Domain tag prefixed to every kind-id hash input so the `Kind::ID`
 /// space is disjoint from `MailboxId`. Must stay byte-identical to
-/// `aether_data::KIND_DOMAIN`; duplicated here for the same reason
-/// `fnv1a_64` is (aether-mail depends on hub-protocol, not the
-/// other way around).
+/// `crate::hash::KIND_DOMAIN`; duplicated here at module scope for
+/// the same reason `fnv1a_64_prefixed` is (the canonical-bytes path
+/// hashes `KIND_DOMAIN ++ bytes` without reaching across module
+/// boundaries).
 pub(crate) const KIND_DOMAIN: &[u8] = b"kind:";
 
 use crate::tag_bits::{HASH_MASK, TAG_KIND, TAG_SHIFT};
@@ -269,11 +270,10 @@ pub fn kind_id_from_shape(shape: &crate::schema::KindShape) -> u64 {
 }
 
 /// FNV-1a 64 over `prefix ++ payload`, mirrored from
-/// `aether_data::fnv1a_64_prefixed`. Duplicated here because
-/// `aether-mail` depends on `aether-hub-protocol`, not the other way
-/// around — same offset basis and prime, identical output. Exposed at
-/// crate scope so the hub's canonical-bytes path can hash
-/// `KIND_DOMAIN ++ bytes` without a transient `Vec<u8>`.
+/// `crate::hash::fnv1a_64_prefixed`. Duplicated at module scope so
+/// the canonical-bytes path can hash `KIND_DOMAIN ++ bytes` without
+/// a transient `Vec<u8>` — same offset basis and prime, identical
+/// output.
 pub(crate) const fn fnv1a_64_prefixed(prefix: &[u8], payload: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut i = 0;
