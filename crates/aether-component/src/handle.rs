@@ -36,10 +36,7 @@
 //! }
 //! ```
 
-use alloc::format;
 use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use aether_data::{Kind, Ref};
@@ -178,7 +175,11 @@ pub fn publish<K: Kind + Serialize>(value: &K) -> Result<Handle<K>, SyncHandleEr
     };
     resolve_sink::<HandlePublish>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
-    let result: HandlePublishResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
+    let result: HandlePublishResult = crate::sync::wait_reply::<_, SyncHandleError>(
+        DEFAULT_TIMEOUT_MS,
+        SMALL_REPLY_CAP,
+        correlation,
+    )?;
     match result {
         HandlePublishResult::Ok { id, .. } => Ok(Handle {
             id: id.0,
@@ -194,7 +195,11 @@ fn sync_release(id: u64) -> Result<(), SyncHandleError> {
     };
     resolve_sink::<HandleRelease>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
-    let result: HandleReleaseResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
+    let result: HandleReleaseResult = crate::sync::wait_reply::<_, SyncHandleError>(
+        DEFAULT_TIMEOUT_MS,
+        SMALL_REPLY_CAP,
+        correlation,
+    )?;
     match result {
         HandleReleaseResult::Ok { .. } => Ok(()),
         HandleReleaseResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
@@ -207,7 +212,11 @@ fn sync_pin(id: u64) -> Result<(), SyncHandleError> {
     };
     resolve_sink::<HandlePin>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
-    let result: HandlePinResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
+    let result: HandlePinResult = crate::sync::wait_reply::<_, SyncHandleError>(
+        DEFAULT_TIMEOUT_MS,
+        SMALL_REPLY_CAP,
+        correlation,
+    )?;
     match result {
         HandlePinResult::Ok { .. } => Ok(()),
         HandlePinResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
@@ -220,55 +229,36 @@ fn sync_unpin(id: u64) -> Result<(), SyncHandleError> {
     };
     resolve_sink::<HandleUnpin>(HANDLE_SINK_NAME).send(&req);
     let correlation = unsafe { raw::prev_correlation() };
-    let result: HandleUnpinResult = wait(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
+    let result: HandleUnpinResult = crate::sync::wait_reply::<_, SyncHandleError>(
+        DEFAULT_TIMEOUT_MS,
+        SMALL_REPLY_CAP,
+        correlation,
+    )?;
     match result {
         HandleUnpinResult::Ok { .. } => Ok(()),
         HandleUnpinResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
     }
 }
 
-/// Allocate a `capacity`-sized scratch buffer in guest memory, park
-/// on `raw::wait_reply` for a mail of kind `K` with the given
-/// `expected_correlation`, and postcard-decode the written bytes.
-/// Mirror of io.rs's `wait` — kept private to this module rather
-/// than factored out to share, since the buffer cap and timeout
-/// defaults are kind-shaped (small replies for handle ops vs the
-/// MB-sized buffer io::read_sync allocates).
-fn wait<K>(
-    timeout_ms: u32,
-    capacity: usize,
-    expected_correlation: u64,
-) -> Result<K, SyncHandleError>
-where
-    K: Kind + serde::de::DeserializeOwned,
-{
-    let mut buf: Vec<u8> = vec![0u8; capacity];
-    let rc = unsafe {
-        raw::wait_reply(
-            K::ID.0,
-            buf.as_mut_ptr().addr() as u32,
-            buf.len() as u32,
-            timeout_ms,
-            expected_correlation,
-        )
-    };
-    match rc {
-        -1 => Err(SyncHandleError::Timeout),
-        -2 => Err(SyncHandleError::BufferTooSmall),
-        -3 => Err(SyncHandleError::Cancelled),
-        n if n >= 0 => {
-            let len = n as usize;
-            postcard::from_bytes(&buf[..len]).map_err(|e| SyncHandleError::Decode(format!("{e}")))
-        }
-        _ => Err(SyncHandleError::Decode(format!(
-            "unexpected wait_reply return: {rc}"
-        ))),
+impl crate::sync::WaitError for SyncHandleError {
+    fn timeout() -> Self {
+        Self::Timeout
+    }
+    fn buffer_too_small() -> Self {
+        Self::BufferTooSmall
+    }
+    fn cancelled() -> Self {
+        Self::Cancelled
+    }
+    fn decode(message: String) -> Self {
+        Self::Decode(message)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use serde::Deserialize;
 
     /// Off-wasm we can't exercise the FFI host calls (`raw::send_mail`
