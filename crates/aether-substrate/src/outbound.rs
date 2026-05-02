@@ -6,15 +6,15 @@
 // log-capture / kinds-changed observation channels. Pre-refactor the
 // type carried an mpsc `Sender<EngineToHub>` and call sites built
 // `EngineToHub` enum variants inline; this module replaces that with
-// seven high-level methods on an `EgressBackend` trait. Substrate-core
-// no longer constructs hub frames; the translation lives in the
-// `aether-hub` crate's `HubProtocolBackend`.
+// seven high-level methods on an `EgressBackend` trait. The substrate
+// no longer constructs hub frames; the translation lives in
+// `aether-substrate-bundle::hub`'s `HubProtocolBackend` (ADR-0073).
 //
 // Identity types (`SessionToken`, `EngineId`) live in `aether-data`
-// (ADR-0071 phase 7c) so substrate-core describes egress targets
-// without depending on the hub-protocol framing crate. ADR-0070's
-// "substrate-core has no hub knowledge" invariant is now satisfied:
-// no `aether-hub-protocol` dep remains in `Cargo.toml`.
+// (ADR-0071 phase 7c) so the substrate describes egress targets
+// without depending on hub-protocol framing. ADR-0070's "substrate
+// has no hub knowledge" invariant is satisfied: no hub-protocol dep
+// remains in `Cargo.toml`.
 
 use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};

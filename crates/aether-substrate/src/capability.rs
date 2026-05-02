@@ -231,9 +231,9 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Borrow the chassis's registry. Capabilities that resolve
-    /// names or descriptors at boot (today: the `aether-hub` client
-    /// capability cloning the registry into its TCP reader thread)
-    /// reach for this; most capabilities don't need it.
+    /// names or descriptors at boot (today: the hub client capability
+    /// cloning the registry into its TCP reader thread) reach for
+    /// this; most capabilities don't need it.
     pub fn registry(&self) -> &Arc<Registry> {
         self.registry
     }
@@ -253,8 +253,9 @@ impl<'a> ChassisCtx<'a> {
     /// Phase 1 stores the handler but does not consult it from substrate
     /// dispatch. Phase 4 wires `Mailer::push` against this slot and
     /// removes today's hub-specific `Mailer.outbound` field, at
-    /// which point `HubClientCapability` (in the new `aether-hub`
-    /// crate) claims the slot to forward unresolved mail over TCP.
+    /// which point `HubClientCapability` (in
+    /// `aether-substrate-bundle::hub`) claims the slot to forward
+    /// unresolved mail over TCP.
     pub fn claim_fallback_router(&mut self, handler: FallbackRouter) -> Result<(), BootError> {
         if self.fallback.is_some() {
             return Err(BootError::FallbackRouterAlreadyClaimed);
