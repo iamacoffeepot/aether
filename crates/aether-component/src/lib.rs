@@ -70,6 +70,7 @@ pub mod io;
 pub mod log;
 pub mod net;
 pub mod raw;
+mod sync;
 
 pub use handle::{Handle, SyncHandleError};
 

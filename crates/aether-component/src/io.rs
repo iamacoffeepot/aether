@@ -161,7 +161,11 @@ pub fn read_sync(namespace: &str, path: &str, timeout_ms: u32) -> Result<Vec<u8>
         namespace: namespace.to_string(),
         path: path.to_string(),
     });
-    let reply: ReadResult = wait::<ReadResult>(timeout_ms, READ_REPLY_CAP, correlation)?;
+    let reply: ReadResult = crate::sync::wait_reply::<ReadResult, SyncIoError>(
+        timeout_ms,
+        READ_REPLY_CAP,
+        correlation,
+    )?;
     match reply {
         ReadResult::Ok { bytes, .. } => Ok(bytes),
         ReadResult::Err { error, .. } => Err(SyncIoError::Io(error)),
@@ -182,7 +186,11 @@ pub fn write_sync(
         path: path.to_string(),
         bytes: bytes.to_vec(),
     });
-    match wait::<WriteResult>(timeout_ms, SMALL_REPLY_CAP, correlation)? {
+    match crate::sync::wait_reply::<WriteResult, SyncIoError>(
+        timeout_ms,
+        SMALL_REPLY_CAP,
+        correlation,
+    )? {
         WriteResult::Ok { .. } => Ok(()),
         WriteResult::Err { error, .. } => Err(SyncIoError::Io(error)),
     }
@@ -196,7 +204,11 @@ pub fn delete_sync(namespace: &str, path: &str, timeout_ms: u32) -> Result<(), S
         namespace: namespace.to_string(),
         path: path.to_string(),
     });
-    match wait::<DeleteResult>(timeout_ms, SMALL_REPLY_CAP, correlation)? {
+    match crate::sync::wait_reply::<DeleteResult, SyncIoError>(
+        timeout_ms,
+        SMALL_REPLY_CAP,
+        correlation,
+    )? {
         DeleteResult::Ok { .. } => Ok(()),
         DeleteResult::Err { error, .. } => Err(SyncIoError::Io(error)),
     }
@@ -214,42 +226,28 @@ pub fn list_sync(
         namespace: namespace.to_string(),
         prefix: prefix.to_string(),
     });
-    match wait::<ListResult>(timeout_ms, LIST_REPLY_CAP, correlation)? {
+    match crate::sync::wait_reply::<ListResult, SyncIoError>(
+        timeout_ms,
+        LIST_REPLY_CAP,
+        correlation,
+    )? {
         ListResult::Ok { entries, .. } => Ok(entries),
         ListResult::Err { error, .. } => Err(SyncIoError::Io(error)),
     }
 }
 
-/// Allocate a `capacity`-sized scratch buffer in guest memory, park
-/// on `raw::wait_reply` for a mail of kind `K` with the given
-/// `expected_correlation`, and postcard-decode the written bytes.
-/// Shared by every `*_sync` wrapper.
-fn wait<K>(timeout_ms: u32, capacity: usize, expected_correlation: u64) -> Result<K, SyncIoError>
-where
-    K: Kind + serde::de::DeserializeOwned,
-{
-    let mut buf: Vec<u8> = alloc::vec![0u8; capacity];
-    let rc = unsafe {
-        raw::wait_reply(
-            K::ID.0,
-            buf.as_mut_ptr().addr() as u32,
-            buf.len() as u32,
-            timeout_ms,
-            expected_correlation,
-        )
-    };
-    match rc {
-        -1 => Err(SyncIoError::Timeout),
-        -2 => Err(SyncIoError::BufferTooSmall),
-        -3 => Err(SyncIoError::Cancelled),
-        n if n >= 0 => {
-            let len = n as usize;
-            postcard::from_bytes(&buf[..len])
-                .map_err(|e| SyncIoError::Decode(alloc::format!("{e}")))
-        }
-        _ => Err(SyncIoError::Decode(alloc::format!(
-            "unexpected wait_reply return: {rc}"
-        ))),
+impl crate::sync::WaitError for SyncIoError {
+    fn timeout() -> Self {
+        Self::Timeout
+    }
+    fn buffer_too_small() -> Self {
+        Self::BufferTooSmall
+    }
+    fn cancelled() -> Self {
+        Self::Cancelled
+    }
+    fn decode(message: String) -> Self {
+        Self::Decode(message)
     }
 }
 

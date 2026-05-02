@@ -31,11 +31,9 @@
 //! cases; the async default gets a nicer ergonomic shape than "send
 //! + separate handler."
 
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_data::Kind;
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
 use crate::{raw, resolve_sink};
@@ -80,6 +78,21 @@ pub enum SyncNetError {
     Cancelled,
     Net(NetError),
     Decode(String),
+}
+
+impl crate::sync::WaitError for SyncNetError {
+    fn timeout() -> Self {
+        Self::Timeout
+    }
+    fn buffer_too_small() -> Self {
+        Self::BufferTooSmall
+    }
+    fn cancelled() -> Self {
+        Self::Cancelled
+    }
+    fn decode(message: String) -> Self {
+        Self::Decode(message)
+    }
 }
 
 /// **⚠️ BLOCKING.** Do not call from a `Tick` handler, an input
@@ -127,28 +140,8 @@ pub enum SyncNetError {
 pub fn fetch_blocking(fetch: &Fetch, timeout_ms: u32) -> Result<FetchResponse, SyncNetError> {
     resolve_sink::<Fetch>(NET_MAILBOX_NAME).send(fetch);
     let correlation = unsafe { raw::prev_correlation() };
-
-    let mut buf: Vec<u8> = alloc::vec![0u8; FETCH_REPLY_CAP];
-    let rc = unsafe {
-        raw::wait_reply(
-            <FetchResult as Kind>::ID.0,
-            buf.as_mut_ptr().addr() as u32,
-            buf.len() as u32,
-            timeout_ms,
-            correlation,
-        )
-    };
-
-    let reply: FetchResult = match rc {
-        -1 => return Err(SyncNetError::Timeout),
-        -2 => return Err(SyncNetError::BufferTooSmall),
-        -3 => return Err(SyncNetError::Cancelled),
-        n if n >= 0 => {
-            let len = n as usize;
-            postcard::from_bytes(&buf[..len]).map_err(|e| SyncNetError::Decode(format!("{e}")))?
-        }
-        _ => return Err(SyncNetError::Decode(format!("unexpected wait_reply: {rc}"))),
-    };
+    let reply: FetchResult =
+        crate::sync::wait_reply::<_, SyncNetError>(timeout_ms, FETCH_REPLY_CAP, correlation)?;
 
     match reply {
         FetchResult::Ok {
