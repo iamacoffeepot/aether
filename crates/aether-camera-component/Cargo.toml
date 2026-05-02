@@ -33,5 +33,5 @@ tracing = { version = "0.1", default-features = false }
 # reference. See `use aether_camera as _;` in tests/scenario.rs.
 aether-camera = { path = "../aether-camera" }
 aether-scenario = { path = "../aether-scenario" }
-aether-substrate-test-bench = { path = "../aether-substrate-test-bench" }
+aether-substrate-bundle = { path = "../aether-substrate-bundle" }
 serde_yml = "0.0.12"

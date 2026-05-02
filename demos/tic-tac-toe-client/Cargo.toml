@@ -27,7 +27,7 @@ aether-kinds = { path = "../../crates/aether-kinds" }
 # `target/wasm32-unknown-unknown/{debug,release}/`.
 [dev-dependencies]
 aether-scenario = { path = "../../crates/aether-scenario" }
-aether-substrate-test-bench = { path = "../../crates/aether-substrate-test-bench" }
+aether-substrate-bundle = { path = "../../crates/aether-substrate-bundle" }
 pollster = "0.4.0"
 serde_yml = "0.0.12"
 wgpu = "29.0.1"

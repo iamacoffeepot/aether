@@ -22,7 +22,7 @@ use aether_substrate::{
     Chassis, capabilities::IoCapability, capture::CaptureQueue, frame_loop, mail::Mail,
     subscribers_for,
 };
-use aether_substrate_test_bench::{
+use aether_substrate_bundle::test_bench::{
     TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
     events::{self, ChassisEvent},
     render::Gpu,
@@ -32,7 +32,7 @@ use aether_substrate_test_bench::{
 /// missing/unparseable input with a warn log so scenario scripts can
 /// see what dimensions they actually got.
 fn parse_size_env() -> (u32, u32) {
-    use aether_substrate_test_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
+    use aether_substrate_bundle::test_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
     let raw = match std::env::var("AETHER_TEST_BENCH_SIZE") {
         Ok(s) => s,
         Err(_) => return (DEFAULT_WIDTH, DEFAULT_HEIGHT),

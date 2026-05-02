@@ -3,17 +3,17 @@ name = "aether-substrate-bundle"
 version.workspace = true
 edition.workspace = true
 
-# Multi-binary chassis crate. Holds the desktop, headless, and hub
-# chassis source as submodules (`src/<chassis>/`), plus the hub
-# library (substrate-side client, wire types, MCP coordinator)
-# under `src/hub/`. Each chassis produces a binary via
+# Multi-binary chassis crate. Holds the desktop, headless, hub, and
+# test-bench chassis source as submodules (`src/<chassis>/`), plus
+# the hub library (substrate-side client, wire types, MCP
+# coordinator) under `src/hub/`. Each chassis produces a binary via
 # `src/bin/<chassis>.rs`. The shared substrate runtime stays in
 # `aether-substrate`; this crate is the per-deployment chassis
 # layer.
 #
-# `aether-substrate-test-bench` stays as its own crate because it
-# exposes a `TestBench` library API that components, the scenario
-# runner, and demos depend on.
+# The in-process `TestBench` API surfaces as
+# `aether_substrate_bundle::test_bench::TestBench` for component +
+# scenario runner consumers.
 
 [lib]
 path = "src/lib.rs"
@@ -29,6 +29,10 @@ path = "src/bin/headless.rs"
 [[bin]]
 name = "aether-substrate-hub"
 path = "src/bin/hub.rs"
+
+[[bin]]
+name = "aether-substrate-test-bench"
+path = "src/bin/test-bench.rs"
 
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render", "audio"] }
@@ -64,3 +68,12 @@ libc = "0.2"
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 wat = "1"
+# Test-bench Phase 3 substrate-feature scenarios (issue 430). Tests
+# boot a `TestBench` and load `aether-test-fixture-probe`'s wasm to
+# exercise input subscription, drop_component, etc.
+aether-test-fixture-probe = { path = "../aether-test-fixture-probe" }
+# Re-uses the visual/PNG helpers (`decode_png`,
+# `differs_from_background`) and the shared `test_helpers` module
+# (issue 460) the per-component scenarios already exercise; avoids
+# reinventing pixel-diff plumbing in the test-bench's own scenarios.
+aether-scenario = { path = "../aether-scenario" }

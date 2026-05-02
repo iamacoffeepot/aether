@@ -18,7 +18,7 @@
 
 use aether_scenario::test_helpers::{require_runtime, run_or_panic};
 use aether_scenario::{Check, Script, Step};
-use aether_substrate_test_bench::TestBench;
+use aether_substrate_bundle::test_bench::TestBench;
 
 // Force linkage of `aether-camera` so its `inventory::submit!`
 // `KindDescriptor` entries reach `aether_kinds::descriptors::all()`

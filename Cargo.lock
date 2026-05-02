@@ -51,7 +51,7 @@ dependencies = [
  "aether-kinds",
  "aether-math",
  "aether-scenario",
- "aether-substrate-test-bench",
+ "aether-substrate-bundle",
  "serde_yml",
  "tracing",
 ]
@@ -115,7 +115,7 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-scenario",
- "aether-substrate-test-bench",
+ "aether-substrate-bundle",
  "bytemuck",
  "pollster",
  "serde_yml",
@@ -139,7 +139,7 @@ dependencies = [
  "aether-demo-tic-tac-toe",
  "aether-kinds",
  "aether-scenario",
- "aether-substrate-test-bench",
+ "aether-substrate-bundle",
  "pollster",
  "serde_yml",
  "wgpu",
@@ -153,7 +153,7 @@ dependencies = [
  "aether-data",
  "aether-demo-tic-tac-toe",
  "aether-scenario",
- "aether-substrate-test-bench",
+ "aether-substrate-bundle",
  "pollster",
  "serde_yml",
  "wgpu",
@@ -208,7 +208,7 @@ dependencies = [
  "aether-mesh",
  "aether-mesh-viewer",
  "aether-scenario",
- "aether-substrate-test-bench",
+ "aether-substrate-bundle",
  "serde_yml",
  "tracing",
 ]
@@ -221,7 +221,7 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-scenario-macros",
- "aether-substrate-test-bench",
+ "aether-substrate-bundle",
  "png",
  "pollster",
  "serde",
@@ -277,7 +277,9 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-kinds",
+ "aether-scenario",
  "aether-substrate",
+ "aether-test-fixture-probe",
  "axum",
  "base64 0.22.1",
  "bytemuck",
@@ -298,26 +300,6 @@ dependencies = [
  "wat",
  "wgpu",
  "winit",
-]
-
-[[package]]
-name = "aether-substrate-test-bench"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-data",
- "aether-kinds",
- "aether-scenario",
- "aether-substrate",
- "aether-substrate-bundle",
- "aether-test-fixture-probe",
- "bytemuck",
- "png",
- "pollster",
- "postcard",
- "serde",
- "tracing",
- "wasmtime",
- "wgpu",
 ]
 
 [[package]]

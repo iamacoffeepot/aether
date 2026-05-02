@@ -18,7 +18,7 @@ aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 aether-codec = { path = "../aether-codec" }
 aether-scenario-macros = { path = "../aether-scenario-macros" }
-aether-substrate-test-bench = { path = "../aether-substrate-test-bench" }
+aether-substrate-bundle = { path = "../aether-substrate-bundle" }
 png = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

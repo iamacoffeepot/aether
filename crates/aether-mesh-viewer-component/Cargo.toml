@@ -33,5 +33,5 @@ tracing = { version = "0.1", default-features = false }
 # `use aether_mesh_viewer as _;` in tests/scenario.rs.
 aether-mesh-viewer = { path = "../aether-mesh-viewer" }
 aether-scenario = { path = "../aether-scenario" }
-aether-substrate-test-bench = { path = "../aether-substrate-test-bench" }
+aether-substrate-bundle = { path = "../aether-substrate-bundle" }
 serde_yml = "0.0.12"

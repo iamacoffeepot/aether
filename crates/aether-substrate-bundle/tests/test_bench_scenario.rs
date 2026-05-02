@@ -33,7 +33,7 @@ use aether_scenario::test_helpers::{
     has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots,
 };
 use aether_scenario::{decode_png, differs_from_background};
-use aether_substrate_test_bench::TestBench;
+use aether_substrate_bundle::test_bench::TestBench;
 use aether_test_fixture_probe::SetRender;
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`

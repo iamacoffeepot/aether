@@ -24,7 +24,7 @@ use aether_scenario::test_helpers::{
     init_save_sandbox, require_runtime, run_or_panic, test_namespace_roots, tick_to, write_fixture,
 };
 use aether_scenario::{Check, Script, Step};
-use aether_substrate_test_bench::TestBench;
+use aether_substrate_bundle::test_bench::TestBench;
 
 // Force linkage of `aether-mesh-viewer` so its `inventory::submit!`
 // `KindDescriptor` entries reach `aether_kinds::descriptors::all()`
