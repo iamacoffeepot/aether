@@ -20,6 +20,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::hub::HubClient;
 use aether_data::{Kind, KindId};
 use aether_kinds::{
     Advance, AdvanceResult, CaptureFrame, FrameStats, PlatformInfo, SetWindowMode, SetWindowTitle,
@@ -40,9 +41,8 @@ use aether_substrate::{
     control::decode_payload,
     render::VERTEX_BUFFER_BYTES,
 };
-use aether_substrate_bundle::hub::HubClient;
 
-use crate::events::{ChassisEvent, EventSender};
+use super::events::{ChassisEvent, EventSender};
 
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
 /// component, the scheduler doesn't read this — it's retained on the
@@ -132,7 +132,7 @@ fn handle_advance(events: &EventSender, outbound: &HubOutbound, sender: ReplyTo,
 /// fields — the chassis instance is the [`PassiveChassis<TestBenchChassis>`]
 /// returned by [`Self::build_passive`]. Test-bench is the embedder-
 /// driven (no-driver) chassis: the binary's `main()` and the
-/// in-process [`crate::TestBench`] both build through this and drive
+/// in-process [`super::TestBench`] both build through this and drive
 /// their own event loops on top.
 pub struct TestBenchChassis;
 
@@ -161,7 +161,7 @@ impl Chassis for TestBenchChassis {
 
 /// Bag of resolved configs the test-bench chassis takes at build
 /// time. Constructed by the embedder — the binary's `main()` reads
-/// env vars; the in-process [`crate::TestBench`] takes builder
+/// env vars; the in-process [`super::TestBench`] takes builder
 /// args. `events_tx` is captured into the chassis-control closure;
 /// the matching `events_rx` rides on [`TestBenchBuild`] for the
 /// embedder to drive.
@@ -289,7 +289,7 @@ impl TestBenchChassis {
                 .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
 
         let render_running: Arc<RenderRunning> = passive.capability();
-        let hub = aether_substrate_bundle::hub::connect_hub_client(&boot, hub_url.as_deref())?;
+        let hub = crate::hub::connect_hub_client(&boot, hub_url.as_deref())?;
 
         // The chassis-control closure already cloned `events_tx`;
         // dropping the local copy lets the receiver hang up cleanly

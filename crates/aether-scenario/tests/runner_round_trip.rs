@@ -5,7 +5,7 @@
 
 use aether_scenario::test_helpers::has_wgpu_adapter;
 use aether_scenario::{Runner, parse_script};
-use aether_substrate_test_bench::TestBench;
+use aether_substrate_bundle::test_bench::TestBench;
 
 #[test]
 fn empty_script_passes_with_no_steps() {

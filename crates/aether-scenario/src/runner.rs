@@ -15,7 +15,7 @@ use std::fs;
 use aether_codec::encode_schema;
 use aether_data::{KindDescriptor, canonical::kind_id_from_parts};
 use aether_kinds::{LoadComponent, descriptors};
-use aether_substrate_test_bench::{KindId, TestBench};
+use aether_substrate_bundle::{KindId, test_bench::TestBench};
 use thiserror::Error;
 
 use crate::report::{RunReport, StepReport, StepStatus};

@@ -41,7 +41,7 @@
 //!         name: "smoke".to_owned(),
 //!         steps: vec![/* … */],
 //!     };
-//!     let mut bench = aether_substrate_test_bench::TestBench::builder()
+//!     let mut bench = aether_substrate_bundle::test_bench::TestBench::builder()
 //!         .size(64, 48)
 //!         .namespace_roots(test_namespace_roots(sandbox))
 //!         .build()
@@ -53,8 +53,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use aether_substrate_test_bench::TestBench;
-use aether_substrate_test_bench::capabilities::io::NamespaceRoots;
+use aether_substrate_bundle::capabilities::io::NamespaceRoots;
+use aether_substrate_bundle::test_bench::TestBench;
 
 use crate::{Runner, Script, Step};
 

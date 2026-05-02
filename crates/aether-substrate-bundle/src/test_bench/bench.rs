@@ -24,11 +24,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use crate::hub::wire::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
 use aether_data::{Kind, KindId, encode_empty, encode_struct};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tick};
-use aether_substrate_bundle::hub::wire::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
+use crate::hub::HubProtocolBackend;
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
     capabilities::{IoCapability, io::NamespaceRoots},
@@ -37,11 +38,10 @@ use aether_substrate::{
     mail::{Mail, MailboxId},
     subscribers_for,
 };
-use aether_substrate_bundle::hub::HubProtocolBackend;
 
-use crate::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
-use crate::events::{ChassisEvent, EventReceiver, channel as event_channel};
-use crate::render::Gpu;
+use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
+use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
+use super::render::Gpu;
 
 /// Default offscreen target dimensions when the caller picks
 /// `start()` (no explicit size). 800x600 matches the scenario harness

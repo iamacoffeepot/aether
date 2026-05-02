@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use aether_scenario::{Check, Runner, Script, Step};
-use aether_substrate_test_bench::TestBench;
+use aether_substrate_bundle::test_bench::TestBench;
 
 // Force linkage of this crate's own rlib so its `inventory::submit!`
 // `KindDescriptor` entries reach `aether_kinds::descriptors::all()`
