@@ -329,4 +329,27 @@ mod tests {
         assert_ne!(IO_MAILBOX_NAME, "io");
         assert_ne!(IO_MAILBOX_NAME, "aether.io");
     }
+
+    /// `SyncIoError` is the [`crate::sync::WaitError`] impl the IO
+    /// `*_sync` wrappers use, so the four trait constructors must
+    /// land on the matching enum variants. A future enum reorder
+    /// would otherwise silently re-route a sentinel rc to the wrong
+    /// failure mode.
+    #[test]
+    fn wait_error_mapping_for_sync_io_error() {
+        use crate::sync::WaitError;
+        assert_eq!(<SyncIoError as WaitError>::timeout(), SyncIoError::Timeout);
+        assert_eq!(
+            <SyncIoError as WaitError>::buffer_too_small(),
+            SyncIoError::BufferTooSmall
+        );
+        assert_eq!(
+            <SyncIoError as WaitError>::cancelled(),
+            SyncIoError::Cancelled
+        );
+        assert_eq!(
+            <SyncIoError as WaitError>::decode("schema drift".to_string()),
+            SyncIoError::Decode("schema drift".to_string())
+        );
+    }
 }

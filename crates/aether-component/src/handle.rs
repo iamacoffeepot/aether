@@ -258,6 +258,7 @@ impl crate::sync::WaitError for SyncHandleError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
     use alloc::vec;
     use serde::Deserialize;
 
@@ -314,5 +315,29 @@ mod tests {
         }
         // Suppress Drop's host-fn call.
         core::mem::forget(handle);
+    }
+
+    /// `SyncHandleError` is the [`crate::sync::WaitError`] impl the
+    /// handle `sync_*` wrappers use, so the four trait constructors
+    /// must land on the matching enum variants.
+    #[test]
+    fn wait_error_mapping_for_sync_handle_error() {
+        use crate::sync::WaitError;
+        assert_eq!(
+            <SyncHandleError as WaitError>::timeout(),
+            SyncHandleError::Timeout
+        );
+        assert_eq!(
+            <SyncHandleError as WaitError>::buffer_too_small(),
+            SyncHandleError::BufferTooSmall
+        );
+        assert_eq!(
+            <SyncHandleError as WaitError>::cancelled(),
+            SyncHandleError::Cancelled
+        );
+        assert_eq!(
+            <SyncHandleError as WaitError>::decode("schema drift".to_string()),
+            SyncHandleError::Decode("schema drift".to_string())
+        );
     }
 }
