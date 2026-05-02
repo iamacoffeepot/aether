@@ -25,10 +25,9 @@ use aether_kinds::{
     Advance, AdvanceResult, CaptureFrame, FrameStats, PlatformInfo, SetWindowMode, SetWindowTitle,
     Tick,
 };
-use aether_substrate::hub::HubClient;
-use aether_substrate_core::capability::BootError;
-use aether_substrate_core::chassis_builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
-use aether_substrate_core::{
+use aether_substrate::capability::BootError;
+use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
+use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
         LogCapability, RenderCapability, RenderConfig, RenderHandles, RenderRunning,
@@ -41,6 +40,7 @@ use aether_substrate_core::{
     control::decode_payload,
     render::VERTEX_BUFFER_BYTES,
 };
+use aether_substrate_bundle::hub::HubClient;
 
 use crate::events::{ChassisEvent, EventSender};
 
@@ -289,7 +289,7 @@ impl TestBenchChassis {
                 .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
 
         let render_running: Arc<RenderRunning> = passive.capability();
-        let hub = aether_substrate::hub::connect_hub_client(&boot, hub_url.as_deref())?;
+        let hub = aether_substrate_bundle::hub::connect_hub_client(&boot, hub_url.as_deref())?;
 
         // The chassis-control closure already cloned `events_tx`;
         // dropping the local copy lets the receiver hang up cleanly

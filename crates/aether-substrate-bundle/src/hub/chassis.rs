@@ -26,9 +26,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_substrate_core::Chassis;
-use aether_substrate_core::capability::BootError;
-use aether_substrate_core::chassis_builder::{
+use aether_substrate::Chassis;
+use aether_substrate::capability::BootError;
+use aether_substrate::chassis_builder::{
     Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError,
 };
 use tokio::runtime::Runtime;

@@ -10,8 +10,10 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use aether_codec::frame::encode_frame;
-use aether_substrate::hub::wire::{EngineId, EngineToHub, Hello, HubToEngine, LogEntry, LogLevel};
-use aether_substrate::hub::{
+use aether_substrate_bundle::hub::wire::{
+    EngineId, EngineToHub, Hello, HubToEngine, LogEntry, LogLevel,
+};
+use aether_substrate_bundle::hub::{
     EngineRegistry, HUB_SELF_ENGINE_ID, LogStore, LoopbackEngine, LoopbackHandle, PendingSpawns,
     SessionRegistry, run_engine_listener,
 };

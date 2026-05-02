@@ -19,8 +19,7 @@ mod test_bench;
 
 pub use test_bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TestBench, TestBenchBuilder, TestBenchError};
 
-pub use aether_substrate::hub::{HubClient, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail};
-pub use aether_substrate_core::{
+pub use aether_substrate::{
     AETHER_CONTROL, Chassis, ChassisControlHandler, Component, ControlPlane, HUB_CLAUDE_BROADCAST,
     HubOutbound, InputSubscribers, KindId, Mail, MailKind, MailboxEntry, MailboxId, Mailer,
     Registry, ReplyTarget, ReplyTo, Scheduler, SinkHandler, SubstrateBoot, SubstrateCtx,
@@ -28,6 +27,9 @@ pub use aether_substrate_core::{
     capture::{CaptureQueue, PendingCapture},
     component, control, ctx, frame_loop, host_fns, input, kind_manifest, log_capture, mail, mailer,
     new_subscribers, registry, remove_from_all, reply_table, scheduler, subscribers_for,
+};
+pub use aether_substrate_bundle::hub::{
+    HubClient, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail,
 };
 
 pub use chassis::{

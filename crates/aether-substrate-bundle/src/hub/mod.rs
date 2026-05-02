@@ -49,7 +49,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{KindDescriptor, KindId, MailboxId};
-use aether_substrate_core::{
+use aether_substrate::{
     BootError, Capability, ChassisCtx, EgressBackend, HubOutbound, LogEntry as SubstrateLogEntry,
     LogLevel as SubstrateLogLevel, Mail, Mailer, Registry, ReplyTarget, ReplyTo, RunningCapability,
     SubstrateBoot,
@@ -73,7 +73,7 @@ mod spawn;
 pub mod wire;
 
 pub use aether_codec::{DecodeError, EncodeError, decode_schema, encode_schema};
-pub use aether_substrate_core::Chassis;
+pub use aether_substrate::Chassis;
 pub use chassis::{HubChassis, HubEnv, HubServerDriverCapability, HubServerDriverRunning};
 pub use engine::READ_TIMEOUT;
 pub use log_store::{LogStore, ReadResult as LogReadResult};
@@ -473,7 +473,7 @@ fn unix_now() -> u64 {
 /// path runs (ADR-0063).
 ///
 /// The capability constructor takes the `Arc<HubOutbound>` from the
-/// chassis's [`aether_substrate_core::SubstrateBoot`] explicitly:
+/// chassis's [`aether_substrate::SubstrateBoot`] explicitly:
 /// substrate-core's `Builder` doesn't surface outbound through
 /// `ChassisCtx`, and the wiring relationship between the boot's
 /// outbound and a hub connection is naturally set at chassis-

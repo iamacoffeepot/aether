@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use aether_data::{Kind, KindId};
 use aether_kinds::{DropComponent, LoadComponent, SubscribeInput, Tick, UnsubscribeInput};
-use aether_substrate::{
+use aether_substrate_bundle::{
     ControlPlane, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
     host_fns, mail::Mail, new_subscribers, subscribers_for,
 };
@@ -114,7 +114,7 @@ fn dispatch<K: aether_data::Kind + serde::Serialize>(plane: &ControlPlane, paylo
         K::ID,
         K::NAME,
         None,
-        aether_substrate::ReplyTo::NONE,
+        aether_substrate_bundle::ReplyTo::NONE,
         &bytes,
         0,
     );

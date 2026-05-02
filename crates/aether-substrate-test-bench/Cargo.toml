@@ -8,7 +8,7 @@ edition.workspace = true
 # (offscreen color target + depth target + capture readback) but
 # omits surface acquisition and presentation. The shared runtime
 # (scheduler, mail, wasmtime host, control plane, hub client) lives
-# in aether-substrate-core; this crate binds that core to a wgpu
+# in aether-substrate; this crate binds that core to a wgpu
 # device with no presentation surface — suitable for CI scenario
 # verification and Rust integration tests where opening a window
 # isn't an option.
@@ -21,8 +21,8 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-aether-substrate-core = { path = "../aether-substrate-core", features = ["render"] }
-aether-substrate = { path = "../aether-substrate" }
+aether-substrate = { path = "../aether-substrate", features = ["render"] }
+aether-substrate-bundle = { path = "../aether-substrate-bundle" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"

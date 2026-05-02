@@ -20,9 +20,9 @@ use aether_kinds::{
     Advance, CaptureFrame, PlatformInfo, SetWindowMode, SetWindowModeResult, SetWindowTitle,
     SetWindowTitleResult, WindowMode,
 };
-use aether_substrate_core::capability::BootError;
-use aether_substrate_core::chassis_builder::{Builder, BuiltChassis};
-use aether_substrate_core::{
+use aether_substrate::capability::BootError;
+use aether_substrate::chassis_builder::{Builder, BuiltChassis};
+use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
         AudioCapability, IoCapability, LogCapability, NetCapability, RenderCapability,

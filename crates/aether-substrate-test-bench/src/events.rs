@@ -12,7 +12,7 @@
 
 use std::sync::mpsc;
 
-use aether_substrate_core::ReplyTo;
+use aether_substrate::ReplyTo;
 
 /// Events the tick loop consumes. Single-producer / single-consumer
 /// in practice — the chassis-control handler is the only producer,
@@ -77,8 +77,8 @@ pub fn channel() -> (EventSender, EventReceiver) {
 
 #[cfg(test)]
 mod tests {
-    use aether_substrate::hub::wire::{SessionToken, Uuid};
-    use aether_substrate_core::ReplyTarget;
+    use aether_substrate::ReplyTarget;
+    use aether_substrate_bundle::hub::wire::{SessionToken, Uuid};
 
     use super::*;
 

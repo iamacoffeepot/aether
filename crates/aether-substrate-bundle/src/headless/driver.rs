@@ -21,11 +21,9 @@ use std::time::{Duration, Instant};
 use crate::hub::HubClient;
 use aether_data::{Kind, KindId, encode_empty};
 use aether_kinds::Tick;
-use aether_substrate_core::capability::BootError;
-use aether_substrate_core::chassis_builder::{
-    DriverCapability, DriverCtx, DriverRunning, RunError,
-};
-use aether_substrate_core::{
+use aether_substrate::capability::BootError;
+use aether_substrate::chassis_builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
+use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
@@ -35,7 +33,7 @@ use aether_substrate_core::{
 /// component, the scheduler doesn't read this — it's retained on the
 /// hub-protocol wire for compatibility). The shared frame-loop
 /// policy (drain budget, frame-stats cadence) lives in
-/// `aether_substrate_core::frame_loop`.
+/// `aether_substrate::frame_loop`.
 pub const WORKERS: usize = 2;
 pub const DEFAULT_TICK_HZ: u32 = 60;
 

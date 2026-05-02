@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use aether_data::{Kind, encode_empty};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
-use aether_substrate_core::{
+use aether_substrate::{
     Chassis, capabilities::IoCapability, capture::CaptureQueue, frame_loop, mail::Mail,
     subscribers_for,
 };
@@ -66,7 +66,7 @@ fn main() -> wasmtime::Result<()> {
 
     // Per issue 464, this `main()` is the env-reading edge.
     let hub_url = std::env::var("AETHER_HUB_URL").ok();
-    let namespace_roots = aether_substrate_core::capabilities::io::NamespaceRoots::from_env();
+    let namespace_roots = aether_substrate::capabilities::io::NamespaceRoots::from_env();
 
     let env = TestBenchEnv {
         name: "test-bench".to_owned(),
@@ -129,13 +129,13 @@ fn main() -> wasmtime::Result<()> {
 fn drive_events_loop(
     events_rx: events::EventReceiver,
     capture_queue: CaptureQueue,
-    boot: aether_substrate_core::SubstrateBoot,
-    passive: aether_substrate_core::PassiveChassis<TestBenchChassis>,
-    render_handles: aether_substrate_core::capabilities::RenderHandles,
+    boot: aether_substrate::SubstrateBoot,
+    passive: aether_substrate::PassiveChassis<TestBenchChassis>,
+    render_handles: aether_substrate::capabilities::RenderHandles,
     mut gpu: Gpu,
     kind_tick: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
-    hub: Option<aether_substrate::hub::HubClient>,
+    hub: Option<aether_substrate_bundle::hub::HubClient>,
 ) -> wasmtime::Result<()> {
     let queue = Arc::clone(&boot.queue);
     let outbound = Arc::clone(&boot.outbound);
@@ -206,14 +206,14 @@ fn run_frame(
     frame: u64,
     started: Instant,
     dispatch_tick: bool,
-    queue: &Arc<aether_substrate_core::Mailer>,
-    outbound: &Arc<aether_substrate_core::HubOutbound>,
-    input_subscribers: &aether_substrate_core::InputSubscribers,
-    broadcast_mbox: aether_substrate_core::MailboxId,
+    queue: &Arc<aether_substrate::Mailer>,
+    outbound: &Arc<aether_substrate::HubOutbound>,
+    input_subscribers: &aether_substrate::InputSubscribers,
+    broadcast_mbox: aether_substrate::MailboxId,
     kind_tick: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
     capture_queue: &CaptureQueue,
-    render_handles: &aether_substrate_core::capabilities::RenderHandles,
+    render_handles: &aether_substrate::capabilities::RenderHandles,
     gpu: &mut Gpu,
 ) {
     if dispatch_tick {

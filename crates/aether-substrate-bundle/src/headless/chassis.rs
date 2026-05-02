@@ -18,9 +18,9 @@ use aether_kinds::{
     Advance, CaptureFrame, FrameStats, PlatformInfo, SetMasterGain, SetMasterGainResult,
     SetWindowMode, SetWindowTitle, Tick,
 };
-use aether_substrate_core::capability::BootError;
-use aether_substrate_core::chassis_builder::{Builder, BuiltChassis};
-use aether_substrate_core::{
+use aether_substrate::capability::BootError;
+use aether_substrate::chassis_builder::{Builder, BuiltChassis};
+use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, ReplyTo, SubstrateBoot,
     capabilities::{
         IoCapability, LogCapability, NetCapability, io::NamespaceRoots, net::NetConfig as NetConf,

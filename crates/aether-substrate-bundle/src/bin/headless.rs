@@ -1,7 +1,7 @@
 //! Headless substrate binary entry point.
 
-use aether_substrate::headless::{HeadlessChassis, HeadlessEnv};
-use aether_substrate_core::Chassis;
+use aether_substrate::Chassis;
+use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
 
 fn main() -> wasmtime::Result<()> {
     let env = HeadlessEnv::from_env();

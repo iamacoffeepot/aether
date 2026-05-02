@@ -29,11 +29,9 @@ use aether_kinds::{
     SetWindowModeResult, SetWindowTitleResult, Tick, VideoMode, WindowInfo, WindowMode, WindowSize,
     keycode,
 };
-use aether_substrate_core::capability::BootError;
-use aether_substrate_core::chassis_builder::{
-    DriverCapability, DriverCtx, DriverRunning, RunError,
-};
-use aether_substrate_core::{
+use aether_substrate::capability::BootError;
+use aether_substrate::chassis_builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
+use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, SubstrateBoot,
     capabilities::{RenderHandles, RenderRunning},
     frame_loop,
@@ -55,7 +53,7 @@ use super::render::Gpu;
 /// hub-protocol wire for compatibility). Stays chassis-side because
 /// it's declarative for `aether.control.platform_info`, not loop
 /// policy. The shared frame-loop policy (drain budget, frame-stats
-/// cadence) lives in `aether_substrate_core::frame_loop`.
+/// cadence) lives in `aether_substrate::frame_loop`.
 pub const WORKERS: usize = 2;
 
 pub struct App {
@@ -82,7 +80,7 @@ pub struct App {
     /// Shared single-slot queue with the control plane. On each
     /// redraw we `take()` any pending capture and, if present, use
     /// `render_and_capture`, then reply-to-sender on `outbound`.
-    capture_queue: aether_substrate_core::capture::CaptureQueue,
+    capture_queue: aether_substrate::capture::CaptureQueue,
     /// Hub outbound — also shared with the log-capture layer and the
     /// broadcast sink. The capture-reply path is the third consumer.
     outbound: Arc<HubOutbound>,
@@ -691,7 +689,7 @@ impl ApplicationHandler<UserEvent> for App {
 pub struct DesktopDriverCapability {
     pub event_loop: EventLoop<UserEvent>,
     pub boot: SubstrateBoot,
-    pub capture_queue: aether_substrate_core::capture::CaptureQueue,
+    pub capture_queue: aether_substrate::capture::CaptureQueue,
     pub boot_kinds_count: u32,
     pub boot_mode: WindowMode,
     pub boot_size: Option<(u32, u32)>,

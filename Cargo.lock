@@ -250,35 +250,6 @@ dependencies = [
 name = "aether-substrate"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-codec",
- "aether-data",
- "aether-kinds",
- "aether-substrate-core",
- "axum",
- "base64 0.22.1",
- "bytemuck",
- "libc",
- "os_info",
- "png",
- "pollster",
- "postcard",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "wasmtime",
- "wgpu",
- "winit",
-]
-
-[[package]]
-name = "aether-substrate-core"
-version = "0.2.0-alpha"
-dependencies = [
  "aether-data",
  "aether-kinds",
  "bytemuck",
@@ -300,6 +271,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-substrate-bundle"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-codec",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "axum",
+ "base64 0.22.1",
+ "bytemuck",
+ "libc",
+ "os_info",
+ "png",
+ "pollster",
+ "postcard",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "wasmtime",
+ "wat",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "aether-substrate-test-bench"
 version = "0.2.0-alpha"
 dependencies = [
@@ -307,7 +308,7 @@ dependencies = [
  "aether-kinds",
  "aether-scenario",
  "aether-substrate",
- "aether-substrate-core",
+ "aether-substrate-bundle",
  "aether-test-fixture-probe",
  "bytemuck",
  "png",
