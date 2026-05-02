@@ -232,13 +232,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-scenario-cli"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-scenario",
-]
-
-[[package]]
 name = "aether-scenario-macros"
 version = "0.2.0-alpha"
 dependencies = [

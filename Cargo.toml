@@ -4,7 +4,6 @@ members = [
     "crates/aether-substrate",
     "crates/aether-substrate-bundle",
     "crates/aether-scenario",
-    "crates/aether-scenario-cli",
     "crates/aether-scenario-macros",
     "crates/aether-codec",
     "crates/aether-data",
