@@ -1,5 +1,5 @@
 //! Proc-macro home for `#[derive(Kind)]` and `#[derive(Schema)]` per
-//! ADR-0019 / ADR-0031 / ADR-0032. Kept separate from `aether-mail`
+//! ADR-0019 / ADR-0031 / ADR-0032. Kept separate from `aether-data`
 //! because Rust requires proc-macro crates to opt into
 //! `proc-macro = true` and forbids them from exporting non-macro
 //! items; pairing them in the same crate would force every consumer

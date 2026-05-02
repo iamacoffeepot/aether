@@ -94,10 +94,10 @@ pub const DISPATCH_HANDLED: u32 = 0;
 pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 
 /// Re-exports the `#[handlers]` macro relies on at expansion sites
-/// that don't depend on `aether-mail` directly (e.g., component
+/// that don't depend on `aether-data` directly (e.g., component
 /// crates that only pull in `aether-component`). Keeping the macro's
 /// emitted paths rooted at `::aether_component::__macro_internals`
-/// removes the "add aether-mail to your Cargo.toml" boilerplate that
+/// removes the "add aether-data to your Cargo.toml" boilerplate that
 /// `::aether_data::...` paths would otherwise force on every consumer.
 ///
 /// Not part of the public API; the macro is the only intended caller.

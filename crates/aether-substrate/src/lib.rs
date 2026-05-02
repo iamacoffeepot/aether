@@ -6,11 +6,16 @@
 //! peripherals (window, GPU, TCP listener, event loop) live in the
 //! chassis crate that binds this as a dependency. See ADR-0035.
 //!
-//! The `Chassis` trait (lifecycle + capabilities) is universal but
-//! intentionally narrow: `const KIND`, `const CAPABILITIES`, and
-//! `fn run(self) -> Result<()>`. Chassis-specific control kinds
-//! (desktop's `capture_frame` / `set_window_mode` / `platform_info`,
-//! hub's future routing/operator kinds) ride through
+//! The `Chassis` trait (ADR-0035, redefined by ADR-0071) is universal
+//! but intentionally narrow: `const PROFILE` (the chassis's stable
+//! identifier — `"desktop"`, `"headless"`, `"hub"`, `"test-bench"`),
+//! `type Driver: DriverCapability` (the capability that owns the main
+//! thread), `type Env` (resolved-config bag), and
+//! `fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError>`.
+//! The chassis instance you `run()` is the [`BuiltChassis<Self>`] the
+//! trait method returns, not a value of `Self` itself. Chassis-specific
+//! control kinds (desktop's `capture_frame` / `set_window_mode` /
+//! `platform_info`, hub's future routing/operator kinds) ride through
 //! `ControlPlane::chassis_handler` — the fallback closure core's
 //! dispatch falls into for unknown kinds. That keeps any single
 //! chassis from having to implement `Unsupported` stubs for

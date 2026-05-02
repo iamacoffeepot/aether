@@ -36,7 +36,7 @@ aether-kinds = { path = "../aether-kinds" }
 bytemuck = { version = "1", features = ["derive"] }
 # ADR-0040 typed-state roundtrip tests derive `Serialize`/`Deserialize`
 # on fixture kinds; pull serde in as a dev-dep so tests don't rely on
-# the transitive re-export from aether-mail.
+# a transitive re-export.
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 # Issue #243: `#[derive(Kind)]` test fixtures (in `#[cfg(test)]` modules
 # of `src/lib.rs` + `src/handle.rs`) emit `inventory::submit!` on
