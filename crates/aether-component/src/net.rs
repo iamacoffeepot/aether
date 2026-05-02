@@ -237,4 +237,28 @@ mod tests {
         assert_ne!(NET_MAILBOX_NAME, "net");
         assert_ne!(NET_MAILBOX_NAME, "aether.net");
     }
+
+    /// `SyncNetError` is the [`crate::sync::WaitError`] impl that
+    /// [`fetch_blocking`] uses, so the four trait constructors must
+    /// land on the matching enum variants.
+    #[test]
+    fn wait_error_mapping_for_sync_net_error() {
+        use crate::sync::WaitError;
+        assert_eq!(
+            <SyncNetError as WaitError>::timeout(),
+            SyncNetError::Timeout
+        );
+        assert_eq!(
+            <SyncNetError as WaitError>::buffer_too_small(),
+            SyncNetError::BufferTooSmall
+        );
+        assert_eq!(
+            <SyncNetError as WaitError>::cancelled(),
+            SyncNetError::Cancelled
+        );
+        assert_eq!(
+            <SyncNetError as WaitError>::decode("schema drift".to_string()),
+            SyncNetError::Decode("schema drift".to_string())
+        );
+    }
 }
