@@ -1,22 +1,28 @@
-//! aether-substrate-bundle: multi-binary chassis crate.
+//! aether-substrate-bundle: multi-binary chassis crate (ADR-0073).
 //!
 //! Standard Cargo layout:
 //!
 //! - `src/<chassis>/` — chassis-specific source (chassis impl,
-//!   driver capability, render plumbing, etc.) for desktop, headless,
-//!   hub. Mirrors what each former chassis-binary crate held.
+//!   driver capability, render plumbing, etc.) for the four chassis:
+//!   `desktop`, `headless`, `hub`, `test_bench`.
 //! - `src/hub/` — the hub library (substrate-side client, wire types,
 //!   MCP coordinator, hub chassis).
-//! - `src/bin/<chassis>.rs` — minimal entry point per binary.
+//! - `src/test_bench/` — the test-bench chassis plus the in-process
+//!   `TestBench` library API consumers reach via
+//!   `aether_substrate_bundle::test_bench::TestBench`.
+//! - `src/bin/<chassis>.rs` — minimal entry point per binary
+//!   (`aether-substrate`, `aether-substrate-headless`,
+//!   `aether-substrate-hub`, `aether-substrate-test-bench` —
+//!   output names preserved across the rename).
 //!
 //! The lib root re-exports a convenience surface (the hub types and
-//! the most-used `aether-substrate` types) so external consumers
-//! — `aether-substrate-test-bench`, integration tests — can write
-//! `use aether_substrate_bundle::{HubClient, Registry, ...};` instead of
-//! chasing through chassis submodules. The shared substrate runtime
-//! (mail scheduler, registry, wasmtime host, capabilities) lives in
-//! `aether-substrate` — depend on that directly when you don't need
-//! chassis or hub surface.
+//! the most-used `aether-substrate` runtime types) so external
+//! consumers — components, integration tests, the scenario runner,
+//! demos — can write `use aether_substrate_bundle::{HubClient,
+//! Registry, ...};` instead of chasing through chassis submodules.
+//! The shared substrate runtime (mail scheduler, registry, wasmtime
+//! host, capabilities) lives in `aether-substrate` — depend on that
+//! directly when you don't need chassis or hub surface.
 
 pub mod desktop;
 pub mod headless;

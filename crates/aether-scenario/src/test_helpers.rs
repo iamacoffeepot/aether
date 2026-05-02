@@ -14,16 +14,15 @@
 //! scenario files focused on the actual `Script` definitions and lets
 //! every new component-test crate skip ~70 lines of mechanical setup.
 //!
-//! ## Why this lives in `aether-scenario` and not `aether-substrate-test-bench`
+//! ## Why this lives in `aether-scenario` and not `aether-substrate-bundle`
 //!
-//! The signatures below reference both `TestBench` (from test-bench)
-//! and `Step`/`Script` (from scenario). `aether-scenario` already
-//! depends on `aether-substrate-test-bench`, so the helpers compose
-//! freely here. Moving them the other direction would require
-//! `aether-substrate-test-bench` to depend on `aether-scenario`,
-//! which produces a circular `path` dependency cargo rejects. Issue
-//! 460 originally proposed test-bench as the home; the inversion
-//! preserves the single-source-of-truth outcome without the cycle.
+//! The signatures below reference both `TestBench` (from
+//! `aether_substrate_bundle::test_bench`, post-ADR-0073) and
+//! `Step` / `Script` (from scenario). `aether-scenario` already
+//! depends on `aether-substrate-bundle`, so the helpers compose
+//! freely here. Moving them the other direction would push
+//! YAML-parsing and `Script` types into chassis-land, inverting the
+//! layer the consolidation in ADR-0073 deliberately preserved.
 //!
 //! ## Usage
 //!
@@ -70,7 +69,7 @@ static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Probe for any usable wgpu adapter. Used by `require_runtime` and
 /// by tests that need wgpu but not a wasm component (e.g. IO sink
-/// scenarios in `aether-substrate-test-bench`'s own tests).
+/// scenarios in `aether-substrate-bundle`'s own test-bench tests).
 pub fn has_wgpu_adapter() -> bool {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
