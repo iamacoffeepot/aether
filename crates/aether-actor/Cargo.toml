@@ -1,0 +1,26 @@
+[package]
+name = "aether-actor"
+version.workspace = true
+edition.workspace = true
+
+# ADR-0074 Phase 1: target-agnostic actor SDK shared by WASM components
+# (via `aether-component`'s `WasmTransport`) and, eventually, native
+# capabilities (via `aether-substrate`'s `NativeTransport`). Holds the
+# `MailTransport` trait, the typed mail/ctx/sink machinery generic over
+# `T: MailTransport`, and the `wait_reply` helper. No FFI imports, no
+# `extern "C"`, no panic handlers — those live with the transport-
+# specific shim that wraps the SDK.
+[dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+# ADR-0030 Phase 2: `InitCtx::subscribe_input` self-addresses
+# `aether.control.subscribe_input` for every `K::IS_INPUT` handler kind.
+# That mail's payload type lives in `aether-kinds`.
+aether-kinds = { path = "../aether-kinds" }
+bytemuck = { version = "1", default-features = false }
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+# `wait_reply` decodes typed reply payloads via postcard, which is
+# serde-driven. The crate stays `no_std`-friendly with `default-features = false`.
+serde = { version = "1", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }

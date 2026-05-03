@@ -1,11 +1,14 @@
 //! Shared `wait_reply` helper used by every synchronous SDK wrapper
-//! (`io::*_sync`, `handle::sync_*`, `net::fetch_blocking`). Each
-//! family carries its own error enum (`SyncIoError`, `SyncHandleError`,
-//! `SyncNetError`), so the helper is generic over both the reply
-//! kind `K` and an error type that implements [`WaitError`].
+//! (handle round-trips, the wasm-side `io::*_sync` / `net::fetch_blocking`
+//! that live in `aether-component`). Each family carries its own
+//! error enum (`SyncIoError`, `SyncHandleError`, `SyncNetError`), so
+//! the helper is generic over both the reply kind `K` and an error
+//! type that implements [`WaitError`]. The transport `T` is the third
+//! generic — picks `WasmTransport` for guests and `NativeTransport`
+//! for native capabilities (Phase 2).
 //!
 //! ADR-0042: the substrate echoes the request's correlation id on the
-//! reply; the host fn `wait_reply` parks the component thread until a
+//! reply; the host fn `wait_reply` parks the actor thread until a
 //! mail of kind `K` with the matching correlation arrives (or the
 //! timeout elapses). The three sentinel return codes (`-1` / `-2` /
 //! `-3`) map onto the [`WaitError`] constructors.
@@ -16,24 +19,24 @@ use alloc::vec::Vec;
 
 use aether_data::Kind;
 
-use crate::raw;
+use crate::transport::MailTransport;
 
 /// Error contract every sync wrapper's error enum needs to implement
 /// so [`wait_reply`] can construct the four post-FFI failure modes
 /// without knowing which family it's serving.
-pub(crate) trait WaitError {
+pub trait WaitError {
     fn timeout() -> Self;
     fn buffer_too_small() -> Self;
     fn cancelled() -> Self;
     fn decode(message: String) -> Self;
 }
 
-/// Allocate a `capacity`-sized scratch buffer in guest memory, park
-/// on `raw::wait_reply` for a mail of kind `K` with the given
+/// Allocate a `capacity`-sized scratch buffer in actor memory, park
+/// on `T::wait_reply` for a mail of kind `K` with the given
 /// `expected_correlation`, and postcard-decode the written bytes.
 /// Replaces the per-family duplicates that previously lived in
 /// `io.rs`, `handle.rs`, and inline in `net::fetch_blocking`.
-pub(crate) fn wait_reply<K, E>(
+pub fn wait_reply<K, E, T>(
     timeout_ms: u32,
     capacity: usize,
     expected_correlation: u64,
@@ -41,27 +44,20 @@ pub(crate) fn wait_reply<K, E>(
 where
     K: Kind + serde::de::DeserializeOwned,
     E: WaitError,
+    T: MailTransport,
 {
     let mut buf: Vec<u8> = vec![0u8; capacity];
-    let rc = unsafe {
-        raw::wait_reply(
-            K::ID.0,
-            buf.as_mut_ptr().addr() as u32,
-            buf.len() as u32,
-            timeout_ms,
-            expected_correlation,
-        )
-    };
+    let rc = T::wait_reply(K::ID.0, &mut buf, timeout_ms, expected_correlation);
     decode_wait_reply::<K, E>(rc, &buf)
 }
 
 /// Pure rc → `Result<K, E>` mapping extracted from [`wait_reply`] so
 /// the four sentinel branches and the unexpected-rc fallback are
-/// testable on host targets (the FFI shim `raw::wait_reply` panics
-/// off-wasm). The happy path postcard-decodes `&buf[..rc as usize]`,
-/// matching what the in-FFI version does after the host fn writes
-/// `rc` bytes into the scratch buffer.
-pub(crate) fn decode_wait_reply<K, E>(rc: i32, buf: &[u8]) -> Result<K, E>
+/// testable without a transport (`MailTransport` impls panic / no-op
+/// off their target). The happy path postcard-decodes
+/// `&buf[..rc as usize]`, matching what the in-FFI version does after
+/// the host fn writes `rc` bytes into the scratch buffer.
+pub fn decode_wait_reply<K, E>(rc: i32, buf: &[u8]) -> Result<K, E>
 where
     K: serde::de::DeserializeOwned,
     E: WaitError,
@@ -87,10 +83,11 @@ mod tests {
 
     // Per-impl mapping tests cover `SyncIoError`, `SyncHandleError`,
     // and `SyncNetError`. They live in their owning modules' test
-    // blocks so each enum's variant set stays next to its definition.
-    // The helper-level tests below exercise the rc → branch mapping
-    // itself via a dummy `WaitError` that just records which
-    // constructor fired.
+    // blocks (handle.rs here; io.rs / net.rs in aether-component
+    // post-Phase 1) so each enum's variant set stays next to its
+    // definition. The helper-level tests below exercise the rc →
+    // branch mapping itself via a dummy `WaitError` that just records
+    // which constructor fired.
 
     /// Tag-recording stub `WaitError` so [`decode_wait_reply`] tests
     /// can assert which sentinel branch the helper picked without

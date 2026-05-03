@@ -9,6 +9,7 @@ members = [
     "crates/aether-data",
     "crates/aether-kinds",
     "crates/aether-math",
+    "crates/aether-actor",
     "crates/aether-component",
     "crates/aether-mesh",
     "crates/aether-camera",

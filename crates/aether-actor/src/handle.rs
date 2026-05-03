@@ -1,16 +1,19 @@
-//! ADR-0045 typed-handle SDK, guest side. The substrate's
+//! ADR-0045 typed-handle SDK, actor side. The substrate's
 //! `"aether.sink.handle"` sink (ADR-0058) owns a refcounted byte cache;
-//! components publish values into
-//! it (postcard-encoded) and receive a fresh ephemeral handle id back
-//! that they can embed in mail as `Ref::Handle { id, kind_id }`. The
-//! substrate's dispatch path resolves the handle to its `Ref::Inline`
-//! form before delivery, so recipients see a normal inline value.
+//! actors publish values into it (postcard-encoded) and receive a
+//! fresh ephemeral handle id back that they can embed in mail as
+//! `Ref::Handle { id, kind_id }`. The substrate's dispatch path
+//! resolves the handle to its `Ref::Inline` form before delivery, so
+//! recipients see a normal inline value.
 //!
 //! Wire shape mirrors the io and net helpers (ADR-0041, ADR-0043):
-//! components mail one of the four typed request kinds and either fire
-//! and forget or block on the paired `*Result` reply.
+//! actors mail one of the four typed request kinds and either fire
+//! and forget or block on the paired `*Result` reply. Helpers here
+//! are generic over `T: MailTransport` so the wasm guest path
+//! (`WasmTransport`) and the future native path (`NativeTransport`)
+//! share one code body.
 //!
-//! Quick tour:
+//! Quick tour (wasm guest):
 //!
 //! ```ignore
 //! use aether_component::{Component, Ctx, InitCtx};
@@ -22,10 +25,10 @@
 //!     #[handler]
 //!     fn on_tick(&mut self, ctx: &mut Ctx<'_>, _t: Tick) {
 //!         let inner = MyValue { ... };
-//!         let Some(handle) = ctx.publish(&inner) else { return };
+//!         let Ok(handle) = ctx.publish(&inner) else { return };
 //!         let outer = MyParent {
 //!             held: handle.as_ref(),
-//!             ...
+//!             ..
 //!         };
 //!         BROADCAST.send(&outer);
 //!         // `handle` drops here → fire-and-forget HandleRelease,
@@ -46,12 +49,14 @@ use aether_kinds::{
 };
 use serde::Serialize;
 
-use crate::{raw, resolve_sink};
+use crate::sink::resolve_sink;
+use crate::sync::{WaitError, wait_reply};
+use crate::transport::MailTransport;
 
 /// Mailbox name the substrate registers its handle sink under
 /// (ADR-0045, namespaced under `aether.sink.*` per ADR-0058). Exposed
-/// for components that want to bypass the typed helpers and build a
-/// `Sink<HandlePublish>` directly without duplicating the string
+/// for actors that want to bypass the typed helpers and build a
+/// `Sink<HandlePublish, T>` directly without duplicating the string
 /// literal.
 pub const HANDLE_SINK_NAME: &str = "aether.sink.handle";
 
@@ -88,15 +93,33 @@ pub enum SyncHandleError {
 /// the right kind id.
 ///
 /// Not `Copy` / `Clone`. Cloning a refcounted handle without an
-/// inc-ref would cause a double-release on drop; if a component
-/// needs multiple references it pins the handle and reads the raw
-/// id via `Handle::id`.
-pub struct Handle<K> {
+/// inc-ref would cause a double-release on drop; if an actor needs
+/// multiple references it pins the handle and reads the raw id via
+/// `Handle::id`.
+///
+/// `T: MailTransport` is on the type so `Drop` and the inherent
+/// `release` / `pin` / `unpin` methods can dispatch through the
+/// right transport without the caller threading it. `Handle<K, T>`
+/// in `aether-component` is aliased to `Handle<K, WasmTransport>`,
+/// so user code keeps writing `Handle<MyKind>`.
+pub struct Handle<K, T: MailTransport> {
     id: u64,
     _k: PhantomData<fn() -> K>,
+    _t: PhantomData<fn() -> T>,
 }
 
-impl<K> Handle<K> {
+impl<K, T: MailTransport> Handle<K, T> {
+    /// Not part of the public API; the `publish` helper builds
+    /// handles through here so the field stays private to the SDK.
+    #[doc(hidden)]
+    pub fn __from_id(id: u64) -> Self {
+        Handle {
+            id,
+            _k: PhantomData,
+            _t: PhantomData,
+        }
+    }
+
     /// Raw handle id. Exposed for hand-rolled callers that need to
     /// pass the id through host fns the SDK doesn't yet wrap, or to
     /// detach the handle from its RAII guard via
@@ -105,7 +128,7 @@ impl<K> Handle<K> {
         self.id
     }
 
-    /// Drop the publisher's reference. Sync — blocks the component
+    /// Drop the publisher's reference. Sync — blocks the actor
     /// thread until the substrate replies, with a 5s default
     /// timeout. Returns `Err(Handle(UnknownHandle))` if the entry
     /// has already been evicted; otherwise `Ok(())`. Use the
@@ -115,24 +138,24 @@ impl<K> Handle<K> {
         let id = self.id;
         // Suppress the Drop impl so we don't release twice.
         core::mem::forget(self);
-        sync_release(id)
+        sync_release::<T>(id)
     }
 
     /// Pin against LRU eviction. Useful when the publisher wants to
     /// release its local guard (drop the `Handle`) but keep the
     /// cached bytes available — pin first, then drop.
     pub fn pin(&self) -> Result<(), SyncHandleError> {
-        sync_pin(self.id)
+        sync_pin::<T>(self.id)
     }
 
     /// Clear the pinned flag. Doesn't drop the entry; only makes
     /// it eligible for LRU eviction once `refcount == 0`.
     pub fn unpin(&self) -> Result<(), SyncHandleError> {
-        sync_unpin(self.id)
+        sync_unpin::<T>(self.id)
     }
 }
 
-impl<K: Kind> Handle<K> {
+impl<K: Kind, T: MailTransport> Handle<K, T> {
     /// Wire-shaped reference to this handle. Embed in a `Ref<K>`
     /// field on an outgoing kind so the substrate's dispatch path
     /// resolves the inline bytes before delivery. `as_ref` is a
@@ -148,7 +171,7 @@ impl<K: Kind> Handle<K> {
     }
 }
 
-impl<K> Drop for Handle<K> {
+impl<K, T: MailTransport> Drop for Handle<K, T> {
     fn drop(&mut self) {
         // Fire-and-forget: a panicking wait would poison teardown.
         // The substrate's release dispatch is idempotent — calling
@@ -156,91 +179,79 @@ impl<K> Drop for Handle<K> {
         let req = HandleRelease {
             id: ::aether_data::HandleId(self.id),
         };
-        resolve_sink::<HandleRelease>(HANDLE_SINK_NAME).send(&req);
+        resolve_sink::<HandleRelease, T>(HANDLE_SINK_NAME).send(&req);
     }
 }
 
 /// Postcard-encode `value` and round-trip a `HandlePublish` request
-/// through the `"aether.sink.handle"` sink. Returns the typed `Handle<K>` on
-/// success or a `SyncHandleError` describing the failure (substrate
-/// timed out, eviction failed, kind id mismatch on a re-publish, …).
+/// through the `"aether.sink.handle"` sink. Returns the typed
+/// `Handle<K, T>` on success or a `SyncHandleError` describing the
+/// failure (substrate timed out, eviction failed, kind id mismatch
+/// on a re-publish, …).
 ///
 /// Shared by `InitCtx::publish` / `Ctx::publish` / `DropCtx::publish`
 /// — keep the wire shape and timeouts in one place.
-pub fn publish<K: Kind + Serialize>(value: &K) -> Result<Handle<K>, SyncHandleError> {
+pub fn publish<K: Kind + Serialize, T: MailTransport>(
+    value: &K,
+) -> Result<Handle<K, T>, SyncHandleError> {
     let bytes = postcard::to_allocvec(value).expect("postcard encode to Vec is infallible");
     let req = HandlePublish {
         kind_id: K::ID,
         bytes,
     };
-    resolve_sink::<HandlePublish>(HANDLE_SINK_NAME).send(&req);
-    let correlation = unsafe { raw::prev_correlation() };
-    let result: HandlePublishResult = crate::sync::wait_reply::<_, SyncHandleError>(
-        DEFAULT_TIMEOUT_MS,
-        SMALL_REPLY_CAP,
-        correlation,
-    )?;
+    resolve_sink::<HandlePublish, T>(HANDLE_SINK_NAME).send(&req);
+    let correlation = T::prev_correlation();
+    let result: HandlePublishResult =
+        wait_reply::<_, SyncHandleError, T>(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
     match result {
-        HandlePublishResult::Ok { id, .. } => Ok(Handle {
-            id: id.0,
-            _k: PhantomData,
-        }),
+        HandlePublishResult::Ok { id, .. } => Ok(Handle::__from_id(id.0)),
         HandlePublishResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
     }
 }
 
-fn sync_release(id: u64) -> Result<(), SyncHandleError> {
+fn sync_release<T: MailTransport>(id: u64) -> Result<(), SyncHandleError> {
     let req = HandleRelease {
         id: ::aether_data::HandleId(id),
     };
-    resolve_sink::<HandleRelease>(HANDLE_SINK_NAME).send(&req);
-    let correlation = unsafe { raw::prev_correlation() };
-    let result: HandleReleaseResult = crate::sync::wait_reply::<_, SyncHandleError>(
-        DEFAULT_TIMEOUT_MS,
-        SMALL_REPLY_CAP,
-        correlation,
-    )?;
+    resolve_sink::<HandleRelease, T>(HANDLE_SINK_NAME).send(&req);
+    let correlation = T::prev_correlation();
+    let result: HandleReleaseResult =
+        wait_reply::<_, SyncHandleError, T>(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
     match result {
         HandleReleaseResult::Ok { .. } => Ok(()),
         HandleReleaseResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
     }
 }
 
-fn sync_pin(id: u64) -> Result<(), SyncHandleError> {
+fn sync_pin<T: MailTransport>(id: u64) -> Result<(), SyncHandleError> {
     let req = HandlePin {
         id: ::aether_data::HandleId(id),
     };
-    resolve_sink::<HandlePin>(HANDLE_SINK_NAME).send(&req);
-    let correlation = unsafe { raw::prev_correlation() };
-    let result: HandlePinResult = crate::sync::wait_reply::<_, SyncHandleError>(
-        DEFAULT_TIMEOUT_MS,
-        SMALL_REPLY_CAP,
-        correlation,
-    )?;
+    resolve_sink::<HandlePin, T>(HANDLE_SINK_NAME).send(&req);
+    let correlation = T::prev_correlation();
+    let result: HandlePinResult =
+        wait_reply::<_, SyncHandleError, T>(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
     match result {
         HandlePinResult::Ok { .. } => Ok(()),
         HandlePinResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
     }
 }
 
-fn sync_unpin(id: u64) -> Result<(), SyncHandleError> {
+fn sync_unpin<T: MailTransport>(id: u64) -> Result<(), SyncHandleError> {
     let req = HandleUnpin {
         id: ::aether_data::HandleId(id),
     };
-    resolve_sink::<HandleUnpin>(HANDLE_SINK_NAME).send(&req);
-    let correlation = unsafe { raw::prev_correlation() };
-    let result: HandleUnpinResult = crate::sync::wait_reply::<_, SyncHandleError>(
-        DEFAULT_TIMEOUT_MS,
-        SMALL_REPLY_CAP,
-        correlation,
-    )?;
+    resolve_sink::<HandleUnpin, T>(HANDLE_SINK_NAME).send(&req);
+    let correlation = T::prev_correlation();
+    let result: HandleUnpinResult =
+        wait_reply::<_, SyncHandleError, T>(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
     match result {
         HandleUnpinResult::Ok { .. } => Ok(()),
         HandleUnpinResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
     }
 }
 
-impl crate::sync::WaitError for SyncHandleError {
+impl WaitError for SyncHandleError {
     fn timeout() -> Self {
         Self::Timeout
     }
@@ -262,7 +273,7 @@ mod tests {
     use alloc::vec;
     use serde::Deserialize;
 
-    /// Off-wasm we can't exercise the FFI host calls (`raw::send_mail`
+    /// Off-target we can't exercise the FFI host calls (`raw::send_mail`
     /// and friends panic with the host-target stub). Pin the wire
     /// shape by encoding the request kinds and asserting the bytes
     /// round-trip into the same kinds.
@@ -296,16 +307,35 @@ mod tests {
         assert_eq!(decoded.id, ::aether_data::HandleId(0xDEAD));
     }
 
+    /// Stub transport for the host-side `as_ref` test — `Drop` would
+    /// call `T::send_mail`, which we suppress via `mem::forget`.
+    /// Lives next to the test that uses it; not a public surface.
+    struct NoopTransport;
+    impl MailTransport for NoopTransport {
+        fn send_mail(_: u64, _: u64, _: &[u8], _: u32) -> u32 {
+            0
+        }
+        fn reply_mail(_: u32, _: u64, _: &[u8], _: u32) -> u32 {
+            0
+        }
+        fn save_state(_: u32, _: &[u8]) -> u32 {
+            0
+        }
+        fn wait_reply(_: u64, _: &mut [u8], _: u32, _: u64) -> i32 {
+            -1
+        }
+        fn prev_correlation() -> u64 {
+            0
+        }
+    }
+
     #[test]
     fn handle_as_ref_carries_kind_id() {
         // Construct a handle bypassing publish (which needs the
         // FFI). Pin the contract: `as_ref` reads `K::ID` from the
         // type parameter, not from a field, so the kind id matches
         // the type's compile-time constant.
-        let handle: Handle<Payload> = Handle {
-            id: 42,
-            _k: PhantomData,
-        };
+        let handle: Handle<Payload, NoopTransport> = Handle::__from_id(42);
         match handle.as_ref() {
             Ref::Handle { id, kind_id } => {
                 assert_eq!(id, 42);

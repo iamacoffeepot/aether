@@ -34,9 +34,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use aether_actor::{MailTransport, WaitError, wait_reply};
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
-use crate::{raw, resolve_sink};
+use crate::{WasmTransport, resolve_sink};
 
 /// Mailbox name the substrate registers its net sink under (ADR-0043,
 /// namespaced under `aether.sink.*` per ADR-0058). Exposed so
@@ -80,7 +81,7 @@ pub enum SyncNetError {
     Decode(String),
 }
 
-impl crate::sync::WaitError for SyncNetError {
+impl WaitError for SyncNetError {
     fn timeout() -> Self {
         Self::Timeout
     }
@@ -139,9 +140,9 @@ impl crate::sync::WaitError for SyncNetError {
 /// ```
 pub fn fetch_blocking(fetch: &Fetch, timeout_ms: u32) -> Result<FetchResponse, SyncNetError> {
     resolve_sink::<Fetch>(NET_MAILBOX_NAME).send(fetch);
-    let correlation = unsafe { raw::prev_correlation() };
+    let correlation = WasmTransport::prev_correlation();
     let reply: FetchResult =
-        crate::sync::wait_reply::<_, SyncNetError>(timeout_ms, FETCH_REPLY_CAP, correlation)?;
+        wait_reply::<_, SyncNetError, WasmTransport>(timeout_ms, FETCH_REPLY_CAP, correlation)?;
 
     match reply {
         FetchResult::Ok {
@@ -238,12 +239,12 @@ mod tests {
         assert_ne!(NET_MAILBOX_NAME, "aether.net");
     }
 
-    /// `SyncNetError` is the [`crate::sync::WaitError`] impl that
+    /// `SyncNetError` is the [`WaitError`] impl that
     /// [`fetch_blocking`] uses, so the four trait constructors must
     /// land on the matching enum variants.
     #[test]
     fn wait_error_mapping_for_sync_net_error() {
-        use crate::sync::WaitError;
+        use WaitError;
         assert_eq!(
             <SyncNetError as WaitError>::timeout(),
             SyncNetError::Timeout
