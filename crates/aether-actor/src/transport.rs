@@ -2,17 +2,18 @@
 //! crossing the actor↔chassis boundary is funnelled through one
 //! `MailTransport` impl chosen at compile time by the consumer crate
 //! — `aether-component`'s `WasmTransport` (delegates to `_p32` host
-//! fns) for WASM guests, `aether-substrate`'s future `NativeTransport`
-//! (delegates to in-process mpsc) for native capabilities.
+//! fns) for WASM guests, `aether-substrate`'s `NativeTransport`
+//! (owned by each native capability) for native actors.
 //!
-//! Trait methods are associated functions, not `&self` methods. The
-//! transport carries no per-actor state — addressing rides on the
-//! `Sink<K, T>` / `Ctx<'_, T>` / `Mail<'_>` arguments, and any
-//! per-thread plumbing the native side needs (current actor's mpsc
-//! sender, etc.) lives behind a thread-local that the impl reads on
-//! call. WASM has no threads so the lookup degrades to a global; the
-//! function-pointer indirection is the only call-site cost over
-//! today's `unsafe { raw::send_mail(...) }`.
+//! Trait methods take `&self`, not associated functions. WasmTransport
+//! is a ZST, so its `&self` is unused and the dispatch lowers to a
+//! direct call to the matching host fn — no overhead. NativeTransport
+//! is a regular struct each capability owns, holding the per-actor
+//! state (mailer + self mailbox + inbox + correlation counter +
+//! overflow queue) directly as fields. No thread-locals, no
+//! install/uninstall ceremony — the type system carries the actor
+//! binding through the `&T` references threaded into `Sink::send`,
+//! `Ctx<'a, T>`, and the `wait_reply` / handle helpers.
 
 /// The five operations every transport must provide. Signatures
 /// mirror the `_p32` FFI in `aether-component::raw` byte-for-byte —
@@ -32,16 +33,16 @@ pub trait MailTransport {
     /// Return `0` on success; non-zero is reserved for transport-
     /// specific failure surfaces. Today only the wasm transport
     /// returns non-zero (substrate-side `register` lookup miss); the
-    /// native transport will collapse the `Result` channel-send
-    /// failure into the same scalar.
-    fn send_mail(recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32;
+    /// native transport collapses any channel-send failure into the
+    /// same scalar.
+    fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32;
 
     /// Reply to the originator of the mail currently being dispatched
     /// (ADR-0013). `sender` is the per-instance handle the dispatcher
     /// threaded onto `Ctx` at receive time; the substrate routes it
     /// to the right Claude session, sibling component, or remote
     /// engine mailbox.
-    fn reply_mail(sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32;
+    fn reply_mail(&self, sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32;
 
     /// Deposit a migration bundle for a future replacement instance
     /// (ADR-0016). Only meaningful inside `on_replace`. `bytes` are
@@ -49,7 +50,11 @@ pub trait MailTransport {
     /// caller is free to drop the slice on return. Returns `0` on
     /// success; non-zero on substrate rejection (today: 1 MiB cap
     /// exceeded, or internal OOB — both component bugs).
-    fn save_state(version: u32, bytes: &[u8]) -> u32;
+    ///
+    /// Native actors don't have a `replace_component`-style hot
+    /// reload path (only wasm components do). The native transport
+    /// returns a non-zero error sentinel so a misuse is loud.
+    fn save_state(&self, version: u32, bytes: &[u8]) -> u32;
 
     /// Block the actor's thread until a mail of `expected_kind` (and,
     /// when `expected_correlation != 0`, also that correlation id)
@@ -63,6 +68,7 @@ pub trait MailTransport {
     /// for future sentinels and surfaces through `WaitError::decode`
     /// in the SDK wrapper so a reader sees the unknown rc by name.
     fn wait_reply(
+        &self,
         expected_kind: u64,
         out: &mut [u8],
         timeout_ms: u32,
@@ -73,5 +79,5 @@ pub trait MailTransport {
     /// `send_mail` call (ADR-0042). `0` before any send. Sync
     /// wrappers use it to filter `wait_reply` to "the reply for the
     /// request I just sent" rather than "any reply of this kind."
-    fn prev_correlation() -> u64;
+    fn prev_correlation(&self) -> u64;
 }

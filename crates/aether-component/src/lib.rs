@@ -52,17 +52,26 @@ pub mod net;
 pub mod raw;
 
 /// ZST `MailTransport` impl for the WASM guest path. Each method
-/// forwards to the matching `raw::*` host-fn import. The trait
-/// methods are associated functions (no `&self`), so this type is
-/// instantiated only at the type-system level — there is no runtime
-/// allocation or pointer indirection.
+/// forwards to the matching `raw::*` host-fn import. The `&self`
+/// receiver is unused — `WasmTransport` carries no per-instance
+/// state because the FFI imports are global to the wasm instance —
+/// so there's no overhead beyond the host-fn call itself.
 ///
-/// Phase 2 introduces `aether_substrate::NativeTransport` for native
-/// capabilities; both impls share the same SDK in `aether-actor`.
+/// `aether_substrate::NativeTransport` is the native counterpart;
+/// both impls share the same SDK in `aether-actor` and the same
+/// trait surface.
 pub struct WasmTransport;
 
+/// Process-wide `WasmTransport` instance. The type is a ZST, so
+/// this `static` occupies zero bytes; its only purpose is giving
+/// `&WASM_TRANSPORT` callers (the `export!`-emitted Ctx/InitCtx/
+/// DropCtx constructors, the `io` / `net` / `log` helper modules,
+/// component examples) a stable address to borrow without each
+/// call site having to write `&WasmTransport` inline.
+pub static WASM_TRANSPORT: WasmTransport = WasmTransport;
+
 impl MailTransport for WasmTransport {
-    fn send_mail(recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
+    fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
         unsafe {
             raw::send_mail(
                 recipient,
@@ -74,7 +83,7 @@ impl MailTransport for WasmTransport {
         }
     }
 
-    fn reply_mail(sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32 {
+    fn reply_mail(&self, sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32 {
         unsafe {
             raw::reply_mail(
                 sender,
@@ -86,11 +95,12 @@ impl MailTransport for WasmTransport {
         }
     }
 
-    fn save_state(version: u32, bytes: &[u8]) -> u32 {
+    fn save_state(&self, version: u32, bytes: &[u8]) -> u32 {
         unsafe { raw::save_state(version, bytes.as_ptr().addr() as u32, bytes.len() as u32) }
     }
 
     fn wait_reply(
+        &self,
         expected_kind: u64,
         out: &mut [u8],
         timeout_ms: u32,
@@ -107,7 +117,7 @@ impl MailTransport for WasmTransport {
         }
     }
 
-    fn prev_correlation() -> u64 {
+    fn prev_correlation(&self) -> u64 {
         unsafe { raw::prev_correlation() }
     }
 }
@@ -283,7 +293,8 @@ macro_rules! export {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
             $crate::log::install_global_default();
-            let mut ctx: $crate::InitCtx<'_> = $crate::InitCtx::__new(mailbox_id);
+            let mut ctx: $crate::InitCtx<'_> =
+                $crate::InitCtx::__new(&$crate::WASM_TRANSPORT, mailbox_id);
             let instance = <$component as $crate::Component>::init(&mut ctx);
             unsafe {
                 __AETHER_COMPONENT.set(instance);
@@ -316,7 +327,7 @@ macro_rules! export {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::Ctx<'_> = $crate::Ctx::__new();
+            let mut ctx: $crate::Ctx<'_> = $crate::Ctx::__new(&$crate::WASM_TRANSPORT);
             let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
             instance.__aether_dispatch(&mut ctx, mail)
         }
@@ -329,7 +340,7 @@ macro_rules! export {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::DropCtx<'_> = $crate::DropCtx::__new();
+            let mut ctx: $crate::DropCtx<'_> = $crate::DropCtx::__new(&$crate::WASM_TRANSPORT);
             <$component as $crate::Component>::on_replace(instance, &mut ctx);
             0
         }
@@ -342,7 +353,7 @@ macro_rules! export {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::DropCtx<'_> = $crate::DropCtx::__new();
+            let mut ctx: $crate::DropCtx<'_> = $crate::DropCtx::__new(&$crate::WASM_TRANSPORT);
             <$component as $crate::Component>::on_drop(instance, &mut ctx);
             0
         }
@@ -358,7 +369,7 @@ macro_rules! export {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::Ctx<'_> = $crate::Ctx::__new();
+            let mut ctx: $crate::Ctx<'_> = $crate::Ctx::__new(&$crate::WASM_TRANSPORT);
             let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
             <$component as $crate::Component>::on_rehydrate(instance, &mut ctx, prior);
             0

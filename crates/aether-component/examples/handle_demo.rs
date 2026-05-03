@@ -88,10 +88,12 @@ impl Component for HandleDemo {
         // forwards to a Claude session the local guard would have
         // been released and the entry could be evicted under
         // pressure — pin it so the cached bytes survive.
-        let _ = handle.pin();
-        BROADCAST.send(&outer);
-        // `handle` drops here → fire-and-forget HandleRelease;
-        // the pin keeps the cached entry alive past release.
+        let _ = handle.pin(ctx.transport());
+        BROADCAST.send(ctx.transport(), &outer);
+        // `handle` drops here without auto-release (ADR-0074: Drop
+        // is no-op now; substrate's LRU evicts forgotten handles).
+        // The pin keeps the cached entry alive past the local
+        // handle's drop so the broadcast recipient can resolve it.
     }
 }
 

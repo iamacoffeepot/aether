@@ -48,7 +48,7 @@ use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 
-use crate::{WasmTransport, resolve_sink};
+use crate::{WASM_TRANSPORT, WasmTransport, resolve_sink};
 
 /// Mailbox name the substrate registers its I/O sink under (ADR-0041,
 /// namespaced under `aether.sink.*` per ADR-0058). Exposed so
@@ -107,12 +107,12 @@ pub fn list(namespace: &str, prefix: &str) {
 }
 
 fn send<K: Kind>(value: &K) -> u64 {
-    resolve_sink::<K>(IO_MAILBOX_NAME).send(value);
+    resolve_sink::<K>(IO_MAILBOX_NAME).send(&WASM_TRANSPORT, value);
     // ADR-0042: capture the correlation the substrate just minted so
     // the sync wrappers can filter on it. For the async helpers
     // (`read` / `write` / `delete` / `list`), this is harmless noise —
     // they don't wait.
-    WasmTransport::prev_correlation()
+    WASM_TRANSPORT.prev_correlation()
 }
 
 /// ADR-0042: errors surfaced by the `*_sync` wrappers. The first three
@@ -163,6 +163,7 @@ pub fn read_sync(namespace: &str, path: &str, timeout_ms: u32) -> Result<Vec<u8>
         path: path.to_string(),
     });
     let reply: ReadResult = wait_reply::<ReadResult, SyncIoError, WasmTransport>(
+        &WASM_TRANSPORT,
         timeout_ms,
         READ_REPLY_CAP,
         correlation,
@@ -188,6 +189,7 @@ pub fn write_sync(
         bytes: bytes.to_vec(),
     });
     match wait_reply::<WriteResult, SyncIoError, WasmTransport>(
+        &WASM_TRANSPORT,
         timeout_ms,
         SMALL_REPLY_CAP,
         correlation,
@@ -206,6 +208,7 @@ pub fn delete_sync(namespace: &str, path: &str, timeout_ms: u32) -> Result<(), S
         path: path.to_string(),
     });
     match wait_reply::<DeleteResult, SyncIoError, WasmTransport>(
+        &WASM_TRANSPORT,
         timeout_ms,
         SMALL_REPLY_CAP,
         correlation,
@@ -228,6 +231,7 @@ pub fn list_sync(
         prefix: prefix.to_string(),
     });
     match wait_reply::<ListResult, SyncIoError, WasmTransport>(
+        &WASM_TRANSPORT,
         timeout_ms,
         LIST_REPLY_CAP,
         correlation,
