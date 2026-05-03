@@ -72,7 +72,7 @@ impl Component for SaveCounter {
     /// this. Watch `receive_mail` for a `demo.save_counter.count`
     /// frame after the component loads.
     #[handler]
-    fn on_tick(&mut self, _ctx: &mut Ctx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
         if self.initialized {
             return;
         }
@@ -86,7 +86,7 @@ impl Component for SaveCounter {
             &next.to_le_bytes(),
             IO_TIMEOUT_MS,
         );
-        BROADCAST.send(&Count { count: next });
+        BROADCAST.send(ctx.transport(), &Count { count: next });
     }
 }
 

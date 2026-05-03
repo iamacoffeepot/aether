@@ -32,11 +32,16 @@ pub trait WaitError {
 }
 
 /// Allocate a `capacity`-sized scratch buffer in actor memory, park
-/// on `T::wait_reply` for a mail of kind `K` with the given
+/// on `transport.wait_reply` for a mail of kind `K` with the given
 /// `expected_correlation`, and postcard-decode the written bytes.
 /// Replaces the per-family duplicates that previously lived in
 /// `io.rs`, `handle.rs`, and inline in `net::fetch_blocking`.
+///
+/// `transport` is the actor-bound `MailTransport` instance — see
+/// `transport.rs` for the `&self` receiver design and how it
+/// type-system-tracks the actor binding.
 pub fn wait_reply<K, E, T>(
+    transport: &T,
     timeout_ms: u32,
     capacity: usize,
     expected_correlation: u64,
@@ -47,7 +52,7 @@ where
     T: MailTransport,
 {
     let mut buf: Vec<u8> = vec![0u8; capacity];
-    let rc = T::wait_reply(K::ID.0, &mut buf, timeout_ms, expected_correlation);
+    let rc = transport.wait_reply(K::ID.0, &mut buf, timeout_ms, expected_correlation);
     decode_wait_reply::<K, E>(rc, &buf)
 }
 

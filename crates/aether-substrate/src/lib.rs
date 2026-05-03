@@ -45,6 +45,7 @@ pub mod log_capture;
 pub mod log_sink;
 pub mod mail;
 pub mod mailer;
+pub mod native_transport;
 pub mod outbound;
 pub mod panic_hook;
 pub mod registry;
@@ -55,8 +56,8 @@ pub mod scheduler;
 
 pub use boot::{ChassisHandlerContext, SubstrateBoot, SubstrateBootBuilder};
 pub use capability::{
-    BootError, BootedChassis, Capability, ChassisBuilder, ChassisCtx, Envelope, FallbackRouter,
-    MailboxClaim, RunningCapability,
+    BootError, BootedChassis, Capability, ChassisBuilder, ChassisCtx, DropOnShutdownClaim,
+    Envelope, FallbackRouter, MailboxClaim, RunningCapability, SinkSender,
 };
 pub use chassis::Chassis;
 pub use chassis_builder::{
@@ -69,6 +70,7 @@ pub use ctx::SubstrateCtx;
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
 pub use mail::{KindId, Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 pub use mailer::Mailer;
+pub use native_transport::NativeTransport;
 pub use outbound::{
     DroppingBackend, EgressBackend, EgressEvent, HubOutbound, LogEntry, LogLevel, RecordingBackend,
 };

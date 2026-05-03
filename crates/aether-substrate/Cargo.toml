@@ -22,6 +22,13 @@ render = ["dep:wgpu", "dep:png"]
 audio = ["dep:cpal", "dep:crossbeam-queue"]
 
 [dependencies]
+# ADR-0074 Phase 2: target-agnostic actor SDK. Capabilities own a
+# `NativeTransport` instance (in `crate::native_transport`) and pass
+# `&self.transport` into the SDK's `Sink<K, T>` / `wait_reply` /
+# `Ctx<'_, T>` machinery — same shape the wasm guest path uses
+# through `WasmTransport`. The trait takes `&self` so per-actor
+# state lives in struct fields, not a thread-local.
+aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"

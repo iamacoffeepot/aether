@@ -1,4 +1,9 @@
 //! ADR-0070 Phase 3: guest-log sink as a native capability.
+//! ADR-0074 Phase 2a: first capability migrated onto the unified
+//! actor SDK. Channel-drop + join lifecycle (no `Arc<AtomicBool>`
+//! polling); owns a [`NativeTransport`] instance the dispatcher
+//! thread uses to talk to the rest of the substrate via the same
+//! `Sink<K, _>` / `wait_reply` machinery the wasm guest path uses.
 //!
 //! Counterpart to the `MailSubscriber` in `aether-component`: decodes
 //! `aether.log` mail the guest sent to `aether.sink.log` and re-emits
@@ -20,13 +25,11 @@
 //! [`crate::SubstrateBoot::build`] returns.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
-use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability};
+use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability, SinkSender};
 use crate::log_sink;
+use crate::native_transport::NativeTransport;
 
 /// Recipient name the log capability claims. Components mail
 /// `aether.log` (kind id) to this mailbox; the SDK's
@@ -34,20 +37,15 @@ use crate::log_sink;
 /// chassis-owned sinks under `aether.sink.*`.
 pub const LOG_SINK_NAME: &str = "aether.sink.log";
 
-/// Polling interval for the dispatcher's shutdown check. Same shape
-/// as `HandleCapability`; see ADR-0070 §"Threading model".
-const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
-
 /// Native capability owning the ADR-0060 guest-log sink. Boots a
 /// single dispatcher thread that pulls envelopes from the
 /// `aether.sink.log` mailbox and routes the bytes through
 /// [`log_sink::handle_log_mail`] for postcard-decode + log-facade
 /// emit.
 ///
-/// Stateless: the capability holds no per-instance config, and the
-/// global tracing subscriber (set up by [`crate::log_capture::init`]
-/// during the shared boot) is what actually receives the bridged
-/// log records.
+/// Stateless beyond the per-actor transport: the global tracing
+/// subscriber (set up by [`crate::log_capture::init`] during the
+/// shared boot) is what actually receives the bridged log records.
 #[derive(Default)]
 pub struct LogCapability {}
 
@@ -57,39 +55,61 @@ impl LogCapability {
     }
 }
 
-/// Running handle returned by [`LogCapability::boot`]. Same shape
-/// as `HandleRunning`: dispatcher thread + shutdown flag the thread
-/// polls.
+/// Running handle returned by [`LogCapability::boot`]. Holds the
+/// dispatcher's `JoinHandle`, the [`SinkSender`] strong handle that
+/// drives channel-drop shutdown, and the actor's
+/// [`NativeTransport`] (kept alive for the dispatcher thread's
+/// lifetime via the `Arc` clone the spawn closure holds).
 pub struct LogRunning {
     thread: Option<JoinHandle<()>>,
-    shutdown_flag: Arc<AtomicBool>,
+    /// Drop-on-shutdown breaks the channel. Held by name so the
+    /// `RunningCapability::shutdown` impl can drop it explicitly
+    /// before joining the thread; the registry's handler can no
+    /// longer upgrade its [`std::sync::Weak`] back-reference, the
+    /// inbox's last sender is gone, and the dispatcher's
+    /// `recv_blocking()` returns `None` on its next iteration.
+    sink_sender: Option<SinkSender>,
+    /// The actor's transport. The dispatcher thread holds an
+    /// `Arc::clone`, so this field exists to keep the same
+    /// transport reachable from chassis-side code that wants to
+    /// inspect or coordinate with this actor (none today; the
+    /// extension point is here without thread-local plumbing).
+    _transport: Arc<NativeTransport>,
 }
 
 impl Capability for LogCapability {
     type Running = LogRunning;
 
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let claim = ctx.claim_mailbox(LOG_SINK_NAME)?;
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let thread_flag = Arc::clone(&shutdown_flag);
-        let receiver = claim.receiver;
+        let claim = ctx.claim_mailbox_drop_on_shutdown(LOG_SINK_NAME)?;
+        let mailer = ctx.mail_send_handle();
+        let mailbox_id = claim.id;
+
+        // ADR-0074 §Decision: `&self` trait, owned transport. The
+        // capability constructs its `NativeTransport` once at boot
+        // and clones the `Arc` into the dispatcher thread; the
+        // dispatcher uses `transport.recv_blocking()` to pull from
+        // its own inbox without thread-local plumbing.
+        let transport = Arc::new(NativeTransport::new(mailer, mailbox_id));
+        transport.install_inbox(claim.receiver);
+        let dispatcher_transport = Arc::clone(&transport);
 
         let thread = thread::Builder::new()
             .name("aether-log-sink".into())
             .spawn(move || {
-                while !thread_flag.load(Ordering::Relaxed) {
-                    match receiver.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
-                        Ok(env) => log_sink::handle_log_mail(&env.payload),
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
+                // Channel-drop + join: pull until the sender side
+                // disconnects. Worst-case shutdown latency is the
+                // OS scheduler's wakeup, not a 100ms poll interval.
+                while let Some(env) = dispatcher_transport.recv_blocking() {
+                    log_sink::handle_log_mail(&env.payload);
                 }
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
         Ok(LogRunning {
             thread: Some(thread),
-            shutdown_flag,
+            sink_sender: Some(claim.sink_sender),
+            _transport: transport,
         })
     }
 }
@@ -98,9 +118,11 @@ impl RunningCapability for LogRunning {
     fn shutdown(self: Box<Self>) {
         let LogRunning {
             mut thread,
-            shutdown_flag,
+            mut sink_sender,
+            _transport,
         } = *self;
-        shutdown_flag.store(true, Ordering::Relaxed);
+        // Drop the strong sender first to break the channel.
+        sink_sender.take();
         if let Some(t) = thread.take() {
             let _ = t.join();
         }
@@ -109,7 +131,8 @@ impl RunningCapability for LogRunning {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::capability::ChassisBuilder;
@@ -128,6 +151,10 @@ mod tests {
     /// tracing subscriber drops the record silently — what we're
     /// asserting is that the dispatch path doesn't panic and that
     /// shutdown joins cleanly).
+    ///
+    /// Post-ADR-0074: shutdown latency is bounded by `recv()`
+    /// returning on channel disconnect, not by a polling interval.
+    /// Channel-drop should land well under the 500ms test budget.
     #[test]
     fn capability_routes_log_event_through_dispatcher() {
         let (registry, mailer) = fresh_substrate();
@@ -156,21 +183,17 @@ mod tests {
             1,
         );
 
-        // Give the dispatcher a moment to drain. recv_timeout means
-        // worst-case latency is one poll interval; test budget is
-        // 200ms.
         thread::sleep(Duration::from_millis(50));
         let start = Instant::now();
         chassis.shutdown();
         assert!(
             start.elapsed() < Duration::from_millis(500),
-            "shutdown should complete within a poll interval"
+            "shutdown should complete promptly via channel-drop"
         );
     }
 
     /// Builder rejects a duplicate claim if the well-known sink name
-    /// was already registered. Same protection as `HandleCapability`'s
-    /// duplicate-claim test.
+    /// was already registered.
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
         let (registry, mailer) = fresh_substrate();

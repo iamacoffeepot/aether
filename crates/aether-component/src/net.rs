@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 use aether_actor::{MailTransport, WaitError, wait_reply};
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
-use crate::{WasmTransport, resolve_sink};
+use crate::{WASM_TRANSPORT, WasmTransport, resolve_sink};
 
 /// Mailbox name the substrate registers its net sink under (ADR-0043,
 /// namespaced under `aether.sink.*` per ADR-0058). Exposed so
@@ -139,10 +139,14 @@ impl WaitError for SyncNetError {
 /// assert_eq!(resp.status, 200);
 /// ```
 pub fn fetch_blocking(fetch: &Fetch, timeout_ms: u32) -> Result<FetchResponse, SyncNetError> {
-    resolve_sink::<Fetch>(NET_MAILBOX_NAME).send(fetch);
-    let correlation = WasmTransport::prev_correlation();
-    let reply: FetchResult =
-        wait_reply::<_, SyncNetError, WasmTransport>(timeout_ms, FETCH_REPLY_CAP, correlation)?;
+    resolve_sink::<Fetch>(NET_MAILBOX_NAME).send(&WASM_TRANSPORT, fetch);
+    let correlation = WASM_TRANSPORT.prev_correlation();
+    let reply: FetchResult = wait_reply::<_, SyncNetError, WasmTransport>(
+        &WASM_TRANSPORT,
+        timeout_ms,
+        FETCH_REPLY_CAP,
+        correlation,
+    )?;
 
     match reply {
         FetchResult::Ok {
@@ -165,7 +169,7 @@ pub fn fetch_blocking(fetch: &Fetch, timeout_ms: u32) -> Result<FetchResponse, S
 /// typed + named counterpart to [`fetch_blocking`]; `ctx.send` on a
 /// user-built `Sink<Fetch>` does the same thing.
 pub fn fetch(fetch: &Fetch) {
-    resolve_sink::<Fetch>(NET_MAILBOX_NAME).send(fetch);
+    resolve_sink::<Fetch>(NET_MAILBOX_NAME).send(&WASM_TRANSPORT, fetch);
 }
 
 /// Tiny constructor for the common "GET with no headers or body"

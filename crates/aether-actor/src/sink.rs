@@ -112,14 +112,23 @@ impl<K: Kind, T: MailTransport> Sink<K, T> {
 impl<K: Kind, T: MailTransport> Sink<K, T> {
     /// Send a single typed payload. The substrate's `count` field is 1.
     ///
+    /// `transport` is the actor-bound `MailTransport` instance — the
+    /// `&self`-receiver design means each send call carries an
+    /// explicit transport reference, so the actor's identity (and per-
+    /// actor state like the correlation counter on `NativeTransport`)
+    /// is type-system-tracked rather than hidden in a thread-local.
+    /// `WasmTransport` is a ZST, so passing `&WASM_TRANSPORT` from
+    /// `aether-component` is free; `NativeTransport` rides on the
+    /// capability that owns it.
+    ///
     /// Issue #240: routes through `Kind::encode_into_bytes`, which the
     /// derive specializes to either a bytemuck cast or a postcard
     /// encode based on whether the type carries `#[repr(C)]`. One call
     /// site for both wire shapes — the wire choice is the kind's, not
     /// the call's.
-    pub fn send(self, payload: &K) {
+    pub fn send(self, transport: &T, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        T::send_mail(self.mailbox, self.kind, &bytes, 1);
+        transport.send_mail(self.mailbox, self.kind, &bytes, 1);
     }
 }
 
@@ -131,9 +140,9 @@ impl<K: Kind + bytemuck::NoUninit, T: MailTransport> Sink<K, T> {
     /// shape (ADR-0019 §6 fixes the batch wire as raw bytes). A
     /// component that wants to fan out N postcard payloads calls
     /// `send` in a loop.
-    pub fn send_many(self, payloads: &[K]) {
+    pub fn send_many(self, transport: &T, payloads: &[K]) {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        T::send_mail(self.mailbox, self.kind, bytes, payloads.len() as u32);
+        transport.send_mail(self.mailbox, self.kind, bytes, payloads.len() as u32);
     }
 }
 
@@ -174,19 +183,19 @@ mod tests {
     /// to the tests that need it; not a public surface.
     struct NoopTransport;
     impl MailTransport for NoopTransport {
-        fn send_mail(_: u64, _: u64, _: &[u8], _: u32) -> u32 {
+        fn send_mail(&self, _: u64, _: u64, _: &[u8], _: u32) -> u32 {
             0
         }
-        fn reply_mail(_: u32, _: u64, _: &[u8], _: u32) -> u32 {
+        fn reply_mail(&self, _: u32, _: u64, _: &[u8], _: u32) -> u32 {
             0
         }
-        fn save_state(_: u32, _: &[u8]) -> u32 {
+        fn save_state(&self, _: u32, _: &[u8]) -> u32 {
             0
         }
-        fn wait_reply(_: u64, _: &mut [u8], _: u32, _: u64) -> i32 {
+        fn wait_reply(&self, _: u64, _: &mut [u8], _: u32, _: u64) -> i32 {
             -1
         }
-        fn prev_correlation() -> u64 {
+        fn prev_correlation(&self) -> u64 {
             0
         }
     }

@@ -98,7 +98,7 @@ impl Subscriber for MailSubscriber {
             target,
             message,
         };
-        resolve_sink::<LogEvent>("aether.sink.log").send(&payload);
+        resolve_sink::<LogEvent>("aether.sink.log").send(&crate::WASM_TRANSPORT, &payload);
     }
 }
 

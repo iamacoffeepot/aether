@@ -75,11 +75,14 @@ impl Component for Probe {
     /// `receive_mail` for `aether.test_fixture.tick_observed` to see
     /// the count climbing.
     #[handler]
-    fn on_tick(&mut self, _ctx: &mut Ctx<'_>, _: Tick) {
+    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _: Tick) {
         self.tick_count += 1;
-        BROADCAST.send(&TickObserved {
-            count: self.tick_count,
-        });
+        BROADCAST.send(
+            ctx.transport(),
+            &TickObserved {
+                count: self.tick_count,
+            },
+        );
         if self.render.visible != 0 {
             let r = self.render.r as f32 / 255.0;
             let g = self.render.g as f32 / 255.0;
@@ -92,9 +95,12 @@ impl Component for Probe {
                 g,
                 b,
             };
-            RENDER.send(&DrawTriangle {
-                verts: [v(-0.9, -0.9), v(0.9, -0.9), v(0.0, 0.9)],
-            });
+            RENDER.send(
+                ctx.transport(),
+                &DrawTriangle {
+                    verts: [v(-0.9, -0.9), v(0.9, -0.9), v(0.0, 0.9)],
+                },
+            );
         }
     }
 

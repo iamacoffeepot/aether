@@ -10,8 +10,15 @@
 //! actors mail one of the four typed request kinds and either fire
 //! and forget or block on the paired `*Result` reply. Helpers here
 //! are generic over `T: MailTransport` so the wasm guest path
-//! (`WasmTransport`) and the future native path (`NativeTransport`)
-//! share one code body.
+//! (`WasmTransport`) and the native path (`NativeTransport`) share
+//! one code body.
+//!
+//! Each helper takes a `&T` transport reference explicitly. ADR-0074
+//! §Decision: the trait takes `&self`, the actor binding is
+//! type-system-tracked through the reference, no thread-locals or
+//! globals. From inside a `#[handlers]` method the natural call shape
+//! is `ctx.publish(...)` — the `Ctx` already holds the transport
+//! borrow, so the user doesn't have to thread it through.
 //!
 //! Quick tour (wasm guest):
 //!
@@ -30,11 +37,10 @@
 //!             held: handle.as_ref(),
 //!             ..
 //!         };
-//!         BROADCAST.send(&outer);
-//!         // `handle` drops here → fire-and-forget HandleRelease,
-//!         // refcount goes to zero, entry stays in the substrate's
-//!         // store subject to LRU eviction. Pin if the cached bytes
-//!         // need to outlive the local guard.
+//!         BROADCAST.send(ctx.transport(), &outer);
+//!         // No auto-release on drop — the substrate's LRU evicts
+//!         // forgotten handles. Call `handle.release(ctx.transport())`
+//!         // for prompt cleanup.
 //!     }
 //! }
 //! ```
@@ -85,23 +91,18 @@ pub enum SyncHandleError {
     Decode(String),
 }
 
-/// Typed wrapper around a substrate-side handle id. Carries an RAII
-/// drop-release: when the value goes out of scope, a fire-and-forget
-/// `HandleRelease` mail tells the substrate to drop one reference.
-/// `K` is phantom — the underlying id is type-agnostic on the wire,
-/// but `as_ref` pulls `K::ID` so the resulting `Ref::Handle` carries
-/// the right kind id.
+/// Typed wrapper around a substrate-side handle id. `K` is phantom —
+/// the underlying id is type-agnostic on the wire, but `as_ref` pulls
+/// `K::ID` so the resulting `Ref::Handle` carries the right kind id.
+/// `T` is also phantom — held to enforce that the sync helper methods
+/// receive a transport of the same flavor the handle was minted on.
 ///
-/// Not `Copy` / `Clone`. Cloning a refcounted handle without an
-/// inc-ref would cause a double-release on drop; if an actor needs
-/// multiple references it pins the handle and reads the raw id via
-/// `Handle::id`.
-///
-/// `T: MailTransport` is on the type so `Drop` and the inherent
-/// `release` / `pin` / `unpin` methods can dispatch through the
-/// right transport without the caller threading it. `Handle<K, T>`
-/// in `aether-component` is aliased to `Handle<K, WasmTransport>`,
-/// so user code keeps writing `Handle<MyKind>`.
+/// Cloning a refcounted handle without an inc-ref would cause double
+/// release issues with the prior auto-Drop design — that auto-release
+/// is gone now (the substrate's LRU eviction handles forgotten
+/// handles), so we could in principle make `Handle` `Copy`. Left
+/// non-Copy for now to keep callsites explicit; a future PR can lift
+/// the restriction if tests show real-world friction.
 pub struct Handle<K, T: MailTransport> {
     id: u64,
     _k: PhantomData<fn() -> K>,
@@ -121,9 +122,7 @@ impl<K, T: MailTransport> Handle<K, T> {
     }
 
     /// Raw handle id. Exposed for hand-rolled callers that need to
-    /// pass the id through host fns the SDK doesn't yet wrap, or to
-    /// detach the handle from its RAII guard via
-    /// [`core::mem::forget`].
+    /// pass the id through host fns the SDK doesn't yet wrap.
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -131,27 +130,26 @@ impl<K, T: MailTransport> Handle<K, T> {
     /// Drop the publisher's reference. Sync — blocks the actor
     /// thread until the substrate replies, with a 5s default
     /// timeout. Returns `Err(Handle(UnknownHandle))` if the entry
-    /// has already been evicted; otherwise `Ok(())`. Use the
-    /// implicit `Drop` if you don't care about errors during
-    /// teardown.
-    pub fn release(self) -> Result<(), SyncHandleError> {
-        let id = self.id;
-        // Suppress the Drop impl so we don't release twice.
-        core::mem::forget(self);
-        sync_release::<T>(id)
+    /// has already been evicted; otherwise `Ok(())`.
+    ///
+    /// Unlike the prior design, `Handle::Drop` is now a no-op —
+    /// the substrate's LRU eviction handles forgotten handles. Call
+    /// this method explicitly when you want prompt cleanup.
+    pub fn release(self, transport: &T) -> Result<(), SyncHandleError> {
+        sync_release::<T>(transport, self.id)
     }
 
     /// Pin against LRU eviction. Useful when the publisher wants to
     /// release its local guard (drop the `Handle`) but keep the
     /// cached bytes available — pin first, then drop.
-    pub fn pin(&self) -> Result<(), SyncHandleError> {
-        sync_pin::<T>(self.id)
+    pub fn pin(&self, transport: &T) -> Result<(), SyncHandleError> {
+        sync_pin::<T>(transport, self.id)
     }
 
     /// Clear the pinned flag. Doesn't drop the entry; only makes
     /// it eligible for LRU eviction once `refcount == 0`.
-    pub fn unpin(&self) -> Result<(), SyncHandleError> {
-        sync_unpin::<T>(self.id)
+    pub fn unpin(&self, transport: &T) -> Result<(), SyncHandleError> {
+        sync_unpin::<T>(transport, self.id)
     }
 }
 
@@ -171,17 +169,12 @@ impl<K: Kind, T: MailTransport> Handle<K, T> {
     }
 }
 
-impl<K, T: MailTransport> Drop for Handle<K, T> {
-    fn drop(&mut self) {
-        // Fire-and-forget: a panicking wait would poison teardown.
-        // The substrate's release dispatch is idempotent — calling
-        // it on an already-released id saturates harmlessly.
-        let req = HandleRelease {
-            id: ::aether_data::HandleId(self.id),
-        };
-        resolve_sink::<HandleRelease, T>(HANDLE_SINK_NAME).send(&req);
-    }
-}
+// ADR-0074 §Decision: no auto-release on Drop. The prior design's
+// `impl Drop for Handle` fired a fire-and-forget `HandleRelease` mail
+// through a static `Sink::send` — that pattern doesn't survive the
+// `&self` trait refactor (Drop has no transport ref to send through).
+// The substrate's LRU eviction is the safety net; explicit
+// `handle.release(transport)` is the prompt-cleanup path.
 
 /// Postcard-encode `value` and round-trip a `HandlePublish` request
 /// through the `"aether.sink.handle"` sink. Returns the typed
@@ -192,6 +185,7 @@ impl<K, T: MailTransport> Drop for Handle<K, T> {
 /// Shared by `InitCtx::publish` / `Ctx::publish` / `DropCtx::publish`
 /// — keep the wire shape and timeouts in one place.
 pub fn publish<K: Kind + Serialize, T: MailTransport>(
+    transport: &T,
     value: &K,
 ) -> Result<Handle<K, T>, SyncHandleError> {
     let bytes = postcard::to_allocvec(value).expect("postcard encode to Vec is infallible");
@@ -199,52 +193,68 @@ pub fn publish<K: Kind + Serialize, T: MailTransport>(
         kind_id: K::ID,
         bytes,
     };
-    resolve_sink::<HandlePublish, T>(HANDLE_SINK_NAME).send(&req);
-    let correlation = T::prev_correlation();
-    let result: HandlePublishResult =
-        wait_reply::<_, SyncHandleError, T>(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
+    resolve_sink::<HandlePublish, T>(HANDLE_SINK_NAME).send(transport, &req);
+    let correlation = transport.prev_correlation();
+    let result: HandlePublishResult = wait_reply::<_, SyncHandleError, T>(
+        transport,
+        DEFAULT_TIMEOUT_MS,
+        SMALL_REPLY_CAP,
+        correlation,
+    )?;
     match result {
         HandlePublishResult::Ok { id, .. } => Ok(Handle::__from_id(id.0)),
         HandlePublishResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
     }
 }
 
-fn sync_release<T: MailTransport>(id: u64) -> Result<(), SyncHandleError> {
+fn sync_release<T: MailTransport>(transport: &T, id: u64) -> Result<(), SyncHandleError> {
     let req = HandleRelease {
         id: ::aether_data::HandleId(id),
     };
-    resolve_sink::<HandleRelease, T>(HANDLE_SINK_NAME).send(&req);
-    let correlation = T::prev_correlation();
-    let result: HandleReleaseResult =
-        wait_reply::<_, SyncHandleError, T>(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
+    resolve_sink::<HandleRelease, T>(HANDLE_SINK_NAME).send(transport, &req);
+    let correlation = transport.prev_correlation();
+    let result: HandleReleaseResult = wait_reply::<_, SyncHandleError, T>(
+        transport,
+        DEFAULT_TIMEOUT_MS,
+        SMALL_REPLY_CAP,
+        correlation,
+    )?;
     match result {
         HandleReleaseResult::Ok { .. } => Ok(()),
         HandleReleaseResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
     }
 }
 
-fn sync_pin<T: MailTransport>(id: u64) -> Result<(), SyncHandleError> {
+fn sync_pin<T: MailTransport>(transport: &T, id: u64) -> Result<(), SyncHandleError> {
     let req = HandlePin {
         id: ::aether_data::HandleId(id),
     };
-    resolve_sink::<HandlePin, T>(HANDLE_SINK_NAME).send(&req);
-    let correlation = T::prev_correlation();
-    let result: HandlePinResult =
-        wait_reply::<_, SyncHandleError, T>(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
+    resolve_sink::<HandlePin, T>(HANDLE_SINK_NAME).send(transport, &req);
+    let correlation = transport.prev_correlation();
+    let result: HandlePinResult = wait_reply::<_, SyncHandleError, T>(
+        transport,
+        DEFAULT_TIMEOUT_MS,
+        SMALL_REPLY_CAP,
+        correlation,
+    )?;
     match result {
         HandlePinResult::Ok { .. } => Ok(()),
         HandlePinResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
     }
 }
 
-fn sync_unpin<T: MailTransport>(id: u64) -> Result<(), SyncHandleError> {
+fn sync_unpin<T: MailTransport>(transport: &T, id: u64) -> Result<(), SyncHandleError> {
     let req = HandleUnpin {
         id: ::aether_data::HandleId(id),
     };
-    resolve_sink::<HandleUnpin, T>(HANDLE_SINK_NAME).send(&req);
-    let correlation = T::prev_correlation();
-    let result: HandleUnpinResult =
-        wait_reply::<_, SyncHandleError, T>(DEFAULT_TIMEOUT_MS, SMALL_REPLY_CAP, correlation)?;
+    resolve_sink::<HandleUnpin, T>(HANDLE_SINK_NAME).send(transport, &req);
+    let correlation = transport.prev_correlation();
+    let result: HandleUnpinResult = wait_reply::<_, SyncHandleError, T>(
+        transport,
+        DEFAULT_TIMEOUT_MS,
+        SMALL_REPLY_CAP,
+        correlation,
+    )?;
     match result {
         HandleUnpinResult::Ok { .. } => Ok(()),
         HandleUnpinResult::Err { error, .. } => Err(SyncHandleError::Handle(error)),
@@ -273,10 +283,9 @@ mod tests {
     use alloc::vec;
     use serde::Deserialize;
 
-    /// Off-target we can't exercise the FFI host calls (`raw::send_mail`
-    /// and friends panic with the host-target stub). Pin the wire
-    /// shape by encoding the request kinds and asserting the bytes
-    /// round-trip into the same kinds.
+    /// Off-target we can't exercise the full FFI round-trip (`raw::*`
+    /// host stubs panic). Pin the wire shape by encoding the request
+    /// kinds and asserting the bytes round-trip into the same kinds.
     #[derive(Kind, Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     #[kind(name = "test.handle.payload")]
     #[allow(dead_code)]
@@ -307,24 +316,23 @@ mod tests {
         assert_eq!(decoded.id, ::aether_data::HandleId(0xDEAD));
     }
 
-    /// Stub transport for the host-side `as_ref` test — `Drop` would
-    /// call `T::send_mail`, which we suppress via `mem::forget`.
-    /// Lives next to the test that uses it; not a public surface.
+    /// Stub transport for the host-side `as_ref` test. Lives next to
+    /// the test that uses it; not a public surface.
     struct NoopTransport;
     impl MailTransport for NoopTransport {
-        fn send_mail(_: u64, _: u64, _: &[u8], _: u32) -> u32 {
+        fn send_mail(&self, _: u64, _: u64, _: &[u8], _: u32) -> u32 {
             0
         }
-        fn reply_mail(_: u32, _: u64, _: &[u8], _: u32) -> u32 {
+        fn reply_mail(&self, _: u32, _: u64, _: &[u8], _: u32) -> u32 {
             0
         }
-        fn save_state(_: u32, _: &[u8]) -> u32 {
+        fn save_state(&self, _: u32, _: &[u8]) -> u32 {
             0
         }
-        fn wait_reply(_: u64, _: &mut [u8], _: u32, _: u64) -> i32 {
+        fn wait_reply(&self, _: u64, _: &mut [u8], _: u32, _: u64) -> i32 {
             -1
         }
-        fn prev_correlation() -> u64 {
+        fn prev_correlation(&self) -> u64 {
             0
         }
     }
@@ -343,8 +351,6 @@ mod tests {
             }
             Ref::Inline(_) => panic!("as_ref should produce Handle, not Inline"),
         }
-        // Suppress Drop's host-fn call.
-        core::mem::forget(handle);
     }
 
     /// `SyncHandleError` is the [`crate::sync::WaitError`] impl the
