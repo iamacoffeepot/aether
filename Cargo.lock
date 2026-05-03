@@ -255,6 +255,7 @@ dependencies = [
 name = "aether-substrate"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-actor",
  "aether-data",
  "aether-kinds",
  "bytemuck",

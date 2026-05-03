@@ -61,6 +61,47 @@ pub struct MailboxClaim {
     pub receiver: mpsc::Receiver<Envelope>,
 }
 
+/// Result returned from [`ChassisCtx::claim_mailbox_drop_on_shutdown`].
+///
+/// Same as [`MailboxClaim`] plus a strong [`SinkSender`] the
+/// capability is expected to drop during shutdown to break the
+/// channel — the channel-drop + join lifecycle ADR-0074 §Decision 5
+/// settles on. The registry's sink-handler closure holds only a
+/// [`std::sync::Weak`] back-reference, so once the strong handle
+/// goes away, in-flight deliveries warn-drop and the dispatcher's
+/// `recv()` returns `Err(Disconnected)`.
+///
+/// Phase 2a: `LogCapability` is the first consumer; the other
+/// capabilities continue with `claim_mailbox` + `Arc<AtomicBool>`
+/// polling until their own migration PRs land.
+#[derive(Debug)]
+pub struct DropOnShutdownClaim {
+    pub id: MailboxId,
+    pub receiver: mpsc::Receiver<Envelope>,
+    pub sink_sender: SinkSender,
+}
+
+/// Strong handle to the inbound `Sender<Envelope>` for a mailbox
+/// claimed via [`ChassisCtx::claim_mailbox_drop_on_shutdown`]. Held
+/// by the capability for the lifetime of its dispatcher thread;
+/// dropping it disconnects the channel and lets the dispatcher's
+/// `recv()` return `Err(Disconnected)` immediately.
+#[derive(Debug)]
+pub struct SinkSender {
+    // Held purely for its `Drop` side effect. When this `Arc` drops
+    // and refcount hits zero, the inner `Sender` drops, the channel
+    // disconnects, and the dispatcher exits its `recv()` loop.
+    _inner: Arc<mpsc::Sender<Envelope>>,
+}
+
+impl SinkSender {
+    /// Internal constructor — only
+    /// [`ChassisCtx::claim_mailbox_drop_on_shutdown`] builds these.
+    pub(crate) fn new(inner: Arc<mpsc::Sender<Envelope>>) -> Self {
+        Self { _inner: inner }
+    }
+}
+
 /// Generic fallback-router handler: invoked by substrate dispatch when a
 /// local mailbox lookup misses. Phase 1 stores the handler but does
 /// not call it; Phase 4 wires `Mailer::push` to consult the slot in
@@ -218,6 +259,72 @@ impl<'a> ChassisCtx<'a> {
             ),
         )?;
         Ok(MailboxClaim { id, receiver: rx })
+    }
+
+    /// Variant of [`Self::claim_mailbox`] that returns a strong
+    /// [`SinkSender`] alongside the receiver. The registry holds
+    /// only a [`std::sync::Weak`] reference to the sender, so when
+    /// the capability drops the `SinkSender` (during shutdown), the
+    /// channel disconnects and the dispatcher's `recv()` returns
+    /// `Err(Disconnected)`.
+    ///
+    /// Use this when the capability wants the channel-drop + join
+    /// shutdown lifecycle (ADR-0074 §Decision 5) instead of an
+    /// `Arc<AtomicBool>` polling flag. Phase 2a wires `LogCapability`
+    /// onto this; the other native capabilities migrate one PR at a
+    /// time per the issue 509 plan.
+    pub fn claim_mailbox_drop_on_shutdown(
+        &mut self,
+        name: &str,
+    ) -> Result<DropOnShutdownClaim, BootError> {
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        // Strong Arc rides on `DropOnShutdownClaim.sink_sender` and
+        // lives for the capability's lifetime. The registry handler
+        // only upgrades a `Weak` per call, so when the capability
+        // drops its strong handle, the inner `Sender` also drops
+        // and the dispatcher's `recv()` returns `Err(Disconnected)`.
+        let tx = Arc::new(tx);
+        let weak = Arc::downgrade(&tx);
+        let id = self.registry.try_register_sink(
+            name.to_owned(),
+            Arc::new(
+                move |kind: KindId,
+                      kind_name: &str,
+                      origin: Option<&str>,
+                      sender: ReplyTo,
+                      payload: &[u8],
+                      count: u32| {
+                    let Some(tx) = weak.upgrade() else {
+                        tracing::warn!(
+                            target: "aether_substrate::capability",
+                            kind = kind_name,
+                            "capability mailbox sender dropped — mail discarded"
+                        );
+                        return;
+                    };
+                    let env = Envelope {
+                        kind,
+                        kind_name: kind_name.to_owned(),
+                        origin: origin.map(str::to_owned),
+                        sender,
+                        payload: payload.to_vec(),
+                        count,
+                    };
+                    if tx.send(env).is_err() {
+                        tracing::warn!(
+                            target: "aether_substrate::capability",
+                            kind = kind_name,
+                            "capability mailbox receiver dropped — mail discarded"
+                        );
+                    }
+                },
+            ),
+        )?;
+        Ok(DropOnShutdownClaim {
+            id,
+            receiver: rx,
+            sink_sender: SinkSender::new(tx),
+        })
     }
 
     /// Clone-able mail-send handle. Capabilities stash this into

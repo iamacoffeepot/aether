@@ -22,6 +22,12 @@ render = ["dep:wgpu", "dep:png"]
 audio = ["dep:cpal", "dep:crossbeam-queue"]
 
 [dependencies]
+# ADR-0074 Phase 2: target-agnostic actor SDK. Capabilities install
+# `NativeTransport` (in `crate::native_transport`) as the
+# `MailTransport` impl on their dispatcher thread so they can use the
+# shared `Sink<K, T>` / `wait_reply` / `Ctx<'_, T>` machinery the
+# wasm guest path already uses.
+aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = "1.19"
