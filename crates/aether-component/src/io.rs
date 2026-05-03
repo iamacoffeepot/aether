@@ -42,12 +42,13 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use aether_actor::{MailTransport, WaitError, wait_reply};
 use aether_data::Kind;
 use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 
-use crate::{raw, resolve_sink};
+use crate::{WasmTransport, resolve_sink};
 
 /// Mailbox name the substrate registers its I/O sink under (ADR-0041,
 /// namespaced under `aether.sink.*` per ADR-0058). Exposed so
@@ -111,7 +112,7 @@ fn send<K: Kind>(value: &K) -> u64 {
     // the sync wrappers can filter on it. For the async helpers
     // (`read` / `write` / `delete` / `list`), this is harmless noise —
     // they don't wait.
-    unsafe { raw::prev_correlation() }
+    WasmTransport::prev_correlation()
 }
 
 /// ADR-0042: errors surfaced by the `*_sync` wrappers. The first three
@@ -161,7 +162,7 @@ pub fn read_sync(namespace: &str, path: &str, timeout_ms: u32) -> Result<Vec<u8>
         namespace: namespace.to_string(),
         path: path.to_string(),
     });
-    let reply: ReadResult = crate::sync::wait_reply::<ReadResult, SyncIoError>(
+    let reply: ReadResult = wait_reply::<ReadResult, SyncIoError, WasmTransport>(
         timeout_ms,
         READ_REPLY_CAP,
         correlation,
@@ -186,7 +187,7 @@ pub fn write_sync(
         path: path.to_string(),
         bytes: bytes.to_vec(),
     });
-    match crate::sync::wait_reply::<WriteResult, SyncIoError>(
+    match wait_reply::<WriteResult, SyncIoError, WasmTransport>(
         timeout_ms,
         SMALL_REPLY_CAP,
         correlation,
@@ -204,7 +205,7 @@ pub fn delete_sync(namespace: &str, path: &str, timeout_ms: u32) -> Result<(), S
         namespace: namespace.to_string(),
         path: path.to_string(),
     });
-    match crate::sync::wait_reply::<DeleteResult, SyncIoError>(
+    match wait_reply::<DeleteResult, SyncIoError, WasmTransport>(
         timeout_ms,
         SMALL_REPLY_CAP,
         correlation,
@@ -226,7 +227,7 @@ pub fn list_sync(
         namespace: namespace.to_string(),
         prefix: prefix.to_string(),
     });
-    match crate::sync::wait_reply::<ListResult, SyncIoError>(
+    match wait_reply::<ListResult, SyncIoError, WasmTransport>(
         timeout_ms,
         LIST_REPLY_CAP,
         correlation,
@@ -236,7 +237,7 @@ pub fn list_sync(
     }
 }
 
-impl crate::sync::WaitError for SyncIoError {
+impl WaitError for SyncIoError {
     fn timeout() -> Self {
         Self::Timeout
     }
@@ -330,14 +331,14 @@ mod tests {
         assert_ne!(IO_MAILBOX_NAME, "aether.io");
     }
 
-    /// `SyncIoError` is the [`crate::sync::WaitError`] impl the IO
+    /// `SyncIoError` is the [`WaitError`] impl the IO
     /// `*_sync` wrappers use, so the four trait constructors must
     /// land on the matching enum variants. A future enum reorder
     /// would otherwise silently re-route a sentinel rc to the wrong
     /// failure mode.
     #[test]
     fn wait_error_mapping_for_sync_io_error() {
-        use crate::sync::WaitError;
+        use WaitError;
         assert_eq!(<SyncIoError as WaitError>::timeout(), SyncIoError::Timeout);
         assert_eq!(
             <SyncIoError as WaitError>::buffer_too_small(),

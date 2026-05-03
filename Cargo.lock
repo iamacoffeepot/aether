@@ -34,6 +34,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "aether-actor"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-data",
+ "aether-kinds",
+ "bytemuck",
+ "postcard",
+ "serde",
+]
+
+[[package]]
 name = "aether-camera"
 version = "0.2.0-alpha"
 dependencies = [
@@ -72,6 +83,7 @@ dependencies = [
 name = "aether-component"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-actor",
  "aether-data",
  "aether-kinds",
  "bytemuck",

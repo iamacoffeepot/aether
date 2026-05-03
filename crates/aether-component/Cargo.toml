@@ -4,16 +4,23 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# ADR-0074 Phase 1: target-agnostic actor SDK. Holds `MailTransport`,
+# `Mail`, `Ctx`, `Sink`, `wait_reply`, and the typed-handle module
+# generic over `T: MailTransport`. This crate provides `WasmTransport`
+# (the wasm guest impl) plus 1-arg type aliases that pin
+# `T = WasmTransport` so existing component code compiles unchanged.
+aether-actor = { path = "../aether-actor" }
 # ADR-0033 attribute macros (`#[handlers]` / `#[handler]` / `#[fallback]`)
 # live in `aether-data-derive` and are re-exported through `aether-data`'s
 # `derive` feature. The SDK forwards them to consumers so they can
 # `use aether_component::{handlers, handler, fallback};` alongside the
 # rest of the component vocabulary.
 aether-data = { path = "../aether-data", features = ["derive"] }
-# ADR-0030 Phase 2: the init walker auto-subscribes each `K::IS_INPUT`
-# kind by mailing `aether.control.subscribe_input` — the SDK needs the
-# concrete `InputStream` + `SubscribeInput` types from the substrate's
-# control vocabulary to build that mail.
+# Wasm-specific helpers in `io.rs` / `net.rs` build the concrete
+# `aether.io.*` / `aether.net.*` request kinds; `log.rs` builds
+# `aether.log.Record`. The actor SDK pulls in `aether-kinds`
+# transitively for `subscribe_input`, but the explicit dep here pins
+# the version so a Cargo.lock dedup never demotes it silently.
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { version = "1", default-features = false }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }

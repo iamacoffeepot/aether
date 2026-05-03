@@ -1,78 +1,153 @@
-//! aether-component: guest-side SDK for WASM components that run on the
-//! substrate. See ADR-0012 for motivation — this crate wraps the raw
-//! `extern "C"` + `static mut u32` + sentinel pattern every component
-//! previously wrote by hand, and presents typed handles instead.
+//! aether-component: WASM-guest facade over the actor SDK.
 //!
-//! Shipped surfaces:
-//!   - ADR-0012: `Sink<K>`, `KindId<K>`, `resolve::<K>()`, `resolve_sink::<K>(name)`,
-//!     and the `raw` FFI module with host-target panicking stubs.
-//!   - ADR-0014: `Component` trait (`init` / `receive`), typed `InitCtx`
-//!     and `Ctx` with init-vs-receive capability fencing, `Mail<'_>` for
-//!     inbound with typed `decode` / `decode_slice`, and the `export!`
-//!     macro that owns the `#[no_mangle]` init/receive shims.
-//!   - ADR-0015: Additive lifecycle hooks on the `Component` trait
-//!     (`on_replace`, `on_drop`, `on_rehydrate`, all defaulted), plus
-//!     the narrowed `DropCtx<'_>` capability type. `export!` emits the
-//!     matching `#[no_mangle]` shims and the substrate invokes them at
-//!     `drop_component` and `replace_component` call sites. Components
-//!     that don't override stay green; hook traps are contained so a
-//!     panicking hook doesn't stall teardown.
-//!   - ADR-0016: Persistent state across hot reload. `DropCtx::save_state`
-//!     lets `on_replace` deposit a version-tagged byte bundle; the
-//!     substrate hands it to the new instance via `on_rehydrate` with
-//!     a populated `PriorState<'_>`. Opt-in — components that don't
-//!     override either hook migrate nothing.
-//!   - ADR-0041: Guest helpers for the substrate's file I/O sink.
-//!     `io::read` / `io::write` / `io::delete` / `io::list` build
-//!     the typed request kinds, postcard-encode them, and send to
-//!     the substrate's `"aether.sink.io"` mailbox. Replies arrive as the paired
-//!     `*Result` kinds — declare `#[handler]` methods to consume
-//!     them. See `io` module rustdoc for the typical save-loader
-//!     shape.
-//!   - ADR-0040: Kind-typed state on top of ADR-0016.
-//!     `DropCtx::save_state_kind::<K>` prepends `K::ID` to the
-//!     postcard encoding of `value` and writes the concatenation
-//!     through the unchanged host fn; `PriorState::as_kind::<K>`
-//!     reads the leading id and decodes on match, returning `None`
-//!     on mismatch so schema evolution (different `K::ID`) reboots
-//!     fresh. The raw `save_state` / `bytes()` API stays legal for
-//!     non-kind blobs and explicit migration flows.
-//!   - ADR-0013: Reply-to-sender. `Mail::sender()` returns `Some(ReplyTo)`
-//!     for mail that came from a Claude session; `Ctx::reply` takes a
-//!     `Sender` and a typed `KindId<K>` to answer the originating
-//!     session. The 4-param `receive(kind, ptr, count, sender)` ABI is
-//!     absorbed by the `export!` macro so component authors don't see it.
-//!   - ADR-0033 (supersedes ADR-0027): `#[handlers]` on an
-//!     `impl Component for T` block is the one and only receive path.
-//!     The attribute macro walks `#[handler]` methods (kind inferred
-//!     from the third param), an optional `#[fallback]`, and per-method
-//!     rustdoc (with `# Agent` section filter), and emits: (a) an
-//!     inherent `__aether_dispatch(&mut self, ctx, mail) -> u32` method
-//!     on the component type that `export!`'s `receive_p32` shim calls,
-//!     (b) input-subscribe calls prepended to the user's `init` so every
-//!     `K::IS_INPUT` handler kind gets wired to the substrate's stream,
-//!     and (c) `aether.kinds.inputs` section statics the hub reads at
-//!     `load_component` for MCP capability surfacing. The dispatcher
-//!     returns `DISPATCH_UNKNOWN_KIND` on a strict-receiver miss so the
-//!     scheduler's warn path actually fires. ADR-0027's `type Kinds`
-//!     typelist, `KindList`/`Cons`/`Nil`, `KindTable`, and the trait
-//!     `Component::receive` method are all retired.
+//! Post-ADR-0074 Phase 1, the SDK types (`MailTransport`, `Mail`,
+//! `Ctx`, `Sink`, `InitCtx`, `DropCtx`, `Slot`, `WaitError`, the
+//! `wait_reply` helper, and the typed-handle module) live in
+//! `aether-actor`. This crate keeps the wasm-specific shim:
+//!
+//!   - [`raw`] — `extern "C"` host-fn imports + host-target panic
+//!     stubs (the only place the `_p32` symbols are named).
+//!   - [`WasmTransport`] — ZST that implements
+//!     `aether_actor::MailTransport` by delegating each method to the
+//!     matching `raw::*` host fn.
+//!   - 1-arg type aliases — `Sink<K>` = `aether_actor::Sink<K,
+//!     WasmTransport>`, `Ctx<'a>` = `aether_actor::Ctx<'a,
+//!     WasmTransport>`, etc. Existing component code keeps writing
+//!     the un-parameterised types; the alias pins `T = WasmTransport`
+//!     for the wasm guest path.
+//!   - [`Component`] trait — wasm-flavoured entry point. Methods take
+//!     the aliased types, so user impls compile unchanged. A
+//!     companion native-actor trait will land in `aether-substrate`
+//!     when ADR-0074 Phase 2 introduces `NativeTransport`.
+//!   - [`io`], [`net`], [`log`] — wasm-specific helper modules. They
+//!     specialise `aether_actor::wait_reply` to `WasmTransport`
+//!     internally so the existing `io::read_sync(...)` /
+//!     `net::fetch_blocking(...)` call shapes don't grow turbofish.
+//!     `log` installs the global `tracing` default the `export!`
+//!     macro plumbs into the `init` shim.
+//!   - [`export!`] — `#[no_mangle]` `init` / `receive` / lifecycle
+//!     shims plus the `aether.kinds.inputs` custom-section pin (issue
+//!     442). Builds `WasmTransport`-flavoured `InitCtx`/`Ctx`/`DropCtx`
+//!     for the user's `Component` impl.
+//!
+//! Original ADR coverage (history retained for the surfaces the
+//! moved types still implement): ADR-0012 (typed sinks), ADR-0013
+//! (reply-to-sender), ADR-0014 (Component trait + Mail), ADR-0015
+//! (lifecycle hooks), ADR-0016 (state-across-replace), ADR-0024
+//! (`_p32` FFI), ADR-0030 (compile-time kind ids), ADR-0033
+//! (`#[handlers]`), ADR-0040 (kind-typed state), ADR-0041 (file
+//! I/O), ADR-0042 (sync wait_reply), ADR-0043 (HTTP egress),
+//! ADR-0045 (typed handles), ADR-0058 (`aether.sink.*` namespace),
+//! ADR-0060 (tracing→mail bridge), ADR-0074 (this restructure).
 
 #![no_std]
 
 extern crate alloc;
 
-use core::marker::PhantomData;
+use aether_actor::MailTransport;
 
-use aether_data::{Kind, Schema, mailbox_id_from_name};
-pub mod handle;
 pub mod io;
 pub mod log;
 pub mod net;
 pub mod raw;
-mod sync;
 
-pub use handle::{Handle, SyncHandleError};
+/// ZST `MailTransport` impl for the WASM guest path. Each method
+/// forwards to the matching `raw::*` host-fn import. The trait
+/// methods are associated functions (no `&self`), so this type is
+/// instantiated only at the type-system level — there is no runtime
+/// allocation or pointer indirection.
+///
+/// Phase 2 introduces `aether_substrate::NativeTransport` for native
+/// capabilities; both impls share the same SDK in `aether-actor`.
+pub struct WasmTransport;
+
+impl MailTransport for WasmTransport {
+    fn send_mail(recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
+        unsafe {
+            raw::send_mail(
+                recipient,
+                kind,
+                bytes.as_ptr().addr() as u32,
+                bytes.len() as u32,
+                count,
+            )
+        }
+    }
+
+    fn reply_mail(sender: u32, kind: u64, bytes: &[u8], count: u32) -> u32 {
+        unsafe {
+            raw::reply_mail(
+                sender,
+                kind,
+                bytes.as_ptr().addr() as u32,
+                bytes.len() as u32,
+                count,
+            )
+        }
+    }
+
+    fn save_state(version: u32, bytes: &[u8]) -> u32 {
+        unsafe { raw::save_state(version, bytes.as_ptr().addr() as u32, bytes.len() as u32) }
+    }
+
+    fn wait_reply(
+        expected_kind: u64,
+        out: &mut [u8],
+        timeout_ms: u32,
+        expected_correlation: u64,
+    ) -> i32 {
+        unsafe {
+            raw::wait_reply(
+                expected_kind,
+                out.as_mut_ptr().addr() as u32,
+                out.len() as u32,
+                timeout_ms,
+                expected_correlation,
+            )
+        }
+    }
+
+    fn prev_correlation() -> u64 {
+        unsafe { raw::prev_correlation() }
+    }
+}
+
+// 1-arg specialisations of the actor SDK's transport-generic types.
+// Existing component code keeps writing `Sink<MyKind>`, `Ctx<'_>`,
+// `InitCtx<'_>`, `DropCtx<'_>` — the alias pins `T = WasmTransport`.
+
+/// Wasm-flavoured [`aether_actor::Sink`].
+pub type Sink<K> = aether_actor::Sink<K, WasmTransport>;
+/// Wasm-flavoured [`aether_actor::Ctx`].
+pub type Ctx<'a> = aether_actor::Ctx<'a, WasmTransport>;
+/// Wasm-flavoured [`aether_actor::InitCtx`].
+pub type InitCtx<'a> = aether_actor::InitCtx<'a, WasmTransport>;
+/// Wasm-flavoured [`aether_actor::DropCtx`].
+pub type DropCtx<'a> = aether_actor::DropCtx<'a, WasmTransport>;
+/// Wasm-flavoured [`aether_actor::handle::Handle`]. Re-exposed at the
+/// crate root so existing `aether_component::Handle<MyKind>` paths
+/// keep resolving.
+pub type Handle<K> = aether_actor::handle::Handle<K, WasmTransport>;
+
+// Re-exports — these types have no transport coupling, so they pass
+// through unchanged from the SDK.
+pub use aether_actor::{
+    DISPATCH_HANDLED, DISPATCH_UNKNOWN_KIND, KindId, Mail, MailTransport as MailTransportTrait,
+    NO_REPLY_HANDLE, PriorState, ReplyTo, Slot, WaitError, decode_wait_reply, resolve, wait_reply,
+};
+
+/// Wasm-flavoured `resolve_sink` — pins `T = WasmTransport` so the
+/// existing `resolve_sink::<MyKind>(name)` call shape (1 turbofish
+/// arg) keeps working. The transport-generic version is at
+/// [`aether_actor::resolve_sink`] for hand-rolled callers that want
+/// to spell out a non-wasm transport.
+pub const fn resolve_sink<K: aether_data::Kind>(mailbox_name: &str) -> Sink<K> {
+    aether_actor::resolve_sink::<K, WasmTransport>(mailbox_name)
+}
+/// Re-export the typed-handle module path so existing
+/// `aether_component::handle::publish` callers compile unchanged.
+pub use aether_actor::handle;
+pub use aether_actor::handle::SyncHandleError;
 
 /// ADR-0033 attribute macros. Applied to `impl Component for C`
 /// blocks: `#[handlers]` at the impl level; `#[handler]` on each
@@ -80,184 +155,31 @@ pub use handle::{Handle, SyncHandleError};
 /// Forwarded from `aether-data-derive` so the full component
 /// vocabulary sits behind one `use aether_component::*` line.
 pub use aether_data::{fallback, handler, handlers};
-/// Return code the `#[handlers]`-synthesized dispatcher sends back up
-/// through `receive_p32` when a `#[handler]` arm matched (or the
-/// `#[fallback]` ran, which by definition handles anything). Propagated
-/// verbatim by `export!`'s FFI shim.
-pub const DISPATCH_HANDLED: u32 = 0;
-
-/// Return code for "no `#[handler]` matched and there's no `#[fallback]`"
-/// — the strict-receiver miss. Propagated through the FFI so the
-/// substrate's scheduler can emit a `tracing::warn!` naming the
-/// mailbox + kind (ADR-0033 §Strict receivers, issue #142). Matches
-/// `aether_substrate_bundle::component::DISPATCH_UNKNOWN_KIND` by value.
-pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 
 /// Re-exports the `#[handlers]` macro relies on at expansion sites
-/// that don't depend on `aether-data` directly (e.g., component
-/// crates that only pull in `aether-component`). Keeping the macro's
-/// emitted paths rooted at `::aether_component::__macro_internals`
-/// removes the "add aether-data to your Cargo.toml" boilerplate that
-/// `::aether_data::...` paths would otherwise force on every consumer.
+/// that don't depend on `aether-data` directly. The macro emits
+/// `::aether_component::__macro_internals::*` paths so the consumer
+/// crate only needs `aether-component` in its dependency list; this
+/// alias forwards into the SDK module that owns the symbols.
 ///
 /// Not part of the public API; the macro is the only intended caller.
 #[doc(hidden)]
 pub mod __macro_internals {
-    pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
-    pub use aether_data::{Kind, Schema};
+    pub use aether_actor::__macro_internals::*;
 }
 
-/// Phantom-typed wrapper around a resolved kind id. A `KindId<Tick>`
-/// cannot be passed where a `KindId<DrawTriangle>` is expected — the
-/// mismatch is a compile error rather than a runtime bad-dispatch.
-///
-/// Constructed via `resolve::<K>()` during component init. The raw
-/// id is retrievable via `.raw()` for comparison against incoming
-/// `kind` parameters in a hand-rolled `receive` shim (ADR-0014's
-/// `Mail::decode` will make the raw-int compare go away).
-pub struct KindId<K: Kind> {
-    raw: u64,
-    _k: PhantomData<fn() -> K>,
-}
-
-impl<K: Kind> Copy for KindId<K> {}
-impl<K: Kind> Clone for KindId<K> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<K: Kind> PartialEq for KindId<K> {
-    fn eq(&self, other: &Self) -> bool {
-        self.raw == other.raw
-    }
-}
-impl<K: Kind> Eq for KindId<K> {}
-
-impl<K: Kind> KindId<K> {
-    /// The raw kind id the substrate assigned. Exposed for hand-rolled
-    /// receive shims that `match` on the inbound `kind: u64` parameter.
-    pub fn raw(self) -> u64 {
-        self.raw
-    }
-
-    /// Returns `true` if `raw` is the id the substrate assigned to `K`.
-    /// Convenience over `kind_id.raw() == raw`.
-    pub fn matches(self, raw: u64) -> bool {
-        self.raw == raw
-    }
-}
-
-/// Phantom-typed send target. Wraps a mailbox id plus the kind id that
-/// the sink accepts. `Sink<DrawTriangle>` can only `send` a
-/// `&DrawTriangle` or `&[DrawTriangle]` — the kind is fixed at
-/// resolution time.
-///
-/// Built via `resolve_sink::<K>(name)` during init.
-pub struct Sink<K: Kind> {
-    mailbox: u64,
-    kind: u64,
-    _k: PhantomData<fn() -> K>,
-}
-
-impl<K: Kind> Copy for Sink<K> {}
-impl<K: Kind> Clone for Sink<K> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<K: Kind> Sink<K> {
-    /// Raw mailbox id. Exposed for components that need to pass the
-    /// id to a host fn not yet wrapped by the SDK.
-    pub fn mailbox(self) -> u64 {
-        self.mailbox
-    }
-
-    /// Raw kind id. Exposed for the same reason as `mailbox`.
-    pub fn kind(self) -> u64 {
-        self.kind
-    }
-}
-
-impl<K: Kind> Sink<K> {
-    /// Send a single typed payload. The substrate's `count` field is 1.
-    ///
-    /// Issue #240: routes through `Kind::encode_into_bytes`, which the
-    /// derive specializes to either a bytemuck cast or a postcard
-    /// encode based on whether the type carries `#[repr(C)]`. One call
-    /// site for both wire shapes — the wire choice is the kind's, not
-    /// the call's.
-    pub fn send(self, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        unsafe {
-            raw::send_mail(
-                self.mailbox,
-                self.kind,
-                bytes.as_ptr().addr() as u32,
-                bytes.len() as u32,
-                1,
-            );
-        }
-    }
-}
-
-impl<K: Kind + bytemuck::NoUninit> Sink<K> {
-    /// Send a slice of typed payloads as a contiguous buffer. The
-    /// substrate's `count` field is `payloads.len()`.
-    ///
-    /// Cast-only — postcard has no efficient contiguous-batch wire
-    /// shape (ADR-0019 §6 fixes the batch wire as raw bytes). A
-    /// component that wants to fan out N postcard payloads calls
-    /// `send` in a loop.
-    pub fn send_many(self, payloads: &[K]) {
-        let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        unsafe {
-            raw::send_mail(
-                self.mailbox,
-                self.kind,
-                bytes.as_ptr().addr() as u32,
-                bytes.len() as u32,
-                payloads.len() as u32,
-            );
-        }
-    }
-}
-
-/// Resolve a kind, producing a typed id from the `const ID` the derive
-/// emits on the `Kind` impl. ADR-0030 Phase 2 made kind ids a pure
-/// function of `(name, schema)` at compile time — no host-fn round
-/// trip, no "kind not registered" failure mode at the guest boundary.
-/// The substrate and guest compute the same id independently; a
-/// mismatch means one side was compiled against a different schema
-/// revision, and that surfaces as "kind not found" on the first mail.
-pub const fn resolve<K: Kind>() -> KindId<K> {
-    KindId {
-        raw: K::ID.0,
-        _k: PhantomData,
-    }
-}
-
-/// Bind a mailbox name to kind `K`, producing a typed `Sink<K>`. The
-/// mailbox id is derived from the name client-side (ADR-0029 stable
-/// hash) and the kind id is `K::ID` (ADR-0030 Phase 2). No host-fn
-/// round trip, no requirement that the target mailbox or kind already
-/// exist on the substrate side at init time.
-pub const fn resolve_sink<K: Kind>(mailbox_name: &str) -> Sink<K> {
-    Sink {
-        mailbox: mailbox_id_from_name(mailbox_name).0,
-        kind: K::ID.0,
-        _k: PhantomData,
-    }
-}
-
-/// User-implemented component. ADR-0014 commits to `Self`-is-state —
+/// User-implemented WASM component. ADR-0014 commits to `Self`-is-state —
 /// cached kind ids, cached sinks, and any domain fields live on the
-/// implementor. `init` runs once before any `receive`; `receive` is
-/// called with the stored `&mut self` on every inbound mail.
+/// implementor. `init` runs once before any `receive`; receive is
+/// driven by the synthesised `__aether_dispatch` from `#[handlers]`.
 ///
 /// The `#[no_mangle]` `init` / `receive` exports that actually cross
 /// the WASM FFI are generated by `export!(MyComponent)`; implementors
-/// do not write `extern "C"` by hand.
+/// do not write `extern "C"` by hand. The trait stays specialised to
+/// `WasmTransport` via the `Ctx` / `InitCtx` / `DropCtx` aliases —
+/// when ADR-0074 Phase 2 lands, the native-actor analogue lives in
+/// `aether-substrate` and writes against
+/// `aether_actor::Ctx<'_, NativeTransport>` directly.
 pub trait Component: Sized + 'static {
     /// Runs once. Resolve kinds and sinks via `ctx` and return the
     /// initial component state. A failed `resolve` panics — see
@@ -302,655 +224,23 @@ pub trait Component: Sized + 'static {
     }
 }
 
-/// Init-only capability handle. The type split between `InitCtx` and
-/// `Ctx` fences "when can I resolve?" (init only) and "when can I
-/// send?" (receive only) at compile time — calling `resolve` from a
-/// `&mut Ctx` is a type error, not a convention.
-///
-/// The component's own mailbox id rides here — the substrate passes it
-/// into `init` at instantiation (ADR-0030 Phase 2) and the SDK uses
-/// it to self-address `aether.control.subscribe_input` mails for
-/// every `K::IS_INPUT` kind in `Component::Kinds`.
-pub struct InitCtx<'a> {
-    mailbox: u64,
-    _borrow: PhantomData<&'a ()>,
-}
-
-impl InitCtx<'_> {
-    /// Not part of the public API; called only by `export!`.
-    #[doc(hidden)]
-    pub fn __new(mailbox: u64) -> Self {
-        InitCtx {
-            mailbox,
-            _borrow: PhantomData,
-        }
-    }
-
-    /// The component's own mailbox id — the value the substrate uses
-    /// to address `receive` calls to this instance. Useful for
-    /// hand-rolled subscribe / self-mailing at init time when the
-    /// SDK's higher-level wrappers don't fit.
-    pub fn mailbox_id(&self) -> u64 {
-        self.mailbox
-    }
-
-    /// Resolve a kind by its `const ID`. Pure compile-time construction
-    /// under ADR-0030 Phase 2 — no host-fn round trip, never fails.
-    pub const fn resolve<K: Kind>(&self) -> KindId<K> {
-        resolve::<K>()
-    }
-
-    /// Resolve a mailbox by name and bind it to kind `K`, producing a
-    /// typed `Sink<K>`. Pure compile-time construction.
-    pub const fn resolve_sink<K: Kind>(&self, name: &str) -> Sink<K> {
-        resolve_sink::<K>(name)
-    }
-
-    /// Publish `value` into the substrate's handle store at init.
-    /// See [`handle::publish`] for full semantics — this is the
-    /// init-time twin of [`Ctx::publish`] / [`DropCtx::publish`].
-    pub fn publish<K: Kind + serde::Serialize>(
-        &self,
-        value: &K,
-    ) -> Result<Handle<K>, SyncHandleError> {
-        handle::publish(value)
-    }
-
-    /// Send `aether.control.subscribe_input` with this component's
-    /// mailbox as the subscriber for `K`. ADR-0068 keys subscriber
-    /// sets by `KindId` directly, so this collapses to a one-line
-    /// send: any `Kind` is sendable, the substrate's platform thread
-    /// fans out only for kinds it actually publishes, and a subscribe
-    /// for a non-stream kind is a harmless no-op.
-    pub fn subscribe_input<K: Kind + 'static>(&self) {
-        use aether_kinds::SubscribeInput;
-        let payload = SubscribeInput {
-            kind: <K as Kind>::ID,
-            mailbox: ::aether_data::MailboxId(self.mailbox),
-        };
-        resolve_sink::<SubscribeInput>("aether.control").send(&payload);
-    }
-}
-
-/// Per-receive capability handle. Exposes send primitives only.
-/// Resolution is intentionally absent — runtime resolution after init
-/// is not a supported shape.
-///
-/// ADR-0033: typed handlers receive `K` by value, so they no longer
-/// hold a `Mail<'_>` to call `mail.reply_to()` on. The synthesized
-/// dispatcher threads the inbound mail's sender onto `Ctx` via
-/// `__set_reply_to` before every handler call, and `Ctx::sender()`
-/// reads it back. `#[fallback]` methods still receive the raw
-/// `Mail<'_>` and can call `mail.reply_to()` directly.
-pub struct Ctx<'a> {
-    sender: Option<u32>,
-    _borrow: PhantomData<&'a ()>,
-}
-
-impl Ctx<'_> {
-    /// Not part of the public API; called only by `export!`.
-    #[doc(hidden)]
-    pub fn __new() -> Self {
-        Ctx {
-            sender: None,
-            _borrow: PhantomData,
-        }
-    }
-
-    /// Not part of the public API; called only by the `#[handlers]`
-    /// dispatcher. Accepts `None` or `Some(ReplyTo)` — the dispatcher
-    /// passes `mail.reply_to()` verbatim so component-origin and
-    /// broadcast mail (which have no reply target) land as `None`.
-    #[doc(hidden)]
-    pub fn __set_reply_to(&mut self, sender: Option<ReplyTo>) {
-        self.sender = sender.map(|s| s.raw);
-    }
-
-    /// Reply handle for the mail currently being dispatched. `None`
-    /// for component-origin and broadcast-origin mail; `Some(ReplyTo)`
-    /// when the inbound came from a Claude session. Pass the returned
-    /// `Sender` back to `Ctx::reply` to answer the originating
-    /// session (ADR-0013).
-    pub fn reply_to(&self) -> Option<ReplyTo> {
-        self.sender.map(|raw| ReplyTo { raw })
-    }
-
-    /// Send a single payload to `sink`. Typed wrapper around
-    /// `Sink::send` — having the same entry point through both
-    /// `Ctx` and `Sink` is deliberate: `Ctx` is the receive-time
-    /// vocabulary, `Sink::send` is the universal one. Wire shape
-    /// (cast or postcard) is the kind's, not the call's (issue #240).
-    pub fn send<K: Kind>(&self, sink: &Sink<K>, payload: &K) {
-        sink.send(payload);
-    }
-
-    /// Send a slice of payloads as a contiguous batch. Cast-only —
-    /// see [`Sink::send_many`] for the wire-shape rationale.
-    pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payloads: &[K]) {
-        sink.send_many(payloads);
-    }
-
-    /// Publish `value` into the substrate's handle store. Returns
-    /// the typed [`Handle<K>`] — its RAII drop fires
-    /// `HandleRelease` so the publisher's refcount goes back to
-    /// zero when the handle leaves scope. See [`handle::publish`]
-    /// for the synchronous round-trip semantics.
-    pub fn publish<K: Kind + serde::Serialize>(
-        &self,
-        value: &K,
-    ) -> Result<Handle<K>, SyncHandleError> {
-        handle::publish(value)
-    }
-
-    /// Reply to the Claude session that originated the inbound mail
-    /// (ADR-0013). `sender` came from `mail.reply_to()` on the current
-    /// receive — pass it back as the routing handle. The kind is
-    /// supplied as a typed `KindId<K>` so the same compile-time
-    /// matching the rest of the SDK uses applies here too.
-    ///
-    /// Status of the underlying host call is dropped; reply is
-    /// fire-and-forget on the guest side. If the session is gone the
-    /// hub silently discards the frame. Issue #240: wire shape (cast
-    /// or postcard) follows `Kind::encode_into_bytes` — the same
-    /// derive-time autodetect as `Ctx::send`.
-    pub fn reply<K: Kind>(&self, sender: ReplyTo, kind: KindId<K>, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        unsafe {
-            raw::reply_mail(
-                sender.raw,
-                kind.raw,
-                bytes.as_ptr().addr() as u32,
-                bytes.len() as u32,
-                1,
-            );
-        }
-    }
-}
-
-/// Sentinel the substrate passes as the reply-handle parameter on
-/// the `receive` shim when there is no reply target — for
-/// component-originated mail (no Claude session involved) and for
-/// broadcast-origin mail. `Mail::reply_to()` returns `None` in this
-/// case; `ReplyTo` is only constructable via the `Mail` accessor.
-pub const NO_REPLY_HANDLE: u32 = u32::MAX;
-
-/// Opaque per-instance handle identifying the reply destination for
-/// an inbound mail. Pass it back to `Ctx::reply` to answer — the
-/// substrate routes it to the right target (a Claude MCP session,
-/// another local component, or a remote engine's mailbox) depending
-/// on where the inbound came from. Mail is pushed at a recipient
-/// and has no real "from" concept; this handle is purely a
-/// reply-to address.
-///
-/// `Copy` because the handle is a `u32` underneath; cloning is free.
-/// Cloning is also fine for stashing across receives — the substrate
-/// guarantees the handle stays valid for the lifetime of the
-/// receiving component instance.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ReplyTo {
-    raw: u32,
-}
-
-impl ReplyTo {
-    /// Raw handle value. Exposed for components that need to call a
-    /// host fn the SDK doesn't yet wrap.
-    pub fn raw(self) -> u32 {
-        self.raw
-    }
-}
-
-/// Narrowed capability handle for shutdown hooks (`on_replace`,
-/// `on_drop`). Like `Ctx`, but deliberately smaller:
-///
-/// - `send` / `send_many` still work — outbound mail during shutdown
-///   is a valid and useful pattern ("I'm going away, here's the last
-///   thing I observed").
-/// - `save_state` is only meaningful in `on_replace` — it deposits a
-///   version-tagged byte bundle the substrate hands to the new
-///   instance via `on_rehydrate`. Calling it from `on_drop` is
-///   technically accepted by the host fn, but the bytes are then
-///   discarded (ADR-0016 §5 — plain drops have no successor).
-/// - No `reply` — sender handles invalidate on teardown; a reply
-///   attempt during `on_drop` cannot be honored.
-/// - No `resolve` — resolution belongs at init. There is no use case
-///   for resolving at teardown.
-pub struct DropCtx<'a> {
-    _borrow: PhantomData<&'a ()>,
-}
-
-impl DropCtx<'_> {
-    /// Not part of the public API; called only by `export!`.
-    #[doc(hidden)]
-    pub fn __new() -> Self {
-        DropCtx {
-            _borrow: PhantomData,
-        }
-    }
-
-    /// Send a single payload during a shutdown hook. Wire shape (cast
-    /// or postcard) follows `Kind::encode_into_bytes`.
-    pub fn send<K: Kind>(&self, sink: &Sink<K>, payload: &K) {
-        sink.send(payload);
-    }
-
-    /// Send a slice of payloads during a shutdown hook. Cast-only —
-    /// see [`Sink::send_many`] for the wire-shape rationale.
-    pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K>, payloads: &[K]) {
-        sink.send_many(payloads);
-    }
-
-    /// Publish `value` into the substrate's handle store during a
-    /// shutdown hook. Common pattern at `on_replace`: pin the
-    /// returned handle so the cached bytes survive the hand-off
-    /// to the next instance, then drop it (`Handle::pin` followed
-    /// by drop releases the local guard but keeps the entry).
-    pub fn publish<K: Kind + serde::Serialize>(
-        &self,
-        value: &K,
-    ) -> Result<Handle<K>, SyncHandleError> {
-        handle::publish(value)
-    }
-
-    /// Deposit a migration bundle for the substrate to hand to the
-    /// replacement instance via `on_rehydrate`. `version` is
-    /// component-defined (the substrate doesn't interpret it); bytes
-    /// are copied into a substrate-owned buffer immediately, so the
-    /// caller is free to drop the slice on return.
-    ///
-    /// Panics if the substrate rejects the call — today that's only
-    /// the 1 MiB cap being exceeded or an internal OOB, both of
-    /// which are component bugs. ADR-0015's trap containment ensures
-    /// the panic doesn't stall teardown on the substrate side.
-    ///
-    /// May be called zero or one times per `on_replace`; a second
-    /// call overwrites. Calling from `on_drop` is legal but the
-    /// bundle is discarded on plain drops — `drop_component` has no
-    /// successor to hand it to (ADR-0016 §5).
-    pub fn save_state(&mut self, version: u32, bytes: &[u8]) {
-        let status =
-            unsafe { raw::save_state(version, bytes.as_ptr().addr() as u32, bytes.len() as u32) };
-        if status != 0 {
-            panic!("aether-component: save_state failed (status {status})");
-        }
-    }
-
-    /// Persist a typed kind value across `replace_component`
-    /// (ADR-0040). The bundle is framed as `[0..8)` little-endian
-    /// `K::ID` followed by the postcard encoding of `value`; the
-    /// replacement instance recovers `K` via `PriorState::as_kind`.
-    ///
-    /// `K::ID` is the ADR-0030 schema hash — changing the shape of
-    /// `K` changes the id, which is what makes `as_kind::<K>`
-    /// automatically reject stale bytes after a schema evolution.
-    /// `version` is passed through to the substrate unchanged;
-    /// components typically leave it `0` since `K::ID` already
-    /// identifies the schema, but a non-zero value is legal for
-    /// components that want to stack a migration counter on top of
-    /// kind identity.
-    ///
-    /// Use the raw `save_state` when persisting bytes that aren't a
-    /// kind (external checkpoints, opaque buffers) or when driving an
-    /// explicit migration path that inspects the leading id itself.
-    pub fn save_state_kind<K>(&mut self, version: u32, value: &K)
-    where
-        K: Kind + Schema + serde::Serialize,
-    {
-        let mut out = alloc::vec::Vec::from(K::ID.0.to_le_bytes());
-        let payload = postcard::to_allocvec(value).expect("postcard encode to Vec is infallible");
-        out.extend_from_slice(&payload);
-        self.save_state(version, &out);
-    }
-}
-
-/// Opaque view of a prior state bundle handed to `on_rehydrate` by
-/// the substrate. Populated when the predecessor called
-/// `DropCtx::save_state` during its own `on_replace`; empty otherwise
-/// (and in that case `on_rehydrate` is not called at all — ADR-0016
-/// §3).
-///
-/// The lifetime `'a` ties `bytes()` back to the call; holding a
-/// reference past return is a compile error.
-pub struct PriorState<'a> {
-    version: u32,
-    ptr: usize,
-    len: usize,
-    _borrow: PhantomData<&'a [u8]>,
-}
-
-impl<'a> PriorState<'a> {
-    /// Not part of the public API; called only by `export!`. The FFI
-    /// delivers the buffer as wasm32 `(u32, u32)`; this widens.
-    #[doc(hidden)]
-    pub unsafe fn __from_raw(version: u32, ptr: u32, len: u32) -> Self {
-        PriorState {
-            version,
-            ptr: ptr as usize,
-            len: len as usize,
-            _borrow: PhantomData,
-        }
-    }
-
-    /// Component-defined schema version. The substrate does not
-    /// interpret it — see ADR-0016.
-    pub fn schema_version(&self) -> u32 {
-        self.version
-    }
-
-    /// Bytes the previous instance saved via `DropCtx::save_state`.
-    pub fn bytes(&self) -> &'a [u8] {
-        if self.len == 0 {
-            &[]
-        } else {
-            unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len) }
-        }
-    }
-
-    /// Decode the prior-state bundle as kind `K` (ADR-0040). Returns
-    /// `Some(K)` when the leading 8 bytes match `K::ID` (little-
-    /// endian) and the trailing bytes decode cleanly via postcard;
-    /// `None` on id mismatch, short buffer (fewer than 8 bytes), or
-    /// decode failure.
-    ///
-    /// Id mismatch is how schema evolution manifests: changing the
-    /// shape of `K` changes `K::ID`, so a replacement instance
-    /// compiled against the new schema sees `None` from the old
-    /// instance's save and boots fresh. Components that want to
-    /// migrate across a schema change can reach for `bytes()` +
-    /// `schema_version()` directly, or try `as_kind::<OldShape>()`
-    /// first and fall back if it returns `None`.
-    pub fn as_kind<K>(&self) -> Option<K>
-    where
-        K: Kind + Schema + serde::de::DeserializeOwned,
-    {
-        let bytes = self.bytes();
-        if bytes.len() < 8 {
-            return None;
-        }
-        let (id_bytes, payload) = bytes.split_at(8);
-        let mut id_arr = [0u8; 8];
-        id_arr.copy_from_slice(id_bytes);
-        let id = u64::from_le_bytes(id_arr);
-        if id != K::ID.0 {
-            return None;
-        }
-        postcard::from_bytes(payload).ok()
-    }
-}
-
-/// Inbound mail, as received by `Component::receive`. Wraps the raw
-/// `(kind, ptr, count, sender)` FFI parameters with typed decode helpers.
-///
-/// The lifetime `'a` ties the returned references back to the receive
-/// call; holding a decoded `&K` past the return of `receive` is a
-/// compile error. The underlying bytes live in the component's own
-/// linear memory (the substrate placed them there before the FFI
-/// call), so zero-copy is possible when alignment permits.
-pub struct Mail<'a> {
-    kind: u64,
-    // Stored as `usize` so `Mail::decode` can reconstruct a full host
-    // pointer for tests, while the FFI path (`__from_raw`) widens the
-    // incoming `u32` address. On wasm32 `usize == u32` so this is a
-    // no-op; on 64-bit hosts it lets us unit-test with real pointers.
-    ptr: usize,
-    // Total payload bytes valid at `ptr` for this delivery. Substrate
-    // sources from `mail.payload.len()` and threads through the
-    // receive ABI as a frame parameter (sibling of `kind`/`count`/
-    // `sender`). Cast decoders sanity-check against
-    // `size_of::<K>() * count`; postcard decoders use it as the
-    // exact slice length so the parser can't run past the substrate-
-    // written bytes into adjacent linear memory.
-    byte_len: u32,
-    count: u32,
-    sender: u32,
-    _borrow: PhantomData<&'a [u8]>,
-}
-
-impl<'a> Mail<'a> {
-    /// Not part of the public API; called only by `export!`. The FFI
-    /// delivers `ptr` as a wasm32 offset (`u32`); this widens it.
-    #[doc(hidden)]
-    pub unsafe fn __from_raw(kind: u64, ptr: u32, byte_len: u32, count: u32, sender: u32) -> Self {
-        Mail {
-            kind,
-            ptr: ptr as usize,
-            byte_len,
-            count,
-            sender,
-            _borrow: PhantomData,
-        }
-    }
-
-    /// Not part of the public API; unit tests that fabricate `Mail`
-    /// from a host pointer go through here so 64-bit addresses survive.
-    #[doc(hidden)]
-    #[cfg(test)]
-    unsafe fn __from_ptr_test(
-        kind: u64,
-        ptr: usize,
-        byte_len: u32,
-        count: u32,
-        sender: u32,
-    ) -> Self {
-        Mail {
-            kind,
-            ptr,
-            byte_len,
-            count,
-            sender,
-            _borrow: PhantomData,
-        }
-    }
-
-    /// Raw kind id the substrate routed this mail under. Match against
-    /// a cached `KindId<K>` via `kind_id.matches(mail.kind())`, or use
-    /// `decode::<K>(kind_id)` and let it be the discriminator.
-    pub fn kind(&self) -> u64 {
-        self.kind
-    }
-
-    /// Number of items carried on the mail frame — 1 for a single
-    /// payload send, N for a batch send of N elements.
-    pub fn count(&self) -> u32 {
-        self.count
-    }
-
-    /// Total bytes the substrate placed at `ptr` for this delivery.
-    /// Cast decoders treat this as a sanity check
-    /// (`size_of::<K>() * count`); postcard decoders use it as the
-    /// exact slice length so the parser is bounded by the substrate-
-    /// written region rather than reading into adjacent memory.
-    pub fn byte_len(&self) -> u32 {
-        self.byte_len
-    }
-
-    /// Reply handle for the session that originated this mail. `None`
-    /// for component-to-component mail and broadcast-origin mail;
-    /// `Some(ReplyTo)` when the inbound came from a Claude session and
-    /// can be answered via `Ctx::reply`.
-    pub fn reply_to(&self) -> Option<ReplyTo> {
-        if self.sender == NO_REPLY_HANDLE {
-            None
-        } else {
-            Some(ReplyTo { raw: self.sender })
-        }
-    }
-
-    /// Decode as a single owned `K`. Returns `None` if the kind does
-    /// not match or if `count` is not 1. Copies rather than borrows so
-    /// alignment of the underlying bytes doesn't matter.
-    pub fn decode<K: Kind + bytemuck::AnyBitPattern>(&self, kind_id: KindId<K>) -> Option<K> {
-        if !kind_id.matches(self.kind) || self.count != 1 {
-            return None;
-        }
-        let byte_len = core::mem::size_of::<K>();
-        let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
-        Some(bytemuck::pod_read_unaligned(bytes))
-    }
-
-    /// Decode as a zero-copy slice of `K`. Returns `None` if the kind
-    /// does not match or the bytes are not aligned for `K`. The
-    /// returned slice borrows from component linear memory for the
-    /// lifetime of this `Mail`.
-    pub fn decode_slice<K: Kind + bytemuck::AnyBitPattern>(
-        &self,
-        kind_id: KindId<K>,
-    ) -> Option<&'a [K]> {
-        if !kind_id.matches(self.kind) {
-            return None;
-        }
-        let byte_len = core::mem::size_of::<K>() * self.count as usize;
-        let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
-        bytemuck::try_cast_slice(bytes).ok()
-    }
-
-    /// True if the inbound mail's kind id matches `<K as Kind>::ID`
-    /// (ADR-0030 compile-time hash). Zero-cost — just a `u64` compare
-    /// against a const. Useful as the discriminator before deciding
-    /// how to handle a kind, or as a signal check when `K` is a
-    /// zero-sized input marker like `Tick` / `MouseButton`.
-    pub fn is<K: Kind>(&self) -> bool {
-        self.kind == K::ID.0
-    }
-
-    /// Type-driven sibling of `decode`: takes `K` as a type parameter
-    /// and uses `<K as Kind>::ID` directly (ADR-0030 compile-time hash),
-    /// so no `KindId<K>` thread-through is needed. Returns `None` if
-    /// the inbound kind doesn't match `K::ID`, if `count != 1`, or
-    /// if `byte_len` doesn't equal `size_of::<K>()` (a sender/receiver
-    /// schema-skew guard the substrate's frame metadata makes free).
-    /// Copies rather than borrows so alignment of the underlying bytes
-    /// doesn't matter — same semantics as `decode`.
-    pub fn decode_typed<K: Kind + bytemuck::AnyBitPattern>(&self) -> Option<K> {
-        if self.kind != K::ID.0 || self.count != 1 {
-            return None;
-        }
-        let byte_len = core::mem::size_of::<K>();
-        if self.byte_len as usize != byte_len {
-            return None;
-        }
-        let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
-        Some(bytemuck::pod_read_unaligned(bytes))
-    }
-
-    /// Type-driven sibling of `decode_slice`. Borrowed, alignment
-    /// required (returns `None` if misaligned).
-    pub fn decode_slice_typed<K: Kind + bytemuck::AnyBitPattern>(&self) -> Option<&'a [K]> {
-        if self.kind != K::ID.0 {
-            return None;
-        }
-        let byte_len = core::mem::size_of::<K>() * self.count as usize;
-        if self.byte_len as usize != byte_len {
-            return None;
-        }
-        let bytes = unsafe { core::slice::from_raw_parts(self.ptr as *const u8, byte_len) };
-        bytemuck::try_cast_slice(bytes).ok()
-    }
-
-    /// Decode a single inbound `K` via the wire shape `K`'s `Kind`
-    /// derive baked into `Kind::decode_from_bytes` — cast for
-    /// `#[repr(C)]` + `Pod` types, postcard for schema-shaped types.
-    /// This is the canonical receive-side decode and what the
-    /// `#[handlers]` dispatcher calls on every typed handler;
-    /// `decode` / `decode_typed` / `decode_slice` / `decode_slice_typed`
-    /// remain as low-level escape hatches for fallback handlers that
-    /// want explicit wire-shape control.
-    ///
-    /// Hands `K::decode_from_bytes` exactly `byte_len` bytes from
-    /// `ptr` so the decoder is bounded by the substrate-written
-    /// frame and can't read past it into adjacent linear memory.
-    /// Returns `None` on kind mismatch, on `count != 1` (batch
-    /// receives go through `decode_slice_typed`), or when
-    /// `K::decode_from_bytes` itself returns `None` — which can be
-    /// either the default body for hand-rolled `Kind` impls that
-    /// didn't override, a cast-size mismatch, or a postcard decode
-    /// error.
-    pub fn decode_kind<K: Kind>(&self) -> Option<K> {
-        if self.kind != K::ID.0 || self.count != 1 {
-            return None;
-        }
-        let bytes =
-            unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.byte_len as usize) };
-        K::decode_from_bytes(bytes)
-    }
-}
-
-/// Macro-use backing store for the one `Component` instance per
-/// guest. WASM components are single-threaded per instance (ADR-0010
-/// §5 — the substrate holds a read lock across `deliver`), so an
-/// `UnsafeCell` with a blanket `Sync` impl is sound *provided the
-/// macro is the only caller*. The `export!` macro orchestrates
-/// `set` / `get_mut` from within `init` / `receive` shims that the
-/// substrate serializes.
-pub struct Slot<T> {
-    inner: core::cell::UnsafeCell<Option<T>>,
-}
-
-impl<T> Slot<T> {
-    /// Build an empty slot. `const` so it can live in a `static`.
-    pub const fn new() -> Self {
-        Slot {
-            inner: core::cell::UnsafeCell::new(None),
-        }
-    }
-
-    /// # Safety
-    /// Caller must guarantee no aliasing access. Intended to be called
-    /// exactly once, from within the `init` shim, before any other
-    /// access.
-    pub unsafe fn set(&self, value: T) {
-        unsafe {
-            *self.inner.get() = Some(value);
-        }
-    }
-
-    /// # Safety
-    /// Caller must guarantee no aliasing access. Intended to be called
-    /// from within the `receive` shim, after `init` has completed.
-    // Returning `&mut T` from `&self` is the load-bearing pattern
-    // here — the `UnsafeCell` makes this sound under the substrate's
-    // serialized-dispatch guarantee. Clippy's `mut_from_ref` lint
-    // catches this as a footgun in general; we're the exception the
-    // lint is designed around.
-    #[allow(clippy::mut_from_ref)]
-    pub unsafe fn get_mut(&self) -> Option<&mut T> {
-        unsafe { (*self.inner.get()).as_mut() }
-    }
-}
-
-impl<T> Default for Slot<T> {
-    fn default() -> Self {
-        Slot::new()
-    }
-}
-
-// Single-threaded WASM + serialized FFI entry points mean the
-// `UnsafeCell` is only ever touched from one thread at a time. The
-// `Sync` impl unlocks `static SLOT: Slot<MyComponent>` without
-// needing `std::sync` types the `no_std` surface can't provide.
-unsafe impl<T> Sync for Slot<T> {}
-
 /// Bind a `Component` implementor to the guest's `#[no_mangle]`
 /// `init` / `receive` exports. Expands to:
 ///
 /// - A `static` `Slot<T>` that backs the component instance.
-/// - `extern "C" fn init() -> u32` — builds an `InitCtx`, calls
-///   `T::init`, stashes the result in the slot.
-/// - `extern "C" fn receive(kind, ptr, count) -> u32` — builds
-///   `Ctx` and `Mail`, calls `T::receive` on the stashed instance.
-/// - The `#[link_section = "aether.kinds.inputs"]` static that pins
-///   the component's handler manifest into the wasm custom section
-///   the substrate reads at `load_component`. The manifest *bytes*
-///   are emitted as associated consts on `T`'s inherent impl by
+/// - `extern "C" fn init(mailbox_id: u64) -> u32` — builds an
+///   `InitCtx`, calls `T::init`, stashes the result in the slot.
+/// - `extern "C" fn receive(kind, ptr, byte_len, count, sender) -> u32`
+///   — builds `Ctx` and `Mail`, calls the `#[handlers]`-synthesized
+///   `__aether_dispatch` on the stashed instance.
+/// - `#[link_section = "aether.kinds.inputs"]` static that pins the
+///   component's handler manifest into the wasm custom section the
+///   substrate reads at `load_component`. The manifest *bytes* are
+///   emitted as associated consts on `T`'s inherent impl by
 ///   `#[handlers]`; this macro is the only place they get a
-///   `link_section` attribute, which means the section can only
-///   land in the cdylib root that calls `export!()` — never in
-///   transitive rlib pulls of a `#[handlers]`-using crate (issue
-///   442). That structural property is what keeps duplicate
-///   Component records from stacking when a cdylib deps on a
-///   sibling `cdylib + rlib` crate's rlib output. ADR-0066's
-///   trunk-rlib pattern (kinds + names in an rlib, runtime impl in
-///   a separate cdylib) is the recommended layout for shared
-///   component types regardless.
+///   `link_section` attribute, which means the section can only land
+///   in the cdylib root that calls `export!()` — never in transitive
+///   rlib pulls of a `#[handlers]`-using crate (issue 442).
 ///
 /// Only one component per guest crate. A second `export!` call in
 /// the same crate is a duplicate-symbol compile error on the shared
@@ -993,7 +283,7 @@ macro_rules! export {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
             $crate::log::install_global_default();
-            let mut ctx = $crate::InitCtx::__new(mailbox_id);
+            let mut ctx: $crate::InitCtx<'_> = $crate::InitCtx::__new(mailbox_id);
             let instance = <$component as $crate::Component>::init(&mut ctx);
             unsafe {
                 __AETHER_COMPONENT.set(instance);
@@ -1026,7 +316,7 @@ macro_rules! export {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx = $crate::Ctx::__new();
+            let mut ctx: $crate::Ctx<'_> = $crate::Ctx::__new();
             let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
             instance.__aether_dispatch(&mut ctx, mail)
         }
@@ -1039,7 +329,7 @@ macro_rules! export {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx = $crate::DropCtx::__new();
+            let mut ctx: $crate::DropCtx<'_> = $crate::DropCtx::__new();
             <$component as $crate::Component>::on_replace(instance, &mut ctx);
             0
         }
@@ -1052,7 +342,7 @@ macro_rules! export {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx = $crate::DropCtx::__new();
+            let mut ctx: $crate::DropCtx<'_> = $crate::DropCtx::__new();
             <$component as $crate::Component>::on_drop(instance, &mut ctx);
             0
         }
@@ -1068,7 +358,7 @@ macro_rules! export {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx = $crate::Ctx::__new();
+            let mut ctx: $crate::Ctx<'_> = $crate::Ctx::__new();
             let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
             <$component as $crate::Component>::on_rehydrate(instance, &mut ctx, prior);
             0
@@ -1079,245 +369,18 @@ macro_rules! export {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_data::Kind;
 
-    struct FakeKind;
-    impl Kind for FakeKind {
-        const NAME: &'static str = "test.fake";
-        // Stable test sentinel — distinct from real schema-hashed kind ids.
-        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0001_0001);
-    }
-
-    #[test]
-    fn kind_id_equality_and_matches() {
-        let a: KindId<FakeKind> = KindId {
-            raw: 7,
-            _k: PhantomData,
-        };
-        let b: KindId<FakeKind> = KindId {
-            raw: 7,
-            _k: PhantomData,
-        };
-        let c: KindId<FakeKind> = KindId {
-            raw: 8,
-            _k: PhantomData,
-        };
-        assert!(a == b);
-        assert!(a != c);
-        assert!(a.matches(7));
-        assert!(!a.matches(8));
-        assert_eq!(a.raw(), 7);
-    }
-
-    #[test]
-    fn sink_accessors() {
-        let s: Sink<FakeKind> = Sink {
-            mailbox: 3u64,
-            kind: 11,
-            _k: PhantomData,
-        };
-        assert_eq!(s.mailbox(), 3u64);
-        assert_eq!(s.kind(), 11);
-    }
-
-    #[test]
-    fn slot_set_then_get_mut_returns_value() {
-        let slot: Slot<u32> = Slot::new();
-        unsafe {
-            slot.set(42);
-        }
-        let got = unsafe { slot.get_mut() };
-        assert_eq!(got.copied(), Some(42));
-    }
-
-    #[test]
-    fn slot_get_mut_before_set_is_none() {
-        let slot: Slot<u32> = Slot::new();
-        let got = unsafe { slot.get_mut() };
-        assert!(got.is_none());
-    }
-
-    #[repr(C)]
-    #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-    struct FakePod {
-        a: u32,
-        b: u32,
-    }
-    impl Kind for FakePod {
-        const NAME: &'static str = "test.fake_pod";
-        // Stable test sentinel — distinct from real schema-hashed kind ids.
-        const ID: ::aether_data::KindId = ::aether_data::KindId(0xDEAD_BEEF_0001_0002);
-    }
-
-    #[test]
-    fn mail_decode_single_roundtrip() {
-        // Build a `Mail` by hand that points at a local `FakePod`.
-        // This is the only place in the crate that fabricates a Mail
-        // outside the FFI path; the unsafe is load-bearing because
-        // decode treats `ptr` as a guest-memory address and the test
-        // has to arrange for that address to point at valid bytes.
-        let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakePod).addr();
-        let byte_len = core::mem::size_of::<FakePod>() as u32;
-        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
-        let kind: KindId<FakePod> = KindId {
-            raw: 7,
-            _k: PhantomData,
-        };
-        let out = mail.decode(kind).unwrap();
-        assert_eq!(out, value);
-    }
-
-    #[test]
-    fn mail_decode_wrong_kind_returns_none() {
-        let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakePod).addr();
-        let byte_len = core::mem::size_of::<FakePod>() as u32;
-        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
-        let wrong: KindId<FakePod> = KindId {
-            raw: 8,
-            _k: PhantomData,
-        };
-        assert!(mail.decode(wrong).is_none());
-    }
-
-    #[test]
-    fn mail_decode_wrong_count_returns_none() {
-        let values = [FakePod { a: 5, b: 9 }, FakePod { a: 1, b: 1 }];
-        let ptr_raw = values.as_ptr().addr();
-        let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
-        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
-        let kind: KindId<FakePod> = KindId {
-            raw: 7,
-            _k: PhantomData,
-        };
-        // `decode` requires count == 1; use `decode_slice` for batches.
-        assert!(mail.decode(kind).is_none());
-    }
-
-    #[test]
-    fn mail_decode_slice_roundtrip() {
-        let values = [FakePod { a: 1, b: 2 }, FakePod { a: 3, b: 4 }];
-        let ptr_raw = values.as_ptr().addr();
-        let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
-        let mail = unsafe { Mail::__from_ptr_test(7, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
-        let kind: KindId<FakePod> = KindId {
-            raw: 7,
-            _k: PhantomData,
-        };
-        let out = mail.decode_slice(kind).unwrap();
-        assert_eq!(out, &values);
-    }
-
-    #[test]
-    fn mail_sender_none_for_sentinel_handle() {
-        let mail = unsafe { Mail::__from_ptr_test(0, 0, 0, 0, NO_REPLY_HANDLE) };
-        assert!(mail.reply_to().is_none());
-    }
-
-    #[test]
-    fn mail_sender_some_for_real_handle() {
-        let mail = unsafe { Mail::__from_ptr_test(0, 0, 0, 0, 42) };
-        let s = mail.reply_to().expect("non-sentinel handle yields Some");
-        assert_eq!(s.raw(), 42);
-    }
-
-    #[test]
-    fn prior_state_empty_bytes_does_not_deref() {
-        // With len=0, `bytes()` must not materialise a pointer — a
-        // raw 0 ptr with len>0 would be UB if anyone called
-        // `from_raw_parts` on it. The `if self.len == 0` branch in
-        // `bytes()` is what guarantees this.
-        let prior = unsafe { PriorState::__from_raw(7, 0, 0) };
-        assert_eq!(prior.schema_version(), 7);
-        assert_eq!(prior.bytes(), &[] as &[u8]);
-    }
-
-    #[test]
-    fn prior_state_nonempty_bytes_roundtrip() {
-        let buf: [u8; 4] = [1, 2, 3, 4];
-        let prior = PriorState {
-            version: 3,
-            ptr: buf.as_ptr().addr(),
-            len: buf.len(),
-            _borrow: PhantomData,
-        };
-        assert_eq!(prior.schema_version(), 3);
-        assert_eq!(prior.bytes(), &buf);
-    }
-
-    /// `DropCtx::__new()` must be callable without special setup so
-    /// the `export!` macro can build one inside a `#[no_mangle]` shim.
-    /// The accessor covered here just verifies the constructor type
-    /// is well-formed; send/send_many require a real FFI and are not
-    /// unit-testable on host.
-    #[test]
-    fn drop_ctx_constructor_well_formed() {
-        let _ctx: DropCtx<'_> = DropCtx::__new();
-    }
-
-    // ADR-0033 phase 3: type-driven Mail tests now use `K::ID`
-    // directly (no `KindTable`). `is::<K>` is a `u64` compare against
-    // the const; `decode_typed::<K>` reads `K::ID` and the payload
-    // size without any per-component cache.
-
-    // Host-test fabrication lets us pick the `kind` id at will. These
-    // types' `Kind::ID` is the name-hash under ADR-0030 — stable but
-    // opaque. We assert against `Kind::ID` directly rather than
-    // hard-coding the integer.
-
-    #[test]
-    fn mail_is_typed_matches_kind_id() {
-        let mail = unsafe { Mail::__from_ptr_test(FakeKind::ID.0, 0, 0, 0, NO_REPLY_HANDLE) };
-        assert!(mail.is::<FakeKind>());
-        assert!(!mail.is::<FakePod>());
-    }
-
-    #[test]
-    fn mail_decode_typed_roundtrip() {
-        let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakePod).addr();
-        let byte_len = core::mem::size_of::<FakePod>() as u32;
-        let mail =
-            unsafe { Mail::__from_ptr_test(FakePod::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
-        let out = mail.decode_typed::<FakePod>().unwrap();
-        assert_eq!(out, value);
-    }
-
-    #[test]
-    fn mail_decode_typed_wrong_kind_returns_none() {
-        let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakePod).addr();
-        let byte_len = core::mem::size_of::<FakePod>() as u32;
-        // Kind id deliberately mismatched (FakeKind instead of FakePod).
-        let mail =
-            unsafe { Mail::__from_ptr_test(FakeKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
-        assert!(mail.decode_typed::<FakePod>().is_none());
-    }
-
-    #[test]
-    fn mail_decode_typed_wrong_count_returns_none() {
-        let values = [FakePod { a: 5, b: 9 }, FakePod { a: 1, b: 1 }];
-        let ptr_raw = values.as_ptr().addr();
-        let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
-        let mail =
-            unsafe { Mail::__from_ptr_test(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
-        assert!(mail.decode_typed::<FakePod>().is_none());
-    }
-
-    #[test]
-    fn mail_decode_slice_typed_roundtrip() {
-        let values = [FakePod { a: 1, b: 2 }, FakePod { a: 3, b: 4 }];
-        let ptr_raw = values.as_ptr().addr();
-        let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
-        let mail =
-            unsafe { Mail::__from_ptr_test(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
-        let out = mail.decode_slice_typed::<FakePod>().unwrap();
-        assert_eq!(out, &values);
-    }
-
-    // `Mail::decode_kind` coverage. Routes through `K::decode_from_bytes`
-    // — the Kind derive picks cast vs postcard based on `#[repr(C)]`,
-    // so these tests exercise both arms via two fixture types.
+    // Mail / Sink / KindId / PriorState / DropCtx unit coverage moved
+    // to `aether-actor` along with the types they exercise. The tests
+    // that stay here cover surfaces unique to this crate:
+    //   - `Kind::encode_into_bytes` round-trip (issue #240) — the
+    //     derive lives in `aether-data`, but the smoke test sits
+    //     here because `aether-component`'s `Sink::send` /
+    //     `Ctx::send` are the consumer.
+    //   - The wasm-aliased `Sink<K>` resolves to `Sink<K, WasmTransport>`
+    //     via the type alias — a regression guard against an
+    //     accidental alias break.
 
     #[derive(
         aether_data::Kind,
@@ -1333,64 +396,6 @@ mod tests {
         tag: alloc::string::String,
         ids: alloc::vec::Vec<u32>,
     }
-
-    #[test]
-    fn mail_decode_kind_postcard_roundtrip() {
-        let value = FakePostcard {
-            tag: alloc::string::String::from("greet"),
-            ids: alloc::vec![1, 2, 3, 4],
-        };
-        let bytes = postcard::to_allocvec(&value).unwrap();
-        let mail = unsafe {
-            Mail::__from_ptr_test(
-                FakePostcard::ID.0,
-                bytes.as_ptr().addr(),
-                bytes.len() as u32,
-                1,
-                NO_REPLY_HANDLE,
-            )
-        };
-        let out = mail.decode_kind::<FakePostcard>().expect("decode");
-        assert_eq!(out, value);
-    }
-
-    #[test]
-    fn mail_decode_kind_cast_roundtrip() {
-        // Cast arm — Kind derive on a `#[repr(C)] + Pod` type emits
-        // `decode_cast` as the body, so `decode_kind` lands on the
-        // bytemuck reader without any per-handler annotation.
-        #[repr(C)]
-        #[derive(
-            Copy,
-            Clone,
-            Debug,
-            PartialEq,
-            bytemuck::Pod,
-            bytemuck::Zeroable,
-            aether_data::Kind,
-            aether_data::Schema,
-        )]
-        #[kind(name = "test.fake_cast_kind")]
-        struct FakeCastKind {
-            a: u32,
-            b: u32,
-        }
-
-        let value = FakeCastKind { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakeCastKind).addr();
-        let byte_len = core::mem::size_of::<FakeCastKind>() as u32;
-        let mail = unsafe {
-            Mail::__from_ptr_test(FakeCastKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE)
-        };
-        let out = mail.decode_kind::<FakeCastKind>().expect("decode");
-        assert_eq!(out, value);
-    }
-
-    // Issue #240 encode-side mirror. `Kind::encode_into_bytes` is the
-    // send-side counterpart to `decode_from_bytes`; the derive picks
-    // cast vs postcard based on the same `#[repr(C)]` flag. These two
-    // tests pin the symmetry: the encode output for each wire shape
-    // round-trips through the decode it pairs with.
 
     #[test]
     fn kind_encode_into_bytes_postcard_roundtrip() {
@@ -1434,201 +439,19 @@ mod tests {
         assert_eq!(decoded, value);
     }
 
+    /// Regression guard for the 1-arg `Sink<K>` alias. If the alias
+    /// breaks (e.g. someone parameterises it with a different default
+    /// transport) this test fails to compile.
     #[test]
-    fn mail_decode_kind_wrong_kind_returns_none() {
-        let value = FakePostcard {
-            tag: alloc::string::String::from("x"),
-            ids: alloc::vec![],
-        };
-        let bytes = postcard::to_allocvec(&value).unwrap();
-        let mail = unsafe {
-            Mail::__from_ptr_test(
-                FakeKind::ID.0,
-                bytes.as_ptr().addr(),
-                bytes.len() as u32,
-                1,
-                NO_REPLY_HANDLE,
-            )
-        };
-        assert!(mail.decode_kind::<FakePostcard>().is_none());
-    }
-
-    #[test]
-    fn mail_decode_kind_wrong_count_returns_none() {
-        let value = FakePostcard {
-            tag: alloc::string::String::from("x"),
-            ids: alloc::vec![],
-        };
-        let bytes = postcard::to_allocvec(&value).unwrap();
-        let mail = unsafe {
-            Mail::__from_ptr_test(
-                FakePostcard::ID.0,
-                bytes.as_ptr().addr(),
-                bytes.len() as u32,
-                2,
-                NO_REPLY_HANDLE,
-            )
-        };
-        assert!(mail.decode_kind::<FakePostcard>().is_none());
-    }
-
-    #[test]
-    fn mail_decode_kind_truncated_bytes_returns_none() {
-        let value = FakePostcard {
-            tag: alloc::string::String::from("longer"),
-            ids: alloc::vec![1, 2, 3],
-        };
-        let bytes = postcard::to_allocvec(&value).unwrap();
-        // Pretend the substrate only wrote the first 2 bytes —
-        // `decode_from_bytes` (postcard arm) gets the truncated slice
-        // and surfaces the parse error as `None`.
-        let mail = unsafe {
-            Mail::__from_ptr_test(
-                FakePostcard::ID.0,
-                bytes.as_ptr().addr(),
-                2,
-                1,
-                NO_REPLY_HANDLE,
-            )
-        };
-        assert!(mail.decode_kind::<FakePostcard>().is_none());
-    }
-
-    #[test]
-    fn mail_decode_kind_default_body_returns_none_for_handrolled_kind() {
-        // FakeKind is a hand-rolled Kind with no `decode_from_bytes`
-        // override, so the default trait body returns None — dispatch
-        // surfaces this as DISPATCH_UNKNOWN_KIND in real components.
-        // Use a real (empty) buffer — `slice::from_raw_parts(NULL, 0)`
-        // is UB even when the length is zero.
-        let buf: [u8; 1] = [0];
-        let mail = unsafe {
-            Mail::__from_ptr_test(FakeKind::ID.0, buf.as_ptr().addr(), 0, 1, NO_REPLY_HANDLE)
-        };
-        assert!(mail.decode_kind::<FakeKind>().is_none());
-    }
-
-    #[test]
-    fn mail_decode_typed_byte_len_mismatch_returns_none() {
-        // Cast decode now sanity-checks byte_len against
-        // `size_of::<K>() * count`. If the substrate ever delivers a
-        // mail whose declared byte_len doesn't match the kind's size,
-        // decode bails rather than reading the wrong window.
-        let value = FakePod { a: 5, b: 9 };
-        let ptr_raw = (&value as *const FakePod).addr();
-        let bogus_byte_len = (core::mem::size_of::<FakePod>() + 4) as u32;
-        let mail = unsafe {
-            Mail::__from_ptr_test(FakePod::ID.0, ptr_raw, bogus_byte_len, 1, NO_REPLY_HANDLE)
-        };
-        assert!(mail.decode_typed::<FakePod>().is_none());
-    }
-
-    // ADR-0040 typed-state framing. `DropCtx::save_state_kind` can't be
-    // exercised end-to-end on host (the underlying `raw::save_state`
-    // panics off-wasm, ADR-0015 §stub policy), so the tests below pair
-    // a hand-built bundle matching the documented framing
-    // (`[0..8) = K::ID LE`, `[8..) = postcard(value)`) against
-    // `PriorState::as_kind` — the one we *can* unit-test on host. A
-    // mismatch between framing and decode surfaces here before either
-    // diverges from the ADR's wire shape.
-    use alloc::vec::Vec;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(
-        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
-    )]
-    #[kind(name = "test.state.struct")]
-    struct StateStruct {
-        tag: u32,
-        label: alloc::string::String,
-        items: Vec<u32>,
-    }
-
-    #[derive(
-        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
-    )]
-    #[kind(name = "test.state.other")]
-    struct OtherState {
-        flag: bool,
-    }
-
-    fn frame_bundle<K: Kind + Schema + Serialize>(value: &K) -> Vec<u8> {
-        let mut out = Vec::from(K::ID.0.to_le_bytes());
-        let payload = postcard::to_allocvec(value).unwrap();
-        out.extend_from_slice(&payload);
-        out
-    }
-
-    fn prior_from(buf: &[u8], version: u32) -> PriorState<'_> {
-        PriorState {
-            version,
-            ptr: buf.as_ptr().addr(),
-            len: buf.len(),
-            _borrow: PhantomData,
-        }
-    }
-
-    #[test]
-    fn as_kind_roundtrip() {
-        let value = StateStruct {
-            tag: 11,
-            label: alloc::string::String::from("phase-2"),
-            items: alloc::vec![1, 2, 3],
-        };
-        let buf = frame_bundle(&value);
-        let prior = prior_from(&buf, 0);
-        let decoded = prior.as_kind::<StateStruct>().unwrap();
-        assert_eq!(decoded, value);
-    }
-
-    #[test]
-    fn as_kind_id_mismatch_returns_none() {
-        // Frame under one kind, decode as a different one — the
-        // leading `K::ID` compare rejects before postcard runs.
-        let value = OtherState { flag: true };
-        let buf = frame_bundle(&value);
-        let prior = prior_from(&buf, 0);
-        assert!(prior.as_kind::<StateStruct>().is_none());
-    }
-
-    #[test]
-    fn as_kind_short_buffer_returns_none() {
-        // Buffer shorter than the 8-byte leading id — not a kind-
-        // typed save (or corrupt). Must not panic.
-        let buf: [u8; 3] = [1, 2, 3];
-        let prior = prior_from(&buf, 0);
-        assert!(prior.as_kind::<StateStruct>().is_none());
-    }
-
-    #[test]
-    fn as_kind_empty_buffer_returns_none() {
-        // `on_rehydrate` only fires when the predecessor saved
-        // something, but a hypothetical zero-length buffer must
-        // still fall through cleanly.
-        let prior = unsafe { PriorState::__from_raw(0, 0, 0) };
-        assert!(prior.as_kind::<StateStruct>().is_none());
-    }
-
-    #[test]
-    fn as_kind_correct_id_garbage_payload_returns_none() {
-        // Leading id matches but the postcard tail is truncated.
-        // Decode error must surface as None, not a panic.
-        let mut buf = Vec::from(StateStruct::ID.0.to_le_bytes());
-        buf.push(0xff);
-        let prior = prior_from(&buf, 0);
-        assert!(prior.as_kind::<StateStruct>().is_none());
-    }
-
-    #[test]
-    fn as_kind_preserves_raw_access_for_migration() {
-        // ADR-0040 keeps the raw bytes + version reachable so a
-        // component that sees `as_kind::<New>() = None` can pivot to
-        // an explicit migration path.
-        let value = OtherState { flag: false };
-        let buf = frame_bundle(&value);
-        let prior = prior_from(&buf, 7);
-        assert!(prior.as_kind::<StateStruct>().is_none());
-        assert_eq!(prior.schema_version(), 7);
-        assert_eq!(prior.bytes(), buf.as_slice());
+    fn sink_alias_resolves_to_wasm_transport() {
+        use core::any::TypeId;
+        // Building a `Sink<FakePostcard>` value via the const resolver
+        // is enough — its type identity is what matters here, not the
+        // mailbox lookup.
+        let _: Sink<FakePostcard> = resolve_sink::<FakePostcard>("test.smoke");
+        assert_eq!(
+            TypeId::of::<Sink<FakePostcard>>(),
+            TypeId::of::<aether_actor::Sink<FakePostcard, WasmTransport>>(),
+        );
     }
 }
