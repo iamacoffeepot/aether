@@ -367,13 +367,7 @@ mod tests {
 
     /// Postcard-shape kind for the schema-driven `decode_kind` path.
     #[derive(
-        ::aether_data::Kind,
-        ::aether_data::Schema,
-        Serialize,
-        Deserialize,
-        Debug,
-        Clone,
-        PartialEq,
+        ::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
     )]
     #[kind(name = "test.fake_postcard")]
     struct FakePostcard {
@@ -468,7 +462,8 @@ mod tests {
         let value = FakePod { a: 5, b: 9 };
         let ptr_raw = (&value as *const FakePod).addr();
         let byte_len = core::mem::size_of::<FakePod>() as u32;
-        let mail = unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
+        let mail =
+            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let out = mail.decode_typed::<FakePod>().unwrap();
         assert_eq!(out, value);
     }
@@ -499,7 +494,8 @@ mod tests {
         let values = [FakePod { a: 1, b: 2 }, FakePod { a: 3, b: 4 }];
         let ptr_raw = values.as_ptr().addr();
         let byte_len = (core::mem::size_of::<FakePod>() * 2) as u32;
-        let mail = unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
+        let mail =
+            unsafe { Mail::__from_ptr(FakePod::ID.0, ptr_raw, byte_len, 2, NO_REPLY_HANDLE) };
         let out = mail.decode_slice_typed::<FakePod>().unwrap();
         assert_eq!(out, &values);
     }
@@ -549,9 +545,8 @@ mod tests {
         let value = FakeCastKind { a: 5, b: 9 };
         let ptr_raw = (&value as *const FakeCastKind).addr();
         let byte_len = core::mem::size_of::<FakeCastKind>() as u32;
-        let mail = unsafe {
-            Mail::__from_ptr(FakeCastKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE)
-        };
+        let mail =
+            unsafe { Mail::__from_ptr(FakeCastKind::ID.0, ptr_raw, byte_len, 1, NO_REPLY_HANDLE) };
         let out = mail.decode_kind::<FakeCastKind>().expect("decode");
         assert_eq!(out, value);
     }
@@ -605,7 +600,13 @@ mod tests {
         // `decode_from_bytes` (postcard arm) gets the truncated slice
         // and surfaces the parse error as `None`.
         let mail = unsafe {
-            Mail::__from_ptr(FakePostcard::ID.0, bytes.as_ptr().addr(), 2, 1, NO_REPLY_HANDLE)
+            Mail::__from_ptr(
+                FakePostcard::ID.0,
+                bytes.as_ptr().addr(),
+                2,
+                1,
+                NO_REPLY_HANDLE,
+            )
         };
         assert!(mail.decode_kind::<FakePostcard>().is_none());
     }
@@ -647,13 +648,7 @@ mod tests {
     // diverges from the ADR's wire shape.
 
     #[derive(
-        ::aether_data::Kind,
-        ::aether_data::Schema,
-        Serialize,
-        Deserialize,
-        Debug,
-        Clone,
-        PartialEq,
+        ::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
     )]
     #[kind(name = "test.state.struct")]
     struct StateStruct {
@@ -663,13 +658,7 @@ mod tests {
     }
 
     #[derive(
-        ::aether_data::Kind,
-        ::aether_data::Schema,
-        Serialize,
-        Deserialize,
-        Debug,
-        Clone,
-        PartialEq,
+        ::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
     )]
     #[kind(name = "test.state.other")]
     struct OtherState {

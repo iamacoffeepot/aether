@@ -210,4 +210,3 @@ mod tests {
         assert_eq!(s.kind(), 11);
     }
 }
-
