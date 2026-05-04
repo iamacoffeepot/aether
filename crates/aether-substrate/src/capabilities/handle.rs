@@ -1,10 +1,14 @@
 //! ADR-0070 Phase 2: handle sink as a native capability.
-//!
-//! First capability extraction. The handle sink (ADR-0045 typed-handle
-//! store front) was the lowest-state, lowest-coupling sink — one
-//! mailbox, one [`HandleStore`], no chassis-feature gating — so it's
-//! the right place to validate the [`Capability`] trait shape end-to-
-//! end before extracting the heavier ones (io, net, audio, render).
+//! ADR-0074 Phase 2b: lifecycle migrated onto channel-drop + join,
+//! mirroring [`crate::capabilities::log::LogCapability`]. Worst-case
+//! shutdown latency is now the OS scheduler's wakeup on
+//! `recv()`-disconnect rather than the prior 100ms `recv_timeout`
+//! polling interval. The reply path still routes through
+//! [`Mailer::send_reply`] directly (the typed `ctx.reply` SDK pattern
+//! is queued for a separate refactor that touches every reply-bearing
+//! capability — handle, audio, io, net — at once so the
+//! [`crate::native_transport::NativeTransport::reply_mail`] stub fires
+//! on a real consumer rather than speculatively).
 //!
 //! Behavior change vs the pre-Phase-2 sink: the substrate-side dispatch
 //! used to run the per-kind handlers synchronously on the calling
@@ -16,21 +20,15 @@
 //! correctness is preserved; latency adds one mpsc hop per op (sub-
 //! microsecond on uncontended channels). See ADR-0070 §"Threading
 //! model".
-//!
-//! Shutdown is signalled via an [`AtomicBool`] the dispatcher polls
-//! on `recv_timeout`. Worst-case shutdown latency is the timeout
-//! interval (currently 100ms), which is fine for chassis teardown
-//! and avoids tying the trait API to a specific channel type.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
-use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability};
+use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability, SinkSender};
 use crate::handle_sink;
 use crate::handle_store::HandleStore;
+use crate::mailer::Mailer;
+use crate::native_transport::NativeTransport;
 
 /// Recipient name the handle capability claims. Components mail
 /// `aether.handle.{publish,release,pin,unpin}` (kind ids) to this
@@ -38,10 +36,6 @@ use crate::handle_store::HandleStore;
 /// resolve through here. ADR-0058 places chassis-owned sinks under
 /// `aether.sink.*`.
 pub const HANDLE_SINK_NAME: &str = "aether.sink.handle";
-
-/// Polling interval for the dispatcher's shutdown check. See module
-/// docs for the latency tradeoff.
-const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Native capability owning the ADR-0045 typed-handle sink. Boots a
 /// single dispatcher thread that pulls envelopes from the
@@ -62,49 +56,61 @@ impl HandleCapability {
 }
 
 /// Running handle returned by [`HandleCapability::boot`]. Holds the
-/// dispatcher thread and the shutdown flag the thread polls. Drop
-/// alone does not stop the thread — call [`HandleRunning::shutdown`]
-/// (or let the parent [`crate::BootedChassis`] do it on drop).
+/// dispatcher's `JoinHandle`, the [`SinkSender`] strong handle that
+/// drives channel-drop shutdown, and the actor's
+/// [`NativeTransport`] (kept alive for the dispatcher thread's
+/// lifetime via the `Arc` clone the spawn closure holds).
 pub struct HandleRunning {
     thread: Option<JoinHandle<()>>,
-    shutdown_flag: Arc<AtomicBool>,
+    /// Drop-on-shutdown breaks the channel. Held by name so the
+    /// `RunningCapability::shutdown` impl can drop it explicitly
+    /// before joining the thread; the registry's handler can no
+    /// longer upgrade its [`std::sync::Weak`] back-reference, the
+    /// inbox's last sender is gone, and the dispatcher's
+    /// `recv_blocking()` returns `None` on its next iteration.
+    sink_sender: Option<SinkSender>,
+    /// The actor's transport. The dispatcher thread holds an
+    /// `Arc::clone`, so this field exists to keep the same transport
+    /// reachable from chassis-side code that wants to inspect or
+    /// coordinate with this actor (none today; the extension point is
+    /// here without thread-local plumbing).
+    _transport: Arc<NativeTransport>,
 }
 
 impl Capability for HandleCapability {
     type Running = HandleRunning;
 
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let claim = ctx.claim_mailbox(HANDLE_SINK_NAME)?;
-        let mailer = ctx.mail_send_handle();
+        let claim = ctx.claim_mailbox_drop_on_shutdown(HANDLE_SINK_NAME)?;
+        let mailer: Arc<Mailer> = ctx.mail_send_handle();
+        let mailbox_id = claim.id;
         let store = self.store;
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let thread_flag = Arc::clone(&shutdown_flag);
-        let receiver = claim.receiver;
+
+        // ADR-0074 §Decision: `&self` trait, owned transport. The
+        // capability constructs its `NativeTransport` once at boot
+        // and clones the `Arc` into the dispatcher thread; the
+        // dispatcher uses `transport.recv_blocking()` to pull from
+        // its own inbox without thread-local plumbing.
+        let transport = Arc::new(NativeTransport::new(Arc::clone(&mailer), mailbox_id));
+        transport.install_inbox(claim.receiver);
+        let dispatcher_transport = Arc::clone(&transport);
 
         let thread = thread::Builder::new()
             .name("aether-handle-sink".into())
             .spawn(move || {
-                while !thread_flag.load(Ordering::Relaxed) {
-                    match receiver.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
-                        Ok(env) => {
-                            handle_sink::dispatch(
-                                &store,
-                                &mailer,
-                                env.kind,
-                                env.sender,
-                                &env.payload,
-                            );
-                        }
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
+                // Channel-drop + join: pull until the sender side
+                // disconnects. Worst-case shutdown latency is the
+                // OS scheduler's wakeup, not a 100ms poll interval.
+                while let Some(env) = dispatcher_transport.recv_blocking() {
+                    handle_sink::dispatch(&store, &mailer, env.kind, env.sender, &env.payload);
                 }
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
         Ok(HandleRunning {
             thread: Some(thread),
-            shutdown_flag,
+            sink_sender: Some(claim.sink_sender),
+            _transport: transport,
         })
     }
 }
@@ -113,9 +119,11 @@ impl RunningCapability for HandleRunning {
     fn shutdown(self: Box<Self>) {
         let HandleRunning {
             mut thread,
-            shutdown_flag,
+            mut sink_sender,
+            _transport,
         } = *self;
-        shutdown_flag.store(true, Ordering::Relaxed);
+        // Drop the strong sender first to break the channel.
+        sink_sender.take();
         if let Some(t) = thread.take() {
             // Join discards the thread's result; a panic on the
             // dispatcher already routed through the panic hook (issue
@@ -130,7 +138,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::RwLock;
     use std::sync::mpsc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use aether_data::{HandleId, Kind, KindId};
     use aether_data::{SessionToken, Uuid};
@@ -240,8 +248,9 @@ mod tests {
         chassis.shutdown();
     }
 
-    /// Shutdown joins the dispatcher thread cleanly. The polling loop
-    /// must return within ~SHUTDOWN_POLL_INTERVAL of the flag set.
+    /// Post-ADR-0074: shutdown latency is bounded by `recv()`
+    /// returning on channel disconnect, not by a polling interval.
+    /// Channel-drop should land well under the 500ms budget.
     #[test]
     fn shutdown_joins_dispatcher_thread() {
         let (store, mailer, registry, _rx) = fresh_substrate();
@@ -256,7 +265,7 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_millis(500),
-            "shutdown should complete within a poll interval (took {elapsed:?})"
+            "shutdown should complete promptly via channel-drop (took {elapsed:?})"
         );
     }
 
