@@ -480,7 +480,11 @@ impl Capability for NetCapability {
         let default_timeout = self.config.default_timeout;
         let adapter = build_net_adapter(self.config);
 
-        let transport = Arc::new(NativeTransport::new(Arc::clone(&mailer), mailbox_id));
+        let transport = Arc::new(NativeTransport::from_ctx(
+            ctx,
+            mailbox_id,
+            Self::FRAME_BARRIER,
+        ));
         transport.install_inbox(claim.receiver);
         let dispatcher_transport = Arc::clone(&transport);
 

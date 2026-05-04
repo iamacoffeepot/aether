@@ -82,15 +82,23 @@ impl Capability for LogCapability {
 
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
         let claim = ctx.claim_mailbox_drop_on_shutdown(LOG_SINK_NAME)?;
-        let mailer = ctx.mail_send_handle();
         let mailbox_id = claim.id;
 
         // ADR-0074 §Decision: `&self` trait, owned transport. The
         // capability constructs its `NativeTransport` once at boot
         // and clones the `Arc` into the dispatcher thread; the
         // dispatcher uses `transport.recv_blocking()` to pull from
-        // its own inbox without thread-local plumbing.
-        let transport = Arc::new(NativeTransport::new(mailer, mailbox_id));
+        // its own inbox without thread-local plumbing. Going through
+        // `from_ctx` wires the chassis's frame-bound set + aborter
+        // into the transport so the cross-class `wait_reply` guard
+        // (ADR-0074 §Decision 5) is live for any future log-side
+        // sync calls — `LogCapability::FRAME_BARRIER` is the default
+        // `false`, so the guard treats this caller as free-running.
+        let transport = Arc::new(NativeTransport::from_ctx(
+            ctx,
+            mailbox_id,
+            Self::FRAME_BARRIER,
+        ));
         transport.install_inbox(claim.receiver);
         let dispatcher_transport = Arc::clone(&transport);
 

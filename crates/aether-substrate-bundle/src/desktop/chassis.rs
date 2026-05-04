@@ -323,6 +323,13 @@ impl DesktopChassis {
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
         let namespace_roots = boot.namespace_roots.clone();
+        // ADR-0074 §Decision 5: production chassis configures the
+        // cross-class `wait_reply` aborter to broadcast
+        // `SubstrateDying` before exit. Built before `boot` moves
+        // into the driver.
+        let aborter: Arc<dyn aether_substrate::lifecycle::FatalAborter> = Arc::new(
+            aether_substrate::lifecycle::OutboundFatalAborter::new(Arc::clone(&boot.outbound)),
+        );
 
         let driver = DesktopDriverCapability {
             event_loop,
@@ -341,6 +348,7 @@ impl DesktopChassis {
         // through the log capture; render last among passives so it
         // claims its mailboxes after every other chassis sink.
         Builder::<DesktopChassis>::new(registry, mailer)
+            .with_aborter(aborter)
             .with(LogCapability::new())
             .with(IoCapability::new(namespace_roots))
             .with(NetCapability::new(net))

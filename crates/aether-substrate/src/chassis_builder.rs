@@ -21,17 +21,18 @@
 //!   chassis can nominate a real driver type rather than a stub.
 
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, RwLock};
 
 use crate::capability::{
     BootError, Capability, ChassisCtx, FallbackRouter, MailboxClaim, RunningCapability,
 };
 use crate::chassis::Chassis;
+use crate::lifecycle::{FatalAborter, PanicAborter};
 use crate::mail::MailboxId;
 use crate::mailer::Mailer;
 use crate::registry::Registry;
@@ -297,21 +298,39 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     mailer: Arc<Mailer>,
     passives: Vec<PassiveBoot>,
     driver: Option<DriverBoot>,
+    aborter: Arc<dyn FatalAborter>,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
 }
 
 impl<C: Chassis> Builder<C, NoDriver> {
     /// Construct a fresh builder against the given substrate handles.
+    /// Defaults the cross-class `wait_reply` aborter to
+    /// [`PanicAborter`]; production drivers swap in
+    /// [`crate::lifecycle::OutboundFatalAborter`] via
+    /// [`Self::with_aborter`] before `build()` / `build_passive()`.
     pub fn new(registry: Arc<Registry>, mailer: Arc<Mailer>) -> Self {
         Self {
             registry,
             mailer,
             passives: Vec::new(),
             driver: None,
+            aborter: Arc::new(PanicAborter),
             _chassis: PhantomData,
             _state: PhantomData,
         }
+    }
+
+    /// Override the default [`PanicAborter`] with a chassis-supplied
+    /// [`FatalAborter`]. Mirrors
+    /// [`crate::ChassisBuilder::with_aborter`]; production drivers
+    /// (desktop, headless) call this before `build()` so a cross-class
+    /// `wait_reply` violation broadcasts `SubstrateDying` before
+    /// process exit. Single-call: a second invocation overwrites the
+    /// prior aborter.
+    pub fn with_aborter(mut self, aborter: Arc<dyn FatalAborter>) -> Self {
+        self.aborter = aborter;
+        self
     }
 
     /// Append a passive capability. Boot order is declaration order;
@@ -338,6 +357,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             mailer: self.mailer,
             passives: self.passives,
             driver: self.driver,
+            aborter: self.aborter,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -347,7 +367,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// and returns a [`PassiveChassis`] whose embedder is responsible
     /// for driving the loop manually (TestBench).
     pub fn build_passive(self) -> Result<PassiveChassis<C>, BootError> {
-        let booted = boot_passives(&self.registry, &self.mailer, self.passives)?;
+        let booted = boot_passives(&self.registry, &self.mailer, &self.aborter, self.passives)?;
         Ok(PassiveChassis {
             booted,
             _chassis: PhantomData,
@@ -378,17 +398,20 @@ impl<C: Chassis> Builder<C, HasDriver> {
             mailer,
             passives,
             driver,
+            aborter,
             ..
         } = self;
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
 
-        let mut booted = boot_passives(&registry, &mailer, passives)?;
+        let mut booted = boot_passives(&registry, &mailer, &aborter, passives)?;
         let driver_running = {
             let chassis_ctx = ChassisCtx::new(
                 &registry,
                 &mailer,
                 &mut booted.fallback,
                 &mut booted.frame_bound_pending,
+                &booted.frame_bound_set,
+                &booted.aborter,
             );
             let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.runnings);
             driver_boot(&mut driver_ctx)?
@@ -413,6 +436,17 @@ struct BootedPassives {
     /// [`DriverCtx::frame_bound_pending`] (the driver stashes a clone
     /// for its frame loop).
     frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
+    /// Membership view of the same set; shared with every
+    /// [`crate::NativeTransport`] booted under this chassis so the
+    /// cross-class `wait_reply` guard can classify recipients.
+    /// Populated alongside `frame_bound_pending` by
+    /// [`ChassisCtx::claim_frame_bound_mailbox`].
+    frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
+    /// Cloned into every `ChassisCtx` and onto every booted
+    /// [`crate::NativeTransport`] so the cross-class `wait_reply`
+    /// guard has somewhere to abort to. Inherited from the
+    /// [`Builder`]'s configured aborter.
+    aborter: Arc<dyn FatalAborter>,
 }
 
 impl BootedPassives {
@@ -440,14 +474,23 @@ impl Drop for BootedPassives {
 fn boot_passives(
     registry: &Arc<Registry>,
     mailer: &Arc<Mailer>,
+    aborter: &Arc<dyn FatalAborter>,
     passives: Vec<PassiveBoot>,
 ) -> Result<BootedPassives, BootError> {
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
     let mut runnings = TypedRunnings::new();
     let mut fallback: Option<FallbackRouter> = None;
     let mut frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)> = Vec::new();
+    let frame_bound_set: Arc<RwLock<HashSet<MailboxId>>> = Arc::new(RwLock::new(HashSet::new()));
     for boot in passives {
-        let mut ctx = ChassisCtx::new(registry, mailer, &mut fallback, &mut frame_bound_pending);
+        let mut ctx = ChassisCtx::new(
+            registry,
+            mailer,
+            &mut fallback,
+            &mut frame_bound_pending,
+            &frame_bound_set,
+            aborter,
+        );
         match boot(&mut ctx, &mut runnings) {
             Ok(shutdown) => shutdowns.push(shutdown),
             Err(e) => {
@@ -463,6 +506,8 @@ fn boot_passives(
         runnings,
         fallback,
         frame_bound_pending,
+        frame_bound_set,
+        aborter: Arc::clone(aborter),
     })
 }
 
