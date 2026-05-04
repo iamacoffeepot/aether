@@ -24,14 +24,13 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability};
+use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability, SinkSender};
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
+use crate::native_transport::NativeTransport;
 use aether_data::{Kind, KindId};
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
@@ -47,9 +46,6 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 /// and the fetch itself supplies no `timeout_ms`. 30s matches
 /// ADR-0043 §4.
 pub const DEFAULT_TIMEOUT_MS: u32 = 30_000;
-
-/// Polling interval for the dispatcher's shutdown check.
-const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Adapter-facing request shape. Converted from the wire `Fetch`
 /// kind by the dispatcher before handing to the adapter.
@@ -463,51 +459,54 @@ impl NetCapability {
     }
 }
 
-/// Running handle returned by [`NetCapability::boot`]. Same shape as
-/// the other dispatcher-thread capabilities.
+/// Running handle returned by [`NetCapability::boot`]. Holds the
+/// dispatcher's `JoinHandle`, the [`SinkSender`] strong handle that
+/// drives channel-drop shutdown, and the actor's
+/// [`NativeTransport`] (kept alive for the dispatcher thread's
+/// lifetime via the `Arc` clone the spawn closure holds).
 pub struct NetRunning {
     thread: Option<JoinHandle<()>>,
-    shutdown_flag: Arc<AtomicBool>,
+    sink_sender: Option<SinkSender>,
+    _transport: Arc<NativeTransport>,
 }
 
 impl Capability for NetCapability {
     type Running = NetRunning;
 
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let claim = ctx.claim_mailbox(NET_SINK_NAME)?;
-        let mailer = ctx.mail_send_handle();
+        let claim = ctx.claim_mailbox_drop_on_shutdown(NET_SINK_NAME)?;
+        let mailer: Arc<Mailer> = ctx.mail_send_handle();
+        let mailbox_id = claim.id;
         let default_timeout = self.config.default_timeout;
         let adapter = build_net_adapter(self.config);
 
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let thread_flag = Arc::clone(&shutdown_flag);
-        let receiver = claim.receiver;
+        let transport = Arc::new(NativeTransport::new(Arc::clone(&mailer), mailbox_id));
+        transport.install_inbox(claim.receiver);
+        let dispatcher_transport = Arc::clone(&transport);
 
         let thread = thread::Builder::new()
             .name("aether-net-sink".into())
             .spawn(move || {
-                while !thread_flag.load(Ordering::Relaxed) {
-                    match receiver.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
-                        Ok(env) => {
-                            dispatch_net_mail(
-                                adapter.as_ref(),
-                                &mailer,
-                                env.kind,
-                                env.sender,
-                                &env.payload,
-                                default_timeout,
-                            );
-                        }
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
+                // Channel-drop + join: pull until the sender side
+                // disconnects. Worst-case shutdown latency is the
+                // OS scheduler's wakeup, not a 100ms poll interval.
+                while let Some(env) = dispatcher_transport.recv_blocking() {
+                    dispatch_net_mail(
+                        adapter.as_ref(),
+                        &mailer,
+                        env.kind,
+                        env.sender,
+                        &env.payload,
+                        default_timeout,
+                    );
                 }
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
         Ok(NetRunning {
             thread: Some(thread),
-            shutdown_flag,
+            sink_sender: Some(claim.sink_sender),
+            _transport: transport,
         })
     }
 }
@@ -516,9 +515,11 @@ impl RunningCapability for NetRunning {
     fn shutdown(self: Box<Self>) {
         let NetRunning {
             mut thread,
-            shutdown_flag,
+            mut sink_sender,
+            _transport,
         } = *self;
-        shutdown_flag.store(true, Ordering::Relaxed);
+        // Drop the strong sender first to break the channel.
+        sink_sender.take();
         if let Some(t) = thread.take() {
             let _ = t.join();
         }
