@@ -18,9 +18,12 @@ use core::marker::PhantomData;
 
 use aether_data::{Kind, Schema};
 
+use crate::actor::{Actor, HandlesKind, Singleton};
 use crate::handle::{self, Handle, SyncHandleError};
 use crate::mail::ReplyTo;
-use crate::sink::{KindId, Mailbox, resolve, resolve_mailbox};
+use crate::sink::{
+    ActorMailbox, KindId, Mailbox, resolve, resolve_actor, resolve_actor_named, resolve_mailbox,
+};
 use crate::transport::MailTransport;
 
 /// Init-only capability handle. The type split between `InitCtx` and
@@ -204,6 +207,36 @@ impl<'a, T: MailTransport> Ctx<'a, T> {
         let bytes = payload.encode_into_bytes();
         self.transport
             .reply_mail(sender.raw(), kind.raw(), &bytes, 1);
+    }
+
+    /// ADR-0075 singleton path: send `payload` to the unique instance of
+    /// actor `R`, addressed by `R::NAMESPACE`. Compile-checked against
+    /// `R: Singleton + HandlesKind<K>` so wrong-receiver and wrong-kind
+    /// sends are caught at the call site instead of silent runtime
+    /// warn-drops.
+    ///
+    /// During the migration (Phases 1–3) this lives alongside the
+    /// kind-typed `Ctx::send(&sink, &payload)`. Phase 4 retires the old
+    /// form and renames `send_to` → `send`.
+    pub fn send_to<R, K>(&self, payload: &K)
+    where
+        R: Singleton + HandlesKind<K>,
+        K: Kind,
+    {
+        resolve_actor::<R, T>().send(self.transport, payload);
+    }
+
+    /// ADR-0075 multi-instance path: resolve a typed `ActorMailbox<R, T>`
+    /// from a runtime instance name. The string surfaces ONCE per
+    /// handle; subsequent sends through the returned handle are
+    /// string-free and compile-checked against `R: HandlesKind<K>`.
+    ///
+    /// Use this when addressing one of several live instances of the
+    /// same actor type (e.g. `"player_1"` vs `"player_2"`). For
+    /// singletons (chassis caps, uniquely-loaded user components),
+    /// `send_to::<R>(&payload)` skips the explicit handle entirely.
+    pub fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<R, T> {
+        resolve_actor_named::<R, T>(name)
     }
 }
 

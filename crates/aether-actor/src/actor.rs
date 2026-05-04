@@ -40,3 +40,33 @@ pub trait Actor: Sized + Send + 'static {
     /// wants per-frame coupling will too.
     const FRAME_BARRIER: bool = false;
 }
+
+/// Marker: only one instance of this actor can be live per substrate.
+/// Required by `Ctx::send_to::<R>` so the type → mailbox lookup is
+/// unambiguous — the substrate enforces "at most one Singleton actor
+/// per `R::NAMESPACE`" at registration time, and senders address by
+/// type rather than by name.
+///
+/// Chassis caps and synthetic actors like `HubBroadcast` are always
+/// singletons. User components are singletons when their cdylib loads
+/// at the default name (`R::NAMESPACE` from the wasm custom section);
+/// multi-instance loads use `ctx.resolve_actor::<R>(name)` instead and
+/// don't go through the singleton path. ADR-0075 §Decision 1.
+pub trait Singleton: Actor {}
+
+/// Per-handler-kind marker: `R: HandlesKind<K>` means actor `R` has
+/// a `#[handler]` method accepting kind `K`. Auto-emitted by the
+/// `#[handlers]` proc-macro alongside the dispatch table — one impl
+/// per handler kind. Authors never write these by hand.
+///
+/// Gates `Ctx::send_to::<R>(&K)` and `ActorMailbox<R, T>::send::<K>` so
+/// the compiler rejects sends to a kind the receiver doesn't handle.
+/// The single source of truth is the handler list on the actor's
+/// `impl` block; adding a `#[handler]` updates senders' compile-time
+/// checks automatically. ADR-0075 §Decision 1.
+///
+/// Blanket impls (e.g. `impl<T: Into<DrawTriangle>> HandlesKind<T> for
+/// RenderCapability`) are an opt-in extension if a real conversion case
+/// wants them; the default macro emission is strict so wire bytes stay
+/// obvious.
+pub trait HandlesKind<K: aether_data::Kind>: Actor {}

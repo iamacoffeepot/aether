@@ -927,8 +927,24 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
         }
     };
 
+    // ADR-0075: emit one `impl HandlesKind<K> for Self {}` per handler
+    // kind. Auto-generated marker impls gate `Ctx::send_to::<R>(&K)` and
+    // `ActorMailbox<R, T>::send::<K>` so wrong-kind sends are compile
+    // errors at the call site. The handler list above is the single
+    // source of truth — adding a `#[handler]` automatically updates
+    // senders' compile-time checks.
+    let handles_kind_impls = handlers.iter().map(|h| {
+        let kind_ty = &h.kind_ty;
+        quote! {
+            impl #impl_generics ::aether_component::HandlesKind<#kind_ty>
+                for #self_ty #where_clause {}
+        }
+    });
+
     Ok(quote! {
         #actor_impl
+
+        #(#handles_kind_impls)*
 
         impl #impl_generics #trait_path for #self_ty #where_clause {
             #wrapped_init

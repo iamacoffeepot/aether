@@ -45,10 +45,12 @@ mod slot;
 mod sync;
 mod transport;
 
-pub use actor::Actor;
+pub use actor::{Actor, HandlesKind, Singleton};
 pub use ctx::{Ctx, DropCtx, InitCtx};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
-pub use sink::{KindId, Mailbox, resolve, resolve_mailbox};
+pub use sink::{
+    ActorMailbox, KindId, Mailbox, resolve, resolve_actor, resolve_actor_named, resolve_mailbox,
+};
 pub use slot::Slot;
 pub use sync::{WaitError, decode_wait_reply, wait_reply};
 pub use transport::MailTransport;
