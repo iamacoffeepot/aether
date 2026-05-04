@@ -1,6 +1,6 @@
 # ADR-0075: Actor-typed sender API and chassis cap marker split
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0076
 - **Date:** 2026-05-04
 
 ## Context
