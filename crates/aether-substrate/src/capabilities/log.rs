@@ -27,6 +27,8 @@
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
+use aether_actor::Actor;
+
 use crate::capability::{BootError, Capability, ChassisCtx, SinkSender};
 use crate::log_sink;
 use crate::native_transport::NativeTransport;
@@ -67,13 +69,15 @@ impl LogCapability {
     }
 }
 
-impl Capability for LogCapability {
+impl Actor for LogCapability {
     /// Components mail `aether.log` (kind id) to this mailbox; the
     /// SDK's `MailSubscriber` resolves through here. The
     /// `aether.<name>` form is the post-ADR-0074 Phase 5 convention
     /// for chassis-owned mailboxes.
     const NAMESPACE: &'static str = "aether.log";
+}
 
+impl Capability for LogCapability {
     fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
         let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
         let mailbox_id = claim.id;

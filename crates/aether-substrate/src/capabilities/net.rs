@@ -27,6 +27,8 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use aether_actor::Actor;
+
 use crate::capability::{BootError, Capability, ChassisCtx, SinkSender};
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
@@ -467,13 +469,15 @@ impl NetCapability {
     }
 }
 
-impl Capability for NetCapability {
+impl Actor for NetCapability {
     /// Components mail `aether.net.{fetch,cancel}` (kind ids) to this
     /// mailbox; the SDK helpers in `aether-component::net` resolve
     /// through here. The `aether.<name>` form is the post-ADR-0074
     /// Phase 5 convention for chassis-owned mailboxes.
     const NAMESPACE: &'static str = "aether.net";
+}
 
+impl Capability for NetCapability {
     fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
         let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();

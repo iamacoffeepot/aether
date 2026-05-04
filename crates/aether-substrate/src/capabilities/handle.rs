@@ -24,6 +24,8 @@
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
+use aether_actor::Actor;
+
 use crate::capability::{BootError, Capability, ChassisCtx, SinkSender};
 use crate::handle_sink;
 use crate::handle_store::HandleStore;
@@ -60,14 +62,16 @@ impl HandleCapability {
     }
 }
 
-impl Capability for HandleCapability {
+impl Actor for HandleCapability {
     /// Components mail `aether.handle.{publish,release,pin,unpin}`
     /// (kind ids) to this mailbox; the SDK's `Ctx::publish` /
     /// `Handle<K>::Drop` pair both resolve through here. The
     /// `aether.<name>` form is the post-ADR-0074 Phase 5 convention
     /// for chassis-owned mailboxes.
     const NAMESPACE: &'static str = "aether.handle";
+}
 
+impl Capability for HandleCapability {
     fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
         let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();

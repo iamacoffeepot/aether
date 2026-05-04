@@ -39,6 +39,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
+use aether_actor::Actor;
 use aether_data::Kind;
 use aether_kinds::{Camera, DRAW_TRIANGLE_BYTES, DrawTriangle};
 
@@ -311,7 +312,7 @@ impl RenderCapability {
     }
 }
 
-impl Capability for RenderCapability {
+impl Actor for RenderCapability {
     /// Components mail `aether.draw_triangle` and `aether.camera`
     /// (kind ids) to this mailbox; the GPU recorder pulls from here.
     /// The `aether.<name>` form is the post-ADR-0074 Phase 5
@@ -325,7 +326,9 @@ impl Capability for RenderCapability {
     /// the frame would land in the *next* frame's `frame_vertices`,
     /// dropping a triangle the component meant for this frame.
     const FRAME_BARRIER: bool = true;
+}
 
+impl Capability for RenderCapability {
     fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
         let claim = ctx.claim_frame_bound_mailbox::<Self>()?;
 

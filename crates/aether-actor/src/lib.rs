@@ -36,6 +36,7 @@
 
 extern crate alloc;
 
+mod actor;
 mod ctx;
 pub mod handle;
 mod mail;
@@ -44,6 +45,7 @@ mod slot;
 mod sync;
 mod transport;
 
+pub use actor::Actor;
 pub use ctx::{Ctx, DropCtx, InitCtx};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
 pub use sink::{KindId, Mailbox, resolve, resolve_mailbox};
