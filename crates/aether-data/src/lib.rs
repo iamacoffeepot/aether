@@ -41,6 +41,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod actor;
 pub mod canonical;
 pub mod hash;
 pub mod ids;
@@ -49,6 +50,7 @@ pub mod tag_bits;
 pub mod tagged_id;
 pub mod wire_id;
 
+pub use actor::{Actor, Dispatch, HandlesKind, Singleton};
 pub use hash::{
     KIND_DOMAIN, MAILBOX_DOMAIN, TYPE_DOMAIN, fnv1a_64_bytes, fnv1a_64_prefixed,
     mailbox_id_from_name,

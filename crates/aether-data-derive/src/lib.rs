@@ -1096,7 +1096,7 @@ fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     let handles_kind_impls = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         quote! {
-            impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
+            impl #impl_generics ::aether_data::HandlesKind<#kind_ty>
                 for #self_ty #where_clause {}
         }
     });
@@ -1125,17 +1125,14 @@ fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     Ok(quote! {
         #(#handles_kind_impls)*
 
-        impl #impl_generics #self_ty #where_clause {
-            /// Dispatch a single mail to the matching `#[handler]`.
-            /// Returns `Some(())` on match + decode success, `None` for
-            /// unknown kinds or decode failure. Auto-emitted by `#[actor]`
-            /// on a native (chassis cap) inherent impl.
-            #[doc(hidden)]
-            pub fn __dispatch(&mut self, kind: u64, payload: &[u8]) -> Option<()> {
+        impl #impl_generics ::aether_data::Dispatch for #self_ty #where_clause {
+            fn __dispatch(&mut self, kind: u64, payload: &[u8]) -> Option<()> {
                 #(#dispatch_arms)*
                 None
             }
+        }
 
+        impl #impl_generics #self_ty #where_clause {
             #(#handler_methods_tokens)*
             #(#helper_methods_tokens)*
         }

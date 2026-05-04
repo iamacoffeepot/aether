@@ -29,12 +29,16 @@ use std::marker::PhantomData;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
-use crate::capability::{BootError, Capability, ChassisCtx, FallbackRouter, MailboxClaim};
+use crate::capability::{
+    BootError, Capability, ChassisCtx, FacadeHandle, FallbackRouter, MailboxClaim,
+};
 use crate::chassis::Chassis;
 use crate::lifecycle::{FatalAborter, PanicAborter};
 use crate::mail::MailboxId;
 use crate::mailer::Mailer;
 use crate::registry::Registry;
+use aether_actor::Actor;
+use aether_data::Dispatch;
 
 /// Failure mode raised by [`DriverRunning::run`].
 #[derive(Debug)]
@@ -148,6 +152,26 @@ impl<C: Capability + Sync> DynShutdown for ArcShutdown<C> {
                 );
             }
         }
+    }
+}
+
+/// Concrete adapter for an ADR-0075 facade cap. The chassis owns the
+/// [`FacadeHandle`]; the cap itself lives in the dispatcher thread.
+/// On shutdown the handle drops, severing the channel and joining the
+/// thread; the captured cap drops there. There's no `TypedRunnings`
+/// entry because the cap value isn't reachable from the chassis side
+/// (drivers that need to talk to the cap should use mail).
+struct FacadeShutdown<C: 'static> {
+    handle: Option<FacadeHandle<C>>,
+}
+
+impl<C: 'static> DynShutdown for FacadeShutdown<C> {
+    fn shutdown_dyn(mut self: Box<Self>) {
+        // Drop the handle eagerly: drops SinkSender, channel
+        // disconnects, dispatcher thread exits, cap drops. Equivalent
+        // to letting `Box<Self>` drop, but explicit so the order is
+        // documented.
+        self.handle.take();
     }
 }
 
@@ -284,6 +308,18 @@ where
     })
 }
 
+fn make_facade_passive_boot<C>(cap: C) -> PassiveBoot
+where
+    C: Actor + Dispatch + Send + 'static,
+{
+    Box::new(move |ctx, _runnings| {
+        let handle = ctx.spawn_actor_dispatcher(cap)?;
+        Ok(Box::new(FacadeShutdown {
+            handle: Some(handle),
+        }) as Box<dyn DynShutdown>)
+    })
+}
+
 fn make_driver_boot<D: DriverCapability>(driver: D) -> DriverBoot {
     Box::new(move |ctx| {
         let running = driver.boot(ctx)?;
@@ -348,6 +384,17 @@ impl<C: Chassis> Builder<C, NoDriver> {
         self
     }
 
+    /// Append an ADR-0075 facade-style cap (cap impls `Actor +
+    /// Dispatch`, chassis owns the dispatcher thread). Booted in
+    /// declaration order alongside [`Self::with`].
+    pub fn with_facade<P>(mut self, cap: P) -> Self
+    where
+        P: Actor + Dispatch + Send + 'static,
+    {
+        self.passives.push(make_facade_passive_boot::<P>(cap));
+        self
+    }
+
     /// Supply the chassis's driver. Transitions to [`HasDriver`] —
     /// further `.driver(_)` calls are forbidden by the type system.
     /// Per ADR-0071 the driver type is fixed by `C::Driver`, so the
@@ -386,6 +433,16 @@ impl<C: Chassis> Builder<C, HasDriver> {
         P: Capability + Sync,
     {
         self.passives.push(make_passive_boot::<P>(cap));
+        self
+    }
+
+    /// Append an ADR-0075 facade-style cap after the driver was
+    /// supplied. Booted before the driver in declaration order.
+    pub fn with_facade<P>(mut self, cap: P) -> Self
+    where
+        P: Actor + Dispatch + Send + 'static,
+    {
+        self.passives.push(make_facade_passive_boot::<P>(cap));
         self
     }
 
