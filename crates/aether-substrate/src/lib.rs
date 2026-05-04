@@ -57,7 +57,8 @@ pub mod scheduler;
 pub use boot::{ChassisHandlerContext, SubstrateBoot, SubstrateBootBuilder};
 pub use capability::{
     BootError, BootedChassis, Capability, ChassisBuilder, ChassisCtx, DropOnShutdownClaim,
-    Envelope, FallbackRouter, MailboxClaim, RunningCapability, SinkSender,
+    Envelope, FallbackRouter, FrameBoundClaim, MailboxClaim, RunningCapability, SinkSender,
+    WedgedFrameBound,
 };
 pub use chassis::Chassis;
 pub use chassis_builder::{

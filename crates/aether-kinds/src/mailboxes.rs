@@ -22,13 +22,11 @@ pub const CONTROL: MailboxId = mailbox_id_from_name("aether.control");
 /// (engine_logs, frame_stats, etc.) is addressed here.
 pub const DIAGNOSTICS: MailboxId = mailbox_id_from_name("aether.diagnostics");
 
-/// Render sink (chassis-owned). DrawTriangle, etc. flow here per
-/// ADR-0058 namespace conventions.
+/// Render sink (chassis-owned). Both `aether.draw_triangle` and
+/// `aether.camera` (view_proj) flow here per ADR-0058 + ADR-0074
+/// §Decision 7 — the pre-Phase-3 `aether.sink.camera` mailbox folded
+/// into render as part of the unified-actor refactor.
 pub const SINK_RENDER: MailboxId = mailbox_id_from_name("aether.sink.render");
-
-/// Camera sink (chassis-owned). `aether.camera { view_proj }` lands
-/// here; latest value wins per tick.
-pub const SINK_CAMERA: MailboxId = mailbox_id_from_name("aether.sink.camera");
 
 /// Audio sink (desktop chassis). NoteOn / NoteOff / SetMasterGain
 /// (ADR-0039) route here.

@@ -1320,9 +1320,10 @@ mod control_plane {
     // `TopdownParams` / `ModeInit`) moved to the `aether-camera` trunk
     // crate. The `aether.camera` view_proj sink contract above stays
     // here — it's a chassis primitive consumed by the desktop chassis's
-    // `aether.sink.camera` sink. The migrated kinds are still wire-
-    // compatible (kind names + schemas unchanged); only the source-side
-    // home moved.
+    // `aether.sink.render` mailbox (the camera mailbox folded into
+    // render per ADR-0074 §Decision 7; the kind name is unchanged).
+    // The migrated kinds are still wire-compatible (kind names +
+    // schemas unchanged); only the source-side home moved.
 
     // ADR-0066: `aether.mesh.load` moved to the `aether-mesh-viewer`
     // trunk crate.

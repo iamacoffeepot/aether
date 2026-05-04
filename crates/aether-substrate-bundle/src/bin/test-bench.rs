@@ -141,6 +141,7 @@ fn drive_events_loop(
     let outbound = Arc::clone(&boot.outbound);
     let input_subscribers = Arc::clone(&boot.input_subscribers);
     let broadcast_mbox = boot.broadcast_mbox;
+    let frame_bound_pending = passive.frame_bound_pending();
     let started = Instant::now();
     let mut frame: u64 = 0;
 
@@ -161,6 +162,7 @@ fn drive_events_loop(
                         kind_frame_stats,
                         &capture_queue,
                         &render_handles,
+                        &frame_bound_pending,
                         &mut gpu,
                     );
                 }
@@ -185,6 +187,7 @@ fn drive_events_loop(
                     kind_frame_stats,
                     &capture_queue,
                     &render_handles,
+                    &frame_bound_pending,
                     &mut gpu,
                 );
             }
@@ -214,6 +217,10 @@ fn run_frame(
     kind_frame_stats: aether_data::KindId,
     capture_queue: &CaptureQueue,
     render_handles: &aether_substrate::capabilities::RenderHandles,
+    frame_bound_pending: &[(
+        aether_substrate::MailboxId,
+        Arc<std::sync::atomic::AtomicU64>,
+    )],
     gpu: &mut Gpu,
 ) {
     if dispatch_tick {
@@ -223,6 +230,10 @@ fn run_frame(
         }
     }
     frame_loop::drain_or_abort(queue, outbound);
+    // ADR-0074 §Decision 5: render's inbox must quiesce before
+    // submit so any DrawTriangle / aether.camera mail this frame is
+    // integrated into the recorded pass.
+    frame_loop::drain_frame_bound_or_abort(frame_bound_pending, outbound);
 
     match capture_queue.take() {
         Some(req) => {

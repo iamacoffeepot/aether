@@ -84,6 +84,12 @@ pub struct App {
     /// Hub outbound — also shared with the log-capture layer and the
     /// broadcast sink. The capture-reply path is the third consumer.
     outbound: Arc<HubOutbound>,
+    /// Snapshot of every frame-bound capability's pending counter
+    /// (ADR-0074 §Decision 5). Today: render. Cloned out of
+    /// `DriverCtx::frame_bound_pending` at driver boot; `RedrawRequested`
+    /// hands it to `frame_loop::drain_frame_bound_or_abort` after the
+    /// component drain so render's inbox quiesces before submit.
+    frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
     /// How many kinds the substrate registered at boot. Captured once
     /// and cached so `platform_info` can report it without having to
     /// consult the live registry (which also contains runtime-loaded
@@ -563,6 +569,11 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 frame_loop::drain_or_abort(&self.queue, &self.outbound);
+                // ADR-0074 §Decision 5: render's inbox must quiesce
+                // before submit so any DrawTriangle / aether.camera
+                // mail this frame is integrated into the recorded
+                // pass.
+                frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
                 if let Some(gpu) = self.gpu.as_mut() {
                     match pending_capture {
                         Some(req) => {
@@ -737,6 +748,7 @@ impl DriverCapability for DesktopDriverCapability {
             camera_state: _,
             triangles_rendered,
         } = render_running.handles();
+        let frame_bound_pending = ctx.frame_bound_pending();
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_key = boot.registry.kind_id(Key::NAME).expect("Key registered");
@@ -776,6 +788,7 @@ impl DriverCapability for DesktopDriverCapability {
             triangles_rendered: Arc::clone(&triangles_rendered),
             capture_queue,
             outbound: Arc::clone(&boot.outbound),
+            frame_bound_pending,
             boot_kinds_count,
             window: None,
             gpu: None,

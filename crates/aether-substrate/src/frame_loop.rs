@@ -25,7 +25,9 @@
 //! actual loop policy and shouldn't be promoted into a shared
 //! module just because every chassis happens to set the same value.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use aether_data::encode;
 use aether_kinds::FrameStats;
@@ -68,6 +70,51 @@ pub fn drain_or_abort(queue: &Mailer, outbound: &HubOutbound) {
     let summary = queue.drain_all_with_budget(DRAIN_BUDGET);
     if let Some(reason) = abort_reason(&summary) {
         lifecycle::fatal_abort(outbound, reason);
+    }
+}
+
+/// Wait for every frame-bound capability's inbox to drain under
+/// `DRAIN_BUDGET` (ADR-0074 §Decision 5). Mirrors [`drain_or_abort`]
+/// but works on the per-mailbox pending counters
+/// [`crate::ChassisCtx::claim_frame_bound_mailbox`] collected for the
+/// chassis (snapshotted by drivers via
+/// [`crate::chassis_builder::DriverCtx::frame_bound_pending`]).
+///
+/// Component drain runs first because component dispatchers are the
+/// upstream of capability mail; running it second would let
+/// component-emitted mail land in capability inboxes after we
+/// already cleared them. Order: component drain → frame-bound drain
+/// → render submit. Each chassis main calls these in that order.
+///
+/// Empty `pending` is a fast no-op — chassis without frame-bound
+/// capabilities (today: headless, hub) call this every frame at
+/// zero cost.
+pub fn drain_frame_bound_or_abort(pending: &[(MailboxId, Arc<AtomicU64>)], outbound: &HubOutbound) {
+    if pending.is_empty() {
+        return;
+    }
+    let deadline = Instant::now() + DRAIN_BUDGET;
+    loop {
+        let mut still_pending: Option<(MailboxId, u64)> = None;
+        for (mbox, counter) in pending {
+            let v = counter.load(Ordering::Acquire);
+            if v > 0 {
+                still_pending = Some((*mbox, v));
+                break;
+            }
+        }
+        match still_pending {
+            None => return,
+            Some((mbox, count)) => {
+                if Instant::now() >= deadline {
+                    let reason = format!(
+                        "frame-bound dispatcher wedged: mailbox={mbox} pending={count} waited={DRAIN_BUDGET:?}"
+                    );
+                    lifecycle::fatal_abort(outbound, reason);
+                }
+                std::thread::sleep(Duration::from_micros(50));
+            }
+        }
     }
 }
 

@@ -26,11 +26,13 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use crate::capability::{
     BootError, Capability, ChassisCtx, FallbackRouter, MailboxClaim, RunningCapability,
 };
 use crate::chassis::Chassis;
+use crate::mail::MailboxId;
 use crate::mailer::Mailer;
 use crate::registry::Registry;
 
@@ -218,6 +220,19 @@ impl<'a> DriverCtx<'a> {
     pub fn try_get<R: Send + Sync + 'static>(&self) -> Option<Arc<R>> {
         self.runnings.try_get()
     }
+
+    /// Snapshot of every frame-bound mailbox's pending counter
+    /// collected during passive boot. Drivers stash this clone and
+    /// hand it to [`crate::frame_loop::drain_frame_bound_or_abort`]
+    /// each frame so render submit waits for inbound mail to drain
+    /// alongside component drains (ADR-0074 §Decision 5).
+    ///
+    /// Returns an empty vec on chassis with no frame-bound
+    /// capabilities (today: the headless chassis without render); in
+    /// that case the per-frame call is a fast no-op.
+    pub fn frame_bound_pending(&self) -> Vec<(MailboxId, Arc<AtomicU64>)> {
+        self.inner.frame_bound_pending().to_vec()
+    }
 }
 
 mod sealed {
@@ -369,7 +384,12 @@ impl<C: Chassis> Builder<C, HasDriver> {
 
         let mut booted = boot_passives(&registry, &mailer, passives)?;
         let driver_running = {
-            let chassis_ctx = ChassisCtx::new(&registry, &mailer, &mut booted.fallback);
+            let chassis_ctx = ChassisCtx::new(
+                &registry,
+                &mailer,
+                &mut booted.fallback,
+                &mut booted.frame_bound_pending,
+            );
             let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.runnings);
             driver_boot(&mut driver_ctx)?
         };
@@ -387,6 +407,12 @@ struct BootedPassives {
     shutdowns: Vec<Box<dyn DynShutdown>>,
     runnings: TypedRunnings,
     fallback: Option<FallbackRouter>,
+    /// Per-mailbox pending counters from
+    /// [`ChassisCtx::claim_frame_bound_mailbox`] calls — collected
+    /// during passive boot, exposed to the driver via
+    /// [`DriverCtx::frame_bound_pending`] (the driver stashes a clone
+    /// for its frame loop).
+    frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
 }
 
 impl BootedPassives {
@@ -419,8 +445,9 @@ fn boot_passives(
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
     let mut runnings = TypedRunnings::new();
     let mut fallback: Option<FallbackRouter> = None;
+    let mut frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)> = Vec::new();
     for boot in passives {
-        let mut ctx = ChassisCtx::new(registry, mailer, &mut fallback);
+        let mut ctx = ChassisCtx::new(registry, mailer, &mut fallback, &mut frame_bound_pending);
         match boot(&mut ctx, &mut runnings) {
             Ok(shutdown) => shutdowns.push(shutdown),
             Err(e) => {
@@ -435,6 +462,7 @@ fn boot_passives(
         shutdowns,
         runnings,
         fallback,
+        frame_bound_pending,
     })
 }
 
@@ -510,6 +538,16 @@ impl<C: Chassis> PassiveChassis<C> {
 
     pub fn is_empty(&self) -> bool {
         self.booted.shutdowns.is_empty()
+    }
+
+    /// Snapshot of every frame-bound mailbox's pending counter
+    /// collected during passive boot. Embedders (TestBench, bin
+    /// drivers) clone this once and feed it to
+    /// [`crate::frame_loop::drain_frame_bound_or_abort`] each frame —
+    /// same role as [`crate::chassis_builder::DriverCtx::frame_bound_pending`]
+    /// on the driver-build path.
+    pub fn frame_bound_pending(&self) -> Vec<(MailboxId, Arc<AtomicU64>)> {
+        self.booted.frame_bound_pending.clone()
     }
 }
 
