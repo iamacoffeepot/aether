@@ -88,11 +88,11 @@ fn main() -> wasmtime::Result<()> {
         hub,
     } = TestBenchChassis::build_passive(env)?;
 
-    // Io cap on the `boot.add_facade` path — the binary fails fast on
+    // Io cap on the `boot.add_capability` path — the binary fails fast on
     // adapter init failure (the in-process API silent-skips for
     // systems without writable default roots).
     let io_cap = IoCapability::new(boot.namespace_roots.clone(), Arc::clone(&boot.queue))?;
-    boot.add_facade(io_cap)?;
+    boot.add_capability(io_cap)?;
 
     let (width, height) = parse_size_env();
     let gpu = Gpu::new(width, height, render_handles.clone());

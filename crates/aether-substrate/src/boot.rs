@@ -164,24 +164,11 @@ impl SubstrateBoot {
     /// same as build-time capabilities. The fallback-router slot is
     /// shared across build-time and post-build capabilities, so the
     /// single-claim invariant holds.
+    ///
+    /// Pre-PR-E3 there was a separate `add_facade` for actor caps
+    /// alongside `add_capability` for legacy `Capability` caps; the
+    /// legacy path retired alongside `Capability` itself.
     pub fn add_capability<C>(&mut self, cap: C) -> wasmtime::Result<()>
-    where
-        C: crate::Capability,
-    {
-        let chassis = self
-            .chassis
-            .as_mut()
-            .expect("SubstrateBoot::build always installs a BootedChassis");
-        chassis
-            .add(&self.registry, &self.queue, cap)
-            .map_err(|e| wasmtime::Error::msg(format!("capability boot failed: {e}")))
-    }
-
-    /// Boot one more facade-style cap into the already-built chassis.
-    /// Counterpart to [`Self::add_capability`] for ADR-0075 facade
-    /// caps; the chassis owns the dispatcher thread and the cap moves
-    /// into it.
-    pub fn add_facade<C>(&mut self, cap: C) -> wasmtime::Result<()>
     where
         C: aether_actor::Actor + aether_data::Dispatch + Send + 'static,
     {
@@ -190,7 +177,7 @@ impl SubstrateBoot {
             .as_mut()
             .expect("SubstrateBoot::build always installs a BootedChassis");
         chassis
-            .add_facade(&self.registry, &self.queue, cap)
+            .add(&self.registry, &self.queue, cap)
             .map_err(|e| wasmtime::Error::msg(format!("capability boot failed: {e}")))
     }
 }
@@ -347,7 +334,7 @@ impl<'a> SubstrateBootBuilder<'a> {
         // control-side code that wants to publish at load can reach
         // it.
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&queue))
-            .with_facade(HandleCapability::new(
+            .with(HandleCapability::new(
                 Arc::clone(&handle_store),
                 Arc::clone(&queue),
             ))

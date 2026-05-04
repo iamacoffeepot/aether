@@ -358,11 +358,11 @@ impl DesktopChassis {
             .map_err(|e| BootError::Other(Box::new(e)))?;
         Builder::<DesktopChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
-            .with_facade(LogCapability::new())
-            .with_facade(io_cap)
-            .with_facade(NetCapability::new(net, Arc::clone(&mailer)))
-            .with_facade(AudioCapability::new(audio, Arc::clone(&mailer)))
-            .with_facade(render_cap)
+            .with(LogCapability::new())
+            .with(io_cap)
+            .with(NetCapability::new(net, Arc::clone(&mailer)))
+            .with(AudioCapability::new(audio, Arc::clone(&mailer)))
+            .with(render_cap)
             .driver(driver)
             .build()
     }

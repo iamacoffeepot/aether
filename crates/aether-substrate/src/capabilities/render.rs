@@ -92,7 +92,7 @@ impl RenderCapability {
     }
 
     /// Cheap clone of the driver-facing handles bundle. Call this
-    /// **before** `chassis.with_facade(cap)` — once the cap moves into
+    /// **before** `chassis.with(cap)` — once the cap moves into
     /// the dispatcher thread, the only access to its accumulator
     /// state is through the cloned handles.
     pub fn handles(&self) -> RenderHandles {
@@ -408,7 +408,7 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         let cap = RenderCapability::new(RenderConfig::default());
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(cap)
+            .with(cap)
             .build()
             .expect("build succeeds");
         assert_eq!(chassis.len(), 1);
@@ -424,7 +424,7 @@ mod tests {
         let handles = cap.handles();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(cap)
+            .with(cap)
             .build()
             .expect("build succeeds");
 
@@ -462,7 +462,7 @@ mod tests {
         let handles = cap.handles();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(cap)
+            .with(cap)
             .build()
             .expect("build succeeds");
 
@@ -499,7 +499,7 @@ mod tests {
         let handles = cap.handles();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(cap)
+            .with(cap)
             .build()
             .expect("build succeeds");
 
@@ -533,7 +533,7 @@ mod tests {
         let handles = cap.handles();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(cap)
+            .with(cap)
             .build()
             .expect("build succeeds");
 

@@ -527,7 +527,7 @@ mod tests {
             ..NetConfig::default()
         };
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(NetCapability::new(config, Arc::clone(&mailer)))
+            .with(NetCapability::new(config, Arc::clone(&mailer)))
             .build()
             .expect("net capability boots");
         assert!(
@@ -548,7 +548,7 @@ mod tests {
         };
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(NetCapability::new(config, Arc::clone(&mailer)))
+            .with(NetCapability::new(config, Arc::clone(&mailer)))
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(
