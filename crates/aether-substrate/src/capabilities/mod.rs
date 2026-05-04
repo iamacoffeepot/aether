@@ -27,7 +27,7 @@ pub mod net;
 pub mod render;
 #[cfg(feature = "audio")]
 pub use audio::{AudioCapability, AudioConfig};
-pub use handle::HandleCapability;
+pub use handle::HandleStoreBackend;
 pub use io::IoCapability;
 pub use log::LogTracingBackend;
 pub use net::NetCapability;

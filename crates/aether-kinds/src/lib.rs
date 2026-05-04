@@ -14,10 +14,12 @@
 extern crate alloc;
 
 pub mod descriptors;
+pub mod handle;
 pub mod keycode;
 pub mod log;
 pub mod mailboxes;
 
+pub use handle::{ErasedHandleBackend, HandleBackend, HandleCapability};
 pub use log::{ErasedLogBackend, LogBackend, LogCapability};
 
 use bytemuck::{Pod, Zeroable};
