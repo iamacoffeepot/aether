@@ -71,6 +71,8 @@ pub struct MeshViewer {
 /// same path.
 #[handlers]
 impl Component for MeshViewer {
+    const NAMESPACE: &'static str = "mesh_viewer";
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         MeshViewer {
             triangles: Vec::new(),

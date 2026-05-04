@@ -56,6 +56,8 @@ pub struct Probe {
 
 #[handlers]
 impl Component for Probe {
+    const NAMESPACE: &'static str = "test_fixture_probe";
+
     fn init(_ctx: &mut InitCtx<'_>) -> Self {
         Probe {
             tick_count: 0,

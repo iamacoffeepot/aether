@@ -64,6 +64,8 @@ pub struct Hello {
 /// sender; the matching `aether.pong` lands back at your session.
 #[handlers]
 impl Component for Hello {
+    const NAMESPACE: &'static str = "hello";
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Hello {
             pong: ctx.resolve::<Pong>(),

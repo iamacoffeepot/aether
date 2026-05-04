@@ -58,6 +58,15 @@ pub const MANIFEST_SECTION: &str = "aether.kinds";
 /// anonymous field names.
 pub const LABELS_SECTION: &str = "aether.kinds.labels";
 
+/// Default-mailbox-name section. Issue 525 Phase 1B: each component
+/// declares `Component::NAMESPACE` and `export!()` pins the bytes
+/// here; substrate's `load_component` reads the section as the default
+/// recipient name when the load payload omits an explicit `name`. The
+/// payload is the raw UTF-8 bytes — no version prefix, no postcard
+/// wrapper, since it's a single fixed-shape string with no anticipated
+/// evolution.
+pub const NAMESPACE_SECTION: &str = "aether.namespace";
+
 /// Wire versions accepted in `aether.kinds`. The shape record's bytes
 /// are `Kind::ID` hash input, so the format is pinned indefinitely at
 /// 0x03's canonical-bytes layout — any change there would shift every
@@ -155,6 +164,28 @@ fn decode_kinds_records(data: &[u8], out: &mut Vec<(KindShape, bool)>) -> Result
         }
     }
     Ok(())
+}
+
+/// Read the component's [`NAMESPACE_SECTION`] payload (issue 525
+/// Phase 1B) as a UTF-8 string. Returns `None` when the section is
+/// absent (component built against a pre-Phase-1B SDK, or built with a
+/// hand-rolled `export!` shim) so callers fall back to a derived
+/// name. Returns an `Err` only on malformed UTF-8 — the substrate
+/// surfaces that as a load failure rather than silently using a
+/// different name.
+pub fn read_namespace_from_bytes(wasm: &[u8]) -> Result<Option<String>, String> {
+    for payload in Parser::new(0).parse_all(wasm) {
+        let payload = payload.map_err(|e| format!("wasmparser: {e}"))?;
+        let Payload::CustomSection(reader) = payload else {
+            continue;
+        };
+        if reader.name() == NAMESPACE_SECTION {
+            return std::str::from_utf8(reader.data())
+                .map(|s| Some(s.to_owned()))
+                .map_err(|e| format!("{NAMESPACE_SECTION}: invalid UTF-8: {e}"));
+        }
+    }
+    Ok(None)
 }
 
 /// Decode the component's `aether.kinds.inputs` section (ADR-0033)

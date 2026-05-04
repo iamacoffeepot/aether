@@ -33,6 +33,8 @@ pub struct InputLogger {
 
 #[handlers]
 impl Component for InputLogger {
+    const NAMESPACE: &'static str = "input_logger";
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         InputLogger {
             observe: ctx.resolve_mailbox::<InputObserved>("hub.claude.broadcast"),

@@ -57,6 +57,8 @@ pub struct TicTacToe {
 /// fresh game.
 #[handlers]
 impl Component for TicTacToe {
+    const NAMESPACE: &'static str = "tic_tac_toe";
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         TicTacToe {
             state: GameState::new_game(),

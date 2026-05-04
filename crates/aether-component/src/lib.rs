@@ -191,6 +191,17 @@ pub mod __macro_internals {
 /// `aether-substrate` and writes against
 /// `aether_actor::Ctx<'_, NativeTransport>` directly.
 pub trait Component: Sized + 'static {
+    /// Default mailbox name the substrate registers this component
+    /// under when `load_component` doesn't supply an explicit name
+    /// (issue 525 Phase 1B). The macro emits this string into the
+    /// cdylib's `aether.namespace` wasm custom section so the loader
+    /// reads it without instantiating the module.
+    ///
+    /// Multi-instance loads still work: pass an explicit `name` to
+    /// `load_component` and the override wins. The default applies
+    /// only when `name` is `None`.
+    const NAMESPACE: &'static str;
+
     /// Runs once. Resolve kinds and sinks via `ctx` and return the
     /// initial component state. A failed `resolve` panics — see
     /// ADR-0012 §2 ("loud at init"). ADR-0033: `#[handlers]` prepends
@@ -251,6 +262,12 @@ pub trait Component: Sized + 'static {
 ///   `link_section` attribute, which means the section can only land
 ///   in the cdylib root that calls `export!()` — never in transitive
 ///   rlib pulls of a `#[handlers]`-using crate (issue 442).
+/// - `#[link_section = "aether.namespace"]` static that pins the
+///   component's `Component::NAMESPACE` bytes (issue 525 Phase 1B).
+///   The substrate reads this at `load_component` and uses it as the
+///   default mailbox name when the load payload omits an explicit
+///   `name`. Same one-place-per-cdylib invariant as the inputs
+///   section — emit only here, never in transitive rlib pulls.
 ///
 /// Only one component per guest crate. A second `export!` call in
 /// the same crate is a duplicate-symbol compile error on the shared
@@ -281,6 +298,27 @@ macro_rules! export {
         #[unsafe(link_section = "aether.kinds.inputs")]
         static __AETHER_INPUTS_SECTION: [u8; <$component>::__AETHER_INPUTS_MANIFEST_LEN] =
             <$component>::__AETHER_INPUTS_MANIFEST;
+
+        // Issue 525 Phase 1B: pin the component's `Component::NAMESPACE`
+        // bytes into a sibling `aether.namespace` custom section. The
+        // substrate reads this at load time as the default mailbox
+        // name when the load payload omits an explicit `name`. Length
+        // is taken via `len()` so the const-array type is known at
+        // compile time without a per-component associated const.
+        #[cfg(target_arch = "wasm32")]
+        #[used]
+        #[unsafe(link_section = "aether.namespace")]
+        static __AETHER_NAMESPACE_SECTION: [u8; <$component as $crate::Component>::NAMESPACE
+            .len()] = {
+            let bytes = <$component as $crate::Component>::NAMESPACE.as_bytes();
+            let mut out = [0u8; <$component as $crate::Component>::NAMESPACE.len()];
+            let mut i = 0;
+            while i < bytes.len() {
+                out[i] = bytes[i];
+                i += 1;
+            }
+            out
+        };
 
         /// # Safety
         /// Called exactly once by the substrate before any `receive`.

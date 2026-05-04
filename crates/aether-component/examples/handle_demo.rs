@@ -52,6 +52,8 @@ pub struct HandleDemo {
 
 #[handlers]
 impl Component for HandleDemo {
+    const NAMESPACE: &'static str = "handle_demo";
+
     fn init(_ctx: &mut InitCtx<'_>) -> Self {
         HandleDemo { fired: false }
     }

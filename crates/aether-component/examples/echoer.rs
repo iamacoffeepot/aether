@@ -31,6 +31,8 @@ pub struct Echoer {
 
 #[handlers]
 impl Component for Echoer {
+    const NAMESPACE: &'static str = "echoer";
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Echoer {
             response: ctx.resolve::<Response>(),

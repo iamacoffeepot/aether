@@ -127,6 +127,8 @@ impl Default for TicTacToeClient {
 /// `capture_frame` to verify rendering.
 #[handlers]
 impl Component for TicTacToeClient {
+    const NAMESPACE: &'static str = "tic_tac_toe_client";
+
     fn init(_ctx: &mut InitCtx<'_>) -> Self {
         TicTacToeClient::default()
     }
