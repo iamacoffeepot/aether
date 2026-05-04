@@ -1,49 +1,37 @@
-//! ADR-0070 phase 3 (Option B per ADR-0071 phase 4) + ADR-0074
-//! §Decision 7: render is one native [`Capability`] with one mailbox
-//! and one dispatcher thread. The pre-Phase-3 `aether.sink.camera`
-//! mailbox folded into `aether.render`; the camera kind
-//! (`aether.camera`) keeps its name but its recipient is now the
-//! render mailbox.
+//! Issue 545 PR E2: render cap converted onto the unified `#[actor]`
+//! shape. Pre-PR-E2 render was the one cap still on the legacy
+//! `Capability + boot()` path with hand-rolled thread spawn — every
+//! other cap moved to `#[actor]` in PR E1. This PR closes the drift.
 //!
-//! The dispatcher pulls envelopes off a [`crate::FrameBoundClaim`]
-//! inbox and routes by kind id:
+//! `RenderCapability` is now a regular `#[actor]` block. Two
+//! `#[handler]` methods (`on_draw_triangle`, `on_camera`) replace the
+//! manual `dispatch_envelope` / `Capability::boot` machinery. The
+//! chassis builder spawns the dispatcher thread via
+//! `spawn_actor_dispatcher`, which detects `FRAME_BARRIER = true` and
+//! claims through the frame-bound path so the chassis frame loop's
+//! `drain_frame_bound_or_abort` can wait on the cap's `pending`
+//! counter as before (ADR-0074 §Decision 5).
 //!
-//! - `aether.draw_triangle` → append vertex bytes to `frame_vertices`,
-//!   bump `triangles_rendered` (with the same fixed-buffer truncation
-//!   semantics as before).
-//! - `aether.camera` → overwrite the cached `view_proj` (latest-value-
-//!   wins; init'd to [`crate::render::IDENTITY_VIEW_PROJ`]).
-//!
-//! Frame-bound (`Capability::FRAME_BARRIER = true`): the chassis frame
-//! loop calls [`crate::frame_loop::drain_frame_bound_or_abort`] each
-//! frame so render's inbox quiesces before the chassis driver records
-//! the GPU pass. The pending counter rides on `FrameBoundClaim` —
-//! incremented by the sink registration handler, decremented by the
-//! dispatcher after each `dispatch_envelope` call.
+//! Driver-side state (wgpu device, queue, pipeline, offscreen
+//! targets, accumulator buffers) lives on [`RenderHandles`], which
+//! the cap exposes via [`RenderCapability::handles`] **before** the
+//! cap moves into the chassis builder. The driver retains an
+//! `RenderHandles` clone (cheap — every field is Arc-shared) and
+//! calls encoder-level methods on it. Pre-PR-E2 the driver retrieved
+//! `Arc<RenderCapability>` via `DriverCtx::expect`; that path retires
+//! for render — facade caps don't go through the typed runnings map.
 //!
 //! Phase 4 keeps the GPU lifecycle, encoder creation, and presentation
 //! in the chassis driver — this capability owns only the mail surface
-//! and accumulator state. Encoder-level primitives + GPU bring-up are
-//! deferred to a future phase once a second consumer (test-bench
-//! `PassiveChassis` build with no winit) makes the right shape obvious.
-//!
-//! The capability builder exposes [`RenderCapability::handles`] so a
-//! chassis adding it via the legacy `boot.add_capability` path can
-//! pull the accumulator `Arc`s before the capability's `boot()` moves
-//! `self`. Once chassis composition migrates to the chassis_builder
-//! `Builder` (ADR-0071), drivers will read the same `Arc`s through
-//! `DriverCtx::expect::<RenderCapability>()` instead.
+//! and accumulator state.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::thread::{self, JoinHandle};
 
-use aether_actor::Actor;
-use aether_data::Kind;
+use aether_data::{Actor, Kind, Singleton};
 use aether_kinds::{Camera, DRAW_TRIANGLE_BYTES, DrawTriangle};
 
-use crate::capability::{BootError, Capability, ChassisCtx, Envelope, SinkSender};
 use crate::render::{
     CaptureMeta, IDENTITY_VIEW_PROJ, Pipeline, RenderError, Targets, build_main_pipeline,
     finish_capture, prepare_capture_copy, record_main_pass,
@@ -54,10 +42,16 @@ use crate::render::{
 /// truncating with a warn — desktop and test-bench both pass
 /// [`crate::render::VERTEX_BUFFER_BYTES`].
 ///
-/// `observed_kinds`, when set, has every inbound mail's kind name
-/// pushed to it from the unified render dispatcher — used by the
-/// in-process test-bench to assert what kinds the sink has seen.
-/// Production chassis leave it `None` (zero overhead).
+/// `observed_kinds`, when set, has every successfully-dispatched
+/// inbound mail's kind name pushed to it from the cap's `#[handler]`
+/// methods — used by the in-process test-bench to assert what kinds
+/// the cap has seen. Production chassis leave it `None` (zero
+/// overhead). Decode failures and unknown kinds don't push (the
+/// macro miss path warn-logs at the chassis-side dispatcher and
+/// short-circuits before any handler runs); pre-PR-E2 the legacy
+/// path pushed the raw `kind_name` regardless of dispatch outcome,
+/// but tests only use the list as a diagnostic in failure messages
+/// so the narrower semantic is fine.
 #[derive(Clone)]
 pub struct RenderConfig {
     pub vertex_buffer_bytes: usize,
@@ -73,42 +67,15 @@ impl Default for RenderConfig {
     }
 }
 
-/// Render sink capability. Constructed before [`Capability::boot`];
-/// the accumulator `Arc`s are pre-allocated so the chassis frame
-/// loop and the dispatcher thread share the same backing storage.
-///
-/// Post-issue-525-Phase-2 the cap is one struct: pre-boot config
-/// (`config`, `handles`) lives alongside the runtime fields populated
-/// in `boot` (`thread`, `sink_sender`, `gpu`). The encoder-level
-/// methods (`install_gpu`, `record_frame`, `record_capture_copy`,
-/// etc.) live as inherent methods directly on `RenderCapability` —
-/// drivers retrieve the cap via `DriverCtx::expect::<RenderCapability>()`
-/// and call those methods on the returned `Arc<RenderCapability>`.
+/// `aether.render` mailbox cap. Holds [`RenderHandles`] (the
+/// driver-facing accumulator state plus GPU bundle) and the
+/// per-instance config. Pre-extract the handles via [`Self::handles`]
+/// before moving the cap into the chassis builder; the dispatcher
+/// thread then owns the cap and routes `aether.draw_triangle` /
+/// `aether.camera` mail through the macro-emitted `Dispatch` impl.
 pub struct RenderCapability {
-    config: RenderConfig,
     handles: RenderHandles,
-    thread: Option<JoinHandle<()>>,
-    sink_sender: Option<SinkSender>,
-    /// wgpu state, installed post-boot by the driver via
-    /// [`Self::install_gpu`]. Boots empty because winit 0.30's
-    /// `ActiveEventLoop::create_window` only fires inside `resumed`,
-    /// after [`Capability::boot`] has returned. Test-bench (no
-    /// surface) installs immediately after `build_passive`; desktop
-    /// installs in its `resumed` handler. Encoder-level methods
-    /// panic if called before install — in practice every code path
-    /// that calls them runs after the install site.
-    gpu: OnceLock<RenderGpu>,
-}
-
-/// Bundle of accumulator state shared between the capability's
-/// dispatcher thread (write side) and the chassis frame loop (read
-/// side). All fields are `Arc`s so cloning is cheap and shutdown
-/// drops are independent.
-#[derive(Clone)]
-pub struct RenderHandles {
-    pub frame_vertices: Arc<Mutex<Vec<u8>>>,
-    pub triangles_rendered: Arc<AtomicU64>,
-    pub camera_state: Arc<Mutex<[f32; 16]>>,
+    config: RenderConfig,
 }
 
 impl RenderCapability {
@@ -119,70 +86,131 @@ impl RenderCapability {
             ))),
             triangles_rendered: Arc::new(AtomicU64::new(0)),
             camera_state: Arc::new(Mutex::new(IDENTITY_VIEW_PROJ)),
+            gpu: Arc::new(OnceLock::new()),
         };
-        Self {
-            config,
-            handles,
-            thread: None,
-            sink_sender: None,
-            gpu: OnceLock::new(),
-        }
+        Self { handles, config }
     }
 
-    /// Pre-boot accessor for the accumulator state. Cloned references
-    /// survive the move into [`Capability::boot`] so the chassis frame
-    /// loop reads the same buffers the dispatcher thread writes.
+    /// Cheap clone of the driver-facing handles bundle. Call this
+    /// **before** `chassis.with_facade(cap)` — once the cap moves into
+    /// the dispatcher thread, the only access to its accumulator
+    /// state is through the cloned handles.
     pub fn handles(&self) -> RenderHandles {
         self.handles.clone()
     }
 }
 
-/// Bundle of wgpu resources `RenderCapability` owns post-install.
-/// Constructed by the driver from a wgpu device + queue obtained via
-/// `Adapter::request_device` (desktop: with surface compatibility;
-/// test-bench: offscreen-only). Holds the pipeline + offscreen
-/// targets so encoder-level methods can record draws and capture
-/// copies without the driver threading these through every call.
-pub struct RenderGpu {
-    pub device: Arc<wgpu::Device>,
-    pub queue: Arc<wgpu::Queue>,
-    pub pipeline: Pipeline,
-    pub targets: Mutex<Targets>,
-    pub color_format: wgpu::TextureFormat,
+impl Actor for RenderCapability {
+    /// Components mail `aether.draw_triangle` and `aether.camera`
+    /// (kind ids) to this mailbox; the GPU recorder pulls from here.
+    /// The `aether.<name>` form is the post-ADR-0074 Phase 5
+    /// convention for chassis-owned mailboxes; ADR-0074 §Decision 7
+    /// folded the camera mailbox into render under this name.
+    const NAMESPACE: &'static str = "aether.render";
+
+    /// Render is the one chassis-owned actor that participates in the
+    /// per-frame drain barrier (ADR-0074 §Decision 7). Without this,
+    /// a `DrawTriangle` mail in flight when the chassis driver records
+    /// the frame would land in the *next* frame's `frame_vertices`,
+    /// dropping a triangle the component meant for this frame. The
+    /// chassis builder's `spawn_actor_dispatcher` checks this const
+    /// and claims through the frame-bound path so the cap's `pending`
+    /// counter registers in the chassis's `frame_bound_pending` Vec.
+    const FRAME_BARRIER: bool = true;
 }
 
-impl RenderGpu {
-    /// Build the standard render pipeline + offscreen targets at the
-    /// given size and pass [`Self`] to [`RenderCapability::install_gpu`].
-    /// `polygon_mode` is `Fill` for the normal case; desktop's
-    /// `AETHER_WIREFRAME=line` chassis env passes `Line` so the main
-    /// pipeline draws as wireframe instead of building a separate
-    /// overlay pipeline.
-    pub fn new(
-        device: Arc<wgpu::Device>,
-        queue: Arc<wgpu::Queue>,
-        color_format: wgpu::TextureFormat,
-        width: u32,
-        height: u32,
-        polygon_mode: wgpu::PolygonMode,
-    ) -> Self {
-        let pipeline = build_main_pipeline(&device, &queue, color_format, polygon_mode);
-        let targets = Targets::new(&device, color_format, width, height);
-        Self {
-            device,
-            queue,
-            pipeline,
-            targets: Mutex::new(targets),
-            color_format,
+impl Singleton for RenderCapability {}
+
+#[aether_data::actor]
+impl RenderCapability {
+    /// `DrawTriangle` handler. Slice-typed because `Mailbox::send_many`
+    /// (ADR-0019) packs `count` triangles into one envelope — the
+    /// macro decodes the whole payload as `&[DrawTriangle]` so a
+    /// batched mesh reaches the cap intact. Truncates at the cap
+    /// boundary so a single oversized mesh degrades gracefully
+    /// instead of collapsing the whole frame downstream; rounds to
+    /// whole triangles so the GPU vertex buffer never sees a half-
+    /// triangle.
+    ///
+    /// # Agent
+    /// Components mail one or more `DrawTriangle`s (cast-shape,
+    /// `DRAW_TRIANGLE_BYTES` per triangle, batched via `send_many`)
+    /// per tick. Fire-and-forget; the cap accumulates into
+    /// `frame_vertices` until the chassis driver records the frame.
+    #[aether_data::handler]
+    fn on_draw_triangle(&mut self, mails: &[DrawTriangle]) {
+        if let Some(obs) = &self.config.observed_kinds {
+            obs.lock()
+                .unwrap()
+                .push(<DrawTriangle as Kind>::NAME.into());
         }
+        let bytes: &[u8] = bytemuck::cast_slice(mails);
+        let cap_bytes = self.config.vertex_buffer_bytes;
+        let mut verts = self.handles.frame_vertices.lock().unwrap();
+        let available = cap_bytes.saturating_sub(verts.len());
+        let write_len = bytes.len().min(available);
+        let write_len = write_len - (write_len % DRAW_TRIANGLE_BYTES);
+        if write_len > 0 {
+            verts.extend_from_slice(&bytes[..write_len]);
+            self.handles
+                .triangles_rendered
+                .fetch_add((write_len / DRAW_TRIANGLE_BYTES) as u64, Ordering::Relaxed);
+        }
+        if write_len < bytes.len() {
+            tracing::warn!(
+                target: "aether_substrate::render",
+                accepted_bytes = write_len,
+                dropped_bytes = bytes.len() - write_len,
+                cap = cap_bytes,
+                "render cap dropped triangles beyond fixed vertex buffer",
+            );
+        }
+    }
+
+    /// `Camera` handler. Latest-value-wins semantics: each successful
+    /// mail overwrites; the prior value is replaced wholesale.
+    /// Initialised in [`RenderCapability::new`] to
+    /// [`IDENTITY_VIEW_PROJ`] so the first frame draws unchanged
+    /// until a camera component starts publishing.
+    ///
+    /// # Agent
+    /// Camera components mail `aether.camera { view_proj: [f32; 16] }`
+    /// to this mailbox. Fire-and-forget; latest value wins.
+    #[aether_data::handler]
+    fn on_camera(&mut self, mail: Camera) {
+        if let Some(obs) = &self.config.observed_kinds {
+            obs.lock().unwrap().push(<Camera as Kind>::NAME.into());
+        }
+        *self.handles.camera_state.lock().unwrap() = mail.view_proj;
     }
 }
 
-impl RenderCapability {
-    /// Install the wgpu resources the encoder-level methods read. The
-    /// driver constructs [`RenderGpu`] once it has a device + queue —
-    /// for desktop that's inside `resumed` after winit hands back a
-    /// window and surface; for test-bench it's right after
+/// Bundle of accumulator state plus GPU resources, shared between
+/// the cap's dispatcher thread (write side for accumulators) and the
+/// chassis driver (read side for accumulators, install + read for
+/// GPU). All fields are `Arc`s so cloning is cheap and shutdown
+/// drops are independent.
+#[derive(Clone)]
+pub struct RenderHandles {
+    pub frame_vertices: Arc<Mutex<Vec<u8>>>,
+    pub triangles_rendered: Arc<AtomicU64>,
+    pub camera_state: Arc<Mutex<[f32; 16]>>,
+    /// wgpu state, installed post-cap-construction by the driver via
+    /// [`Self::install_gpu`]. Boots empty because winit 0.30's
+    /// `ActiveEventLoop::create_window` only fires inside `resumed`,
+    /// after `Builder::build` has returned. Test-bench (no surface)
+    /// installs immediately after `build_passive`; desktop installs
+    /// in its `resumed` handler. Encoder-level methods panic if
+    /// called before install — in practice every code path that
+    /// calls them runs after the install site.
+    gpu: Arc<OnceLock<RenderGpu>>,
+}
+
+impl RenderHandles {
+    /// Install the wgpu resources the encoder-level methods read.
+    /// The driver constructs [`RenderGpu`] once it has a device +
+    /// queue — for desktop that's inside `resumed` after winit hands
+    /// back a window and surface; for test-bench it's right after
     /// `build_passive` returns. Calling twice panics: install is the
     /// chassis's promise that wgpu state is now ready and stable for
     /// the chassis lifetime.
@@ -190,7 +218,7 @@ impl RenderCapability {
         self.gpu
             .set(gpu)
             .ok()
-            .expect("RenderCapability::install_gpu called twice");
+            .expect("RenderHandles::install_gpu called twice");
     }
 
     /// Returns the installed [`RenderGpu`], or `None` if `install_gpu`
@@ -203,7 +231,7 @@ impl RenderCapability {
 
     fn expect_gpu(&self) -> &RenderGpu {
         self.gpu.get().expect(
-            "RenderCapability::install_gpu must be called before encoder-level methods. \
+            "RenderHandles::install_gpu must be called before encoder-level methods. \
              Desktop installs in winit's resumed; test-bench installs after build_passive.",
         )
     }
@@ -221,12 +249,12 @@ impl RenderCapability {
         extra_pipelines: &[&wgpu::RenderPipeline],
     ) -> Result<(), RenderError> {
         let gpu = self.expect_gpu();
-        let cap = self.handles.frame_vertices.lock().unwrap().capacity();
+        let cap = self.frame_vertices.lock().unwrap().capacity();
         let vertices = std::mem::replace(
-            &mut *self.handles.frame_vertices.lock().unwrap(),
+            &mut *self.frame_vertices.lock().unwrap(),
             Vec::with_capacity(cap),
         );
-        let view_proj = *self.handles.camera_state.lock().unwrap();
+        let view_proj = *self.camera_state.lock().unwrap();
         let targets = gpu.targets.lock().unwrap();
         record_main_pass(
             &gpu.queue,
@@ -312,155 +340,44 @@ impl RenderCapability {
     }
 }
 
-impl Actor for RenderCapability {
-    /// Components mail `aether.draw_triangle` and `aether.camera`
-    /// (kind ids) to this mailbox; the GPU recorder pulls from here.
-    /// The `aether.<name>` form is the post-ADR-0074 Phase 5
-    /// convention for chassis-owned mailboxes; ADR-0074 §Decision 7
-    /// folded the camera mailbox into render under this name.
-    const NAMESPACE: &'static str = "aether.render";
-
-    /// Render is the one chassis-owned actor that participates in the
-    /// per-frame drain barrier (ADR-0074 §Decision 7). Without this,
-    /// a `DrawTriangle` mail in flight when the chassis driver records
-    /// the frame would land in the *next* frame's `frame_vertices`,
-    /// dropping a triangle the component meant for this frame.
-    const FRAME_BARRIER: bool = true;
+/// Bundle of wgpu resources `RenderHandles` exposes post-install.
+/// Constructed by the driver from a wgpu device + queue obtained via
+/// `Adapter::request_device` (desktop: with surface compatibility;
+/// test-bench: offscreen-only). Holds the pipeline + offscreen
+/// targets so encoder-level methods can record draws and capture
+/// copies without the driver threading these through every call.
+pub struct RenderGpu {
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
+    pub pipeline: Pipeline,
+    pub targets: Mutex<Targets>,
+    pub color_format: wgpu::TextureFormat,
 }
 
-impl Capability for RenderCapability {
-    fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
-        let claim = ctx.claim_frame_bound_mailbox::<Self>()?;
-
-        let frame_vertices = Arc::clone(&self.handles.frame_vertices);
-        let triangles_rendered = Arc::clone(&self.handles.triangles_rendered);
-        let camera_state = Arc::clone(&self.handles.camera_state);
-        let cap_bytes = self.config.vertex_buffer_bytes;
-        let observed = self.config.observed_kinds.clone();
-        let pending = Arc::clone(&claim.pending);
-        let receiver = claim.receiver;
-
-        let thread = thread::Builder::new()
-            .name("aether-render-sink".into())
-            .spawn(move || {
-                // Channel-drop + join: the sender lives on
-                // `RenderCapability.sink_sender`; shutdown drops it,
-                // disconnecting the channel so `recv()` returns
-                // `Err(Disconnected)` and the loop exits.
-                while let Ok(env) = receiver.recv() {
-                    if let Some(obs) = &observed {
-                        obs.lock().unwrap().push(env.kind_name.clone());
-                    }
-                    dispatch_envelope(
-                        &frame_vertices,
-                        &triangles_rendered,
-                        &camera_state,
-                        cap_bytes,
-                        &env,
-                    );
-                    // Decrement matches the sink-handler's increment —
-                    // the chassis frame-bound drain barrier
-                    // (`drain_frame_bound_or_abort`) reads this counter
-                    // to know when the dispatcher is caught up.
-                    pending.fetch_sub(1, Ordering::AcqRel);
-                }
-            })
-            .map_err(|e| BootError::Other(Box::new(e)))?;
-
-        self.thread = Some(thread);
-        self.sink_sender = Some(claim.sink_sender);
-        Ok(self)
-    }
-}
-
-impl Drop for RenderCapability {
-    fn drop(&mut self) {
-        // Drop the strong sender to break the channel.
-        self.sink_sender.take();
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+impl RenderGpu {
+    /// Build the standard render pipeline + offscreen targets at the
+    /// given size and pass [`Self`] to [`RenderHandles::install_gpu`].
+    /// `polygon_mode` is `Fill` for the normal case; desktop's
+    /// `AETHER_WIREFRAME=line` chassis env passes `Line` so the main
+    /// pipeline draws as wireframe instead of building a separate
+    /// overlay pipeline.
+    pub fn new(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        color_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        polygon_mode: wgpu::PolygonMode,
+    ) -> Self {
+        let pipeline = build_main_pipeline(&device, &queue, color_format, polygon_mode);
+        let targets = Targets::new(&device, color_format, width, height);
+        Self {
+            device,
+            queue,
+            pipeline,
+            targets: Mutex::new(targets),
+            color_format,
         }
-        // gpu drops here; wgpu device/queue/pipeline/targets clean up
-        // via their own Drop impls.
-    }
-}
-
-/// Dispatch one envelope to the right per-kind handler. Routes by
-/// kind id — `aether.draw_triangle` builds the frame vertex buffer,
-/// `aether.camera` updates the cached `view_proj`. Unknown kinds
-/// warn-drop without affecting either accumulator.
-fn dispatch_envelope(
-    frame_vertices: &Mutex<Vec<u8>>,
-    triangles_rendered: &AtomicU64,
-    camera_state: &Mutex<[f32; 16]>,
-    cap_bytes: usize,
-    env: &Envelope,
-) {
-    if env.kind == <DrawTriangle as Kind>::ID {
-        dispatch_draw_triangle(frame_vertices, triangles_rendered, cap_bytes, env);
-    } else if env.kind == <Camera as Kind>::ID {
-        dispatch_camera(camera_state, env);
-    } else {
-        tracing::warn!(
-            target: "aether_substrate::render",
-            kind = %env.kind,
-            kind_name = %env.kind_name,
-            "render sink received unknown kind — dropping",
-        );
-    }
-}
-
-/// DrawTriangle handler. Truncates the inbound vertex bytes at the
-/// sink boundary so a single oversized mesh degrades gracefully
-/// instead of collapsing the whole frame downstream. Rounds to whole
-/// triangles so the GPU vertex buffer never sees a half-triangle.
-fn dispatch_draw_triangle(
-    frame_vertices: &Mutex<Vec<u8>>,
-    triangles_rendered: &AtomicU64,
-    cap_bytes: usize,
-    env: &Envelope,
-) {
-    let mut verts = frame_vertices.lock().unwrap();
-    let available = cap_bytes.saturating_sub(verts.len());
-    let write_len = env.payload.len().min(available);
-    let write_len = write_len - (write_len % DRAW_TRIANGLE_BYTES);
-    if write_len > 0 {
-        verts.extend_from_slice(&env.payload[..write_len]);
-        triangles_rendered.fetch_add((write_len / DRAW_TRIANGLE_BYTES) as u64, Ordering::Relaxed);
-    }
-    if write_len < env.payload.len() {
-        tracing::warn!(
-            target: "aether_substrate::render",
-            accepted_bytes = write_len,
-            dropped_bytes = env.payload.len() - write_len,
-            cap = cap_bytes,
-            "render sink dropped triangles beyond fixed vertex buffer",
-        );
-    }
-}
-
-/// Camera handler. Latest-value-wins semantics: each successful mail
-/// overwrites; on length mismatch or cast failure the prior value
-/// stays. Initialised in [`RenderCapability::new`] to
-/// [`IDENTITY_VIEW_PROJ`] so the first frame draws unchanged until a
-/// camera component starts publishing.
-fn dispatch_camera(camera_state: &Mutex<[f32; 16]>, env: &Envelope) {
-    if env.payload.len() != 64 {
-        tracing::warn!(
-            target: "aether_substrate::camera",
-            got = env.payload.len(),
-            expected = 64,
-            "camera mail: payload length mismatch, dropping",
-        );
-        return;
-    }
-    match bytemuck::try_pod_read_unaligned::<[f32; 16]>(&env.payload) {
-        Ok(mat) => *camera_state.lock().unwrap() = mat,
-        Err(e) => tracing::warn!(
-            target: "aether_substrate::camera",
-            error = %e,
-            "camera mail: cast failed, dropping",
-        ),
     }
 }
 
@@ -491,7 +408,7 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         let cap = RenderCapability::new(RenderConfig::default());
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(cap)
+            .with_facade(cap)
             .build()
             .expect("build succeeds");
         assert_eq!(chassis.len(), 1);
@@ -507,7 +424,7 @@ mod tests {
         let handles = cap.handles();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(cap)
+            .with_facade(cap)
             .build()
             .expect("build succeeds");
 
@@ -545,11 +462,13 @@ mod tests {
         let handles = cap.handles();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(cap)
+            .with_facade(cap)
             .build()
             .expect("build succeeds");
 
-        // Send 5 triangles; only 2 fit.
+        // Send 5 triangles' worth of bytes in one batched mail; only
+        // 2 fit. The slice-typed handler reads the whole batch and
+        // truncates at the cap boundary.
         let payload = vec![0u8; DRAW_TRIANGLE_BYTES * 5];
         deliver(
             &registry,
@@ -580,7 +499,7 @@ mod tests {
         let handles = cap.handles();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(cap)
+            .with_facade(cap)
             .build()
             .expect("build succeeds");
 
@@ -614,11 +533,12 @@ mod tests {
         let handles = cap.handles();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(cap)
+            .with_facade(cap)
             .build()
             .expect("build succeeds");
 
-        // 16 bytes — wrong length, should be 64.
+        // 16 bytes — wrong length, decode fails, macro miss path
+        // logs warn at chassis-side dispatcher; identity unchanged.
         deliver(
             &registry,
             RenderCapability::NAMESPACE,
@@ -627,7 +547,6 @@ mod tests {
         );
 
         std::thread::sleep(Duration::from_millis(50));
-        // Identity unchanged.
         assert_eq!(*handles.camera_state.lock().unwrap(), IDENTITY_VIEW_PROJ);
 
         chassis.shutdown();

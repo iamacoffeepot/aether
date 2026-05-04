@@ -685,12 +685,30 @@ impl<'a> ChassisCtx<'a> {
     where
         C: Actor + Dispatch + Send + 'static,
     {
-        let claim = self.claim_mailbox_drop_on_shutdown_with_override(C::NAMESPACE)?;
-        let DropOnShutdownClaim {
-            id: _,
-            receiver,
-            sink_sender,
-        } = claim;
+        // FRAME_BARRIER caps (today: render) need the pending counter
+        // the chassis frame loop drains against — claim through the
+        // frame-bound path so the `pending` counter registers in the
+        // chassis's `frame_bound_pending` Vec. Free-running caps go
+        // through the regular drop-on-shutdown claim. The dispatch
+        // loop is identical apart from the post-dispatch decrement.
+        let (receiver, sink_sender, pending) = if C::FRAME_BARRIER {
+            let claim = self.claim_frame_bound_mailbox_with_override(C::NAMESPACE)?;
+            let FrameBoundClaim {
+                id: _,
+                receiver,
+                sink_sender,
+                pending,
+            } = claim;
+            (receiver, sink_sender, Some(pending))
+        } else {
+            let claim = self.claim_mailbox_drop_on_shutdown_with_override(C::NAMESPACE)?;
+            let DropOnShutdownClaim {
+                id: _,
+                receiver,
+                sink_sender,
+            } = claim;
+            (receiver, sink_sender, None)
+        };
 
         let mut owned = cap;
         let thread = thread::Builder::new()
@@ -713,6 +731,13 @@ impl<'a> ChassisCtx<'a> {
                             kind = env.kind_name.as_str(),
                             "facade cap dispatch missed: kind not handled or decode failed"
                         );
+                    }
+                    // Decrement matches the sink-handler's increment —
+                    // the chassis frame-bound drain barrier
+                    // (`drain_frame_bound_or_abort`) reads this counter
+                    // to know when the dispatcher is caught up.
+                    if let Some(p) = &pending {
+                        p.fetch_sub(1, Ordering::AcqRel);
                     }
                 }
                 // `owned` drops here on thread exit, running the cap's

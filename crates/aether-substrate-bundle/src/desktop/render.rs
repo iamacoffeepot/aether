@@ -2,7 +2,7 @@
 // into core's `RenderCapability` (via `RenderGpu` + `install_gpu`); this
 // file now owns only the desktop-specific surface + swapchain config
 // + optional wireframe overlay pipeline. Each frame creates an
-// encoder, asks `render_running.record_frame(...)` to record the
+// encoder, asks `render_handles.record_frame(...)` to record the
 // shared offscreen pass, optionally records a capture copy, copies
 // offscreen → swapchain, submits, and presents.
 //
@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use aether_substrate::capabilities::{RenderCapability, RenderGpu};
+use aether_substrate::capabilities::{RenderGpu, RenderHandles};
 use aether_substrate::render::{self, RenderError, vertex_buffer_layout};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -63,7 +63,7 @@ pub struct Gpu {
     /// is `1` / `overlay`. `record_frame` draws this after the main
     /// pipeline as an extra inside the same render pass.
     wire_pipeline: Option<wgpu::RenderPipeline>,
-    render_running: Arc<RenderCapability>,
+    render_handles: RenderHandles,
 }
 
 /// Wireframe rendering mode, set at boot via `AETHER_WIREFRAME`.
@@ -93,7 +93,7 @@ impl WireframeMode {
 }
 
 impl Gpu {
-    pub fn new(window: Arc<Window>, render_running: Arc<RenderCapability>) -> Self {
+    pub fn new(window: Arc<Window>, render_handles: RenderHandles) -> Self {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance
@@ -176,7 +176,7 @@ impl Gpu {
         } else {
             wgpu::PolygonMode::Fill
         };
-        render_running.install_gpu(RenderGpu::new(
+        render_handles.install_gpu(RenderGpu::new(
             Arc::clone(&device),
             Arc::clone(&queue),
             format,
@@ -191,7 +191,7 @@ impl Gpu {
         // install so it can borrow the bind group + pipeline layouts
         // from the installed RenderGpu's pipeline.
         let wire_pipeline = if wireframe_mode == WireframeMode::Overlay {
-            let installed = render_running.gpu().expect("install_gpu just succeeded");
+            let installed = render_handles.gpu().expect("install_gpu just succeeded");
             let pipeline_layout = &installed.pipeline.pipeline_layout;
             let wire_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("wireframe shader"),
@@ -253,7 +253,7 @@ impl Gpu {
             adapter_info,
             limits,
             wire_pipeline,
-            render_running,
+            render_handles,
         }
     }
 
@@ -264,8 +264,8 @@ impl Gpu {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface
-            .configure(&self.render_running.device(), &self.config);
-        self.render_running
+            .configure(&self.render_handles.device(), &self.config);
+        self.render_handles
             .resize(self.config.width, self.config.height);
     }
 
@@ -291,8 +291,8 @@ impl Gpu {
     /// couldn't allocate. Surface unavailability does *not* prevent
     /// capture — offscreen is the source of truth.
     fn render_impl(&mut self, capture: bool) -> Option<Result<Vec<u8>, String>> {
-        let device = self.render_running.device();
-        let queue = self.render_running.queue();
+        let device = self.render_handles.device();
+        let queue = self.render_handles.queue();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame encoder"),
         });
@@ -307,7 +307,7 @@ impl Gpu {
             None => &[],
         };
         match self
-            .render_running
+            .render_handles
             .record_frame(&mut encoder, extra_pipelines)
         {
             Ok(()) => {}
@@ -318,7 +318,7 @@ impl Gpu {
         // which is unaffected by whether a swapchain image is available
         // this frame. That decouples capture from window visibility.
         let capture_meta = if capture {
-            Some(self.render_running.record_capture_copy(&mut encoder))
+            Some(self.render_handles.record_capture_copy(&mut encoder))
         } else {
             None
         };
@@ -329,8 +329,8 @@ impl Gpu {
         // still resolve.
         let surface_tex = self.acquire_surface_texture();
         if let Some(tex) = surface_tex.as_ref() {
-            let (w, h) = self.render_running.color_size();
-            self.render_running.with_color_texture(|src| {
+            let (w, h) = self.render_handles.color_size();
+            self.render_handles.with_color_texture(|src| {
                 encoder.copy_texture_to_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: src,
@@ -358,7 +358,7 @@ impl Gpu {
             tex.present();
         }
 
-        capture_meta.map(|meta| self.render_running.finish_capture(&meta))
+        capture_meta.map(|meta| self.render_handles.finish_capture(&meta))
     }
 
     /// Try to get the current swapchain texture. Reconfigures the
@@ -370,12 +370,12 @@ impl Gpu {
             wgpu::CurrentSurfaceTexture::Success(t) => Some(t),
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
                 self.surface
-                    .configure(&self.render_running.device(), &self.config);
+                    .configure(&self.render_handles.device(), &self.config);
                 Some(t)
             }
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface
-                    .configure(&self.render_running.device(), &self.config);
+                    .configure(&self.render_handles.device(), &self.config);
                 None
             }
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => None,
