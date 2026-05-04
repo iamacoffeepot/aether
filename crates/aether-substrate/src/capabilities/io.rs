@@ -39,10 +39,6 @@ use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 
-/// Recipient name the io capability claims. ADR-0058 places
-/// chassis-owned sinks under `aether.sink.*`.
-pub const IO_MAILBOX_NAME: &str = "aether.io";
-
 /// Result shape used throughout the adapter layer. The variants of
 /// `IoError` map directly onto ADR-0041 §1's reply enums, so the
 /// chassis dispatcher can forward an adapter failure without
@@ -600,8 +596,14 @@ pub struct IoRunning {
 impl Capability for IoCapability {
     type Running = IoRunning;
 
+    /// Components mail `aether.io.{read,write,delete,list}` (kind ids)
+    /// to this mailbox; the SDK helpers in `aether-component::io`
+    /// resolve through here. The `aether.<name>` form is the
+    /// post-ADR-0074 Phase 5 convention for chassis-owned mailboxes.
+    const NAMESPACE: &'static str = "aether.io";
+
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let claim = ctx.claim_mailbox_drop_on_shutdown(IO_MAILBOX_NAME)?;
+        let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();
         let mailbox_id = claim.id;
         let (registry, roots) = build_registry(self.roots).map_err(|e| {
@@ -942,7 +944,7 @@ mod tests {
             .build()
             .expect("io capability boots");
         assert!(
-            registry.lookup(IO_MAILBOX_NAME).is_some(),
+            registry.lookup(IoCapability::NAMESPACE).is_some(),
             "sink mailbox registered"
         );
         chassis.shutdown();
@@ -981,7 +983,7 @@ mod tests {
     fn duplicate_claim_rejects_with_typed_error() {
         let root = scratch_root("collide");
         let (registry, mailer) = fresh_substrate();
-        registry.register_sink(IO_MAILBOX_NAME, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(IoCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with(IoCapability::new(roots_under(&root)))
@@ -989,7 +991,7 @@ mod tests {
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
-            BootError::MailboxAlreadyClaimed { ref name } if name == IO_MAILBOX_NAME
+            BootError::MailboxAlreadyClaimed { ref name } if name == IoCapability::NAMESPACE
         ));
         cleanup(&root);
     }

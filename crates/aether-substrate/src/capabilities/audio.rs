@@ -49,10 +49,6 @@ use crate::native_transport::NativeTransport;
 use aether_data::{Kind, KindId, MailboxId};
 use aether_kinds::{NoteOff, NoteOn, SetMasterGain, SetMasterGainResult};
 
-/// Recipient name the audio capability claims. ADR-0058 places
-/// chassis-owned sinks under `aether.sink.*`.
-pub const AUDIO_MAILBOX_NAME: &str = "aether.audio";
-
 /// Capacity of the event queue between the sink dispatcher and the
 /// audio-callback consumer. 1024 slots hold ~10 seconds of a dense
 /// 100-note-per-second stream; overflow is warn-dropped, which the
@@ -820,8 +816,14 @@ pub struct AudioRunning {
 impl Capability for AudioCapability {
     type Running = AudioRunning;
 
+    /// Components mail `aether.audio.{note_on,note_off,set_master_gain}`
+    /// (kind ids) to this mailbox; the synth pulls from here. The
+    /// `aether.<name>` form is the post-ADR-0074 Phase 5 convention
+    /// for chassis-owned mailboxes.
+    const NAMESPACE: &'static str = "aether.audio";
+
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let claim = ctx.claim_mailbox_drop_on_shutdown(AUDIO_MAILBOX_NAME)?;
+        let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();
         let mailbox_id = claim.id;
         let config = self.config;
@@ -1062,7 +1064,7 @@ mod tests {
             .build()
             .expect("audio capability boots");
         assert!(
-            registry.lookup(AUDIO_MAILBOX_NAME).is_some(),
+            registry.lookup(AudioCapability::NAMESPACE).is_some(),
             "sink mailbox registered"
         );
         chassis.shutdown();
@@ -1073,7 +1075,7 @@ mod tests {
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
         let (registry, mailer) = fresh_substrate();
-        registry.register_sink(AUDIO_MAILBOX_NAME, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(AudioCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with(AudioCapability::new(AudioConfig {
@@ -1084,7 +1086,7 @@ mod tests {
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
-            BootError::MailboxAlreadyClaimed { ref name } if name == AUDIO_MAILBOX_NAME
+            BootError::MailboxAlreadyClaimed { ref name } if name == AudioCapability::NAMESPACE
         ));
     }
 }

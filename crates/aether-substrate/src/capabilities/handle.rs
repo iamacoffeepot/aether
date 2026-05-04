@@ -30,13 +30,6 @@ use crate::handle_store::HandleStore;
 use crate::mailer::Mailer;
 use crate::native_transport::NativeTransport;
 
-/// Recipient name the handle capability claims. Components mail
-/// `aether.handle.{publish,release,pin,unpin}` (kind ids) to this
-/// mailbox; the SDK's `Ctx::publish` / `Handle<K>::Drop` pair both
-/// resolve through here. ADR-0058 places chassis-owned sinks under
-/// `aether.sink.*`.
-pub const HANDLE_MAILBOX_NAME: &str = "aether.handle";
-
 /// Native capability owning the ADR-0045 typed-handle sink. Boots a
 /// single dispatcher thread that pulls envelopes from the
 /// `aether.handle` mailbox and routes them through
@@ -80,8 +73,15 @@ pub struct HandleRunning {
 impl Capability for HandleCapability {
     type Running = HandleRunning;
 
+    /// Components mail `aether.handle.{publish,release,pin,unpin}`
+    /// (kind ids) to this mailbox; the SDK's `Ctx::publish` /
+    /// `Handle<K>::Drop` pair both resolve through here. The
+    /// `aether.<name>` form is the post-ADR-0074 Phase 5 convention
+    /// for chassis-owned mailboxes.
+    const NAMESPACE: &'static str = "aether.handle";
+
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let claim = ctx.claim_mailbox_drop_on_shutdown(HANDLE_MAILBOX_NAME)?;
+        let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();
         let mailbox_id = claim.id;
         let store = self.store;
@@ -199,7 +199,7 @@ mod tests {
 
         // Resolve the sink the capability registered.
         let id = registry
-            .lookup(HANDLE_MAILBOX_NAME)
+            .lookup(HandleCapability::NAMESPACE)
             .expect("sink registered");
         let MailboxEntry::Sink(handler) = registry.entry(id).expect("entry") else {
             panic!("expected sink entry");
@@ -278,11 +278,11 @@ mod tests {
     /// Builder rejects a duplicate claim if the well-known sink name
     /// was already registered. Guards against the side-by-side window
     /// where a phase-2 PR didn't clean up its legacy
-    /// `register_sink(HANDLE_MAILBOX_NAME, ...)` call.
+    /// `register_sink(HandleCapability::NAMESPACE, ...)` call.
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
         let (store, mailer, registry, _rx) = fresh_substrate();
-        registry.register_sink(HANDLE_MAILBOX_NAME, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(HandleCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with(HandleCapability::new(Arc::clone(&store)))
@@ -290,7 +290,7 @@ mod tests {
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
-            BootError::MailboxAlreadyClaimed { ref name } if name == HANDLE_MAILBOX_NAME
+            BootError::MailboxAlreadyClaimed { ref name } if name == HandleCapability::NAMESPACE
         ));
     }
 }

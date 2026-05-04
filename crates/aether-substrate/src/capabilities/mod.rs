@@ -26,12 +26,10 @@ pub mod net;
 #[cfg(feature = "render")]
 pub mod render;
 #[cfg(feature = "audio")]
-pub use audio::{AUDIO_MAILBOX_NAME, AudioCapability, AudioConfig, AudioRunning};
-pub use handle::{HANDLE_MAILBOX_NAME, HandleCapability, HandleRunning};
-pub use io::{IO_MAILBOX_NAME, IoCapability, IoRunning};
-pub use log::{LOG_MAILBOX_NAME, LogCapability, LogRunning};
-pub use net::{NET_MAILBOX_NAME, NetCapability, NetRunning};
+pub use audio::{AudioCapability, AudioConfig, AudioRunning};
+pub use handle::{HandleCapability, HandleRunning};
+pub use io::{IoCapability, IoRunning};
+pub use log::{LogCapability, LogRunning};
+pub use net::{NetCapability, NetRunning};
 #[cfg(feature = "render")]
-pub use render::{
-    RENDER_MAILBOX_NAME, RenderCapability, RenderConfig, RenderGpu, RenderHandles, RenderRunning,
-};
+pub use render::{RenderCapability, RenderConfig, RenderGpu, RenderHandles, RenderRunning};
