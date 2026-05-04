@@ -236,6 +236,18 @@ impl From<wasmtime::Error> for BootError {
 pub trait Capability: Send + 'static {
     type Running: RunningCapability;
 
+    /// The recipient name this capability claims at boot — the same
+    /// string components address with `Mailbox<K>::send` on the wire.
+    /// Issue 525 Phase 1: declared on the trait so the cap's own type
+    /// is the single source of truth, retiring the per-cap free
+    /// `pub const X_MAILBOX_NAME` consts that mirrored this field.
+    /// Each in-tree cap declares its `aether.<name>` namespace per the
+    /// post-ADR-0074 Phase 5 convention; test fixtures with
+    /// parameterized names declare a placeholder and bypass via
+    /// [`ChassisCtx::claim_mailbox_with_override`] +
+    /// friends.
+    const NAMESPACE: &'static str;
+
     /// ADR-0074 §Decision 5 scheduling class. `true` means this
     /// capability participates in the per-frame drain barrier — the
     /// chassis frame loop waits for the dispatcher's inbox to quiesce
@@ -320,8 +332,22 @@ impl<'a> ChassisCtx<'a> {
         }
     }
 
+    /// Register an mpsc-fed sink under `C::NAMESPACE` and return both
+    /// its derived [`MailboxId`] (ADR-0029 hash) and the receiver.
+    /// The capability's own type is the single source of truth for
+    /// the recipient name (issue 525 Phase 1).
+    ///
+    /// Tests that need a parameterized name (one fixture, many
+    /// claims) reach for [`Self::claim_mailbox_with_override`].
+    pub fn claim_mailbox<C: Capability>(&mut self) -> Result<MailboxClaim, BootError> {
+        self.claim_mailbox_with_override(C::NAMESPACE)
+    }
+
     /// Register an mpsc-fed sink under `name` and return both its
     /// derived [`MailboxId`] (ADR-0029 hash) and the receiver.
+    /// Escape hatch for tests with parameterized names; production
+    /// caps go through [`Self::claim_mailbox`] so the cap's own
+    /// `NAMESPACE` is authoritative.
     ///
     /// The closure registered with the registry forwards every
     /// delivery into the sender side of the mpsc pair, so the
@@ -330,7 +356,7 @@ impl<'a> ChassisCtx<'a> {
     /// capability drops it; the matching sender lives in the sink
     /// closure stored on the registry until the registry itself is
     /// dropped.
-    pub fn claim_mailbox(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
+    pub fn claim_mailbox_with_override(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
         let (tx, rx) = mpsc::channel::<Envelope>();
         let tx = Arc::new(tx);
         let id = self.registry.try_register_sink(
@@ -364,10 +390,21 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Variant of [`Self::claim_mailbox`] that returns a strong
-    /// [`SinkSender`] alongside the receiver. The registry holds
-    /// only a [`std::sync::Weak`] reference to the sender, so when
-    /// the capability drops the `SinkSender` (during shutdown), the
-    /// channel disconnects and the dispatcher's `recv()` returns
+    /// [`SinkSender`] alongside the receiver. Claims under
+    /// `C::NAMESPACE`. See
+    /// [`Self::claim_mailbox_drop_on_shutdown_with_override`] for the
+    /// arbitrary-name escape hatch.
+    pub fn claim_mailbox_drop_on_shutdown<C: Capability>(
+        &mut self,
+    ) -> Result<DropOnShutdownClaim, BootError> {
+        self.claim_mailbox_drop_on_shutdown_with_override(C::NAMESPACE)
+    }
+
+    /// Variant of [`Self::claim_mailbox_with_override`] that returns
+    /// a strong [`SinkSender`] alongside the receiver. The registry
+    /// holds only a [`std::sync::Weak`] reference to the sender, so
+    /// when the capability drops the `SinkSender` (during shutdown),
+    /// the channel disconnects and the dispatcher's `recv()` returns
     /// `Err(Disconnected)`.
     ///
     /// Use this when the capability wants the channel-drop + join
@@ -375,7 +412,7 @@ impl<'a> ChassisCtx<'a> {
     /// `Arc<AtomicBool>` polling flag. Phase 2a wires
     /// `LogCapability` onto this; the other native capabilities
     /// migrate one PR at a time per the issue 509 plan.
-    pub fn claim_mailbox_drop_on_shutdown(
+    pub fn claim_mailbox_drop_on_shutdown_with_override(
         &mut self,
         name: &str,
     ) -> Result<DropOnShutdownClaim, BootError> {
@@ -430,7 +467,17 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Variant of [`Self::claim_mailbox_drop_on_shutdown`] for
-    /// frame-bound capabilities (ADR-0074 §Decision 5). In addition
+    /// frame-bound capabilities. Claims under `C::NAMESPACE`. See
+    /// [`Self::claim_frame_bound_mailbox_with_override`] for the
+    /// arbitrary-name escape hatch.
+    pub fn claim_frame_bound_mailbox<C: Capability>(
+        &mut self,
+    ) -> Result<FrameBoundClaim, BootError> {
+        self.claim_frame_bound_mailbox_with_override(C::NAMESPACE)
+    }
+
+    /// Variant of [`Self::claim_mailbox_drop_on_shutdown_with_override`]
+    /// for frame-bound capabilities (ADR-0074 §Decision 5). In addition
     /// to the channel-drop shutdown machinery, the registered sink
     /// handler increments a `pending` counter on every accepted send;
     /// the capability's dispatcher must decrement after each
@@ -443,7 +490,10 @@ impl<'a> ChassisCtx<'a> {
     /// on the [`Capability`] impl. See
     /// [`crate::capabilities::render::RenderCapability`] for the
     /// reference shape.
-    pub fn claim_frame_bound_mailbox(&mut self, name: &str) -> Result<FrameBoundClaim, BootError> {
+    pub fn claim_frame_bound_mailbox_with_override(
+        &mut self,
+        name: &str,
+    ) -> Result<FrameBoundClaim, BootError> {
         let (tx, rx) = mpsc::channel::<Envelope>();
         let tx = Arc::new(tx);
         let weak = Arc::downgrade(&tx);
@@ -863,8 +913,12 @@ mod tests {
 
     impl Capability for EchoCapability {
         type Running = EchoRunning;
+        // Placeholder: parameterized fixtures bypass the type-level
+        // namespace via `claim_mailbox_with_override` below, so no
+        // production code observes this string.
+        const NAMESPACE: &'static str = "test.echo.placeholder";
         fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-            let claim = ctx.claim_mailbox(self.name)?;
+            let claim = ctx.claim_mailbox_with_override(self.name)?;
             Ok(EchoRunning {
                 receiver: claim.receiver,
                 log: self.log,
@@ -991,6 +1045,7 @@ mod tests {
         struct FallbackRunning;
         impl Capability for FallbackCap {
             type Running = FallbackRunning;
+            const NAMESPACE: &'static str = "test.fallback.placeholder";
             fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
                 let handler: FallbackRouter = Arc::new(|_env: &Envelope| true);
                 ctx.claim_fallback_router(handler)?;
@@ -1027,6 +1082,7 @@ mod tests {
         struct ProbeRunning;
         impl Capability for ProbeCap {
             type Running = ProbeRunning;
+            const NAMESPACE: &'static str = "test.probe.placeholder";
             fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
                 *self.captured.lock().unwrap() = Some(ctx.mail_send_handle());
                 Ok(ProbeRunning)

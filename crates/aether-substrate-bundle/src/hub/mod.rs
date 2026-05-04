@@ -530,6 +530,12 @@ pub struct HubClientRunning {
 impl Capability for HubClientCapability {
     type Running = HubClientRunning;
 
+    /// The hub-client cap dials a TCP socket; it does not claim a
+    /// chassis mailbox. The `NAMESPACE` const is required by the
+    /// trait (issue 525 Phase 1) but never address-resolved, so the
+    /// value here is purely diagnostic.
+    const NAMESPACE: &'static str = "chassis.hub_client";
+
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
         let url = match self.url.as_deref() {
             Some(u) if !u.is_empty() => u.to_owned(),

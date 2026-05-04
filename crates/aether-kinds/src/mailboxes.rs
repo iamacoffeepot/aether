@@ -1,10 +1,12 @@
 //! Typed `MailboxId` constants for the well-known mailbox names in the
-//! substrate vocabulary. The names themselves are scattered across the
-//! codebase as `&'static str` constants (`AETHER_CONTROL`,
-//! `HANDLE_MAILBOX_NAME`, `AETHER_DIAGNOSTICS`, etc.) — those keep their
-//! string form for log-message interpolation. This module is the typed
-//! companion: anywhere a `MailboxId` is being compared or constructed
-//! against a well-known mailbox, prefer one of these constants over
+//! substrate vocabulary. Substrate-side capabilities each declare
+//! their `&'static str` recipient name as `<X>Capability::NAMESPACE`
+//! (issue 525 Phase 1); the SDK side mirrors them as free
+//! `pub const X_MAILBOX_NAME` strings (`aether-component::io`,
+//! `aether-component::net`, `aether-actor::handle`) for use in
+//! `Mailbox::resolve(...)` calls. This module is the typed companion:
+//! anywhere a `MailboxId` is being compared or constructed against a
+//! well-known mailbox, prefer one of these constants over
 //! `mailbox_id_from_name("...")` so the resolution happens at compile
 //! time and the call site is one symbol instead of a name + hash
 //! invocation.

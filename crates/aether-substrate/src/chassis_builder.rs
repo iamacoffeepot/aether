@@ -199,8 +199,12 @@ impl<'a> DriverCtx<'a> {
         Self { inner, runnings }
     }
 
+    /// Drivers don't impl `Capability`, so they have no `NAMESPACE`
+    /// const to delegate against — claim by explicit name. The
+    /// passive-side equivalent is [`ChassisCtx::claim_mailbox`] (typed)
+    /// or [`ChassisCtx::claim_mailbox_with_override`] (escape hatch).
     pub fn claim_mailbox(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
-        self.inner.claim_mailbox(name)
+        self.inner.claim_mailbox_with_override(name)
     }
 
     pub fn mail_send_handle(&self) -> Arc<Mailer> {
@@ -641,8 +645,11 @@ mod tests {
 
     impl Capability for EchoCap {
         type Running = EchoRunning;
+        // Placeholder: parameterized fixtures bypass the type-level
+        // namespace via `claim_mailbox_with_override` below.
+        const NAMESPACE: &'static str = "test.echo.placeholder";
         fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-            let claim = ctx.claim_mailbox(self.name)?;
+            let claim = ctx.claim_mailbox_with_override(self.name)?;
             Ok(EchoRunning {
                 receiver: Mutex::new(Some(claim.receiver)),
                 log: Mutex::new(Vec::new()),
@@ -771,6 +778,7 @@ mod tests {
         }
         impl Capability for ProbeCap {
             type Running = ProbeRunning;
+            const NAMESPACE: &'static str = "test.probe.placeholder";
             fn boot(self, _ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
                 Ok(ProbeRunning { flag: self.flag })
             }
