@@ -26,10 +26,10 @@ pub mod net;
 #[cfg(feature = "render")]
 pub mod render;
 #[cfg(feature = "audio")]
-pub use audio::{AudioCapability, AudioConfig, AudioRunning};
-pub use handle::{HandleCapability, HandleRunning};
-pub use io::{IoCapability, IoRunning};
-pub use log::{LogCapability, LogRunning};
-pub use net::{NetCapability, NetRunning};
+pub use audio::{AudioCapability, AudioConfig};
+pub use handle::HandleCapability;
+pub use io::IoCapability;
+pub use log::LogCapability;
+pub use net::NetCapability;
 #[cfg(feature = "render")]
-pub use render::{RenderCapability, RenderConfig, RenderGpu, RenderHandles, RenderRunning};
+pub use render::{RenderCapability, RenderConfig, RenderGpu, RenderHandles};

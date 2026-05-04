@@ -111,7 +111,7 @@ pub struct TestBench {
     gpu: Gpu,
     /// `triangles_rendered` is read on the FrameStats emit path; the
     /// other accumulator handles (`frame_vertices` / `camera_state`)
-    /// retired post-C2 because `RenderRunning::record_frame` drains
+    /// retired post-C2 because `RenderCapability::record_frame` drains
     /// them internally.
     triangles_rendered: Arc<AtomicU64>,
 

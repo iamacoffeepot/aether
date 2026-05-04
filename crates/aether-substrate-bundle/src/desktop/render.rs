@@ -1,5 +1,5 @@
 // Desktop wgpu plumbing. ADR-0071 phase C2: pipeline + targets moved
-// into core's `RenderRunning` (via `RenderGpu` + `install_gpu`); this
+// into core's `RenderCapability` (via `RenderGpu` + `install_gpu`); this
 // file now owns only the desktop-specific surface + swapchain config
 // + optional wireframe overlay pipeline. Each frame creates an
 // encoder, asks `render_running.record_frame(...)` to record the
@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use aether_substrate::capabilities::{RenderGpu, RenderRunning};
+use aether_substrate::capabilities::{RenderCapability, RenderGpu};
 use aether_substrate::render::{self, RenderError, vertex_buffer_layout};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -63,7 +63,7 @@ pub struct Gpu {
     /// is `1` / `overlay`. `record_frame` draws this after the main
     /// pipeline as an extra inside the same render pass.
     wire_pipeline: Option<wgpu::RenderPipeline>,
-    render_running: Arc<RenderRunning>,
+    render_running: Arc<RenderCapability>,
 }
 
 /// Wireframe rendering mode, set at boot via `AETHER_WIREFRAME`.
@@ -93,7 +93,7 @@ impl WireframeMode {
 }
 
 impl Gpu {
-    pub fn new(window: Arc<Window>, render_running: Arc<RenderRunning>) -> Self {
+    pub fn new(window: Arc<Window>, render_running: Arc<RenderCapability>) -> Self {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let surface = instance

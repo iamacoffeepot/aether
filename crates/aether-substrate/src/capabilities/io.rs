@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability, SinkSender};
+use crate::capability::{BootError, Capability, ChassisCtx, SinkSender};
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
 use crate::native_transport::NativeTransport;
@@ -572,41 +572,44 @@ fn dispatch_io_mail(
 /// Native capability owning the ADR-0041 file-I/O sink. Constructor
 /// takes the resolved [`NamespaceRoots`] explicitly — the chassis
 /// main reads env (per issue 464) and passes the roots through.
+///
+/// Post-issue-525-Phase-2 the cap is one struct: pre-boot config
+/// (`roots`) lives alongside the runtime fields populated in
+/// `boot`. `Drop` runs the prior `shutdown` body.
 pub struct IoCapability {
-    roots: NamespaceRoots,
+    roots: Option<NamespaceRoots>,
+    thread: Option<JoinHandle<()>>,
+    sink_sender: Option<SinkSender>,
+    _transport: Option<Arc<NativeTransport>>,
 }
 
 impl IoCapability {
     pub fn new(roots: NamespaceRoots) -> Self {
-        Self { roots }
+        Self {
+            roots: Some(roots),
+            thread: None,
+            sink_sender: None,
+            _transport: None,
+        }
     }
 }
 
-/// Running handle returned by [`IoCapability::boot`]. Holds the
-/// dispatcher's `JoinHandle`, the [`SinkSender`] strong handle that
-/// drives channel-drop shutdown, and the actor's
-/// [`NativeTransport`] (kept alive for the dispatcher thread's
-/// lifetime via the `Arc` clone the spawn closure holds).
-pub struct IoRunning {
-    thread: Option<JoinHandle<()>>,
-    sink_sender: Option<SinkSender>,
-    _transport: Arc<NativeTransport>,
-}
-
 impl Capability for IoCapability {
-    type Running = IoRunning;
-
     /// Components mail `aether.io.{read,write,delete,list}` (kind ids)
     /// to this mailbox; the SDK helpers in `aether-component::io`
     /// resolve through here. The `aether.<name>` form is the
     /// post-ADR-0074 Phase 5 convention for chassis-owned mailboxes.
     const NAMESPACE: &'static str = "aether.io";
 
-    fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+    fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
         let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();
         let mailbox_id = claim.id;
-        let (registry, roots) = build_registry(self.roots).map_err(|e| {
+        let roots = self
+            .roots
+            .take()
+            .expect("IoCapability::boot called twice — `roots` already consumed");
+        let (registry, roots) = build_registry(roots).map_err(|e| {
             BootError::Other(Box::new(std::io::Error::new(
                 e.kind(),
                 format!("io adapter init failed: {e}"),
@@ -631,33 +634,24 @@ impl Capability for IoCapability {
         let thread = thread::Builder::new()
             .name("aether-io-sink".into())
             .spawn(move || {
-                // Channel-drop + join: pull until the sender side
-                // disconnects. Worst-case shutdown latency is the
-                // OS scheduler's wakeup, not a 100ms poll interval.
                 while let Some(env) = dispatcher_transport.recv_blocking() {
                     dispatch_io_mail(&registry, &mailer, env.kind, env.sender, &env.payload);
                 }
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
-        Ok(IoRunning {
-            thread: Some(thread),
-            sink_sender: Some(claim.sink_sender),
-            _transport: transport,
-        })
+        self.thread = Some(thread);
+        self.sink_sender = Some(claim.sink_sender);
+        self._transport = Some(transport);
+        Ok(self)
     }
 }
 
-impl RunningCapability for IoRunning {
-    fn shutdown(self: Box<Self>) {
-        let IoRunning {
-            mut thread,
-            mut sink_sender,
-            _transport,
-        } = *self;
+impl Drop for IoCapability {
+    fn drop(&mut self) {
         // Drop the strong sender first to break the channel.
-        sink_sender.take();
-        if let Some(t) = thread.take() {
+        self.sink_sender.take();
+        if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
     }

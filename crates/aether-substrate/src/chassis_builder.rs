@@ -1,13 +1,14 @@
 //! ADR-0071 Phase 2A: driver-capability traits + chassis builder
 //! type-state.
 //!
-//! Sibling to ADR-0070's [`Capability`] / [`RunningCapability`]
-//! family. A chassis composes passive capabilities (dispatcher-thread
-//! sinks per ADR-0070) plus exactly one [`DriverCapability`] that
-//! owns the chassis main thread. The type-state [`Builder`] enforces
-//! "exactly one driver" structurally; embedders that drive manually
-//! (TestBench, future embedded harnesses) build a [`PassiveChassis`]
-//! via the no-driver path.
+//! Sibling to ADR-0070's [`Capability`] family (post-issue-525-Phase-2:
+//! one struct per cap, `Drop` replaces `RunningCapability::shutdown`).
+//! A chassis composes passive capabilities (dispatcher-thread sinks
+//! per ADR-0070) plus exactly one [`DriverCapability`] that owns the
+//! chassis main thread. The type-state [`Builder`] enforces "exactly
+//! one driver" structurally; embedders that drive manually (TestBench,
+//! future embedded harnesses) build a [`PassiveChassis`] via the
+//! no-driver path.
 //!
 //! # Phase 2A scope
 //!
@@ -28,9 +29,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
-use crate::capability::{
-    BootError, Capability, ChassisCtx, FallbackRouter, MailboxClaim, RunningCapability,
-};
+use crate::capability::{BootError, Capability, ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::Chassis;
 use crate::lifecycle::{FatalAborter, PanicAborter};
 use crate::mail::MailboxId;
@@ -114,36 +113,38 @@ impl DriverRunning for NeverDriverRunning {
     }
 }
 
-/// Type-erased shutdown adapter for a passive [`Capability::Running`]
-/// stored in the builder's shutdown queue. Single-threaded path, so
-/// no `Send` bound — the adapter never crosses threads (the chassis
+/// Type-erased shutdown adapter for a passive [`Capability`] stored
+/// in the builder's shutdown queue. Single-threaded path, so no
+/// `Send` bound — the adapter never crosses threads (the chassis
 /// runs on the main thread end-to-end).
 trait DynShutdown {
     fn shutdown_dyn(self: Box<Self>);
 }
 
-/// Concrete adapter: holds the running as an [`Arc`] (so the same
+/// Concrete adapter: holds the booted cap as an [`Arc`] (so the same
 /// value can also live in the typed-running map for driver lookup)
 /// and on shutdown attempts to take exclusive ownership via
-/// [`Arc::try_unwrap`]. If outstanding clones remain — a driver
-/// retained one without dropping it before shutdown — the explicit
-/// `shutdown(Box<Self>)` call is skipped and the value tears down
-/// via Drop when refcounts hit zero.
-struct ArcShutdown<R: RunningCapability + Sync> {
-    arc: Arc<R>,
+/// [`Arc::try_unwrap`]. Post-issue-525-Phase-2 the cap's `Drop` impl
+/// replaces the prior `RunningCapability::shutdown`; whether teardown
+/// runs explicitly here or implicitly when the last `Arc` clone goes
+/// away, the same `Drop` body executes.
+struct ArcShutdown<C: Capability + Sync> {
+    arc: Arc<C>,
     name: &'static str,
 }
 
-impl<R: RunningCapability + Sync> DynShutdown for ArcShutdown<R> {
+impl<C: Capability + Sync> DynShutdown for ArcShutdown<C> {
     fn shutdown_dyn(self: Box<Self>) {
         let ArcShutdown { arc, name } = *self;
         match Arc::try_unwrap(arc) {
-            Ok(running) => Box::new(running).shutdown(),
+            // Cap drops at end of arm, running its `Drop` impl
+            // (channel-drop + thread join) eagerly.
+            Ok(_cap) => {}
             Err(_arc) => {
                 tracing::warn!(
                     target: "aether_substrate::chassis_builder",
                     capability = name,
-                    "skipped explicit shutdown — outstanding Arc clones; relying on Drop"
+                    "skipped eager shutdown — outstanding Arc clones; relying on Drop"
                 );
             }
         }
@@ -270,16 +271,15 @@ type DriverBoot = Box<dyn FnOnce(&mut DriverCtx<'_>) -> Result<Box<dyn DriverRun
 
 fn make_passive_boot<P>(cap: P) -> PassiveBoot
 where
-    P: Capability,
-    P::Running: Sync,
+    P: Capability + Sync,
 {
     Box::new(move |ctx, runnings| {
-        let running = cap.boot(ctx)?;
-        let arc = Arc::new(running);
+        let booted = cap.boot(ctx)?;
+        let arc = Arc::new(booted);
         runnings.insert(Arc::clone(&arc));
         Ok(Box::new(ArcShutdown {
             arc,
-            name: std::any::type_name::<P::Running>(),
+            name: std::any::type_name::<P>(),
         }) as Box<dyn DynShutdown>)
     })
 }
@@ -342,8 +342,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// before the driver.
     pub fn with<P>(mut self, cap: P) -> Self
     where
-        P: Capability,
-        P::Running: Sync,
+        P: Capability + Sync,
     {
         self.passives.push(make_passive_boot::<P>(cap));
         self
@@ -384,8 +383,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
     /// Booted before the driver in declaration order.
     pub fn with<P>(mut self, cap: P) -> Self
     where
-        P: Capability,
-        P::Running: Sync,
+        P: Capability + Sync,
     {
         self.passives.push(make_passive_boot::<P>(cap));
         self
@@ -568,14 +566,16 @@ impl<C: Chassis> fmt::Debug for PassiveChassis<C> {
 }
 
 impl<C: Chassis> PassiveChassis<C> {
-    /// Look up a booted passive's running by type. Panics if no
-    /// passive of type `R` was registered.
-    pub fn capability<R: RunningCapability + Sync + 'static>(&self) -> Arc<R> {
+    /// Look up a booted passive by type. Panics if no passive of type
+    /// `P` was registered. Post-issue-525-Phase-2 the type parameter
+    /// is the merged cap struct itself (the prior `Running` half no
+    /// longer exists as a distinct type).
+    pub fn capability<P: Capability + Sync>(&self) -> Arc<P> {
         self.booted.runnings.expect()
     }
 
     /// Soft variant of [`Self::capability`].
-    pub fn try_capability<R: RunningCapability + Sync + 'static>(&self) -> Option<Arc<R>> {
+    pub fn try_capability<P: Capability + Sync>(&self) -> Option<Arc<P>> {
         self.booted.runnings.try_get()
     }
 
@@ -633,33 +633,40 @@ mod tests {
 
     /// Test passive: claims one mailbox, records every envelope
     /// received, exposes recorded envelopes via the typed lookup.
+    /// Post-issue-525-Phase-2 the cap is one struct: pre-boot config
+    /// (`name`) lives alongside the runtime fields populated in
+    /// `boot`. `Drop` runs the prior `shutdown` body.
     struct EchoCap {
         name: &'static str,
-    }
-
-    struct EchoRunning {
         receiver: Mutex<Option<std::sync::mpsc::Receiver<Envelope>>>,
         log: Mutex<Vec<Envelope>>,
         shutdown_flag: std::sync::atomic::AtomicBool,
     }
 
-    impl Capability for EchoCap {
-        type Running = EchoRunning;
-        // Placeholder: parameterized fixtures bypass the type-level
-        // namespace via `claim_mailbox_with_override` below.
-        const NAMESPACE: &'static str = "test.echo.placeholder";
-        fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-            let claim = ctx.claim_mailbox_with_override(self.name)?;
-            Ok(EchoRunning {
-                receiver: Mutex::new(Some(claim.receiver)),
+    impl EchoCap {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                receiver: Mutex::new(None),
                 log: Mutex::new(Vec::new()),
                 shutdown_flag: std::sync::atomic::AtomicBool::new(false),
-            })
+            }
         }
     }
 
-    impl RunningCapability for EchoRunning {
-        fn shutdown(self: Box<Self>) {
+    impl Capability for EchoCap {
+        // Placeholder: parameterized fixtures bypass the type-level
+        // namespace via `claim_mailbox_with_override` below.
+        const NAMESPACE: &'static str = "test.echo.placeholder";
+        fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
+            let claim = ctx.claim_mailbox_with_override(self.name)?;
+            *self.receiver.lock().unwrap() = Some(claim.receiver);
+            Ok(self)
+        }
+    }
+
+    impl Drop for EchoCap {
+        fn drop(&mut self) {
             if let Some(rx) = self.receiver.lock().unwrap().take() {
                 while let Ok(env) = rx.try_recv() {
                     self.log.lock().unwrap().push(env);
@@ -701,12 +708,12 @@ mod tests {
     fn passive_build_exposes_capabilities_via_typed_lookup() {
         let (registry, mailer) = fresh_substrate();
         let passive = Builder::<TestChassis>::new(registry, mailer)
-            .with(EchoCap { name: "test.echo" })
+            .with(EchoCap::new("test.echo"))
             .build_passive()
             .expect("build_passive succeeds");
 
         assert_eq!(passive.len(), 1);
-        let echo: Arc<EchoRunning> = passive.capability();
+        let echo: Arc<EchoCap> = passive.capability();
         assert!(!echo.shutdown_flag.load(std::sync::atomic::Ordering::SeqCst));
     }
 
@@ -716,7 +723,7 @@ mod tests {
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let chassis = Builder::<DrivenTestChassis<EchoDriver>>::new(registry, mailer)
-            .with(EchoCap { name: "test.echo" })
+            .with(EchoCap::new("test.echo"))
             .driver(EchoDriver {
                 ran: Arc::clone(&ran),
             })
@@ -733,10 +740,8 @@ mod tests {
         registry.register_sink("test.collide", Arc::new(|_, _, _, _, _, _| {}));
 
         let err = Builder::<TestChassis>::new(registry, mailer)
-            .with(EchoCap { name: "test.fresh" })
-            .with(EchoCap {
-                name: "test.collide",
-            })
+            .with(EchoCap::new("test.fresh"))
+            .with(EchoCap::new("test.collide"))
             .build_passive()
             .expect_err("second passive must fail");
 
@@ -747,11 +752,11 @@ mod tests {
     fn passive_chassis_drop_runs_shutdowns() {
         let (registry, mailer) = fresh_substrate();
         let passive = Builder::<TestChassis>::new(registry, mailer)
-            .with(EchoCap { name: "test.echo" })
+            .with(EchoCap::new("test.echo"))
             .build_passive()
             .expect("build_passive succeeds");
 
-        let echo: Arc<EchoRunning> = passive.capability();
+        let echo: Arc<EchoCap> = passive.capability();
         // Drop the passive chassis. The internal Arc has refcount 2
         // (chassis + our `echo` clone). The chassis-side shutdown
         // call hits Arc::try_unwrap, sees an outstanding clone, and
@@ -773,18 +778,14 @@ mod tests {
         struct ProbeCap {
             flag: Arc<std::sync::atomic::AtomicBool>,
         }
-        struct ProbeRunning {
-            flag: Arc<std::sync::atomic::AtomicBool>,
-        }
         impl Capability for ProbeCap {
-            type Running = ProbeRunning;
             const NAMESPACE: &'static str = "test.probe.placeholder";
-            fn boot(self, _ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-                Ok(ProbeRunning { flag: self.flag })
+            fn boot(self, _ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
+                Ok(self)
             }
         }
-        impl RunningCapability for ProbeRunning {
-            fn shutdown(self: Box<Self>) {
+        impl Drop for ProbeCap {
+            fn drop(&mut self) {
                 self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
             }
         }
@@ -809,16 +810,16 @@ mod tests {
     #[test]
     fn driver_ctx_expect_returns_passive_running() {
         let (registry, mailer) = fresh_substrate();
-        let captured: Arc<Mutex<Option<Arc<EchoRunning>>>> = Arc::new(Mutex::new(None));
+        let captured: Arc<Mutex<Option<Arc<EchoCap>>>> = Arc::new(Mutex::new(None));
 
         struct CaptureDriver {
-            captured: Arc<Mutex<Option<Arc<EchoRunning>>>>,
+            captured: Arc<Mutex<Option<Arc<EchoCap>>>>,
         }
         struct CaptureDriverRunning;
         impl DriverCapability for CaptureDriver {
             type Running = CaptureDriverRunning;
             fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-                let echo: Arc<EchoRunning> = ctx.expect();
+                let echo: Arc<EchoCap> = ctx.expect();
                 *self.captured.lock().unwrap() = Some(echo);
                 Ok(CaptureDriverRunning)
             }
@@ -830,7 +831,7 @@ mod tests {
         }
 
         let chassis = Builder::<DrivenTestChassis<CaptureDriver>>::new(registry, mailer)
-            .with(EchoCap { name: "test.echo" })
+            .with(EchoCap::new("test.echo"))
             .driver(CaptureDriver {
                 captured: Arc::clone(&captured),
             })

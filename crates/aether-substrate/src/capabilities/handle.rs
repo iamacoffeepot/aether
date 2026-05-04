@@ -24,7 +24,7 @@
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability, SinkSender};
+use crate::capability::{BootError, Capability, ChassisCtx, SinkSender};
 use crate::handle_sink;
 use crate::handle_store::HandleStore;
 use crate::mailer::Mailer;
@@ -34,8 +34,15 @@ use crate::native_transport::NativeTransport;
 /// single dispatcher thread that pulls envelopes from the
 /// `aether.handle` mailbox and routes them through
 /// [`handle_sink::dispatch`].
+///
+/// Post-issue-525-Phase-2 the cap is one struct: pre-boot config
+/// (`store`) lives alongside the runtime fields populated in
+/// `boot`. `Drop` runs the prior `shutdown` body.
 pub struct HandleCapability {
     store: Arc<HandleStore>,
+    thread: Option<JoinHandle<()>>,
+    sink_sender: Option<SinkSender>,
+    _transport: Option<Arc<NativeTransport>>,
 }
 
 impl HandleCapability {
@@ -44,35 +51,16 @@ impl HandleCapability {
     /// `Ref<Handle>` resolution and capability-handled
     /// publish/release/pin/unpin observe the same entries.
     pub fn new(store: Arc<HandleStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            thread: None,
+            sink_sender: None,
+            _transport: None,
+        }
     }
 }
 
-/// Running handle returned by [`HandleCapability::boot`]. Holds the
-/// dispatcher's `JoinHandle`, the [`SinkSender`] strong handle that
-/// drives channel-drop shutdown, and the actor's
-/// [`NativeTransport`] (kept alive for the dispatcher thread's
-/// lifetime via the `Arc` clone the spawn closure holds).
-pub struct HandleRunning {
-    thread: Option<JoinHandle<()>>,
-    /// Drop-on-shutdown breaks the channel. Held by name so the
-    /// `RunningCapability::shutdown` impl can drop it explicitly
-    /// before joining the thread; the registry's handler can no
-    /// longer upgrade its [`std::sync::Weak`] back-reference, the
-    /// inbox's last sender is gone, and the dispatcher's
-    /// `recv_blocking()` returns `None` on its next iteration.
-    sink_sender: Option<SinkSender>,
-    /// The actor's transport. The dispatcher thread holds an
-    /// `Arc::clone`, so this field exists to keep the same transport
-    /// reachable from chassis-side code that wants to inspect or
-    /// coordinate with this actor (none today; the extension point is
-    /// here without thread-local plumbing).
-    _transport: Arc<NativeTransport>,
-}
-
 impl Capability for HandleCapability {
-    type Running = HandleRunning;
-
     /// Components mail `aether.handle.{publish,release,pin,unpin}`
     /// (kind ids) to this mailbox; the SDK's `Ctx::publish` /
     /// `Handle<K>::Drop` pair both resolve through here. The
@@ -80,17 +68,12 @@ impl Capability for HandleCapability {
     /// for chassis-owned mailboxes.
     const NAMESPACE: &'static str = "aether.handle";
 
-    fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+    fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
         let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();
         let mailbox_id = claim.id;
-        let store = self.store;
+        let store = Arc::clone(&self.store);
 
-        // ADR-0074 §Decision: `&self` trait, owned transport. The
-        // capability constructs its `NativeTransport` once at boot
-        // and clones the `Arc` into the dispatcher thread; the
-        // dispatcher uses `transport.recv_blocking()` to pull from
-        // its own inbox without thread-local plumbing.
         let transport = Arc::new(NativeTransport::from_ctx(
             ctx,
             mailbox_id,
@@ -102,33 +85,24 @@ impl Capability for HandleCapability {
         let thread = thread::Builder::new()
             .name("aether-handle-sink".into())
             .spawn(move || {
-                // Channel-drop + join: pull until the sender side
-                // disconnects. Worst-case shutdown latency is the
-                // OS scheduler's wakeup, not a 100ms poll interval.
                 while let Some(env) = dispatcher_transport.recv_blocking() {
                     handle_sink::dispatch(&store, &mailer, env.kind, env.sender, &env.payload);
                 }
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
-        Ok(HandleRunning {
-            thread: Some(thread),
-            sink_sender: Some(claim.sink_sender),
-            _transport: transport,
-        })
+        self.thread = Some(thread);
+        self.sink_sender = Some(claim.sink_sender);
+        self._transport = Some(transport);
+        Ok(self)
     }
 }
 
-impl RunningCapability for HandleRunning {
-    fn shutdown(self: Box<Self>) {
-        let HandleRunning {
-            mut thread,
-            mut sink_sender,
-            _transport,
-        } = *self;
+impl Drop for HandleCapability {
+    fn drop(&mut self) {
         // Drop the strong sender first to break the channel.
-        sink_sender.take();
-        if let Some(t) = thread.take() {
+        self.sink_sender.take();
+        if let Some(t) = self.thread.take() {
             // Join discards the thread's result; a panic on the
             // dispatcher already routed through the panic hook (issue
             // 321), so there's nothing further to surface here.

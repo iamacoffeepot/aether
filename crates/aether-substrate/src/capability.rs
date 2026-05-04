@@ -226,16 +226,20 @@ impl From<wasmtime::Error> for BootError {
 
 /// A native capability: chassis-policy code that owns one or more
 /// mailboxes plus the state behind them. Each capability is
-/// `boot()`-ed once during chassis startup and `shutdown()`-ed once
-/// during teardown.
+/// `boot()`-ed once during chassis startup; teardown happens through
+/// the cap's own [`Drop`] impl when the chassis-owned `Box<Self>`
+/// drops (issue 525 Phase 2 collapsed the prior `Self` / `Self::Running`
+/// pair into one struct, retiring `RunningCapability::shutdown` in
+/// favour of `Drop`).
 ///
-/// Implementors define `Self::Running` to describe the post-boot
-/// handle (typically a struct holding spawned thread joins, the
-/// retained mail-send handle, and any state shared with the
-/// dispatcher).
-pub trait Capability: Send + 'static {
-    type Running: RunningCapability;
-
+/// Implementors author one struct per cap. The struct typically holds
+/// `Option<JoinHandle<()>>`, an `Option<SinkSender>` (drives channel-
+/// drop shutdown), and the cap's `Arc<NativeTransport>` — `boot()`
+/// fills these from `None` to `Some` and returns the same `self`. The
+/// `Drop` impl drops the sender first to break the channel and then
+/// joins the thread, mirroring the prior `RunningCapability::shutdown`
+/// body.
+pub trait Capability: Send + Sized + 'static {
     /// The recipient name this capability claims at boot — the same
     /// string components address with `Mailbox<K>::send` on the wire.
     /// Issue 525 Phase 1: declared on the trait so the cap's own type
@@ -263,16 +267,22 @@ pub trait Capability: Send + 'static {
     /// used by Phase 4's cross-class `wait_reply` guard.
     const FRAME_BARRIER: bool = false;
 
-    fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError>;
+    /// Wire the capability into the chassis. The pre-boot `self`
+    /// carries any constructor config (read by [`Self::new`]-style
+    /// builders); `boot` claims mailboxes through `ctx`, spawns the
+    /// dispatcher thread, and returns the same `self` with its
+    /// runtime-state fields populated. On error the chassis aborts
+    /// already-booted caps via their [`Drop`] impls.
+    fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError>;
 }
 
-/// The post-boot handle returned by [`Capability::boot`]. The chassis
-/// owns it for the rest of the run; on shutdown the chassis calls
-/// `shutdown(self: Box<Self>)`, which is responsible for joining any
-/// dispatcher threads the capability spawned.
-pub trait RunningCapability: Send {
-    fn shutdown(self: Box<Self>);
-}
+/// Marker trait for type-erased capability storage in [`BootedChassis`]
+/// and the [`crate::chassis_builder`] passive list. Implemented blanket
+/// for every [`Capability`]; carries no methods of its own — teardown
+/// runs through the cap's [`Drop`] impl when the `Box<dyn ActorErased>`
+/// drops (issue 525 Phase 2).
+pub trait ActorErased: Send {}
+impl<C: Capability> ActorErased for C {}
 
 /// Kernel-side handle bundle exposed to a capability during its
 /// `boot()` call. Shared (`&mut`) across every `boot()` in the
@@ -631,9 +641,11 @@ impl<'a> ChassisCtx<'a> {
 /// Type-erased boot trampoline so [`ChassisBuilder`] can collect
 /// heterogeneous capability types into one `Vec`. Each entry, when
 /// invoked, takes the ctx, calls the underlying `Capability::boot`,
-/// and boxes the resulting `Running` handle.
+/// and boxes the resulting cap as [`ActorErased`] so the chassis can
+/// store every cap in one homogeneous `Vec`. Teardown runs through
+/// the cap's own [`Drop`] when the box drops (issue 525 Phase 2).
 type BootFn =
-    Box<dyn FnOnce(&mut ChassisCtx<'_>) -> Result<Box<dyn RunningCapability>, BootError> + Send>;
+    Box<dyn FnOnce(&mut ChassisCtx<'_>) -> Result<Box<dyn ActorErased>, BootError> + Send>;
 
 /// Declarative chassis composition. Capabilities are added in
 /// declaration order (ADR-0070 resolved decision 3); `build()` boots
@@ -686,15 +698,16 @@ impl ChassisBuilder {
         C: Capability,
     {
         self.pending.push(Box::new(move |ctx| {
-            let running = cap.boot(ctx)?;
-            Ok(Box::new(running) as Box<dyn RunningCapability>)
+            let booted = cap.boot(ctx)?;
+            Ok(Box::new(booted) as Box<dyn ActorErased>)
         }));
         self
     }
 
     /// Boot every capability. On the first error, already-booted
-    /// capabilities are shut down in reverse order before the error
-    /// propagates — no partial-boot state is ever returned.
+    /// capabilities are torn down in reverse order via their `Drop`
+    /// impls before the error propagates — no partial-boot state is
+    /// ever returned.
     pub fn build(self) -> Result<BootedChassis, BootError> {
         let ChassisBuilder {
             registry,
@@ -706,7 +719,7 @@ impl ChassisBuilder {
         let mut frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)> = Vec::new();
         let frame_bound_set: Arc<RwLock<HashSet<MailboxId>>> =
             Arc::new(RwLock::new(HashSet::new()));
-        let mut booted: Vec<Box<dyn RunningCapability>> = Vec::with_capacity(pending.len());
+        let mut booted: Vec<Box<dyn ActorErased>> = Vec::with_capacity(pending.len());
         for boot in pending {
             let mut ctx = ChassisCtx::new(
                 &registry,
@@ -717,10 +730,15 @@ impl ChassisBuilder {
                 &aborter,
             );
             match boot(&mut ctx) {
-                Ok(running) => booted.push(running),
+                Ok(actor) => booted.push(actor),
                 Err(e) => {
-                    while let Some(c) = booted.pop() {
-                        c.shutdown();
+                    // Drop in reverse boot order: pop runs each cap's
+                    // `Drop` (channel-drop + thread join) one at a
+                    // time, so a panic in one teardown doesn't strand
+                    // the others. Equivalent to letting the Vec drop,
+                    // but explicit so the order is documented.
+                    while let Some(actor) = booted.pop() {
+                        drop(actor);
                     }
                     return Err(e);
                 }
@@ -737,12 +755,13 @@ impl ChassisBuilder {
 }
 
 /// The output of [`ChassisBuilder::build`]. Holds every booted
-/// capability's `Running` handle plus the (optionally claimed)
-/// fallback router. On `shutdown` the capabilities are torn down in
-/// reverse boot order so later-booted state can rely on
-/// earlier-booted state during its own shutdown.
+/// capability (each merged Self-with-runtime-state per issue 525
+/// Phase 2) plus the (optionally claimed) fallback router. On
+/// `shutdown` the boxes are dropped in reverse boot order, running
+/// each cap's [`Drop`] impl so later-booted state can rely on
+/// earlier-booted state during its own teardown.
 pub struct BootedChassis {
-    running: Vec<Box<dyn RunningCapability>>,
+    running: Vec<Box<dyn ActorErased>>,
     /// Held for the lifetime of the chassis; Phase 4 will read this
     /// from `Mailer` dispatch. Today it's just owned-and-not-called.
     _fallback: Option<FallbackRouter>,
@@ -815,8 +834,8 @@ impl BootedChassis {
             &self.frame_bound_set,
             &self.aborter,
         );
-        let running = cap.boot(&mut ctx)?;
-        self.running.push(Box::new(running));
+        let booted = cap.boot(&mut ctx)?;
+        self.running.push(Box::new(booted));
         Ok(())
     }
 
@@ -865,16 +884,18 @@ impl BootedChassis {
         }
     }
 
-    /// Tear down every capability in reverse boot order. Idempotent
-    /// with [`Drop`] — calling `shutdown` first leaves [`Drop`] with
-    /// nothing to do.
+    /// Tear down every capability in reverse boot order by popping
+    /// each box and dropping it — the cap's `Drop` impl runs the
+    /// channel-drop + thread-join sequence the prior
+    /// `RunningCapability::shutdown` did. Idempotent with the
+    /// implicit `Drop` on `BootedChassis`.
     pub fn shutdown(mut self) {
         self.shutdown_in_place();
     }
 
     fn shutdown_in_place(&mut self) {
-        while let Some(c) = self.running.pop() {
-            c.shutdown();
+        while let Some(actor) = self.running.pop() {
+            drop(actor);
         }
     }
 }
@@ -883,9 +904,7 @@ impl Drop for BootedChassis {
     fn drop(&mut self) {
         // Forgotten-shutdown safety net: the chassis owner can drop
         // a `BootedChassis` without calling `shutdown` and still
-        // get its capability dispatcher threads joined. Phase 2's
-        // `HandleCapability` polls a flag every 100ms, so worst-case
-        // drop latency is one poll interval per capability.
+        // get every cap's `Drop` impl run in reverse boot order.
         self.shutdown_in_place();
     }
 }
@@ -899,40 +918,52 @@ mod tests {
 
     /// Test-only capability that claims one mailbox and records
     /// every envelope it receives plus whether shutdown ran.
+    /// Post-issue-525-Phase-2 the cap is one struct: pre-boot fields
+    /// (`name`, shared `log`/`shutdown_flag` handles) live alongside
+    /// the runtime `Option<Receiver>` populated in `boot`. `Drop`
+    /// runs the prior `shutdown` body.
     struct EchoCapability {
         name: &'static str,
         log: Arc<Mutex<Vec<Envelope>>>,
         shutdown_flag: Arc<Mutex<bool>>,
+        receiver: Mutex<Option<mpsc::Receiver<Envelope>>>,
     }
 
-    struct EchoRunning {
-        receiver: mpsc::Receiver<Envelope>,
-        log: Arc<Mutex<Vec<Envelope>>>,
-        shutdown_flag: Arc<Mutex<bool>>,
+    impl EchoCapability {
+        fn new(
+            name: &'static str,
+            log: Arc<Mutex<Vec<Envelope>>>,
+            shutdown_flag: Arc<Mutex<bool>>,
+        ) -> Self {
+            Self {
+                name,
+                log,
+                shutdown_flag,
+                receiver: Mutex::new(None),
+            }
+        }
     }
 
     impl Capability for EchoCapability {
-        type Running = EchoRunning;
         // Placeholder: parameterized fixtures bypass the type-level
         // namespace via `claim_mailbox_with_override` below, so no
         // production code observes this string.
         const NAMESPACE: &'static str = "test.echo.placeholder";
-        fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+        fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
             let claim = ctx.claim_mailbox_with_override(self.name)?;
-            Ok(EchoRunning {
-                receiver: claim.receiver,
-                log: self.log,
-                shutdown_flag: self.shutdown_flag,
-            })
+            *self.receiver.lock().unwrap() = Some(claim.receiver);
+            Ok(self)
         }
     }
 
-    impl RunningCapability for EchoRunning {
-        fn shutdown(self: Box<Self>) {
+    impl Drop for EchoCapability {
+        fn drop(&mut self) {
             // Drain any pending envelopes synchronously so tests can
-            // assert against `log` after `shutdown` returns.
-            while let Ok(env) = self.receiver.try_recv() {
-                self.log.lock().unwrap().push(env);
+            // assert against `log` after the drop returns.
+            if let Some(rx) = self.receiver.lock().unwrap().take() {
+                while let Ok(env) = rx.try_recv() {
+                    self.log.lock().unwrap().push(env);
+                }
             }
             *self.shutdown_flag.lock().unwrap() = true;
         }
@@ -957,11 +988,11 @@ mod tests {
         let flag = Arc::new(Mutex::new(false));
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(EchoCapability {
-                name: "test.echo",
-                log: Arc::clone(&log),
-                shutdown_flag: Arc::clone(&flag),
-            })
+            .with(EchoCapability::new(
+                "test.echo",
+                Arc::clone(&log),
+                Arc::clone(&flag),
+            ))
             .build()
             .expect("build succeeds");
         assert_eq!(chassis.len(), 1);
@@ -988,11 +1019,7 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
         let flag = Arc::new(Mutex::new(false));
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(EchoCapability {
-                name: "test.collide",
-                log,
-                shutdown_flag: flag,
-            })
+            .with(EchoCapability::new("test.collide", log, flag))
             .build()
             .expect_err("build must reject duplicate claim");
         assert!(
@@ -1012,27 +1039,33 @@ mod tests {
         let log = Arc::new(Mutex::new(Vec::new()));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(EchoCapability {
-                name: "test.fail.first",
-                log: Arc::clone(&log),
-                shutdown_flag: Arc::clone(&first_flag),
-            })
-            .with(EchoCapability {
-                name: "test.fail.second",
-                log: Arc::clone(&log),
-                shutdown_flag: Arc::clone(&second_flag),
-            })
+            .with(EchoCapability::new(
+                "test.fail.first",
+                Arc::clone(&log),
+                Arc::clone(&first_flag),
+            ))
+            .with(EchoCapability::new(
+                "test.fail.second",
+                Arc::clone(&log),
+                Arc::clone(&second_flag),
+            ))
             .build()
             .expect_err("second capability must fail");
         assert!(matches!(err, BootError::MailboxAlreadyClaimed { .. }));
         assert!(
             *first_flag.lock().unwrap(),
-            "first capability shut down on boot abort"
+            "first capability dropped on boot abort"
         );
-        assert!(
-            !*second_flag.lock().unwrap(),
-            "second capability never booted"
-        );
+        // Post-issue-525-Phase-2: `second_flag` is set to `true` here
+        // too — the second EchoCapability value drops on the failed
+        // boot path, running its `Drop` impl. Pre-Phase-2 the flag
+        // was a "ran shutdown" proxy on the post-boot Running, which
+        // never existed for the second cap. The new semantic is "Drop
+        // ran" (on every constructed value, regardless of boot
+        // success), so we don't assert against `second_flag` here —
+        // the boot-aborted-cleanly check is `first_flag` plus the
+        // typed `BootError`.
+        let _ = second_flag;
     }
 
     #[test]
@@ -1042,22 +1075,17 @@ mod tests {
         struct FallbackCap {
             should_succeed: bool,
         }
-        struct FallbackRunning;
         impl Capability for FallbackCap {
-            type Running = FallbackRunning;
             const NAMESPACE: &'static str = "test.fallback.placeholder";
-            fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+            fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
                 let handler: FallbackRouter = Arc::new(|_env: &Envelope| true);
                 ctx.claim_fallback_router(handler)?;
                 if self.should_succeed {
-                    Ok(FallbackRunning)
+                    Ok(self)
                 } else {
                     Err(BootError::Other("unreachable".into()))
                 }
             }
-        }
-        impl RunningCapability for FallbackRunning {
-            fn shutdown(self: Box<Self>) {}
         }
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
@@ -1079,17 +1107,12 @@ mod tests {
         struct ProbeCap {
             captured: Arc<Mutex<Option<Arc<Mailer>>>>,
         }
-        struct ProbeRunning;
         impl Capability for ProbeCap {
-            type Running = ProbeRunning;
             const NAMESPACE: &'static str = "test.probe.placeholder";
-            fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+            fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
                 *self.captured.lock().unwrap() = Some(ctx.mail_send_handle());
-                Ok(ProbeRunning)
+                Ok(self)
             }
-        }
-        impl RunningCapability for ProbeRunning {
-            fn shutdown(self: Box<Self>) {}
         }
 
         let captured = Arc::new(Mutex::new(None));
