@@ -283,7 +283,7 @@ impl ControlPlane {
 
         // ADR-0033: read the receive-side capability surface from the
         // sibling `aether.kinds.inputs` section. Absence is not an
-        // error — components predating the `#[handlers]` macro ship
+        // error — components predating the `#[actor]` macro ship
         // an empty `ComponentCapabilities` and the hub treats them as
         // opaque (no structured receive vocabulary to show MCP).
         let capabilities = match kind_manifest::read_inputs_from_bytes(&payload.wasm) {

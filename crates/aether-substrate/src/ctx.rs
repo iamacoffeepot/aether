@@ -44,7 +44,7 @@ pub struct SubstrateCtx {
     /// silently drop, matching the broadcast semantics.
     pub outbound: Arc<HubOutbound>,
     /// ADR-0021 subscriber sets, shared with the platform-event
-    /// publisher in `main.rs`. `#[handlers]`-decorated components
+    /// publisher in `main.rs`. `#[actor]`-decorated components
     /// auto-subscribe every `K::IS_INPUT` handler kind by mailing
     /// `aether.control.subscribe_input` from the init prologue the
     /// macro prepends (ADR-0033 phase 3), which the control plane

@@ -4,7 +4,7 @@
 //! live in the sibling `aether-demo-tic-tac-toe-server` cdylib;
 //! consumers (e.g. `aether-demo-tic-tac-toe-client`) depend on this
 //! crate for the wire shapes without pulling in the server's
-//! `#[handlers]` section emissions, which would stack on top of their
+//! `#[actor]` section emissions, which would stack on top of their
 //! own and trip the substrate's "duplicate Component record" check
 //! (issue 442).
 //!

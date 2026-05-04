@@ -56,7 +56,7 @@ pub trait Singleton: Actor {}
 
 /// Per-handler-kind marker: `R: HandlesKind<K>` means actor `R` has
 /// a `#[handler]` method accepting kind `K`. Auto-emitted by the
-/// `#[handlers]` proc-macro alongside the dispatch table — one impl
+/// `#[actor]` proc-macro alongside the dispatch table — one impl
 /// per handler kind. Authors never write these by hand.
 ///
 /// Gates `Ctx::send_to::<R>(&K)` and `ActorMailbox<R, T>::send::<K>` so

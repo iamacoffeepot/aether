@@ -225,7 +225,7 @@ impl<'a> Mail<'a> {
     /// derive baked into `Kind::decode_from_bytes` — cast for
     /// `#[repr(C)]` + `Pod` types, postcard for schema-shaped types.
     /// This is the canonical receive-side decode and what the
-    /// `#[handlers]` dispatcher calls on every typed handler;
+    /// `#[actor]` dispatcher calls on every typed handler;
     /// `decode` / `decode_typed` / `decode_slice` / `decode_slice_typed`
     /// remain as low-level escape hatches for fallback handlers that
     /// want explicit wire-shape control.

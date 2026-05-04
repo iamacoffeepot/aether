@@ -22,7 +22,7 @@
 //! thin RAII wrapper over the same wire surface as `io::*` and
 //! `net::*`.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers, resolve_mailbox};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor, resolve_mailbox};
 use aether_data::Ref;
 use aether_kinds::Tick;
 
@@ -50,7 +50,7 @@ pub struct HandleDemo {
     fired: bool,
 }
 
-#[handlers]
+#[actor]
 impl Component for HandleDemo {
     const NAMESPACE: &'static str = "handle_demo";
 

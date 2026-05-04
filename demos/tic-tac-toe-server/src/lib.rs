@@ -22,7 +22,7 @@
 //! on the trunk for those without pulling in this crate's
 //! `Component` impl. Per ADR-0066.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, KindId, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, KindId, Mailbox, actor};
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, CLIENT_OBSERVER, GAME_DRAW, GAME_PLAYING, GAME_WON_O, GAME_WON_X, GameState,
     MOVE_CELL_OCCUPIED, MOVE_GAME_OVER, MOVE_OK, MOVE_OUT_OF_BOUNDS, MoveResult, PLAYER_NONE,
@@ -55,7 +55,7 @@ pub struct TicTacToe {
 /// sent the move — that's the broadcast path the hub fans out to
 /// every session. Send `tic_tac_toe.reset` (empty payload) to start a
 /// fresh game.
-#[handlers]
+#[actor]
 impl Component for TicTacToe {
     const NAMESPACE: &'static str = "tic_tac_toe";
 

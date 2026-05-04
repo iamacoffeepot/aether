@@ -10,13 +10,13 @@
 //! clip-space-only version until a camera component starts driving
 //! `aether.camera`.
 //!
-//! ADR-0033 shape: `#[handlers]` on the `impl Component` block emits
+//! ADR-0033 shape: `#[actor]` on the `impl Component` block emits
 //! both the dispatcher and the `aether.kinds.inputs` section entries.
 //! Per-handler rustdoc (with an optional `# Agent` section) feeds
 //! MCP via the same section so the harness sees typed capabilities
 //! plus author-written intent for each inbox.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, KindId, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, KindId, Mailbox, actor};
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
@@ -62,7 +62,7 @@ pub struct Hello {
 /// if the frame goes solid color the tick path stalled. Send
 /// `aether.ping` with an incrementing `seq` to exercise reply-to-
 /// sender; the matching `aether.pong` lands back at your session.
-#[handlers]
+#[actor]
 impl Component for Hello {
     const NAMESPACE: &'static str = "hello";
 

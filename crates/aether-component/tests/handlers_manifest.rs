@@ -1,10 +1,10 @@
-//! Issue 442 regression: `#[handlers]` emits the
+//! Issue 442 regression: `#[actor]` emits the
 //! `aether.kinds.inputs` payload as associated consts on the
 //! component type's inherent impl, NOT as `#[link_section]` statics.
 //! `aether_component::export!()` is the only place that pins those
 //! bytes into the wasm custom section, so the section can only land
 //! in the cdylib root that calls `export!()` — never in transitive
-//! rlib pulls of a `#[handlers]`-using crate.
+//! rlib pulls of a `#[actor]`-using crate.
 //!
 //! Pre-issue-442 the macro emitted N separate `#[link_section]`
 //! statics, one per handler/fallback/component-doc record, gated on
@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use aether_component::{BootError, Component, Ctx, DropCtx, InitCtx, handlers};
+use aether_component::{BootError, Component, Ctx, DropCtx, InitCtx, actor};
 use aether_data::Kind;
 use aether_data::{INPUTS_SECTION_VERSION, InputsRecord};
 use bytemuck::{Pod, Zeroable};
@@ -39,11 +39,11 @@ struct Ping {
 // `crate-type = ["cdylib"]` and only build for `wasm32-unknown-unknown`
 // — the test exercises the const path host-side. Maintenance is the
 // usual SDK-surface cadence: when `Component` / `Ctx` / `Mail` /
-// `#[handlers]` change shape, this fixture moves with every other
+// `#[actor]` change shape, this fixture moves with every other
 // component in the workspace.
 struct ManifestProbe;
 
-#[handlers]
+#[actor]
 impl Component for ManifestProbe {
     const NAMESPACE: &'static str = "manifest_probe";
 

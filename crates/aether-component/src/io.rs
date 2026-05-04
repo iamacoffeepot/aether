@@ -15,7 +15,7 @@
 //! use aether_component::io;
 //! use aether_kinds::{ReadResult, IoError};
 //!
-//! #[handlers]
+//! #[actor]
 //! impl Component for MySaveLoader {
 //!     fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
 //!         io::read("save", "slot1.bin");

@@ -35,7 +35,7 @@
 //! (reply-to-sender), ADR-0014 (Component trait + Mail), ADR-0015
 //! (lifecycle hooks), ADR-0016 (state-across-replace), ADR-0024
 //! (`_p32` FFI), ADR-0030 (compile-time kind ids), ADR-0033
-//! (`#[handlers]`), ADR-0040 (kind-typed state), ADR-0041 (file
+//! (`#[actor]`), ADR-0040 (kind-typed state), ADR-0041 (file
 //! I/O), ADR-0042 (sync wait_reply), ADR-0043 (HTTP egress),
 //! ADR-0045 (typed handles), ADR-0058 (`aether.sink.*` namespace),
 //! ADR-0060 (tracing→mail bridge), ADR-0074 (this restructure).
@@ -213,13 +213,13 @@ pub use aether_actor::handle;
 pub use aether_actor::handle::SyncHandleError;
 
 /// ADR-0033 attribute macros. Applied to `impl Component for C`
-/// blocks: `#[handlers]` at the impl level; `#[handler]` on each
-/// typed handler method; `#[fallback]` on an optional catchall.
-/// Forwarded from `aether-data-derive` so the full component
-/// vocabulary sits behind one `use aether_component::*` line.
-pub use aether_data::{fallback, handler, handlers};
+/// blocks: `#[actor]` at the impl level; `#[handler]` on each typed
+/// handler method; `#[fallback]` on an optional catchall. Forwarded
+/// from `aether-data-derive` so the full component vocabulary sits
+/// behind one `use aether_component::*` line.
+pub use aether_data::{actor, fallback, handler};
 
-/// Re-exports the `#[handlers]` macro relies on at expansion sites
+/// Re-exports the `#[actor]` macro relies on at expansion sites
 /// that don't depend on `aether-data` directly. The macro emits
 /// `::aether_component::__macro_internals::*` paths so the consumer
 /// crate only needs `aether-component` in its dependency list; this
@@ -240,7 +240,7 @@ pub use aether_actor::Actor;
 /// User-implemented WASM component. ADR-0014 commits to `Self`-is-state —
 /// cached kind ids, cached sinks, and any domain fields live on the
 /// implementor. `init` runs once before any `receive`; receive is
-/// driven by the synthesised `__aether_dispatch` from `#[handlers]`.
+/// driven by the synthesised `__aether_dispatch` from `#[actor]`.
 ///
 /// Renamed from `Component` to `WasmActor` in issue 525 Phase 4 — the
 /// wasm-side leaf of the unified [`Actor`] trait, mirroring the
@@ -262,7 +262,7 @@ pub use aether_actor::Actor;
 /// `WasmTransport` via the `Ctx` / `InitCtx` / `DropCtx` aliases.
 pub trait WasmActor: Actor {
     /// Runs once. Resolve kinds and sinks via `ctx` and return the
-    /// initial component state. ADR-0033: `#[handlers]` prepends
+    /// initial component state. ADR-0033: `#[actor]` prepends
     /// `ctx.subscribe_input::<K>()` for every `K::IS_INPUT` handler
     /// kind so the user body never needs to do it by hand.
     ///
@@ -340,16 +340,16 @@ pub trait Replaceable: WasmActor {
 /// - `extern "C" fn init(mailbox_id: u64) -> u32` — builds an
 ///   `InitCtx`, calls `T::init`, stashes the result in the slot.
 /// - `extern "C" fn receive(kind, ptr, byte_len, count, sender) -> u32`
-///   — builds `Ctx` and `Mail`, calls the `#[handlers]`-synthesized
+///   — builds `Ctx` and `Mail`, calls the `#[actor]`-synthesized
 ///   `__aether_dispatch` on the stashed instance.
 /// - `#[link_section = "aether.kinds.inputs"]` static that pins the
 ///   component's handler manifest into the wasm custom section the
 ///   substrate reads at `load_component`. The manifest *bytes* are
 ///   emitted as associated consts on `T`'s inherent impl by
-///   `#[handlers]`; this macro is the only place they get a
+///   `#[actor]`; this macro is the only place they get a
 ///   `link_section` attribute, which means the section can only land
 ///   in the cdylib root that calls `export!()` — never in transitive
-///   rlib pulls of a `#[handlers]`-using crate (issue 442).
+///   rlib pulls of a `#[actor]`-using crate (issue 442).
 /// - `#[link_section = "aether.namespace"]` static that pins the
 ///   component's `Component::NAMESPACE` bytes (issue 525 Phase 1B).
 ///   The substrate reads this at `load_component` and uses it as the
@@ -395,10 +395,10 @@ macro_rules! __export_internal {
         // ADR-0033 / issue 442: pin the component's `aether.kinds.inputs`
         // bytes into the cdylib's wasm custom section. The const data
         // (`__AETHER_INPUTS_MANIFEST_LEN` / `__AETHER_INPUTS_MANIFEST`)
-        // is emitted by `#[handlers]` on the type's inherent impl;
+        // is emitted by `#[actor]` on the type's inherent impl;
         // section emission lives here so it only fires in the cdylib
         // root crate (where `export!()` is invoked) and never in
-        // transitive rlib pulls of a `#[handlers]`-using crate, which
+        // transitive rlib pulls of a `#[actor]`-using crate, which
         // would otherwise stack duplicate Component records and fail
         // the substrate's manifest reader.
         #[cfg(target_arch = "wasm32")]
@@ -431,7 +431,7 @@ macro_rules! __export_internal {
         /// # Safety
         /// Called exactly once by the substrate before any `receive`.
         /// Receives the component's own mailbox id (ADR-0030 Phase 2)
-        /// so `#[handlers]`'s synthesized `init` prologue can self-
+        /// so `#[actor]`'s synthesized `init` prologue can self-
         /// address `subscribe_input` for every `K::IS_INPUT` handler
         /// kind. ADR-0060: also installs `MailSubscriber` as the global
         /// `tracing` default before user `init` runs, so logging from
@@ -481,7 +481,7 @@ macro_rules! __export_internal {
         /// (ADR-0013) or `NO_REPLY_HANDLE` for mail with no
         /// meaningful reply target. Exported under the `_p32` suffix
         /// per ADR-0024 Phase 1. Returns the `u32` the
-        /// `#[handlers]`-synthesized `__aether_dispatch` produces —
+        /// `#[actor]`-synthesized `__aether_dispatch` produces —
         /// `DISPATCH_HANDLED` on match, `DISPATCH_UNKNOWN_KIND` on a
         /// strict-receiver miss (ADR-0033 §Strict receivers).
         #[unsafe(export_name = "receive_p32")]
