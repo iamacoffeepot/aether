@@ -285,14 +285,14 @@ impl TestBench {
         boot.outbound
             .attach_backend(Arc::new(HubProtocolBackend::new(loopback_tx)));
 
-        // Io cap on the `boot.add_facade` path. Silent-skip on init
+        // Io cap on the `boot.add_capability` path. Silent-skip on init
         // failure preserves prior behavior so tests on systems without
         // writable default roots don't fail at the harness layer;
         // tests that care about io supply tempdir roots via the
         // builder.
         match IoCapability::new(boot.namespace_roots.clone(), Arc::clone(&boot.queue)) {
             Ok(io_cap) => {
-                if let Err(e) = boot.add_facade(io_cap) {
+                if let Err(e) = boot.add_capability(io_cap) {
                     tracing::warn!(
                         target: "aether_substrate::io",
                         error = %e,

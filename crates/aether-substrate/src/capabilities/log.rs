@@ -76,7 +76,7 @@ mod tests {
     fn capability_routes_log_event_through_dispatcher() {
         let (registry, mailer) = fresh_substrate();
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(LogCapability::new())
+            .with(LogCapability::new())
             .build()
             .expect("capability boots");
 
@@ -121,7 +121,7 @@ mod tests {
         registry.register_sink(LogCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(LogCapability::new())
+            .with(LogCapability::new())
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(

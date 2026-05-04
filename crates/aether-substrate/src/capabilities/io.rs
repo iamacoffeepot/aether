@@ -744,7 +744,7 @@ mod tests {
         let cap =
             IoCapability::new(roots_under(&root), Arc::clone(&mailer)).expect("adapters init");
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(cap)
+            .with(cap)
             .build()
             .expect("io capability boots");
         assert!(
@@ -789,7 +789,7 @@ mod tests {
         let cap =
             IoCapability::new(roots_under(&root), Arc::clone(&mailer)).expect("adapters init");
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(cap)
+            .with(cap)
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(

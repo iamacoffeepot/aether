@@ -229,49 +229,22 @@ impl From<wasmtime::Error> for BootError {
     }
 }
 
-/// A native actor: chassis-policy code that owns one or more
-/// mailboxes plus the state behind them. Each cap is `boot()`-ed
-/// once during chassis startup; teardown happens through the cap's
-/// own [`Drop`] impl when the chassis-owned `Box<Self>` drops
-/// (issue 525 Phase 2).
-///
-/// Renamed from `Capability` to `NativeActor` in issue 525 Phase 3:
-/// the cap is the chassis-side leaf of the unified [`Actor`] trait,
-/// the wasm-side leaf is `Component` (renaming to `WasmActor` in
-/// Phase 4). The [`Actor`] super-trait owns the symmetric bits
-/// (`NAMESPACE`, `FRAME_BARRIER`); `NativeActor` adds the
-/// chassis-side lifecycle method.
-///
-/// Implementors author one struct per cap. The struct typically holds
-/// `Option<JoinHandle<()>>`, an `Option<SinkSender>` (drives channel-
-/// drop shutdown), and the cap's `Arc<NativeTransport>` — `boot()`
-/// fills these from `None` to `Some` and returns the same `self`. The
-/// `Drop` impl drops the sender first to break the channel and then
-/// joins the thread.
-pub trait NativeActor: Actor {
-    /// Wire the cap into the chassis. The pre-boot `self` carries any
-    /// constructor config (read by `Self::new`-style builders); `boot`
-    /// claims mailboxes through `ctx`, spawns the dispatcher thread,
-    /// and returns the same `self` with its runtime-state fields
-    /// populated. On error the chassis aborts already-booted caps via
-    /// their [`Drop`] impls.
-    fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError>;
-}
-
-/// Backwards-compatibility alias for [`NativeActor`]. Lets the
-/// substrate's existing `crate::Capability` re-export keep resolving
-/// while consumers migrate to the new name. New code should prefer
-/// `NativeActor` directly; this alias is purely an ergonomic on-ramp
-/// during issue 525's phased rollout.
-pub use NativeActor as Capability;
-
-/// Marker trait for type-erased actor storage in [`BootedChassis`]
-/// and the [`crate::chassis_builder`] passive list. Implemented blanket
-/// for every [`NativeActor`]; carries no methods of its own —
-/// teardown runs through the cap's [`Drop`] impl when the
-/// `Box<dyn ActorErased>` drops (issue 525 Phase 2).
+/// Marker trait for type-erased chassis-stored entries. Pre-PR-E3
+/// the `BootedChassis` and `chassis_builder` passive lists held both
+/// owned caps (legacy `Capability` path) and `FacadeHandle` wrappers
+/// (facade caps). Post-E3 every cap is a facade; the only entries
+/// in those lists are `FacadeHandle<C>` instances plus the
+/// fallback-router marker. The trait survives so the boxed-dyn vec
+/// keeps a stable type.
 pub trait ActorErased: Send {}
-impl<C: NativeActor> ActorErased for C {}
+
+/// Zero-sized stand-in for `ChassisBuilder::with_fallback_router`.
+/// The fallback handler is owned by the chassis's `fallback` slot,
+/// not by anything held in the type-erased entries vec; we still
+/// push a marker so the boot order / shutdown drop semantics align
+/// with the cap entries.
+struct FallbackMarker;
+impl ActorErased for FallbackMarker {}
 
 /// Kernel-side handle bundle exposed to a capability during its
 /// `boot()` call. Shared (`&mut`) across every `boot()` in the
@@ -338,7 +311,7 @@ impl<'a> ChassisCtx<'a> {
     ///
     /// Tests that need a parameterized name (one fixture, many
     /// claims) reach for [`Self::claim_mailbox_with_override`].
-    pub fn claim_mailbox<C: Capability>(&mut self) -> Result<MailboxClaim, BootError> {
+    pub fn claim_mailbox<C: Actor>(&mut self) -> Result<MailboxClaim, BootError> {
         self.claim_mailbox_with_override(C::NAMESPACE)
     }
 
@@ -393,7 +366,7 @@ impl<'a> ChassisCtx<'a> {
     /// `C::NAMESPACE`. See
     /// [`Self::claim_mailbox_drop_on_shutdown_with_override`] for the
     /// arbitrary-name escape hatch.
-    pub fn claim_mailbox_drop_on_shutdown<C: Capability>(
+    pub fn claim_mailbox_drop_on_shutdown<C: Actor>(
         &mut self,
     ) -> Result<DropOnShutdownClaim, BootError> {
         self.claim_mailbox_drop_on_shutdown_with_override(C::NAMESPACE)
@@ -469,9 +442,7 @@ impl<'a> ChassisCtx<'a> {
     /// frame-bound capabilities. Claims under `C::NAMESPACE`. See
     /// [`Self::claim_frame_bound_mailbox_with_override`] for the
     /// arbitrary-name escape hatch.
-    pub fn claim_frame_bound_mailbox<C: Capability>(
-        &mut self,
-    ) -> Result<FrameBoundClaim, BootError> {
+    pub fn claim_frame_bound_mailbox<C: Actor>(&mut self) -> Result<FrameBoundClaim, BootError> {
         self.claim_frame_bound_mailbox_with_override(C::NAMESPACE)
     }
 
@@ -766,10 +737,11 @@ fn alloc_thread_name<C: Actor>() -> String {
 
 /// Type-erased boot trampoline so [`ChassisBuilder`] can collect
 /// heterogeneous capability types into one `Vec`. Each entry, when
-/// invoked, takes the ctx, calls the underlying `Capability::boot`,
-/// and boxes the resulting cap as [`ActorErased`] so the chassis can
-/// store every cap in one homogeneous `Vec`. Teardown runs through
-/// the cap's own [`Drop`] when the box drops (issue 525 Phase 2).
+/// invoked, takes the ctx, runs `spawn_actor_dispatcher` for the
+/// capability, and boxes the returned [`FacadeHandle`] as
+/// [`ActorErased`] so the chassis can store every cap in one
+/// homogeneous `Vec`. Teardown runs through the handle's `Drop`
+/// when the box drops.
 type BootFn =
     Box<dyn FnOnce(&mut ChassisCtx<'_>) -> Result<Box<dyn ActorErased>, BootError> + Send>;
 
@@ -818,33 +790,32 @@ impl ChassisBuilder {
         self
     }
 
-    /// Append a capability. Boot order is declaration order.
+    /// Append a chassis cap. The chassis claims the cap's mailbox
+    /// and runs the dispatcher; the cap is an `Actor + Dispatch`
+    /// value (typically built by `#[actor]` on an inherent impl).
+    /// Boot order is declaration order. Pre-PR-E3 this method was
+    /// named `with_facade`; the legacy `with`-takes-Capability
+    /// variant retired alongside `Capability` itself.
     pub fn with<C>(mut self, cap: C) -> Self
-    where
-        C: Capability,
-    {
-        self.pending.push(Box::new(move |ctx| {
-            let booted = cap.boot(ctx)?;
-            Ok(Box::new(booted) as Box<dyn ActorErased>)
-        }));
-        self
-    }
-
-    /// Append a facade-style cap (ADR-0075 §Decision 3): the chassis
-    /// claims the mailbox and runs the dispatcher; the cap is purely
-    /// an `Actor + Dispatch` value carrying its backend. Boot order
-    /// is declaration order, same as [`Self::with`].
-    ///
-    /// PR C wires [`aether_kinds::LogCapability<LogTracingBackend>`]
-    /// through this; PR D migrates the rest of the chassis caps onto
-    /// it.
-    pub fn with_facade<C>(mut self, cap: C) -> Self
     where
         C: Actor + Dispatch + Send + 'static,
     {
         self.pending.push(Box::new(move |ctx| {
             let handle = ctx.spawn_actor_dispatcher(cap)?;
             Ok(Box::new(handle) as Box<dyn ActorErased>)
+        }));
+        self
+    }
+
+    /// Register a fallback router — a single-shot handler the
+    /// substrate consults for envelopes whose mailbox name doesn't
+    /// resolve. Useful for tests that want to observe routing of
+    /// unhandled mail; production chassis don't currently install
+    /// one. Multiple calls collapse to a `BootError` at `build()`.
+    pub fn with_fallback_router(mut self, handler: FallbackRouter) -> Self {
+        self.pending.push(Box::new(move |ctx| {
+            ctx.claim_fallback_router(handler)?;
+            Ok(Box::new(FallbackMarker) as Box<dyn ActorErased>)
         }));
         self
     }
@@ -951,46 +922,24 @@ impl BootedChassis {
     }
 
     /// Boot one more capability into an already-built chassis. The
-    /// capability sees the same `ChassisCtx` shape as those booted
-    /// through [`ChassisBuilder::with`] — the same registry, the
-    /// same mail-send handle, and (crucially) the same fallback-
-    /// router slot, so the single-claim invariant still holds across
-    /// the build-time and post-build sets.
+    /// cap sees the same `ChassisCtx` shape as those booted through
+    /// [`ChassisBuilder::with`] — the same registry, the same
+    /// mail-send handle, and (crucially) the same fallback-router
+    /// slot, so the single-claim invariant still holds across the
+    /// build-time and post-build sets.
     ///
     /// Used by chassis mains to compose chassis-conditional
-    /// capabilities (`LogCapability`, `IoCapability`, etc.) on top
-    /// of the universal capabilities `SubstrateBoot::build` already
-    /// installed. Boots run in call order; shutdown tears down in
-    /// reverse, exactly like the build-time path.
+    /// capabilities on top of the universal capabilities
+    /// `SubstrateBoot::build` already installed (today: the bundle
+    /// hooks `IoCapability` here in TestBench because adapter init
+    /// can fail silently on systems without writable default roots).
+    /// Boots run in call order; shutdown tears down in reverse,
+    /// exactly like the build-time path.
+    ///
+    /// Pre-PR-E3 there was a separate `add_facade` for actor caps
+    /// alongside `add` for legacy `Capability` caps; the legacy
+    /// path retired alongside `Capability` itself.
     pub fn add<C>(
-        &mut self,
-        registry: &Arc<Registry>,
-        mailer: &Arc<Mailer>,
-        cap: C,
-    ) -> Result<(), BootError>
-    where
-        C: Capability,
-    {
-        let mut ctx = ChassisCtx::new(
-            registry,
-            mailer,
-            &mut self._fallback,
-            &mut self.frame_bound_pending,
-            &self.frame_bound_set,
-            &self.aborter,
-        );
-        let booted = cap.boot(&mut ctx)?;
-        self.running.push(Box::new(booted));
-        Ok(())
-    }
-
-    /// Boot one more facade-style cap into an already-built chassis.
-    /// Counterpart to [`Self::add`] for [`ChassisBuilder::with_facade`]
-    /// caps. Used by chassis mains that compose chassis-conditional
-    /// caps (today: the bundle hooks `LogCapability`,
-    /// `IoCapability`, etc. on top of `SubstrateBoot::build`'s
-    /// universal set).
-    pub fn add_facade<C>(
         &mut self,
         registry: &Arc<Registry>,
         mailer: &Arc<Mailer>,
@@ -1085,226 +1034,91 @@ impl Drop for BootedChassis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mail::ReplyTo;
-    use crate::registry::MailboxEntry;
-    use std::sync::Mutex;
-
-    /// Test-only capability that claims one mailbox and records
-    /// every envelope it receives plus whether shutdown ran.
-    /// Post-issue-525-Phase-2 the cap is one struct: pre-boot fields
-    /// (`name`, shared `log`/`shutdown_flag` handles) live alongside
-    /// the runtime `Option<Receiver>` populated in `boot`. `Drop`
-    /// runs the prior `shutdown` body.
-    struct EchoCapability {
-        name: &'static str,
-        log: Arc<Mutex<Vec<Envelope>>>,
-        shutdown_flag: Arc<Mutex<bool>>,
-        receiver: Mutex<Option<mpsc::Receiver<Envelope>>>,
-    }
-
-    impl EchoCapability {
-        fn new(
-            name: &'static str,
-            log: Arc<Mutex<Vec<Envelope>>>,
-            shutdown_flag: Arc<Mutex<bool>>,
-        ) -> Self {
-            Self {
-                name,
-                log,
-                shutdown_flag,
-                receiver: Mutex::new(None),
-            }
-        }
-    }
-
-    impl Actor for EchoCapability {
-        // Placeholder: parameterized fixtures bypass the type-level
-        // namespace via `claim_mailbox_with_override` below, so no
-        // production code observes this string.
-        const NAMESPACE: &'static str = "test.echo.placeholder";
-    }
-
-    impl Capability for EchoCapability {
-        fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
-            let claim = ctx.claim_mailbox_with_override(self.name)?;
-            *self.receiver.lock().unwrap() = Some(claim.receiver);
-            Ok(self)
-        }
-    }
-
-    impl Drop for EchoCapability {
-        fn drop(&mut self) {
-            // Drain any pending envelopes synchronously so tests can
-            // assert against `log` after the drop returns.
-            if let Some(rx) = self.receiver.lock().unwrap().take() {
-                while let Ok(env) = rx.try_recv() {
-                    self.log.lock().unwrap().push(env);
-                }
-            }
-            *self.shutdown_flag.lock().unwrap() = true;
-        }
-    }
+    use aether_data::ReplyTo;
+    use aether_kinds::LogEvent;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         (Arc::new(Registry::new()), Arc::new(Mailer::new()))
     }
 
-    fn deliver(registry: &Registry, name: &str, payload: &[u8]) {
-        let id = registry.lookup(name).expect("mailbox registered");
-        let MailboxEntry::Sink(handler) = registry.entry(id).expect("entry exists") else {
-            panic!("expected sink entry for {name}");
-        };
-        handler(KindId(42), "test.kind", None, ReplyTo::NONE, payload, 1);
-    }
-
-    #[test]
-    fn capability_claims_mailbox_and_receives_mail() {
-        let (registry, mailer) = fresh_substrate();
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let flag = Arc::new(Mutex::new(false));
-
-        let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(EchoCapability::new(
-                "test.echo",
-                Arc::clone(&log),
-                Arc::clone(&flag),
-            ))
-            .build()
-            .expect("build succeeds");
-        assert_eq!(chassis.len(), 1);
-
-        deliver(&registry, "test.echo", b"hello");
-        deliver(&registry, "test.echo", b"world");
-
-        chassis.shutdown();
-        let log = log.lock().unwrap();
-        assert_eq!(log.len(), 2);
-        assert_eq!(log[0].payload, b"hello");
-        assert_eq!(log[1].payload, b"world");
-        assert!(*flag.lock().unwrap());
-    }
-
-    #[test]
-    fn duplicate_mailbox_claim_fails_with_loud_error() {
-        let (registry, mailer) = fresh_substrate();
-        // Pre-register the name to simulate the side-by-side period
-        // where legacy `register_sink` and a new capability would
-        // both target the same mailbox.
-        registry.register_sink("test.collide", Arc::new(|_, _, _, _, _, _| {}));
-
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let flag = Arc::new(Mutex::new(false));
-        let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(EchoCapability::new("test.collide", log, flag))
-            .build()
-            .expect_err("build must reject duplicate claim");
-        assert!(
-            matches!(err, BootError::MailboxAlreadyClaimed { ref name } if name == "test.collide")
-        );
-    }
-
+    /// Boot-time mailbox-claim collision aborts the build and runs
+    /// every already-booted cap's `Drop`. Two `LogCapability`
+    /// instances both claim `aether.log`; the second hits the
+    /// duplicate-claim guard and the chassis tears the first down.
+    /// Per-cap mailbox-claim and mail-receive coverage lives in
+    /// `crate::capabilities::log::tests` and the equivalents for
+    /// the other facade caps.
     #[test]
     fn boot_failure_shuts_down_already_booted_capabilities() {
+        use crate::capabilities::LogCapability;
+
         let (registry, mailer) = fresh_substrate();
-        // First capability claims a fresh name; the second is set up
-        // to fail by pre-registering its target name.
-        registry.register_sink("test.fail.second", Arc::new(|_, _, _, _, _, _| {}));
-
-        let first_flag = Arc::new(Mutex::new(false));
-        let second_flag = Arc::new(Mutex::new(false));
-        let log = Arc::new(Mutex::new(Vec::new()));
-
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(EchoCapability::new(
-                "test.fail.first",
-                Arc::clone(&log),
-                Arc::clone(&first_flag),
-            ))
-            .with(EchoCapability::new(
-                "test.fail.second",
-                Arc::clone(&log),
-                Arc::clone(&second_flag),
-            ))
+            .with(LogCapability::new())
+            .with(LogCapability::new())
             .build()
-            .expect_err("second capability must fail");
-        assert!(matches!(err, BootError::MailboxAlreadyClaimed { .. }));
+            .expect_err("second LogCapability must fail with duplicate claim");
         assert!(
-            *first_flag.lock().unwrap(),
-            "first capability dropped on boot abort"
+            matches!(err, BootError::MailboxAlreadyClaimed { ref name } if name == LogCapability::NAMESPACE)
         );
-        // Post-issue-525-Phase-2: `second_flag` is set to `true` here
-        // too — the second EchoCapability value drops on the failed
-        // boot path, running its `Drop` impl. Pre-Phase-2 the flag
-        // was a "ran shutdown" proxy on the post-boot Running, which
-        // never existed for the second cap. The new semantic is "Drop
-        // ran" (on every constructed value, regardless of boot
-        // success), so we don't assert against `second_flag` here —
-        // the boot-aborted-cleanly check is `first_flag` plus the
-        // typed `BootError`.
-        let _ = second_flag;
     }
 
+    /// Two `with_fallback_router` calls on one builder collapse to a
+    /// `FallbackRouterAlreadyClaimed` at `build()` — single-slot
+    /// invariant. Pre-PR-E3 a Capability::boot body called
+    /// `ctx.claim_fallback_router`; post-E3 the builder method
+    /// surfaces the same single-claim guard.
     #[test]
     fn fallback_router_slot_is_single_claim() {
         let (registry, mailer) = fresh_substrate();
-
-        struct FallbackCap {
-            should_succeed: bool,
-        }
-        impl Actor for FallbackCap {
-            const NAMESPACE: &'static str = "test.fallback.placeholder";
-        }
-        impl Capability for FallbackCap {
-            fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
-                let handler: FallbackRouter = Arc::new(|_env: &Envelope| true);
-                ctx.claim_fallback_router(handler)?;
-                if self.should_succeed {
-                    Ok(self)
-                } else {
-                    Err(BootError::Other("unreachable".into()))
-                }
-            }
-        }
-
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(FallbackCap {
-                should_succeed: true,
-            })
-            .with(FallbackCap {
-                should_succeed: true,
-            })
+            .with_fallback_router(Arc::new(|_env: &Envelope| true))
+            .with_fallback_router(Arc::new(|_env: &Envelope| true))
             .build()
             .expect_err("second fallback claim must fail");
         assert!(matches!(err, BootError::FallbackRouterAlreadyClaimed));
     }
 
+    /// Smoke test: one cap, one envelope, clean shutdown. Validates
+    /// the chassis builder boots through the facade path end-to-end.
+    /// Per-cap routing semantics live in their own test modules; this
+    /// test just exercises the chassis-level invariants
+    /// (`with(cap).build()` succeeds, `shutdown()` joins).
     #[test]
-    fn mail_send_handle_clones_to_same_mailer() {
+    fn chassis_builder_boots_one_cap_and_shuts_down_clean() {
+        use crate::capabilities::LogCapability;
+        use aether_data::Kind;
+
         let (registry, mailer) = fresh_substrate();
-
-        struct ProbeCap {
-            captured: Arc<Mutex<Option<Arc<Mailer>>>>,
-        }
-        impl Actor for ProbeCap {
-            const NAMESPACE: &'static str = "test.probe.placeholder";
-        }
-        impl Capability for ProbeCap {
-            fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
-                *self.captured.lock().unwrap() = Some(ctx.mail_send_handle());
-                Ok(self)
-            }
-        }
-
-        let captured = Arc::new(Mutex::new(None));
-        ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(ProbeCap {
-                captured: Arc::clone(&captured),
-            })
+        let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with(LogCapability::new())
             .build()
-            .expect("build succeeds")
-            .shutdown();
+            .expect("build succeeds");
+        assert_eq!(chassis.len(), 1);
 
-        let captured = captured.lock().unwrap().take().expect("handle captured");
-        assert!(Arc::ptr_eq(&captured, &mailer));
+        let id = registry
+            .lookup(LogCapability::NAMESPACE)
+            .expect("log mailbox registered");
+        let crate::registry::MailboxEntry::Sink(handler) =
+            registry.entry(id).expect("entry exists")
+        else {
+            panic!("expected sink entry");
+        };
+        let event = LogEvent {
+            level: 3,
+            target: "aether_test".into(),
+            message: "boot smoke".into(),
+        };
+        let bytes = postcard::to_allocvec(&event).expect("encode");
+        handler(
+            <LogEvent as Kind>::ID,
+            "aether.log",
+            None,
+            ReplyTo::NONE,
+            &bytes,
+            1,
+        );
+
+        chassis.shutdown();
     }
 }

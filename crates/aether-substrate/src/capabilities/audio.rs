@@ -1020,7 +1020,7 @@ mod tests {
             Arc::clone(&mailer),
         );
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(cap)
+            .with(cap)
             .build()
             .expect("audio capability boots");
         assert!(
@@ -1044,7 +1044,7 @@ mod tests {
             Arc::clone(&mailer),
         );
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(cap)
+            .with(cap)
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(

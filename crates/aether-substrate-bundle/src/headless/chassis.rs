@@ -232,9 +232,9 @@ impl HeadlessChassis {
             .map_err(|e| BootError::Other(Box::new(e)))?;
         Builder::<HeadlessChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
-            .with_facade(LogCapability::new())
-            .with_facade(io_cap)
-            .with_facade(NetCapability::new(net, Arc::clone(&mailer)))
+            .with(LogCapability::new())
+            .with(io_cap)
+            .with(NetCapability::new(net, Arc::clone(&mailer)))
             .driver(driver)
             .build()
     }

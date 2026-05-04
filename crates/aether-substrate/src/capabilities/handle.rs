@@ -211,7 +211,7 @@ mod tests {
         let (store, mailer, registry, rx) = fresh_substrate();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(HandleCapability::new(
+            .with(HandleCapability::new(
                 Arc::clone(&store),
                 Arc::clone(&mailer),
             ))
@@ -279,7 +279,7 @@ mod tests {
         let (store, mailer, registry, _rx) = fresh_substrate();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(HandleCapability::new(
+            .with(HandleCapability::new(
                 Arc::clone(&store),
                 Arc::clone(&mailer),
             ))
@@ -303,7 +303,7 @@ mod tests {
         registry.register_sink(HandleCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(HandleCapability::new(
+            .with(HandleCapability::new(
                 Arc::clone(&store),
                 Arc::clone(&mailer),
             ))

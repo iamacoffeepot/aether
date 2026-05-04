@@ -56,9 +56,8 @@ pub mod scheduler;
 pub use aether_actor::Actor;
 pub use boot::{ChassisHandlerContext, SubstrateBoot, SubstrateBootBuilder};
 pub use capability::{
-    ActorErased, BootError, BootedChassis, Capability, ChassisBuilder, ChassisCtx,
-    DropOnShutdownClaim, Envelope, FallbackRouter, FrameBoundClaim, MailboxClaim, NativeActor,
-    SinkSender, WedgedFrameBound,
+    ActorErased, BootError, BootedChassis, ChassisBuilder, ChassisCtx, DropOnShutdownClaim,
+    Envelope, FallbackRouter, FrameBoundClaim, MailboxClaim, SinkSender, WedgedFrameBound,
 };
 pub use chassis::Chassis;
 pub use chassis_builder::{
