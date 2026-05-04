@@ -1,12 +1,13 @@
 //! Reply-routing types shared by every mail-bearing surface (ADR-0008,
-//! ADR-0037, ADR-0042). Lives in `aether-data` so chassis caps in
-//! `aether-kinds` can name the substrate's reply target type from
-//! their `#[handler]` signatures (ADR-0075 / issue 533 PR D).
+//! ADR-0037, ADR-0042). Lives in `aether-data` so the `Dispatch` trait
+//! in `aether-actor` (which references `ReplyTo` in its signature) can
+//! name them without depending on `aether-actor`-internal modules,
+//! AND to avoid a name clash with `aether-actor`'s wasm-side `ReplyTo`
+//! — that one is a `u32` FFI handle distinct in shape from this
+//! substrate-side dispatch type. ADR-0076 documents the split.
 //!
 //! `aether-substrate` re-exports these from `aether_substrate::mail`
-//! so existing call sites compile unchanged. Wasm components see a
-//! different `ReplyTo` (a u32 FFI handle in `aether-actor::mail`); the
-//! two types share a name but serve different sides of the boundary.
+//! so existing call sites compile unchanged.
 
 use crate::{EngineId, MailboxId, SessionToken};
 
