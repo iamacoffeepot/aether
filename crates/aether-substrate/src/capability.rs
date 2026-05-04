@@ -34,6 +34,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use aether_actor::Actor;
+
 use crate::lifecycle::{FatalAborter, PanicAborter};
 use crate::mail::{KindId, MailboxId, ReplyTo};
 use crate::mailer::Mailer;
@@ -224,65 +226,49 @@ impl From<wasmtime::Error> for BootError {
     }
 }
 
-/// A native capability: chassis-policy code that owns one or more
-/// mailboxes plus the state behind them. Each capability is
-/// `boot()`-ed once during chassis startup; teardown happens through
-/// the cap's own [`Drop`] impl when the chassis-owned `Box<Self>`
-/// drops (issue 525 Phase 2 collapsed the prior `Self` / `Self::Running`
-/// pair into one struct, retiring `RunningCapability::shutdown` in
-/// favour of `Drop`).
+/// A native actor: chassis-policy code that owns one or more
+/// mailboxes plus the state behind them. Each cap is `boot()`-ed
+/// once during chassis startup; teardown happens through the cap's
+/// own [`Drop`] impl when the chassis-owned `Box<Self>` drops
+/// (issue 525 Phase 2).
+///
+/// Renamed from `Capability` to `NativeActor` in issue 525 Phase 3:
+/// the cap is the chassis-side leaf of the unified [`Actor`] trait,
+/// the wasm-side leaf is `Component` (renaming to `WasmActor` in
+/// Phase 4). The [`Actor`] super-trait owns the symmetric bits
+/// (`NAMESPACE`, `FRAME_BARRIER`); `NativeActor` adds the
+/// chassis-side lifecycle method.
 ///
 /// Implementors author one struct per cap. The struct typically holds
 /// `Option<JoinHandle<()>>`, an `Option<SinkSender>` (drives channel-
 /// drop shutdown), and the cap's `Arc<NativeTransport>` — `boot()`
 /// fills these from `None` to `Some` and returns the same `self`. The
 /// `Drop` impl drops the sender first to break the channel and then
-/// joins the thread, mirroring the prior `RunningCapability::shutdown`
-/// body.
-pub trait Capability: Send + Sized + 'static {
-    /// The recipient name this capability claims at boot — the same
-    /// string components address with `Mailbox<K>::send` on the wire.
-    /// Issue 525 Phase 1: declared on the trait so the cap's own type
-    /// is the single source of truth, retiring the per-cap free
-    /// `pub const X_MAILBOX_NAME` consts that mirrored this field.
-    /// Each in-tree cap declares its `aether.<name>` namespace per the
-    /// post-ADR-0074 Phase 5 convention; test fixtures with
-    /// parameterized names declare a placeholder and bypass via
-    /// [`ChassisCtx::claim_mailbox_with_override`] +
-    /// friends.
-    const NAMESPACE: &'static str;
-
-    /// ADR-0074 §Decision 5 scheduling class. `true` means this
-    /// capability participates in the per-frame drain barrier — the
-    /// chassis frame loop waits for the dispatcher's inbox to quiesce
-    /// before submitting the next render frame, so any mail a
-    /// component sent this frame is integrated before submit.
-    /// Defaults to `false` (free-running). Today only `RenderCapability`
-    /// overrides; future drawing-side capabilities will too.
-    ///
-    /// The const is paired with [`ChassisCtx::claim_frame_bound_mailbox`]:
-    /// frame-bound capabilities must claim their inbox through that
-    /// method so the chassis collects the per-mailbox pending counter
-    /// the barrier reads. The trait const itself is the static marker
-    /// used by Phase 4's cross-class `wait_reply` guard.
-    const FRAME_BARRIER: bool = false;
-
-    /// Wire the capability into the chassis. The pre-boot `self`
-    /// carries any constructor config (read by [`Self::new`]-style
-    /// builders); `boot` claims mailboxes through `ctx`, spawns the
-    /// dispatcher thread, and returns the same `self` with its
-    /// runtime-state fields populated. On error the chassis aborts
-    /// already-booted caps via their [`Drop`] impls.
+/// joins the thread.
+pub trait NativeActor: Actor {
+    /// Wire the cap into the chassis. The pre-boot `self` carries any
+    /// constructor config (read by `Self::new`-style builders); `boot`
+    /// claims mailboxes through `ctx`, spawns the dispatcher thread,
+    /// and returns the same `self` with its runtime-state fields
+    /// populated. On error the chassis aborts already-booted caps via
+    /// their [`Drop`] impls.
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError>;
 }
 
-/// Marker trait for type-erased capability storage in [`BootedChassis`]
+/// Backwards-compatibility alias for [`NativeActor`]. Lets the
+/// substrate's existing `crate::Capability` re-export keep resolving
+/// while consumers migrate to the new name. New code should prefer
+/// `NativeActor` directly; this alias is purely an ergonomic on-ramp
+/// during issue 525's phased rollout.
+pub use NativeActor as Capability;
+
+/// Marker trait for type-erased actor storage in [`BootedChassis`]
 /// and the [`crate::chassis_builder`] passive list. Implemented blanket
-/// for every [`Capability`]; carries no methods of its own — teardown
-/// runs through the cap's [`Drop`] impl when the `Box<dyn ActorErased>`
-/// drops (issue 525 Phase 2).
+/// for every [`NativeActor`]; carries no methods of its own —
+/// teardown runs through the cap's [`Drop`] impl when the
+/// `Box<dyn ActorErased>` drops (issue 525 Phase 2).
 pub trait ActorErased: Send {}
-impl<C: Capability> ActorErased for C {}
+impl<C: NativeActor> ActorErased for C {}
 
 /// Kernel-side handle bundle exposed to a capability during its
 /// `boot()` call. Shared (`&mut`) across every `boot()` in the
@@ -944,11 +930,14 @@ mod tests {
         }
     }
 
-    impl Capability for EchoCapability {
+    impl Actor for EchoCapability {
         // Placeholder: parameterized fixtures bypass the type-level
         // namespace via `claim_mailbox_with_override` below, so no
         // production code observes this string.
         const NAMESPACE: &'static str = "test.echo.placeholder";
+    }
+
+    impl Capability for EchoCapability {
         fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
             let claim = ctx.claim_mailbox_with_override(self.name)?;
             *self.receiver.lock().unwrap() = Some(claim.receiver);
@@ -1075,8 +1064,10 @@ mod tests {
         struct FallbackCap {
             should_succeed: bool,
         }
-        impl Capability for FallbackCap {
+        impl Actor for FallbackCap {
             const NAMESPACE: &'static str = "test.fallback.placeholder";
+        }
+        impl Capability for FallbackCap {
             fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
                 let handler: FallbackRouter = Arc::new(|_env: &Envelope| true);
                 ctx.claim_fallback_router(handler)?;
@@ -1107,8 +1098,10 @@ mod tests {
         struct ProbeCap {
             captured: Arc<Mutex<Option<Arc<Mailer>>>>,
         }
-        impl Capability for ProbeCap {
+        impl Actor for ProbeCap {
             const NAMESPACE: &'static str = "test.probe.placeholder";
+        }
+        impl Capability for ProbeCap {
             fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
                 *self.captured.lock().unwrap() = Some(ctx.mail_send_handle());
                 Ok(self)

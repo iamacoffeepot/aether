@@ -604,6 +604,7 @@ impl<C: Chassis> PassiveChassis<C> {
 mod tests {
     use super::*;
     use crate::capability::Envelope;
+    use aether_actor::Actor;
     use std::sync::Mutex;
 
     /// Fixture chassis for passive-build tests. `type Driver` is the
@@ -654,10 +655,13 @@ mod tests {
         }
     }
 
-    impl Capability for EchoCap {
+    impl Actor for EchoCap {
         // Placeholder: parameterized fixtures bypass the type-level
         // namespace via `claim_mailbox_with_override` below.
         const NAMESPACE: &'static str = "test.echo.placeholder";
+    }
+
+    impl Capability for EchoCap {
         fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
             let claim = ctx.claim_mailbox_with_override(self.name)?;
             *self.receiver.lock().unwrap() = Some(claim.receiver);
@@ -778,8 +782,10 @@ mod tests {
         struct ProbeCap {
             flag: Arc<std::sync::atomic::AtomicBool>,
         }
-        impl Capability for ProbeCap {
+        impl Actor for ProbeCap {
             const NAMESPACE: &'static str = "test.probe.placeholder";
+        }
+        impl Capability for ProbeCap {
             fn boot(self, _ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
                 Ok(self)
             }
