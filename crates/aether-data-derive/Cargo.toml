@@ -27,3 +27,6 @@ serde = { version = "1", features = ["derive"] }
 # crate. Tests run native, so unconditional dev-dep is fine — no wasm
 # build to skip.
 inventory = "0.3"
+# Issue 533 PR B: native-actor tests assert HandlesKind<K> impls land
+# on chassis cap inherent impls. The trait itself is in aether-actor.
+aether-actor = { path = "../aether-actor" }

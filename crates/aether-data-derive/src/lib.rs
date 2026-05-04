@@ -795,12 +795,39 @@ struct FallbackFn {
 }
 
 fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
-    if item.trait_.is_none() {
-        return Err(syn::Error::new_spanned(
-            &item,
-            "#[actor] must wrap `impl Component for T` — not an inherent impl",
-        ));
+    if item.trait_.is_some() {
+        expand_wasm_actor(item)
+    } else {
+        expand_native_actor(item)
     }
+}
+
+/// Match `#[handler]`, `#[crate::handler]`, or `#[aether_data::handler]` —
+/// any path whose last segment is `handler`. Bare `is_ident("handler")`
+/// only matches the unqualified form, so qualified-path tests like
+/// `#[aether_data::handler]` would skip the macro silently.
+fn attr_is_handler(attr: &Attribute) -> bool {
+    attr.path()
+        .segments
+        .last()
+        .is_some_and(|s| s.ident == "handler")
+}
+
+/// Same logic for `#[fallback]`.
+fn attr_is_fallback(attr: &Attribute) -> bool {
+    attr.path()
+        .segments
+        .last()
+        .is_some_and(|s| s.ident == "fallback")
+}
+
+/// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
+/// the back-compat `impl Component for X`). Emits the full wasm
+/// surface: dispatch table referencing `aether_component::Ctx<'_>`,
+/// init wrapper, `aether.kinds.inputs` manifest consts, kind retention
+/// statics, plus the `HandlesKind<K>` and `Actor` impls common to both
+/// shapes.
+fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     let self_ty = &item.self_ty;
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
@@ -836,8 +863,8 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
             }
             ImplItem::Fn(mut f) => {
                 let name = f.sig.ident.to_string();
-                let handler_attr_idx = f.attrs.iter().position(|a| a.path().is_ident("handler"));
-                let fallback_attr_idx = f.attrs.iter().position(|a| a.path().is_ident("fallback"));
+                let handler_attr_idx = f.attrs.iter().position(attr_is_handler);
+                let fallback_attr_idx = f.attrs.iter().position(attr_is_fallback);
 
                 if handler_attr_idx.is_some() && fallback_attr_idx.is_some() {
                     return Err(syn::Error::new_spanned(
@@ -987,6 +1014,162 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
 
         #kind_retention_statics
     })
+}
+
+/// Native-actor expansion — `#[actor] impl X` (inherent impl).
+/// Used for chassis cap facades in `aether-kinds` whose `NativeActor`
+/// impl lives in `aether-substrate` but whose marker / handler list
+/// must stay wasm-importable.
+///
+/// Emits:
+///   - `impl HandlesKind<K> for X` per `#[handler]` method.
+///   - A `__dispatch(&mut self, kind: u64, payload: &[u8]) -> Option<()>`
+///     fn that decodes payload and calls the matching handler.
+///     Substrate's `NativeActor::boot` calls this from the dispatcher
+///     thread loop.
+///   - The original handler methods, attribute-stripped, as inherent
+///     methods (so they're callable from `__dispatch` and from the
+///     backend trait impl that delegates to them).
+///
+/// Native handlers take `(&mut self, kind: K)` — no ctx parameter.
+/// Chassis caps that need to send mail or hold runtime state do so
+/// through the backend trait impl; the cap's handler body is just
+/// `self.backend.on_X(kind)` delegation.
+fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
+    let self_ty = &item.self_ty;
+    let generics = &item.generics;
+    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+
+    let mut handlers: Vec<NativeHandlerFn> = Vec::new();
+    let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
+
+    for impl_item in item.items {
+        match impl_item {
+            ImplItem::Fn(mut f) => {
+                let handler_attr_idx = f.attrs.iter().position(attr_is_handler);
+                if f.attrs.iter().any(attr_is_fallback) {
+                    return Err(syn::Error::new_spanned(
+                        &f,
+                        "#[fallback] is not supported on native chassis-cap impls (#[actor] on inherent impl) — \
+                         every kind a chassis cap accepts is declared via #[handler]",
+                    ));
+                }
+                if let Some(idx) = handler_attr_idx {
+                    let kind_ty = extract_native_handler_kind_type(&f.sig)?;
+                    f.attrs.remove(idx);
+                    handlers.push(NativeHandlerFn { method: f, kind_ty });
+                } else {
+                    helpers.push(f);
+                }
+            }
+            ImplItem::Const(_) => {
+                helpers.push(syn::ImplItemFn {
+                    attrs: Vec::new(),
+                    vis: syn::Visibility::Inherited,
+                    defaultness: None,
+                    sig: syn::parse_quote!(fn __unused_native_const_marker()),
+                    block: syn::parse_quote!({}),
+                });
+                // We don't actually keep the const — unsupported on native impls
+                return Err(syn::Error::new_spanned(
+                    self_ty,
+                    "associated consts are not supported on native chassis-cap impls (#[actor] on inherent impl); \
+                     declare them on the standalone `Actor` impl instead",
+                ));
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "unexpected item in #[actor] inherent impl (only fns are allowed)",
+                ));
+            }
+        }
+    }
+
+    if handlers.is_empty() {
+        return Err(syn::Error::new_spanned(
+            self_ty,
+            "#[actor] inherent impl requires at least one #[handler] method",
+        ));
+    }
+
+    let handles_kind_impls = handlers.iter().map(|h| {
+        let kind_ty = &h.kind_ty;
+        quote! {
+            impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
+                for #self_ty #where_clause {}
+        }
+    });
+
+    // Dispatch body: one if-arm per handler. Each arm decodes the
+    // payload (returning early on decode failure for the matched kind
+    // — substrate-side dispatcher logs the miss separately) and calls
+    // the inherent handler method by its original ident.
+    let dispatch_arms = handlers.iter().map(|h| {
+        let kind_ty = &h.kind_ty;
+        let method_ident = &h.method.sig.ident;
+        quote! {
+            if kind == <#kind_ty as ::aether_data::Kind>::ID.0 {
+                if let Some(__decoded) = <#kind_ty as ::aether_data::Kind>::decode_from_bytes(payload) {
+                    self.#method_ident(__decoded);
+                    return Some(());
+                }
+                return None;
+            }
+        }
+    });
+
+    let handler_methods_tokens = handlers.iter().map(|h| &h.method);
+    let helper_methods_tokens = helpers.iter();
+
+    Ok(quote! {
+        #(#handles_kind_impls)*
+
+        impl #impl_generics #self_ty #where_clause {
+            /// Dispatch a single mail to the matching `#[handler]`.
+            /// Returns `Some(())` on match + decode success, `None` for
+            /// unknown kinds or decode failure. Auto-emitted by `#[actor]`
+            /// on a native (chassis cap) inherent impl.
+            #[doc(hidden)]
+            pub fn __dispatch(&mut self, kind: u64, payload: &[u8]) -> Option<()> {
+                #(#dispatch_arms)*
+                None
+            }
+
+            #(#handler_methods_tokens)*
+            #(#helper_methods_tokens)*
+        }
+    })
+}
+
+struct NativeHandlerFn {
+    method: syn::ImplItemFn,
+    kind_ty: Type,
+}
+
+/// Extract `K` from a native handler's second parameter (`arg: K`).
+/// Native handlers don't take a ctx; signature is `(&mut self, K)`.
+fn extract_native_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
+    if sig.inputs.len() != 2 {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "native #[handler] method must have signature `(&mut self, arg: K)`",
+        ));
+    }
+    let first = &sig.inputs[0];
+    if !matches!(first, FnArg::Receiver(_)) {
+        return Err(syn::Error::new_spanned(
+            first,
+            "native #[handler] first parameter must be `&mut self`",
+        ));
+    }
+    let FnArg::Typed(pat_ty) = &sig.inputs[1] else {
+        return Err(syn::Error::new_spanned(
+            &sig.inputs[1],
+            "native #[handler] second parameter must be `arg: K`",
+        ));
+    };
+    Ok((*pat_ty.ty).clone())
 }
 
 /// Extract `K` from a handler method's third parameter (`arg: K`).
