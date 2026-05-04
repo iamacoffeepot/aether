@@ -21,7 +21,9 @@
 //! 3. `terminate_substrate`, spawn another, observe the count
 //!    bumped by one.
 
-use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers, io, resolve_mailbox};
+use aether_component::{
+    BootError, Component, Ctx, InitCtx, Mailbox, handlers, io, resolve_mailbox,
+};
 use aether_kinds::{IoError, Tick};
 
 /// Broadcast payload the Claude session (or any component listening
@@ -63,8 +65,8 @@ pub struct SaveCounter {
 impl Component for SaveCounter {
     const NAMESPACE: &'static str = "save_counter";
 
-    fn init(_ctx: &mut InitCtx<'_>) -> Self {
-        SaveCounter { initialized: false }
+    fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+        Ok(SaveCounter { initialized: false })
     }
 
     /// First tick drives the sync read → increment → write cycle.

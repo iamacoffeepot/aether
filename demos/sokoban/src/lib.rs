@@ -12,7 +12,7 @@
 //! Grid is still capped at 16×16 (pre-ADR-0028 carryover).
 
 use aether_camera::{CameraTopdownSet, TopdownParams};
-use aether_component::{Component, Ctx, InitCtx, KindId, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, KindId, Mailbox, handlers};
 use aether_data::{Kind, Schema};
 use aether_kinds::{DrawTriangle, Key, Tick, Vertex, keycode};
 use bytemuck::{Pod, Zeroable};
@@ -141,7 +141,7 @@ pub struct Sokoban {
 impl Component for Sokoban {
     const NAMESPACE: &'static str = "sokoban";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Self {
+    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
         let mut me = Sokoban {
             state: SokobanState::default(),
             state_kind: ctx.resolve::<SokobanState>(),
@@ -156,7 +156,7 @@ impl Component for Sokoban {
             },
         };
         me.load_level(0);
-        me
+        Ok(me)
     }
 
     #[handler]

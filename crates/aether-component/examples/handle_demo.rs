@@ -22,7 +22,7 @@
 //! thin RAII wrapper over the same wire surface as `io::*` and
 //! `net::*`.
 
-use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers, resolve_mailbox};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers, resolve_mailbox};
 use aether_data::Ref;
 use aether_kinds::Tick;
 
@@ -54,8 +54,8 @@ pub struct HandleDemo {
 impl Component for HandleDemo {
     const NAMESPACE: &'static str = "handle_demo";
 
-    fn init(_ctx: &mut InitCtx<'_>) -> Self {
-        HandleDemo { fired: false }
+    fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+        Ok(HandleDemo { fired: false })
     }
 
     /// First-tick: publish a `Note`, broadcast a `HeldNote` whose

@@ -38,7 +38,7 @@ use aether_camera::{
     CameraCreate, CameraDestroy, CameraOrbitSet, CameraSetActive, CameraSetMode, CameraTopdownSet,
     ModeInit, OrbitParams, TopdownParams,
 };
-use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers};
 use aether_kinds::{Camera, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, Vec2, Vec3};
 
@@ -247,7 +247,7 @@ pub struct CameraComponent {
 impl Component for CameraComponent {
     const NAMESPACE: &'static str = "camera";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Self {
+    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
         let mut cameras = HashMap::new();
         cameras.insert(
             "main".to_owned(),
@@ -255,12 +255,12 @@ impl Component for CameraComponent {
                 mode: ModeState::Orbit(OrbitState::from_params(&OrbitParams::default())),
             },
         );
-        CameraComponent {
+        Ok(CameraComponent {
             cameras,
             active: Some("main".to_owned()),
             aspect: DEFAULT_ASPECT,
             camera: ctx.resolve_mailbox::<Camera>("aether.render"),
-        }
+        })
     }
 
     /// Advance every camera's per-mode state, then publish the active

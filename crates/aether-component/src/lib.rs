@@ -45,6 +45,58 @@
 extern crate alloc;
 
 use aether_actor::MailTransport;
+use alloc::borrow::Cow;
+use alloc::string::String;
+
+/// Error returned by [`WasmActor::init`] when the component cannot
+/// start (config parse failure, required handle missing, malformed
+/// env var). The message rides the `init_failed_p32` host fn into
+/// the substrate, which surfaces it in `LoadResult::Err { error }`
+/// instead of the panic-hook path's generic "guest trapped during
+/// init" text. Issue 525 Phase 4b / issue 531.
+///
+/// Wraps a `Cow<'static, str>` so static-string callers don't
+/// allocate (`BootError::from("config missing")`) while owned
+/// strings still flow through (`BootError::from(format!("..."))`).
+#[derive(Debug, Clone)]
+pub struct BootError {
+    message: Cow<'static, str>,
+}
+
+impl BootError {
+    /// Construct a `BootError` from anything convertible to a
+    /// `Cow<'static, str>` — `&'static str` for compile-time messages,
+    /// `String` for `format!`-built diagnostics.
+    pub fn new<S: Into<Cow<'static, str>>>(message: S) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// Borrow the error text. Used by the `export!` shim to copy
+    /// bytes into the substrate via `init_failed_p32`.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl core::fmt::Display for BootError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<&'static str> for BootError {
+    fn from(s: &'static str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for BootError {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
 
 pub mod io;
 pub mod log;
@@ -209,11 +261,19 @@ pub use aether_actor::Actor;
 /// `WasmTransport` via the `Ctx` / `InitCtx` / `DropCtx` aliases.
 pub trait WasmActor: Actor {
     /// Runs once. Resolve kinds and sinks via `ctx` and return the
-    /// initial component state. A failed `resolve` panics — see
-    /// ADR-0012 §2 ("loud at init"). ADR-0033: `#[handlers]` prepends
+    /// initial component state. ADR-0033: `#[handlers]` prepends
     /// `ctx.subscribe_input::<K>()` for every `K::IS_INPUT` handler
     /// kind so the user body never needs to do it by hand.
-    fn init(ctx: &mut InitCtx<'_>) -> Self;
+    ///
+    /// Returns `Result<Self, BootError>` so a component that hits an
+    /// unrecoverable startup condition (config parse failure, required
+    /// handle missing, malformed env var) can surface its own message
+    /// in `LoadResult::Err { error }` instead of the panic-hook path's
+    /// generic "guest trapped during init" text. Issue 525 Phase 4b /
+    /// issue 531. Most components have no meaningful failure mode and
+    /// return `Ok(Self { ... })` unconditionally. A failed `resolve`
+    /// inside `init` still panics — see ADR-0012 §2 ("loud at init").
+    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError>;
 
     /// Called once on the instance being dropped — both for
     /// `drop_component` and for the old instance of
@@ -375,16 +435,38 @@ macro_rules! __export_internal {
         /// kind. ADR-0060: also installs `MailSubscriber` as the global
         /// `tracing` default before user `init` runs, so logging from
         /// inside `init` reaches the substrate's `aether.log` sink.
+        ///
+        /// Returns `0` on success and non-zero when the component's
+        /// `init` returned `Err(BootError)`. On the `Err` path the
+        /// shim ships the error text to the substrate via the
+        /// `init_failed_p32` host fn before returning, so the
+        /// substrate surfaces the message in `LoadResult::Err`
+        /// instead of a generic instantiation error. Issue 525
+        /// Phase 4b / issue 531.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
             $crate::log::install_global_default();
             let mut ctx: $crate::InitCtx<'_> =
                 $crate::InitCtx::__new(&$crate::WASM_TRANSPORT, mailbox_id);
-            let instance = <$component as $crate::Component>::init(&mut ctx);
-            unsafe {
-                __AETHER_COMPONENT.set(instance);
+            match <$component as $crate::Component>::init(&mut ctx) {
+                Ok(instance) => {
+                    unsafe {
+                        __AETHER_COMPONENT.set(instance);
+                    }
+                    0
+                }
+                Err(err) => {
+                    let msg = err.message();
+                    let bytes = msg.as_bytes();
+                    unsafe {
+                        $crate::raw::init_failed(
+                            bytes.as_ptr().addr() as u32,
+                            bytes.len() as u32,
+                        );
+                    }
+                    1
+                }
             }
-            0
         }
 
         /// # Safety

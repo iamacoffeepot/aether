@@ -27,7 +27,7 @@
 //!
 //! #[handlers]
 //! impl Component for MyComp {
-//!     fn init(_ctx: &mut InitCtx<'_>) -> Self { Self }
+//!     fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> { Ok(Self) }
 //!
 //!     #[handler]
 //!     fn on_tick(&mut self, ctx: &mut Ctx<'_>, _t: Tick) {

@@ -45,7 +45,7 @@
 //! That's as shape-y as this first pass gets; proper X / O glyphs
 //! are a rendering-polish pass for later.
 
-use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers};
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, GameState, LAST_MOVE_NONE, MoveResult, PLAYER_X, PlayMove, SERVER,
 };
@@ -129,8 +129,8 @@ impl Default for TicTacToeClient {
 impl Component for TicTacToeClient {
     const NAMESPACE: &'static str = "tic_tac_toe_client";
 
-    fn init(_ctx: &mut InitCtx<'_>) -> Self {
-        TicTacToeClient::default()
+    fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+        Ok(TicTacToeClient::default())
     }
 
     /// Cached copy of the latest authoritative state. Overwrites

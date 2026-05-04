@@ -312,6 +312,53 @@ fn load_component_missing_import_does_not_reserve_name() {
     );
 }
 
+/// Issue 525 Phase 4b / issue 531: a wasm whose `init` returns a
+/// non-zero status after staging a `BootError` via
+/// `init_failed_p32` produces a `LoadResult::Err` whose `error`
+/// carries the staged message. Without the host-fn plumbing the
+/// guest's diagnostic would be lost in translation and the load
+/// would surface as a generic instantiation error.
+#[test]
+fn load_component_init_failure_surfaces_staged_message() {
+    let plane = make_plane();
+    // The static byte string at offset 0 is exactly 23 bytes;
+    // `init` calls `init_failed_p32(0, 23)` to stage it, then
+    // returns 1 to signal failure. `receive_p32` is exported so
+    // the module is well-formed; it would never run.
+    const WAT_INIT_FAILS: &str = r#"
+            (module
+                (import "aether" "init_failed_p32" (func $init_failed (param i32 i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 0) "boot failed: bad config")
+                (func (export "init") (param i64) (result i32)
+                    i32.const 0
+                    i32.const 23
+                    call $init_failed
+                    i32.const 1)
+                (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                    i32.const 0))
+        "#;
+    let wasm = wat::parse_str(WAT_INIT_FAILS).unwrap();
+    let result = plane.handle_load(
+        &postcard::to_allocvec(&LoadComponent {
+            wasm,
+            name: Some("init_fails".into()),
+        })
+        .unwrap(),
+    );
+    let LoadResult::Err { error } = result else {
+        panic!("expected LoadResult::Err, got {result:?}");
+    };
+    assert!(
+        error.contains("boot failed: bad config"),
+        "staged BootError message should appear in LoadResult::Err, got: {error}",
+    );
+    assert!(
+        plane.registry.lookup("init_fails").is_none(),
+        "failed init must not leave a ghost mailbox",
+    );
+}
+
 /// ADR-0028 / ADR-0032 happy path: a component ships both its
 /// canonical `aether.kinds` record and the paired
 /// `aether.kinds.labels` sidecar. The substrate reads both and

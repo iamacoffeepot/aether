@@ -878,7 +878,7 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
     let init_method = init_method.ok_or_else(|| {
         syn::Error::new_spanned(
             self_ty,
-            "#[handlers] requires `fn init(ctx: &mut InitCtx<'_>) -> Self`",
+            "#[handlers] requires `fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError>`",
         )
     })?;
 

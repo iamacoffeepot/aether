@@ -16,7 +16,7 @@
 //! MCP via the same section so the harness sees typed capabilities
 //! plus author-written intent for each inbox.
 
-use aether_component::{Component, Ctx, InitCtx, KindId, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, KindId, Mailbox, handlers};
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
@@ -66,11 +66,11 @@ pub struct Hello {
 impl Component for Hello {
     const NAMESPACE: &'static str = "hello";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Self {
-        Hello {
+    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Hello {
             pong: ctx.resolve::<Pong>(),
             render: ctx.resolve_mailbox::<DrawTriangle>("aether.render"),
-        }
+        })
     }
 
     /// Emits the configured triangle to the render sink every tick.

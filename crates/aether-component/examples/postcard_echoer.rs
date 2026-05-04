@@ -13,7 +13,7 @@
 //! to wasm; load via `mcp__aether-hub__load_component` and send
 //! `demo.postcard_request` to verify the dispatch.
 
-use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers};
 use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
@@ -47,10 +47,10 @@ pub struct PostcardEchoer {
 impl Component for PostcardEchoer {
     const NAMESPACE: &'static str = "postcard_echoer";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Self {
-        PostcardEchoer {
+    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+        Ok(PostcardEchoer {
             broadcast: ctx.resolve_mailbox::<PostcardObserved>("hub.claude.broadcast"),
-        }
+        })
     }
 
     /// Decoded postcard payload arrives as the third parameter. No
