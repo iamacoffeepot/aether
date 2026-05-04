@@ -17,15 +17,16 @@ use std::sync::Arc;
 
 use aether_data::Kind;
 use aether_kinds::{
-    Advance, CaptureFrame, IoCapability, LogCapability, NetCapability, PlatformInfo, SetWindowMode,
-    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, WindowMode,
+    Advance, AudioCapability, CaptureFrame, IoCapability, LogCapability, NetCapability,
+    PlatformInfo, SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
+    WindowMode,
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
-        AudioCapability, IoAdapterBackend, LogTracingBackend, NetAdapterBackend, RenderCapability,
+        CpalAudioBackend, IoAdapterBackend, LogTracingBackend, NetAdapterBackend, RenderCapability,
         RenderConfig, audio::AudioConfig as AudioConf, io::NamespaceRoots,
         net::NetConfig as NetConf,
     },
@@ -350,12 +351,13 @@ impl DesktopChassis {
         let io_backend = IoAdapterBackend::new(namespace_roots, Arc::clone(&mailer))
             .map_err(|e| BootError::Other(Box::new(e)))?;
         let net_backend = NetAdapterBackend::new(net, Arc::clone(&mailer));
+        let audio_backend = CpalAudioBackend::new(audio, Arc::clone(&mailer));
         Builder::<DesktopChassis>::new(registry, mailer)
             .with_aborter(aborter)
             .with_facade(LogCapability::new(LogTracingBackend::new()))
             .with_facade(IoCapability::new(io_backend))
             .with_facade(NetCapability::new(net_backend))
-            .with(AudioCapability::new(audio))
+            .with_facade(AudioCapability::new(audio_backend))
             .with(RenderCapability::new(RenderConfig::default()))
             .driver(driver)
             .build()
