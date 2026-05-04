@@ -1,13 +1,13 @@
 // Test-bench wgpu shim. ADR-0071 phase C3: pipeline + targets +
-// device + queue ownership all live inside core's `RenderRunning`
+// device + queue ownership all live inside core's `RenderCapability`
 // (via `RenderGpu` + `install_gpu`). What's left in this file is the
 // thinnest reasonable wrapper: device acquisition (offscreen, no
 // surface), and per-frame helpers that wrap encoder lifecycle around
-// `RenderRunning`'s encoder-level methods.
+// `RenderCapability`'s encoder-level methods.
 
 use std::sync::Arc;
 
-use aether_substrate::capabilities::{RenderGpu, RenderRunning};
+use aether_substrate::capabilities::{RenderCapability, RenderGpu};
 use aether_substrate::render::RenderError;
 
 pub use aether_substrate::render::VERTEX_BUFFER_BYTES;
@@ -24,7 +24,7 @@ pub struct Gpu {
     /// `Err` to.
     #[allow(dead_code)]
     pub limits: wgpu::Limits,
-    render_running: Arc<RenderRunning>,
+    render_running: Arc<RenderCapability>,
 }
 
 impl Gpu {
@@ -33,7 +33,7 @@ impl Gpu {
     /// `render_running` so encoder methods on the running can read
     /// them. `width` and `height` size the offscreen color + depth
     /// targets — the dimensions every captured frame will report.
-    pub fn new(width: u32, height: u32, render_running: Arc<RenderRunning>) -> Self {
+    pub fn new(width: u32, height: u32, render_running: Arc<RenderCapability>) -> Self {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

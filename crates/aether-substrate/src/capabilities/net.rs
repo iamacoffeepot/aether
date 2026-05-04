@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability, SinkSender};
+use crate::capability::{BootError, Capability, ChassisCtx, SinkSender};
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
 use crate::native_transport::NativeTransport;
@@ -445,42 +445,45 @@ fn dispatch_net_mail(
 /// Native capability owning the ADR-0043 net-egress sink. Constructor
 /// takes a [`NetConfig`] (resolved from env or built explicitly by
 /// the chassis main per issue 464).
+///
+/// Post-issue-525-Phase-2 the cap is one struct: pre-boot config
+/// (`config`) lives alongside the runtime fields populated in
+/// `boot`. `Drop` runs the prior `shutdown` body.
 pub struct NetCapability {
-    config: NetConfig,
+    config: Option<NetConfig>,
+    thread: Option<JoinHandle<()>>,
+    sink_sender: Option<SinkSender>,
+    _transport: Option<Arc<NativeTransport>>,
 }
 
 impl NetCapability {
     pub fn new(config: NetConfig) -> Self {
-        Self { config }
+        Self {
+            config: Some(config),
+            thread: None,
+            sink_sender: None,
+            _transport: None,
+        }
     }
 }
 
-/// Running handle returned by [`NetCapability::boot`]. Holds the
-/// dispatcher's `JoinHandle`, the [`SinkSender`] strong handle that
-/// drives channel-drop shutdown, and the actor's
-/// [`NativeTransport`] (kept alive for the dispatcher thread's
-/// lifetime via the `Arc` clone the spawn closure holds).
-pub struct NetRunning {
-    thread: Option<JoinHandle<()>>,
-    sink_sender: Option<SinkSender>,
-    _transport: Arc<NativeTransport>,
-}
-
 impl Capability for NetCapability {
-    type Running = NetRunning;
-
     /// Components mail `aether.net.{fetch,cancel}` (kind ids) to this
     /// mailbox; the SDK helpers in `aether-component::net` resolve
     /// through here. The `aether.<name>` form is the post-ADR-0074
     /// Phase 5 convention for chassis-owned mailboxes.
     const NAMESPACE: &'static str = "aether.net";
 
-    fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+    fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
         let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();
         let mailbox_id = claim.id;
-        let default_timeout = self.config.default_timeout;
-        let adapter = build_net_adapter(self.config);
+        let config = self
+            .config
+            .take()
+            .expect("NetCapability::boot called twice — `config` already consumed");
+        let default_timeout = config.default_timeout;
+        let adapter = build_net_adapter(config);
 
         let transport = Arc::new(NativeTransport::from_ctx(
             ctx,
@@ -493,9 +496,6 @@ impl Capability for NetCapability {
         let thread = thread::Builder::new()
             .name("aether-net-sink".into())
             .spawn(move || {
-                // Channel-drop + join: pull until the sender side
-                // disconnects. Worst-case shutdown latency is the
-                // OS scheduler's wakeup, not a 100ms poll interval.
                 while let Some(env) = dispatcher_transport.recv_blocking() {
                     dispatch_net_mail(
                         adapter.as_ref(),
@@ -509,24 +509,18 @@ impl Capability for NetCapability {
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
-        Ok(NetRunning {
-            thread: Some(thread),
-            sink_sender: Some(claim.sink_sender),
-            _transport: transport,
-        })
+        self.thread = Some(thread);
+        self.sink_sender = Some(claim.sink_sender);
+        self._transport = Some(transport);
+        Ok(self)
     }
 }
 
-impl RunningCapability for NetRunning {
-    fn shutdown(self: Box<Self>) {
-        let NetRunning {
-            mut thread,
-            mut sink_sender,
-            _transport,
-        } = *self;
+impl Drop for NetCapability {
+    fn drop(&mut self) {
         // Drop the strong sender first to break the channel.
-        sink_sender.take();
-        if let Some(t) = thread.take() {
+        self.sink_sender.take();
+        if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
     }

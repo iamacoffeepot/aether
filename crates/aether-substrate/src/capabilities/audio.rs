@@ -42,7 +42,7 @@ use std::thread::{self, JoinHandle};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
-use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability, SinkSender};
+use crate::capability::{BootError, Capability, ChassisCtx, SinkSender};
 use crate::mail::{ReplyTarget, ReplyTo};
 use crate::mailer::Mailer;
 use crate::native_transport::NativeTransport;
@@ -790,43 +790,45 @@ fn dispatch_audio_mail(
 /// Native capability owning the ADR-0039 audio sink. Constructor
 /// takes an [`AudioConfig`] (resolved from env or built explicitly
 /// by the chassis main per issue 464).
+///
+/// Post-issue-525-Phase-2 the cap is one struct: pre-boot config
+/// (`config`) lives alongside the runtime fields populated in
+/// `boot`. `Drop` runs the prior `shutdown` body. The cpal pipeline
+/// (with its `!Send`-on-macOS `Stream`) lives entirely on the
+/// dispatcher thread and tears down when the thread exits.
 pub struct AudioCapability {
-    config: AudioConfig,
+    config: Option<AudioConfig>,
+    thread: Option<JoinHandle<()>>,
+    sink_sender: Option<SinkSender>,
+    _transport: Option<Arc<NativeTransport>>,
 }
 
 impl AudioCapability {
     pub fn new(config: AudioConfig) -> Self {
-        Self { config }
+        Self {
+            config: Some(config),
+            thread: None,
+            sink_sender: None,
+            _transport: None,
+        }
     }
 }
 
-/// Running handle returned by [`AudioCapability::boot`]. Holds the
-/// dispatcher's `JoinHandle`, the [`SinkSender`] strong handle that
-/// drives channel-drop shutdown, and the actor's
-/// [`NativeTransport`] (kept alive for the dispatcher thread's
-/// lifetime via the `Arc` clone the spawn closure holds). The cpal
-/// pipeline (with its `!Send`-on-macOS `Stream`) lives entirely on
-/// the dispatcher thread and tears down when the thread exits.
-pub struct AudioRunning {
-    thread: Option<JoinHandle<()>>,
-    sink_sender: Option<SinkSender>,
-    _transport: Arc<NativeTransport>,
-}
-
 impl Capability for AudioCapability {
-    type Running = AudioRunning;
-
     /// Components mail `aether.audio.{note_on,note_off,set_master_gain}`
     /// (kind ids) to this mailbox; the synth pulls from here. The
     /// `aether.<name>` form is the post-ADR-0074 Phase 5 convention
     /// for chassis-owned mailboxes.
     const NAMESPACE: &'static str = "aether.audio";
 
-    fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+    fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
         let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();
         let mailbox_id = claim.id;
-        let config = self.config;
+        let config = self
+            .config
+            .take()
+            .expect("AudioCapability::boot called twice — `config` already consumed");
 
         let transport = Arc::new(NativeTransport::from_ctx(
             ctx,
@@ -863,9 +865,6 @@ impl Capability for AudioCapability {
                 };
                 let audio_sender = pipeline.as_ref().map(|p| p.sender.clone());
 
-                // Channel-drop + join: pull until the sender side
-                // disconnects. Worst-case shutdown latency is the
-                // OS scheduler's wakeup, not a 100ms poll interval.
                 while let Some(env) = dispatcher_transport.recv_blocking() {
                     dispatch_audio_mail(
                         &mailer,
@@ -880,24 +879,18 @@ impl Capability for AudioCapability {
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
-        Ok(AudioRunning {
-            thread: Some(thread),
-            sink_sender: Some(claim.sink_sender),
-            _transport: transport,
-        })
+        self.thread = Some(thread);
+        self.sink_sender = Some(claim.sink_sender);
+        self._transport = Some(transport);
+        Ok(self)
     }
 }
 
-impl RunningCapability for AudioRunning {
-    fn shutdown(self: Box<Self>) {
-        let AudioRunning {
-            mut thread,
-            mut sink_sender,
-            _transport,
-        } = *self;
+impl Drop for AudioCapability {
+    fn drop(&mut self) {
         // Drop the strong sender first to break the channel.
-        sink_sender.take();
-        if let Some(t) = thread.take() {
+        self.sink_sender.take();
+        if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
     }

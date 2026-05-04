@@ -33,7 +33,7 @@ use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, SubstrateBoot,
-    capabilities::{RenderHandles, RenderRunning},
+    capabilities::{RenderCapability, RenderHandles},
     frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
@@ -71,11 +71,11 @@ pub struct App {
     kind_mouse_move: aether_data::KindId,
     kind_window_size: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
-    /// Cloned out of `RenderRunning` at driver boot. Source-of-truth
+    /// Cloned out of `RenderCapability` at driver boot. Source-of-truth
     /// lives in core's `RenderCapability`; the app holds a clone so
     /// `Gpu::new` can install wgpu state and the per-frame loop can
     /// call `record_frame` / `record_capture_copy` / `finish_capture`.
-    render_running: Arc<RenderRunning>,
+    render_running: Arc<RenderCapability>,
     triangles_rendered: Arc<AtomicU64>,
     /// Shared single-slot queue with the control plane. On each
     /// redraw we `take()` any pending capture and, if present, use
@@ -691,7 +691,7 @@ impl ApplicationHandler<UserEvent> for App {
 /// ADR-0071 driver capability for the desktop chassis. Owns the
 /// pieces the winit event-loop body needs at construction time, then
 /// `boot()`-builds the App + DriverRunning that drives the loop.
-/// `boot()` looks up [`RenderRunning`] via [`DriverCtx::expect`]
+/// `boot()` looks up [`RenderCapability`] via [`DriverCtx::expect`]
 /// (booted earlier in the `.with()` chain) and pulls the accumulator
 /// handles out of it.
 ///
@@ -739,10 +739,10 @@ impl DriverCapability for DesktopDriverCapability {
 
         // Look up RenderCapability's running via the chassis_builder
         // typed-store (ADR-0071). The render passive booted before
-        // this driver, so its `RenderRunning` is in the typed map;
+        // this driver, so its `RenderCapability` is in the typed map;
         // pull the accumulator handles for the per-frame loop to
         // read.
-        let render_running: Arc<RenderRunning> = ctx.expect();
+        let render_running: Arc<RenderCapability> = ctx.expect();
         let RenderHandles {
             frame_vertices: _,
             camera_state: _,

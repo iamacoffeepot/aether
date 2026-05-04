@@ -51,8 +51,7 @@ use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{KindDescriptor, KindId, MailboxId};
 use aether_substrate::{
     BootError, Capability, ChassisCtx, EgressBackend, HubOutbound, LogEntry as SubstrateLogEntry,
-    LogLevel as SubstrateLogLevel, Mail, Mailer, Registry, ReplyTarget, ReplyTo, RunningCapability,
-    SubstrateBoot,
+    LogLevel as SubstrateLogLevel, Mail, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,
 };
 use tokio::net::TcpListener;
 
@@ -480,12 +479,22 @@ fn unix_now() -> u64 {
 /// composition time. A successful connect calls
 /// `outbound.attach_backend(...)` which is what makes substrate-side
 /// egress flow upward through the TCP socket.
+/// Post-issue-525-Phase-2 the cap is one struct: pre-boot config
+/// (`url`, `name`, `version`, `kinds`, `outbound`) is consumed by
+/// `boot` to produce the live `client`. The cap's [`Drop`] impl is a
+/// no-op — dropping the inner [`HubClient`] is enough; the writer
+/// thread observes the dropped channel and exits, the reader thread
+/// observes the closed socket and exits, and the heartbeat thread
+/// observes the closed channel and exits.
 pub struct HubClientCapability {
     url: Option<String>,
-    name: String,
-    version: String,
-    kinds: Vec<KindDescriptor>,
-    outbound: Arc<HubOutbound>,
+    name: Option<String>,
+    version: Option<String>,
+    kinds: Option<Vec<KindDescriptor>>,
+    outbound: Option<Arc<HubOutbound>>,
+    /// Live client populated by `boot` on a successful dial; `None`
+    /// when the constructor's `url` was `None` / empty.
+    pub client: Option<HubClient>,
 }
 
 impl HubClientCapability {
@@ -508,70 +517,59 @@ impl HubClientCapability {
     ) -> Self {
         Self {
             url,
-            name: name.into(),
-            version: version.into(),
-            kinds,
-            outbound,
+            name: Some(name.into()),
+            version: Some(version.into()),
+            kinds: Some(kinds),
+            outbound: Some(outbound),
+            client: None,
         }
     }
 }
 
-/// Post-boot handle for [`HubClientCapability`]. Holds the live
-/// [`HubClient`] (its `JoinHandle`s) when the capability successfully
-/// dialed; `None` when the constructor's `url` was `None` or empty.
-/// On chassis shutdown the [`RunningCapability::shutdown`] impl drops
-/// the client; the writer thread observes the dropped channel and
-/// exits, the reader thread observes the closed socket and exits, and
-/// the heartbeat thread observes the closed channel and exits.
-pub struct HubClientRunning {
-    pub client: Option<HubClient>,
-}
-
 impl Capability for HubClientCapability {
-    type Running = HubClientRunning;
-
     /// The hub-client cap dials a TCP socket; it does not claim a
     /// chassis mailbox. The `NAMESPACE` const is required by the
     /// trait (issue 525 Phase 1) but never address-resolved, so the
     /// value here is purely diagnostic.
     const NAMESPACE: &'static str = "chassis.hub_client";
 
-    fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+    fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
         let url = match self.url.as_deref() {
             Some(u) if !u.is_empty() => u.to_owned(),
-            _ => return Ok(HubClientRunning { client: None }),
+            _ => {
+                // No-op boot — preserves the pre-Phase-2 "boots cleanly
+                // without dialing" semantic. `client` stays `None`.
+                return Ok(self);
+            }
         };
         let registry = Arc::clone(ctx.registry());
         let queue = Arc::clone(ctx.mailer());
+        let name = self.name.take().expect("HubClientCapability::boot twice");
+        let version = self
+            .version
+            .take()
+            .expect("HubClientCapability::boot twice");
+        let kinds = self.kinds.take().expect("HubClientCapability::boot twice");
+        let outbound = self
+            .outbound
+            .take()
+            .expect("HubClientCapability::boot twice");
         let client = HubClient::connect(
             url.as_str(),
-            self.name,
-            self.version,
-            self.kinds,
+            name,
+            version,
+            kinds,
             registry,
             queue,
-            self.outbound,
+            outbound,
         )
         .map_err(|e| {
             BootError::Other(Box::new(io::Error::other(format!(
                 "hub connect to {url:?} failed: {e}"
             ))))
         })?;
-        Ok(HubClientRunning {
-            client: Some(client),
-        })
-    }
-}
-
-impl RunningCapability for HubClientRunning {
-    fn shutdown(self: Box<Self>) {
-        // Dropping the `HubClient` drops its writer/reader/heartbeat
-        // join handles, which detaches them — they exit naturally
-        // when the TCP socket closes or the outbound channel drains.
-        // No explicit join: chassis shutdown is best-effort about hub
-        // teardown (ADR-0063 fail-fast already handles the abort
-        // case via `flush_now`).
-        drop(self);
+        self.client = Some(client);
+        Ok(self)
     }
 }
 

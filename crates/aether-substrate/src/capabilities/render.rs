@@ -32,7 +32,7 @@
 //! pull the accumulator `Arc`s before the capability's `boot()` moves
 //! `self`. Once chassis composition migrates to the chassis_builder
 //! `Builder` (ADR-0071), drivers will read the same `Arc`s through
-//! `DriverCtx::expect::<RenderRunning>()` instead.
+//! `DriverCtx::expect::<RenderCapability>()` instead.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,9 +42,7 @@ use std::thread::{self, JoinHandle};
 use aether_data::Kind;
 use aether_kinds::{Camera, DRAW_TRIANGLE_BYTES, DrawTriangle};
 
-use crate::capability::{
-    BootError, Capability, ChassisCtx, Envelope, RunningCapability, SinkSender,
-};
+use crate::capability::{BootError, Capability, ChassisCtx, Envelope, SinkSender};
 use crate::render::{
     CaptureMeta, IDENTITY_VIEW_PROJ, Pipeline, RenderError, Targets, build_main_pipeline,
     finish_capture, prepare_capture_copy, record_main_pass,
@@ -75,13 +73,30 @@ impl Default for RenderConfig {
 }
 
 /// Render sink capability. Constructed before [`Capability::boot`];
-/// the accumulator `Arc`s are pre-allocated and exposed via
-/// [`Self::handles`] so a chassis using the legacy
-/// `boot.add_capability` path can capture them before the capability
-/// moves into boot.
+/// the accumulator `Arc`s are pre-allocated so the chassis frame
+/// loop and the dispatcher thread share the same backing storage.
+///
+/// Post-issue-525-Phase-2 the cap is one struct: pre-boot config
+/// (`config`, `handles`) lives alongside the runtime fields populated
+/// in `boot` (`thread`, `sink_sender`, `gpu`). The encoder-level
+/// methods (`install_gpu`, `record_frame`, `record_capture_copy`,
+/// etc.) live as inherent methods directly on `RenderCapability` —
+/// drivers retrieve the cap via `DriverCtx::expect::<RenderCapability>()`
+/// and call those methods on the returned `Arc<RenderCapability>`.
 pub struct RenderCapability {
     config: RenderConfig,
     handles: RenderHandles,
+    thread: Option<JoinHandle<()>>,
+    sink_sender: Option<SinkSender>,
+    /// wgpu state, installed post-boot by the driver via
+    /// [`Self::install_gpu`]. Boots empty because winit 0.30's
+    /// `ActiveEventLoop::create_window` only fires inside `resumed`,
+    /// after [`Capability::boot`] has returned. Test-bench (no
+    /// surface) installs immediately after `build_passive`; desktop
+    /// installs in its `resumed` handler. Encoder-level methods
+    /// panic if called before install — in practice every code path
+    /// that calls them runs after the install site.
+    gpu: OnceLock<RenderGpu>,
 }
 
 /// Bundle of accumulator state shared between the capability's
@@ -104,7 +119,13 @@ impl RenderCapability {
             triangles_rendered: Arc::new(AtomicU64::new(0)),
             camera_state: Arc::new(Mutex::new(IDENTITY_VIEW_PROJ)),
         };
-        Self { config, handles }
+        Self {
+            config,
+            handles,
+            thread: None,
+            sink_sender: None,
+            gpu: OnceLock::new(),
+        }
     }
 
     /// Pre-boot accessor for the accumulator state. Cloned references
@@ -115,22 +136,7 @@ impl RenderCapability {
     }
 }
 
-pub struct RenderRunning {
-    handles: RenderHandles,
-    thread: Option<JoinHandle<()>>,
-    sink_sender: Option<SinkSender>,
-    /// wgpu state, installed post-boot by the driver via
-    /// [`Self::install_gpu`]. Boots empty because winit 0.30's
-    /// `ActiveEventLoop::create_window` only fires inside `resumed`,
-    /// after [`Capability::boot`] has returned. Test-bench (no
-    /// surface) installs immediately after `build_passive`; desktop
-    /// installs in its `resumed` handler. Encoder-level methods
-    /// panic if called before install — in practice every code path
-    /// that calls them runs after the install site.
-    gpu: OnceLock<RenderGpu>,
-}
-
-/// Bundle of wgpu resources `RenderRunning` owns post-install.
+/// Bundle of wgpu resources `RenderCapability` owns post-install.
 /// Constructed by the driver from a wgpu device + queue obtained via
 /// `Adapter::request_device` (desktop: with surface compatibility;
 /// test-bench: offscreen-only). Holds the pipeline + offscreen
@@ -146,7 +152,7 @@ pub struct RenderGpu {
 
 impl RenderGpu {
     /// Build the standard render pipeline + offscreen targets at the
-    /// given size and pass [`Self`] to [`RenderRunning::install_gpu`].
+    /// given size and pass [`Self`] to [`RenderCapability::install_gpu`].
     /// `polygon_mode` is `Fill` for the normal case; desktop's
     /// `AETHER_WIREFRAME=line` chassis env passes `Line` so the main
     /// pipeline draws as wireframe instead of building a separate
@@ -171,16 +177,7 @@ impl RenderGpu {
     }
 }
 
-impl RenderRunning {
-    /// Post-boot accessor for the accumulator state. Used by drivers
-    /// reading via the chassis_builder typed lookup once render
-    /// migrates onto the new builder; the legacy
-    /// `boot.add_capability` path uses [`RenderCapability::handles`]
-    /// instead.
-    pub fn handles(&self) -> RenderHandles {
-        self.handles.clone()
-    }
-
+impl RenderCapability {
     /// Install the wgpu resources the encoder-level methods read. The
     /// driver constructs [`RenderGpu`] once it has a device + queue —
     /// for desktop that's inside `resumed` after winit hands back a
@@ -192,7 +189,7 @@ impl RenderRunning {
         self.gpu
             .set(gpu)
             .ok()
-            .expect("RenderRunning::install_gpu called twice");
+            .expect("RenderCapability::install_gpu called twice");
     }
 
     /// Returns the installed [`RenderGpu`], or `None` if `install_gpu`
@@ -205,7 +202,7 @@ impl RenderRunning {
 
     fn expect_gpu(&self) -> &RenderGpu {
         self.gpu.get().expect(
-            "RenderRunning::install_gpu must be called before encoder-level methods. \
+            "RenderCapability::install_gpu must be called before encoder-level methods. \
              Desktop installs in winit's resumed; test-bench installs after build_passive.",
         )
     }
@@ -315,8 +312,6 @@ impl RenderRunning {
 }
 
 impl Capability for RenderCapability {
-    type Running = RenderRunning;
-
     /// Components mail `aether.draw_triangle` and `aether.camera`
     /// (kind ids) to this mailbox; the GPU recorder pulls from here.
     /// The `aether.<name>` form is the post-ADR-0074 Phase 5
@@ -331,16 +326,14 @@ impl Capability for RenderCapability {
     /// dropping a triangle the component meant for this frame.
     const FRAME_BARRIER: bool = true;
 
-    fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let RenderCapability { config, handles } = self;
-
+    fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
         let claim = ctx.claim_frame_bound_mailbox::<Self>()?;
 
-        let frame_vertices = Arc::clone(&handles.frame_vertices);
-        let triangles_rendered = Arc::clone(&handles.triangles_rendered);
-        let camera_state = Arc::clone(&handles.camera_state);
-        let cap_bytes = config.vertex_buffer_bytes;
-        let observed = config.observed_kinds.clone();
+        let frame_vertices = Arc::clone(&self.handles.frame_vertices);
+        let triangles_rendered = Arc::clone(&self.handles.triangles_rendered);
+        let camera_state = Arc::clone(&self.handles.camera_state);
+        let cap_bytes = self.config.vertex_buffer_bytes;
+        let observed = self.config.observed_kinds.clone();
         let pending = Arc::clone(&claim.pending);
         let receiver = claim.receiver;
 
@@ -348,7 +341,7 @@ impl Capability for RenderCapability {
             .name("aether-render-sink".into())
             .spawn(move || {
                 // Channel-drop + join: the sender lives on
-                // `RenderRunning.sink_sender`; shutdown drops it,
+                // `RenderCapability.sink_sender`; shutdown drops it,
                 // disconnecting the channel so `recv()` returns
                 // `Err(Disconnected)` and the loop exits.
                 while let Ok(env) = receiver.recv() {
@@ -371,26 +364,17 @@ impl Capability for RenderCapability {
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
-        Ok(RenderRunning {
-            handles,
-            thread: Some(thread),
-            sink_sender: Some(claim.sink_sender),
-            gpu: OnceLock::new(),
-        })
+        self.thread = Some(thread);
+        self.sink_sender = Some(claim.sink_sender);
+        Ok(self)
     }
 }
 
-impl RunningCapability for RenderRunning {
-    fn shutdown(self: Box<Self>) {
-        let RenderRunning {
-            handles: _,
-            mut thread,
-            mut sink_sender,
-            gpu: _,
-        } = *self;
+impl Drop for RenderCapability {
+    fn drop(&mut self) {
         // Drop the strong sender to break the channel.
-        sink_sender.take();
-        if let Some(t) = thread.take() {
+        self.sink_sender.take();
+        if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
         // gpu drops here; wgpu device/queue/pipeline/targets clean up

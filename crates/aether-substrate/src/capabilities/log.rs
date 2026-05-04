@@ -27,7 +27,7 @@
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability, SinkSender};
+use crate::capability::{BootError, Capability, ChassisCtx, SinkSender};
 use crate::log_sink;
 use crate::native_transport::NativeTransport;
 
@@ -37,11 +37,29 @@ use crate::native_transport::NativeTransport;
 /// [`log_sink::handle_log_mail`] for postcard-decode + log-facade
 /// emit.
 ///
-/// Stateless beyond the per-actor transport: the global tracing
-/// subscriber (set up by [`crate::log_capture::init`] during the
-/// shared boot) is what actually receives the bridged log records.
+/// Post-issue-525-Phase-2 the cap is one struct: pre-boot fields are
+/// empty (no constructor config), runtime fields are populated by
+/// `boot` and dropped via [`Drop`]. Stateless beyond the per-actor
+/// transport — the global tracing subscriber (set up by
+/// [`crate::log_capture::init`] during the shared boot) is what
+/// actually receives the bridged log records.
 #[derive(Default)]
-pub struct LogCapability {}
+pub struct LogCapability {
+    thread: Option<JoinHandle<()>>,
+    /// Drop-on-shutdown breaks the channel. Held in an `Option` so
+    /// the [`Drop`] impl can take it before joining the thread; the
+    /// registry's handler can no longer upgrade its
+    /// [`std::sync::Weak`] back-reference, the inbox's last sender
+    /// is gone, and the dispatcher's `recv_blocking()` returns
+    /// `None` on its next iteration.
+    sink_sender: Option<SinkSender>,
+    /// The actor's transport. The dispatcher thread holds an
+    /// `Arc::clone`, so this field exists to keep the same
+    /// transport reachable from chassis-side code that wants to
+    /// inspect or coordinate with this actor (none today; the
+    /// extension point is here without thread-local plumbing).
+    _transport: Option<Arc<NativeTransport>>,
+}
 
 impl LogCapability {
     pub fn new() -> Self {
@@ -49,38 +67,14 @@ impl LogCapability {
     }
 }
 
-/// Running handle returned by [`LogCapability::boot`]. Holds the
-/// dispatcher's `JoinHandle`, the [`SinkSender`] strong handle that
-/// drives channel-drop shutdown, and the actor's
-/// [`NativeTransport`] (kept alive for the dispatcher thread's
-/// lifetime via the `Arc` clone the spawn closure holds).
-pub struct LogRunning {
-    thread: Option<JoinHandle<()>>,
-    /// Drop-on-shutdown breaks the channel. Held by name so the
-    /// `RunningCapability::shutdown` impl can drop it explicitly
-    /// before joining the thread; the registry's handler can no
-    /// longer upgrade its [`std::sync::Weak`] back-reference, the
-    /// inbox's last sender is gone, and the dispatcher's
-    /// `recv_blocking()` returns `None` on its next iteration.
-    sink_sender: Option<SinkSender>,
-    /// The actor's transport. The dispatcher thread holds an
-    /// `Arc::clone`, so this field exists to keep the same
-    /// transport reachable from chassis-side code that wants to
-    /// inspect or coordinate with this actor (none today; the
-    /// extension point is here without thread-local plumbing).
-    _transport: Arc<NativeTransport>,
-}
-
 impl Capability for LogCapability {
-    type Running = LogRunning;
-
     /// Components mail `aether.log` (kind id) to this mailbox; the
     /// SDK's `MailSubscriber` resolves through here. The
     /// `aether.<name>` form is the post-ADR-0074 Phase 5 convention
     /// for chassis-owned mailboxes.
     const NAMESPACE: &'static str = "aether.log";
 
-    fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
+    fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
         let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
         let mailbox_id = claim.id;
 
@@ -114,24 +108,18 @@ impl Capability for LogCapability {
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
-        Ok(LogRunning {
-            thread: Some(thread),
-            sink_sender: Some(claim.sink_sender),
-            _transport: transport,
-        })
+        self.thread = Some(thread);
+        self.sink_sender = Some(claim.sink_sender);
+        self._transport = Some(transport);
+        Ok(self)
     }
 }
 
-impl RunningCapability for LogRunning {
-    fn shutdown(self: Box<Self>) {
-        let LogRunning {
-            mut thread,
-            mut sink_sender,
-            _transport,
-        } = *self;
+impl Drop for LogCapability {
+    fn drop(&mut self) {
         // Drop the strong sender first to break the channel.
-        sink_sender.take();
-        if let Some(t) = thread.take() {
+        self.sink_sender.take();
+        if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
     }
