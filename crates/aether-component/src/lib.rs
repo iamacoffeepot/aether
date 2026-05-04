@@ -123,11 +123,11 @@ impl MailTransport for WasmTransport {
 }
 
 // 1-arg specialisations of the actor SDK's transport-generic types.
-// Existing component code keeps writing `Sink<MyKind>`, `Ctx<'_>`,
-// `InitCtx<'_>`, `DropCtx<'_>` — the alias pins `T = WasmTransport`.
+// Component code writes `Mailbox<MyKind>`, `Ctx<'_>`, `InitCtx<'_>`,
+// `DropCtx<'_>` — the alias pins `T = WasmTransport`.
 
-/// Wasm-flavoured [`aether_actor::Sink`].
-pub type Sink<K> = aether_actor::Sink<K, WasmTransport>;
+/// Wasm-flavoured [`aether_actor::Mailbox`].
+pub type Mailbox<K> = aether_actor::Mailbox<K, WasmTransport>;
 /// Wasm-flavoured [`aether_actor::Ctx`].
 pub type Ctx<'a> = aether_actor::Ctx<'a, WasmTransport>;
 /// Wasm-flavoured [`aether_actor::InitCtx`].
@@ -146,13 +146,13 @@ pub use aether_actor::{
     NO_REPLY_HANDLE, PriorState, ReplyTo, Slot, WaitError, decode_wait_reply, resolve, wait_reply,
 };
 
-/// Wasm-flavoured `resolve_sink` — pins `T = WasmTransport` so the
-/// existing `resolve_sink::<MyKind>(name)` call shape (1 turbofish
-/// arg) keeps working. The transport-generic version is at
-/// [`aether_actor::resolve_sink`] for hand-rolled callers that want
-/// to spell out a non-wasm transport.
-pub const fn resolve_sink<K: aether_data::Kind>(mailbox_name: &str) -> Sink<K> {
-    aether_actor::resolve_sink::<K, WasmTransport>(mailbox_name)
+/// Wasm-flavoured `resolve_mailbox` — pins `T = WasmTransport` so the
+/// 1-turbofish-arg call shape `resolve_mailbox::<MyKind>(name)` works
+/// without spelling out the transport. The transport-generic version
+/// is at [`aether_actor::resolve_mailbox`] for hand-rolled callers
+/// that want a non-wasm transport.
+pub const fn resolve_mailbox<K: aether_data::Kind>(mailbox_name: &str) -> Mailbox<K> {
+    aether_actor::resolve_mailbox::<K, WasmTransport>(mailbox_name)
 }
 /// Re-export the typed-handle module path so existing
 /// `aether_component::handle::publish` callers compile unchanged.
@@ -289,7 +289,7 @@ macro_rules! export {
         /// address `subscribe_input` for every `K::IS_INPUT` handler
         /// kind. ADR-0060: also installs `MailSubscriber` as the global
         /// `tracing` default before user `init` runs, so logging from
-        /// inside `init` reaches the substrate's `aether.sink.log` sink.
+        /// inside `init` reaches the substrate's `aether.log` sink.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
             $crate::log::install_global_default();
@@ -454,15 +454,15 @@ mod tests {
     /// breaks (e.g. someone parameterises it with a different default
     /// transport) this test fails to compile.
     #[test]
-    fn sink_alias_resolves_to_wasm_transport() {
+    fn mailbox_alias_resolves_to_wasm_transport() {
         use core::any::TypeId;
-        // Building a `Sink<FakePostcard>` value via the const resolver
-        // is enough — its type identity is what matters here, not the
-        // mailbox lookup.
-        let _: Sink<FakePostcard> = resolve_sink::<FakePostcard>("test.smoke");
+        // Building a `Mailbox<FakePostcard>` value via the const
+        // resolver is enough — its type identity is what matters
+        // here, not the mailbox lookup.
+        let _: Mailbox<FakePostcard> = resolve_mailbox::<FakePostcard>("test.smoke");
         assert_eq!(
-            TypeId::of::<Sink<FakePostcard>>(),
-            TypeId::of::<aether_actor::Sink<FakePostcard, WasmTransport>>(),
+            TypeId::of::<Mailbox<FakePostcard>>(),
+            TypeId::of::<aether_actor::Mailbox<FakePostcard, WasmTransport>>(),
         );
     }
 }

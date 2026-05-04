@@ -45,7 +45,7 @@ pub enum Step {
         name: Option<String>,
     },
     /// Generic mail send. `recipient` is a mailbox name (e.g.
-    /// `"aether.sink.io"`); `kind` names the payload kind in the
+    /// `"aether.io"`); `kind` names the payload kind in the
     /// substrate's descriptor inventory (e.g. `"aether.io.write"`);
     /// `params` is the YAML body the schema encoder maps onto the
     /// kind's wire shape.
@@ -82,7 +82,7 @@ pub enum Check {
     },
     /// Mail: asserts at least `min_count` mail frames with kind name
     /// `name` were observed. Observations come from the bench's
-    /// chassis-owned `aether.sink.render` sink (which receives
+    /// chassis-owned `aether.render` sink (which receives
     /// `aether.draw_triangle` and `aether.camera` post-ADR-0074
     /// §Decision 7) plus broadcast / session-zero frames on the
     /// loopback — see `TestBench::count_observed` for the full
@@ -235,7 +235,7 @@ steps:
     path: /tmp/mesh-viewer.wasm
     name: mv
   - op: send_mail
-    recipient: aether.sink.io
+    recipient: aether.io
     kind: aether.io.write
     params:
       namespace: save
@@ -257,7 +257,7 @@ steps:
                 kind,
                 params,
             } => {
-                assert_eq!(recipient, "aether.sink.io");
+                assert_eq!(recipient, "aether.io");
                 assert_eq!(kind, "aether.io.write");
                 let mapping = params.as_mapping().expect("params is mapping");
                 assert_eq!(

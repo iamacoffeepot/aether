@@ -15,7 +15,7 @@
 //!   `capture_frame` scenarios can observe pre-mail effects in the
 //!   captured PNG.
 
-use aether_component::{Component, Ctx, InitCtx, Sink, handlers, resolve_sink};
+use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers, resolve_mailbox};
 use aether_kinds::{DrawTriangle, Tick, Vertex};
 use bytemuck::{Pod, Zeroable};
 
@@ -46,8 +46,8 @@ pub struct SetRender {
     pub visible: u8,
 }
 
-const BROADCAST: Sink<TickObserved> = resolve_sink::<TickObserved>("hub.claude.broadcast");
-const RENDER: Sink<DrawTriangle> = resolve_sink::<DrawTriangle>("aether.sink.render");
+const BROADCAST: Mailbox<TickObserved> = resolve_mailbox::<TickObserved>("hub.claude.broadcast");
+const RENDER: Mailbox<DrawTriangle> = resolve_mailbox::<DrawTriangle>("aether.render");
 
 pub struct Probe {
     tick_count: u64,

@@ -1,5 +1,5 @@
 // ADR-0060 guest-side log dispatch. ADR-0070 Phase 3 moved the
-// `aether.sink.log` mailbox out of inline registration in chassis
+// `aether.log` mailbox out of inline registration in chassis
 // mains and into [`crate::capabilities::log`] — this module retains
 // the per-payload decode + log-facade emit, called from the
 // capability's dispatcher thread for each envelope it receives.
@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn log_event_kind_name_matches() {
-        // The component-side subscriber sends to "aether.sink.log" with
+        // The component-side subscriber sends to "aether.log" with
         // kind name "aether.log"; if either side renames in isolation
         // this test catches the divergence without needing a live wire.
         assert_eq!(LogEvent::NAME, "aether.log");

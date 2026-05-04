@@ -20,7 +20,7 @@ use aether_data::{Kind, Schema};
 
 use crate::handle::{self, Handle, SyncHandleError};
 use crate::mail::ReplyTo;
-use crate::sink::{KindId, Sink, resolve, resolve_sink};
+use crate::sink::{KindId, Mailbox, resolve, resolve_mailbox};
 use crate::transport::MailTransport;
 
 /// Init-only capability handle. The type split between `InitCtx` and
@@ -76,9 +76,9 @@ impl<'a, T: MailTransport> InitCtx<'a, T> {
     }
 
     /// Resolve a mailbox by name and bind it to kind `K`, producing a
-    /// typed `Sink<K, T>`. Pure compile-time construction.
-    pub const fn resolve_sink<K: Kind>(&self, name: &str) -> Sink<K, T> {
-        resolve_sink::<K, T>(name)
+    /// typed `Mailbox<K, T>`. Pure compile-time construction.
+    pub const fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K, T> {
+        resolve_mailbox::<K, T>(name)
     }
 
     /// Publish `value` into the substrate's handle store at init.
@@ -103,7 +103,7 @@ impl<'a, T: MailTransport> InitCtx<'a, T> {
             kind: <K as Kind>::ID,
             mailbox: ::aether_data::MailboxId(self.mailbox),
         };
-        resolve_sink::<SubscribeInput, T>("aether.control").send(self.transport, &payload);
+        resolve_mailbox::<SubscribeInput, T>("aether.control").send(self.transport, &payload);
     }
 }
 
@@ -168,13 +168,13 @@ impl<'a, T: MailTransport> Ctx<'a, T> {
     /// `Ctx` and `Sink` is deliberate: `Ctx` is the receive-time
     /// vocabulary, `Sink::send` is the universal one. Wire shape
     /// (cast or postcard) is the kind's, not the call's (issue #240).
-    pub fn send<K: Kind>(&self, sink: &Sink<K, T>, payload: &K) {
+    pub fn send<K: Kind>(&self, sink: &Mailbox<K, T>, payload: &K) {
         sink.send(self.transport, payload);
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only —
     /// see [`Sink::send_many`] for the wire-shape rationale.
-    pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K, T>, payloads: &[K]) {
+    pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Mailbox<K, T>, payloads: &[K]) {
         sink.send_many(self.transport, payloads);
     }
 
@@ -245,13 +245,13 @@ impl<'a, T: MailTransport> DropCtx<'a, T> {
 
     /// Send a single payload during a shutdown hook. Wire shape (cast
     /// or postcard) follows `Kind::encode_into_bytes`.
-    pub fn send<K: Kind>(&self, sink: &Sink<K, T>, payload: &K) {
+    pub fn send<K: Kind>(&self, sink: &Mailbox<K, T>, payload: &K) {
         sink.send(self.transport, payload);
     }
 
     /// Send a slice of payloads during a shutdown hook. Cast-only —
     /// see [`Sink::send_many`] for the wire-shape rationale.
-    pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Sink<K, T>, payloads: &[K]) {
+    pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Mailbox<K, T>, payloads: &[K]) {
         sink.send_many(self.transport, payloads);
     }
 

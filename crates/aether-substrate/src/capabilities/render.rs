@@ -1,7 +1,7 @@
 //! ADR-0070 phase 3 (Option B per ADR-0071 phase 4) + ADR-0074
 //! §Decision 7: render is one native [`Capability`] with one mailbox
 //! and one dispatcher thread. The pre-Phase-3 `aether.sink.camera`
-//! mailbox folded into `aether.sink.render`; the camera kind
+//! mailbox folded into `aether.render`; the camera kind
 //! (`aether.camera`) keeps its name but its recipient is now the
 //! render mailbox.
 //!
@@ -50,7 +50,7 @@ use crate::render::{
     finish_capture, prepare_capture_copy, record_main_pass,
 };
 
-pub const RENDER_SINK_NAME: &str = "aether.sink.render";
+pub const RENDER_MAILBOX_NAME: &str = "aether.render";
 
 /// Configuration for [`RenderCapability`]. `vertex_buffer_bytes` is
 /// the maximum bytes the render accumulator will hold before
@@ -329,7 +329,7 @@ impl Capability for RenderCapability {
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
         let RenderCapability { config, handles } = self;
 
-        let claim = ctx.claim_frame_bound_mailbox(RENDER_SINK_NAME)?;
+        let claim = ctx.claim_frame_bound_mailbox(RENDER_MAILBOX_NAME)?;
 
         let frame_vertices = Arc::clone(&handles.frame_vertices);
         let triangles_rendered = Arc::clone(&handles.triangles_rendered);
@@ -503,7 +503,7 @@ mod tests {
             .build()
             .expect("build succeeds");
         assert_eq!(chassis.len(), 1);
-        assert!(registry.lookup(RENDER_SINK_NAME).is_some());
+        assert!(registry.lookup(RENDER_MAILBOX_NAME).is_some());
         // Camera mailbox retired (ADR-0074 §Decision 7).
         assert!(registry.lookup("aether.sink.camera").is_none());
     }
@@ -522,7 +522,7 @@ mod tests {
         let one_triangle = vec![0u8; DRAW_TRIANGLE_BYTES];
         deliver(
             &registry,
-            RENDER_SINK_NAME,
+            RENDER_MAILBOX_NAME,
             <DrawTriangle as Kind>::ID,
             &one_triangle,
         );
@@ -561,7 +561,7 @@ mod tests {
         let payload = vec![0u8; DRAW_TRIANGLE_BYTES * 5];
         deliver(
             &registry,
-            RENDER_SINK_NAME,
+            RENDER_MAILBOX_NAME,
             <DrawTriangle as Kind>::ID,
             &payload,
         );
@@ -597,7 +597,7 @@ mod tests {
             2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         let bytes: &[u8] = bytemuck::cast_slice(&mat);
-        deliver(&registry, RENDER_SINK_NAME, <Camera as Kind>::ID, bytes);
+        deliver(&registry, RENDER_MAILBOX_NAME, <Camera as Kind>::ID, bytes);
 
         for _ in 0..50 {
             if handles.camera_state.lock().unwrap()[0] == 2.0 {
@@ -624,7 +624,7 @@ mod tests {
         // 16 bytes — wrong length, should be 64.
         deliver(
             &registry,
-            RENDER_SINK_NAME,
+            RENDER_MAILBOX_NAME,
             <Camera as Kind>::ID,
             &[1u8; 16],
         );

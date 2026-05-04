@@ -76,7 +76,7 @@ pub struct SubstrateBoot {
     /// supplied to `SubstrateBootBuilder::namespace_roots` or
     /// [`crate::capabilities::io::NamespaceRoots::from_env`] when no override was
     /// set. Chassis mains pass this to `crate::capabilities::io::build_registry`
-    /// when wiring the `aether.sink.io` sink.
+    /// when wiring the `aether.io` sink.
     pub namespace_roots: crate::capabilities::io::NamespaceRoots,
     /// ADR-0070 native capabilities booted during shared bring-up.
     /// Phase 2: holds the [`HandleCapability`] dispatcher thread.
@@ -192,7 +192,7 @@ impl<'a> SubstrateBootBuilder<'a> {
     /// no env mutation is required to redirect `save://` / `config://`
     /// / `assets://` at a tempdir.
     ///
-    /// The override doesn't itself wire the `aether.sink.io` sink —
+    /// The override doesn't itself wire the `aether.io` sink —
     /// the chassis still drives that via `crate::capabilities::io::build_registry`,
     /// reading [`SubstrateBoot::namespace_roots`] for the resolved
     /// paths.

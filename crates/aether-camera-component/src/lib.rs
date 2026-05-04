@@ -1,7 +1,7 @@
 //! Multi-camera component. Hosts N named cameras (each in one of two
 //! modes — orbit or orthographic top-down), advances every camera each
 //! tick, and publishes the active camera's `view_proj` to
-//! `"aether.sink.render"` (the camera mailbox folded into render per ADR-0074 §Decision 7; the kind name `aether.camera` is unchanged).
+//! `"aether.render"` (the camera mailbox folded into render per ADR-0074 §Decision 7; the kind name `aether.camera` is unchanged).
 //!
 //! Boots with one default camera, `name = "main"`, in orbit mode and
 //! marked active, so loading the component still produces a visible
@@ -38,7 +38,7 @@ use aether_camera::{
     CameraCreate, CameraDestroy, CameraOrbitSet, CameraSetActive, CameraSetMode, CameraTopdownSet,
     ModeInit, OrbitParams, TopdownParams,
 };
-use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
+use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers};
 use aether_kinds::{Camera, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, Vec2, Vec3};
 
@@ -222,7 +222,7 @@ pub struct CameraComponent {
     cameras: HashMap<String, CameraState>,
     active: Option<String>,
     aspect: f32,
-    camera: Sink<Camera>,
+    camera: Mailbox<Camera>,
 }
 
 /// Multi-camera component. Hosts N named cameras, ticks all, publishes
@@ -257,12 +257,12 @@ impl Component for CameraComponent {
             cameras,
             active: Some("main".to_owned()),
             aspect: DEFAULT_ASPECT,
-            camera: ctx.resolve_sink::<Camera>("aether.sink.render"),
+            camera: ctx.resolve_mailbox::<Camera>("aether.render"),
         }
     }
 
     /// Advance every camera's per-mode state, then publish the active
-    /// camera's `view_proj` to `"aether.sink.render"`. Inactive cameras
+    /// camera's `view_proj` to `"aether.render"`. Inactive cameras
     /// still tick (so orbit yaw keeps accumulating); only the active
     /// one writes to the sink.
     ///
@@ -329,7 +329,7 @@ impl Component for CameraComponent {
     }
 
     /// Promote `name` to be the camera whose `view_proj` publishes to
-    /// `"aether.sink.render"` each tick. Errors (warn-log, no state
+    /// `"aether.render"` each tick. Errors (warn-log, no state
     /// change) if `name` isn't bound.
     #[handler]
     fn on_set_active(&mut self, _ctx: &mut Ctx<'_>, msg: CameraSetActive) {

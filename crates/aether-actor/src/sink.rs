@@ -1,5 +1,5 @@
-//! Typed addressing — `KindId<K>`, `Sink<K, T>`, and the const
-//! resolvers. `Sink` is generic over the transport so `send` /
+//! Typed addressing — `KindId<K>`, `Mailbox<K, T>`, and the const
+//! resolvers. `Mailbox` is generic over the transport so `send` /
 //! `send_many` dispatch through the consumer crate's `MailTransport`
 //! impl. The sink itself stores no transport state; the trait is
 //! purely associated functions.
@@ -61,35 +61,35 @@ impl<K: Kind> KindId<K> {
 }
 
 /// Phantom-typed send target. Wraps a mailbox id plus the kind id that
-/// the sink accepts. `Sink<DrawTriangle, T>` can only `send` a
+/// the sink accepts. `Mailbox<DrawTriangle, T>` can only `send` a
 /// `&DrawTriangle` or `&[DrawTriangle]` — the kind is fixed at
 /// resolution time.
 ///
-/// Built via `resolve_sink::<K, T>(name)` during init. The `T`
+/// Built via `resolve_mailbox::<K, T>(name)` during init. The `T`
 /// parameter selects the transport — it's `WasmTransport` inside a
-/// guest cdylib (via the `aether-component::Sink<K>` 1-arg alias) and
+/// guest cdylib (via the `aether-component::Mailbox<K>` 1-arg alias) and
 /// will be `NativeTransport` inside a native capability when ADR-0074
 /// Phase 2 lands.
-pub struct Sink<K: Kind, T: MailTransport> {
+pub struct Mailbox<K: Kind, T: MailTransport> {
     mailbox: u64,
     kind: u64,
     _k: PhantomData<fn() -> K>,
     _t: PhantomData<fn() -> T>,
 }
 
-impl<K: Kind, T: MailTransport> Copy for Sink<K, T> {}
-impl<K: Kind, T: MailTransport> Clone for Sink<K, T> {
+impl<K: Kind, T: MailTransport> Copy for Mailbox<K, T> {}
+impl<K: Kind, T: MailTransport> Clone for Mailbox<K, T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<K: Kind, T: MailTransport> Sink<K, T> {
-    /// Not part of the public API; the const `resolve_sink::<K, T>`
+impl<K: Kind, T: MailTransport> Mailbox<K, T> {
+    /// Not part of the public API; the const `resolve_mailbox::<K, T>`
     /// builder goes through here so the fields stay private to the SDK.
     #[doc(hidden)]
     pub const fn __new(mailbox: u64, kind: u64) -> Self {
-        Sink {
+        Mailbox {
             mailbox,
             kind,
             _k: PhantomData,
@@ -109,7 +109,7 @@ impl<K: Kind, T: MailTransport> Sink<K, T> {
     }
 }
 
-impl<K: Kind, T: MailTransport> Sink<K, T> {
+impl<K: Kind, T: MailTransport> Mailbox<K, T> {
     /// Send a single typed payload. The substrate's `count` field is 1.
     ///
     /// `transport` is the actor-bound `MailTransport` instance — the
@@ -132,7 +132,7 @@ impl<K: Kind, T: MailTransport> Sink<K, T> {
     }
 }
 
-impl<K: Kind + bytemuck::NoUninit, T: MailTransport> Sink<K, T> {
+impl<K: Kind + bytemuck::NoUninit, T: MailTransport> Mailbox<K, T> {
     /// Send a slice of typed payloads as a contiguous buffer. The
     /// substrate's `count` field is `payloads.len()`.
     ///
@@ -157,13 +157,13 @@ pub const fn resolve<K: Kind>() -> KindId<K> {
     KindId::__new(K::ID.0)
 }
 
-/// Bind a mailbox name to kind `K`, producing a typed `Sink<K, T>`. The
+/// Bind a mailbox name to kind `K`, producing a typed `Mailbox<K, T>`. The
 /// mailbox id is derived from the name client-side (ADR-0029 stable
 /// hash) and the kind id is `K::ID` (ADR-0030 Phase 2). No host-fn
 /// round trip, no requirement that the target mailbox or kind already
 /// exist on the substrate side at init time.
-pub const fn resolve_sink<K: Kind, T: MailTransport>(mailbox_name: &str) -> Sink<K, T> {
-    Sink::__new(mailbox_id_from_name(mailbox_name).0, K::ID.0)
+pub const fn resolve_mailbox<K: Kind, T: MailTransport>(mailbox_name: &str) -> Mailbox<K, T> {
+    Mailbox::__new(mailbox_id_from_name(mailbox_name).0, K::ID.0)
 }
 
 #[cfg(test)]
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn sink_accessors() {
-        let s: Sink<FakeKind, NoopTransport> = Sink::__new(3u64, 11);
+        let s: Mailbox<FakeKind, NoopTransport> = Mailbox::__new(3u64, 11);
         assert_eq!(s.mailbox(), 3u64);
         assert_eq!(s.kind(), 11);
     }

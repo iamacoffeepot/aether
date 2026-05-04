@@ -2,7 +2,7 @@
 //!
 //! `MailSubscriber` implements `tracing::Subscriber` so existing
 //! `tracing::warn!` / `error!` / `info!` calls in component code emit
-//! mail to the substrate-owned `aether.sink.log` mailbox. The chassis
+//! mail to the substrate-owned `aether.log` mailbox. The chassis
 //! sink decodes and re-emits through the host-side `tracing` subscriber
 //! so events land in `engine_logs` (ADR-0023).
 //!
@@ -34,7 +34,7 @@ use tracing::{
     span,
 };
 
-use crate::resolve_sink;
+use crate::resolve_mailbox;
 
 /// Hard cap on the mail payload's `message` field. Protects the queue
 /// from a misbehaving component flooding multi-megabyte log frames; the
@@ -98,7 +98,7 @@ impl Subscriber for MailSubscriber {
             target,
             message,
         };
-        resolve_sink::<LogEvent>("aether.sink.log").send(&crate::WASM_TRANSPORT, &payload);
+        resolve_mailbox::<LogEvent>("aether.log").send(&crate::WASM_TRANSPORT, &payload);
     }
 }
 

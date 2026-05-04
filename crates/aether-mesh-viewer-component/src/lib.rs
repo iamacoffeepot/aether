@@ -1,6 +1,6 @@
 //! Mesh viewer. Loads a mesh file from the substrate's I/O surface
 //! (ADR-0041), parses it into `DrawTriangle`s, and replays the cached
-//! list to the `"aether.sink.render"` sink every tick.
+//! list to the `"aether.render"` sink every tick.
 //!
 //! Dispatches on the file extension echoed back on `aether.io.read_result`:
 //!
@@ -29,9 +29,9 @@
 //!    parse or mesh failure leaves the prior cache intact (silent
 //!    drop; errors surface via `engine_logs`).
 //! 4. Every `aether.tick` re-emits the cached triangles to
-//!    `"aether.sink.render"`.
+//!    `"aether.render"`.
 
-use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io};
+use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers, io};
 use aether_kinds::{DrawTriangle, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
@@ -56,7 +56,7 @@ const OBJ_DEFAULT_COLOR: (f32, f32, f32) = PALETTE[0];
 
 pub struct MeshViewer {
     triangles: Vec<DrawTriangle>,
-    render: Sink<DrawTriangle>,
+    render: Mailbox<DrawTriangle>,
 }
 
 /// Mesh viewer component.
@@ -74,7 +74,7 @@ impl Component for MeshViewer {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         MeshViewer {
             triangles: Vec::new(),
-            render: ctx.resolve_sink::<DrawTriangle>("aether.sink.render"),
+            render: ctx.resolve_mailbox::<DrawTriangle>("aether.render"),
         }
     }
 

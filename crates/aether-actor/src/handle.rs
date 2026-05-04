@@ -1,5 +1,5 @@
 //! ADR-0045 typed-handle SDK, actor side. The substrate's
-//! `"aether.sink.handle"` sink (ADR-0058) owns a refcounted byte cache;
+//! `"aether.handle"` sink (ADR-0058) owns a refcounted byte cache;
 //! actors publish values into it (postcard-encoded) and receive a
 //! fresh ephemeral handle id back that they can embed in mail as
 //! `Ref::Handle { id, kind_id }`. The substrate's dispatch path
@@ -55,16 +55,17 @@ use aether_kinds::{
 };
 use serde::Serialize;
 
-use crate::sink::resolve_sink;
+use crate::sink::resolve_mailbox;
 use crate::sync::{WaitError, wait_reply};
 use crate::transport::MailTransport;
 
-/// Mailbox name the substrate registers its handle sink under
-/// (ADR-0045, namespaced under `aether.sink.*` per ADR-0058). Exposed
+/// Mailbox name the substrate registers its handle store under
+/// (ADR-0045). ADR-0074 Phase 5 retired the `aether.sink.*` namespace
+/// — chassis-owned mailboxes now address as `aether.<name>`. Exposed
 /// for actors that want to bypass the typed helpers and build a
-/// `Sink<HandlePublish, T>` directly without duplicating the string
-/// literal.
-pub const HANDLE_SINK_NAME: &str = "aether.sink.handle";
+/// `Mailbox<HandlePublish, T>` directly without duplicating the
+/// string literal.
+pub const HANDLE_MAILBOX_NAME: &str = "aether.handle";
 
 /// Wait-buffer capacity for the four reply kinds. Their `Ok` /
 /// `Err` payloads are at most a couple of u64s plus an `HandleError`
@@ -177,7 +178,7 @@ impl<K: Kind, T: MailTransport> Handle<K, T> {
 // `handle.release(transport)` is the prompt-cleanup path.
 
 /// Postcard-encode `value` and round-trip a `HandlePublish` request
-/// through the `"aether.sink.handle"` sink. Returns the typed
+/// through the `"aether.handle"` sink. Returns the typed
 /// `Handle<K, T>` on success or a `SyncHandleError` describing the
 /// failure (substrate timed out, eviction failed, kind id mismatch
 /// on a re-publish, …).
@@ -193,7 +194,7 @@ pub fn publish<K: Kind + Serialize, T: MailTransport>(
         kind_id: K::ID,
         bytes,
     };
-    resolve_sink::<HandlePublish, T>(HANDLE_SINK_NAME).send(transport, &req);
+    resolve_mailbox::<HandlePublish, T>(HANDLE_MAILBOX_NAME).send(transport, &req);
     let correlation = transport.prev_correlation();
     let result: HandlePublishResult = wait_reply::<_, SyncHandleError, T>(
         transport,
@@ -211,7 +212,7 @@ fn sync_release<T: MailTransport>(transport: &T, id: u64) -> Result<(), SyncHand
     let req = HandleRelease {
         id: ::aether_data::HandleId(id),
     };
-    resolve_sink::<HandleRelease, T>(HANDLE_SINK_NAME).send(transport, &req);
+    resolve_mailbox::<HandleRelease, T>(HANDLE_MAILBOX_NAME).send(transport, &req);
     let correlation = transport.prev_correlation();
     let result: HandleReleaseResult = wait_reply::<_, SyncHandleError, T>(
         transport,
@@ -229,7 +230,7 @@ fn sync_pin<T: MailTransport>(transport: &T, id: u64) -> Result<(), SyncHandleEr
     let req = HandlePin {
         id: ::aether_data::HandleId(id),
     };
-    resolve_sink::<HandlePin, T>(HANDLE_SINK_NAME).send(transport, &req);
+    resolve_mailbox::<HandlePin, T>(HANDLE_MAILBOX_NAME).send(transport, &req);
     let correlation = transport.prev_correlation();
     let result: HandlePinResult = wait_reply::<_, SyncHandleError, T>(
         transport,
@@ -247,7 +248,7 @@ fn sync_unpin<T: MailTransport>(transport: &T, id: u64) -> Result<(), SyncHandle
     let req = HandleUnpin {
         id: ::aether_data::HandleId(id),
     };
-    resolve_sink::<HandleUnpin, T>(HANDLE_SINK_NAME).send(transport, &req);
+    resolve_mailbox::<HandleUnpin, T>(HANDLE_MAILBOX_NAME).send(transport, &req);
     let correlation = transport.prev_correlation();
     let result: HandleUnpinResult = wait_reply::<_, SyncHandleError, T>(
         transport,

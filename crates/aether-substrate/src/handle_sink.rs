@@ -1,5 +1,5 @@
 //! ADR-0045 typed-handle sink dispatch logic. ADR-0070 Phase 2
-//! moved the `aether.sink.handle` mailbox out of `SubstrateBoot`'s
+//! moved the `aether.handle` mailbox out of `SubstrateBoot`'s
 //! inline registration and into [`crate::capabilities::handle`] —
 //! this module retains the per-kind dispatch implementation, called
 //! from the capability's dispatcher thread for each envelope it

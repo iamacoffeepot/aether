@@ -3,7 +3,7 @@
 //!
 //! Owns the full HTTP egress stack — `NetAdapter` trait, the `ureq`-
 //! backed `UreqNetAdapter`, env-driven `NetConfig`, the
-//! `aether.sink.net` mailbox claim, and the dispatcher thread that
+//! `aether.net` mailbox claim, and the dispatcher thread that
 //! decodes `Fetch` envelopes and invokes the adapter. Chassis mains
 //! resolve a [`NetConfig`] (typically via [`NetConfig::from_env`])
 //! and pass it to [`NetCapability::new`]; everything below the
@@ -36,7 +36,7 @@ use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
 /// Recipient name the net capability claims. ADR-0058 places
 /// chassis-owned sinks under `aether.sink.*`.
-pub const NET_SINK_NAME: &str = "aether.sink.net";
+pub const NET_MAILBOX_NAME: &str = "aether.net";
 
 /// Default response-body cap when `AETHER_NET_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -474,7 +474,7 @@ impl Capability for NetCapability {
     type Running = NetRunning;
 
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let claim = ctx.claim_mailbox_drop_on_shutdown(NET_SINK_NAME)?;
+        let claim = ctx.claim_mailbox_drop_on_shutdown(NET_MAILBOX_NAME)?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();
         let mailbox_id = claim.id;
         let default_timeout = self.config.default_timeout;
@@ -626,7 +626,7 @@ mod tests {
             .build()
             .expect("net capability boots");
         assert!(
-            registry.lookup(NET_SINK_NAME).is_some(),
+            registry.lookup(NET_MAILBOX_NAME).is_some(),
             "sink mailbox registered"
         );
         chassis.shutdown();
@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
         let (registry, mailer) = fresh_substrate();
-        registry.register_sink(NET_SINK_NAME, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(NET_MAILBOX_NAME, Arc::new(|_, _, _, _, _, _| {}));
         let config = NetConfig {
             disabled: true,
             ..NetConfig::default()
@@ -649,7 +649,7 @@ mod tests {
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
-            BootError::MailboxAlreadyClaimed { ref name } if name == NET_SINK_NAME
+            BootError::MailboxAlreadyClaimed { ref name } if name == NET_MAILBOX_NAME
         ));
     }
 
