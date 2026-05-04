@@ -17,8 +17,15 @@
 //! Threading: the capability spawns one OS thread that builds the
 //! `cpal::Stream` and runs the mail-dispatch loop. cpal's `Stream`
 //! is `!Send` on macOS, so the stream is constructed on, owned by,
-//! and dropped from the same thread; only `JoinHandle<()>` and
-//! `Arc<AtomicBool>` (both `Send`) cross thread boundaries.
+//! and dropped from the same thread.
+//!
+//! ADR-0074 Phase 2c: lifecycle is channel-drop + join, mirroring
+//! [`crate::capabilities::log::LogCapability`]. The dispatcher pulls
+//! envelopes from a [`NativeTransport`]; shutdown drops the
+//! [`SinkSender`] strong handle, the channel disconnects, and
+//! `recv_blocking()` returns `None`. Worst-case shutdown latency is
+//! the OS scheduler's recv() wakeup rather than a 100ms poll
+//! interval.
 //!
 //! Boot error policy: cpal init failure is **not** fatal. Audio is
 //! a peripheral, not infrastructure — a CI machine without an audio
@@ -30,26 +37,21 @@
 
 use std::f32::consts::TAU;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
-use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability};
+use crate::capability::{BootError, Capability, ChassisCtx, RunningCapability, SinkSender};
 use crate::mail::{ReplyTarget, ReplyTo};
 use crate::mailer::Mailer;
+use crate::native_transport::NativeTransport;
 use aether_data::{Kind, KindId, MailboxId};
 use aether_kinds::{NoteOff, NoteOn, SetMasterGain, SetMasterGainResult};
 
 /// Recipient name the audio capability claims. ADR-0058 places
 /// chassis-owned sinks under `aether.sink.*`.
 pub const AUDIO_SINK_NAME: &str = "aether.sink.audio";
-
-/// Polling interval for the dispatcher's shutdown check.
-const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Capacity of the event queue between the sink dispatcher and the
 /// audio-callback consumer. 1024 slots hold ~10 seconds of a dense
@@ -802,24 +804,31 @@ impl AudioCapability {
     }
 }
 
-/// Running handle returned by [`AudioCapability::boot`]. Holds only
-/// `Send` types — the cpal pipeline (with its `!Send`-on-macOS
-/// `Stream`) lives entirely on the dispatcher thread.
+/// Running handle returned by [`AudioCapability::boot`]. Holds the
+/// dispatcher's `JoinHandle`, the [`SinkSender`] strong handle that
+/// drives channel-drop shutdown, and the actor's
+/// [`NativeTransport`] (kept alive for the dispatcher thread's
+/// lifetime via the `Arc` clone the spawn closure holds). The cpal
+/// pipeline (with its `!Send`-on-macOS `Stream`) lives entirely on
+/// the dispatcher thread and tears down when the thread exits.
 pub struct AudioRunning {
     thread: Option<JoinHandle<()>>,
-    shutdown_flag: Arc<AtomicBool>,
+    sink_sender: Option<SinkSender>,
+    _transport: Arc<NativeTransport>,
 }
 
 impl Capability for AudioCapability {
     type Running = AudioRunning;
 
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let claim = ctx.claim_mailbox(AUDIO_SINK_NAME)?;
-        let mailer = ctx.mail_send_handle();
-        let receiver = claim.receiver;
-        let shutdown_flag = Arc::new(AtomicBool::new(false));
-        let thread_flag = Arc::clone(&shutdown_flag);
+        let claim = ctx.claim_mailbox_drop_on_shutdown(AUDIO_SINK_NAME)?;
+        let mailer: Arc<Mailer> = ctx.mail_send_handle();
+        let mailbox_id = claim.id;
         let config = self.config;
+
+        let transport = Arc::new(NativeTransport::new(Arc::clone(&mailer), mailbox_id));
+        transport.install_inbox(claim.receiver);
+        let dispatcher_transport = Arc::clone(&transport);
 
         let thread = thread::Builder::new()
             .name("aether-audio-sink".into())
@@ -848,20 +857,17 @@ impl Capability for AudioCapability {
                 };
                 let audio_sender = pipeline.as_ref().map(|p| p.sender.clone());
 
-                while !thread_flag.load(Ordering::Relaxed) {
-                    match receiver.recv_timeout(SHUTDOWN_POLL_INTERVAL) {
-                        Ok(env) => {
-                            dispatch_audio_mail(
-                                &mailer,
-                                audio_sender.as_ref(),
-                                env.kind,
-                                env.sender,
-                                &env.payload,
-                            );
-                        }
-                        Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
+                // Channel-drop + join: pull until the sender side
+                // disconnects. Worst-case shutdown latency is the
+                // OS scheduler's wakeup, not a 100ms poll interval.
+                while let Some(env) = dispatcher_transport.recv_blocking() {
+                    dispatch_audio_mail(
+                        &mailer,
+                        audio_sender.as_ref(),
+                        env.kind,
+                        env.sender,
+                        &env.payload,
+                    );
                 }
                 // pipeline drops here, cpal stream tears down on thread exit.
                 drop(pipeline);
@@ -870,7 +876,8 @@ impl Capability for AudioCapability {
 
         Ok(AudioRunning {
             thread: Some(thread),
-            shutdown_flag,
+            sink_sender: Some(claim.sink_sender),
+            _transport: transport,
         })
     }
 }
@@ -879,9 +886,11 @@ impl RunningCapability for AudioRunning {
     fn shutdown(self: Box<Self>) {
         let AudioRunning {
             mut thread,
-            shutdown_flag,
+            mut sink_sender,
+            _transport,
         } = *self;
-        shutdown_flag.store(true, Ordering::Relaxed);
+        // Drop the strong sender first to break the channel.
+        sink_sender.take();
         if let Some(t) = thread.take() {
             let _ = t.join();
         }
