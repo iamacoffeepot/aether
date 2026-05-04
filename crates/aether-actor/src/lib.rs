@@ -17,7 +17,7 @@
 //!     `_p32` FFI byte-for-byte.
 //!   - [`Mail`], [`PriorState`], [`ReplyTo`], [`KindId`] —
 //!     transport-free types: pure decode / phantom typing.
-//!   - [`Sink`], [`Ctx`], [`InitCtx`], [`DropCtx`] — generic over
+//!   - [`Mailbox`], [`Ctx`], [`InitCtx`], [`DropCtx`] — generic over
 //!     `T: MailTransport`; method bodies dispatch through `T::*`.
 //!   - [`Slot`] — single-instance backing store the consumer's
 //!     `export!` macro emits as a `static`.
@@ -46,7 +46,7 @@ mod transport;
 
 pub use ctx::{Ctx, DropCtx, InitCtx};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
-pub use sink::{KindId, Sink, resolve, resolve_sink};
+pub use sink::{KindId, Mailbox, resolve, resolve_mailbox};
 pub use slot::Slot;
 pub use sync::{WaitError, decode_wait_reply, wait_reply};
 pub use transport::MailTransport;

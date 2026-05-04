@@ -895,7 +895,7 @@ mod control_plane {
     }
 
     // ADR-0041 substrate file I/O. Four request kinds on the
-    // `"aether.sink.io"` sink (read / write / delete / list), paired
+    // `"aether.io"` sink (read / write / delete / list), paired
     // 1:1 with reply kinds
     // that carry a structured `IoError` on failure. All postcard-
     // shaped because every request carries String namespace/path
@@ -923,7 +923,7 @@ mod control_plane {
     }
 
     /// `aether.io.read` — request the substrate read a file and reply
-    /// with its bytes. Mailed to the `"aether.sink.io"` sink; reply
+    /// with its bytes. Mailed to the `"aether.io"` sink; reply
     /// lands via `reply_mail` as `ReadResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.io.read")]
@@ -1051,7 +1051,7 @@ mod control_plane {
     }
 
     // ADR-0043 substrate HTTP egress. One request kind + one reply
-    // kind on the `"aether.sink.net"` sink, plus supporting `HttpMethod`,
+    // kind on the `"aether.net"` sink, plus supporting `HttpMethod`,
     // `HttpHeader`, and `NetError` shapes. All postcard-shaped
     // (Strings, Vecs, Option<u32>).
     //
@@ -1111,7 +1111,7 @@ mod control_plane {
 
     /// `aether.net.fetch` — request the substrate perform an HTTP
     /// request and reply with the response. Mailed to the
-    /// `"aether.sink.net"` sink; reply lands via `reply_mail` as
+    /// `"aether.net"` sink; reply lands via `reply_mail` as
     /// `FetchResult`.
     /// `timeout_ms` overrides the chassis default
     /// (`AETHER_NET_TIMEOUT_MS`, default 30000) when set; `None`
@@ -1152,7 +1152,7 @@ mod control_plane {
     }
 
     // ADR-0045 typed-handle store. Four request kinds on the
-    // `"aether.sink.handle"` sink (`publish` / `release` / `pin` / `unpin`),
+    // `"aether.handle"` sink (`publish` / `release` / `pin` / `unpin`),
     // paired 1:1 with reply kinds. Components mail `HandlePublish`
     // with `kind_id` + payload bytes and receive a fresh ephemeral
     // handle id back in `HandlePublishResult::Ok`; subsequent mail
@@ -1197,7 +1197,7 @@ mod control_plane {
 
     /// `aether.handle.publish` — request the substrate stash
     /// `bytes` in the handle store under `kind_id` and reply with
-    /// a fresh ephemeral id. Mailed to the `"aether.sink.handle"` sink;
+    /// a fresh ephemeral id. Mailed to the `"aether.handle"` sink;
     /// reply lands as `HandlePublishResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.handle.publish")]
@@ -1291,14 +1291,14 @@ mod control_plane {
     }
 
     // ADR-0060 guest-side logging via mail sink. One postcard kind on
-    // the substrate-owned `"aether.sink.log"` mailbox. The SDK installs
+    // the substrate-owned `"aether.log"` mailbox. The SDK installs
     // a `tracing::Subscriber` that formats events into this shape and
     // sends them; chassis sinks decode and re-emit through the host
     // `tracing` subscriber so `engine_logs` (ADR-0023) sees them.
 
     /// `aether.log` — a single tracing event the guest emitted, ready
     /// for the substrate to re-emit into its own subscriber. Mailed to
-    /// the `"aether.sink.log"` sink; fire-and-forget (no reply).
+    /// the `"aether.log"` sink; fire-and-forget (no reply).
     /// `level` maps to a `tracing::Level` substrate-side
     /// (`0 = trace`, `1 = debug`, `2 = info`, `3 = warn`, `4 = error`).
     /// `target` is a module-style string the chassis's `EnvFilter`
@@ -1320,7 +1320,7 @@ mod control_plane {
     // `TopdownParams` / `ModeInit`) moved to the `aether-camera` trunk
     // crate. The `aether.camera` view_proj sink contract above stays
     // here — it's a chassis primitive consumed by the desktop chassis's
-    // `aether.sink.render` mailbox (the camera mailbox folded into
+    // `aether.render` mailbox (the camera mailbox folded into
     // render per ADR-0074 §Decision 7; the kind name is unchanged).
     // The migrated kinds are still wire-compatible (kind names +
     // schemas unchanged); only the source-side home moved.

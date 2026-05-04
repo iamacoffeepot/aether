@@ -7,10 +7,10 @@
 //! trip is visible to the driving Claude session.
 //!
 //! ADR-0033 phase 3: each kind gets its own `#[handler]` method on
-//! the `#[handlers]`-decorated impl; `Sink<K>` still carries the
+//! the `#[handlers]`-decorated impl; `Mailbox<K>` still carries the
 //! send-side mailbox name (data, not type).
 
-use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
+use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers};
 use aether_data::{Kind, Schema};
 use aether_kinds::Tick;
 use bytemuck::{Pod, Zeroable};
@@ -37,8 +37,8 @@ pub struct Observation {
 }
 
 pub struct Caller {
-    request: Sink<Request>,
-    observe: Sink<Observation>,
+    request: Mailbox<Request>,
+    observe: Mailbox<Observation>,
     next_seq: u32,
 }
 
@@ -46,8 +46,8 @@ pub struct Caller {
 impl Component for Caller {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Caller {
-            request: ctx.resolve_sink::<Request>("echoer"),
-            observe: ctx.resolve_sink::<Observation>("hub.claude.broadcast"),
+            request: ctx.resolve_mailbox::<Request>("echoer"),
+            observe: ctx.resolve_mailbox::<Observation>("hub.claude.broadcast"),
             next_seq: 0,
         }
     }

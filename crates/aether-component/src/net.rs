@@ -37,14 +37,15 @@ use alloc::vec::Vec;
 use aether_actor::{MailTransport, WaitError, wait_reply};
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
-use crate::{WASM_TRANSPORT, WasmTransport, resolve_sink};
+use crate::{WASM_TRANSPORT, WasmTransport, resolve_mailbox};
 
-/// Mailbox name the substrate registers its net sink under (ADR-0043,
-/// namespaced under `aether.sink.*` per ADR-0058). Exposed so
+/// Mailbox name the substrate registers its net adapter under
+/// (ADR-0043). ADR-0074 Phase 5 retired the `aether.sink.*` namespace;
+/// chassis-owned mailboxes now address as `aether.<name>`. Exposed so
 /// components that want to bypass [`fetch_blocking`] and use
-/// `ctx.send(&Sink::<Fetch>, ..)` directly don't have to duplicate the
-/// string literal.
-pub const NET_MAILBOX_NAME: &str = "aether.sink.net";
+/// `ctx.send(&Mailbox::<Fetch>, ..)` directly don't have to duplicate
+/// the string literal.
+pub const NET_MAILBOX_NAME: &str = "aether.net";
 
 /// Default guest-side wait buffer for a `FetchResult`. 16MB matches
 /// the substrate's `AETHER_NET_MAX_BODY_BYTES` default (ADR-0043
@@ -139,7 +140,7 @@ impl WaitError for SyncNetError {
 /// assert_eq!(resp.status, 200);
 /// ```
 pub fn fetch_blocking(fetch: &Fetch, timeout_ms: u32) -> Result<FetchResponse, SyncNetError> {
-    resolve_sink::<Fetch>(NET_MAILBOX_NAME).send(&WASM_TRANSPORT, fetch);
+    resolve_mailbox::<Fetch>(NET_MAILBOX_NAME).send(&WASM_TRANSPORT, fetch);
     let correlation = WASM_TRANSPORT.prev_correlation();
     let reply: FetchResult = wait_reply::<_, SyncNetError, WasmTransport>(
         &WASM_TRANSPORT,
@@ -167,9 +168,9 @@ pub fn fetch_blocking(fetch: &Fetch, timeout_ms: u32) -> Result<FetchResponse, S
 /// `FetchResult` arrives on the component's mailbox — wire a
 /// `#[handler] fn on_fetch_result(..)` to consume it. Exists as the
 /// typed + named counterpart to [`fetch_blocking`]; `ctx.send` on a
-/// user-built `Sink<Fetch>` does the same thing.
+/// user-built `Mailbox<Fetch>` does the same thing.
 pub fn fetch(fetch: &Fetch) {
-    resolve_sink::<Fetch>(NET_MAILBOX_NAME).send(&WASM_TRANSPORT, fetch);
+    resolve_mailbox::<Fetch>(NET_MAILBOX_NAME).send(&WASM_TRANSPORT, fetch);
 }
 
 /// Tiny constructor for the common "GET with no headers or body"
@@ -235,12 +236,13 @@ mod tests {
 
     #[test]
     fn net_mailbox_name_is_namespaced() {
-        // ADR-0058: chassis sinks live under `aether.sink.*`. Regression
-        // guard so a future "simplification" that drops the prefix
-        // collides with the user-space `"net"` namespace.
-        assert_eq!(NET_MAILBOX_NAME, "aether.sink.net");
+        // ADR-0074 Phase 5 retired the `aether.sink.*` namespace —
+        // chassis-owned mailboxes now address as `aether.<name>`.
+        // Regression guard so a future "simplification" that drops
+        // the prefix collides with the user-space `"net"` namespace.
+        assert_eq!(NET_MAILBOX_NAME, "aether.net");
         assert_ne!(NET_MAILBOX_NAME, "net");
-        assert_ne!(NET_MAILBOX_NAME, "aether.net");
+        assert_ne!(NET_MAILBOX_NAME, "aether.sink.net");
     }
 
     /// `SyncNetError` is the [`WaitError`] impl that

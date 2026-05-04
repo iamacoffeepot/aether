@@ -142,12 +142,12 @@ pub struct TestBench {
     stashed_replies: HashMap<u64, EngineToHub>,
 
     /// Kind names of mail observed via the chassis-owned render sink
-    /// (`aether.sink.render` — both `aether.draw_triangle` and
+    /// (`aether.render` — both `aether.draw_triangle` and
     /// `aether.camera` flow here post-ADR-0074 §Decision 7) plus
     /// broadcast / session-zero frames that arrived on the loopback.
     /// Used by scenario assertions like `Check::MailObserved`.
     /// Limitation (v1): mail addressed to other sinks
-    /// (`aether.sink.io`, `aether.sink.log`) and direct
+    /// (`aether.io`, `aether.log`) and direct
     /// component-to-component mail does not show up here — those
     /// flows don't pass through outbound and are not observed by the
     /// chassis-owned sinks the bench wraps.
@@ -207,7 +207,7 @@ impl TestBenchBuilder {
 
     /// Override the ADR-0041 namespace roots. Forwarded to
     /// `SubstrateBootBuilder::namespace_roots` at boot, so the
-    /// `aether.sink.io` adapter wired by the bench resolves
+    /// `aether.io` adapter wired by the bench resolves
     /// `save://` / `assets://` / `config://` against these paths
     /// instead of [`NamespaceRoots::from_env`].
     pub fn namespace_roots(mut self, roots: NamespaceRoots) -> Self {
@@ -334,7 +334,7 @@ impl TestBench {
     }
 
     /// Count how many mail observations match `kind_name`. Includes
-    /// mail observed at the chassis-owned `aether.sink.render` sink
+    /// mail observed at the chassis-owned `aether.render` sink
     /// (which receives both `aether.draw_triangle` and
     /// `aether.camera` post-ADR-0074 §Decision 7) plus any broadcast
     /// / session-zero frames that arrived on the loopback. Mail to
@@ -397,7 +397,7 @@ impl TestBench {
     /// decode it as `R`. The reply must be postcard-encoded — true
     /// for every standard reply kind (`*Result` variants in
     /// `aether-kinds`). Use this for any sink/component whose reply
-    /// pattern is "send → await → decode" — e.g. the `aether.sink.io`
+    /// pattern is "send → await → decode" — e.g. the `aether.io`
     /// `Read`/`Write`/`Delete`/`List` round trips. `advance` and
     /// `capture` are specialisations of this same shape against the
     /// `aether.control` mailbox.

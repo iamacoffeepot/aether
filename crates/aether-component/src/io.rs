@@ -1,7 +1,7 @@
 //! ADR-0041 substrate file I/O, guest side. Thin helpers that build
 //! the typed request kinds (`Read` / `Write` / `Delete` / `List`),
 //! postcard-encode them, and send to the substrate's
-//! `"aether.sink.io"` sink (ADR-0058) —
+//! `"aether.io"` mailbox (ADR-0074 §Decision 7) —
 //! so component authors don't have to know the mailbox-name
 //! convention, import the kinds manually, or hand-roll the encode.
 //!
@@ -48,13 +48,15 @@ use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 
-use crate::{WASM_TRANSPORT, WasmTransport, resolve_sink};
+use crate::{WASM_TRANSPORT, WasmTransport, resolve_mailbox};
 
-/// Mailbox name the substrate registers its I/O sink under (ADR-0041,
-/// namespaced under `aether.sink.*` per ADR-0058). Exposed so
+/// Mailbox name the substrate registers its I/O store under
+/// (ADR-0041). ADR-0074 Phase 5 retired the `aether.sink.*` namespace;
+/// chassis-owned mailboxes now address as `aether.<name>`. Exposed so
 /// components that want to bypass the typed helpers and build a
-/// `Sink<K>` directly can do so without duplicating the string literal.
-pub const IO_MAILBOX_NAME: &str = "aether.sink.io";
+/// `Mailbox<K>` directly can do so without duplicating the string
+/// literal.
+pub const IO_MAILBOX_NAME: &str = "aether.io";
 
 /// Send an `aether.io.read` request to the substrate. The reply
 /// arrives as a `ReadResult` on the calling component's mailbox —
@@ -107,7 +109,7 @@ pub fn list(namespace: &str, prefix: &str) {
 }
 
 fn send<K: Kind>(value: &K) -> u64 {
-    resolve_sink::<K>(IO_MAILBOX_NAME).send(&WASM_TRANSPORT, value);
+    resolve_mailbox::<K>(IO_MAILBOX_NAME).send(&WASM_TRANSPORT, value);
     // ADR-0042: capture the correlation the substrate just minted so
     // the sync wrappers can filter on it. For the async helpers
     // (`read` / `write` / `delete` / `list`), this is harmless noise —
@@ -327,12 +329,13 @@ mod tests {
 
     #[test]
     fn io_mailbox_name_is_namespaced() {
-        // ADR-0058: chassis sinks live under `aether.sink.*`. Regression
-        // guard so a future "simplification" that drops the prefix
-        // collides with the user-space `"io"` namespace.
-        assert_eq!(IO_MAILBOX_NAME, "aether.sink.io");
+        // ADR-0074 Phase 5 retired the `aether.sink.*` namespace —
+        // chassis-owned mailboxes now address as `aether.<name>`.
+        // Regression guard so a future "simplification" that drops
+        // the prefix collides with the user-space `"io"` namespace.
+        assert_eq!(IO_MAILBOX_NAME, "aether.io");
         assert_ne!(IO_MAILBOX_NAME, "io");
-        assert_ne!(IO_MAILBOX_NAME, "aether.io");
+        assert_ne!(IO_MAILBOX_NAME, "aether.sink.io");
     }
 
     /// `SyncIoError` is the [`WaitError`] impl the IO

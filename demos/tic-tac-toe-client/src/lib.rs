@@ -45,7 +45,7 @@
 //! That's as shape-y as this first pass gets; proper X / O glyphs
 //! are a rendering-polish pass for later.
 
-use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
+use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers};
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, GameState, LAST_MOVE_NONE, MoveResult, PLAYER_X, PlayMove, SERVER,
 };
@@ -89,8 +89,8 @@ pub struct TicTacToeClient {
     /// mapped to a cell, so they're dropped until the first publish
     /// lands (happens within one tick of subscribing).
     window: Option<(u32, u32)>,
-    render: Sink<DrawTriangle>,
-    server: Sink<PlayMove>,
+    render: Mailbox<DrawTriangle>,
+    server: Mailbox<PlayMove>,
 }
 
 impl Default for TicTacToeClient {
@@ -105,8 +105,8 @@ impl Default for TicTacToeClient {
             state: GameState::new_game(),
             mouse: None,
             window: None,
-            render: aether_component::resolve_sink::<DrawTriangle>("aether.sink.render"),
-            server: aether_component::resolve_sink::<PlayMove>(SERVER),
+            render: aether_component::resolve_mailbox::<DrawTriangle>("aether.render"),
+            server: aether_component::resolve_mailbox::<PlayMove>(SERVER),
         }
     }
 }

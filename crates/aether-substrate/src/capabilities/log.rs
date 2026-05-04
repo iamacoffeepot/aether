@@ -6,7 +6,7 @@
 //! `Sink<K, _>` / `wait_reply` machinery the wasm guest path uses.
 //!
 //! Counterpart to the `MailSubscriber` in `aether-component`: decodes
-//! `aether.log` mail the guest sent to `aether.sink.log` and re-emits
+//! `aether.log` mail the guest sent to `aether.log` and re-emits
 //! the event through the host's existing tracing pipeline so it shows
 //! up in `engine_logs` (ADR-0023) and on stderr alongside native-side
 //! logs.
@@ -35,11 +35,11 @@ use crate::native_transport::NativeTransport;
 /// `aether.log` (kind id) to this mailbox; the SDK's
 /// `MailSubscriber` resolves through here. ADR-0058 places
 /// chassis-owned sinks under `aether.sink.*`.
-pub const LOG_SINK_NAME: &str = "aether.sink.log";
+pub const LOG_MAILBOX_NAME: &str = "aether.log";
 
 /// Native capability owning the ADR-0060 guest-log sink. Boots a
 /// single dispatcher thread that pulls envelopes from the
-/// `aether.sink.log` mailbox and routes the bytes through
+/// `aether.log` mailbox and routes the bytes through
 /// [`log_sink::handle_log_mail`] for postcard-decode + log-facade
 /// emit.
 ///
@@ -81,7 +81,7 @@ impl Capability for LogCapability {
     type Running = LogRunning;
 
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let claim = ctx.claim_mailbox_drop_on_shutdown(LOG_SINK_NAME)?;
+        let claim = ctx.claim_mailbox_drop_on_shutdown(LOG_MAILBOX_NAME)?;
         let mailbox_id = claim.id;
 
         // ADR-0074 §Decision: `&self` trait, owned transport. The
@@ -171,7 +171,7 @@ mod tests {
             .build()
             .expect("capability boots");
 
-        let id = registry.lookup(LOG_SINK_NAME).expect("sink registered");
+        let id = registry.lookup(LOG_MAILBOX_NAME).expect("sink registered");
         let MailboxEntry::Sink(handler) = registry.entry(id).expect("entry") else {
             panic!("expected sink entry");
         };
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
         let (registry, mailer) = fresh_substrate();
-        registry.register_sink(LOG_SINK_NAME, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(LOG_MAILBOX_NAME, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with(LogCapability::new())
@@ -213,7 +213,7 @@ mod tests {
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
-            BootError::MailboxAlreadyClaimed { ref name } if name == LOG_SINK_NAME
+            BootError::MailboxAlreadyClaimed { ref name } if name == LOG_MAILBOX_NAME
         ));
     }
 }

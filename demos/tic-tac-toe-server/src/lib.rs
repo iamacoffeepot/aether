@@ -22,7 +22,7 @@
 //! on the trunk for those without pulling in this crate's
 //! `Component` impl. Per ADR-0066.
 
-use aether_component::{Component, Ctx, InitCtx, KindId, Sink, handlers};
+use aether_component::{Component, Ctx, InitCtx, KindId, Mailbox, handlers};
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, CLIENT_OBSERVER, GAME_DRAW, GAME_PLAYING, GAME_WON_O, GAME_WON_X, GameState,
     MOVE_CELL_OCCUPIED, MOVE_GAME_OVER, MOVE_OK, MOVE_OUT_OF_BOUNDS, MoveResult, PLAYER_NONE,
@@ -35,8 +35,8 @@ use aether_demo_tic_tac_toe::{
 pub struct TicTacToe {
     state: GameState,
     move_result_kind: KindId<MoveResult>,
-    broadcast: Sink<GameState>,
-    client_observer: Sink<GameState>,
+    broadcast: Mailbox<GameState>,
+    client_observer: Mailbox<GameState>,
 }
 
 /// Authoritative tic-tac-toe server. Accepts `PlayMove` and `Reset`
@@ -61,8 +61,8 @@ impl Component for TicTacToe {
         TicTacToe {
             state: GameState::new_game(),
             move_result_kind: ctx.resolve::<MoveResult>(),
-            broadcast: ctx.resolve_sink::<GameState>("hub.claude.broadcast"),
-            client_observer: ctx.resolve_sink::<GameState>(CLIENT_OBSERVER),
+            broadcast: ctx.resolve_mailbox::<GameState>("hub.claude.broadcast"),
+            client_observer: ctx.resolve_mailbox::<GameState>(CLIENT_OBSERVER),
         }
     }
 
@@ -197,8 +197,8 @@ mod tests {
         TicTacToe {
             state: GameState::new_game(),
             move_result_kind: aether_component::resolve::<MoveResult>(),
-            broadcast: aether_component::resolve_sink::<GameState>("hub.claude.broadcast"),
-            client_observer: aether_component::resolve_sink::<GameState>(CLIENT_OBSERVER),
+            broadcast: aether_component::resolve_mailbox::<GameState>("hub.claude.broadcast"),
+            client_observer: aether_component::resolve_mailbox::<GameState>(CLIENT_OBSERVER),
         }
     }
 

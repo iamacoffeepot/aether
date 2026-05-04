@@ -16,13 +16,13 @@
 //!    handle on dispatch.
 //!
 //! Mechanism check: the publish + broadcast sequence runs entirely
-//! through mail (`aether.handle.publish` to the `"aether.sink.handle"` sink,
+//! through mail (`aether.handle.publish` to the `"aether.handle"` sink,
 //! `wait_reply` for `HandlePublishResult`, then `send` to the
 //! broadcast sink). No host fns; the SDK's `Handle<K>` is a
 //! thin RAII wrapper over the same wire surface as `io::*` and
 //! `net::*`.
 
-use aether_component::{Component, Ctx, InitCtx, Sink, handlers, resolve_sink};
+use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers, resolve_mailbox};
 use aether_data::Ref;
 use aether_kinds::Tick;
 
@@ -44,7 +44,7 @@ pub struct HeldNote {
     pub seq: u32,
 }
 
-const BROADCAST: Sink<HeldNote> = resolve_sink::<HeldNote>("hub.claude.broadcast");
+const BROADCAST: Mailbox<HeldNote> = resolve_mailbox::<HeldNote>("hub.claude.broadcast");
 
 pub struct HandleDemo {
     fired: bool,

@@ -1,7 +1,7 @@
 //! ADR-0070 Phase 3 (part 2): file I/O sink as a native capability.
 //!
 //! Owns the full ADR-0041 stack — `FileAdapter` trait, `LocalFileAdapter`,
-//! `AdapterRegistry`, env-driven `NamespaceRoots`, the `aether.sink.io`
+//! `AdapterRegistry`, env-driven `NamespaceRoots`, the `aether.io`
 //! mailbox claim, and the dispatcher thread that decodes inbound
 //! `Read` / `Write` / `Delete` / `List` mail and drives the matching
 //! adapter. Chassis mains resolve a [`NamespaceRoots`] (typically via
@@ -41,7 +41,7 @@ use aether_kinds::{
 
 /// Recipient name the io capability claims. ADR-0058 places
 /// chassis-owned sinks under `aether.sink.*`.
-pub const IO_SINK_NAME: &str = "aether.sink.io";
+pub const IO_MAILBOX_NAME: &str = "aether.io";
 
 /// Result shape used throughout the adapter layer. The variants of
 /// `IoError` map directly onto ADR-0041 §1's reply enums, so the
@@ -601,7 +601,7 @@ impl Capability for IoCapability {
     type Running = IoRunning;
 
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let claim = ctx.claim_mailbox_drop_on_shutdown(IO_SINK_NAME)?;
+        let claim = ctx.claim_mailbox_drop_on_shutdown(IO_MAILBOX_NAME)?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();
         let mailbox_id = claim.id;
         let (registry, roots) = build_registry(self.roots).map_err(|e| {
@@ -942,7 +942,7 @@ mod tests {
             .build()
             .expect("io capability boots");
         assert!(
-            registry.lookup(IO_SINK_NAME).is_some(),
+            registry.lookup(IO_MAILBOX_NAME).is_some(),
             "sink mailbox registered"
         );
         chassis.shutdown();
@@ -981,7 +981,7 @@ mod tests {
     fn duplicate_claim_rejects_with_typed_error() {
         let root = scratch_root("collide");
         let (registry, mailer) = fresh_substrate();
-        registry.register_sink(IO_SINK_NAME, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(IO_MAILBOX_NAME, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with(IoCapability::new(roots_under(&root)))
@@ -989,7 +989,7 @@ mod tests {
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
-            BootError::MailboxAlreadyClaimed { ref name } if name == IO_SINK_NAME
+            BootError::MailboxAlreadyClaimed { ref name } if name == IO_MAILBOX_NAME
         ));
         cleanup(&root);
     }

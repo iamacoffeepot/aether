@@ -21,7 +21,7 @@
 //! 3. `terminate_substrate`, spawn another, observe the count
 //!    bumped by one.
 
-use aether_component::{Component, Ctx, InitCtx, Sink, handlers, io, resolve_sink};
+use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers, io, resolve_mailbox};
 use aether_kinds::{IoError, Tick};
 
 /// Broadcast payload the Claude session (or any component listening
@@ -45,9 +45,9 @@ const SAVE_PATH: &str = "counter.bin";
 const IO_TIMEOUT_MS: u32 = 1_000;
 /// Broadcast sink — `hub.claude.broadcast` fans out to every
 /// attached Claude session. `Count` is postcard-shaped; the unified
-/// `Sink::send` routes through `Kind::encode_into_bytes`, which the
+/// `Mailbox::send` routes through `Kind::encode_into_bytes`, which the
 /// derive specializes to postcard here (issue #240).
-const BROADCAST: Sink<Count> = resolve_sink::<Count>("hub.claude.broadcast");
+const BROADCAST: Mailbox<Count> = resolve_mailbox::<Count>("hub.claude.broadcast");
 
 pub struct SaveCounter {
     initialized: bool,

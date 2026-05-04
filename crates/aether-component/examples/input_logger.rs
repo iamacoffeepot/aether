@@ -14,7 +14,7 @@
 //! kind at init, so the test harness just loads the component and
 //! starts driving input — no manual `subscribe_input` needed.
 
-use aether_component::{Component, Ctx, InitCtx, Sink, handlers};
+use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers};
 use aether_data::{Kind, Schema};
 use aether_kinds::{Key, MouseButton, MouseMove, Tick};
 use bytemuck::{Pod, Zeroable};
@@ -28,14 +28,14 @@ pub struct InputObserved {
 }
 
 pub struct InputLogger {
-    observe: Sink<InputObserved>,
+    observe: Mailbox<InputObserved>,
 }
 
 #[handlers]
 impl Component for InputLogger {
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         InputLogger {
-            observe: ctx.resolve_sink::<InputObserved>("hub.claude.broadcast"),
+            observe: ctx.resolve_mailbox::<InputObserved>("hub.claude.broadcast"),
         }
     }
 

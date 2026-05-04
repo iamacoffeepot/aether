@@ -3,7 +3,7 @@
 //! to drive it. The runtime cdylib lives in `aether-camera-component`.
 //!
 //! `aether.camera` (the singular `view_proj` sink kind consumed by
-//! the desktop chassis's `aether.sink.render` mailbox per ADR-0074
+//! the desktop chassis's `aether.render` mailbox per ADR-0074
 //! §Decision 7) is *not* here — it's a chassis sink contract and
 //! lives in `aether-kinds` alongside the other substrate primitives.
 
@@ -88,7 +88,7 @@ pub struct CameraDestroy {
 }
 
 /// `aether.camera.set_active` — promote the named camera to be the
-/// one whose `view_proj` publishes to `"aether.sink.render"` each
+/// one whose `view_proj` publishes to `"aether.render"` each
 /// tick. Errors if the name isn't bound. Inactive cameras still
 /// tick (orbit yaw keeps accumulating, etc.) so re-activating
 /// later doesn't snap.

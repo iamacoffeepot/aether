@@ -35,11 +35,11 @@ use crate::native_transport::NativeTransport;
 /// mailbox; the SDK's `Ctx::publish` / `Handle<K>::Drop` pair both
 /// resolve through here. ADR-0058 places chassis-owned sinks under
 /// `aether.sink.*`.
-pub const HANDLE_SINK_NAME: &str = "aether.sink.handle";
+pub const HANDLE_MAILBOX_NAME: &str = "aether.handle";
 
 /// Native capability owning the ADR-0045 typed-handle sink. Boots a
 /// single dispatcher thread that pulls envelopes from the
-/// `aether.sink.handle` mailbox and routes them through
+/// `aether.handle` mailbox and routes them through
 /// [`handle_sink::dispatch`].
 pub struct HandleCapability {
     store: Arc<HandleStore>,
@@ -81,7 +81,7 @@ impl Capability for HandleCapability {
     type Running = HandleRunning;
 
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError> {
-        let claim = ctx.claim_mailbox_drop_on_shutdown(HANDLE_SINK_NAME)?;
+        let claim = ctx.claim_mailbox_drop_on_shutdown(HANDLE_MAILBOX_NAME)?;
         let mailer: Arc<Mailer> = ctx.mail_send_handle();
         let mailbox_id = claim.id;
         let store = self.store;
@@ -198,7 +198,9 @@ mod tests {
             .expect("capability boots");
 
         // Resolve the sink the capability registered.
-        let id = registry.lookup(HANDLE_SINK_NAME).expect("sink registered");
+        let id = registry
+            .lookup(HANDLE_MAILBOX_NAME)
+            .expect("sink registered");
         let MailboxEntry::Sink(handler) = registry.entry(id).expect("entry") else {
             panic!("expected sink entry");
         };
@@ -276,11 +278,11 @@ mod tests {
     /// Builder rejects a duplicate claim if the well-known sink name
     /// was already registered. Guards against the side-by-side window
     /// where a phase-2 PR didn't clean up its legacy
-    /// `register_sink(HANDLE_SINK_NAME, ...)` call.
+    /// `register_sink(HANDLE_MAILBOX_NAME, ...)` call.
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
         let (store, mailer, registry, _rx) = fresh_substrate();
-        registry.register_sink(HANDLE_SINK_NAME, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(HANDLE_MAILBOX_NAME, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with(HandleCapability::new(Arc::clone(&store)))
@@ -288,7 +290,7 @@ mod tests {
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
-            BootError::MailboxAlreadyClaimed { ref name } if name == HANDLE_SINK_NAME
+            BootError::MailboxAlreadyClaimed { ref name } if name == HANDLE_MAILBOX_NAME
         ));
     }
 }

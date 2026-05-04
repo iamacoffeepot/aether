@@ -147,14 +147,14 @@ impl HeadlessChassis {
             .kind_id(FrameStats::NAME)
             .expect("FrameStats registered");
 
-        // Silent drop for `aether.sink.render` — desktop-designed
+        // Silent drop for `aether.render` — desktop-designed
         // components loaded on headless emit both `DrawTriangle` and
         // (post-ADR-0074 §Decision 7) `aether.camera` at the tick
         // rate; without this sink, core's mailbox-resolution warn
         // fires every tick. The camera mailbox folded into render in
         // Phase 3, so one nop sink covers both.
         boot.registry.register_sink(
-            "aether.sink.render",
+            "aether.render",
             Arc::new(
                 |_kind: KindId,
                  _kind_name: &str,
@@ -173,7 +173,7 @@ impl HeadlessChassis {
             .expect("SetMasterGain registered");
         let outbound_for_audio_sink = Arc::clone(&boot.outbound);
         boot.registry.register_sink(
-            "aether.sink.audio",
+            "aether.audio",
             Arc::new(
                 move |kind: KindId,
                       _kind_name: &str,

@@ -12,7 +12,7 @@
 //! Grid is still capped at 16×16 (pre-ADR-0028 carryover).
 
 use aether_camera::{CameraTopdownSet, TopdownParams};
-use aether_component::{Component, Ctx, InitCtx, KindId, Sink, handlers};
+use aether_component::{Component, Ctx, InitCtx, KindId, Mailbox, handlers};
 use aether_data::{Kind, Schema};
 use aether_kinds::{DrawTriangle, Key, Tick, Vertex, keycode};
 use bytemuck::{Pod, Zeroable};
@@ -117,8 +117,8 @@ const LEVELS: &[&[&str]] = &[
 pub struct Sokoban {
     state: SokobanState,
     state_kind: KindId<SokobanState>,
-    render: Sink<DrawTriangle>,
-    camera_follow: Sink<CameraTopdownSet>,
+    render: Mailbox<DrawTriangle>,
+    camera_follow: Mailbox<CameraTopdownSet>,
     /// Cached camera-follow envelope. The `name` field is set once at
     /// init and reused every tick to avoid re-allocating the String;
     /// only `params.center` is mutated per frame.
@@ -143,8 +143,8 @@ impl Component for Sokoban {
         let mut me = Sokoban {
             state: SokobanState::default(),
             state_kind: ctx.resolve::<SokobanState>(),
-            render: ctx.resolve_sink::<DrawTriangle>("aether.sink.render"),
-            camera_follow: ctx.resolve_sink::<CameraTopdownSet>("camera"),
+            render: ctx.resolve_mailbox::<DrawTriangle>("aether.render"),
+            camera_follow: ctx.resolve_mailbox::<CameraTopdownSet>("camera"),
             follow_msg: CameraTopdownSet {
                 name: "main".to_owned(),
                 params: TopdownParams {
