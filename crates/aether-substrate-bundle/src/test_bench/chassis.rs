@@ -23,15 +23,15 @@ use std::sync::{Arc, Mutex};
 use crate::hub::HubClient;
 use aether_data::{Kind, KindId};
 use aether_kinds::{
-    Advance, AdvanceResult, CaptureFrame, FrameStats, PlatformInfo, SetWindowMode, SetWindowTitle,
-    Tick,
+    Advance, AdvanceResult, CaptureFrame, FrameStats, LogCapability, PlatformInfo, SetWindowMode,
+    SetWindowTitle, Tick,
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
-        LogCapability, RenderCapability, RenderConfig, RenderHandles, io::NamespaceRoots,
+        LogTracingBackend, RenderCapability, RenderConfig, RenderHandles, io::NamespaceRoots,
     },
     capture::{
         CaptureQueue, begin_capture_request, reply_unsupported_platform_info,
@@ -282,7 +282,7 @@ impl TestBenchChassis {
 
         let passive =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
-                .with(LogCapability::new())
+                .with_facade(LogCapability::new(LogTracingBackend::new()))
                 .with(render_cap)
                 .build_passive()
                 .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;

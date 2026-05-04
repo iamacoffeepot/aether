@@ -17,15 +17,15 @@ use std::sync::Arc;
 
 use aether_data::Kind;
 use aether_kinds::{
-    Advance, CaptureFrame, PlatformInfo, SetWindowMode, SetWindowModeResult, SetWindowTitle,
-    SetWindowTitleResult, WindowMode,
+    Advance, CaptureFrame, LogCapability, PlatformInfo, SetWindowMode, SetWindowModeResult,
+    SetWindowTitle, SetWindowTitleResult, WindowMode,
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
-        AudioCapability, IoCapability, LogCapability, NetCapability, RenderCapability,
+        AudioCapability, IoCapability, LogTracingBackend, NetCapability, RenderCapability,
         RenderConfig, audio::AudioConfig as AudioConf, io::NamespaceRoots,
         net::NetConfig as NetConf,
     },
@@ -349,7 +349,7 @@ impl DesktopChassis {
         // claims its mailboxes after every other chassis sink.
         Builder::<DesktopChassis>::new(registry, mailer)
             .with_aborter(aborter)
-            .with(LogCapability::new())
+            .with_facade(LogCapability::new(LogTracingBackend::new()))
             .with(IoCapability::new(namespace_roots))
             .with(NetCapability::new(net))
             .with(AudioCapability::new(audio))

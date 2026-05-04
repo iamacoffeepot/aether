@@ -2,15 +2,15 @@
 // path (PR B of issue 533). Verifies:
 //
 //   - `HandlesKind<K>` impls land for each `#[handler]` method.
-//   - `__dispatch(kind: u64, payload: &[u8]) -> Option<()>` routes
-//     payloads to the matching handler and returns `None` for
-//     unknown kinds.
+//   - `Dispatch::__dispatch(kind: u64, payload: &[u8]) -> Option<()>`
+//     routes payloads to the matching handler and returns `None`
+//     for unknown kinds.
 //
 // Compiles native-only — `aether-data-derive` runs as a proc-macro
 // crate, so these tests exercise the generated code on the host.
 
 use aether_actor::Actor;
-use aether_data::Kind;
+use aether_data::{Dispatch, Kind};
 use bytemuck::{Pod, Zeroable};
 
 /// Two distinct cast-shape kinds the test cap handles.

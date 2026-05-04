@@ -15,15 +15,16 @@ use std::time::Duration;
 
 use aether_data::{Kind, KindId};
 use aether_kinds::{
-    Advance, CaptureFrame, FrameStats, PlatformInfo, SetMasterGain, SetMasterGainResult,
-    SetWindowMode, SetWindowTitle, Tick,
+    Advance, CaptureFrame, FrameStats, LogCapability, PlatformInfo, SetMasterGain,
+    SetMasterGainResult, SetWindowMode, SetWindowTitle, Tick,
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, ReplyTo, SubstrateBoot,
     capabilities::{
-        IoCapability, LogCapability, NetCapability, io::NamespaceRoots, net::NetConfig as NetConf,
+        IoCapability, LogTracingBackend, NetCapability, io::NamespaceRoots,
+        net::NetConfig as NetConf,
     },
     capture::{
         reply_unsupported_advance, reply_unsupported_capture_frame,
@@ -230,7 +231,7 @@ impl HeadlessChassis {
         // through the log capture.
         Builder::<HeadlessChassis>::new(registry, mailer)
             .with_aborter(aborter)
-            .with(LogCapability::new())
+            .with_facade(LogCapability::new(LogTracingBackend::new()))
             .with(IoCapability::new(namespace_roots))
             .with(NetCapability::new(net))
             .driver(driver)

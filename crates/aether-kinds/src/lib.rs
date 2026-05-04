@@ -15,7 +15,10 @@ extern crate alloc;
 
 pub mod descriptors;
 pub mod keycode;
+pub mod log;
 pub mod mailboxes;
+
+pub use log::{ErasedLogBackend, LogBackend, LogCapability};
 
 use bytemuck::{Pod, Zeroable};
 

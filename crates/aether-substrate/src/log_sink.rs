@@ -23,10 +23,12 @@
 use aether_kinds::LogEvent;
 
 /// Decode a single `aether.log` payload and emit through the
-/// `log::log!` facade. Called by
-/// [`crate::capabilities::log::LogCapability`]'s dispatcher thread;
-/// tests can call it directly to exercise the decode path without
-/// spinning up a capability.
+/// `log::log!` facade. Pre-ADR-0075 this was the dispatcher's whole
+/// body; post-ADR-0075 the chassis dispatcher decodes via the cap's
+/// macro-emitted `Dispatch::__dispatch` which calls
+/// [`handle_log_mail_decoded`] directly. This raw-bytes form remains
+/// for tests that want to exercise the decode + warn-on-garbage path.
+#[cfg(test)]
 pub(crate) fn handle_log_mail(bytes: &[u8]) {
     let event: LogEvent = match postcard::from_bytes(bytes) {
         Ok(e) => e,
@@ -40,6 +42,13 @@ pub(crate) fn handle_log_mail(bytes: &[u8]) {
             return;
         }
     };
+    handle_log_mail_decoded(event);
+}
+
+/// Emit an already-decoded `LogEvent` through the `log::log!` facade.
+/// Called from the substrate-side `LogTracingBackend::on_log_event`
+/// after the macro-emitted `Dispatch::__dispatch` decoded the bytes.
+pub(crate) fn handle_log_mail_decoded(event: LogEvent) {
     let level = match event.level {
         0 => log::Level::Trace,
         1 => log::Level::Debug,

@@ -29,12 +29,15 @@
 use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use aether_actor::Actor;
+use aether_data::Dispatch;
 
 use crate::lifecycle::{FatalAborter, PanicAborter};
 use crate::mail::{KindId, MailboxId, ReplyTo};
@@ -624,6 +627,115 @@ impl<'a> ChassisCtx<'a> {
     }
 }
 
+/// Chassis-side handle for a facade-cap dispatcher (ADR-0075).
+///
+/// The chassis owns this; the cap (with its [`Dispatch`] impl) lives
+/// inside the dispatcher thread. Dropping the handle drops the
+/// [`SinkSender`] (channel disconnects), the dispatcher's `recv()`
+/// returns `Err(Disconnected)`, the thread exits, and the captured
+/// cap drops with it — running its `Drop` impl on the dispatcher
+/// thread (where any backend resource cleanup happens).
+///
+/// `PhantomData<C>` ties the handle to the cap type for storage
+/// hygiene without holding the cap (the dispatcher thread does).
+/// Boxed as `dyn ActorErased` in the chassis's `running` vec.
+pub struct FacadeHandle<C: 'static> {
+    thread: Option<JoinHandle<()>>,
+    /// Drop-on-shutdown breaks the channel. `Option` so [`Drop`] can
+    /// `take()` it before joining the thread; once gone, the
+    /// registry's `Weak` upgrade fails on subsequent sends and the
+    /// dispatcher's `recv()` returns `Err(Disconnected)`.
+    sink_sender: Option<SinkSender>,
+    _cap: PhantomData<fn() -> C>,
+}
+
+impl<C: 'static> Drop for FacadeHandle<C> {
+    fn drop(&mut self) {
+        // Sender first — that's what disconnects the channel and lets
+        // the dispatcher thread exit. Joining a still-alive sender
+        // would hang.
+        self.sink_sender.take();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+// `FacadeHandle<C>` is itself the chassis-stored entry — the cap C
+// lives inside the dispatcher thread. `Send` is the only ActorErased
+// requirement; the handle's fields (`Option<JoinHandle>`,
+// `Option<SinkSender>`, PhantomData) are all `Send`.
+impl<C: 'static> ActorErased for FacadeHandle<C> {}
+
+impl<'a> ChassisCtx<'a> {
+    /// Claim a mailbox for a facade-style chassis cap and spawn a
+    /// dispatcher thread that owns the cap and routes inbound mail
+    /// through its [`Dispatch`] impl. ADR-0075 §Decision 3.
+    ///
+    /// The cap is moved into the thread; the returned [`FacadeHandle`]
+    /// owns the [`SinkSender`] + [`JoinHandle`]. On chassis shutdown
+    /// the handle drops, the channel disconnects, the thread exits,
+    /// and the cap's `Drop` runs on the dispatcher thread (so any
+    /// backend cleanup that touches non-Send resources stays on the
+    /// owning thread).
+    ///
+    /// Today this is the path PR C wires for [`aether_kinds::LogCapability`];
+    /// PR D migrates the rest of the chassis caps onto it.
+    pub fn spawn_actor_dispatcher<C>(&mut self, cap: C) -> Result<FacadeHandle<C>, BootError>
+    where
+        C: Actor + Dispatch + Send + 'static,
+    {
+        let claim = self.claim_mailbox_drop_on_shutdown_with_override(C::NAMESPACE)?;
+        let DropOnShutdownClaim {
+            id: _,
+            receiver,
+            sink_sender,
+        } = claim;
+
+        let mut owned = cap;
+        let thread = thread::Builder::new()
+            .name(alloc_thread_name::<C>())
+            .spawn(move || {
+                // Channel-drop + join: pull until the sender side
+                // disconnects. Worst-case shutdown latency is the OS
+                // scheduler's wakeup, not a polling interval. The
+                // strict-receiver miss path (None from __dispatch)
+                // logs at the chassis-side dispatcher rather than the
+                // SDK so the warning carries the cap's namespace.
+                while let Ok(env) = receiver.recv() {
+                    if owned.__dispatch(env.kind.0, &env.payload).is_none() {
+                        tracing::warn!(
+                            target: "aether_substrate::capability",
+                            actor = C::NAMESPACE,
+                            kind = env.kind_name.as_str(),
+                            "facade cap dispatch missed: kind not handled or decode failed"
+                        );
+                    }
+                }
+                // `owned` drops here on thread exit, running the cap's
+                // `Drop` impl (which in turn drops the backend, which
+                // typically owns the resource cleanup).
+            })
+            .map_err(|e| BootError::Other(Box::new(e)))?;
+
+        Ok(FacadeHandle {
+            thread: Some(thread),
+            sink_sender: Some(sink_sender),
+            _cap: PhantomData,
+        })
+    }
+}
+
+/// Build a stable `aether-actor-<namespace>` thread name for the
+/// dispatcher. Namespaces are `&'static str`, so allocating once at
+/// boot is fine — most chassis have ≤ 7 caps total.
+fn alloc_thread_name<C: Actor>() -> String {
+    let mut name = String::with_capacity("aether-actor-".len() + C::NAMESPACE.len());
+    name.push_str("aether-actor-");
+    name.push_str(C::NAMESPACE);
+    name
+}
+
 /// Type-erased boot trampoline so [`ChassisBuilder`] can collect
 /// heterogeneous capability types into one `Vec`. Each entry, when
 /// invoked, takes the ctx, calls the underlying `Capability::boot`,
@@ -686,6 +798,25 @@ impl ChassisBuilder {
         self.pending.push(Box::new(move |ctx| {
             let booted = cap.boot(ctx)?;
             Ok(Box::new(booted) as Box<dyn ActorErased>)
+        }));
+        self
+    }
+
+    /// Append a facade-style cap (ADR-0075 §Decision 3): the chassis
+    /// claims the mailbox and runs the dispatcher; the cap is purely
+    /// an `Actor + Dispatch` value carrying its backend. Boot order
+    /// is declaration order, same as [`Self::with`].
+    ///
+    /// PR C wires [`aether_kinds::LogCapability<LogTracingBackend>`]
+    /// through this; PR D migrates the rest of the chassis caps onto
+    /// it.
+    pub fn with_facade<C>(mut self, cap: C) -> Self
+    where
+        C: Actor + Dispatch + Send + 'static,
+    {
+        self.pending.push(Box::new(move |ctx| {
+            let handle = ctx.spawn_actor_dispatcher(cap)?;
+            Ok(Box::new(handle) as Box<dyn ActorErased>)
         }));
         self
     }
@@ -822,6 +953,34 @@ impl BootedChassis {
         );
         let booted = cap.boot(&mut ctx)?;
         self.running.push(Box::new(booted));
+        Ok(())
+    }
+
+    /// Boot one more facade-style cap into an already-built chassis.
+    /// Counterpart to [`Self::add`] for [`ChassisBuilder::with_facade`]
+    /// caps. Used by chassis mains that compose chassis-conditional
+    /// caps (today: the bundle hooks `LogCapability`,
+    /// `IoCapability`, etc. on top of `SubstrateBoot::build`'s
+    /// universal set).
+    pub fn add_facade<C>(
+        &mut self,
+        registry: &Arc<Registry>,
+        mailer: &Arc<Mailer>,
+        cap: C,
+    ) -> Result<(), BootError>
+    where
+        C: Actor + Dispatch + Send + 'static,
+    {
+        let mut ctx = ChassisCtx::new(
+            registry,
+            mailer,
+            &mut self._fallback,
+            &mut self.frame_bound_pending,
+            &self.frame_bound_set,
+            &self.aborter,
+        );
+        let handle = ctx.spawn_actor_dispatcher(cap)?;
+        self.running.push(Box::new(handle));
         Ok(())
     }
 
