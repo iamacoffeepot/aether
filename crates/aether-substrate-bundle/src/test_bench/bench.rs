@@ -119,6 +119,13 @@ pub struct TestBench {
     broadcast_mbox: MailboxId,
     kind_tick: KindId,
     kind_frame_stats: KindId,
+    /// Snapshot of every frame-bound capability's pending counter
+    /// (ADR-0074 §Decision 5). Today: render. Cloned out of
+    /// `PassiveChassis::frame_bound_pending` at boot; `advance` /
+    /// the bin's `run_frame` hand it to
+    /// `frame_loop::drain_frame_bound_or_abort` so render's inbox
+    /// quiesces before `record_frame`.
+    frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
 
     started: Instant,
     frame: u64,
@@ -134,14 +141,16 @@ pub struct TestBench {
     /// late-arriving frame) doesn't get silently dropped.
     stashed_replies: HashMap<u64, EngineToHub>,
 
-    /// Kind names of mail observed via the chassis-owned sinks
-    /// (`aether.sink.render`, `aether.sink.camera`) plus broadcast /
-    /// session-zero frames that arrived on the loopback. Used by
-    /// scenario assertions like `Check::MailObserved`. Limitation
-    /// (v1): mail addressed to other sinks (`aether.sink.io`,
-    /// `aether.sink.log`) and direct component-to-component mail does
-    /// not show up here — those flows don't pass through outbound and
-    /// are not observed by the chassis-owned sinks the bench wraps.
+    /// Kind names of mail observed via the chassis-owned render sink
+    /// (`aether.sink.render` — both `aether.draw_triangle` and
+    /// `aether.camera` flow here post-ADR-0074 §Decision 7) plus
+    /// broadcast / session-zero frames that arrived on the loopback.
+    /// Used by scenario assertions like `Check::MailObserved`.
+    /// Limitation (v1): mail addressed to other sinks
+    /// (`aether.sink.io`, `aether.sink.log`) and direct
+    /// component-to-component mail does not show up here — those
+    /// flows don't pass through outbound and are not observed by the
+    /// chassis-owned sinks the bench wraps.
     observed_kinds: Arc<Mutex<Vec<String>>>,
 
     /// Lifetime guard. Boot owns the scheduler; dropping the
@@ -297,6 +306,7 @@ impl TestBench {
         let registry = Arc::clone(&boot.registry);
         let input_subscribers = boot.input_subscribers.clone();
         let broadcast_mbox = boot.broadcast_mbox;
+        let frame_bound_pending = passive.frame_bound_pending();
 
         Ok(Self {
             queue,
@@ -311,6 +321,7 @@ impl TestBench {
             broadcast_mbox,
             kind_tick,
             kind_frame_stats,
+            frame_bound_pending,
             started: Instant::now(),
             frame: 0,
             next_correlation_id: AtomicU64::new(1),
@@ -323,10 +334,12 @@ impl TestBench {
     }
 
     /// Count how many mail observations match `kind_name`. Includes
-    /// mail observed at the chassis-owned `aether.sink.render` /
-    /// `aether.sink.camera` sinks plus any broadcast / session-zero
-    /// frames that arrived on the loopback. Mail to other sinks and
-    /// direct component-to-component flows are not observed (v1).
+    /// mail observed at the chassis-owned `aether.sink.render` sink
+    /// (which receives both `aether.draw_triangle` and
+    /// `aether.camera` post-ADR-0074 §Decision 7) plus any broadcast
+    /// / session-zero frames that arrived on the loopback. Mail to
+    /// other sinks and direct component-to-component flows are not
+    /// observed (v1).
     pub fn count_observed(&self, kind_name: &str) -> usize {
         self.observed_kinds
             .lock()
@@ -615,6 +628,10 @@ impl TestBench {
             }
         }
         frame_loop::drain_or_abort(&self.queue, &self.outbound);
+        // ADR-0074 §Decision 5: render's inbox must quiesce before
+        // submit so any DrawTriangle / aether.camera mail this frame
+        // is integrated into the recorded pass.
+        frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
 
         match self.capture_queue.take() {
             Some(req) => {

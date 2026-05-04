@@ -29,7 +29,9 @@
 use std::error::Error as StdError;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use crate::mail::{KindId, MailboxId, ReplyTo};
 use crate::mailer::Mailer;
@@ -96,9 +98,58 @@ pub struct SinkSender {
 
 impl SinkSender {
     /// Internal constructor — only
-    /// [`ChassisCtx::claim_mailbox_drop_on_shutdown`] builds these.
+    /// [`ChassisCtx::claim_mailbox_drop_on_shutdown`] /
+    /// [`ChassisCtx::claim_frame_bound_mailbox`] build these.
     pub(crate) fn new(inner: Arc<mpsc::Sender<Envelope>>) -> Self {
         Self { _inner: inner }
+    }
+}
+
+/// Result returned from [`ChassisCtx::claim_frame_bound_mailbox`].
+///
+/// Same as [`DropOnShutdownClaim`] plus a `pending` counter that the
+/// sink registration handler increments on every accepted send and
+/// the capability's dispatcher decrements after each processed
+/// envelope. The chassis collects this counter so
+/// [`BootedChassis::drain_frame_bound`] can wait on it as part of
+/// the per-frame drain barrier (ADR-0074 §Decision 5).
+///
+/// Capabilities authored with `Capability::FRAME_BARRIER = true`
+/// must claim through this method instead of
+/// [`ChassisCtx::claim_mailbox_drop_on_shutdown`] — otherwise the
+/// chassis has no counter to wait on and the barrier degrades to
+/// "components only", reintroducing the race the FRAME_BARRIER
+/// classification exists to close.
+#[derive(Debug)]
+pub struct FrameBoundClaim {
+    pub id: MailboxId,
+    pub receiver: mpsc::Receiver<Envelope>,
+    pub sink_sender: SinkSender,
+    /// Shared with the registry's sink handler. The handler increments
+    /// before pushing into the mpsc; the capability's dispatcher must
+    /// decrement after each `dispatch()` returns.
+    pub pending: Arc<AtomicU64>,
+}
+
+/// Diagnostic returned from [`BootedChassis::drain_frame_bound`] when
+/// a frame-bound capability's inbox didn't drain within the budget.
+/// The chassis frame loop routes this through `lifecycle::fatal_abort`
+/// the same way component-side wedges do — see
+/// [`crate::frame_loop::drain_frame_bound_or_abort`].
+#[derive(Debug, Clone, Copy)]
+pub struct WedgedFrameBound {
+    pub mailbox: MailboxId,
+    pub pending: u64,
+    pub waited: Duration,
+}
+
+impl fmt::Display for WedgedFrameBound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "frame-bound dispatcher wedged: mailbox={} pending={} waited={:?}",
+            self.mailbox, self.pending, self.waited,
+        )
     }
 }
 
@@ -182,6 +233,22 @@ impl From<wasmtime::Error> for BootError {
 /// dispatcher).
 pub trait Capability: Send + 'static {
     type Running: RunningCapability;
+
+    /// ADR-0074 §Decision 5 scheduling class. `true` means this
+    /// capability participates in the per-frame drain barrier — the
+    /// chassis frame loop waits for the dispatcher's inbox to quiesce
+    /// before submitting the next render frame, so any mail a
+    /// component sent this frame is integrated before submit.
+    /// Defaults to `false` (free-running). Today only `RenderCapability`
+    /// overrides; future drawing-side capabilities will too.
+    ///
+    /// The const is paired with [`ChassisCtx::claim_frame_bound_mailbox`]:
+    /// frame-bound capabilities must claim their inbox through that
+    /// method so the chassis collects the per-mailbox pending counter
+    /// the barrier reads. The trait const itself is the static marker
+    /// used by Phase 4's cross-class `wait_reply` guard.
+    const FRAME_BARRIER: bool = false;
+
     fn boot(self, ctx: &mut ChassisCtx<'_>) -> Result<Self::Running, BootError>;
 }
 
@@ -201,6 +268,12 @@ pub struct ChassisCtx<'a> {
     registry: &'a Arc<Registry>,
     mailer: &'a Arc<Mailer>,
     fallback: &'a mut Option<FallbackRouter>,
+    /// Per-mailbox pending counters collected from
+    /// [`ChassisCtx::claim_frame_bound_mailbox`] calls. The chassis
+    /// builder hands these to the resulting [`BootedChassis`] so the
+    /// frame loop can wait on them via
+    /// [`BootedChassis::drain_frame_bound`].
+    frame_bound_pending: &'a mut Vec<(MailboxId, Arc<AtomicU64>)>,
 }
 
 impl<'a> ChassisCtx<'a> {
@@ -210,11 +283,13 @@ impl<'a> ChassisCtx<'a> {
         registry: &'a Arc<Registry>,
         mailer: &'a Arc<Mailer>,
         fallback: &'a mut Option<FallbackRouter>,
+        frame_bound_pending: &'a mut Vec<(MailboxId, Arc<AtomicU64>)>,
     ) -> Self {
         Self {
             registry,
             mailer,
             fallback,
+            frame_bound_pending,
         }
     }
 
@@ -327,6 +402,78 @@ impl<'a> ChassisCtx<'a> {
         })
     }
 
+    /// Variant of [`Self::claim_mailbox_drop_on_shutdown`] for
+    /// frame-bound capabilities (ADR-0074 §Decision 5). In addition
+    /// to the channel-drop shutdown machinery, the registered sink
+    /// handler increments a `pending` counter on every accepted send;
+    /// the capability's dispatcher must decrement after each
+    /// processed envelope so the counter reflects "envelopes accepted
+    /// by the sink but not yet drained by the dispatcher."
+    ///
+    /// The chassis collects the counter so
+    /// [`BootedChassis::drain_frame_bound`] can wait for it to hit
+    /// zero before render submit. Pair this with `FRAME_BARRIER = true`
+    /// on the [`Capability`] impl. See
+    /// [`crate::capabilities::render::RenderCapability`] for the
+    /// reference shape.
+    pub fn claim_frame_bound_mailbox(&mut self, name: &str) -> Result<FrameBoundClaim, BootError> {
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        let tx = Arc::new(tx);
+        let weak = Arc::downgrade(&tx);
+        let pending = Arc::new(AtomicU64::new(0));
+        let pending_for_handler = Arc::clone(&pending);
+        let id = self.registry.try_register_sink(
+            name.to_owned(),
+            Arc::new(
+                move |kind: KindId,
+                      kind_name: &str,
+                      origin: Option<&str>,
+                      sender: ReplyTo,
+                      payload: &[u8],
+                      count: u32| {
+                    let Some(tx) = weak.upgrade() else {
+                        tracing::warn!(
+                            target: "aether_substrate::capability",
+                            kind = kind_name,
+                            "frame-bound capability sender dropped — mail discarded"
+                        );
+                        return;
+                    };
+                    let env = Envelope {
+                        kind,
+                        kind_name: kind_name.to_owned(),
+                        origin: origin.map(str::to_owned),
+                        sender,
+                        payload: payload.to_vec(),
+                        count,
+                    };
+                    // Increment before send so the dispatcher's
+                    // matching decrement-after-dispatch sees a count
+                    // > 0 by the time it tries to decrement. If the
+                    // send itself fails (receiver dropped between the
+                    // upgrade and the send — shutdown race), undo
+                    // the increment so the counter doesn't drift up.
+                    pending_for_handler.fetch_add(1, Ordering::AcqRel);
+                    if tx.send(env).is_err() {
+                        pending_for_handler.fetch_sub(1, Ordering::AcqRel);
+                        tracing::warn!(
+                            target: "aether_substrate::capability",
+                            kind = kind_name,
+                            "frame-bound capability receiver dropped — mail discarded"
+                        );
+                    }
+                },
+            ),
+        )?;
+        self.frame_bound_pending.push((id, Arc::clone(&pending)));
+        Ok(FrameBoundClaim {
+            id,
+            receiver: rx,
+            sink_sender: SinkSender::new(tx),
+            pending,
+        })
+    }
+
     /// Clone-able mail-send handle. Capabilities stash this into
     /// their dispatcher state to send mail to other mailboxes
     /// (including other capabilities). Same `Arc<Mailer>` every
@@ -351,6 +498,16 @@ impl<'a> ChassisCtx<'a> {
     /// `Arc::clone` itself.
     pub fn mailer(&self) -> &Arc<Mailer> {
         self.mailer
+    }
+
+    /// Read the list of frame-bound pending counters collected so far
+    /// from earlier `claim_frame_bound_mailbox` calls. Used by
+    /// [`crate::chassis_builder::DriverCtx::frame_bound_pending`] to
+    /// snapshot the list at driver-boot time; capabilities that just
+    /// want their own counter should hold the `Arc<AtomicU64>` from
+    /// their [`FrameBoundClaim`] directly instead.
+    pub fn frame_bound_pending(&self) -> &[(MailboxId, Arc<AtomicU64>)] {
+        self.frame_bound_pending
     }
 
     /// Install the fallback-router handler. At most one capability
@@ -426,9 +583,11 @@ impl ChassisBuilder {
             pending,
         } = self;
         let mut fallback: Option<FallbackRouter> = None;
+        let mut frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)> = Vec::new();
         let mut booted: Vec<Box<dyn RunningCapability>> = Vec::with_capacity(pending.len());
         for boot in pending {
-            let mut ctx = ChassisCtx::new(&registry, &mailer, &mut fallback);
+            let mut ctx =
+                ChassisCtx::new(&registry, &mailer, &mut fallback, &mut frame_bound_pending);
             match boot(&mut ctx) {
                 Ok(running) => booted.push(running),
                 Err(e) => {
@@ -442,6 +601,7 @@ impl ChassisBuilder {
         Ok(BootedChassis {
             running: booted,
             _fallback: fallback,
+            frame_bound_pending,
         })
     }
 }
@@ -456,6 +616,12 @@ pub struct BootedChassis {
     /// Held for the lifetime of the chassis; Phase 4 will read this
     /// from `Mailer` dispatch. Today it's just owned-and-not-called.
     _fallback: Option<FallbackRouter>,
+    /// Per-mailbox pending counters for frame-bound capabilities,
+    /// collected at boot from [`ChassisCtx::claim_frame_bound_mailbox`].
+    /// Read by [`Self::drain_frame_bound`] each frame; per ADR-0074
+    /// §Decision 5 the frame loop waits on these alongside component
+    /// drains so render submit sees fully-integrated state.
+    frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
 }
 
 impl fmt::Debug for BootedChassis {
@@ -463,6 +629,7 @@ impl fmt::Debug for BootedChassis {
         f.debug_struct("BootedChassis")
             .field("running", &self.running.len())
             .field("fallback_claimed", &self._fallback.is_some())
+            .field("frame_bound_mailboxes", &self.frame_bound_pending.len())
             .finish()
     }
 }
@@ -499,10 +666,60 @@ impl BootedChassis {
     where
         C: Capability,
     {
-        let mut ctx = ChassisCtx::new(registry, mailer, &mut self._fallback);
+        let mut ctx = ChassisCtx::new(
+            registry,
+            mailer,
+            &mut self._fallback,
+            &mut self.frame_bound_pending,
+        );
         let running = cap.boot(&mut ctx)?;
         self.running.push(Box::new(running));
         Ok(())
+    }
+
+    /// Wait for every frame-bound capability's inbox to drain (the
+    /// pending counter on each [`FrameBoundClaim`] hits zero) within
+    /// `budget`. Returns `Ok(())` on clean drain, or
+    /// `Err(WedgedFrameBound)` describing the first mailbox the
+    /// barrier was still waiting on when the budget expired.
+    ///
+    /// Polls in a tight sleep loop because the dispatcher decrement
+    /// and the chassis driver thread don't share a synchronization
+    /// primitive — the pending counter is the only signal. 50 µs
+    /// sleep keeps wakeups cheap on quiet frames without burning a
+    /// core on busy ones.
+    pub fn drain_frame_bound(&self, budget: Duration) -> Result<(), WedgedFrameBound> {
+        if self.frame_bound_pending.is_empty() {
+            return Ok(());
+        }
+        let deadline = Instant::now() + budget;
+        loop {
+            let mut still_pending: Option<(MailboxId, u64)> = None;
+            for (mbox, pending) in &self.frame_bound_pending {
+                let v = pending.load(Ordering::Acquire);
+                if v > 0 {
+                    still_pending = Some((*mbox, v));
+                    break;
+                }
+            }
+            match still_pending {
+                None => return Ok(()),
+                Some((mbox, count)) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(WedgedFrameBound {
+                            mailbox: mbox,
+                            pending: count,
+                            waited: budget,
+                        });
+                    }
+                    // Brief sleep — long enough to avoid burning a
+                    // core, short enough that a typical drain (sub-ms
+                    // dispatcher hop) finishes in one wakeup.
+                    std::thread::sleep(Duration::from_micros(50));
+                }
+            }
+        }
     }
 
     /// Tear down every capability in reverse boot order. Idempotent

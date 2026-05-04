@@ -82,9 +82,11 @@ pub enum Check {
     },
     /// Mail: asserts at least `min_count` mail frames with kind name
     /// `name` were observed. Observations come from the bench's
-    /// chassis-owned `aether.sink.render` and `aether.sink.camera`
-    /// sinks plus broadcast / session-zero frames on the loopback —
-    /// see `TestBench::count_observed` for the full surface.
+    /// chassis-owned `aether.sink.render` sink (which receives
+    /// `aether.draw_triangle` and `aether.camera` post-ADR-0074
+    /// §Decision 7) plus broadcast / session-zero frames on the
+    /// loopback — see `TestBench::count_observed` for the full
+    /// surface.
     MailObserved {
         name: String,
         #[serde(default = "default_min_count")]
