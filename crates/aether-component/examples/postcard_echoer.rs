@@ -6,14 +6,14 @@
 //! so the receive landed observably.
 //!
 //! Pairs with the cast-shaped `echoer.rs` example to demonstrate that
-//! `#[handlers]` dispatches both wire shapes from the same impl block
+//! `#[actor]` dispatches both wire shapes from the same impl block
 //! with no per-handler annotation — wire shape is picked at the kind's
 //! `Kind` derive site (cast for `#[repr(C)]` + `Pod`, postcard
 //! otherwise) and routed through `Kind::decode_from_bytes`. Compiles
 //! to wasm; load via `mcp__aether-hub__load_component` and send
 //! `demo.postcard_request` to verify the dispatch.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor};
 use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
@@ -43,7 +43,7 @@ pub struct PostcardEchoer {
     broadcast: Mailbox<PostcardObserved>,
 }
 
-#[handlers]
+#[actor]
 impl Component for PostcardEchoer {
     const NAMESPACE: &'static str = "postcard_echoer";
 

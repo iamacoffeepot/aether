@@ -694,7 +694,7 @@ impl Hub {
     }
 
     #[tool(
-        description = "Describe a loaded component's receive-side capabilities (ADR-0033). Returns the component's name, its top-level author-written documentation, the set of kinds it typed-handles (id, name, optional per-handler doc), and whether it has a `#[fallback]` catchall (with the fallback's own optional doc). The capability set is parsed from the component's `aether.kinds.inputs` wasm custom section at `load_component` / `replace_component` time. Strict receivers — components without a fallback — are distinguishable via `fallback: null` in the response. Components predating the `#[handlers]` macro ship with empty fields since they have no structured capability surface to advertise."
+        description = "Describe a loaded component's receive-side capabilities (ADR-0033). Returns the component's name, its top-level author-written documentation, the set of kinds it typed-handles (id, name, optional per-handler doc), and whether it has a `#[fallback]` catchall (with the fallback's own optional doc). The capability set is parsed from the component's `aether.kinds.inputs` wasm custom section at `load_component` / `replace_component` time. Strict receivers — components without a fallback — are distinguishable via `fallback: null` in the response. Components predating the `#[actor]` macro ship with empty fields since they have no structured capability surface to advertise."
     )]
     pub(super) async fn describe_component(
         &self,

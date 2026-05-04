@@ -140,7 +140,7 @@ impl<'a, T: MailTransport> Ctx<'a, T> {
         }
     }
 
-    /// Not part of the public API; called only by the `#[handlers]`
+    /// Not part of the public API; called only by the `#[actor]`
     /// dispatcher. Accepts `None` or `Some(ReplyTo)` — the dispatcher
     /// passes `mail.reply_to()` verbatim so component-origin and
     /// broadcast mail (which have no reply target) land as `None`.

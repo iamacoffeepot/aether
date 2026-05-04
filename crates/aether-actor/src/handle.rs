@@ -16,7 +16,7 @@
 //! Each helper takes a `&T` transport reference explicitly. ADR-0074
 //! §Decision: the trait takes `&self`, the actor binding is
 //! type-system-tracked through the reference, no thread-locals or
-//! globals. From inside a `#[handlers]` method the natural call shape
+//! globals. From inside a `#[actor]` method the natural call shape
 //! is `ctx.publish(...)` — the `Ctx` already holds the transport
 //! borrow, so the user doesn't have to thread it through.
 //!
@@ -25,7 +25,7 @@
 //! ```ignore
 //! use aether_component::{Component, Ctx, InitCtx};
 //!
-//! #[handlers]
+//! #[actor]
 //! impl Component for MyComp {
 //!     fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> { Ok(Self) }
 //!

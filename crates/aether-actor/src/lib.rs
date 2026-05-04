@@ -55,7 +55,7 @@ pub use slot::Slot;
 pub use sync::{WaitError, decode_wait_reply, wait_reply};
 pub use transport::MailTransport;
 
-/// Return code the `#[handlers]`-synthesized dispatcher sends back up
+/// Return code the `#[actor]`-synthesized dispatcher sends back up
 /// through `receive_p32` when a `#[handler]` arm matched (or the
 /// `#[fallback]` ran, which by definition handles anything). Propagated
 /// verbatim by the consumer's FFI shim.
@@ -68,7 +68,7 @@ pub const DISPATCH_HANDLED: u32 = 0;
 /// `aether_substrate_bundle::component::DISPATCH_UNKNOWN_KIND` by value.
 pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 
-/// Re-exports the `#[handlers]` macro relies on at expansion sites
+/// Re-exports the `#[actor]` macro relies on at expansion sites
 /// that don't depend on `aether-data` directly. Keeping the macro's
 /// emitted paths rooted at `::aether_component::__macro_internals` (which
 /// re-exports this module) removes the "add aether-data to your

@@ -29,7 +29,7 @@ use bytemuck::{Pod, Zeroable};
 /// Per-frame signal from the substrate's frame loop. Empty payload —
 /// elapsed-time is parked until a subscriber actually needs it.
 ///
-/// ADR-0033 handler dispatch (`#[handlers]` synthesized
+/// ADR-0033 handler dispatch (`#[actor]` synthesized
 /// `__aether_dispatch`) decodes every typed handler via
 /// `Mail::decode_typed::<K>()`, which requires `K: AnyBitPattern`.
 /// Zero-sized unit kinds like `Tick` trivially satisfy that through
@@ -487,7 +487,7 @@ mod control_plane {
     /// into this shape so the hub can store and the MCP harness can
     /// render without a second parser. Empty `handlers` + `None`
     /// fallback + `None` doc describes a component that shipped
-    /// without the `#[handlers]` macro (ADR-0027 shape) — the hub can
+    /// without the `#[actor]` macro (ADR-0027 shape) — the hub can
     /// tell those apart from a truly empty receive surface.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
     pub struct ComponentCapabilities {

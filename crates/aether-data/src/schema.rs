@@ -751,7 +751,7 @@ impl<'de> Deserialize<'de> for VariantLabel {
 /// `Kind::ID` (so the record is self-identifying), the Rust type
 /// label, and the parallel-shape `LabelNode` tree. Paired with the
 /// matching `SchemaShape` record from `aether.kinds` by id, not by
-/// declaration order — any emitter (the Kind derive, `#[handlers]`
+/// declaration order — any emitter (the Kind derive, `#[actor]`
 /// retention, a third-party shared-rlib wrapper) can write records
 /// in any order and the reader will rejoin them correctly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -779,7 +779,7 @@ pub enum InputsRecord {
     },
     /// A `#[fallback]` method's presence and optional description.
     Fallback { doc: Option<Cow<'static, str>> },
-    /// Component-wide rustdoc lifted from the `#[handlers]` impl block.
+    /// Component-wide rustdoc lifted from the `#[actor]` impl block.
     Component { doc: Cow<'static, str> },
 }
 

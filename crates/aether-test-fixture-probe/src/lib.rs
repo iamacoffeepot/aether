@@ -15,7 +15,7 @@
 //!   `capture_frame` scenarios can observe pre-mail effects in the
 //!   captured PNG.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers, resolve_mailbox};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor, resolve_mailbox};
 use aether_kinds::{DrawTriangle, Tick, Vertex};
 use bytemuck::{Pod, Zeroable};
 
@@ -54,7 +54,7 @@ pub struct Probe {
     render: SetRender,
 }
 
-#[handlers]
+#[actor]
 impl Component for Probe {
     const NAMESPACE: &'static str = "test_fixture_probe";
 

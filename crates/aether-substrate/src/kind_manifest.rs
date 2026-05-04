@@ -12,7 +12,7 @@
 // records carry their `kind_id` inline (v0x03 field), so the reader
 // indexes labels by id and looks up per shape. Pairing is robust
 // against emit order, duplicates, and mixed emitters (the Kind derive,
-// `#[handlers]` retention for kinds defined in rlib dependencies, and
+// `#[actor]` retention for kinds defined in rlib dependencies, and
 // future external sources of kind metadata).
 //
 // Pre-v0x03 labels lacked `kind_id` and were paired by declaration
@@ -673,7 +673,7 @@ mod tests {
 
     #[test]
     fn duplicate_kinds_records_tolerated_under_by_id_pairing() {
-        // `#[handlers]` retention emits both an `aether.kinds` and an
+        // `#[actor]` retention emits both an `aether.kinds` and an
         // `aether.kinds.labels` record per handler kind; when the
         // defining crate also emits via `Kind` derive, a kind ends up
         // with duplicate records in both sections. The by-id merge
@@ -747,7 +747,7 @@ mod tests {
 
     #[test]
     fn sokoban_load_level_single_field_has_name() {
-        // Regression: `#[handlers]` retention historically wrote kinds
+        // Regression: `#[actor]` retention historically wrote kinds
         // records into `aether.kinds` without parallel labels records
         // into `aether.kinds.labels`, desyncing the old by-index
         // pairing. `demo.sokoban.load_level`'s single `id` field came

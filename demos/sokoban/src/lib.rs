@@ -12,7 +12,7 @@
 //! Grid is still capped at 16×16 (pre-ADR-0028 carryover).
 
 use aether_camera::{CameraTopdownSet, TopdownParams};
-use aether_component::{BootError, Component, Ctx, InitCtx, KindId, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, KindId, Mailbox, actor};
 use aether_data::{Kind, Schema};
 use aether_kinds::{DrawTriangle, Key, Tick, Vertex, keycode};
 use bytemuck::{Pod, Zeroable};
@@ -137,7 +137,7 @@ pub struct Sokoban {
 /// - `SokobanLoadLevel { id }` — switch levels. Out-of-range is a
 ///   no-op.
 /// - `SokobanReset` — reload the active level.
-#[handlers]
+#[actor]
 impl Component for Sokoban {
     const NAMESPACE: &'static str = "sokoban";
 

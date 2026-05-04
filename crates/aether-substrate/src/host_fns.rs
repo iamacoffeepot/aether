@@ -95,7 +95,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     // guest side via the `Kind` derive's `const ID`. The host fn and
     // its `KIND_NOT_FOUND` sentinel are gone. Input-stream auto-
     // subscribe (the side-effect that used to ride this host fn)
-    // moved to the guest SDK — ADR-0033 phase 3 has `#[handlers]`
+    // moved to the guest SDK — ADR-0033 phase 3 has `#[actor]`
     // prepend `ctx.subscribe_input::<K>()` for every `K::IS_INPUT`
     // handler kind to the user's `init` body.
 

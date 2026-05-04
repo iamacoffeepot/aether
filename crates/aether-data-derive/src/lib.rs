@@ -84,7 +84,7 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // the substrate carried it as raw cast bytes (and the user has
     // `#[derive(Pod, Zeroable)]`); anything else is postcard-shaped
     // (and the user has `#[derive(Serialize, Deserialize)]`). The
-    // dispatcher in `#[handlers]` calls `Kind::decode_from_bytes` via
+    // dispatcher in `#[actor]` calls `Kind::decode_from_bytes` via
     // `Mail::decode_kind::<K>()`; emitting the body per-impl here is
     // what lets that one call site compile against types whose Pod /
     // Deserialize bounds are disjoint.
@@ -679,7 +679,7 @@ fn to_screaming_snake_case(s: &str) -> String {
     out
 }
 
-// ADR-0033 phase 3: `#[handlers]` on an `impl Component for C` block
+// ADR-0033 phase 3: `#[actor]` on an `impl Component for C` block
 // is the one receive path for every component. The macro emits:
 //
 //   (a) An inherent method `__aether_dispatch(&mut self, ctx, mail)
@@ -707,7 +707,7 @@ fn to_screaming_snake_case(s: &str) -> String {
 //       bytes into the wasm custom section is emitted by
 //       `aether_component::export!()` in the cdylib root crate, NOT
 //       here. Sections only land where `export!()` runs (the cdylib
-//       root); transitive rlib pulls of a `#[handlers]`-using crate
+//       root); transitive rlib pulls of a `#[actor]`-using crate
 //       carry only the const data and contribute no section bytes —
 //       which is what keeps duplicate Component records from stacking
 //       when a cdylib deps on a sibling cdylib's rlib output.
@@ -723,12 +723,28 @@ fn to_screaming_snake_case(s: &str) -> String {
 // comment — the `# Agent` heading sits alongside `# Safety`/`# Examples`
 // as a conventional reader-specific section.
 
+/// Outer attribute on an `impl WasmActor for X` (or `impl Component for X`)
+/// block. Reads the `#[handler]` / `#[fallback]` methods inside, then emits:
+///
+/// - One `impl HandlesKind<K> for X` per handler kind (gates type-driven
+///   sender bounds — ADR-0075).
+/// - The dispatch table inherent method `__aether_dispatch` that the
+///   `export!` shim's `receive_p32` calls.
+/// - The `aether.kinds.inputs` manifest consts (substrate reads them via
+///   the wasm custom section the cdylib's `export!` pins in).
+/// - The `Actor`-trait const re-routing (NAMESPACE / FRAME_BARRIER from
+///   the impl block flow into a sibling `impl Actor`).
+///
+/// Renamed from `#[actor]` in PR A of issue 533. Same behavior; the
+/// new name reads as "decorate this actor's impl" — natural now that the
+/// macro applies to any actor (and will extend to native chassis caps in
+/// a follow-up).
 #[proc_macro_attribute]
-pub fn handlers(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
-            "#[handlers] takes no arguments",
+            "#[actor] takes no arguments",
         )
         .to_compile_error()
         .into();
@@ -742,13 +758,13 @@ pub fn handlers(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 #[proc_macro_attribute]
 pub fn handler(_attr: TokenStream, _item: TokenStream) -> TokenStream {
-    // Real logic runs inside `#[handlers]` (the enclosing impl-block
+    // Real logic runs inside `#[actor]` (the enclosing impl-block
     // attribute scans for #[handler] markers). This standalone shim
     // only exists so rustc accepts `#[handler]` syntactically outside
     // macro expansion and so rust-analyzer doesn't redline it.
     syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[handler] may only appear inside a `#[handlers] impl Component for T` block",
+        "#[handler] may only appear inside a `#[actor] impl WasmActor for T` block",
     )
     .to_compile_error()
     .into()
@@ -757,11 +773,11 @@ pub fn handler(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     // Same story as `#[handler]` — marker attribute consumed by the
-    // enclosing `#[handlers]` scan. Standalone invocation is a
+    // enclosing `#[actor]` scan. Standalone invocation is a
     // compile-time error.
     syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[fallback] may only appear inside a `#[handlers] impl Component for T` block",
+        "#[fallback] may only appear inside a `#[actor] impl WasmActor for T` block",
     )
     .to_compile_error()
     .into()
@@ -782,7 +798,7 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
     if item.trait_.is_none() {
         return Err(syn::Error::new_spanned(
             &item,
-            "#[handlers] must wrap `impl Component for T` — not an inherent impl",
+            "#[actor] must wrap `impl Component for T` — not an inherent impl",
         ));
     }
     let self_ty = &item.self_ty;
@@ -803,7 +819,7 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
     // Issue 525 Phase 1B: pass-through trait consts (today: NAMESPACE,
     // FRAME_BARRIER) so each component declares them inside its
-    // `#[handlers] impl Component for C` block alongside `init` /
+    // `#[actor] impl WasmActor for C` block alongside `init` /
     // `#[handler]` methods.
     let mut consts: Vec<syn::ImplItemConst> = Vec::new();
 
@@ -812,7 +828,7 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
             ImplItem::Type(it) if it.ident == "Kinds" => {
                 return Err(syn::Error::new_spanned(
                     it,
-                    "#[handlers] synthesizes `type Kinds` from the #[handler] methods; remove this declaration",
+                    "#[actor] synthesizes `type Kinds` from the #[handler] methods; remove this declaration",
                 ));
             }
             ImplItem::Const(c) => {
@@ -860,7 +876,7 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
                 } else if name == "receive" {
                     return Err(syn::Error::new_spanned(
                         &f,
-                        "#[handlers] synthesizes `fn receive`; remove this definition",
+                        "#[actor] synthesizes `fn receive`; remove this definition",
                     ));
                 } else {
                     helpers.push(f);
@@ -869,7 +885,7 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "unexpected item in #[handlers] impl (only fns and the synthesized `type Kinds` are allowed)",
+                    "unexpected item in #[actor] impl (only fns and the synthesized `type Kinds` are allowed)",
                 ));
             }
         }
@@ -878,14 +894,14 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
     let init_method = init_method.ok_or_else(|| {
         syn::Error::new_spanned(
             self_ty,
-            "#[handlers] requires `fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError>`",
+            "#[actor] requires `fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError>`",
         )
     })?;
 
     if handlers.is_empty() && fallback.is_none() {
         return Err(syn::Error::new_spanned(
             self_ty,
-            "#[handlers] requires at least one #[handler] method or a #[fallback] method",
+            "#[actor] requires at least one #[handler] method or a #[fallback] method",
         ));
     }
 
@@ -912,7 +928,7 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
 
     // Issue 525 Phase 4: trait consts (NAMESPACE, FRAME_BARRIER) live
     // on the `Actor` super-trait, not `Component` / `WasmActor`. Route
-    // any const items the user declared inside `#[handlers] impl
+    // any const items the user declared inside `#[actor] impl
     // Component for X` to a sibling `impl ::aether_component::Actor`
     // block so satisfying `WasmActor: Actor` works without making the
     // user split the impl manually.
@@ -1088,7 +1104,7 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
 /// `aether_component::export!()` reads these consts and emits the
 /// `#[unsafe(link_section = "aether.kinds.inputs")]` static in the
 /// cdylib root crate. Keeping the section emission out of this macro
-/// is what prevents the section from stacking when a `#[handlers]`-
+/// is what prevents the section from stacking when a `#[actor]`-
 /// using crate is pulled in as a wasm32 rlib by another cdylib (a
 /// rlib that doesn't call `export!()` contributes no section bytes).
 fn build_inputs_manifest_consts(
@@ -1220,7 +1236,7 @@ fn build_inputs_manifest_consts(
 /// name. `#[used]` keeps the symbol in the rlib's object file but
 /// doesn't cross the rlib→cdylib boundary under `--gc-sections`. The
 /// `aether.kinds.inputs` section survives only because
-/// `#[handlers]` emits it here, in the consumer's own compilation
+/// `#[actor]` emits it here, in the consumer's own compilation
 /// unit. We apply the same trick to `aether.kinds`.
 ///
 /// The bytes are computed via trait dispatch on `<K as Kind>::NAME`

@@ -45,7 +45,7 @@
 //! That's as shape-y as this first pass gets; proper X / O glyphs
 //! are a rendering-polish pass for later.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor};
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, GameState, LAST_MOVE_NONE, MoveResult, PLAYER_X, PlayMove, SERVER,
 };
@@ -125,7 +125,7 @@ impl Default for TicTacToeClient {
 /// `tic_tac_toe.play_move` directly against the `tic_tac_toe` server
 /// component; the board updates the same way either route. Use
 /// `capture_frame` to verify rendering.
-#[handlers]
+#[actor]
 impl Component for TicTacToeClient {
     const NAMESPACE: &'static str = "tic_tac_toe_client";
 

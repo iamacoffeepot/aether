@@ -61,13 +61,13 @@ pub use wire_id::{EngineId, SessionToken, Uuid};
 /// Re-exported derive macros from `aether-data-derive`. Behind the
 /// `derive` feature so `cargo build` on a guest that hand-writes
 /// `impl Kind` doesn't pay the proc-macro compile cost. The
-/// `#[handlers]` / `#[handler]` / `#[fallback]` attribute macros
+/// `#[actor]` / `#[handler]` / `#[fallback]` attribute macros
 /// (ADR-0033) ride in the same crate because adding a second proc-
 /// macro crate would double consumer compile cost for no separation
 /// gain — both derives and attributes expand into the same runtime
 /// surface.
 #[cfg(feature = "derive")]
-pub use aether_data_derive::{Kind, Schema, fallback, handler, handlers};
+pub use aether_data_derive::{Kind, Schema, actor, fallback, handler};
 
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
 /// `"aether.tick"`, `"hello.npc_health"`) and a `u64` id derived from
@@ -78,7 +78,7 @@ pub use aether_data_derive::{Kind, Schema, fallback, handler, handlers};
 ///
 /// `IS_STREAM` marks the kind as a substrate-published input stream
 /// (`Tick`, `Key`, `MouseMove`, `MouseButton` — ADR-0021). Defaults
-/// to `false`; `#[handlers]` auto-subscribes a component's mailbox to
+/// to `false`; `#[actor]` auto-subscribes a component's mailbox to
 /// every `K::IS_STREAM` handler kind before the user's `init` body
 /// runs (ADR-0033 phase 3), so components writing
 /// `#[handler] fn on_tick(..., tick: Tick)` don't need to send
@@ -99,11 +99,11 @@ pub trait Kind {
     /// `Kind` derive auto-implements this with the right body for the
     /// type's wire shape (cast for `#[repr(C)]` + `Pod`, postcard
     /// otherwise). Hand-rolled `Kind` impls that don't participate in
-    /// `#[handlers]` receive dispatch can leave the default — it
+    /// `#[actor]` receive dispatch can leave the default — it
     /// returns `None`, which the SDK surfaces as a strict-receiver
     /// miss (`DISPATCH_UNKNOWN_KIND`).
     ///
-    /// The dispatcher synthesised by `#[handlers]` calls this through
+    /// The dispatcher synthesised by `#[actor]` calls this through
     /// `Mail::decode_kind::<K>()`, which hands `bytes` already sliced
     /// to the substrate-supplied `byte_len` so the decoder is bounded
     /// by the actual frame and can't read past the substrate-written

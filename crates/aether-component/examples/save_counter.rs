@@ -21,9 +21,7 @@
 //! 3. `terminate_substrate`, spawn another, observe the count
 //!    bumped by one.
 
-use aether_component::{
-    BootError, Component, Ctx, InitCtx, Mailbox, handlers, io, resolve_mailbox,
-};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor, io, resolve_mailbox};
 use aether_kinds::{IoError, Tick};
 
 /// Broadcast payload the Claude session (or any component listening
@@ -61,7 +59,7 @@ pub struct SaveCounter {
 /// # Agent
 /// `spawn_substrate` with this component and poll `receive_mail`;
 /// each fresh instance bumps the counter by one.
-#[handlers]
+#[actor]
 impl Component for SaveCounter {
     const NAMESPACE: &'static str = "save_counter";
 

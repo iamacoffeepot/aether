@@ -2,12 +2,12 @@
 //! handles). Receives `demo.request { seq }` and replies with
 //! `demo.response { seq }` to whatever component sent it.
 //!
-//! ADR-0033 phase 3: uses `#[handlers]` as the only receive path.
+//! ADR-0033 phase 3: uses `#[actor]` as the only receive path.
 //! The synthesized dispatcher reads `ctx.reply_to()` (threaded from the
-//! inbound mail by `#[handlers]`) so the handler body never touches
+//! inbound mail by `#[actor]`) so the handler body never touches
 //! `Mail<'_>` directly.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, KindId, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, KindId, actor};
 use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
@@ -29,7 +29,7 @@ pub struct Echoer {
     response: KindId<Response>,
 }
 
-#[handlers]
+#[actor]
 impl Component for Echoer {
     const NAMESPACE: &'static str = "echoer";
 

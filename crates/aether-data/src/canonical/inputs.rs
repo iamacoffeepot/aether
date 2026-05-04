@@ -1,4 +1,4 @@
-//! `InputsRecord` const-fn encoders (ADR-0033). The `#[handlers]`
+//! `InputsRecord` const-fn encoders (ADR-0033). The `#[actor]`
 //! macro emits one postcard-compatible byte array per handler /
 //! fallback / component-doc record, length-prefixed with the section
 //! version tag, and drops the bytes into the `aether.kinds.inputs`

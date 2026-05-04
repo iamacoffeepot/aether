@@ -10,11 +10,11 @@
 //! MouseButton).
 //!
 //! ADR-0033 phase 3: each input kind has its own `#[handler]`
-//! method. `#[handlers]` auto-subscribes every `K::IS_INPUT` handler
+//! method. `#[actor]` auto-subscribes every `K::IS_INPUT` handler
 //! kind at init, so the test harness just loads the component and
 //! starts driving input — no manual `subscribe_input` needed.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor};
 use aether_data::{Kind, Schema};
 use aether_kinds::{Key, MouseButton, MouseMove, Tick};
 use bytemuck::{Pod, Zeroable};
@@ -31,7 +31,7 @@ pub struct InputLogger {
     observe: Mailbox<InputObserved>,
 }
 
-#[handlers]
+#[actor]
 impl Component for InputLogger {
     const NAMESPACE: &'static str = "input_logger";
 

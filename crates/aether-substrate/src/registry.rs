@@ -631,7 +631,7 @@ mod tests {
     /// second registration of the same structural kind with stripped
     /// names (e.g. reconstructed from a component's `aether.kinds`
     /// canonical bytes) must be accepted as idempotent because both
-    /// produce the same kind id. This is the path `#[handlers]`
+    /// produce the same kind id. This is the path `#[actor]`
     /// consumer-crate retention relies on for cross-crate kinds that
     /// duplicate boot-registered ones.
     #[test]

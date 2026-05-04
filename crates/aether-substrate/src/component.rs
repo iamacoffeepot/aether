@@ -13,7 +13,7 @@ use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
 
 const MAIL_OFFSET: u32 = 1024;
 
-/// Sentinel the ADR-0033 `#[handlers]` dispatcher returns from
+/// Sentinel the ADR-0033 `#[actor]` dispatcher returns from
 /// `receive_p32` when mail arrives with a kind id the component has
 /// no typed handler for and no fallback. Substrate-side, the
 /// scheduler turns this into a `tracing::warn!` so the unhandled

@@ -38,7 +38,7 @@ use aether_camera::{
     CameraCreate, CameraDestroy, CameraOrbitSet, CameraSetActive, CameraSetMode, CameraTopdownSet,
     ModeInit, OrbitParams, TopdownParams,
 };
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor};
 use aether_kinds::{Camera, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, Vec2, Vec3};
 
@@ -243,7 +243,7 @@ pub struct CameraComponent {
 ///   camera in place.
 ///
 /// Use `capture_frame` between sends to verify each change.
-#[handlers]
+#[actor]
 impl Component for CameraComponent {
     const NAMESPACE: &'static str = "camera";
 

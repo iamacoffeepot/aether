@@ -7,10 +7,10 @@
 //! trip is visible to the driving Claude session.
 //!
 //! ADR-0033 phase 3: each kind gets its own `#[handler]` method on
-//! the `#[handlers]`-decorated impl; `Mailbox<K>` still carries the
+//! the `#[actor]`-decorated impl; `Mailbox<K>` still carries the
 //! send-side mailbox name (data, not type).
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor};
 use aether_data::{Kind, Schema};
 use aether_kinds::Tick;
 use bytemuck::{Pod, Zeroable};
@@ -42,7 +42,7 @@ pub struct Caller {
     next_seq: u32,
 }
 
-#[handlers]
+#[actor]
 impl Component for Caller {
     const NAMESPACE: &'static str = "caller";
 

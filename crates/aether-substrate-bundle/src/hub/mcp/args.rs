@@ -363,7 +363,7 @@ pub struct LoadComponentResponse {
     /// Receive-side capability surface the component advertised via
     /// `aether.kinds.inputs` (ADR-0033). Empty `handlers` + no
     /// fallback + no doc describes a component that shipped without
-    /// the `#[handlers]` macro — still loadable, just opaque to
+    /// the `#[actor]` macro — still loadable, just opaque to
     /// `describe_component`.
     pub capabilities: ComponentCapabilitiesWire,
 }
