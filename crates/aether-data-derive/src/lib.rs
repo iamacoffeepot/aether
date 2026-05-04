@@ -1055,9 +1055,13 @@ fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
                     ));
                 }
                 if let Some(idx) = handler_attr_idx {
-                    let kind_ty = extract_native_handler_kind_type(&f.sig)?;
+                    let (kind_ty, takes_sender) = extract_native_handler_kind_type(&f.sig)?;
                     f.attrs.remove(idx);
-                    handlers.push(NativeHandlerFn { method: f, kind_ty });
+                    handlers.push(NativeHandlerFn {
+                        method: f,
+                        kind_ty,
+                        takes_sender,
+                    });
                 } else {
                     helpers.push(f);
                 }
@@ -1105,13 +1109,25 @@ fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     // payload (returning early on decode failure for the matched kind
     // — substrate-side dispatcher logs the miss separately) and calls
     // the inherent handler method by its original ident.
+    //
+    // Two call shapes:
+    //   - `takes_sender = true` → forward the dispatcher's `sender`
+    //     argument as the second arg. Used by reply-bearing caps
+    //     (Handle, Audio, Io, Net, ...) — issue 533 PR D1.
+    //   - `takes_sender = false` → drop sender on the floor.
+    //     Fire-and-forget caps (Log) keep the 2-arg signature.
     let dispatch_arms = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         let method_ident = &h.method.sig.ident;
+        let call = if h.takes_sender {
+            quote! { self.#method_ident(__sender, __decoded); }
+        } else {
+            quote! { self.#method_ident(__decoded); }
+        };
         quote! {
             if kind == <#kind_ty as ::aether_data::Kind>::ID.0 {
                 if let Some(__decoded) = <#kind_ty as ::aether_data::Kind>::decode_from_bytes(payload) {
-                    self.#method_ident(__decoded);
+                    #call
                     return Some(());
                 }
                 return None;
@@ -1126,7 +1142,16 @@ fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         #(#handles_kind_impls)*
 
         impl #impl_generics ::aether_data::Dispatch for #self_ty #where_clause {
-            fn __dispatch(&mut self, kind: u64, payload: &[u8]) -> Option<()> {
+            fn __dispatch(
+                &mut self,
+                __sender: ::aether_data::ReplyTo,
+                kind: u64,
+                payload: &[u8],
+            ) -> Option<()> {
+                // `__sender` is shadowed-bind so dispatch arms that
+                // forward it stay readable. Underscore prefix avoids
+                // shadowing user identifiers when no handler takes it.
+                let _ = &__sender;
                 #(#dispatch_arms)*
                 None
             }
@@ -1142,15 +1167,29 @@ fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
 struct NativeHandlerFn {
     method: syn::ImplItemFn,
     kind_ty: Type,
+    /// `true` for 3-arg `(&mut self, sender: ReplyTo, mail: K)` — the
+    /// dispatcher forwards the envelope's `sender` through to the
+    /// handler. `false` for 2-arg `(&mut self, mail: K)` — sender is
+    /// ignored (fire-and-forget caps like Log).
+    takes_sender: bool,
 }
 
-/// Extract `K` from a native handler's second parameter (`arg: K`).
-/// Native handlers don't take a ctx; signature is `(&mut self, K)`.
-fn extract_native_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
-    if sig.inputs.len() != 2 {
+/// Extract `K` from a native handler's signature. Accepts two shapes:
+///   - 2-arg `(&mut self, mail: K)` — fire-and-forget handler, sender
+///     is ignored when the dispatcher invokes it.
+///   - 3-arg `(&mut self, sender: ReplyTo, mail: K)` — reply-bearing
+///     handler, sender is the envelope's reply target. The macro
+///     trusts the second arg's name/type and forwards the dispatcher's
+///     `sender` through to it.
+///
+/// Returns the kind type plus a `takes_sender` flag the caller uses
+/// to pick the right dispatch-arm shape.
+fn extract_native_handler_kind_type(sig: &Signature) -> syn::Result<(Type, bool)> {
+    if sig.inputs.len() != 2 && sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
-            "native #[handler] method must have signature `(&mut self, arg: K)`",
+            "native #[handler] method must have signature `(&mut self, arg: K)` \
+             or `(&mut self, sender: ::aether_data::ReplyTo, arg: K)`",
         ));
     }
     let first = &sig.inputs[0];
@@ -1160,13 +1199,15 @@ fn extract_native_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
             "native #[handler] first parameter must be `&mut self`",
         ));
     }
-    let FnArg::Typed(pat_ty) = &sig.inputs[1] else {
+    let takes_sender = sig.inputs.len() == 3;
+    let kind_arg_idx = if takes_sender { 2 } else { 1 };
+    let FnArg::Typed(pat_ty) = &sig.inputs[kind_arg_idx] else {
         return Err(syn::Error::new_spanned(
-            &sig.inputs[1],
-            "native #[handler] second parameter must be `arg: K`",
+            &sig.inputs[kind_arg_idx],
+            "native #[handler] kind parameter must be a typed `arg: K`",
         ));
     };
-    Ok((*pat_ty.ty).clone())
+    Ok(((*pat_ty.ty).clone(), takes_sender))
 }
 
 /// Extract `K` from a handler method's third parameter (`arg: K`).
