@@ -29,7 +29,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use aether_data::{Actor, Kind, Singleton};
+use aether_actor::{Actor, Singleton};
+use aether_data::Kind;
 use aether_kinds::{Camera, DRAW_TRIANGLE_BYTES, DrawTriangle};
 
 use crate::render::{

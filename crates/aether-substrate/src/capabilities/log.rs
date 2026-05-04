@@ -11,7 +11,7 @@
 //! and let `tracing-subscriber`'s `tracing-log` integration lift each
 //! record back into the tracing pipeline.
 
-use aether_data::{Actor, Singleton};
+use aether_actor::{Actor, Singleton};
 use aether_kinds::LogEvent;
 
 use crate::log_sink;

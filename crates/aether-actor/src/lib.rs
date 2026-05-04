@@ -45,7 +45,7 @@ mod slot;
 mod sync;
 mod transport;
 
-pub use actor::{Actor, HandlesKind, Singleton};
+pub use actor::{Actor, Dispatch, HandlesKind, Singleton};
 pub use ctx::{Ctx, DropCtx, InitCtx};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
 pub use sink::{

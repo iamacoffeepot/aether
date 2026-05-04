@@ -22,7 +22,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_data::{Actor, ReplyTo, Singleton};
+use aether_actor::{Actor, Singleton};
+use aether_data::ReplyTo;
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
 use crate::mailer::Mailer;

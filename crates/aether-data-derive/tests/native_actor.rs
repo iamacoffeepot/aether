@@ -12,8 +12,8 @@
 // Compiles native-only — `aether-data-derive` runs as a proc-macro
 // crate, so these tests exercise the generated code on the host.
 
-use aether_actor::Actor;
-use aether_data::{Dispatch, Kind, ReplyTarget, ReplyTo, SessionToken, Uuid};
+use aether_actor::{Actor, Dispatch};
+use aether_data::{Kind, ReplyTarget, ReplyTo, SessionToken, Uuid};
 use bytemuck::{Pod, Zeroable};
 
 /// Two distinct cast-shape kinds the test cap handles.
