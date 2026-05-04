@@ -91,7 +91,11 @@ impl Capability for HandleCapability {
         // and clones the `Arc` into the dispatcher thread; the
         // dispatcher uses `transport.recv_blocking()` to pull from
         // its own inbox without thread-local plumbing.
-        let transport = Arc::new(NativeTransport::new(Arc::clone(&mailer), mailbox_id));
+        let transport = Arc::new(NativeTransport::from_ctx(
+            ctx,
+            mailbox_id,
+            Self::FRAME_BARRIER,
+        ));
         transport.install_inbox(claim.receiver);
         let dispatcher_transport = Arc::clone(&transport);
 

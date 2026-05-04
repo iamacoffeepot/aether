@@ -15,16 +15,17 @@
 //! `aether_component::WasmTransport` (a ZST) the same way; both
 //! impls share the SDK in `aether-actor`.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use aether_actor::MailTransport;
 
-use crate::capability::Envelope;
+use crate::capability::{ChassisCtx, Envelope};
+use crate::lifecycle::{FatalAborter, PanicAborter};
 use crate::mail::{KindId, Mail, MailboxId, ReplyTarget, ReplyTo};
 use crate::mailer::Mailer;
 
@@ -69,7 +70,50 @@ pub struct NativeTransport {
     /// Monotonic correlation counter — atomic so `&self` can mint
     /// new ids without `&mut`.
     correlation: AtomicU64,
+    /// ADR-0074 §Decision 5 cross-class `wait_reply` guard. `true`
+    /// means this transport's owning capability declared
+    /// `Capability::FRAME_BARRIER = true`; combined with the
+    /// `frame_bound_set` lookup below, [`Self::wait_reply`] aborts
+    /// when a frame-bound caller blocks on a free-running recipient
+    /// (which would wedge the per-frame drain barrier waiting on a
+    /// thread that doesn't synchronize with frames).
+    caller_frame_bound: bool,
+    /// Membership view of the chassis's frame-bound mailbox set.
+    /// Read on each [`Self::wait_reply`] to classify the recipient
+    /// of the prior `send_mail`. Cloned from
+    /// [`ChassisCtx::frame_bound_set`] at boot; the chassis adds
+    /// entries as additional frame-bound capabilities boot, so this
+    /// view stays current across the chassis lifetime.
+    frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
+    /// Indirection over [`crate::lifecycle::fatal_abort`] — invoked
+    /// by [`Self::wait_reply`] on cross-class violation. Cloned from
+    /// [`ChassisCtx::fatal_aborter`] at boot.
+    aborter: Arc<dyn FatalAborter>,
+    /// Tracks `correlation_id → recipient_mailbox` for outbound
+    /// requests so [`Self::wait_reply`] can resolve the recipient
+    /// when checking the cross-class guard. Populated by
+    /// [`Self::send_mail`] (every send, since fire-and-forget vs
+    /// request/reply isn't distinguishable at this layer); pruned
+    /// by [`Self::wait_reply`] when the matching reply arrives or
+    /// the deadline expires. Bounded by the cleanup pass in
+    /// `wait_reply`'s exit paths plus an opportunistic cap (see
+    /// `MAX_PENDING_RECIPIENTS`); a runaway sender that never paired
+    /// a wait would otherwise leak entries here.
+    pending_recipients: Mutex<HashMap<u64, MailboxId>>,
 }
+
+/// Soft cap on [`NativeTransport::pending_recipients`]. A
+/// fire-and-forget `send_mail` (one with no paired `wait_reply`)
+/// leaves an entry in the map indefinitely; the cap stops a runaway
+/// sender from growing the map without bound. Picked large enough
+/// to comfortably exceed any realistic burst of in-flight requests
+/// from a single capability — the cross-class guard is preventive,
+/// not load-bearing for normal traffic. When the cap is hit the
+/// oldest entry is dropped (insertion order; we accept that the
+/// pruned correlation will silently skip the guard if its reply
+/// ever lands, which is strictly less safe than aborting but no
+/// worse than the pre-guard baseline).
+const MAX_PENDING_RECIPIENTS: usize = 1024;
 
 impl NativeTransport {
     /// Build a fresh transport. Pair `self_mailbox` with the id the
@@ -79,14 +123,74 @@ impl NativeTransport {
     /// separately via [`Self::install_inbox`] so capabilities that
     /// build the transport before pulling the receiver out of their
     /// claim aren't forced into a specific construction order.
-    pub fn new(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
+    ///
+    /// `caller_frame_bound`, `frame_bound_set`, and `aborter` wire
+    /// the ADR-0074 §Decision 5 cross-class `wait_reply` guard.
+    /// Capabilities authored under a [`crate::ChassisCtx`] should
+    /// prefer [`Self::from_ctx`], which inherits the chassis's
+    /// shared set + aborter automatically; the explicit constructor
+    /// is for harnesses that don't go through a chassis (TestBench
+    /// internals) or for tests that want to substitute a custom
+    /// aborter.
+    pub fn new(
+        mailer: Arc<Mailer>,
+        self_mailbox: MailboxId,
+        caller_frame_bound: bool,
+        frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
+        aborter: Arc<dyn FatalAborter>,
+    ) -> Self {
         Self {
             mailer,
             self_mailbox,
             inbox: OnceLock::new(),
             overflow: Mutex::new(VecDeque::new()),
             correlation: AtomicU64::new(0),
+            caller_frame_bound,
+            frame_bound_set,
+            aborter,
+            pending_recipients: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Convenience constructor that pulls the cross-class guard
+    /// state (frame-bound set + aborter) from a [`ChassisCtx`]. The
+    /// natural call site is inside a [`crate::Capability::boot`]:
+    ///
+    /// ```ignore
+    /// let claim = ctx.claim_mailbox_drop_on_shutdown(NAME)?;
+    /// let transport = NativeTransport::from_ctx(ctx, claim.id, Self::FRAME_BARRIER);
+    /// ```
+    ///
+    /// Capabilities that don't migrate to this constructor in the
+    /// same PR keep using [`Self::new_for_test`] (or call
+    /// [`Self::new`] explicitly with their chosen guard state); the
+    /// guard is a no-op for non-frame-bound callers and the
+    /// PanicAborter default is harmless for production caps that
+    /// never call `wait_reply`.
+    pub fn from_ctx(ctx: &ChassisCtx<'_>, self_mailbox: MailboxId, frame_bound: bool) -> Self {
+        Self::new(
+            ctx.mail_send_handle(),
+            self_mailbox,
+            frame_bound,
+            ctx.frame_bound_set(),
+            ctx.fatal_aborter(),
+        )
+    }
+
+    /// Test-only constructor that disables the cross-class guard
+    /// (non-frame-bound caller, empty set, [`PanicAborter`]). Lets
+    /// existing unit tests construct a transport without naming
+    /// every guard parameter; not appropriate for production
+    /// capabilities, which should go through [`Self::from_ctx`] so
+    /// the guard wires to the chassis's shared state.
+    pub fn new_for_test(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
+        Self::new(
+            mailer,
+            self_mailbox,
+            false,
+            Arc::new(RwLock::new(HashSet::new())),
+            Arc::new(PanicAborter),
+        )
     }
 
     /// Install the receiver half of the actor's inbox so
@@ -159,11 +263,26 @@ const ERR_NO_INBOX_I32: i32 = 100;
 impl MailTransport for NativeTransport {
     fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
+        let recipient_id = MailboxId(recipient);
         let reply_to =
             ReplyTo::with_correlation(ReplyTarget::Component(self.self_mailbox), correlation);
-        let mail = Mail::new(MailboxId(recipient), KindId(kind), bytes.to_vec(), count)
+        let mail = Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count)
             .with_reply_to(reply_to)
             .with_origin(self.self_mailbox);
+        // Record `correlation -> recipient` for the cross-class
+        // `wait_reply` guard. We record on every send (the FFI here
+        // can't tell fire-and-forget from request/reply) and let
+        // `wait_reply` prune. The opportunistic cap below stops a
+        // runaway sender that never paired a wait from leaking.
+        {
+            let mut pending = self.pending_recipients.lock().unwrap();
+            if pending.len() >= MAX_PENDING_RECIPIENTS
+                && let Some(&drop_key) = pending.keys().next()
+            {
+                pending.remove(&drop_key);
+            }
+            pending.insert(correlation, recipient_id);
+        }
         self.mailer.push(mail);
         0
     }
@@ -208,10 +327,39 @@ impl MailTransport for NativeTransport {
             return -ERR_NO_INBOX_I32;
         };
 
+        // ADR-0074 §Decision 5 cross-class guard: a frame-bound
+        // caller blocking on a free-running recipient would wedge
+        // the per-frame drain barrier waiting on a thread that
+        // doesn't synchronize with frames. Detect at the call site
+        // and abort with a specific diagnostic instead of letting
+        // `drain_frame_bound_or_abort` time out further downstream
+        // with a less actionable "dispatcher wedged" reason. The
+        // guard is preventive — today no in-tree capability calls
+        // `wait_reply` cross-class — so the early return path is
+        // for future-cap correctness, not current behavior.
+        if self.caller_frame_bound
+            && expected_correlation != ReplyTo::NO_CORRELATION
+            && let Some(recipient) = self
+                .pending_recipients
+                .lock()
+                .unwrap()
+                .get(&expected_correlation)
+                .copied()
+            && !self.frame_bound_set.read().unwrap().contains(&recipient)
+        {
+            self.aborter.abort(format!(
+                "frame-bound actor {} attempted wait_reply on free-running recipient {} \
+                 (correlation {expected_correlation}, expected_kind {expected_kind}) — \
+                 forbidden by ADR-0074 §Decision 5: blocking on a free-running actor would \
+                 wedge the per-frame drain barrier",
+                self.self_mailbox, recipient,
+            ));
+        }
+
         let timeout = Duration::from_millis(timeout_ms as u64);
         let deadline = Instant::now() + timeout;
 
-        loop {
+        let rc = loop {
             // Drain overflow first — a previous `wait_reply` may
             // have parked envelopes that match this kind /
             // correlation. Mirrors `SubstrateCtx::wait_reply` on
@@ -224,7 +372,7 @@ impl MailTransport for NativeTransport {
                 pos.and_then(|i| overflow.remove(i))
             };
             if let Some(env) = from_overflow {
-                return write_payload(&env, out);
+                break write_payload(&env, out);
             }
 
             // No overflow match — pull from the inbox with whatever
@@ -238,16 +386,28 @@ impl MailTransport for NativeTransport {
             match recv_outcome {
                 Ok(env) => {
                     if matches_filter(&env, expected_kind, expected_correlation) {
-                        return write_payload(&env, out);
+                        break write_payload(&env, out);
                     }
                     self.overflow.lock().unwrap().push_back(env);
                     // Loop continues — try again with whatever time
                     // is left on the deadline.
                 }
-                Err(RecvTimeoutError::Timeout) => return -1,
-                Err(RecvTimeoutError::Disconnected) => return -3,
+                Err(RecvTimeoutError::Timeout) => break -1,
+                Err(RecvTimeoutError::Disconnected) => break -3,
             }
+        };
+
+        // Whatever the outcome, drop the recipient tracking entry
+        // for this correlation — we won't need it again. (Keeps the
+        // `pending_recipients` map bounded by the actual rate of
+        // unpaired sends rather than total send volume.)
+        if expected_correlation != ReplyTo::NO_CORRELATION {
+            self.pending_recipients
+                .lock()
+                .unwrap()
+                .remove(&expected_correlation);
         }
+        rc
     }
 
     fn prev_correlation(&self) -> u64 {
@@ -320,7 +480,7 @@ mod tests {
         );
         let recipient = registry.lookup("test.sink").unwrap();
 
-        let transport = NativeTransport::new(mailer, MailboxId(99));
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(99));
 
         assert_eq!(transport.prev_correlation(), 0);
         assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);
@@ -334,7 +494,7 @@ mod tests {
     #[test]
     fn wait_reply_without_inbox_returns_no_inbox_sentinel() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new(mailer, MailboxId(1));
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
         let mut buf = [0u8; 16];
         let rc = transport.wait_reply(0, &mut buf, 1, 0);
         assert_eq!(rc, -ERR_NO_INBOX_I32);
@@ -346,7 +506,7 @@ mod tests {
     #[test]
     fn reply_mail_and_save_state_are_tracked_stubs() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new(mailer, MailboxId(1));
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
         assert_eq!(transport.reply_mail(0, 0, &[], 0), ERR_NOT_IMPLEMENTED);
         assert_eq!(transport.save_state(0, &[]), ERR_NOT_IMPLEMENTED);
     }
@@ -356,7 +516,7 @@ mod tests {
     #[should_panic(expected = "install_inbox called twice")]
     fn install_inbox_twice_panics() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new(mailer, MailboxId(1));
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
         let (_tx1, rx1) = mpsc::channel::<Envelope>();
         let (_tx2, rx2) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx1);
@@ -368,12 +528,192 @@ mod tests {
     #[test]
     fn wait_reply_times_out_when_inbox_quiet() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new(mailer, MailboxId(1));
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
         let (_tx, rx) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx);
         let mut buf = [0u8; 16];
         // 1ms is enough — no sender ever pushes.
         let rc = transport.wait_reply(0, &mut buf, 1, 0);
         assert_eq!(rc, -1);
+    }
+
+    /// Build a transport with the cross-class guard wired: caller
+    /// classification is configurable, and the chassis's
+    /// frame-bound set is shared so tests can pre-populate it to
+    /// classify recipients. Aborter is [`PanicAborter`] so a
+    /// triggered abort surfaces as `should_panic` rather than
+    /// `process::exit`-ing the test runner.
+    fn transport_with_guard(
+        mailer: Arc<Mailer>,
+        self_mailbox: MailboxId,
+        caller_frame_bound: bool,
+        frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
+    ) -> NativeTransport {
+        NativeTransport::new(
+            mailer,
+            self_mailbox,
+            caller_frame_bound,
+            frame_bound_set,
+            Arc::new(PanicAborter),
+        )
+    }
+
+    /// ADR-0074 §Decision 5: a frame-bound caller blocking on a
+    /// free-running recipient must abort. Verified via the
+    /// PanicAborter — the panic message names both mailboxes plus
+    /// the ADR.
+    #[test]
+    #[should_panic(expected = "forbidden by ADR-0074")]
+    fn cross_class_wait_reply_aborts_when_caller_frame_bound_and_recipient_free_running() {
+        let (registry, mailer) = fresh_substrate();
+        let (tx, _rx) = mpsc::channel::<Envelope>();
+        registry.register_sink(
+            "test.free.running",
+            Arc::new(move |kind, kind_name, origin, sender, payload, count| {
+                let _ = tx.send(Envelope {
+                    kind,
+                    kind_name: kind_name.to_owned(),
+                    origin: origin.map(str::to_owned),
+                    sender,
+                    payload: payload.to_vec(),
+                    count,
+                });
+            }),
+        );
+        let recipient = registry.lookup("test.free.running").unwrap();
+
+        // Empty frame-bound set => recipient classifies as free-running.
+        let frame_bound_set = Arc::new(RwLock::new(HashSet::new()));
+        let transport =
+            transport_with_guard(Arc::clone(&mailer), MailboxId(99), true, frame_bound_set);
+        let (_tx_inbox, rx_inbox) = mpsc::channel::<Envelope>();
+        transport.install_inbox(rx_inbox);
+
+        // Send first to record the recipient against a correlation id.
+        assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);
+        let correlation = transport.prev_correlation();
+
+        // wait_reply should abort before timing out.
+        let mut buf = [0u8; 16];
+        transport.wait_reply(1, &mut buf, 1, correlation);
+    }
+
+    /// Same shape as the abort test, but the recipient is
+    /// pre-registered as frame-bound. Guard sees same-class and
+    /// lets `wait_reply` proceed to its normal `-1` timeout.
+    #[test]
+    fn cross_class_wait_reply_does_not_abort_when_recipient_also_frame_bound() {
+        let (registry, mailer) = fresh_substrate();
+        let (tx, _rx) = mpsc::channel::<Envelope>();
+        registry.register_sink(
+            "test.frame.bound",
+            Arc::new(move |kind, kind_name, origin, sender, payload, count| {
+                let _ = tx.send(Envelope {
+                    kind,
+                    kind_name: kind_name.to_owned(),
+                    origin: origin.map(str::to_owned),
+                    sender,
+                    payload: payload.to_vec(),
+                    count,
+                });
+            }),
+        );
+        let recipient = registry.lookup("test.frame.bound").unwrap();
+
+        let frame_bound_set = Arc::new(RwLock::new(HashSet::new()));
+        // Pre-populate recipient as frame-bound (mirroring what
+        // `claim_frame_bound_mailbox` would do).
+        frame_bound_set.write().unwrap().insert(recipient);
+
+        let transport = transport_with_guard(
+            Arc::clone(&mailer),
+            MailboxId(99),
+            true,
+            Arc::clone(&frame_bound_set),
+        );
+        let (_tx_inbox, rx_inbox) = mpsc::channel::<Envelope>();
+        transport.install_inbox(rx_inbox);
+
+        assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);
+        let correlation = transport.prev_correlation();
+
+        let mut buf = [0u8; 16];
+        // Same-class: no abort, just normal timeout (1ms).
+        let rc = transport.wait_reply(1, &mut buf, 1, correlation);
+        assert_eq!(rc, -1);
+    }
+
+    /// Free-running caller never trips the guard regardless of
+    /// recipient class — only frame-bound callers care about being
+    /// blocked across a class boundary.
+    #[test]
+    fn cross_class_wait_reply_does_not_abort_when_caller_free_running() {
+        let (registry, mailer) = fresh_substrate();
+        let (tx, _rx) = mpsc::channel::<Envelope>();
+        registry.register_sink(
+            "test.any",
+            Arc::new(move |kind, kind_name, origin, sender, payload, count| {
+                let _ = tx.send(Envelope {
+                    kind,
+                    kind_name: kind_name.to_owned(),
+                    origin: origin.map(str::to_owned),
+                    sender,
+                    payload: payload.to_vec(),
+                    count,
+                });
+            }),
+        );
+        let recipient = registry.lookup("test.any").unwrap();
+
+        // Empty set — recipient is free-running. Caller is also
+        // free-running. Guard must be inert.
+        let frame_bound_set = Arc::new(RwLock::new(HashSet::new()));
+        let transport =
+            transport_with_guard(Arc::clone(&mailer), MailboxId(99), false, frame_bound_set);
+        let (_tx_inbox, rx_inbox) = mpsc::channel::<Envelope>();
+        transport.install_inbox(rx_inbox);
+
+        assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);
+        let correlation = transport.prev_correlation();
+
+        let mut buf = [0u8; 16];
+        let rc = transport.wait_reply(1, &mut buf, 1, correlation);
+        assert_eq!(rc, -1);
+    }
+
+    /// `pending_recipients` is cleaned up after `wait_reply` exits
+    /// (success, timeout, disconnect) so fire-and-forget senders
+    /// don't leak entries past their correlation horizon.
+    #[test]
+    fn wait_reply_prunes_pending_recipient_on_timeout() {
+        let (registry, mailer) = fresh_substrate();
+        let (tx, _rx) = mpsc::channel::<Envelope>();
+        registry.register_sink(
+            "test.prune",
+            Arc::new(move |kind, kind_name, origin, sender, payload, count| {
+                let _ = tx.send(Envelope {
+                    kind,
+                    kind_name: kind_name.to_owned(),
+                    origin: origin.map(str::to_owned),
+                    sender,
+                    payload: payload.to_vec(),
+                    count,
+                });
+            }),
+        );
+        let recipient = registry.lookup("test.prune").unwrap();
+
+        let transport = NativeTransport::new_for_test(Arc::clone(&mailer), MailboxId(99));
+        let (_tx_inbox, rx_inbox) = mpsc::channel::<Envelope>();
+        transport.install_inbox(rx_inbox);
+
+        assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);
+        let correlation = transport.prev_correlation();
+        assert_eq!(transport.pending_recipients.lock().unwrap().len(), 1);
+
+        let mut buf = [0u8; 16];
+        let rc = transport.wait_reply(1, &mut buf, 1, correlation);
+        assert_eq!(rc, -1);
+        assert_eq!(transport.pending_recipients.lock().unwrap().len(), 0);
     }
 }

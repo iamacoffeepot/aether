@@ -26,13 +26,15 @@
 //! - No sinks are migrated yet — `crate::capabilities` is an empty
 //!   submodule placeholder that future PRs populate.
 
+use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::lifecycle::{FatalAborter, PanicAborter};
 use crate::mail::{KindId, MailboxId, ReplyTo};
 use crate::mailer::Mailer;
 use crate::registry::{NameConflict, Registry};
@@ -274,6 +276,27 @@ pub struct ChassisCtx<'a> {
     /// frame loop can wait on them via
     /// [`BootedChassis::drain_frame_bound`].
     frame_bound_pending: &'a mut Vec<(MailboxId, Arc<AtomicU64>)>,
+    /// Membership view of the same set the `frame_bound_pending` Vec
+    /// covers, shared with every [`crate::NativeTransport`] built
+    /// against this chassis. Capabilities clone the [`Arc`] into their
+    /// transport at boot; the transport's cross-class `wait_reply`
+    /// guard reads it (with a brief read-lock) to classify the
+    /// recipient of an outbound request as frame-bound or
+    /// free-running. [`Self::claim_frame_bound_mailbox`] inserts the
+    /// claimed mailbox id here in addition to pushing onto the
+    /// pending-counter list.
+    frame_bound_set: &'a Arc<RwLock<HashSet<MailboxId>>>,
+    /// Indirection over [`crate::lifecycle::fatal_abort`] cloned into
+    /// every [`crate::NativeTransport`] this ctx builds, so the
+    /// cross-class `wait_reply` guard (ADR-0074 §Decision 5) can
+    /// abort without each capability needing to plumb
+    /// [`crate::HubOutbound`] itself. Defaults to
+    /// [`PanicAborter`] when the chassis builder doesn't override —
+    /// production drivers swap in
+    /// [`crate::lifecycle::OutboundFatalAborter`] via
+    /// [`ChassisBuilder::with_aborter`] /
+    /// [`crate::chassis_builder::Builder::with_aborter`].
+    aborter: &'a Arc<dyn FatalAborter>,
 }
 
 impl<'a> ChassisCtx<'a> {
@@ -284,12 +307,16 @@ impl<'a> ChassisCtx<'a> {
         mailer: &'a Arc<Mailer>,
         fallback: &'a mut Option<FallbackRouter>,
         frame_bound_pending: &'a mut Vec<(MailboxId, Arc<AtomicU64>)>,
+        frame_bound_set: &'a Arc<RwLock<HashSet<MailboxId>>>,
+        aborter: &'a Arc<dyn FatalAborter>,
     ) -> Self {
         Self {
             registry,
             mailer,
             fallback,
             frame_bound_pending,
+            frame_bound_set,
+            aborter,
         }
     }
 
@@ -466,6 +493,12 @@ impl<'a> ChassisCtx<'a> {
             ),
         )?;
         self.frame_bound_pending.push((id, Arc::clone(&pending)));
+        // Mirror the membership into the shared set so each
+        // capability's [`crate::NativeTransport`] can resolve "is the
+        // recipient of this `wait_reply` frame-bound?" with a single
+        // read-lock — without each transport having to scan the
+        // pending-counter Vec on every check.
+        self.frame_bound_set.write().unwrap().insert(id);
         Ok(FrameBoundClaim {
             id,
             receiver: rx,
@@ -510,6 +543,22 @@ impl<'a> ChassisCtx<'a> {
         self.frame_bound_pending
     }
 
+    /// Clone the chassis's shared frame-bound membership set. Read by
+    /// [`crate::NativeTransport::from_ctx`] so the cross-class
+    /// `wait_reply` guard can classify each outbound recipient.
+    /// Capabilities that just want to send mail don't need this.
+    pub fn frame_bound_set(&self) -> Arc<RwLock<HashSet<MailboxId>>> {
+        Arc::clone(self.frame_bound_set)
+    }
+
+    /// Clone the chassis's [`FatalAborter`]. Read by
+    /// [`crate::NativeTransport::from_ctx`] so the cross-class
+    /// `wait_reply` guard has somewhere to abort to without each
+    /// transport plumbing [`crate::HubOutbound`] itself.
+    pub fn fatal_aborter(&self) -> Arc<dyn FatalAborter> {
+        Arc::clone(self.aborter)
+    }
+
     /// Install the fallback-router handler. At most one capability
     /// may claim the slot; a second call returns
     /// [`BootError::FallbackRouterAlreadyClaimed`].
@@ -545,6 +594,7 @@ pub struct ChassisBuilder {
     registry: Arc<Registry>,
     mailer: Arc<Mailer>,
     pending: Vec<BootFn>,
+    aborter: Arc<dyn FatalAborter>,
 }
 
 impl ChassisBuilder {
@@ -553,12 +603,31 @@ impl ChassisBuilder {
     /// (TestBench rewrite) folds substrate construction into the
     /// builder; until then, the existing `SubstrateBoot::build` is
     /// the construction site.
+    ///
+    /// Defaults the cross-class `wait_reply` aborter to
+    /// [`PanicAborter`] — appropriate for tests and embedder-driven
+    /// chassis. Production drivers swap in
+    /// [`crate::lifecycle::OutboundFatalAborter`] via
+    /// [`Self::with_aborter`] before `build()`.
     pub fn new(registry: Arc<Registry>, mailer: Arc<Mailer>) -> Self {
         Self {
             registry,
             mailer,
             pending: Vec::new(),
+            aborter: Arc::new(PanicAborter),
         }
+    }
+
+    /// Override the default [`PanicAborter`] with a chassis-supplied
+    /// [`FatalAborter`]. Production drivers (desktop, headless) call
+    /// this with an [`crate::lifecycle::OutboundFatalAborter`] cloned
+    /// from their [`crate::HubOutbound`] so a cross-class
+    /// `wait_reply` violation broadcasts `SubstrateDying` before
+    /// process exit. Single-call: a second invocation overwrites the
+    /// prior aborter.
+    pub fn with_aborter(mut self, aborter: Arc<dyn FatalAborter>) -> Self {
+        self.aborter = aborter;
+        self
     }
 
     /// Append a capability. Boot order is declaration order.
@@ -581,13 +650,22 @@ impl ChassisBuilder {
             registry,
             mailer,
             pending,
+            aborter,
         } = self;
         let mut fallback: Option<FallbackRouter> = None;
         let mut frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)> = Vec::new();
+        let frame_bound_set: Arc<RwLock<HashSet<MailboxId>>> =
+            Arc::new(RwLock::new(HashSet::new()));
         let mut booted: Vec<Box<dyn RunningCapability>> = Vec::with_capacity(pending.len());
         for boot in pending {
-            let mut ctx =
-                ChassisCtx::new(&registry, &mailer, &mut fallback, &mut frame_bound_pending);
+            let mut ctx = ChassisCtx::new(
+                &registry,
+                &mailer,
+                &mut fallback,
+                &mut frame_bound_pending,
+                &frame_bound_set,
+                &aborter,
+            );
             match boot(&mut ctx) {
                 Ok(running) => booted.push(running),
                 Err(e) => {
@@ -602,6 +680,8 @@ impl ChassisBuilder {
             running: booted,
             _fallback: fallback,
             frame_bound_pending,
+            frame_bound_set,
+            aborter,
         })
     }
 }
@@ -622,6 +702,17 @@ pub struct BootedChassis {
     /// §Decision 5 the frame loop waits on these alongside component
     /// drains so render submit sees fully-integrated state.
     frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
+    /// Membership view of the frame-bound mailbox set. Shared with
+    /// every [`crate::NativeTransport`] booted under this chassis;
+    /// also threaded into [`Self::add`] so post-build capabilities
+    /// see (and contribute to) the same set.
+    frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
+    /// Aborter cloned into every [`crate::NativeTransport`] this
+    /// chassis builds. Defaulted to [`PanicAborter`] by
+    /// [`ChassisBuilder::new`]; production drivers swap in
+    /// [`crate::lifecycle::OutboundFatalAborter`] via
+    /// [`ChassisBuilder::with_aborter`].
+    aborter: Arc<dyn FatalAborter>,
 }
 
 impl fmt::Debug for BootedChassis {
@@ -671,6 +762,8 @@ impl BootedChassis {
             mailer,
             &mut self._fallback,
             &mut self.frame_bound_pending,
+            &self.frame_bound_set,
+            &self.aborter,
         );
         let running = cap.boot(&mut ctx)?;
         self.running.push(Box::new(running));

@@ -618,7 +618,11 @@ impl Capability for IoCapability {
             "io adapters registered",
         );
 
-        let transport = Arc::new(NativeTransport::new(Arc::clone(&mailer), mailbox_id));
+        let transport = Arc::new(NativeTransport::from_ctx(
+            ctx,
+            mailbox_id,
+            Self::FRAME_BARRIER,
+        ));
         transport.install_inbox(claim.receiver);
         let dispatcher_transport = Arc::clone(&transport);
 
