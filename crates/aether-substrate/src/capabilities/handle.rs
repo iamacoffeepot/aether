@@ -1,42 +1,39 @@
-//! ADR-0075 §Decision 3 backend for the [`aether_kinds::HandleCapability`]
-//! facade (issue 533 PR D2). The cap and its `HandleBackend` trait
-//! live in `aether-kinds` so wasm senders can address it without
-//! pulling in `HandleStore` / `Mailer` types; this module supplies
-//! the concrete backend the chassis installs at boot.
+//! Issue 545 PR E1: collapsed `aether.handle` cap. Pre-PR-E1 the cap
+//! lived split across `aether-kinds::handle::HandleCapability<B>`
+//! (facade generic) and this file (concrete `HandleStoreBackend`).
+//! The facade pattern (ADR-0075) is retired — caps are now regular
+//! `#[actor]` blocks, same shape as wasm components.
 //!
-//! Pre-PR-D2 the cap and dispatcher both lived here, with
-//! `handle_sink::dispatch_*` doing per-kind kind-id matching. The
-//! macro-emitted `Dispatch` impl on `HandleCapability` now does the
-//! kind matching; the per-kind logic moved into the matching
-//! [`HandleBackend`] methods on this struct.
+//! Owns the shared [`HandleStore`] (the same instance the substrate's
+//! `Mailer::wire_handle_store` references for `Ref<Handle>` resolution)
+//! and an [`Arc<Mailer>`] for routing reply mail. The dispatcher
+//! thread owns the cap through the macro-emitted `Dispatch` impl;
+//! channel-drop on shutdown disconnects the inbox and the cap drops
+//! on the dispatcher thread.
 
 use std::sync::Arc;
 
-use aether_data::ReplyTo;
+use aether_data::{Actor, ReplyTo, Singleton};
 use aether_kinds::{
-    HandleBackend, HandleError, HandlePin, HandlePinResult, HandlePublish, HandlePublishResult,
-    HandleRelease, HandleReleaseResult, HandleUnpin, HandleUnpinResult,
+    HandleError, HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
+    HandleReleaseResult, HandleUnpin, HandleUnpinResult,
 };
 
 use crate::handle_store::{HandleStore, PutError};
 use crate::mailer::Mailer;
 
-/// Substrate-side state for the handle cap. Holds the shared
-/// [`HandleStore`] (the same instance the substrate's
-/// `Mailer::wire_handle_store` references for `Ref<Handle>` resolution)
-/// and an [`Arc<Mailer>`] for routing reply mail.
-///
-/// The dispatcher thread owns this through the macro-emitted
-/// `Dispatch` impl on `aether_kinds::HandleCapability<Self>`; the
-/// chassis stores only the `FacadeHandle` wrapper. On shutdown the
-/// channel disconnects, the thread exits, and this struct drops on
-/// the dispatcher thread — no cross-thread state to worry about.
-pub struct HandleStoreBackend {
+/// `aether.handle` mailbox cap. Owns the substrate's `HandleStore`
+/// and routes ADR-0045 publish/release/pin/unpin requests, replying
+/// via `Mailer::send_reply`. Decode failure on a malformed payload
+/// goes through the macro miss path (warn-log, no reply, sender's
+/// `wait_reply` times out) — substrate-level invariant violation, not
+/// user-recoverable input.
+pub struct HandleCapability {
     store: Arc<HandleStore>,
     mailer: Arc<Mailer>,
 }
 
-impl HandleStoreBackend {
+impl HandleCapability {
     /// Construct against the substrate's [`HandleStore`] and
     /// [`Mailer`]. The store is shared with `Mailer::wire_handle_store`
     /// so dispatch-time `Ref<Handle>` resolution and capability-handled
@@ -46,7 +43,21 @@ impl HandleStoreBackend {
     }
 }
 
-impl HandleBackend for HandleStoreBackend {
+impl Actor for HandleCapability {
+    /// ADR-0045 + ADR-0074 Phase 5: chassis-owned mailbox under the
+    /// `aether.<name>` namespace.
+    const NAMESPACE: &'static str = "aether.handle";
+}
+
+impl Singleton for HandleCapability {}
+
+#[aether_data::actor]
+impl HandleCapability {
+    /// Publish bytes under a fresh handle id.
+    ///
+    /// # Agent
+    /// Reply: `HandlePublishResult`.
+    #[aether_data::handler]
     fn on_publish(&mut self, sender: ReplyTo, mail: HandlePublish) {
         let id = self.store.next_ephemeral();
         match self.store.put(id, mail.kind_id, mail.bytes) {
@@ -76,6 +87,12 @@ impl HandleBackend for HandleStoreBackend {
         }
     }
 
+    /// Decrement a handle's refcount. SDK-side `Handle<K>::Drop`
+    /// fires this; explicit `Ctx::release` paths also use it.
+    ///
+    /// # Agent
+    /// Reply: `HandleReleaseResult`.
+    #[aether_data::handler]
     fn on_release(&mut self, sender: ReplyTo, mail: HandleRelease) {
         if self.store.dec_ref(mail.id) {
             self.mailer
@@ -91,6 +108,11 @@ impl HandleBackend for HandleStoreBackend {
         }
     }
 
+    /// Pin a handle so the LRU evictor skips it.
+    ///
+    /// # Agent
+    /// Reply: `HandlePinResult`.
+    #[aether_data::handler]
     fn on_pin(&mut self, sender: ReplyTo, mail: HandlePin) {
         if self.store.pin(mail.id) {
             self.mailer
@@ -106,6 +128,11 @@ impl HandleBackend for HandleStoreBackend {
         }
     }
 
+    /// Clear the pinned flag on a handle.
+    ///
+    /// # Agent
+    /// Reply: `HandleUnpinResult`.
+    #[aether_data::handler]
     fn on_unpin(&mut self, sender: ReplyTo, mail: HandleUnpin) {
         if self.store.unpin(mail.id) {
             self.mailer
@@ -134,19 +161,6 @@ fn put_error_to_handle_error(e: PutError) -> HandleError {
     }
 }
 
-// Decode failure for one of the four request kinds bypasses these
-// methods entirely — the macro-emitted `Dispatch::__dispatch` body
-// returns `None` on decode error, and the chassis-side dispatcher
-// surfaces the miss as a `tracing::warn!` (see
-// `ChassisCtx::spawn_actor_dispatcher`). The pre-PR-D2 sink replied
-// with `HandleError::AdapterError("decode failed: …")`; the new
-// behaviour is wait_reply-timeout instead, which is consistent with
-// every other facade cap and acceptable because schema mismatches at
-// this layer indicate a substrate-level invariant violation rather
-// than user-recoverable input.
-#[allow(dead_code)]
-fn _decode_failure_documentation() {}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -155,9 +169,8 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use aether_data::{Actor, HandleId, Kind, KindId};
+    use aether_data::{HandleId, Kind, KindId};
     use aether_data::{SessionToken, Uuid};
-    use aether_kinds::{HandleCapability, HandlePublish, HandlePublishResult};
 
     use super::*;
     use crate::capability::{BootError, ChassisBuilder};
@@ -189,25 +202,24 @@ mod tests {
         ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(0xfeed))))
     }
 
-    /// End-to-end through the facade: boot the cap, push a
-    /// `HandlePublish` mail at the registered mailbox, the dispatcher
-    /// thread runs the macro-emitted `Dispatch::__dispatch` which
-    /// delegates to the backend's `on_publish`, the reply lands on
-    /// the hub-outbound channel.
+    /// End-to-end through the cap: boot it, push a `HandlePublish`
+    /// mail at the registered mailbox, the dispatcher thread runs the
+    /// macro-emitted `Dispatch::__dispatch` which calls `on_publish`,
+    /// the reply lands on the hub-outbound channel.
     #[test]
     fn capability_routes_publish_through_dispatcher_thread() {
         let (store, mailer, registry, rx) = fresh_substrate();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(HandleCapability::new(HandleStoreBackend::new(
+            .with_facade(HandleCapability::new(
                 Arc::clone(&store),
                 Arc::clone(&mailer),
-            )))
+            ))
             .build()
             .expect("capability boots");
 
         let id = registry
-            .lookup(<HandleCapability<HandleStoreBackend> as Actor>::NAMESPACE)
+            .lookup(HandleCapability::NAMESPACE)
             .expect("mailbox registered");
         let MailboxEntry::Sink(handler) = registry.entry(id).expect("entry") else {
             panic!("expected sink entry");
@@ -267,10 +279,10 @@ mod tests {
         let (store, mailer, registry, _rx) = fresh_substrate();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(HandleCapability::new(HandleStoreBackend::new(
+            .with_facade(HandleCapability::new(
                 Arc::clone(&store),
                 Arc::clone(&mailer),
-            )))
+            ))
             .build()
             .expect("capability boots");
 
@@ -288,22 +300,19 @@ mod tests {
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
         let (store, mailer, registry, _rx) = fresh_substrate();
-        registry.register_sink(
-            <HandleCapability<HandleStoreBackend> as Actor>::NAMESPACE,
-            Arc::new(|_, _, _, _, _, _| {}),
-        );
+        registry.register_sink(HandleCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(HandleCapability::new(HandleStoreBackend::new(
+            .with_facade(HandleCapability::new(
                 Arc::clone(&store),
                 Arc::clone(&mailer),
-            )))
+            ))
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
             BootError::MailboxAlreadyClaimed { ref name }
-                if name == <HandleCapability<HandleStoreBackend> as Actor>::NAMESPACE
+                if name == HandleCapability::NAMESPACE
         ));
     }
 }

@@ -30,10 +30,9 @@ use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tic
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use crate::hub::HubProtocolBackend;
-use aether_kinds::IoCapability;
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
-    capabilities::{IoAdapterBackend, io::NamespaceRoots},
+    capabilities::{IoCapability, io::NamespaceRoots},
     capture::CaptureQueue,
     frame_loop,
     mail::{Mail, MailboxId},
@@ -287,18 +286,18 @@ impl TestBench {
         boot.outbound
             .attach_backend(Arc::new(HubProtocolBackend::new(loopback_tx)));
 
-        // Io facade on the `boot.add_facade` path (ADR-0075 / issue
-        // 533 PR D3). Silent-skip on adapter init failure preserves
-        // pre-PR-D3 behavior so tests on systems without writable
-        // default roots don't fail at the harness layer; tests that
-        // care about io supply tempdir roots via the builder.
-        match IoAdapterBackend::new(boot.namespace_roots.clone(), Arc::clone(&boot.queue)) {
-            Ok(io_backend) => {
-                if let Err(e) = boot.add_facade(IoCapability::new(io_backend)) {
+        // Io cap on the `boot.add_facade` path. Silent-skip on init
+        // failure preserves prior behavior so tests on systems without
+        // writable default roots don't fail at the harness layer;
+        // tests that care about io supply tempdir roots via the
+        // builder.
+        match IoCapability::new(boot.namespace_roots.clone(), Arc::clone(&boot.queue)) {
+            Ok(io_cap) => {
+                if let Err(e) = boot.add_facade(io_cap) {
                     tracing::warn!(
                         target: "aether_substrate::io",
                         error = %e,
-                        "io facade boot failed in TestBench (expected on systems without writable default roots)",
+                        "io cap boot failed in TestBench (expected on systems without writable default roots)",
                     );
                 }
             }

@@ -1,14 +1,8 @@
-//! ADR-0075 §Decision 3: substrate-side backend for the
-//! [`aether_kinds::LogCapability`] facade. The cap's facade lives in
-//! `aether-kinds` (so wasm senders can address it without pulling in
-//! substrate-only types); this module provides the concrete backend
-//! the chassis installs at boot.
-//!
-//! Pre-ADR-0075 the cap and the dispatcher lifecycle both lived here.
-//! ADR-0075 split them: the cap is now a thin generic in
-//! `aether-kinds`, the dispatcher loop moved into the chassis-side
-//! [`crate::capability::ChassisCtx::spawn_actor_dispatcher`] helper,
-//! and this file is just the substrate-side `LogBackend` impl.
+//! Issue 545 PR E1: collapsed `aether.log` cap. Pre-PR-E1 the cap
+//! lived split across `aether-kinds::log::LogCapability<B>` (facade
+//! generic) and this file (concrete `LogTracingBackend`). The facade
+//! pattern (ADR-0075) is retired — caps are now regular `#[actor]`
+//! blocks, same shape as wasm components.
 //!
 //! Bridging via the `log` crate facade (rather than `tracing::event!`)
 //! is load-bearing — see [`crate::log_sink`] for the rationale.
@@ -17,25 +11,42 @@
 //! and let `tracing-subscriber`'s `tracing-log` integration lift each
 //! record back into the tracing pipeline.
 
-use aether_kinds::{LogBackend, LogEvent};
+use aether_data::{Actor, Singleton};
+use aether_kinds::LogEvent;
 
 use crate::log_sink;
 
-/// `LogBackend` impl that bridges decoded `LogEvent` mail through the
-/// `log` facade so the chassis's existing `tracing-log` subscriber
-/// re-emits it. Stateless beyond what the global subscriber owns —
-/// every cap instance shares the process-wide `tracing` plumbing set
-/// up by [`crate::log_capture::init`] during chassis boot.
+/// `aether.log` mailbox cap. Stateless beyond the process-wide
+/// `tracing` subscriber set up by [`crate::log_capture::init`] —
+/// every cap instance bridges decoded `LogEvent` mail through the
+/// `log` facade and `tracing-log` re-emits it.
 #[derive(Default)]
-pub struct LogTracingBackend;
+pub struct LogCapability;
 
-impl LogTracingBackend {
+impl LogCapability {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl LogBackend for LogTracingBackend {
+impl Actor for LogCapability {
+    /// Components mail `aether.log` (kind id) to this mailbox; the
+    /// `aether.<name>` form is the post-ADR-0074 Phase 5 convention
+    /// for chassis-owned mailboxes.
+    const NAMESPACE: &'static str = "aether.log";
+}
+
+impl Singleton for LogCapability {}
+
+#[aether_data::actor]
+impl LogCapability {
+    /// Emit a decoded log event through the host's `tracing` pipeline
+    /// so `engine_logs` (ADR-0023) sees it.
+    ///
+    /// # Agent
+    /// Components mail `aether.log` `LogEvent { level, target, message }`
+    /// to this mailbox. Fire-and-forget; no reply.
+    #[aether_data::handler]
     fn on_log_event(&mut self, event: LogEvent) {
         log_sink::handle_log_mail_decoded(event);
     }
@@ -51,28 +62,26 @@ mod tests {
     use crate::capability::ChassisBuilder;
     use crate::mailer::Mailer;
     use crate::registry::{MailboxEntry, Registry};
-    use aether_data::{Actor, Kind};
-    use aether_kinds::LogCapability;
+    use aether_data::Kind;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         (Arc::new(Registry::new()), Arc::new(Mailer::new()))
     }
 
-    /// End-to-end: boot the facade cap, push an `aether.log` mail at
-    /// the registered mailbox, the dispatcher thread runs the
-    /// macro-emitted `Dispatch::__dispatch` which delegates to the
-    /// backend's `on_log_event`. Test asserts dispatch + clean
-    /// shutdown without hanging.
+    /// End-to-end: boot the cap, push an `aether.log` mail at the
+    /// registered mailbox, the dispatcher thread runs the
+    /// macro-emitted `Dispatch::__dispatch` which calls
+    /// `on_log_event`. Test asserts dispatch + clean shutdown.
     #[test]
     fn capability_routes_log_event_through_dispatcher() {
         let (registry, mailer) = fresh_substrate();
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(LogCapability::new(LogTracingBackend::new()))
+            .with_facade(LogCapability::new())
             .build()
             .expect("capability boots");
 
         let id = registry
-            .lookup(<LogCapability<LogTracingBackend> as Actor>::NAMESPACE)
+            .lookup(LogCapability::NAMESPACE)
             .expect("mailbox registered");
         let MailboxEntry::Sink(handler) = registry.entry(id).expect("entry") else {
             panic!("expected sink entry");
@@ -109,19 +118,16 @@ mod tests {
         use crate::capability::BootError;
 
         let (registry, mailer) = fresh_substrate();
-        registry.register_sink(
-            <LogCapability<LogTracingBackend> as Actor>::NAMESPACE,
-            Arc::new(|_, _, _, _, _, _| {}),
-        );
+        registry.register_sink(LogCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(LogCapability::new(LogTracingBackend::new()))
+            .with_facade(LogCapability::new())
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
             BootError::MailboxAlreadyClaimed { ref name }
-                if name == <LogCapability<LogTracingBackend> as Actor>::NAMESPACE
+                if name == LogCapability::NAMESPACE
         ));
     }
 }

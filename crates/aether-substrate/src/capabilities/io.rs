@@ -1,36 +1,34 @@
-//! ADR-0070 Phase 3 (part 2) + ADR-0075 §Decision 3: file I/O backend
-//! behind the [`aether_kinds::IoCapability`] facade (issue 533 PR D3).
+//! Issue 545 PR E1: collapsed `aether.io` cap. Pre-PR-E1 the cap
+//! lived split across `aether-kinds::io::IoCapability<B>` (facade
+//! generic) and this file (concrete `IoAdapterBackend`). The facade
+//! pattern (ADR-0075) is retired — caps are now regular `#[actor]`
+//! blocks, same shape as wasm components.
 //!
 //! Owns the full ADR-0041 stack — `FileAdapter` trait,
 //! `LocalFileAdapter`, `AdapterRegistry`, env-driven `NamespaceRoots`,
-//! and the [`IoBackend`] impl the chassis installs at boot. Chassis
-//! mains resolve a [`NamespaceRoots`] (typically via
-//! [`NamespaceRoots::from_env`]), construct an [`IoAdapterBackend`],
-//! and hand it to `IoCapability::new(...)`. Everything below the
-//! capability boundary is private.
+//! and the [`IoCapability`] itself. Chassis mains resolve a
+//! [`NamespaceRoots`] (typically via [`NamespaceRoots::from_env`]),
+//! call [`IoCapability::new`], and hand the cap to the chassis
+//! builder.
 //!
 //! Boot error policy: per ADR-0063 fail-fast, adapter init failure
-//! surfaces at [`IoAdapterBackend::new`] (returns
-//! `std::io::Result`) rather than at chassis-builder time. Chassis
-//! mains propagate via `?` to the same fail-fast outcome; operators
-//! with filesystem misconfiguration see the error at startup.
+//! surfaces at [`IoCapability::new`] (returns `std::io::Result`) so
+//! chassis mains propagate via `?` to abort startup.
 //!
-//! Threading: chassis-side dispatcher thread per ADR-0075 — the
-//! macro-emitted `Dispatch` impl on `IoCapability<IoAdapterBackend>`
+//! Threading: chassis-side dispatcher thread (`spawn_actor_dispatcher`)
 //! pulls envelopes from the `aether.io` mailbox and routes them to
-//! the matching backend method. Adapter calls run synchronously on
-//! the dispatcher thread; ADR-0041 flagged a future host-fn fast path
-//! for asset-sized streaming.
+//! the matching `#[handler]` method. Adapter calls run synchronously
+//! on the dispatcher thread; ADR-0041 flagged a future host-fn fast
+//! path for asset-sized streaming.
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aether_data::ReplyTo;
+use aether_data::{Actor, ReplyTo, Singleton};
 use aether_kinds::{
-    Delete, DeleteResult, IoBackend, IoError, List, ListResult, Read, ReadResult, Write,
-    WriteResult,
+    Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 
 use crate::mailer::Mailer;
@@ -59,11 +57,11 @@ pub trait FileAdapter: Send + Sync {
     fn list(&self, prefix: &str) -> IoResult<Vec<String>>;
 }
 
-/// Namespace → adapter table built at chassis boot. The I/O sink
-/// dispatcher reads `namespace` off an incoming `Read`/`Write`/etc.
-/// mail, looks up the adapter here, and either drives the call or
-/// replies `IoError::UnknownNamespace`. Registration is one-shot
-/// at boot; hot-swap is out of scope.
+/// Namespace → adapter table built at chassis boot. The cap reads
+/// `namespace` off an incoming `Read`/`Write`/etc. mail, looks up
+/// the adapter here, and either drives the call or replies
+/// `IoError::UnknownNamespace`. Registration is one-shot at boot;
+/// hot-swap is out of scope.
 pub struct AdapterRegistry {
     adapters: HashMap<String, Arc<dyn FileAdapter>>,
 }
@@ -140,16 +138,10 @@ impl LocalFileAdapter {
         if path.starts_with('/') {
             return Err(IoError::Forbidden);
         }
-        // Empty path resolves to the root itself — useful for
-        // `list("")` but not for `read`/`write`/`delete`, which the
-        // adapter rejects downstream when the resolved path points
-        // at a directory or doesn't exist.
         for component in path.split('/') {
             if component == ".." {
                 return Err(IoError::Forbidden);
             }
-            // Allow `.` and empty components (the latter covers
-            // trailing slash and double slash as no-ops on join).
         }
         Ok(self.root.join(path))
     }
@@ -172,9 +164,6 @@ impl FileAdapter for LocalFileAdapter {
         if let Some(parent) = resolved.parent() {
             std::fs::create_dir_all(parent).map_err(|e| IoError::AdapterError(e.to_string()))?;
         }
-        // `.tmp-{pid}` suffix keeps concurrent writes from different
-        // processes off each other; within one process, last-write-
-        // wins is already the documented ADR-0041 semantic.
         let mut tmp = resolved.clone();
         let existing = tmp
             .file_name()
@@ -186,8 +175,6 @@ impl FileAdapter for LocalFileAdapter {
         match std::fs::rename(&tmp, &resolved) {
             Ok(()) => Ok(()),
             Err(e) => {
-                // Try to clean the staging file so a failed rename
-                // doesn't leave litter in the namespace directory.
                 let _ = std::fs::remove_file(&tmp);
                 Err(IoError::AdapterError(e.to_string()))
             }
@@ -211,9 +198,6 @@ impl FileAdapter for LocalFileAdapter {
         let mut names = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|e| IoError::AdapterError(e.to_string()))?;
-            // Non-UTF8 filenames are skipped rather than surfaced as
-            // an error — the namespace abstraction is string-typed,
-            // so a file the wire can't name isn't reachable anyway.
             if let Some(s) = entry.file_name().to_str() {
                 names.push(s.to_string());
             }
@@ -247,7 +231,7 @@ impl NamespaceRoots {
     /// the `dirs`-crate platform default. v1 ships the env layer;
     /// ADR-0041's precedence order (CLI > env > TOML > defaults)
     /// leaves room for TOML and CLI to sit in front of this without
-    /// changing the adapter or sink code.
+    /// changing the cap or adapter code.
     ///
     /// Defaults:
     /// - `save` → `data_dir()/aether/save`
@@ -303,12 +287,7 @@ fn env_or_default(var: &str, default: impl FnOnce() -> PathBuf) -> PathBuf {
 /// [`NamespaceRoots`]. `save` and `config` are writable; `assets` is
 /// read-only. Returns the populated registry along with the roots
 /// echoed back (cloned) so the chassis can log what it actually
-/// wired. Propagates any `create_dir_all` / `canonicalize` failure
-/// verbatim so the chassis can decide whether to fail boot.
-///
-/// Per issue 464, this is the explicit-config entry point — chassis
-/// mains read env into a `NamespaceRoots` and pass it here. Tests
-/// pass their own tempdir-backed roots directly.
+/// wired.
 pub fn build_registry(
     roots: NamespaceRoots,
 ) -> std::io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
@@ -323,22 +302,21 @@ pub fn build_registry(
 }
 
 /// Env-driven wrapper around [`build_registry`]. Resolves
-/// [`NamespaceRoots::from_env`] then delegates. Kept for callers
-/// that don't need to thread roots through their own config.
+/// [`NamespaceRoots::from_env`] then delegates.
 pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
     build_registry(NamespaceRoots::from_env())
 }
 
-/// Substrate-side state for the io cap. Holds the resolved adapter
-/// registry + namespace roots and the chassis [`Arc<Mailer>`] for
-/// routing replies. The dispatcher thread owns this through the
-/// macro-emitted `Dispatch` impl on `aether_kinds::IoCapability<Self>`.
-pub struct IoAdapterBackend {
+/// `aether.io` mailbox cap. Owns the resolved adapter registry +
+/// namespace roots and the chassis [`Arc<Mailer>`] for routing
+/// replies. The dispatcher thread owns this through the macro-emitted
+/// `Dispatch` impl.
+pub struct IoCapability {
     registry: Arc<AdapterRegistry>,
     mailer: Arc<Mailer>,
 }
 
-impl IoAdapterBackend {
+impl IoCapability {
     /// Construct from explicit [`NamespaceRoots`] (resolved by the
     /// chassis main, typically via [`NamespaceRoots::from_env`]) and
     /// the chassis's [`Mailer`]. Returns `Err(std::io::Error)` if the
@@ -365,7 +343,20 @@ impl IoAdapterBackend {
     }
 }
 
-impl IoBackend for IoAdapterBackend {
+impl Actor for IoCapability {
+    /// ADR-0041 + ADR-0074 Phase 5 chassis-owned mailbox.
+    const NAMESPACE: &'static str = "aether.io";
+}
+
+impl Singleton for IoCapability {}
+
+#[aether_data::actor]
+impl IoCapability {
+    /// Read bytes from a logical namespace path.
+    ///
+    /// # Agent
+    /// Reply: `ReadResult`. Echoes namespace + path on both arms.
+    #[aether_data::handler]
     fn on_read(&mut self, sender: ReplyTo, mail: Read) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
             self.mailer.send_reply(
@@ -393,6 +384,13 @@ impl IoBackend for IoAdapterBackend {
         self.mailer.send_reply(sender, &reply);
     }
 
+    /// Write bytes to a logical namespace path. Atomic via tmp+rename
+    /// in the local file adapter; semantics may differ in future
+    /// adapters (cloud, in-memory).
+    ///
+    /// # Agent
+    /// Reply: `WriteResult`. Echoes namespace + path (NOT bytes).
+    #[aether_data::handler]
     fn on_write(&mut self, sender: ReplyTo, mail: Write) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
             self.mailer.send_reply(
@@ -419,6 +417,11 @@ impl IoBackend for IoAdapterBackend {
         self.mailer.send_reply(sender, &reply);
     }
 
+    /// Delete a path under a namespace.
+    ///
+    /// # Agent
+    /// Reply: `DeleteResult`. Echoes namespace + path.
+    #[aether_data::handler]
     fn on_delete(&mut self, sender: ReplyTo, mail: Delete) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
             self.mailer.send_reply(
@@ -445,6 +448,11 @@ impl IoBackend for IoAdapterBackend {
         self.mailer.send_reply(sender, &reply);
     }
 
+    /// List entries under a namespace prefix.
+    ///
+    /// # Agent
+    /// Reply: `ListResult`. Echoes namespace + prefix.
+    #[aether_data::handler]
     fn on_list(&mut self, sender: ReplyTo, mail: List) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
             self.mailer.send_reply(
@@ -480,8 +488,7 @@ mod tests {
     use super::*;
     use crate::capability::{BootError, ChassisBuilder};
     use crate::registry::Registry;
-    use aether_data::{Actor, Kind};
-    use aether_kinds::IoCapability;
+    use aether_data::Kind;
 
     /// Manual tempdir helper to avoid pulling in the `tempfile`
     /// crate. Caller cleans up via [`cleanup`] after the test asserts.
@@ -542,9 +549,6 @@ mod tests {
 
     #[test]
     fn resolve_permits_dot_segments() {
-        // `./foo` should resolve to `root/foo`. A read of
-        // `./nonexistent` should surface as `NotFound`, not
-        // `Forbidden`, so the normalization doesn't over-reject.
         let root = scratch_root("resolve-dot");
         let a = LocalFileAdapter::new(root.clone(), true).unwrap();
         assert!(matches!(a.read("./nonexistent"), Err(IoError::NotFound)));
@@ -579,8 +583,6 @@ mod tests {
 
     #[test]
     fn write_is_atomic_no_tmp_left_behind() {
-        // After a successful write, no .tmp-* sibling should be
-        // visible under the target's parent directory.
         let root = scratch_root("write-atomic");
         let a = LocalFileAdapter::new(root.clone(), true).unwrap();
         a.write("slot.bin", &[0u8; 16]).unwrap();
@@ -688,16 +690,9 @@ mod tests {
         cleanup(&root);
     }
 
-    // Sink dispatcher end-to-end: builds a real `LocalFileAdapter`
-    // against a tempdir, pushes encoded mail bytes through the
-    // dispatch function, and reads the outbound reply channel to
-    // confirm the correct `*Result` variant was sent back. The
-    // outbound is built via `crate::outbound::HubOutbound::attached_loopback` which
-    // skips the TCP plumbing but keeps `send_reply`'s encode path
-    // live.
-
     use crate::outbound::EgressEvent;
     use aether_data::{SessionToken, Uuid};
+
     fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
         let adapter: Arc<dyn FileAdapter> =
             Arc::new(LocalFileAdapter::new(root.to_path_buf(), writable).unwrap());
@@ -711,10 +706,7 @@ mod tests {
     }
 
     /// Build a fully-wired `Mailer` connected to a fresh test
-    /// outbound channel. Sessions/engine replies land on `rx`;
-    /// component replies push into the mailer's component table,
-    /// which is pre-wired with an empty registry + empty components
-    /// table so `push` can route without panicking.
+    /// outbound channel.
     fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
         use std::collections::HashMap;
         use std::sync::RwLock;
@@ -732,8 +724,6 @@ mod tests {
     fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
         rx: &std::sync::mpsc::Receiver<EgressEvent>,
     ) -> K {
-        // The test channel gets `EgressEvent::ToSession` events from
-        // `send_reply`; pull the first one and decode its payload.
         let event = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
         let EgressEvent::ToSession {
             kind_name, payload, ..
@@ -751,31 +741,26 @@ mod tests {
     fn capability_boots_and_registers_mailbox() {
         let root = scratch_root("boots");
         let (registry, mailer) = fresh_substrate();
-        let backend =
-            IoAdapterBackend::new(roots_under(&root), Arc::clone(&mailer)).expect("adapters init");
+        let cap =
+            IoCapability::new(roots_under(&root), Arc::clone(&mailer)).expect("adapters init");
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(IoCapability::new(backend))
+            .with_facade(cap)
             .build()
             .expect("io capability boots");
         assert!(
-            registry
-                .lookup(<IoCapability<IoAdapterBackend> as Actor>::NAMESPACE)
-                .is_some(),
+            registry.lookup(IoCapability::NAMESPACE).is_some(),
             "io mailbox registered"
         );
         chassis.shutdown();
         cleanup(&root);
     }
 
-    /// Backend init fails when the adapter registry can't be built —
+    /// Cap init fails when the adapter registry can't be built —
     /// provoke `LocalFileAdapter::new` failure by pointing the save
-    /// root at a regular file rather than a directory. Pre-PR-D3 this
-    /// surfaced as `BootError::Other` from `IoCapability::boot`; the
-    /// facade pattern moves the error to construction time
-    /// (`IoAdapterBackend::new` returns `std::io::Result`), so the
-    /// chassis main propagates it via `?` to the same fail-fast result.
+    /// root at a regular file rather than a directory. Constructor
+    /// returns `std::io::Result`, chassis main propagates via `?`.
     #[test]
-    fn backend_init_fails_when_adapter_init_fails() {
+    fn cap_init_fails_when_adapter_init_fails() {
         let root = scratch_root("init-fails");
         let save_path = root.join("save_is_actually_a_file");
         std::fs::write(&save_path, b"not a dir").unwrap();
@@ -788,11 +773,8 @@ mod tests {
         std::fs::create_dir_all(&roots.config).unwrap();
 
         let (_, mailer) = fresh_substrate();
-        let result = IoAdapterBackend::new(roots, mailer);
-        assert!(
-            result.is_err(),
-            "save root being a file must fail backend init"
-        );
+        let result = IoCapability::new(roots, mailer);
+        assert!(result.is_err(), "save root being a file must fail cap init");
         cleanup(&root);
     }
 
@@ -802,36 +784,33 @@ mod tests {
     fn duplicate_claim_rejects_with_typed_error() {
         let root = scratch_root("collide");
         let (registry, mailer) = fresh_substrate();
-        registry.register_sink(
-            <IoCapability<IoAdapterBackend> as Actor>::NAMESPACE,
-            Arc::new(|_, _, _, _, _, _| {}),
-        );
+        registry.register_sink(IoCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
-        let backend =
-            IoAdapterBackend::new(roots_under(&root), Arc::clone(&mailer)).expect("adapters init");
+        let cap =
+            IoCapability::new(roots_under(&root), Arc::clone(&mailer)).expect("adapters init");
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(IoCapability::new(backend))
+            .with_facade(cap)
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
             BootError::MailboxAlreadyClaimed { ref name }
-                if name == <IoCapability<IoAdapterBackend> as Actor>::NAMESPACE
+                if name == IoCapability::NAMESPACE
         ));
         cleanup(&root);
     }
 
     #[test]
-    fn backend_read_ok_replies_with_bytes() {
-        let root = scratch_root("backend-read");
+    fn cap_read_ok_replies_with_bytes() {
+        let root = scratch_root("cap-read");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         reg.get("save")
             .unwrap()
             .write("slot.bin", &[9, 9, 9])
             .unwrap();
-        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
-        backend.on_read(
+        let mut cap = IoCapability::from_registry(reg, mailer);
+        cap.on_read(
             session_sender(),
             Read {
                 namespace: "save".to_string(),
@@ -854,12 +833,12 @@ mod tests {
     }
 
     #[test]
-    fn backend_read_unknown_namespace_replies_err() {
-        let root = scratch_root("backend-ns");
+    fn cap_read_unknown_namespace_replies_err() {
+        let root = scratch_root("cap-ns");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
-        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
-        backend.on_read(
+        let mut cap = IoCapability::from_registry(reg, mailer);
+        cap.on_read(
             session_sender(),
             Read {
                 namespace: "nope".to_string(),
@@ -881,12 +860,12 @@ mod tests {
     }
 
     #[test]
-    fn backend_read_not_found_replies_err() {
-        let root = scratch_root("backend-nf");
+    fn cap_read_not_found_replies_err() {
+        let root = scratch_root("cap-nf");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
-        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
-        backend.on_read(
+        let mut cap = IoCapability::from_registry(reg, mailer);
+        cap.on_read(
             session_sender(),
             Read {
                 namespace: "save".to_string(),
@@ -904,13 +883,13 @@ mod tests {
     }
 
     #[test]
-    fn backend_write_ok_persists_bytes() {
-        let root = scratch_root("backend-write");
+    fn cap_write_ok_persists_bytes() {
+        let root = scratch_root("cap-write");
         let reg = build_save_only_registry(&root, true);
         let reg_clone = Arc::clone(&reg);
         let (mailer, rx) = test_mailer_and_rx();
-        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
-        backend.on_write(
+        let mut cap = IoCapability::from_registry(reg, mailer);
+        cap.on_write(
             session_sender(),
             Write {
                 namespace: "save".to_string(),
@@ -933,12 +912,12 @@ mod tests {
     }
 
     #[test]
-    fn backend_write_read_only_namespace_replies_forbidden() {
-        let root = scratch_root("backend-ro");
+    fn cap_write_read_only_namespace_replies_forbidden() {
+        let root = scratch_root("cap-ro");
         let reg = build_save_only_registry(&root, false);
         let (mailer, rx) = test_mailer_and_rx();
-        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
-        backend.on_write(
+        let mut cap = IoCapability::from_registry(reg, mailer);
+        cap.on_write(
             session_sender(),
             Write {
                 namespace: "save".to_string(),
@@ -957,14 +936,14 @@ mod tests {
     }
 
     #[test]
-    fn backend_delete_then_read_surfaces_not_found() {
-        let root = scratch_root("backend-del");
+    fn cap_delete_then_read_surfaces_not_found() {
+        let root = scratch_root("cap-del");
         let reg = build_save_only_registry(&root, true);
         let reg_clone = Arc::clone(&reg);
         let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("x.bin", b"x").unwrap();
-        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
-        backend.on_delete(
+        let mut cap = IoCapability::from_registry(reg, mailer);
+        cap.on_delete(
             session_sender(),
             Delete {
                 namespace: "save".to_string(),
@@ -986,14 +965,14 @@ mod tests {
     }
 
     #[test]
-    fn backend_list_returns_sorted_entries() {
-        let root = scratch_root("backend-list");
+    fn cap_list_returns_sorted_entries() {
+        let root = scratch_root("cap-list");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("b.bin", b"").unwrap();
         reg.get("save").unwrap().write("a.bin", b"").unwrap();
-        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
-        backend.on_list(
+        let mut cap = IoCapability::from_registry(reg, mailer);
+        cap.on_list(
             session_sender(),
             List {
                 namespace: "save".to_string(),
@@ -1015,21 +994,11 @@ mod tests {
         cleanup(&root);
     }
 
-    // Pre-PR-D3 dispatch tests for "unknown kind id" and "malformed
-    // payload bytes" hit the dispatcher's catch-all warn-drop path
-    // and the per-kind decode-failure branch respectively. Under the
-    // facade pattern both go through the macro-emitted
-    // `Dispatch::__dispatch` miss path: chassis-side warn log + no
-    // reply (sender's wait_reply times out). Behaviour matches Handle
-    // PR D2; consistent across every facade cap.
-
-    /// End-to-end: a component pushes a `Read` at the io sink and
+    /// End-to-end: a component pushes a `Read` at the io cap and
     /// receives the `ReadResult` via `Mailer::send_reply` →
     /// `Mailer::push` → its own dispatcher's `deliver`. The WAT
     /// guest records the inbound kind id at a known offset so the
-    /// test can confirm the reply actually reached receive. Prior
-    /// to the `ReplyTo::Component` plumbing this path silently
-    /// dropped the reply at `HubOutbound::send_reply(None, ..)`.
+    /// test can confirm the reply actually reached receive.
     #[test]
     fn component_reply_roundtrip_delivers_readresult_to_originator() {
         use std::collections::HashMap;
@@ -1041,9 +1010,6 @@ mod tests {
         use crate::ctx::SubstrateCtx;
         use crate::scheduler::{ComponentEntry, close_and_join};
 
-        // WAT: store the inbound `kind` (param 0) lower+upper u32
-        // halves at offsets 200 and 204 so the test can read back
-        // the full u64 kind id after delivery.
         const WAT_RECORDS_KIND: &str = r#"
             (module
                 (memory (export "memory") 1)
@@ -1068,8 +1034,6 @@ mod tests {
             .write("slot.bin", &[1, 2, 3])
             .unwrap();
 
-        // Full mailer wiring: a real `Registry` + `ComponentTable`
-        // so the reply push routes into the test component's inbox.
         let registry = Arc::new(Registry::new());
         let caller_mailbox = registry.register_component("test_caller");
         let components: crate::scheduler::ComponentTable = Arc::new(RwLock::new(HashMap::new()));
@@ -1078,8 +1042,6 @@ mod tests {
         mailer.wire(Arc::clone(&registry), Arc::clone(&components));
         mailer.wire_outbound(Arc::clone(&outbound));
 
-        // Instantiate the component. Its ctx gets the same mailer /
-        // registry / outbound the sink will dispatch through.
         let engine = Engine::default();
         let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
         crate::host_fns::register(&mut linker).expect("register host fns");
@@ -1105,13 +1067,8 @@ mod tests {
             .unwrap()
             .insert(caller_mailbox, Arc::clone(&entry));
 
-        // Dispatch a Read with sender = Component(caller_mailbox).
-        // Call the backend directly — the chassis dispatcher's macro-
-        // emitted `Dispatch::__dispatch` would route the same way, but
-        // staying out of the chassis here keeps the test focused on
-        // the reply-routing path.
-        let mut backend = IoAdapterBackend::from_registry(reg, Arc::clone(&mailer));
-        backend.on_read(
+        let mut cap = IoCapability::from_registry(reg, Arc::clone(&mailer));
+        cap.on_read(
             ReplyTo::to(aether_data::ReplyTarget::Component(caller_mailbox)),
             Read {
                 namespace: "save".to_string(),
@@ -1119,10 +1076,8 @@ mod tests {
             },
         );
 
-        // Wait for the reply to reach receive.
         mailer.drain_all();
 
-        // Recover the component and check it observed ReadResult.
         let mut component = close_and_join(entry);
         let lo = component.read_u32(200) as u64;
         let hi = component.read_u32(204) as u64;

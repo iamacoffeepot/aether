@@ -1,13 +1,14 @@
-//! ADR-0070 Phase 3 (part 3) + ADR-0075 §Decision 3: net-egress
-//! backend behind the [`aether_kinds::NetCapability`] facade.
+//! Issue 545 PR E1: collapsed `aether.net` cap. Pre-PR-E1 the cap
+//! lived split across `aether-kinds::net::NetCapability<B>` (facade
+//! generic) and this file (concrete `NetAdapterBackend`). The facade
+//! pattern (ADR-0075) is retired — caps are now regular `#[actor]`
+//! blocks, same shape as wasm components.
 //!
 //! Owns the full HTTP egress stack — `NetAdapter` trait, the `ureq`-
 //! backed `UreqNetAdapter`, env-driven `NetConfig`, and the
-//! `NetBackend` impl the chassis installs at boot. Chassis mains
-//! resolve a [`NetConfig`] (typically via [`NetConfig::from_env`]),
-//! pass it to [`NetAdapterBackend::new`], and hand the resulting
-//! backend to `NetCapability::new(...)`. Everything below the
-//! capability boundary is private.
+//! [`NetCapability`] itself. Chassis mains resolve a [`NetConfig`]
+//! (typically via [`NetConfig::from_env`]), call
+//! [`NetCapability::new`], and hand the cap to the chassis builder.
 //!
 //! v1 semantics (ADR-0043):
 //! - Blocking on the dispatcher thread (one request at a time).
@@ -21,8 +22,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_data::ReplyTo;
-use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetBackend, NetError};
+use aether_data::{Actor, ReplyTo, Singleton};
+use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
 use crate::mailer::Mailer;
 
@@ -36,7 +37,7 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_TIMEOUT_MS: u32 = 30_000;
 
 /// Adapter-facing request shape. Converted from the wire `Fetch`
-/// kind by the backend before handing to the adapter.
+/// kind by the cap before handing to the adapter.
 pub struct FetchRequest {
     pub url: String,
     pub method: HttpMethod,
@@ -46,7 +47,7 @@ pub struct FetchRequest {
 }
 
 /// Adapter-facing response shape. Converted to the wire
-/// `FetchResult::Ok` by the backend.
+/// `FetchResult::Ok` by the cap.
 pub struct FetchResponse {
     pub status: u16,
     pub headers: Vec<HttpHeader>,
@@ -56,13 +57,13 @@ pub struct FetchResponse {
 /// HTTP backend. One method — `fetch` — takes a validated request
 /// and returns the response or a structured error. The adapter is
 /// responsible for allowlist enforcement, URL validation, body
-/// caps, and timeout application; the backend just moves bytes
-/// between wire and adapter.
+/// caps, and timeout application; the cap just moves bytes between
+/// wire and adapter.
 pub trait NetAdapter: Send + Sync {
     fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, NetError>;
 }
 
-/// Adapter returned when `AETHER_NET_DISABLE=1` or when backend
+/// Adapter returned when `AETHER_NET_DISABLE=1` or when adapter
 /// construction fails at boot. Every fetch replies
 /// `NetError::Disabled` so callers learn why nothing's happening
 /// instead of hanging or silently dropping.
@@ -77,9 +78,9 @@ impl NetAdapter for DisabledNetAdapter {
 /// `ureq`-backed adapter. Holds the shared agent, the allowlist
 /// (empty = deny all), the response cap, and the `require_https`
 /// flag. Thread-safe: `ureq::Agent` is cheaply cloneable and
-/// internally synchronised, so the same adapter drives the backend
-/// from one dispatch thread today and would parallelise cleanly
-/// behind a multi-thread dispatcher later.
+/// internally synchronised, so the same adapter drives the cap from
+/// one dispatch thread today and would parallelise cleanly behind a
+/// multi-thread dispatcher later.
 pub struct UreqNetAdapter {
     agent: ureq::Agent,
     allowlist: HashSet<String>,
@@ -231,7 +232,7 @@ fn ureq_error_to_net_error(e: ureq::Error) -> NetError {
 /// mains read env vars (`AETHER_NET_DISABLE`, `AETHER_NET_ALLOWLIST`,
 /// `AETHER_NET_REQUIRE_HTTPS`, `AETHER_NET_MAX_BODY_BYTES`,
 /// `AETHER_NET_TIMEOUT_MS`) into a `NetConfig` and pass it to
-/// [`NetAdapterBackend::new`]. Tests build a `NetConfig` directly,
+/// [`NetCapability::new`]. Tests build a `NetConfig` directly,
 /// never touching process env (issue 464).
 #[derive(Clone, Debug)]
 pub struct NetConfig {
@@ -350,20 +351,17 @@ fn parse_default_timeout_env() -> Duration {
     Duration::from_millis(ms as u64)
 }
 
-/// Substrate-side state for the net cap. Holds the resolved adapter,
-/// the chassis [`Arc<Mailer>`] for routing replies, and the default
-/// per-request timeout applied when `Fetch.timeout_ms` is `None`.
-///
-/// The dispatcher thread owns this through the macro-emitted
-/// `Dispatch` impl on `aether_kinds::NetCapability<Self>`; the
-/// chassis stores only the `FacadeHandle` wrapper.
-pub struct NetAdapterBackend {
+/// `aether.net` mailbox cap. Owns the resolved adapter, the chassis
+/// [`Arc<Mailer>`] for routing replies, and the default per-request
+/// timeout applied when `Fetch.timeout_ms` is `None`. The dispatcher
+/// thread owns this through the macro-emitted `Dispatch` impl.
+pub struct NetCapability {
     adapter: Arc<dyn NetAdapter>,
     mailer: Arc<Mailer>,
     default_timeout: Duration,
 }
 
-impl NetAdapterBackend {
+impl NetCapability {
     /// Construct from a [`NetConfig`] (resolved by the chassis main
     /// — typically via [`NetConfig::from_env`]) and the chassis's
     /// [`Mailer`]. The adapter is built immediately so any
@@ -393,7 +391,21 @@ impl NetAdapterBackend {
     }
 }
 
-impl NetBackend for NetAdapterBackend {
+impl Actor for NetCapability {
+    /// ADR-0043 + ADR-0074 Phase 5 chassis-owned mailbox.
+    const NAMESPACE: &'static str = "aether.net";
+}
+
+impl Singleton for NetCapability {}
+
+#[aether_data::actor]
+impl NetCapability {
+    /// Run a fetch request and reply with the response.
+    ///
+    /// # Agent
+    /// Reply: `FetchResult`. Synchronous on the dispatcher thread —
+    /// long-running fetches block other net mail until they finish.
+    #[aether_data::handler]
     fn on_fetch(&mut self, sender: ReplyTo, mail: Fetch) {
         let timeout = mail
             .timeout_ms
@@ -427,8 +439,7 @@ mod tests {
     use super::*;
     use crate::capability::{BootError, ChassisBuilder};
     use crate::registry::Registry;
-    use aether_data::{Actor, Kind};
-    use aether_kinds::NetCapability;
+    use aether_data::Kind;
     use std::sync::Mutex;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
@@ -516,16 +527,11 @@ mod tests {
             ..NetConfig::default()
         };
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(NetCapability::new(NetAdapterBackend::new(
-                config,
-                Arc::clone(&mailer),
-            )))
+            .with_facade(NetCapability::new(config, Arc::clone(&mailer)))
             .build()
             .expect("net capability boots");
         assert!(
-            registry
-                .lookup(<NetCapability<NetAdapterBackend> as Actor>::NAMESPACE)
-                .is_some(),
+            registry.lookup(NetCapability::NAMESPACE).is_some(),
             "net mailbox registered"
         );
         chassis.shutdown();
@@ -535,38 +541,32 @@ mod tests {
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
         let (registry, mailer) = fresh_substrate();
-        registry.register_sink(
-            <NetCapability<NetAdapterBackend> as Actor>::NAMESPACE,
-            Arc::new(|_, _, _, _, _, _| {}),
-        );
+        registry.register_sink(NetCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
         let config = NetConfig {
             disabled: true,
             ..NetConfig::default()
         };
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(NetCapability::new(NetAdapterBackend::new(
-                config,
-                Arc::clone(&mailer),
-            )))
+            .with_facade(NetCapability::new(config, Arc::clone(&mailer)))
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
             BootError::MailboxAlreadyClaimed { ref name }
-                if name == <NetCapability<NetAdapterBackend> as Actor>::NAMESPACE
+                if name == NetCapability::NAMESPACE
         ));
     }
 
     #[test]
     fn disabled_adapter_replies_disabled() {
         let (mailer, rx) = test_mailer_and_rx();
-        let mut backend = NetAdapterBackend::from_adapter(
+        let mut cap = NetCapability::from_adapter(
             Arc::new(DisabledNetAdapter),
             mailer,
             NetConfig::default().default_timeout,
         );
-        backend.on_fetch(
+        cap.on_fetch(
             session_sender(),
             Fetch {
                 url: "https://api.example.com/".to_string(),
@@ -659,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_fetch_ok_replies_with_response() {
+    fn cap_fetch_ok_replies_with_response() {
         let (mailer, rx) = test_mailer_and_rx();
         let stub = StubAdapter::with(Ok(FetchResponse {
             status: 200,
@@ -669,12 +669,12 @@ mod tests {
             }],
             body: b"{}".to_vec(),
         }));
-        let mut backend = NetAdapterBackend::from_adapter(
+        let mut cap = NetCapability::from_adapter(
             stub as Arc<dyn NetAdapter>,
             mailer,
             NetConfig::default().default_timeout,
         );
-        backend.on_fetch(
+        cap.on_fetch(
             session_sender(),
             Fetch {
                 url: "https://api.example.com/v1".to_string(),
@@ -701,14 +701,14 @@ mod tests {
     }
 
     #[test]
-    fn backend_fetch_err_echoes_url_and_error() {
+    fn cap_fetch_err_echoes_url_and_error() {
         let (mailer, rx) = test_mailer_and_rx();
-        let mut backend = NetAdapterBackend::from_adapter(
+        let mut cap = NetCapability::from_adapter(
             StubAdapter::with(Err(NetError::Timeout)) as Arc<dyn NetAdapter>,
             mailer,
             NetConfig::default().default_timeout,
         );
-        backend.on_fetch(
+        cap.on_fetch(
             session_sender(),
             Fetch {
                 url: "https://slow.example.com/".to_string(),
@@ -728,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn backend_uses_default_timeout_when_none_provided() {
+    fn cap_uses_default_timeout_when_none_provided() {
         let (mailer, _rx) = test_mailer_and_rx();
         let stub = StubAdapter::with(Ok(FetchResponse {
             status: 200,
@@ -736,12 +736,12 @@ mod tests {
             body: vec![],
         }));
         let stub_clone = Arc::clone(&stub);
-        let mut backend = NetAdapterBackend::from_adapter(
+        let mut cap = NetCapability::from_adapter(
             stub as Arc<dyn NetAdapter>,
             mailer,
             NetConfig::default().default_timeout,
         );
-        backend.on_fetch(
+        cap.on_fetch(
             session_sender(),
             Fetch {
                 url: "https://api.example.com/".to_string(),
@@ -776,17 +776,6 @@ mod tests {
         });
         assert!(matches!(resp, Err(NetError::Disabled)));
     }
-
-    /// Decode failure now goes through the macro's miss path —
-    /// reaching the backend's `on_fetch` is impossible without a
-    /// well-formed `Fetch`. The pre-PR-D2 dispatcher used to reply
-    /// `AdapterError("decode failed: ...")` with empty url; under
-    /// the facade pattern decode failure logs `tracing::warn!`
-    /// (chassis-side) and the sender's wait_reply times out.
-    /// Documented in PR D2's body; the Net cap inherits the same
-    /// behaviour.
-    #[allow(dead_code)]
-    fn _decode_failure_documentation_sentinel() {}
 
     /// Silence `Kind` unused-import (handy for the test mod's
     /// `decode_reply` bound).

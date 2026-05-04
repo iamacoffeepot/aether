@@ -26,10 +26,10 @@ pub mod net;
 #[cfg(feature = "render")]
 pub mod render;
 #[cfg(feature = "audio")]
-pub use audio::{AudioConfig, CpalAudioBackend};
-pub use handle::HandleStoreBackend;
-pub use io::IoAdapterBackend;
-pub use log::LogTracingBackend;
-pub use net::NetAdapterBackend;
+pub use audio::{AudioCapability, AudioConfig};
+pub use handle::HandleCapability;
+pub use io::IoCapability;
+pub use log::LogCapability;
+pub use net::NetCapability;
 #[cfg(feature = "render")]
 pub use render::{RenderCapability, RenderConfig, RenderGpu, RenderHandles};

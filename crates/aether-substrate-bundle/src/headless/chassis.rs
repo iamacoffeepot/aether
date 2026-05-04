@@ -15,16 +15,15 @@ use std::time::Duration;
 
 use aether_data::{Kind, KindId};
 use aether_kinds::{
-    Advance, CaptureFrame, FrameStats, IoCapability, LogCapability, NetCapability, PlatformInfo,
-    SetMasterGain, SetMasterGainResult, SetWindowMode, SetWindowTitle, Tick,
+    Advance, CaptureFrame, FrameStats, PlatformInfo, SetMasterGain, SetMasterGainResult,
+    SetWindowMode, SetWindowTitle, Tick,
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, ReplyTo, SubstrateBoot,
     capabilities::{
-        IoAdapterBackend, LogTracingBackend, NetAdapterBackend, io::NamespaceRoots,
-        net::NetConfig as NetConf,
+        IoCapability, LogCapability, NetCapability, io::NamespaceRoots, net::NetConfig as NetConf,
     },
     capture::{
         reply_unsupported_advance, reply_unsupported_capture_frame,
@@ -229,14 +228,13 @@ impl HeadlessChassis {
         // chassis_builder `.with()` chain. Boot order is declaration
         // order — log first so other capabilities' boot tracing routes
         // through the log capture.
-        let io_backend = IoAdapterBackend::new(namespace_roots, Arc::clone(&mailer))
+        let io_cap = IoCapability::new(namespace_roots, Arc::clone(&mailer))
             .map_err(|e| BootError::Other(Box::new(e)))?;
-        let net_backend = NetAdapterBackend::new(net, Arc::clone(&mailer));
-        Builder::<HeadlessChassis>::new(registry, mailer)
+        Builder::<HeadlessChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
-            .with_facade(LogCapability::new(LogTracingBackend::new()))
-            .with_facade(IoCapability::new(io_backend))
-            .with_facade(NetCapability::new(net_backend))
+            .with_facade(LogCapability::new())
+            .with_facade(io_cap)
+            .with_facade(NetCapability::new(net, Arc::clone(&mailer)))
             .driver(driver)
             .build()
     }

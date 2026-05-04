@@ -42,10 +42,9 @@ use wasmtime::{Engine, Linker};
 use crate::{
     AETHER_CONTROL, AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ChassisControlHandler,
     ControlPlane, HUB_CLAUDE_BROADCAST, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler,
-    SubstrateCtx, capabilities::HandleStoreBackend, handle_store::HandleStore, host_fns,
+    SubstrateCtx, capabilities::HandleCapability, handle_store::HandleStore, host_fns,
     input::new_subscribers, log_capture, mail::MailboxId,
 };
-use aether_kinds::HandleCapability;
 
 /// Everything a chassis needs after shared boot setup. Fields are
 /// `pub` so chassis code destructures and takes ownership of the
@@ -348,10 +347,10 @@ impl<'a> SubstrateBootBuilder<'a> {
         // control-side code that wants to publish at load can reach
         // it.
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&queue))
-            .with_facade(HandleCapability::new(HandleStoreBackend::new(
+            .with_facade(HandleCapability::new(
                 Arc::clone(&handle_store),
                 Arc::clone(&queue),
-            )))
+            ))
             .build()
             .map_err(|e| wasmtime::Error::msg(format!("chassis capability boot: {e}")))?;
 

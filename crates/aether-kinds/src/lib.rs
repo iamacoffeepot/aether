@@ -13,20 +13,9 @@
 
 extern crate alloc;
 
-pub mod audio;
 pub mod descriptors;
-pub mod handle;
-pub mod io;
 pub mod keycode;
-pub mod log;
 pub mod mailboxes;
-pub mod net;
-
-pub use audio::{AudioBackend, AudioCapability, ErasedAudioBackend};
-pub use handle::{ErasedHandleBackend, HandleBackend, HandleCapability};
-pub use io::{ErasedIoBackend, IoBackend, IoCapability};
-pub use log::{ErasedLogBackend, LogBackend, LogCapability};
-pub use net::{ErasedNetBackend, NetBackend, NetCapability};
 
 use bytemuck::{Pod, Zeroable};
 
