@@ -42,9 +42,10 @@ use wasmtime::{Engine, Linker};
 use crate::{
     AETHER_CONTROL, AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ChassisControlHandler,
     ControlPlane, HUB_CLAUDE_BROADCAST, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler,
-    SubstrateCtx, capabilities::HandleCapability, handle_store::HandleStore, host_fns,
+    SubstrateCtx, capabilities::HandleStoreBackend, handle_store::HandleStore, host_fns,
     input::new_subscribers, log_capture, mail::MailboxId,
 };
+use aether_kinds::HandleCapability;
 
 /// Everything a chassis needs after shared boot setup. Fields are
 /// `pub` so chassis code destructures and takes ownership of the
@@ -320,15 +321,20 @@ impl<'a> SubstrateBootBuilder<'a> {
         queue.wire_outbound(Arc::clone(&outbound));
         let handle_store = Arc::new(HandleStore::from_env());
         queue.wire_handle_store(Arc::clone(&handle_store));
-        // ADR-0045 handle sink. ADR-0070 Phase 2 moved this out of an
-        // inline `register_sink` call and into a native capability;
-        // booting the chassis here registers the sink + spawns the
+        // ADR-0045 handle mailbox. ADR-0070 Phase 2 moved this out of
+        // an inline `register_sink` call and into a native capability;
+        // ADR-0075 / issue 533 PR D2 moved the cap onto the facade
+        // pattern (cap shape + handler list in `aether-kinds`, runtime
+        // state in `aether-substrate::capabilities::handle`). Booting
+        // the chassis here registers the mailbox + spawns the
         // dispatcher thread before the control plane is wired so any
         // control-side code that wants to publish at load can reach
-        // it. Future phases extend this builder with one `.with()`
-        // line per extracted sink.
+        // it.
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&queue))
-            .with(HandleCapability::new(Arc::clone(&handle_store)))
+            .with_facade(HandleCapability::new(HandleStoreBackend::new(
+                Arc::clone(&handle_store),
+                Arc::clone(&queue),
+            )))
             .build()
             .map_err(|e| wasmtime::Error::msg(format!("chassis capability boot: {e}")))?;
 
