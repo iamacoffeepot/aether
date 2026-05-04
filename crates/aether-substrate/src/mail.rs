@@ -6,11 +6,13 @@
 /// this remains re-exported under the `aether_substrate::mail::MailboxId`
 /// path so existing call sites compile unchanged.
 pub use aether_data::{KindId, MailboxId};
-/// Reply-routing types — ADR-0075 / issue 533 PR D1 hoisted these into
-/// `aether-data` so chassis caps in `aether-kinds` can name them from
-/// `#[handler]` signatures. This module re-exports them so existing
-/// `aether_substrate::mail::{ReplyTo, ReplyTarget}` call sites compile
-/// unchanged.
+/// Reply-routing types. Canonical home is `aether-data` (ADR-0076) —
+/// `aether-actor`'s `Dispatch` trait references them in its signature
+/// without taking an `aether-actor`-internal dep, and the location
+/// avoids a name clash with `aether-actor`'s wasm-side `ReplyTo` (a
+/// distinct `u32` FFI handle). This module re-exports them so
+/// existing `aether_substrate::mail::{ReplyTo, ReplyTarget}` call
+/// sites compile unchanged.
 pub use aether_data::{ReplyTarget, ReplyTo};
 /// Host/guest contract tag for the payload layout. The substrate and the
 /// components that talk to it agree on a specific layout per kind. The

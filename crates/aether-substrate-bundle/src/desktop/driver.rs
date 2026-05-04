@@ -708,9 +708,9 @@ pub struct DesktopDriverCapability {
     /// Cloned out of `RenderCapability::handles()` before the cap
     /// moves into the chassis builder. Pre-PR-E2 the driver's `boot`
     /// pulled `Arc<RenderCapability>` from `DriverCtx::expect`; post-
-    /// E2 the cap is owned by its dispatcher thread (facade pattern)
-    /// and only the Arc-shared handles bundle is reachable from the
-    /// driver side.
+    /// E2 the cap is owned by its dispatcher thread (ADR-0076's
+    /// unified `#[actor]` pattern) and only the Arc-shared handles
+    /// bundle is reachable from the driver side.
     pub render_handles: RenderHandles,
 }
 
