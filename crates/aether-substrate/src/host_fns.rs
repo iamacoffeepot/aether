@@ -416,5 +416,39 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
         |caller: Caller<'_, SubstrateCtx>| -> u64 { caller.data().prev_correlation() },
     )?;
 
+    // HOST_FN_OK: ADR-0002 / issue 531. The BootError plumbing
+    // can't ride a mail sink because mail is not dispatched until
+    // the component finishes booting — the `init` FFI call itself
+    // is the entry point, and a `Result::Err` returned from it
+    // needs a side channel to ship the error string back to the
+    // substrate before the FFI call returns. A host fn is the
+    // only mechanism that's available pre-`init`-completion.
+    //
+    // Issue 525 Phase 4b / issue 531: stage a `BootError` message
+    // for `Component::instantiate` to surface in `LoadResult::Err`
+    // after the guest's `init` returns non-zero. The bytes are
+    // copied out of guest memory before the call returns; OOB or
+    // missing-memory drops silently — the guest's non-zero return
+    // still triggers the failure path, just without a message
+    // (`Component::instantiate` falls back to a generic "init
+    // returned <rc> without staging an error" diagnostic).
+    linker.func_wrap(
+        "aether",
+        "init_failed_p32",
+        |mut caller: Caller<'_, SubstrateCtx>, ptr: u32, len: u32| {
+            let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
+                return;
+            };
+            let data = memory.data(&caller);
+            let start = ptr as usize;
+            let end = match start.checked_add(len as usize) {
+                Some(e) if e <= data.len() => e,
+                _ => return,
+            };
+            let msg = String::from_utf8_lossy(&data[start..end]).into_owned();
+            caller.data_mut().init_failure = Some(msg);
+        },
+    )?;
+
     Ok(())
 }

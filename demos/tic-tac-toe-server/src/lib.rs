@@ -22,7 +22,7 @@
 //! on the trunk for those without pulling in this crate's
 //! `Component` impl. Per ADR-0066.
 
-use aether_component::{Component, Ctx, InitCtx, KindId, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, KindId, Mailbox, handlers};
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, CLIENT_OBSERVER, GAME_DRAW, GAME_PLAYING, GAME_WON_O, GAME_WON_X, GameState,
     MOVE_CELL_OCCUPIED, MOVE_GAME_OVER, MOVE_OK, MOVE_OUT_OF_BOUNDS, MoveResult, PLAYER_NONE,
@@ -59,13 +59,13 @@ pub struct TicTacToe {
 impl Component for TicTacToe {
     const NAMESPACE: &'static str = "tic_tac_toe";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Self {
-        TicTacToe {
+    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+        Ok(TicTacToe {
             state: GameState::new_game(),
             move_result_kind: ctx.resolve::<MoveResult>(),
             broadcast: ctx.resolve_mailbox::<GameState>("hub.claude.broadcast"),
             client_observer: ctx.resolve_mailbox::<GameState>(CLIENT_OBSERVER),
-        }
+        })
     }
 
     /// Applies a move if legal, then replies to the sender with the

@@ -7,7 +7,7 @@
 //! inbound mail by `#[handlers]`) so the handler body never touches
 //! `Mail<'_>` directly.
 
-use aether_component::{Component, Ctx, InitCtx, KindId, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, KindId, handlers};
 use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
@@ -33,10 +33,10 @@ pub struct Echoer {
 impl Component for Echoer {
     const NAMESPACE: &'static str = "echoer";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Self {
-        Echoer {
+    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Echoer {
             response: ctx.resolve::<Response>(),
-        }
+        })
     }
 
     #[handler]

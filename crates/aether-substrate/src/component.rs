@@ -80,11 +80,30 @@ impl Component {
         // (ADR-0030 Phase 2). Falls back to the legacy `init()` shape
         // so raw-FFI components predating the Phase 2 ABI still load —
         // they just don't get auto-subscribe, which they never did.
+        //
+        // Issue 525 Phase 4b / issue 531: a non-zero return value
+        // means the guest's `WasmActor::init` returned `Err(BootError)`
+        // and staged the message via `init_failed_p32`. Drain the
+        // staged string off the ctx and surface it as a wasmtime
+        // error so the existing `dispatch_load_component` failure
+        // path reports it via `LoadResult::Err { error }` — same
+        // shape as a wasm trap, just with a more informative message.
         let mailbox_id = store.data().sender.0;
-        if let Ok(init) = instance.get_typed_func::<u64, u32>(&mut store, "init") {
-            init.call(&mut store, mailbox_id)?;
+        let init_rc = if let Ok(init) = instance.get_typed_func::<u64, u32>(&mut store, "init") {
+            Some(init.call(&mut store, mailbox_id)?)
         } else if let Ok(init) = instance.get_typed_func::<(), u32>(&mut store, "init") {
-            init.call(&mut store, ())?;
+            Some(init.call(&mut store, ())?)
+        } else {
+            None
+        };
+        if let Some(rc) = init_rc
+            && rc != 0
+        {
+            let msg =
+                store.data_mut().init_failure.take().unwrap_or_else(|| {
+                    format!("guest init returned {rc} without staging an error")
+                });
+            return Err(wasmtime::Error::msg(format!("guest init failed: {msg}")));
         }
 
         // ADR-0015 hook exports are optional. A component whose

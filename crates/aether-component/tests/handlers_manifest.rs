@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use aether_component::{Component, Ctx, DropCtx, InitCtx, handlers};
+use aether_component::{BootError, Component, Ctx, DropCtx, InitCtx, handlers};
 use aether_data::Kind;
 use aether_data::{INPUTS_SECTION_VERSION, InputsRecord};
 use bytemuck::{Pod, Zeroable};
@@ -47,8 +47,8 @@ struct ManifestProbe;
 impl Component for ManifestProbe {
     const NAMESPACE: &'static str = "manifest_probe";
 
-    fn init(_ctx: &mut InitCtx<'_>) -> Self {
-        Self
+    fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
     }
 
     /// # Agent

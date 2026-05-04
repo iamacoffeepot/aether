@@ -17,9 +17,9 @@
 //!
 //! #[handlers]
 //! impl Component for MySaveLoader {
-//!     fn init(ctx: &mut InitCtx<'_>) -> Self {
+//!     fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
 //!         io::read("save", "slot1.bin");
-//!         Self { /* ... */ }
+//!         Ok(Self { /* ... */ })
 //!     }
 //!
 //!     #[handler]

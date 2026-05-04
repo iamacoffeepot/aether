@@ -31,7 +31,7 @@
 //! 4. Every `aether.tick` re-emits the cached triangles to
 //!    `"aether.render"`.
 
-use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers, io};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers, io};
 use aether_kinds::{DrawTriangle, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
@@ -73,11 +73,11 @@ pub struct MeshViewer {
 impl Component for MeshViewer {
     const NAMESPACE: &'static str = "mesh_viewer";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Self {
-        MeshViewer {
+    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+        Ok(MeshViewer {
             triangles: Vec::new(),
             render: ctx.resolve_mailbox::<DrawTriangle>("aether.render"),
-        }
+        })
     }
 
     /// Re-emits every cached triangle to the render sink.

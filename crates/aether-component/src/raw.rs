@@ -47,6 +47,15 @@ unsafe extern "C" {
     /// of this kind."
     #[link_name = "prev_correlation_p32"]
     pub fn prev_correlation() -> u64;
+    /// Issue 525 Phase 4b / issue 531: stage a `BootError` message
+    /// for the substrate to surface in `LoadResult::Err` after the
+    /// guest's `init` returns non-zero. The `export!` macro is the
+    /// only intended caller — user code returns `Err(BootError)`
+    /// from `WasmActor::init` and the macro plumbs the bytes
+    /// through this import. Bytes at `(ptr, len)` are copied out of
+    /// guest memory before the call returns.
+    #[link_name = "init_failed_p32"]
+    pub fn init_failed(ptr: u32, len: u32);
 }
 
 /// # Safety
@@ -93,4 +102,12 @@ pub unsafe fn wait_reply(
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn prev_correlation() -> u64 {
     panic!("aether-component: prev_correlation called on non-wasm target");
+}
+
+/// # Safety
+/// Host-target stub for the wasm `aether::init_failed` import.
+/// Always panics — callers on non-wasm targets are misusing the SDK.
+#[cfg(not(target_arch = "wasm32"))]
+pub unsafe fn init_failed(_ptr: u32, _len: u32) {
+    panic!("aether-component: init_failed called on non-wasm target");
 }

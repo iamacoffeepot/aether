@@ -70,6 +70,16 @@ pub struct SubstrateCtx {
     /// the replace; the substrate checks this after `on_replace` and
     /// surfaces the message back up the control plane.
     pub save_state_error: Option<String>,
+    /// Set by the `init_failed_p32` host fn when the guest's `init`
+    /// returns `Err(BootError)`. Issue 525 Phase 4b / issue 531: the
+    /// substrate reads this after `init` returns non-zero and
+    /// surfaces the message in `LoadResult::Err { error }`. The guest
+    /// stages the bytes here and returns 1 from its `init` shim;
+    /// `Component::instantiate` turns the staged message into a
+    /// `wasmtime::Error` so the existing load-failure path in
+    /// `dispatch_load_component` reports it like any other
+    /// instantiation error. None on the success path.
+    pub init_failure: Option<String>,
     /// ADR-0042 inbox machinery: the component's mpsc `Receiver`
     /// lives here (not on the dispatcher's stack) so the
     /// `wait_reply_p32` host fn can drain it directly, and a FIFO
@@ -115,6 +125,7 @@ impl SubstrateCtx {
             reply_table: ReplyTable::new(),
             saved_state: None,
             save_state_error: None,
+            init_failure: None,
             inbox_rx: Mutex::new(None),
             inbox_overflow: Mutex::new(VecDeque::new()),
             correlation_counter: Cell::new(1),

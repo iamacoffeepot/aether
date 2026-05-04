@@ -15,7 +15,7 @@
 //!   `capture_frame` scenarios can observe pre-mail effects in the
 //!   captured PNG.
 
-use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers, resolve_mailbox};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers, resolve_mailbox};
 use aether_kinds::{DrawTriangle, Tick, Vertex};
 use bytemuck::{Pod, Zeroable};
 
@@ -58,11 +58,11 @@ pub struct Probe {
 impl Component for Probe {
     const NAMESPACE: &'static str = "test_fixture_probe";
 
-    fn init(_ctx: &mut InitCtx<'_>) -> Self {
-        Probe {
+    fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Probe {
             tick_count: 0,
             render: SetRender::default(),
-        }
+        })
     }
 
     /// Counts ticks delivered to this mailbox; broadcasts the running

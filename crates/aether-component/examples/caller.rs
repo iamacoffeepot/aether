@@ -10,7 +10,7 @@
 //! the `#[handlers]`-decorated impl; `Mailbox<K>` still carries the
 //! send-side mailbox name (data, not type).
 
-use aether_component::{Component, Ctx, InitCtx, Mailbox, handlers};
+use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, handlers};
 use aether_data::{Kind, Schema};
 use aether_kinds::Tick;
 use bytemuck::{Pod, Zeroable};
@@ -46,12 +46,12 @@ pub struct Caller {
 impl Component for Caller {
     const NAMESPACE: &'static str = "caller";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Self {
-        Caller {
+    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Caller {
             request: ctx.resolve_mailbox::<Request>("echoer"),
             observe: ctx.resolve_mailbox::<Observation>("hub.claude.broadcast"),
             next_seq: 0,
-        }
+        })
     }
 
     #[handler]
