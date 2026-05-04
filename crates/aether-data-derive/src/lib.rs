@@ -910,12 +910,27 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
         build_inputs_manifest_consts(&handlers, fallback.as_ref(), &component_doc);
     let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers);
 
+    // Issue 525 Phase 4: trait consts (NAMESPACE, FRAME_BARRIER) live
+    // on the `Actor` super-trait, not `Component` / `WasmActor`. Route
+    // any const items the user declared inside `#[handlers] impl
+    // Component for X` to a sibling `impl ::aether_component::Actor`
+    // block so satisfying `WasmActor: Actor` works without making the
+    // user split the impl manually.
     let const_tokens = consts.iter();
+    let actor_impl = if consts.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            impl #impl_generics ::aether_component::Actor for #self_ty #where_clause {
+                #(#const_tokens)*
+            }
+        }
+    };
 
     Ok(quote! {
-        impl #impl_generics #trait_path for #self_ty #where_clause {
-            #(#const_tokens)*
+        #actor_impl
 
+        impl #impl_generics #trait_path for #self_ty #where_clause {
             #wrapped_init
 
             #(#lifecycle_methods)*
