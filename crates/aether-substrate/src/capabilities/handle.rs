@@ -13,7 +13,8 @@
 
 use std::sync::Arc;
 
-use aether_data::{Actor, ReplyTo, Singleton};
+use aether_actor::{Actor, Singleton};
+use aether_data::ReplyTo;
 use aether_kinds::{
     HandleError, HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
     HandleReleaseResult, HandleUnpin, HandleUnpinResult,

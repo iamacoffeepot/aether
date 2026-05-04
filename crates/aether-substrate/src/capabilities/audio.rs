@@ -55,7 +55,8 @@ use std::thread::{self, JoinHandle};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
-use aether_data::{Actor, MailboxId, ReplyTarget, ReplyTo, Singleton};
+use aether_actor::{Actor, Singleton};
+use aether_data::{MailboxId, ReplyTarget, ReplyTo};
 use aether_kinds::{NoteOff, NoteOn, SetMasterGain, SetMasterGainResult};
 
 use crate::mailer::Mailer;

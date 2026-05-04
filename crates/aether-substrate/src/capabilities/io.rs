@@ -26,7 +26,8 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aether_data::{Actor, ReplyTo, Singleton};
+use aether_actor::{Actor, Singleton};
+use aether_data::ReplyTo;
 use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };

@@ -37,7 +37,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use aether_actor::Actor;
-use aether_data::Dispatch;
+use aether_actor::Dispatch;
 
 use crate::lifecycle::{FatalAborter, PanicAborter};
 use crate::mail::{KindId, MailboxId, ReplyTo};

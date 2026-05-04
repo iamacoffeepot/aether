@@ -170,7 +170,7 @@ impl SubstrateBoot {
     /// legacy path retired alongside `Capability` itself.
     pub fn add_capability<C>(&mut self, cap: C) -> wasmtime::Result<()>
     where
-        C: aether_actor::Actor + aether_data::Dispatch + Send + 'static,
+        C: aether_actor::Actor + aether_actor::Dispatch + Send + 'static,
     {
         let chassis = self
             .chassis

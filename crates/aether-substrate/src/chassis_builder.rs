@@ -35,7 +35,7 @@ use crate::mail::MailboxId;
 use crate::mailer::Mailer;
 use crate::registry::Registry;
 use aether_actor::Actor;
-use aether_data::Dispatch;
+use aether_actor::Dispatch;
 
 /// Failure mode raised by [`DriverRunning::run`].
 #[derive(Debug)]
