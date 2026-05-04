@@ -109,6 +109,7 @@ dependencies = [
 name = "aether-data-derive"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-actor",
  "aether-data",
  "bytemuck",
  "inventory",
