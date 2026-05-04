@@ -166,6 +166,139 @@ pub const fn resolve_mailbox<K: Kind, T: MailTransport>(mailbox_name: &str) -> M
     Mailbox::__new(mailbox_id_from_name(mailbox_name).0, K::ID.0)
 }
 
+/// Phantom-typed receiver-actor handle. ADR-0075's actor-typed sender
+/// API: `ActorMailbox<R, T>` addresses the mailbox of receiver actor `R`,
+/// not a single kind. Lives alongside [`Mailbox<K, T>`] during the
+/// migration — Phase 4 retires the kind-typed form and renames this
+/// to `Mailbox`.
+///
+/// Multi-kind by construction: `send::<K>` is gated on `R: HandlesKind<K>`,
+/// so the same `ActorMailbox<RenderCapability, T>` accepts both
+/// `&DrawTriangle` and `&Camera` (instead of needing two `Mailbox<K>`
+/// declarations as today). Wrong-kind sends are compile errors.
+///
+/// Built two ways:
+///
+/// - Singleton path: senders never construct one explicitly. Inside
+///   `Ctx::send_to::<R>(&kind)` the SDK resolves the singleton mailbox
+///   from `R::NAMESPACE` and dispatches in one call.
+/// - Multi-instance path: `Ctx::resolve_actor::<R>(name)` returns an
+///   `ActorMailbox<R, T>` value that the caller stores; subsequent sends
+///   go through `actor_mailbox.send(transport, &kind)` and are
+///   string-free.
+pub struct ActorMailbox<R, T: MailTransport> {
+    mailbox: u64,
+    _r: PhantomData<fn() -> R>,
+    _t: PhantomData<fn() -> T>,
+}
+
+impl<R, T: MailTransport> Copy for ActorMailbox<R, T> {}
+impl<R, T: MailTransport> Clone for ActorMailbox<R, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R, T: MailTransport> ActorMailbox<R, T> {
+    /// Not part of the public API; the const builders go through here
+    /// so the field stays private.
+    #[doc(hidden)]
+    pub const fn __new(mailbox: u64) -> Self {
+        ActorMailbox {
+            mailbox,
+            _r: PhantomData,
+            _t: PhantomData,
+        }
+    }
+
+    /// Raw mailbox id. Exposed for callers that need it for a
+    /// host fn the SDK doesn't yet wrap.
+    pub fn mailbox(self) -> u64 {
+        self.mailbox
+    }
+}
+
+impl<R: crate::Actor, T: MailTransport> ActorMailbox<R, T> {
+    /// Send a single payload of kind `K` to actor `R`. Compile-checked
+    /// against `R: HandlesKind<K>` — wrong-kind sends are rejected at
+    /// the call site.
+    ///
+    /// Wire shape (cast or postcard) follows `Kind::encode_into_bytes`
+    /// — same single source of truth as the kind-typed `Mailbox::send`
+    /// per issue #240.
+    ///
+    /// ```compile_fail
+    /// use aether_actor::{Actor, ActorMailbox, HandlesKind, Singleton, MailTransport};
+    /// use aether_data::Kind;
+    ///
+    /// // Two kinds; the receiver only handles the first.
+    /// struct KindOk;
+    /// impl Kind for KindOk {
+    ///     const NAME: &'static str = "doctest.ok";
+    ///     const ID: aether_data::KindId = aether_data::KindId(1);
+    /// }
+    /// struct KindWrong;
+    /// impl Kind for KindWrong {
+    ///     const NAME: &'static str = "doctest.wrong";
+    ///     const ID: aether_data::KindId = aether_data::KindId(2);
+    /// }
+    /// struct R;
+    /// impl Actor for R { const NAMESPACE: &'static str = "doctest"; }
+    /// impl Singleton for R {}
+    /// impl HandlesKind<KindOk> for R {}     // R handles KindOk only
+    ///
+    /// struct T;
+    /// impl MailTransport for T {
+    ///     fn send_mail(&self, _: u64, _: u64, _: &[u8], _: u32) -> u32 { 0 }
+    ///     fn reply_mail(&self, _: u32, _: u64, _: &[u8], _: u32) -> u32 { 0 }
+    ///     fn save_state(&self, _: u32, _: &[u8]) -> u32 { 0 }
+    ///     fn wait_reply(&self, _: u64, _: &mut [u8], _: u32, _: u64) -> i32 { -1 }
+    ///     fn prev_correlation(&self) -> u64 { 0 }
+    /// }
+    ///
+    /// let h: ActorMailbox<R, T> = aether_actor::resolve_actor::<R, T>();
+    /// let t = T;
+    /// h.send(&t, &KindWrong);   // ← compile error: R does not impl HandlesKind<KindWrong>
+    /// ```
+    pub fn send<K>(self, transport: &T, payload: &K)
+    where
+        R: crate::HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        transport.send_mail(self.mailbox, K::ID.0, &bytes, 1);
+    }
+
+    /// Send a slice of payloads as a contiguous batch. Cast-only —
+    /// see [`Mailbox::send_many`] for the wire-shape rationale.
+    pub fn send_many<K>(self, transport: &T, payloads: &[K])
+    where
+        R: crate::HandlesKind<K>,
+        K: Kind + bytemuck::NoUninit,
+    {
+        let bytes: &[u8] = bytemuck::cast_slice(payloads);
+        transport.send_mail(self.mailbox, K::ID.0, bytes, payloads.len() as u32);
+    }
+}
+
+/// Resolve an actor by its `Actor::NAMESPACE`, producing a typed
+/// `ActorMailbox<R, T>` for the singleton instance. Pure compile-time
+/// construction — the mailbox id is `mailbox_id_from_name(R::NAMESPACE)`.
+///
+/// For multi-instance actors loaded under a non-default name, use
+/// [`resolve_actor_named`] (or `Ctx::resolve_actor`) instead.
+pub const fn resolve_actor<R: crate::Actor, T: MailTransport>() -> ActorMailbox<R, T> {
+    ActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0)
+}
+
+/// Resolve a multi-instance actor by runtime name, producing a typed
+/// `ActorMailbox<R, T>`. The string surfaces ONCE per handle; subsequent
+/// sends through the returned handle are string-free and compile-checked
+/// against `R: HandlesKind<K>`.
+pub fn resolve_actor_named<R: crate::Actor, T: MailTransport>(name: &str) -> ActorMailbox<R, T> {
+    ActorMailbox::__new(mailbox_id_from_name(name).0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +350,124 @@ mod tests {
         let s: Mailbox<FakeKind, NoopTransport> = Mailbox::__new(3u64, 11);
         assert_eq!(s.mailbox(), 3u64);
         assert_eq!(s.kind(), 11);
+    }
+
+    /// ADR-0075 actor-typed sender API. `ActorMailbox<R, T>` is keyed on
+    /// the receiver actor `R`; `send::<K>` is gated on `R: HandlesKind<K>`
+    /// so wrong-kind sends are rejected at the call site.
+    mod actor_typed_send {
+        use super::super::{ActorMailbox, resolve_actor, resolve_actor_named};
+        use crate::actor::{Actor, HandlesKind, Singleton};
+        use crate::transport::MailTransport;
+        use ::aether_data::{Kind, mailbox_id_from_name};
+        use alloc::vec::Vec;
+        use core::cell::RefCell;
+
+        /// Cast-shaped kind — overrides `encode_into_bytes` so the
+        /// default-panic doesn't trip.
+        #[repr(C)]
+        #[derive(Copy, Clone)]
+        struct PingKind {
+            tag: u32,
+        }
+        unsafe impl bytemuck::Zeroable for PingKind {}
+        unsafe impl bytemuck::Pod for PingKind {}
+        impl Kind for PingKind {
+            const NAME: &'static str = "test.actor_typed.ping";
+            const ID: ::aether_data::KindId = ::aether_data::KindId(0x1111_2222_3333_4444);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+        }
+
+        /// Singleton receiver. `HandlesKind<PingKind>` opens the gate.
+        struct PingActor;
+        impl Actor for PingActor {
+            const NAMESPACE: &'static str = "test.ping_actor";
+        }
+        impl Singleton for PingActor {}
+        impl HandlesKind<PingKind> for PingActor {}
+
+        #[derive(Clone)]
+        struct RecordedSend {
+            recipient: u64,
+            kind: u64,
+            bytes: Vec<u8>,
+            count: u32,
+        }
+
+        /// Recording transport so we can inspect what `send::<K>`
+        /// actually plumbed through. `RefCell` is fine — the SDK is
+        /// single-threaded per actor, and these tests run on one thread.
+        struct RecordingTransport {
+            sends: RefCell<Vec<RecordedSend>>,
+        }
+        impl RecordingTransport {
+            fn new() -> Self {
+                RecordingTransport {
+                    sends: RefCell::new(Vec::new()),
+                }
+            }
+            fn snapshot(&self) -> Vec<RecordedSend> {
+                self.sends.borrow().clone()
+            }
+        }
+        impl MailTransport for RecordingTransport {
+            fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
+                self.sends.borrow_mut().push(RecordedSend {
+                    recipient,
+                    kind,
+                    bytes: bytes.to_vec(),
+                    count,
+                });
+                0
+            }
+            fn reply_mail(&self, _: u32, _: u64, _: &[u8], _: u32) -> u32 {
+                0
+            }
+            fn save_state(&self, _: u32, _: &[u8]) -> u32 {
+                0
+            }
+            fn wait_reply(&self, _: u64, _: &mut [u8], _: u32, _: u64) -> i32 {
+                -1
+            }
+            fn prev_correlation(&self) -> u64 {
+                0
+            }
+        }
+        // Single-threaded test stub — Send + Sync needed because the
+        // SDK trait requires them. Real transports (WasmTransport ZST,
+        // NativeTransport) carry these properly.
+        unsafe impl Send for RecordingTransport {}
+        unsafe impl Sync for RecordingTransport {}
+
+        #[test]
+        fn resolve_actor_addresses_namespace() {
+            let h: ActorMailbox<PingActor, RecordingTransport> = resolve_actor::<PingActor, _>();
+            assert_eq!(h.mailbox(), mailbox_id_from_name(PingActor::NAMESPACE).0);
+        }
+
+        #[test]
+        fn resolve_actor_named_addresses_runtime_name() {
+            let h: ActorMailbox<PingActor, RecordingTransport> =
+                resolve_actor_named::<PingActor, _>("instance_42");
+            assert_eq!(h.mailbox(), mailbox_id_from_name("instance_42").0);
+        }
+
+        #[test]
+        fn actor_mailbox_send_records_recipient_and_kind() {
+            let transport = RecordingTransport::new();
+            let h: ActorMailbox<PingActor, RecordingTransport> = resolve_actor::<PingActor, _>();
+            let payload = PingKind { tag: 0xCAFE_BABE };
+            h.send(&transport, &payload);
+
+            let snap = transport.snapshot();
+            assert_eq!(snap.len(), 1);
+            let entry = &snap[0];
+            assert_eq!(entry.recipient, mailbox_id_from_name(PingActor::NAMESPACE).0);
+            assert_eq!(entry.kind, PingKind::ID.0);
+            assert_eq!(entry.bytes.len(), core::mem::size_of::<PingKind>());
+            assert_eq!(entry.count, 1);
+        }
     }
 }

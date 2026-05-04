@@ -194,8 +194,9 @@ pub type Handle<K> = aether_actor::handle::Handle<K, WasmTransport>;
 // Re-exports — these types have no transport coupling, so they pass
 // through unchanged from the SDK.
 pub use aether_actor::{
-    DISPATCH_HANDLED, DISPATCH_UNKNOWN_KIND, KindId, Mail, MailTransport as MailTransportTrait,
-    NO_REPLY_HANDLE, PriorState, ReplyTo, Slot, WaitError, decode_wait_reply, resolve, wait_reply,
+    DISPATCH_HANDLED, DISPATCH_UNKNOWN_KIND, HandlesKind, KindId, Mail,
+    MailTransport as MailTransportTrait, NO_REPLY_HANDLE, PriorState, ReplyTo, Singleton, Slot,
+    WaitError, decode_wait_reply, resolve, wait_reply,
 };
 
 /// Wasm-flavoured `resolve_mailbox` — pins `T = WasmTransport` so the
