@@ -30,9 +30,10 @@ use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tic
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use crate::hub::HubProtocolBackend;
+use aether_kinds::IoCapability;
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
-    capabilities::{IoCapability, io::NamespaceRoots},
+    capabilities::{IoAdapterBackend, io::NamespaceRoots},
     capture::CaptureQueue,
     frame_loop,
     mail::{Mail, MailboxId},
@@ -286,17 +287,28 @@ impl TestBench {
         boot.outbound
             .attach_backend(Arc::new(HubProtocolBackend::new(loopback_tx)));
 
-        // Io capability on the legacy `boot.add_capability` path.
-        // Silent-skip on adapter init failure preserves pre-Phase-3
-        // behavior so tests on systems without writable default roots
-        // don't fail at the harness layer; tests that care about io
-        // supply tempdir roots via the builder.
-        if let Err(e) = boot.add_capability(IoCapability::new(boot.namespace_roots.clone())) {
-            tracing::warn!(
-                target: "aether_substrate::io",
-                error = %e,
-                "io capability boot failed in TestBench (expected on systems without writable default roots)",
-            );
+        // Io facade on the `boot.add_facade` path (ADR-0075 / issue
+        // 533 PR D3). Silent-skip on adapter init failure preserves
+        // pre-PR-D3 behavior so tests on systems without writable
+        // default roots don't fail at the harness layer; tests that
+        // care about io supply tempdir roots via the builder.
+        match IoAdapterBackend::new(boot.namespace_roots.clone(), Arc::clone(&boot.queue)) {
+            Ok(io_backend) => {
+                if let Err(e) = boot.add_facade(IoCapability::new(io_backend)) {
+                    tracing::warn!(
+                        target: "aether_substrate::io",
+                        error = %e,
+                        "io facade boot failed in TestBench (expected on systems without writable default roots)",
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "aether_substrate::io",
+                    error = %e,
+                    "io adapter init failed in TestBench (expected on systems without writable default roots)",
+                );
+            }
         }
 
         let gpu = Gpu::new(width, height, render_running);

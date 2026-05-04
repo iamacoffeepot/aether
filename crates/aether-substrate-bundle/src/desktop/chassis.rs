@@ -17,15 +17,15 @@ use std::sync::Arc;
 
 use aether_data::Kind;
 use aether_kinds::{
-    Advance, CaptureFrame, LogCapability, PlatformInfo, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult, WindowMode,
+    Advance, CaptureFrame, IoCapability, LogCapability, NetCapability, PlatformInfo, SetWindowMode,
+    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, WindowMode,
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capabilities::{
-        AudioCapability, IoCapability, LogTracingBackend, NetCapability, RenderCapability,
+        AudioCapability, IoAdapterBackend, LogTracingBackend, NetAdapterBackend, RenderCapability,
         RenderConfig, audio::AudioConfig as AudioConf, io::NamespaceRoots,
         net::NetConfig as NetConf,
     },
@@ -347,11 +347,14 @@ impl DesktopChassis {
         // order — log first so other capabilities' boot tracing routes
         // through the log capture; render last among passives so it
         // claims its mailboxes after every other chassis sink.
+        let io_backend = IoAdapterBackend::new(namespace_roots, Arc::clone(&mailer))
+            .map_err(|e| BootError::Other(Box::new(e)))?;
+        let net_backend = NetAdapterBackend::new(net, Arc::clone(&mailer));
         Builder::<DesktopChassis>::new(registry, mailer)
             .with_aborter(aborter)
             .with_facade(LogCapability::new(LogTracingBackend::new()))
-            .with(IoCapability::new(namespace_roots))
-            .with(NetCapability::new(net))
+            .with_facade(IoCapability::new(io_backend))
+            .with_facade(NetCapability::new(net_backend))
             .with(AudioCapability::new(audio))
             .with(RenderCapability::new(RenderConfig::default()))
             .driver(driver)

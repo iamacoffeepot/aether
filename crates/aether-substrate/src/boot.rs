@@ -177,6 +177,23 @@ impl SubstrateBoot {
             .add(&self.registry, &self.queue, cap)
             .map_err(|e| wasmtime::Error::msg(format!("capability boot failed: {e}")))
     }
+
+    /// Boot one more facade-style cap into the already-built chassis.
+    /// Counterpart to [`Self::add_capability`] for ADR-0075 facade
+    /// caps; the chassis owns the dispatcher thread and the cap moves
+    /// into it.
+    pub fn add_facade<C>(&mut self, cap: C) -> wasmtime::Result<()>
+    where
+        C: aether_actor::Actor + aether_data::Dispatch + Send + 'static,
+    {
+        let chassis = self
+            .chassis
+            .as_mut()
+            .expect("SubstrateBoot::build always installs a BootedChassis");
+        chassis
+            .add_facade(&self.registry, &self.queue, cap)
+            .map_err(|e| wasmtime::Error::msg(format!("capability boot failed: {e}")))
+    }
 }
 
 impl<'a> SubstrateBootBuilder<'a> {

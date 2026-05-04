@@ -1,45 +1,39 @@
-//! ADR-0070 Phase 3 (part 2): file I/O sink as a native capability.
+//! ADR-0070 Phase 3 (part 2) + ADR-0075 §Decision 3: file I/O backend
+//! behind the [`aether_kinds::IoCapability`] facade (issue 533 PR D3).
 //!
-//! Owns the full ADR-0041 stack — `FileAdapter` trait, `LocalFileAdapter`,
-//! `AdapterRegistry`, env-driven `NamespaceRoots`, the `aether.io`
-//! mailbox claim, and the dispatcher thread that decodes inbound
-//! `Read` / `Write` / `Delete` / `List` mail and drives the matching
-//! adapter. Chassis mains resolve a [`NamespaceRoots`] (typically via
-//! [`NamespaceRoots::from_env`]) and pass it to [`IoCapability::new`];
-//! everything below the capability boundary is private.
-//!
-//! The trait deliberately stays small. Adding a backend is "impl
-//! four methods" (`read` / `write` / `delete` / `list`), not
-//! "refactor the sink."
+//! Owns the full ADR-0041 stack — `FileAdapter` trait,
+//! `LocalFileAdapter`, `AdapterRegistry`, env-driven `NamespaceRoots`,
+//! and the [`IoBackend`] impl the chassis installs at boot. Chassis
+//! mains resolve a [`NamespaceRoots`] (typically via
+//! [`NamespaceRoots::from_env`]), construct an [`IoAdapterBackend`],
+//! and hand it to `IoCapability::new(...)`. Everything below the
+//! capability boundary is private.
 //!
 //! Boot error policy: per ADR-0063 fail-fast, adapter init failure
-//! aborts the chassis. Pre-Phase-3-part-2 behavior was log-and-skip;
-//! the capability tightens this to a typed `BootError`. Operators with
-//! filesystem misconfiguration will see the error loudly at startup
-//! rather than silently lose the io sink.
+//! surfaces at [`IoAdapterBackend::new`] (returns
+//! `std::io::Result`) rather than at chassis-builder time. Chassis
+//! mains propagate via `?` to the same fail-fast outcome; operators
+//! with filesystem misconfiguration see the error at startup.
 //!
-//! Threading: single dispatcher thread on a channel-drop + join
-//! lifecycle (ADR-0074 Phase 2d, mirroring
-//! [`crate::capabilities::log::LogCapability`]). Adapter calls run
-//! synchronously on the dispatcher thread; ADR-0041 flagged a future
-//! host-fn fast path for asset-sized streaming.
+//! Threading: chassis-side dispatcher thread per ADR-0075 — the
+//! macro-emitted `Dispatch` impl on `IoCapability<IoAdapterBackend>`
+//! pulls envelopes from the `aether.io` mailbox and routes them to
+//! the matching backend method. Adapter calls run synchronously on
+//! the dispatcher thread; ADR-0041 flagged a future host-fn fast path
+//! for asset-sized streaming.
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
 
-use aether_actor::Actor;
-
-use crate::capability::{BootError, Capability, ChassisCtx, SinkSender};
-use crate::mail::ReplyTo;
-use crate::mailer::Mailer;
-use crate::native_transport::NativeTransport;
-use aether_data::{Kind, KindId};
+use aether_data::ReplyTo;
 use aether_kinds::{
-    Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
+    Delete, DeleteResult, IoBackend, IoError, List, ListResult, Read, ReadResult, Write,
+    WriteResult,
 };
+
+use crate::mailer::Mailer;
 
 /// Result shape used throughout the adapter layer. The variants of
 /// `IoError` map directly onto ADR-0041 §1's reply enums, so the
@@ -335,290 +329,24 @@ pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, Namesp
     build_registry(NamespaceRoots::from_env())
 }
 
-/// Demultiplex one envelope's payload to the matching per-kind
-/// adapter call. The dispatcher thread invokes this for each
-/// envelope it receives.
-///
-/// The reply router is `Mailer::send_reply`, not
-/// `HubOutbound::send_reply`, so session / engine-mailbox /
-/// local-component replies all funnel through one path. Component-
-/// originated mail (`ReplyTo::Component`) pushes the reply back
-/// into the requesting component's inbox; session / engine mail
-/// hands off to the hub outbound as before.
-///
-/// Adapter calls run synchronously on the dispatcher thread —
-/// fine for save/config (KB-MB files). Asset-sized workloads
-/// should not ride this path; ADR-0041 flags a future host-fn fast
-/// path for zero-copy streaming reads.
-fn dispatch_io_mail(
-    registry: &AdapterRegistry,
-    mailer: &Mailer,
-    kind: KindId,
-    sender: ReplyTo,
-    bytes: &[u8],
-) {
-    // Decode-failure helper: the request couldn't be parsed, so we
-    // have no namespace/path to echo. Send the reply with empty
-    // strings in the echo fields — the `AdapterError` text carries
-    // the decode diagnostic, and empty-string echo is a loud signal
-    // that the request itself was malformed.
-    match kind {
-        <Read as Kind>::ID => {
-            let req: Read = match postcard::from_bytes(bytes) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "aether_substrate::io",
-                        error = %e,
-                        "read: decode failed, replying Err",
-                    );
-                    mailer.send_reply(
-                        sender,
-                        &ReadResult::Err {
-                            namespace: String::new(),
-                            path: String::new(),
-                            error: IoError::AdapterError(format!("decode failed: {e}")),
-                        },
-                    );
-                    return;
-                }
-            };
-            let Some(adapter) = registry.get(&req.namespace) else {
-                mailer.send_reply(
-                    sender,
-                    &ReadResult::Err {
-                        namespace: req.namespace.clone(),
-                        path: req.path.clone(),
-                        error: IoError::UnknownNamespace,
-                    },
-                );
-                return;
-            };
-            let _ = match adapter.read(&req.path) {
-                Ok(bytes) => mailer.send_reply(
-                    sender,
-                    &ReadResult::Ok {
-                        namespace: req.namespace.clone(),
-                        path: req.path.clone(),
-                        bytes,
-                    },
-                ),
-                Err(error) => mailer.send_reply(
-                    sender,
-                    &ReadResult::Err {
-                        namespace: req.namespace,
-                        path: req.path,
-                        error,
-                    },
-                ),
-            };
-        }
-        <Write as Kind>::ID => {
-            let req: Write = match postcard::from_bytes(bytes) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "aether_substrate::io",
-                        error = %e,
-                        "write: decode failed, replying Err",
-                    );
-                    mailer.send_reply(
-                        sender,
-                        &WriteResult::Err {
-                            namespace: String::new(),
-                            path: String::new(),
-                            error: IoError::AdapterError(format!("decode failed: {e}")),
-                        },
-                    );
-                    return;
-                }
-            };
-            let Some(adapter) = registry.get(&req.namespace) else {
-                mailer.send_reply(
-                    sender,
-                    &WriteResult::Err {
-                        namespace: req.namespace.clone(),
-                        path: req.path.clone(),
-                        error: IoError::UnknownNamespace,
-                    },
-                );
-                return;
-            };
-            let _ = match adapter.write(&req.path, &req.bytes) {
-                Ok(()) => mailer.send_reply(
-                    sender,
-                    &WriteResult::Ok {
-                        namespace: req.namespace.clone(),
-                        path: req.path.clone(),
-                    },
-                ),
-                Err(error) => mailer.send_reply(
-                    sender,
-                    &WriteResult::Err {
-                        namespace: req.namespace,
-                        path: req.path,
-                        error,
-                    },
-                ),
-            };
-        }
-        <Delete as Kind>::ID => {
-            let req: Delete = match postcard::from_bytes(bytes) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "aether_substrate::io",
-                        error = %e,
-                        "delete: decode failed, replying Err",
-                    );
-                    mailer.send_reply(
-                        sender,
-                        &DeleteResult::Err {
-                            namespace: String::new(),
-                            path: String::new(),
-                            error: IoError::AdapterError(format!("decode failed: {e}")),
-                        },
-                    );
-                    return;
-                }
-            };
-            let Some(adapter) = registry.get(&req.namespace) else {
-                mailer.send_reply(
-                    sender,
-                    &DeleteResult::Err {
-                        namespace: req.namespace.clone(),
-                        path: req.path.clone(),
-                        error: IoError::UnknownNamespace,
-                    },
-                );
-                return;
-            };
-            let _ = match adapter.delete(&req.path) {
-                Ok(()) => mailer.send_reply(
-                    sender,
-                    &DeleteResult::Ok {
-                        namespace: req.namespace.clone(),
-                        path: req.path.clone(),
-                    },
-                ),
-                Err(error) => mailer.send_reply(
-                    sender,
-                    &DeleteResult::Err {
-                        namespace: req.namespace,
-                        path: req.path,
-                        error,
-                    },
-                ),
-            };
-        }
-        <List as Kind>::ID => {
-            let req: List = match postcard::from_bytes(bytes) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "aether_substrate::io",
-                        error = %e,
-                        "list: decode failed, replying Err",
-                    );
-                    mailer.send_reply(
-                        sender,
-                        &ListResult::Err {
-                            namespace: String::new(),
-                            prefix: String::new(),
-                            error: IoError::AdapterError(format!("decode failed: {e}")),
-                        },
-                    );
-                    return;
-                }
-            };
-            let Some(adapter) = registry.get(&req.namespace) else {
-                mailer.send_reply(
-                    sender,
-                    &ListResult::Err {
-                        namespace: req.namespace.clone(),
-                        prefix: req.prefix.clone(),
-                        error: IoError::UnknownNamespace,
-                    },
-                );
-                return;
-            };
-            let _ = match adapter.list(&req.prefix) {
-                Ok(entries) => mailer.send_reply(
-                    sender,
-                    &ListResult::Ok {
-                        namespace: req.namespace.clone(),
-                        prefix: req.prefix.clone(),
-                        entries,
-                    },
-                ),
-                Err(error) => mailer.send_reply(
-                    sender,
-                    &ListResult::Err {
-                        namespace: req.namespace,
-                        prefix: req.prefix,
-                        error,
-                    },
-                ),
-            };
-        }
-        _ => {
-            tracing::warn!(
-                target: "aether_substrate::io",
-                kind = %kind,
-                "io sink received unknown kind — dropping",
-            );
-        }
-    }
+/// Substrate-side state for the io cap. Holds the resolved adapter
+/// registry + namespace roots and the chassis [`Arc<Mailer>`] for
+/// routing replies. The dispatcher thread owns this through the
+/// macro-emitted `Dispatch` impl on `aether_kinds::IoCapability<Self>`.
+pub struct IoAdapterBackend {
+    registry: Arc<AdapterRegistry>,
+    mailer: Arc<Mailer>,
 }
 
-/// Native capability owning the ADR-0041 file-I/O sink. Constructor
-/// takes the resolved [`NamespaceRoots`] explicitly — the chassis
-/// main reads env (per issue 464) and passes the roots through.
-///
-/// Post-issue-525-Phase-2 the cap is one struct: pre-boot config
-/// (`roots`) lives alongside the runtime fields populated in
-/// `boot`. `Drop` runs the prior `shutdown` body.
-pub struct IoCapability {
-    roots: Option<NamespaceRoots>,
-    thread: Option<JoinHandle<()>>,
-    sink_sender: Option<SinkSender>,
-    _transport: Option<Arc<NativeTransport>>,
-}
-
-impl IoCapability {
-    pub fn new(roots: NamespaceRoots) -> Self {
-        Self {
-            roots: Some(roots),
-            thread: None,
-            sink_sender: None,
-            _transport: None,
-        }
-    }
-}
-
-impl Actor for IoCapability {
-    /// Components mail `aether.io.{read,write,delete,list}` (kind ids)
-    /// to this mailbox; the SDK helpers in `aether-component::io`
-    /// resolve through here. The `aether.<name>` form is the
-    /// post-ADR-0074 Phase 5 convention for chassis-owned mailboxes.
-    const NAMESPACE: &'static str = "aether.io";
-}
-
-impl Capability for IoCapability {
-    fn boot(mut self, ctx: &mut ChassisCtx<'_>) -> Result<Self, BootError> {
-        let claim = ctx.claim_mailbox_drop_on_shutdown::<Self>()?;
-        let mailer: Arc<Mailer> = ctx.mail_send_handle();
-        let mailbox_id = claim.id;
-        let roots = self
-            .roots
-            .take()
-            .expect("IoCapability::boot called twice — `roots` already consumed");
-        let (registry, roots) = build_registry(roots).map_err(|e| {
-            BootError::Other(Box::new(std::io::Error::new(
-                e.kind(),
-                format!("io adapter init failed: {e}"),
-            )))
-        })?;
+impl IoAdapterBackend {
+    /// Construct from explicit [`NamespaceRoots`] (resolved by the
+    /// chassis main, typically via [`NamespaceRoots::from_env`]) and
+    /// the chassis's [`Mailer`]. Returns `Err(std::io::Error)` if the
+    /// adapter registry can't be built — chassis mains propagate via
+    /// `?` so misconfiguration aborts the chassis at startup
+    /// (ADR-0063 fail-fast).
+    pub fn new(roots: NamespaceRoots, mailer: Arc<Mailer>) -> std::io::Result<Self> {
+        let (registry, roots) = build_registry(roots)?;
         tracing::info!(
             target: "aether_substrate::io",
             save = %roots.save.display(),
@@ -626,38 +354,122 @@ impl Capability for IoCapability {
             config = %roots.config.display(),
             "io adapters registered",
         );
+        Ok(Self { registry, mailer })
+    }
 
-        let transport = Arc::new(NativeTransport::from_ctx(
-            ctx,
-            mailbox_id,
-            Self::FRAME_BARRIER,
-        ));
-        transport.install_inbox(claim.receiver);
-        let dispatcher_transport = Arc::clone(&transport);
-
-        let thread = thread::Builder::new()
-            .name("aether-io-sink".into())
-            .spawn(move || {
-                while let Some(env) = dispatcher_transport.recv_blocking() {
-                    dispatch_io_mail(&registry, &mailer, env.kind, env.sender, &env.payload);
-                }
-            })
-            .map_err(|e| BootError::Other(Box::new(e)))?;
-
-        self.thread = Some(thread);
-        self.sink_sender = Some(claim.sink_sender);
-        self._transport = Some(transport);
-        Ok(self)
+    /// Construct from an explicit pre-built registry. Used by tests
+    /// that supply a save-only registry against a tempdir.
+    #[cfg(test)]
+    pub fn from_registry(registry: Arc<AdapterRegistry>, mailer: Arc<Mailer>) -> Self {
+        Self { registry, mailer }
     }
 }
 
-impl Drop for IoCapability {
-    fn drop(&mut self) {
-        // Drop the strong sender first to break the channel.
-        self.sink_sender.take();
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+impl IoBackend for IoAdapterBackend {
+    fn on_read(&mut self, sender: ReplyTo, mail: Read) {
+        let Some(adapter) = self.registry.get(&mail.namespace) else {
+            self.mailer.send_reply(
+                sender,
+                &ReadResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: IoError::UnknownNamespace,
+                },
+            );
+            return;
+        };
+        let reply = match adapter.read(&mail.path) {
+            Ok(bytes) => ReadResult::Ok {
+                namespace: mail.namespace,
+                path: mail.path,
+                bytes,
+            },
+            Err(error) => ReadResult::Err {
+                namespace: mail.namespace,
+                path: mail.path,
+                error,
+            },
+        };
+        self.mailer.send_reply(sender, &reply);
+    }
+
+    fn on_write(&mut self, sender: ReplyTo, mail: Write) {
+        let Some(adapter) = self.registry.get(&mail.namespace) else {
+            self.mailer.send_reply(
+                sender,
+                &WriteResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: IoError::UnknownNamespace,
+                },
+            );
+            return;
+        };
+        let reply = match adapter.write(&mail.path, &mail.bytes) {
+            Ok(()) => WriteResult::Ok {
+                namespace: mail.namespace,
+                path: mail.path,
+            },
+            Err(error) => WriteResult::Err {
+                namespace: mail.namespace,
+                path: mail.path,
+                error,
+            },
+        };
+        self.mailer.send_reply(sender, &reply);
+    }
+
+    fn on_delete(&mut self, sender: ReplyTo, mail: Delete) {
+        let Some(adapter) = self.registry.get(&mail.namespace) else {
+            self.mailer.send_reply(
+                sender,
+                &DeleteResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: IoError::UnknownNamespace,
+                },
+            );
+            return;
+        };
+        let reply = match adapter.delete(&mail.path) {
+            Ok(()) => DeleteResult::Ok {
+                namespace: mail.namespace,
+                path: mail.path,
+            },
+            Err(error) => DeleteResult::Err {
+                namespace: mail.namespace,
+                path: mail.path,
+                error,
+            },
+        };
+        self.mailer.send_reply(sender, &reply);
+    }
+
+    fn on_list(&mut self, sender: ReplyTo, mail: List) {
+        let Some(adapter) = self.registry.get(&mail.namespace) else {
+            self.mailer.send_reply(
+                sender,
+                &ListResult::Err {
+                    namespace: mail.namespace,
+                    prefix: mail.prefix,
+                    error: IoError::UnknownNamespace,
+                },
+            );
+            return;
+        };
+        let reply = match adapter.list(&mail.prefix) {
+            Ok(entries) => ListResult::Ok {
+                namespace: mail.namespace,
+                prefix: mail.prefix,
+                entries,
+            },
+            Err(error) => ListResult::Err {
+                namespace: mail.namespace,
+                prefix: mail.prefix,
+                error,
+            },
+        };
+        self.mailer.send_reply(sender, &reply);
     }
 }
 
@@ -666,8 +478,10 @@ mod tests {
     use std::env::temp_dir;
 
     use super::*;
-    use crate::capability::ChassisBuilder;
+    use crate::capability::{BootError, ChassisBuilder};
     use crate::registry::Registry;
+    use aether_data::{Actor, Kind};
+    use aether_kinds::IoCapability;
 
     /// Manual tempdir helper to avoid pulling in the `tempfile`
     /// crate. Caller cleans up via [`cleanup`] after the test asserts.
@@ -931,30 +745,37 @@ mod tests {
         postcard::from_bytes(&payload).unwrap()
     }
 
-    /// Boot the capability against a fresh tempdir; assert the sink
+    /// Boot the cap against a fresh tempdir; assert the mailbox
     /// is registered.
     #[test]
-    fn capability_boots_and_registers_sink() {
+    fn capability_boots_and_registers_mailbox() {
         let root = scratch_root("boots");
         let (registry, mailer) = fresh_substrate();
+        let backend =
+            IoAdapterBackend::new(roots_under(&root), Arc::clone(&mailer)).expect("adapters init");
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(IoCapability::new(roots_under(&root)))
+            .with_facade(IoCapability::new(backend))
             .build()
             .expect("io capability boots");
         assert!(
-            registry.lookup(IoCapability::NAMESPACE).is_some(),
-            "sink mailbox registered"
+            registry
+                .lookup(<IoCapability<IoAdapterBackend> as Actor>::NAMESPACE)
+                .is_some(),
+            "io mailbox registered"
         );
         chassis.shutdown();
         cleanup(&root);
     }
 
-    /// Boot fails with a typed [`BootError::Other`] when the adapter
-    /// registry can't be built. Provoke `LocalFileAdapter::new`
-    /// failure by pointing the save root at a regular file rather
-    /// than a directory.
+    /// Backend init fails when the adapter registry can't be built —
+    /// provoke `LocalFileAdapter::new` failure by pointing the save
+    /// root at a regular file rather than a directory. Pre-PR-D3 this
+    /// surfaced as `BootError::Other` from `IoCapability::boot`; the
+    /// facade pattern moves the error to construction time
+    /// (`IoAdapterBackend::new` returns `std::io::Result`), so the
+    /// chassis main propagates it via `?` to the same fail-fast result.
     #[test]
-    fn boot_fails_with_typed_error_when_adapter_init_fails() {
+    fn backend_init_fails_when_adapter_init_fails() {
         let root = scratch_root("init-fails");
         let save_path = root.join("save_is_actually_a_file");
         std::fs::write(&save_path, b"not a dir").unwrap();
@@ -966,12 +787,12 @@ mod tests {
         std::fs::create_dir_all(&roots.assets).unwrap();
         std::fs::create_dir_all(&roots.config).unwrap();
 
-        let (registry, mailer) = fresh_substrate();
-        let err = ChassisBuilder::new(registry, mailer)
-            .with(IoCapability::new(roots))
-            .build()
-            .expect_err("save root being a file must fail");
-        assert!(matches!(err, BootError::Other(_)));
+        let (_, mailer) = fresh_substrate();
+        let result = IoAdapterBackend::new(roots, mailer);
+        assert!(
+            result.is_err(),
+            "save root being a file must fail backend init"
+        );
         cleanup(&root);
     }
 
@@ -981,34 +802,42 @@ mod tests {
     fn duplicate_claim_rejects_with_typed_error() {
         let root = scratch_root("collide");
         let (registry, mailer) = fresh_substrate();
-        registry.register_sink(IoCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(
+            <IoCapability<IoAdapterBackend> as Actor>::NAMESPACE,
+            Arc::new(|_, _, _, _, _, _| {}),
+        );
 
+        let backend =
+            IoAdapterBackend::new(roots_under(&root), Arc::clone(&mailer)).expect("adapters init");
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(IoCapability::new(roots_under(&root)))
+            .with_facade(IoCapability::new(backend))
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
-            BootError::MailboxAlreadyClaimed { ref name } if name == IoCapability::NAMESPACE
+            BootError::MailboxAlreadyClaimed { ref name }
+                if name == <IoCapability<IoAdapterBackend> as Actor>::NAMESPACE
         ));
         cleanup(&root);
     }
 
     #[test]
-    fn dispatch_read_ok_replies_with_bytes() {
-        let root = scratch_root("dispatch-read");
+    fn backend_read_ok_replies_with_bytes() {
+        let root = scratch_root("backend-read");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         reg.get("save")
             .unwrap()
             .write("slot.bin", &[9, 9, 9])
             .unwrap();
-        let req = postcard::to_allocvec(&Read {
-            namespace: "save".to_string(),
-            path: "slot.bin".to_string(),
-        })
-        .unwrap();
-        dispatch_io_mail(&reg, &mailer, <Read as Kind>::ID, session_sender(), &req);
+        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
+        backend.on_read(
+            session_sender(),
+            Read {
+                namespace: "save".to_string(),
+                path: "slot.bin".to_string(),
+            },
+        );
         match decode_reply::<ReadResult>(&rx) {
             ReadResult::Ok {
                 namespace,
@@ -1025,25 +854,24 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_read_unknown_namespace_replies_err() {
-        let root = scratch_root("dispatch-ns");
+    fn backend_read_unknown_namespace_replies_err() {
+        let root = scratch_root("backend-ns");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
-        let req = postcard::to_allocvec(&Read {
-            namespace: "nope".to_string(),
-            path: "x.bin".to_string(),
-        })
-        .unwrap();
-        dispatch_io_mail(&reg, &mailer, <Read as Kind>::ID, session_sender(), &req);
+        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
+        backend.on_read(
+            session_sender(),
+            Read {
+                namespace: "nope".to_string(),
+                path: "x.bin".to_string(),
+            },
+        );
         match decode_reply::<ReadResult>(&rx) {
             ReadResult::Err {
                 namespace,
                 path,
                 error: IoError::UnknownNamespace,
             } => {
-                // Echoed fields survive the unknown-namespace path —
-                // the dispatcher pulls them from the decoded request
-                // before looking up the adapter.
                 assert_eq!(namespace, "nope");
                 assert_eq!(path, "x.bin");
             }
@@ -1053,16 +881,18 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_read_not_found_replies_err() {
-        let root = scratch_root("dispatch-nf");
+    fn backend_read_not_found_replies_err() {
+        let root = scratch_root("backend-nf");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
-        let req = postcard::to_allocvec(&Read {
-            namespace: "save".to_string(),
-            path: "ghost.bin".to_string(),
-        })
-        .unwrap();
-        dispatch_io_mail(&reg, &mailer, <Read as Kind>::ID, session_sender(), &req);
+        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
+        backend.on_read(
+            session_sender(),
+            Read {
+                namespace: "save".to_string(),
+                path: "ghost.bin".to_string(),
+            },
+        );
         assert!(matches!(
             decode_reply::<ReadResult>(&rx),
             ReadResult::Err {
@@ -1074,17 +904,20 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_write_ok_persists_bytes() {
-        let root = scratch_root("dispatch-write");
+    fn backend_write_ok_persists_bytes() {
+        let root = scratch_root("backend-write");
         let reg = build_save_only_registry(&root, true);
+        let reg_clone = Arc::clone(&reg);
         let (mailer, rx) = test_mailer_and_rx();
-        let req = postcard::to_allocvec(&Write {
-            namespace: "save".to_string(),
-            path: "slot.bin".to_string(),
-            bytes: vec![1, 2, 3],
-        })
-        .unwrap();
-        dispatch_io_mail(&reg, &mailer, <Write as Kind>::ID, session_sender(), &req);
+        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
+        backend.on_write(
+            session_sender(),
+            Write {
+                namespace: "save".to_string(),
+                path: "slot.bin".to_string(),
+                bytes: vec![1, 2, 3],
+            },
+        );
         match decode_reply::<WriteResult>(&rx) {
             WriteResult::Ok { namespace, path } => {
                 assert_eq!(namespace, "save");
@@ -1093,24 +926,26 @@ mod tests {
             WriteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
         }
         assert_eq!(
-            reg.get("save").unwrap().read("slot.bin").unwrap(),
+            reg_clone.get("save").unwrap().read("slot.bin").unwrap(),
             vec![1, 2, 3]
         );
         cleanup(&root);
     }
 
     #[test]
-    fn dispatch_write_read_only_namespace_replies_forbidden() {
-        let root = scratch_root("dispatch-ro");
+    fn backend_write_read_only_namespace_replies_forbidden() {
+        let root = scratch_root("backend-ro");
         let reg = build_save_only_registry(&root, false);
         let (mailer, rx) = test_mailer_and_rx();
-        let req = postcard::to_allocvec(&Write {
-            namespace: "save".to_string(),
-            path: "slot.bin".to_string(),
-            bytes: vec![],
-        })
-        .unwrap();
-        dispatch_io_mail(&reg, &mailer, <Write as Kind>::ID, session_sender(), &req);
+        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
+        backend.on_write(
+            session_sender(),
+            Write {
+                namespace: "save".to_string(),
+                path: "slot.bin".to_string(),
+                bytes: vec![],
+            },
+        );
         assert!(matches!(
             decode_reply::<WriteResult>(&rx),
             WriteResult::Err {
@@ -1122,17 +957,20 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_delete_then_read_surfaces_not_found() {
-        let root = scratch_root("dispatch-del");
+    fn backend_delete_then_read_surfaces_not_found() {
+        let root = scratch_root("backend-del");
         let reg = build_save_only_registry(&root, true);
+        let reg_clone = Arc::clone(&reg);
         let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("x.bin", b"x").unwrap();
-        let req = postcard::to_allocvec(&Delete {
-            namespace: "save".to_string(),
-            path: "x.bin".to_string(),
-        })
-        .unwrap();
-        dispatch_io_mail(&reg, &mailer, <Delete as Kind>::ID, session_sender(), &req);
+        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
+        backend.on_delete(
+            session_sender(),
+            Delete {
+                namespace: "save".to_string(),
+                path: "x.bin".to_string(),
+            },
+        );
         match decode_reply::<DeleteResult>(&rx) {
             DeleteResult::Ok { namespace, path } => {
                 assert_eq!(namespace, "save");
@@ -1141,25 +979,27 @@ mod tests {
             DeleteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
         }
         assert!(matches!(
-            reg.get("save").unwrap().read("x.bin"),
+            reg_clone.get("save").unwrap().read("x.bin"),
             Err(IoError::NotFound)
         ));
         cleanup(&root);
     }
 
     #[test]
-    fn dispatch_list_returns_sorted_entries() {
-        let root = scratch_root("dispatch-list");
+    fn backend_list_returns_sorted_entries() {
+        let root = scratch_root("backend-list");
         let reg = build_save_only_registry(&root, true);
         let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("b.bin", b"").unwrap();
         reg.get("save").unwrap().write("a.bin", b"").unwrap();
-        let req = postcard::to_allocvec(&List {
-            namespace: "save".to_string(),
-            prefix: "".to_string(),
-        })
-        .unwrap();
-        dispatch_io_mail(&reg, &mailer, <List as Kind>::ID, session_sender(), &req);
+        let mut backend = IoAdapterBackend::from_registry(reg, mailer);
+        backend.on_list(
+            session_sender(),
+            List {
+                namespace: "save".to_string(),
+                prefix: "".to_string(),
+            },
+        );
         match decode_reply::<ListResult>(&rx) {
             ListResult::Ok {
                 namespace,
@@ -1175,18 +1015,13 @@ mod tests {
         cleanup(&root);
     }
 
-    #[test]
-    fn dispatch_unknown_kind_id_does_not_reply() {
-        // An unrelated kind id hitting the io sink should warn-drop,
-        // not panic, and must not produce a reply (nothing for the
-        // sender to be waiting on).
-        let root = scratch_root("dispatch-unknown");
-        let reg = build_save_only_registry(&root, true);
-        let (mailer, rx) = test_mailer_and_rx();
-        dispatch_io_mail(&reg, &mailer, KindId(0xdead_beef), session_sender(), &[]);
-        assert!(rx.try_recv().is_err(), "unexpected reply on unknown kind");
-        cleanup(&root);
-    }
+    // Pre-PR-D3 dispatch tests for "unknown kind id" and "malformed
+    // payload bytes" hit the dispatcher's catch-all warn-drop path
+    // and the per-kind decode-failure branch respectively. Under the
+    // facade pattern both go through the macro-emitted
+    // `Dispatch::__dispatch` miss path: chassis-side warn log + no
+    // reply (sender's wait_reply times out). Behaviour matches Handle
+    // PR D2; consistent across every facade cap.
 
     /// End-to-end: a component pushes a `Read` at the io sink and
     /// receives the `ReadResult` via `Mailer::send_reply` →
@@ -1271,17 +1106,17 @@ mod tests {
             .insert(caller_mailbox, Arc::clone(&entry));
 
         // Dispatch a Read with sender = Component(caller_mailbox).
-        let req = postcard::to_allocvec(&Read {
-            namespace: "save".to_string(),
-            path: "slot.bin".to_string(),
-        })
-        .unwrap();
-        dispatch_io_mail(
-            &reg,
-            &mailer,
-            <Read as Kind>::ID,
-            ReplyTo::to(crate::mail::ReplyTarget::Component(caller_mailbox)),
-            &req,
+        // Call the backend directly — the chassis dispatcher's macro-
+        // emitted `Dispatch::__dispatch` would route the same way, but
+        // staying out of the chassis here keeps the test focused on
+        // the reply-routing path.
+        let mut backend = IoAdapterBackend::from_registry(reg, Arc::clone(&mailer));
+        backend.on_read(
+            ReplyTo::to(aether_data::ReplyTarget::Component(caller_mailbox)),
+            Read {
+                namespace: "save".to_string(),
+                path: "slot.bin".to_string(),
+            },
         );
 
         // Wait for the reply to reach receive.
@@ -1298,38 +1133,6 @@ mod tests {
             "component received a kind id different from ReadResult",
         );
 
-        cleanup(&root);
-    }
-
-    #[test]
-    fn dispatch_malformed_payload_replies_adapter_error_with_empty_echo() {
-        // Bytes that don't postcard-decode as `Read`. Dispatcher
-        // must fall through to the decode-error branch and reply
-        // with `IoError::AdapterError` rather than hang. Echo
-        // fields are empty strings because the dispatcher has no
-        // parsed request to pull them from — loud signal that the
-        // request itself was malformed.
-        let root = scratch_root("dispatch-mal");
-        let reg = build_save_only_registry(&root, true);
-        let (mailer, rx) = test_mailer_and_rx();
-        dispatch_io_mail(
-            &reg,
-            &mailer,
-            <Read as Kind>::ID,
-            session_sender(),
-            &[0xffu8; 4],
-        );
-        match decode_reply::<ReadResult>(&rx) {
-            ReadResult::Err {
-                namespace,
-                path,
-                error: IoError::AdapterError(_),
-            } => {
-                assert_eq!(namespace, "");
-                assert_eq!(path, "");
-            }
-            other => panic!("expected Err AdapterError with empty echo, got {other:?}"),
-        }
         cleanup(&root);
     }
 }
