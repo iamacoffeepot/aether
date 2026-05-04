@@ -801,6 +801,11 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
     let mut handlers: Vec<HandlerFn> = Vec::new();
     let mut fallback: Option<FallbackFn> = None;
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
+    // Issue 525 Phase 1B: pass-through trait consts (today: NAMESPACE,
+    // FRAME_BARRIER) so each component declares them inside its
+    // `#[handlers] impl Component for C` block alongside `init` /
+    // `#[handler]` methods.
+    let mut consts: Vec<syn::ImplItemConst> = Vec::new();
 
     for impl_item in item.items {
         match impl_item {
@@ -809,6 +814,9 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
                     it,
                     "#[handlers] synthesizes `type Kinds` from the #[handler] methods; remove this declaration",
                 ));
+            }
+            ImplItem::Const(c) => {
+                consts.push(c);
             }
             ImplItem::Fn(mut f) => {
                 let name = f.sig.ident.to_string();
@@ -902,8 +910,12 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
         build_inputs_manifest_consts(&handlers, fallback.as_ref(), &component_doc);
     let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers);
 
+    let const_tokens = consts.iter();
+
     Ok(quote! {
         impl #impl_generics #trait_path for #self_ty #where_clause {
+            #(#const_tokens)*
+
             #wrapped_init
 
             #(#lifecycle_methods)*

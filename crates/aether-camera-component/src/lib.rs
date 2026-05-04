@@ -245,6 +245,8 @@ pub struct CameraComponent {
 /// Use `capture_frame` between sends to verify each change.
 #[handlers]
 impl Component for CameraComponent {
+    const NAMESPACE: &'static str = "camera";
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         let mut cameras = HashMap::new();
         cameras.insert(

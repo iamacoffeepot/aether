@@ -61,6 +61,8 @@ pub struct SaveCounter {
 /// each fresh instance bumps the counter by one.
 #[handlers]
 impl Component for SaveCounter {
+    const NAMESPACE: &'static str = "save_counter";
+
     fn init(_ctx: &mut InitCtx<'_>) -> Self {
         SaveCounter { initialized: false }
     }

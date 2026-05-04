@@ -44,6 +44,8 @@ pub struct Caller {
 
 #[handlers]
 impl Component for Caller {
+    const NAMESPACE: &'static str = "caller";
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         Caller {
             request: ctx.resolve_mailbox::<Request>("echoer"),

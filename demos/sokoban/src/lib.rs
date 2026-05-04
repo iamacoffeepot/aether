@@ -139,6 +139,8 @@ pub struct Sokoban {
 /// - `SokobanReset` — reload the active level.
 #[handlers]
 impl Component for Sokoban {
+    const NAMESPACE: &'static str = "sokoban";
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         let mut me = Sokoban {
             state: SokobanState::default(),

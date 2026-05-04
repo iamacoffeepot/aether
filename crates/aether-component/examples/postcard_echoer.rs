@@ -45,6 +45,8 @@ pub struct PostcardEchoer {
 
 #[handlers]
 impl Component for PostcardEchoer {
+    const NAMESPACE: &'static str = "postcard_echoer";
+
     fn init(ctx: &mut InitCtx<'_>) -> Self {
         PostcardEchoer {
             broadcast: ctx.resolve_mailbox::<PostcardObserved>("hub.claude.broadcast"),

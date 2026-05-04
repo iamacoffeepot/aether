@@ -45,6 +45,8 @@ struct ManifestProbe;
 
 #[handlers]
 impl Component for ManifestProbe {
+    const NAMESPACE: &'static str = "manifest_probe";
+
     fn init(_ctx: &mut InitCtx<'_>) -> Self {
         Self
     }

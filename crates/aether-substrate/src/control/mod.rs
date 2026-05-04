@@ -300,10 +300,26 @@ impl ControlPlane {
             }
         };
 
-        let name = payload.name.unwrap_or_else(|| {
-            let n = self.default_name_counter.fetch_add(1, Ordering::Relaxed);
-            format!("component_{n}")
-        });
+        // Issue 525 Phase 1B: when the load payload omits an
+        // explicit name, prefer the component's `aether.namespace`
+        // section over a generic `component_N` slot. The section
+        // carries `Component::NAMESPACE` verbatim, so a load with no
+        // name still produces a stable, addressable name. Multi-
+        // instance loads stay possible by passing an explicit
+        // `name` — the override always wins. Sectionless wasm (built
+        // pre-Phase-1B) falls back to the counter so old binaries
+        // load unchanged.
+        let name = match payload.name {
+            Some(n) => n,
+            None => match kind_manifest::read_namespace_from_bytes(&payload.wasm) {
+                Ok(Some(declared)) => declared,
+                Ok(None) => {
+                    let n = self.default_name_counter.fetch_add(1, Ordering::Relaxed);
+                    format!("component_{n}")
+                }
+                Err(error) => return LoadResult::Err { error },
+            },
+        };
 
         // ADR-0029: mailbox ids are name-derived (FNV-1a 64), so we
         // can compute the id without touching the registry. That lets
