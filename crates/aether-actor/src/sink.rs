@@ -464,7 +464,10 @@ mod tests {
             let snap = transport.snapshot();
             assert_eq!(snap.len(), 1);
             let entry = &snap[0];
-            assert_eq!(entry.recipient, mailbox_id_from_name(PingActor::NAMESPACE).0);
+            assert_eq!(
+                entry.recipient,
+                mailbox_id_from_name(PingActor::NAMESPACE).0
+            );
             assert_eq!(entry.kind, PingKind::ID.0);
             assert_eq!(entry.bytes.len(), core::mem::size_of::<PingKind>());
             assert_eq!(entry.count, 1);
