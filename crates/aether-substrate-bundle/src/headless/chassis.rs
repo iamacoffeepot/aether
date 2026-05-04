@@ -15,15 +15,15 @@ use std::time::Duration;
 
 use aether_data::{Kind, KindId};
 use aether_kinds::{
-    Advance, CaptureFrame, FrameStats, LogCapability, PlatformInfo, SetMasterGain,
-    SetMasterGainResult, SetWindowMode, SetWindowTitle, Tick,
+    Advance, CaptureFrame, FrameStats, IoCapability, LogCapability, NetCapability, PlatformInfo,
+    SetMasterGain, SetMasterGainResult, SetWindowMode, SetWindowTitle, Tick,
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, ReplyTo, SubstrateBoot,
     capabilities::{
-        IoCapability, LogTracingBackend, NetCapability, io::NamespaceRoots,
+        IoAdapterBackend, LogTracingBackend, NetAdapterBackend, io::NamespaceRoots,
         net::NetConfig as NetConf,
     },
     capture::{
@@ -229,11 +229,14 @@ impl HeadlessChassis {
         // chassis_builder `.with()` chain. Boot order is declaration
         // order — log first so other capabilities' boot tracing routes
         // through the log capture.
+        let io_backend = IoAdapterBackend::new(namespace_roots, Arc::clone(&mailer))
+            .map_err(|e| BootError::Other(Box::new(e)))?;
+        let net_backend = NetAdapterBackend::new(net, Arc::clone(&mailer));
         Builder::<HeadlessChassis>::new(registry, mailer)
             .with_aborter(aborter)
             .with_facade(LogCapability::new(LogTracingBackend::new()))
-            .with(IoCapability::new(namespace_roots))
-            .with(NetCapability::new(net))
+            .with_facade(IoCapability::new(io_backend))
+            .with_facade(NetCapability::new(net_backend))
             .driver(driver)
             .build()
     }

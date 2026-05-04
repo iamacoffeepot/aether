@@ -17,9 +17,9 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use aether_data::{Kind, encode_empty};
-use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
+use aether_kinds::{AdvanceResult, CaptureFrameResult, IoCapability, Tick};
 use aether_substrate::{
-    Chassis, capabilities::IoCapability, capture::CaptureQueue, frame_loop, mail::Mail,
+    Chassis, capabilities::IoAdapterBackend, capture::CaptureQueue, frame_loop, mail::Mail,
     subscribers_for,
 };
 use aether_substrate_bundle::test_bench::{
@@ -89,10 +89,11 @@ fn main() -> wasmtime::Result<()> {
         hub,
     } = TestBenchChassis::build_passive(env)?;
 
-    // Io capability on the legacy `boot.add_capability` path —
+    // Io facade on the `boot.add_facade` path (ADR-0075) —
     // the binary fails fast on adapter init failure (the in-process
     // API silent-skips for systems without writable default roots).
-    boot.add_capability(IoCapability::new(boot.namespace_roots.clone()))?;
+    let io_backend = IoAdapterBackend::new(boot.namespace_roots.clone(), Arc::clone(&boot.queue))?;
+    boot.add_facade(IoCapability::new(io_backend))?;
 
     let (width, height) = parse_size_env();
     let gpu = Gpu::new(width, height, render_running);
