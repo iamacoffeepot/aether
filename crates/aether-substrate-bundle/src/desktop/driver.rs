@@ -33,7 +33,7 @@ use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, SubstrateBoot,
-    capabilities::{RenderCapability, RenderHandles},
+    capabilities::RenderHandles,
     frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
@@ -71,11 +71,11 @@ pub struct App {
     kind_mouse_move: aether_data::KindId,
     kind_window_size: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
-    /// Cloned out of `RenderCapability` at driver boot. Source-of-truth
-    /// lives in core's `RenderCapability`; the app holds a clone so
+    /// Cloned out of `RenderCapability::handles()` before the cap
+    /// moves into the chassis builder. The app holds a clone so
     /// `Gpu::new` can install wgpu state and the per-frame loop can
     /// call `record_frame` / `record_capture_copy` / `finish_capture`.
-    render_running: Arc<RenderCapability>,
+    render_handles: RenderHandles,
     triangles_rendered: Arc<AtomicU64>,
     /// Shared single-slot queue with the control plane. On each
     /// redraw we `take()` any pending capture and, if present, use
@@ -526,10 +526,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("create_window"));
-        self.gpu = Some(Gpu::new(
-            Arc::clone(&window),
-            Arc::clone(&self.render_running),
-        ));
+        self.gpu = Some(Gpu::new(Arc::clone(&window), self.render_handles.clone()));
         window.request_redraw();
         let initial_size = window.inner_size();
         self.window = Some(window);
@@ -708,6 +705,13 @@ pub struct DesktopDriverCapability {
     /// Held for the chassis lifetime so the hub reader + heartbeat
     /// threads stay spawned. `None` when `AETHER_HUB_URL` was unset.
     pub hub: Option<HubClient>,
+    /// Cloned out of `RenderCapability::handles()` before the cap
+    /// moves into the chassis builder. Pre-PR-E2 the driver's `boot`
+    /// pulled `Arc<RenderCapability>` from `DriverCtx::expect`; post-
+    /// E2 the cap is owned by its dispatcher thread (facade pattern)
+    /// and only the Arc-shared handles bundle is reachable from the
+    /// driver side.
+    pub render_handles: RenderHandles,
 }
 
 pub struct DesktopDriverRunning {
@@ -735,19 +739,17 @@ impl DriverCapability for DesktopDriverCapability {
             boot_size,
             boot_title,
             hub,
+            render_handles,
         } = self;
 
-        // Look up RenderCapability's running via the chassis_builder
-        // typed-store (ADR-0071). The render passive booted before
-        // this driver, so its `RenderCapability` is in the typed map;
-        // pull the accumulator handles for the per-frame loop to
-        // read.
-        let render_running: Arc<RenderCapability> = ctx.expect();
-        let RenderHandles {
-            frame_vertices: _,
-            camera_state: _,
-            triangles_rendered,
-        } = render_running.handles();
+        // Render is a facade cap (PR E2) so its dispatcher owns the
+        // cap; the Arc-shared accumulator state was extracted via
+        // `cap.handles()` before the cap moved into the chassis
+        // builder, and the chassis main passed the bundle through
+        // `DesktopDriverCapability.render_handles`. The frame-bound
+        // pending counter is registered separately in the chassis's
+        // `frame_bound_pending` list, queryable here via `ctx`.
+        let triangles_rendered = Arc::clone(&render_handles.triangles_rendered);
         let frame_bound_pending = ctx.frame_bound_pending();
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
@@ -784,7 +786,7 @@ impl DriverCapability for DesktopDriverCapability {
             kind_mouse_move,
             kind_window_size,
             kind_frame_stats,
-            render_running: Arc::clone(&render_running),
+            render_handles,
             triangles_rendered: Arc::clone(&triangles_rendered),
             capture_queue,
             outbound: Arc::clone(&boot.outbound),

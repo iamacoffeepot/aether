@@ -83,7 +83,6 @@ fn main() -> wasmtime::Result<()> {
         passive,
         mut boot,
         render_handles,
-        render_running,
         kind_tick,
         kind_frame_stats,
         hub,
@@ -96,7 +95,7 @@ fn main() -> wasmtime::Result<()> {
     boot.add_facade(io_cap)?;
 
     let (width, height) = parse_size_env();
-    let gpu = Gpu::new(width, height, render_running);
+    let gpu = Gpu::new(width, height, render_handles.clone());
     tracing::info!(
         target: "aether_substrate::boot",
         adapter = %gpu.adapter_info.name,

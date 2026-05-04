@@ -273,7 +273,6 @@ impl TestBench {
             passive,
             mut boot,
             render_handles,
-            render_running,
             kind_tick,
             kind_frame_stats,
             hub: _hub,
@@ -310,7 +309,7 @@ impl TestBench {
             }
         }
 
-        let gpu = Gpu::new(width, height, render_running);
+        let gpu = Gpu::new(width, height, render_handles.clone());
 
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);

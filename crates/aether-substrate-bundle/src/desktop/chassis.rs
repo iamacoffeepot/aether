@@ -331,6 +331,13 @@ impl DesktopChassis {
             aether_substrate::lifecycle::OutboundFatalAborter::new(Arc::clone(&boot.outbound)),
         );
 
+        // PR E2: render is now a `#[actor]` cap. Extract the
+        // driver-facing accumulator + GPU bundle before the cap moves
+        // into the chassis builder; the dispatcher thread takes the
+        // cap by value and the driver retains the Arc-shared handles.
+        let render_cap = RenderCapability::new(RenderConfig::default());
+        let render_handles = render_cap.handles();
+
         let driver = DesktopDriverCapability {
             event_loop,
             boot,
@@ -340,13 +347,13 @@ impl DesktopChassis {
             boot_size,
             boot_title,
             hub,
+            render_handles,
         };
 
-        // ADR-0071 phase B: every native cap composes through the
-        // chassis_builder `.with()` chain. Boot order is declaration
-        // order — log first so other capabilities' boot tracing routes
-        // through the log capture; render last among passives so it
-        // claims its mailboxes after every other chassis cap.
+        // Boot order is declaration order — log first so other
+        // capabilities' boot tracing routes through the log capture;
+        // render last so it claims its mailboxes after every other
+        // chassis cap.
         let io_cap = IoCapability::new(namespace_roots, Arc::clone(&mailer))
             .map_err(|e| BootError::Other(Box::new(e)))?;
         Builder::<DesktopChassis>::new(registry, Arc::clone(&mailer))
@@ -355,7 +362,7 @@ impl DesktopChassis {
             .with_facade(io_cap)
             .with_facade(NetCapability::new(net, Arc::clone(&mailer)))
             .with_facade(AudioCapability::new(audio, Arc::clone(&mailer)))
-            .with(RenderCapability::new(RenderConfig::default()))
+            .with_facade(render_cap)
             .driver(driver)
             .build()
     }

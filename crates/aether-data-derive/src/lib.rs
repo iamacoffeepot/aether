@@ -1055,12 +1055,14 @@ fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
                     ));
                 }
                 if let Some(idx) = handler_attr_idx {
-                    let (kind_ty, takes_sender) = extract_native_handler_kind_type(&f.sig)?;
+                    let (kind_ty, takes_sender, is_slice) =
+                        extract_native_handler_kind_type(&f.sig)?;
                     f.attrs.remove(idx);
                     handlers.push(NativeHandlerFn {
                         method: f,
                         kind_ty,
                         takes_sender,
+                        is_slice,
                     });
                 } else {
                     helpers.push(f);
@@ -1124,13 +1126,32 @@ fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         } else {
             quote! { self.#method_ident(__decoded); }
         };
-        quote! {
-            if kind == <#kind_ty as ::aether_data::Kind>::ID.0 {
-                if let Some(__decoded) = <#kind_ty as ::aether_data::Kind>::decode_from_bytes(payload) {
-                    #call
-                    return Some(());
+        if h.is_slice {
+            // Slice handler — payload is `count * size_of::<K>()`
+            // contiguous bytes (ADR-0019 batch wire). Cast to
+            // `&[K]` for the handler. Only meaningful for cast-shape
+            // kinds; postcard kinds reject `&[K]` at the macro
+            // boundary because there's no batched postcard wire.
+            quote! {
+                if kind == <#kind_ty as ::aether_data::Kind>::ID.0 {
+                    if let Some(__decoded) =
+                        ::aether_data::__derive_runtime::decode_cast_slice::<#kind_ty>(payload)
+                    {
+                        #call
+                        return Some(());
+                    }
+                    return None;
                 }
-                return None;
+            }
+        } else {
+            quote! {
+                if kind == <#kind_ty as ::aether_data::Kind>::ID.0 {
+                    if let Some(__decoded) = <#kind_ty as ::aether_data::Kind>::decode_from_bytes(payload) {
+                        #call
+                        return Some(());
+                    }
+                    return None;
+                }
             }
         }
     });
@@ -1166,12 +1187,23 @@ fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
 
 struct NativeHandlerFn {
     method: syn::ImplItemFn,
+    /// The kind's inner type. For `mail: K` this is `K`; for slice
+    /// handlers `mail: &[K]` it's also `K` — the slice form just
+    /// changes how the dispatcher decodes from `payload` bytes.
     kind_ty: Type,
-    /// `true` for 3-arg `(&mut self, sender: ReplyTo, mail: K)` — the
+    /// `true` for 3-arg `(&mut self, sender: ReplyTo, mail: …)` — the
     /// dispatcher forwards the envelope's `sender` through to the
-    /// handler. `false` for 2-arg `(&mut self, mail: K)` — sender is
+    /// handler. `false` for 2-arg `(&mut self, mail: …)` — sender is
     /// ignored (fire-and-forget caps like Log).
     takes_sender: bool,
+    /// `true` when the `mail` parameter is `&[K]` rather than `K`.
+    /// The dispatch arm decodes the whole payload as a contiguous
+    /// slice via `bytemuck::cast_slice` so a single envelope with
+    /// `count > 1` (`Mailbox::send_many`, ADR-0019) reaches the
+    /// handler intact. Only valid for cast-shape kinds — postcard
+    /// has no batch wire (postcard slices would need length-prefix
+    /// framing per element).
+    is_slice: bool,
 }
 
 /// Extract `K` from a native handler's signature. Accepts two shapes:
@@ -1182,14 +1214,18 @@ struct NativeHandlerFn {
 ///     trusts the second arg's name/type and forwards the dispatcher's
 ///     `sender` through to it.
 ///
-/// Returns the kind type plus a `takes_sender` flag the caller uses
-/// to pick the right dispatch-arm shape.
-fn extract_native_handler_kind_type(sig: &Signature) -> syn::Result<(Type, bool)> {
+/// Returns the kind's inner type plus the `takes_sender` and
+/// `is_slice` flags the caller uses to pick the right dispatch-arm
+/// shape. `is_slice = true` when the parameter is `&[K]` (batched
+/// cast-shape decode); the inner `K` is what `HandlesKind` /
+/// `Kind::ID` reference.
+fn extract_native_handler_kind_type(sig: &Signature) -> syn::Result<(Type, bool, bool)> {
     if sig.inputs.len() != 2 && sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
             "native #[handler] method must have signature `(&mut self, arg: K)` \
-             or `(&mut self, sender: ::aether_data::ReplyTo, arg: K)`",
+             or `(&mut self, sender: ::aether_data::ReplyTo, arg: K)` \
+             (where K may also be `&[K]` for batched cast-shape kinds)",
         ));
     }
     let first = &sig.inputs[0];
@@ -1207,7 +1243,15 @@ fn extract_native_handler_kind_type(sig: &Signature) -> syn::Result<(Type, bool)
             "native #[handler] kind parameter must be a typed `arg: K`",
         ));
     };
-    Ok(((*pat_ty.ty).clone(), takes_sender))
+    // Detect `&[K]` slice handlers (any reference to a slice). Inner
+    // `K` is what `HandlesKind` / `Kind::ID` reference; the slice
+    // form just picks a different decode path in the dispatch arm.
+    if let Type::Reference(type_ref) = &*pat_ty.ty
+        && let Type::Slice(slice) = &*type_ref.elem
+    {
+        return Ok(((*slice.elem).clone(), takes_sender, true));
+    }
+    Ok(((*pat_ty.ty).clone(), takes_sender, false))
 }
 
 /// Extract `K` from a handler method's third parameter (`arg: K`).

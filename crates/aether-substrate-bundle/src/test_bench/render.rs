@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use aether_substrate::capabilities::{RenderCapability, RenderGpu};
+use aether_substrate::capabilities::{RenderGpu, RenderHandles};
 use aether_substrate::render::RenderError;
 
 pub use aether_substrate::render::VERTEX_BUFFER_BYTES;
@@ -24,7 +24,7 @@ pub struct Gpu {
     /// `Err` to.
     #[allow(dead_code)]
     pub limits: wgpu::Limits,
-    render_running: Arc<RenderCapability>,
+    render_handles: RenderHandles,
 }
 
 impl Gpu {
@@ -33,7 +33,7 @@ impl Gpu {
     /// `render_running` so encoder methods on the running can read
     /// them. `width` and `height` size the offscreen color + depth
     /// targets — the dimensions every captured frame will report.
-    pub fn new(width: u32, height: u32, render_running: Arc<RenderCapability>) -> Self {
+    pub fn new(width: u32, height: u32, render_handles: RenderHandles) -> Self {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -55,7 +55,7 @@ impl Gpu {
         }))
         .expect("request_device");
 
-        render_running.install_gpu(RenderGpu::new(
+        render_handles.install_gpu(RenderGpu::new(
             Arc::new(device),
             Arc::new(queue),
             COLOR_FORMAT,
@@ -67,7 +67,7 @@ impl Gpu {
         Self {
             adapter_info,
             limits,
-            render_running,
+            render_handles,
         }
     }
 
@@ -76,7 +76,7 @@ impl Gpu {
     /// and invalidates the readback buffer.
     #[allow(dead_code)] // wired in PR2 alongside test_bench.advance kinds
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.render_running.resize(width, height);
+        self.render_handles.resize(width, height);
     }
 
     /// Draw the current accumulator's vertices into the offscreen
@@ -84,12 +84,12 @@ impl Gpu {
     /// — desktop's swapchain blit is omitted because there's no
     /// surface.
     pub fn render(&mut self) {
-        let device = self.render_running.device();
-        let queue = self.render_running.queue();
+        let device = self.render_handles.device();
+        let queue = self.render_handles.queue();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame encoder"),
         });
-        match self.render_running.record_frame(&mut encoder, &[]) {
+        match self.render_handles.record_frame(&mut encoder, &[]) {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => return,
         }
@@ -101,19 +101,19 @@ impl Gpu {
     /// On any capture-path failure, returns `Err(reason)`; the frame
     /// still rendered to the offscreen — capture is a side channel.
     pub fn render_and_capture(&mut self) -> Result<Vec<u8>, String> {
-        let device = self.render_running.device();
-        let queue = self.render_running.queue();
+        let device = self.render_handles.device();
+        let queue = self.render_handles.queue();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame encoder"),
         });
-        match self.render_running.record_frame(&mut encoder, &[]) {
+        match self.render_handles.record_frame(&mut encoder, &[]) {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => {
                 return Err("vertex buffer overflow — capture skipped".to_owned());
             }
         }
-        let meta = self.render_running.record_capture_copy(&mut encoder);
+        let meta = self.render_handles.record_capture_copy(&mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
-        self.render_running.finish_capture(&meta)
+        self.render_handles.finish_capture(&meta)
     }
 }

@@ -216,12 +216,12 @@ pub struct TestBenchEnv {
 pub struct TestBenchBuild {
     pub passive: PassiveChassis<TestBenchChassis>,
     pub boot: SubstrateBoot,
+    /// Driver-facing accumulator + GPU bundle. Pre-PR-E2 the embedder
+    /// also got `Arc<RenderCapability>` via `passive.capability()` to
+    /// call `install_gpu` / `record_frame` / etc. on it; post-E2
+    /// render is a facade cap (dispatcher owns the cap) and the
+    /// encoder-level methods live on [`RenderHandles`].
     pub render_handles: RenderHandles,
-    /// The [`RenderCapability`] handle the embedder calls
-    /// [`RenderCapability::install_gpu`] on once it has a wgpu device +
-    /// queue, plus encoder-level methods (`record_frame`, etc.)
-    /// thereafter. Cloned out of `passive` for ergonomic access.
-    pub render_running: Arc<RenderCapability>,
     pub kind_tick: KindId,
     pub kind_frame_stats: KindId,
     pub hub: Option<HubClient>,
@@ -283,11 +283,10 @@ impl TestBenchChassis {
         let passive =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
                 .with_facade(LogCapability::new())
-                .with(render_cap)
+                .with_facade(render_cap)
                 .build_passive()
                 .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
 
-        let render_running: Arc<RenderCapability> = passive.capability();
         let hub = crate::hub::connect_hub_client(&boot, hub_url.as_deref())?;
 
         // The chassis-control closure already cloned `events_tx`;
@@ -302,7 +301,6 @@ impl TestBenchChassis {
             passive,
             boot,
             render_handles,
-            render_running,
             kind_tick,
             kind_frame_stats,
             hub,

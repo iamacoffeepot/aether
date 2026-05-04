@@ -504,6 +504,18 @@ pub mod __derive_runtime {
         Some(bytemuck::pod_read_unaligned(bytes))
     }
 
+    /// Slice-cast helper for batched cast-shape kinds. The native
+    /// `#[handler]` macro emits this when a handler's `mail`
+    /// parameter is `&[K]` rather than `K` — ADR-0019's `send_many`
+    /// wire shape lets one envelope carry `count` contiguous Ks, so
+    /// the handler sees the whole batch in one call. `bytes.len()`
+    /// must be a multiple of `size_of::<T>()` and the slice must be
+    /// suitably aligned; mis-shaped buffers return `None` and the
+    /// dispatcher's miss path warn-logs at the chassis side.
+    pub fn decode_cast_slice<T: bytemuck::AnyBitPattern>(bytes: &[u8]) -> Option<&[T]> {
+        bytemuck::try_cast_slice(bytes).ok()
+    }
+
     /// Postcard-shape decode helper. Sibling of `decode_cast` for
     /// schema-shaped kinds (anything carrying `Vec` / `String` /
     /// `Option` / a tagged enum). `T` satisfies `DeserializeOwned`
