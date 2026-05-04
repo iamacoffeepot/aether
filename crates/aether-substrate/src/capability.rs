@@ -703,7 +703,10 @@ impl<'a> ChassisCtx<'a> {
                 // logs at the chassis-side dispatcher rather than the
                 // SDK so the warning carries the cap's namespace.
                 while let Ok(env) = receiver.recv() {
-                    if owned.__dispatch(env.kind.0, &env.payload).is_none() {
+                    if owned
+                        .__dispatch(env.sender, env.kind.0, &env.payload)
+                        .is_none()
+                    {
                         tracing::warn!(
                             target: "aether_substrate::capability",
                             actor = C::NAMESPACE,

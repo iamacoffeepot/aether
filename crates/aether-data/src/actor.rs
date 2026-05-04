@@ -74,10 +74,17 @@ pub trait HandlesKind<K: crate::Kind>: Actor {}
 /// `aether-kinds` can implement it without picking up an `aether-actor`
 /// dependency — see [`Actor`] for the cycle context.
 ///
+/// `sender` carries the envelope's reply target and correlation id
+/// (issue 533 PR D1). `#[handler]` methods that need to reply declare
+/// a 3-arg signature `(&mut self, sender: ReplyTo, mail: K)`; the
+/// macro routes `sender` through to those handlers and ignores it
+/// for 2-arg `(&mut self, mail: K)` handlers (fire-and-forget caps
+/// like Log).
+///
 /// Returns `Some(())` on match + decode success, `None` on unknown
 /// kind or decode failure. The chassis-side dispatcher logs misses
 /// separately (kind-id + cap-namespace) so the strict-receiver
 /// surface stays observable.
 pub trait Dispatch {
-    fn __dispatch(&mut self, kind: u64, payload: &[u8]) -> Option<()>;
+    fn __dispatch(&mut self, sender: crate::ReplyTo, kind: u64, payload: &[u8]) -> Option<()>;
 }
