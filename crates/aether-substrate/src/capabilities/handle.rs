@@ -102,13 +102,7 @@ impl Capability for HandleCapability {
                 // disconnects. Worst-case shutdown latency is the
                 // OS scheduler's wakeup, not a 100ms poll interval.
                 while let Some(env) = dispatcher_transport.recv_blocking() {
-                    handle_sink::dispatch(
-                        &store,
-                        &mailer,
-                        env.kind,
-                        env.sender,
-                        &env.payload,
-                    );
+                    handle_sink::dispatch(&store, &mailer, env.kind, env.sender, &env.payload);
                 }
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
