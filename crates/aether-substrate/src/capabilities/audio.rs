@@ -1,8 +1,12 @@
-//! ADR-0070 Phase 3 (part 4) + ADR-0075 §Decision 3: desktop audio
-//! synth backend behind the [`aether_kinds::AudioCapability`] facade
-//! (issue 533 PR D4). ADR-0039 Phase 2 stack lives here — `cpal`
-//! output stream, hand-rolled synth, built-in instrument registry —
-//! plus the [`AudioBackend`] impl the chassis installs at boot.
+//! Issue 545 PR E1: collapsed `aether.audio` cap. Pre-PR-E1 the cap
+//! lived split across `aether-kinds::audio::AudioCapability<B>`
+//! (facade generic) and this file (concrete `CpalAudioBackend`). The
+//! facade pattern (ADR-0075) is retired — caps are now regular
+//! `#[actor]` blocks, same shape as wasm components.
+//!
+//! ADR-0039 Phase 2 stack lives here — `cpal` output stream,
+//! hand-rolled synth, built-in instrument registry — plus the
+//! [`AudioCapability`] itself.
 //!
 //! Synthesis is hand-rolled (no SoundFont, no DSP graph library): a
 //! waveform oscillator + ADSR envelope per voice, summed flat, scaled
@@ -14,34 +18,32 @@
 //! ## Threading: per-cap audio worker
 //!
 //! `cpal::Stream` is `!Send` on macOS — it must live on the thread
-//! that constructed it. The chassis dispatcher thread (the one
-//! `spawn_actor_dispatcher` owns) requires the cap struct to be
-//! `Send` so it can move into the spawn closure. Putting `Stream` in
-//! the backend struct directly would make the whole cap `!Send`.
+//! that constructed it. The chassis dispatcher thread requires the
+//! cap struct to be `Send` so it can move into the spawn closure.
+//! Putting `Stream` on the cap directly would make the whole cap
+//! `!Send`.
 //!
-//! Resolution: the backend spawns its own audio worker thread at
+//! Resolution: the cap spawns its own audio worker thread at
 //! construction. The worker builds the `cpal::Stream`, parks on a
 //! shutdown channel, and drops the stream when the channel
-//! disconnects. The backend itself holds an
+//! disconnects. The cap itself holds an
 //! [`Arc<ArrayQueue<AudioEvent>>`] (Send) that the cpal callback
 //! reads from; `on_note_on` / `on_note_off` push to that queue
 //! directly with no thread hop. This is the one cap with a worker
-//! thread — every other facade cap is single-threaded by design
-//! (ADR-0075 §Decision 3 / memory note "per-cap thread spawning is
-//! an artifact"); cpal's `!Send` constraint forces this exception.
+//! thread — every other cap is single-threaded by design; cpal's
+//! `!Send` constraint forces this exception.
 //!
-//! Backend lifecycle: dropping the backend drops the shutdown sender,
-//! the worker's `recv()` returns, the worker exits dropping
+//! Cap lifecycle: dropping the cap drops the shutdown sender, the
+//! worker's `recv()` returns, the worker exits dropping
 //! `cpal::Stream`. The chassis dispatcher's drop sequence
-//! (`FacadeHandle` → backend → worker thread) handles this
-//! transparently.
+//! (`FacadeHandle` → cap → worker thread) handles this transparently.
 //!
 //! ## Boot error policy
 //!
 //! cpal init failure is **not** fatal. Audio is a peripheral, not
 //! infrastructure — a CI machine without an audio device should
 //! still boot. If cpal fails (no device, rate unsupported,
-//! `AETHER_AUDIO_DISABLE=1`), the backend falls back to nop:
+//! `AETHER_AUDIO_DISABLE=1`), the cap falls back to nop:
 //! `NoteOn` / `NoteOff` are dropped silently and `SetMasterGain`
 //! replies `Err` so agents fail fast instead of hanging.
 
@@ -53,12 +55,12 @@ use std::thread::{self, JoinHandle};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
-use aether_data::{MailboxId, ReplyTarget, ReplyTo};
-use aether_kinds::{AudioBackend, NoteOff, NoteOn, SetMasterGain, SetMasterGainResult};
+use aether_data::{Actor, MailboxId, ReplyTarget, ReplyTo, Singleton};
+use aether_kinds::{NoteOff, NoteOn, SetMasterGain, SetMasterGainResult};
 
 use crate::mailer::Mailer;
 
-/// Capacity of the event queue between the sink dispatcher and the
+/// Capacity of the event queue between the cap's handlers and the
 /// audio-callback consumer. 1024 slots hold ~10 seconds of a dense
 /// 100-note-per-second stream; overflow is warn-dropped, which the
 /// ADR-0039 timing-quantization section already documents as a v1
@@ -77,7 +79,7 @@ pub const MAX_VOICES: usize = 64;
 /// (issue 464). Tests build an `AudioConfig` directly.
 #[derive(Clone, Debug, Default)]
 pub struct AudioConfig {
-    /// `AETHER_AUDIO_DISABLE=1` skips cpal init entirely. The sink
+    /// `AETHER_AUDIO_DISABLE=1` skips cpal init entirely. The cap
     /// still claims its mailbox and replies `Err` to `SetMasterGain`
     /// so agents fail fast instead of hanging.
     pub disabled: bool,
@@ -102,9 +104,9 @@ impl AudioConfig {
     }
 }
 
-/// Event a sink dispatcher pushes into the audio callback's queue.
-/// The `sender_mailbox` is baked in here (not re-derived on the
-/// callback side) so the callback stays branch-minimal.
+/// Event a handler pushes into the audio callback's queue. The
+/// `sender_mailbox` is baked in here (not re-derived on the callback
+/// side) so the callback stays branch-minimal.
 #[derive(Copy, Clone, Debug)]
 enum AudioEvent {
     NoteOn {
@@ -123,9 +125,9 @@ enum AudioEvent {
     },
 }
 
-/// Producer side of the audio event queue. The dispatcher thread
-/// holds one (after building the pipeline) and pushes events on
-/// every inbound `NoteOn` / `NoteOff` / `SetMasterGain`.
+/// Producer side of the audio event queue. The cap holds one (after
+/// building the pipeline) and pushes events on every inbound `NoteOn`
+/// / `NoteOff` / `SetMasterGain`.
 #[derive(Clone)]
 struct AudioEventSender {
     queue: Arc<ArrayQueue<AudioEvent>>,
@@ -302,9 +304,6 @@ impl Voice {
     ) -> Self {
         let freq = 440.0 * 2f32.powf((f32::from(pitch) - 69.0) / 12.0);
         let phase_step = freq / sample_rate;
-        // Velocity maps 0..127 → 0..1 with a gentle curve so mid-range
-        // velocities sit at perceived mid-loudness rather than
-        // mathematical mid.
         let v = f32::from(velocity) / 127.0;
         let amplitude = def.base_amp * v * v;
         Self {
@@ -320,9 +319,6 @@ impl Voice {
         }
     }
 
-    /// Transition into the release phase. Capturing `from_level`
-    /// avoids a visible discontinuity when a note is released mid-
-    /// attack or mid-decay.
     fn note_off(&mut self) {
         let from_level = match self.envelope {
             EnvelopeStage::Attack { t } => {
@@ -350,9 +346,6 @@ impl Voice {
         matches!(self.envelope, EnvelopeStage::Done)
     }
 
-    /// Advance the envelope state; returns the current envelope level
-    /// `[0.0, 1.0]`. Also ticks `Done` when the release ramp hits
-    /// zero, so the synth can reclaim the slot.
     fn advance_envelope(&mut self, dt: f32) -> f32 {
         match &mut self.envelope {
             EnvelopeStage::Attack { t } => {
@@ -398,8 +391,6 @@ impl Voice {
                 }
             }
             Wave::Triangle => {
-                // Two linear segments: up from -1 to 1 on [0, 0.5),
-                // down from 1 to -1 on [0.5, 1).
                 if self.phase < 0.5 {
                     -1.0 + 4.0 * self.phase
                 } else {
@@ -422,7 +413,7 @@ impl Voice {
 }
 
 /// Whole-process synth state. Lives on the cpal callback thread;
-/// the dispatcher communicates via the event queue.
+/// the cap communicates via the event queue.
 struct Synth {
     events: Arc<ArrayQueue<AudioEvent>>,
     voices: Vec<Voice>,
@@ -440,9 +431,6 @@ impl Synth {
         }
     }
 
-    /// Drain pending events. Runs at the top of every cpal buffer fill
-    /// so events that arrived since the last callback take effect on
-    /// the first sample of the new buffer.
     fn drain_events(&mut self) {
         while let Some(ev) = self.events.pop() {
             match ev {
@@ -460,16 +448,9 @@ impl Synth {
                         );
                         continue;
                     };
-                    // Voice-steal on overflow: drop the oldest voice
-                    // (front of vec) so the inbound one can land.
                     if self.voices.len() >= MAX_VOICES {
                         self.voices.remove(0);
                     }
-                    // A NoteOn for the same (sender, instrument, pitch)
-                    // as a live voice replaces it — ADR-0039's voice
-                    // key. The alternative (pile up voices per key)
-                    // creates stuck notes when a component retriggers
-                    // a held pitch.
                     if let Some(existing) = self.voices.iter().position(|v| {
                         v.sender_mailbox == sender_mailbox
                             && v.instrument_id == instrument_id
@@ -498,9 +479,6 @@ impl Synth {
                     }) {
                         v.note_off();
                     }
-                    // Unmatched note_off is silently ignored — normal
-                    // during the race window between voice-done
-                    // reclamation and a late note_off from the sender.
                 }
                 AudioEvent::SetMasterGain { gain } => {
                     self.master_gain = gain.clamp(0.0, 1.0);
@@ -509,9 +487,6 @@ impl Synth {
         }
     }
 
-    /// Fill a cpal output buffer. `channels` is typically 2 for stereo
-    /// desktop output; the synth is mono-summed, broadcast to every
-    /// channel per sample.
     fn fill(&mut self, buffer: &mut [f32], channels: usize) {
         self.drain_events();
         let dt = 1.0 / self.sample_rate;
@@ -522,18 +497,12 @@ impl Synth {
                 sample += voice.next_sample(dt);
             }
             sample *= self.master_gain;
-            // Soft clip to avoid clicks if a patch or pile-up
-            // exceeds unity. `tanh` is cheap and the closed-form
-            // choice; in a heavier synth we'd reach for a shaped
-            // saturator.
             sample = sample.tanh();
             let start = frame * channels;
             for ch in 0..channels {
                 buffer[start + ch] = sample;
             }
         }
-        // GC retired voices. Stable order doesn't matter for
-        // synthesis and `swap_remove` keeps the hot path O(1).
         let mut i = 0;
         while i < self.voices.len() {
             if self.voices[i].done() {
@@ -555,7 +524,7 @@ impl Synth {
     }
 }
 
-/// Handle to a running cpal pipeline. Lives on the audio dispatcher
+/// Handle to a running cpal pipeline. Lives on the audio worker
 /// thread for the entire run — `cpal::Stream` is `!Send` on macOS,
 /// so the stream is constructed on, owned by, and dropped from the
 /// same thread. Dropping the pipeline silences every voice and tears
@@ -586,10 +555,6 @@ impl core::fmt::Display for AudioBuildError {
     }
 }
 
-/// Try to build a cpal output stream + synth. Returns `Err` if the
-/// host has no default output device, the requested sample rate
-/// isn't supported, or cpal refuses to build the stream. Callers
-/// treat `Err` as "audio not available" and fall back to a nop sink.
 fn try_build_pipeline(
     requested_sample_rate: Option<u32>,
 ) -> Result<AudioPipeline, AudioBuildError> {
@@ -665,7 +630,7 @@ fn find_config_for_rate(device: &cpal::Device, rate: u32) -> Option<cpal::Stream
 /// Extract the sender's mailbox id for voice-table keying. Component
 /// senders come through as `EngineMailbox { mailbox_id }`; Claude
 /// sessions and substrate-internal pushes (which shouldn't reach the
-/// audio sink in practice) collapse to id `0`, sharing one voice
+/// audio cap in practice) collapse to id `0`, sharing one voice
 /// slot per (instrument, pitch).
 fn sender_mailbox_id(sender: ReplyTo) -> MailboxId {
     match sender.target {
@@ -674,18 +639,18 @@ fn sender_mailbox_id(sender: ReplyTo) -> MailboxId {
     }
 }
 
-/// Substrate-side state for the audio cap. Holds the chassis
-/// [`Arc<Mailer>`] for `SetMasterGainResult` replies, the producer
-/// side of the synth event queue ([`AudioEventSender`]), the audio
-/// worker thread that owns the [`cpal::Stream`] (see module-level
-/// "per-cap audio worker" docs for the `!Send` rationale), and a
-/// shutdown channel that signals the worker to exit on drop.
+/// `aether.audio` mailbox cap. Holds the chassis [`Arc<Mailer>`] for
+/// `SetMasterGainResult` replies, the producer side of the synth
+/// event queue ([`AudioEventSender`]), the audio worker thread that
+/// owns the [`cpal::Stream`] (see module-level "per-cap audio worker"
+/// docs for the `!Send` rationale), and a shutdown channel that
+/// signals the worker to exit on drop.
 ///
 /// `audio_sender` is `None` when the cpal pipeline isn't running
 /// (`AETHER_AUDIO_DISABLE=1`, no audio device, init failure). In
 /// that mode `NoteOn` / `NoteOff` no-op and `SetMasterGain` replies
 /// `Err`.
-pub struct CpalAudioBackend {
+pub struct AudioCapability {
     mailer: Arc<Mailer>,
     audio_sender: Option<AudioEventSender>,
     /// Worker thread holding the [`cpal::Stream`]. `None` in nop
@@ -697,15 +662,15 @@ pub struct CpalAudioBackend {
     audio_shutdown: Option<mpsc::Sender<()>>,
 }
 
-impl CpalAudioBackend {
+impl AudioCapability {
     /// Construct from an [`AudioConfig`] (resolved by the chassis
     /// main, typically via [`AudioConfig::from_env`]) and the
-    /// chassis [`Mailer`]. Always returns a backend instance — cpal
-    /// init failure logs a warning and falls back to nop mode (per
+    /// chassis [`Mailer`]. Always returns a cap instance — cpal init
+    /// failure logs a warning and falls back to nop mode (per
     /// ADR-0039: audio is a peripheral, not infrastructure). The
-    /// backend always claims its mailbox so agents on chassis
-    /// without audio still get loud `Err` replies for
-    /// `SetMasterGain` instead of timing out.
+    /// cap always claims its mailbox so agents on chassis without
+    /// audio still get loud `Err` replies for `SetMasterGain` instead
+    /// of timing out.
     pub fn new(config: AudioConfig, mailer: Arc<Mailer>) -> Self {
         if config.disabled {
             tracing::info!(
@@ -742,7 +707,7 @@ impl CpalAudioBackend {
     }
 }
 
-impl Drop for CpalAudioBackend {
+impl Drop for AudioCapability {
     fn drop(&mut self) {
         // Drop the shutdown sender first; the worker's `recv()`
         // returns, it drops the cpal::Stream on its own thread, and
@@ -754,7 +719,22 @@ impl Drop for CpalAudioBackend {
     }
 }
 
-impl AudioBackend for CpalAudioBackend {
+impl Actor for AudioCapability {
+    /// ADR-0039 + ADR-0074 Phase 5 chassis-owned mailbox.
+    const NAMESPACE: &'static str = "aether.audio";
+}
+
+impl Singleton for AudioCapability {}
+
+#[aether_data::actor]
+impl AudioCapability {
+    /// Start a note.
+    ///
+    /// # Agent
+    /// Fire-and-forget. The synth keys voices on
+    /// `(sender, instrument_id, pitch)`; sending two `NoteOn`s with
+    /// the same triple is a no-op.
+    #[aether_data::handler]
     fn on_note_on(&mut self, sender: ReplyTo, mail: NoteOn) {
         let Some(s) = self.audio_sender.as_ref() else {
             return;
@@ -773,6 +753,11 @@ impl AudioBackend for CpalAudioBackend {
         }
     }
 
+    /// Stop a note. Pairs with `on_note_on` by voice key.
+    ///
+    /// # Agent
+    /// Fire-and-forget.
+    #[aether_data::handler]
     fn on_note_off(&mut self, sender: ReplyTo, mail: NoteOff) {
         let Some(s) = self.audio_sender.as_ref() else {
             return;
@@ -790,6 +775,12 @@ impl AudioBackend for CpalAudioBackend {
         }
     }
 
+    /// Set the master gain.
+    ///
+    /// # Agent
+    /// Reply: `SetMasterGainResult`. `Ok { applied_gain }` clamps to
+    /// `0.0..=1.0`; `Err` on chassis without audio.
+    #[aether_data::handler]
     fn on_set_master_gain(&mut self, sender: ReplyTo, mail: SetMasterGain) {
         let applied = mail.gain.clamp(0.0, 1.0);
         match self.audio_sender.as_ref() {
@@ -822,7 +813,7 @@ impl AudioBackend for CpalAudioBackend {
 }
 
 /// Spawn the audio worker thread that owns `cpal::Stream` for the
-/// backend's lifetime. The worker:
+/// cap's lifetime. The worker:
 ///   1. Builds the cpal pipeline on its own thread (`!Send`
 ///      constraint).
 ///   2. Sends the [`AudioEventSender`] back over the init channel.
@@ -831,7 +822,7 @@ impl AudioBackend for CpalAudioBackend {
 ///      drops on this thread.
 ///
 /// Returns the producer side of the synth event queue plus the
-/// worker thread + shutdown sender for the backend to manage. On
+/// worker thread + shutdown sender for the cap to manage. On
 /// pipeline build failure, the worker thread exits cleanly and the
 /// caller sees the error.
 fn spawn_audio_worker(
@@ -845,13 +836,8 @@ fn spawn_audio_worker(
         .spawn(move || {
             match try_build_pipeline(requested_sample_rate) {
                 Ok(pipeline) => {
-                    // Hand the sender back to the backend; keep the
-                    // pipeline (sender + stream) on this thread.
                     let _ = init_tx.send(Ok(pipeline.sender.clone()));
                     drop(init_tx);
-                    // Park until the backend drops its shutdown
-                    // sender. `recv()` returns `Err` on disconnect,
-                    // which is the shutdown signal.
                     let _ = shutdown_rx.recv();
                     drop(pipeline); // cpal::Stream tears down here
                 }
@@ -882,7 +868,6 @@ mod tests {
     use super::*;
     use crate::capability::{BootError, ChassisBuilder};
     use crate::registry::Registry;
-    use aether_kinds::AudioCapability;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         let registry = Arc::new(Registry::new());
@@ -914,9 +899,6 @@ mod tests {
         let mut buf = vec![0.0f32; 480];
         synth.fill(&mut buf, 1);
         assert_eq!(synth.voice_count(), 1);
-        // Some samples should be non-zero (attack ramp at 48kHz
-        // completes in 0.01s = 480 samples — we rendered exactly that
-        // many so the final sample is at peak attack).
         assert!(buf.iter().any(|s| s.abs() > 0.0));
 
         sender
@@ -926,7 +908,6 @@ mod tests {
                 instrument_id: 0,
             })
             .unwrap();
-        // Render past the release tail so the voice marks itself done.
         let release_samples = (0.5 * 48_000.0) as usize;
         let mut tail = vec![0.0f32; release_samples];
         synth.fill(&mut tail, 1);
@@ -1031,7 +1012,7 @@ mod tests {
     #[test]
     fn capability_boots_and_registers_mailbox() {
         let (registry, mailer) = fresh_substrate();
-        let backend = CpalAudioBackend::new(
+        let cap = AudioCapability::new(
             AudioConfig {
                 disabled: true,
                 ..AudioConfig::default()
@@ -1039,13 +1020,11 @@ mod tests {
             Arc::clone(&mailer),
         );
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(AudioCapability::new(backend))
+            .with_facade(cap)
             .build()
             .expect("audio capability boots");
         assert!(
-            registry
-                .lookup(<AudioCapability<CpalAudioBackend> as aether_data::Actor>::NAMESPACE)
-                .is_some(),
+            registry.lookup(AudioCapability::NAMESPACE).is_some(),
             "audio mailbox registered"
         );
         chassis.shutdown();
@@ -1055,12 +1034,9 @@ mod tests {
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
         let (registry, mailer) = fresh_substrate();
-        registry.register_sink(
-            <AudioCapability<CpalAudioBackend> as aether_data::Actor>::NAMESPACE,
-            Arc::new(|_, _, _, _, _, _| {}),
-        );
+        registry.register_sink(AudioCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
-        let backend = CpalAudioBackend::new(
+        let cap = AudioCapability::new(
             AudioConfig {
                 disabled: true,
                 ..AudioConfig::default()
@@ -1068,13 +1044,13 @@ mod tests {
             Arc::clone(&mailer),
         );
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_facade(AudioCapability::new(backend))
+            .with_facade(cap)
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,
             BootError::MailboxAlreadyClaimed { ref name }
-                if name == <AudioCapability<CpalAudioBackend> as aether_data::Actor>::NAMESPACE
+                if name == AudioCapability::NAMESPACE
         ));
     }
 }
