@@ -793,11 +793,18 @@ where
     // a real map for caps that DO need peer lookups; both end up using
     // the same NativeInitCtx + dispatcher trampoline shape.
     let empty_actors = crate::Actors::new();
+
+    // Per-actor scratch storage (issue 582). Stamped into TLS via
+    // `local::with_stamped` for the duration of `init` and
+    // each handler dispatch. Mirrors the non-legacy path in
+    // `chassis_builder::make_native_actor_boot`.
+    let slots = Box::new(aether_actor::local::ActorSlots::new());
+
     let actor = {
         let mailer_clone = ctx.mail_send_handle();
         let mut init_ctx =
             crate::native_actor::NativeInitCtx::new(&transport, &empty_actors, mailer_clone);
-        A::init(config, &mut init_ctx)?
+        aether_actor::local::with_stamped(&slots, || A::init(config, &mut init_ctx))?
     };
     drop(empty_actors); // explicit shape — no shared state outlives init
 
@@ -810,19 +817,21 @@ where
         .name(thread_name)
         .spawn(move || {
             while let Some(env) = transport_for_thread.recv_blocking() {
-                let mut native_ctx =
-                    crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
-                if actor_for_thread
-                    .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
-                    .is_none()
-                {
-                    tracing::warn!(
-                        target: "aether_substrate::capability",
-                        actor = A::NAMESPACE,
-                        kind = env.kind_name.as_str(),
-                        "native actor dispatch missed: kind not handled or decode failed"
-                    );
-                }
+                aether_actor::local::with_stamped(&slots, || {
+                    let mut native_ctx =
+                        crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
+                    if actor_for_thread
+                        .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
+                        .is_none()
+                    {
+                        tracing::warn!(
+                            target: "aether_substrate::capability",
+                            actor = A::NAMESPACE,
+                            kind = env.kind_name.as_str(),
+                            "native actor dispatch missed: kind not handled or decode failed"
+                        );
+                    }
+                });
                 // Decrement matches the sink-handler's increment —
                 // the chassis frame-bound drain barrier reads this
                 // counter to know when the dispatcher is caught up.
