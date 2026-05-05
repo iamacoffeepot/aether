@@ -246,6 +246,21 @@ impl NativeTransport {
         let inbox = self.inbox.get()?;
         inbox.lock().unwrap().try_recv().ok()
     }
+
+    /// Stage 2 reply path for native actors. Routes through the
+    /// substrate's `Mailer::send_reply` so a handler's `ctx.reply(&result)`
+    /// reaches the originator the same way a pre-stage-2 cap's
+    /// `self.mailer.send_reply(sender, &result)` did. The wasm-flavoured
+    /// `MailTransport::reply_mail` still returns `ERR_NOT_IMPLEMENTED`
+    /// because its `sender: u32` is a wasm-handle shape that doesn't
+    /// fit the native `ReplyTo` — the typed entry below is the actual
+    /// reply API native actors use.
+    pub fn send_reply_for_handler<K>(&self, sender: ReplyTo, payload: &K)
+    where
+        K: aether_data::Kind + serde::Serialize,
+    {
+        self.mailer.send_reply(sender, payload);
+    }
 }
 
 /// Return code surfaced from `send_mail` / `reply_mail` /

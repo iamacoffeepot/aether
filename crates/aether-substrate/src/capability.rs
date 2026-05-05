@@ -745,6 +745,125 @@ fn alloc_thread_name<C: Actor>() -> String {
 type BootFn =
     Box<dyn FnOnce(&mut ChassisCtx<'_>) -> Result<Box<dyn ActorErased>, BootError> + Send>;
 
+/// Issue 552 stage 2: boot a `NativeActor` through the legacy
+/// `ChassisBuilder` path. Mirrors
+/// `chassis_builder::make_native_actor_boot` but uses the legacy
+/// boot machinery (no chassis-side Actors map; init-time peer lookups
+/// via `NativeInitCtx::actor::<A>()` always return `None`). The cap's
+/// dispatcher thread, transport, and inbox lifecycle match the new
+/// `Builder::with_actor` path verbatim — only the chassis-level
+/// bookkeeping differs, so cross-cap mail flow (the substrate's
+/// universal communication primitive) is unchanged.
+fn boot_native_actor<A>(
+    ctx: &mut ChassisCtx<'_>,
+    config: A::Config,
+) -> Result<Box<dyn ActorErased>, BootError>
+where
+    A: crate::NativeActor + crate::NativeDispatch,
+{
+    if A::FRAME_BARRIER {
+        return Err(BootError::Other(Box::new(std::io::Error::other(format!(
+            "with_actor::<{}> rejected: FRAME_BARRIER caps must use the legacy with(cap) path \
+             until stage 2 wires frame-bound claims through with_actor",
+            A::NAMESPACE
+        )))));
+    }
+
+    let claim = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
+    let DropOnShutdownClaim {
+        id: mailbox_id,
+        receiver,
+        sink_sender,
+    } = claim;
+
+    let transport = Arc::new(crate::NativeTransport::from_ctx(
+        ctx,
+        mailbox_id,
+        A::FRAME_BARRIER,
+    ));
+    transport.install_inbox(receiver);
+
+    // The legacy path doesn't carry a chassis-side `Actors` map; init
+    // contexts that don't need peer lookups (today: every cap migrating
+    // through this path — Handle, Audio, Io, Net) work fine against an
+    // empty map. The new `Builder::with_actor` path threads a real map
+    // for caps that DO need peer lookups; both end up using the same
+    // NativeInitCtx + dispatcher trampoline shape.
+    let empty_actors = crate::Actors::new();
+    let actor = {
+        let mailer_clone = ctx.mail_send_handle();
+        let mut init_ctx =
+            crate::native_actor::NativeInitCtx::new(&transport, &empty_actors, mailer_clone);
+        A::init(config, &mut init_ctx)?
+    };
+    drop(empty_actors); // explicit shape — no shared state outlives init
+
+    let actor_arc: Arc<A> = Arc::new(actor);
+
+    let actor_for_thread = Arc::clone(&actor_arc);
+    let transport_for_thread = Arc::clone(&transport);
+    let thread_name = alloc_legacy_native_actor_thread_name::<A>();
+    let thread = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            while let Some(env) = transport_for_thread.recv_blocking() {
+                let mut native_ctx =
+                    crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
+                if actor_for_thread
+                    .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
+                    .is_none()
+                {
+                    tracing::warn!(
+                        target: "aether_substrate::capability",
+                        actor = A::NAMESPACE,
+                        kind = env.kind_name.as_str(),
+                        "native actor dispatch missed: kind not handled or decode failed"
+                    );
+                }
+            }
+        })
+        .map_err(|e| BootError::Other(Box::new(e)))?;
+
+    Ok(Box::new(LegacyNativeActorErased {
+        thread: Some(thread),
+        sink_sender: Some(sink_sender),
+        // Hold the Arc<A> to keep the actor alive for the dispatcher
+        // thread's lifetime; on drop the dispatcher's recv exits and
+        // the Arc reaches refcount zero, dropping the actor itself.
+        _actor: actor_arc as Arc<dyn std::any::Any + Send + Sync>,
+    }) as Box<dyn ActorErased>)
+}
+
+fn alloc_legacy_native_actor_thread_name<A: aether_actor::Actor>() -> String {
+    let mut name = String::with_capacity("aether-actor-".len() + A::NAMESPACE.len());
+    name.push_str("aether-actor-");
+    name.push_str(A::NAMESPACE);
+    name
+}
+
+/// Erased shutdown for a `NativeActor` booted through the legacy
+/// `ChassisBuilder.with_actor` path. Drops the [`SinkSender`] to
+/// disconnect the inbox channel (the dispatcher's `recv` returns
+/// `None` and the thread exits), then joins.
+struct LegacyNativeActorErased {
+    thread: Option<std::thread::JoinHandle<()>>,
+    sink_sender: Option<SinkSender>,
+    _actor: Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl ActorErased for LegacyNativeActorErased {}
+
+impl Drop for LegacyNativeActorErased {
+    fn drop(&mut self) {
+        // Sender first — disconnects the channel and lets the
+        // dispatcher's recv return None so the thread exits.
+        self.sink_sender.take();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
 /// Declarative chassis composition. Capabilities are added in
 /// declaration order (ADR-0070 resolved decision 3); `build()` boots
 /// them in the same order. The first failure aborts the build and
@@ -816,6 +935,37 @@ impl ChassisBuilder {
         self.pending.push(Box::new(move |ctx| {
             ctx.claim_fallback_router(handler)?;
             Ok(Box::new(FallbackMarker) as Box<dyn ActorErased>)
+        }));
+        self
+    }
+
+    /// Issue 552 stage 2: boot a [`crate::NativeActor`] with its
+    /// associated `Config`. Mirrors
+    /// [`crate::chassis_builder::Builder::with_actor`] for the legacy
+    /// `ChassisBuilder` boot path used by [`crate::SubstrateBoot::build`].
+    /// Both paths exist side-by-side until stage 2c retires the legacy
+    /// builder; this method lets caps migrate onto `NativeActor` without
+    /// blocking on that retirement.
+    ///
+    /// FRAME_BARRIER caps aren't supported here yet — same fast-fail
+    /// rationale as the new builder: a frame-bound cap booted through
+    /// the non-frame-bound claim would silently miss the per-frame
+    /// drain barrier.
+    pub fn with_actor<A>(mut self, config: A::Config) -> Self
+    where
+        A: crate::NativeActor + crate::NativeDispatch,
+    {
+        // Use a `Cell<Option<Config>>` so the closure can take ownership
+        // on the single firing without making the whole closure FnOnce
+        // (the boot trampoline is FnOnce already, but `Box<dyn ...>`
+        // demands the right erasure). Move the config through a
+        // single-shot Option pulled out at boot time.
+        let mut config_cell = Some(config);
+        self.pending.push(Box::new(move |ctx| {
+            let config = config_cell
+                .take()
+                .expect("with_actor closure fired exactly once");
+            boot_native_actor::<A>(ctx, config)
         }));
         self
     }

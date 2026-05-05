@@ -386,7 +386,7 @@ impl<'a, T: MailTransport> Sender for Ctx<'a, T> {
 /// dispatches via `T::reply_mail`. No-op when the inbound has no
 /// reply target (component-origin / broadcast mail).
 impl<'a, T: MailTransport> MailCtx for Ctx<'a, T> {
-    fn reply<K: aether_data::Kind>(&mut self, payload: &K) {
+    fn reply<K: aether_data::Kind + serde::Serialize>(&mut self, payload: &K) {
         if let Some(raw) = self.sender {
             let bytes = payload.encode_into_bytes();
             self.transport.reply_mail(raw, K::ID.0, &bytes, 1);

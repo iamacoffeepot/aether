@@ -333,11 +333,15 @@ impl<'a> SubstrateBootBuilder<'a> {
         // dispatcher thread before the control plane is wired so any
         // control-side code that wants to publish at load can reach
         // it.
+        // HandleCapability pulls its `Arc<HandleStore>` from the
+        // `Mailer::handle_store()` accessor at init — the store is
+        // wired above before chassis build, so the lookup succeeds.
+        // The Arc<HandleStore> we hold locally stays so subsequent
+        // wires / control-plane resolution paths can read it; the cap
+        // and the local reference share the same backing store.
+        let _ = &handle_store;
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&queue))
-            .with(HandleCapability::new(
-                Arc::clone(&handle_store),
-                Arc::clone(&queue),
-            ))
+            .with_actor::<HandleCapability>(())
             .build()
             .map_err(|e| wasmtime::Error::msg(format!("chassis capability boot: {e}")))?;
 
