@@ -1,8 +1,13 @@
-//! Issue 545 PR E1: collapsed `aether.log` cap. Pre-PR-E1 the cap
-//! lived split across `aether-kinds::log::LogCapability<B>` (facade
-//! generic) and this file (concrete `LogTracingBackend`). The facade
-//! pattern (ADR-0075) is retired — caps are now regular `#[actor]`
-//! blocks, same shape as wasm components.
+//! Issue 552 stage 2: `aether.log` cap migrated onto `NativeActor`.
+//! Pre-stage-2 the cap was a unit struct with `impl Actor` +
+//! `impl Singleton` + an inherent `#[actor] impl LogCapability` block
+//! taking `&mut self` handlers. Stage 2 collapses that into the
+//! symmetric authoring shape: `#[capability] #[derive(Singleton)]
+//! struct + #[actor] impl NativeActor for X { type Config; fn init;
+//! #[handler] fn (&self, ctx: &mut NativeCtx<'_>, mail) }`. The Log
+//! cap is the smallest pilot — no fields, no `Config`, no reply, no
+//! sender param to drop — so it validates the macro + ctx + dispatch
+//! path before the larger caps follow in 2b/2c.
 //!
 //! Bridging via the `log` crate facade (rather than `tracing::event!`)
 //! is load-bearing — see [`crate::log_sink`] for the rationale.
@@ -11,35 +16,30 @@
 //! and let `tracing-subscriber`'s `tracing-log` integration lift each
 //! record back into the tracing pipeline.
 
-use aether_actor::{Actor, Singleton};
+use aether_actor::{Singleton, capability};
 use aether_kinds::LogEvent;
 
+use crate::capability::BootError;
 use crate::log_sink;
+use crate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// `aether.log` mailbox cap. Stateless beyond the process-wide
 /// `tracing` subscriber set up by [`crate::log_capture::init`] —
 /// every cap instance bridges decoded `LogEvent` mail through the
 /// `log` facade and `tracing-log` re-emits it.
-#[derive(Default)]
+#[capability]
+#[derive(Singleton)]
 pub struct LogCapability;
 
-impl LogCapability {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Actor for LogCapability {
-    /// Components mail `aether.log` (kind id) to this mailbox; the
-    /// `aether.<name>` form is the post-ADR-0074 Phase 5 convention
-    /// for chassis-owned mailboxes.
-    const NAMESPACE: &'static str = "aether.log";
-}
-
-impl Singleton for LogCapability {}
-
 #[aether_data::actor]
-impl LogCapability {
+impl NativeActor for LogCapability {
+    type Config = ();
+    const NAMESPACE: &'static str = "aether.log";
+
+    fn init(_: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
     /// Emit a decoded log event through the host's `tracing` pipeline
     /// so `engine_logs` (ADR-0023) sees it.
     ///
@@ -47,7 +47,7 @@ impl LogCapability {
     /// Components mail `aether.log` `LogEvent { level, target, message }`
     /// to this mailbox. Fire-and-forget; no reply.
     #[aether_data::handler]
-    fn on_log_event(&mut self, event: LogEvent) {
+    fn on_log_event(&self, _ctx: &mut NativeCtx<'_>, event: LogEvent) {
         log_sink::handle_log_mail_decoded(event);
     }
 }
@@ -59,25 +59,41 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::capability::ChassisBuilder;
+    use crate::chassis::Chassis;
+    use crate::chassis_builder::{Builder, BuiltChassis, NeverDriver};
     use crate::mailer::Mailer;
     use crate::registry::{MailboxEntry, Registry};
+    use aether_actor::Actor;
     use aether_data::Kind;
+
+    /// Stand-in chassis for the passive boot path. The Log cap doesn't
+    /// need a driver, so `build_passive()` is the natural test entry
+    /// — same shape as the `with_actor_*` smokes in
+    /// `chassis_builder::tests`.
+    struct TestChassis;
+    impl Chassis for TestChassis {
+        const PROFILE: &'static str = "test";
+        type Driver = NeverDriver;
+        type Env = ();
+        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+            unreachable!("TestChassis is driven by Builder::new directly in unit tests")
+        }
+    }
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         (Arc::new(Registry::new()), Arc::new(Mailer::new()))
     }
 
-    /// End-to-end: boot the cap, push an `aether.log` mail at the
-    /// registered mailbox, the dispatcher thread runs the
-    /// macro-emitted `Dispatch::__dispatch` which calls
+    /// End-to-end: boot the cap through `with_actor`, push an
+    /// `aether.log` mail at the registered mailbox, the dispatcher
+    /// thread runs the macro-emitted `NativeDispatch` which calls
     /// `on_log_event`. Test asserts dispatch + clean shutdown.
     #[test]
     fn capability_routes_log_event_through_dispatcher() {
         let (registry, mailer) = fresh_substrate();
-        let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(LogCapability::new())
-            .build()
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<LogCapability>(())
+            .build_passive()
             .expect("capability boots");
 
         let id = registry
@@ -104,7 +120,7 @@ mod tests {
 
         thread::sleep(Duration::from_millis(50));
         let start = Instant::now();
-        chassis.shutdown();
+        drop(chassis);
         assert!(
             start.elapsed() < Duration::from_millis(500),
             "shutdown should complete promptly via channel-drop"
@@ -115,14 +131,12 @@ mod tests {
     /// was already registered.
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
-        use crate::capability::BootError;
-
         let (registry, mailer) = fresh_substrate();
         registry.register_sink(LogCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
-        let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(LogCapability::new())
-            .build()
+        let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<LogCapability>(())
+            .build_passive()
             .expect_err("collision must surface as BootError");
         assert!(matches!(
             err,

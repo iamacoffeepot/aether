@@ -1035,31 +1035,45 @@ impl Drop for BootedChassis {
 mod tests {
     use super::*;
     use aether_data::ReplyTo;
-    use aether_kinds::LogEvent;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         (Arc::new(Registry::new()), Arc::new(Mailer::new()))
     }
 
+    /// Hand-rolled `Actor + Dispatch` fixture for the legacy
+    /// `ChassisBuilder.with(cap)` path. Pre-stage-2 the tests in this
+    /// module reached for `LogCapability::new()` as a representative
+    /// stand-in; stage 2 migrated `LogCapability` to `NativeActor`
+    /// (no longer `Actor + Dispatch`), so the legacy-path tests now
+    /// use this in-module fixture instead.
+    struct StubCap;
+    impl Actor for StubCap {
+        const NAMESPACE: &'static str = "test.legacy_chassis_builder.stub";
+    }
+    impl Dispatch for StubCap {
+        fn __dispatch(&mut self, _sender: ReplyTo, _kind: u64, _payload: &[u8]) -> Option<()> {
+            // Stub never dispatches anything substantive — these tests
+            // exercise boot/shutdown wiring, not handler routing.
+            None
+        }
+    }
+
     /// Boot-time mailbox-claim collision aborts the build and runs
-    /// every already-booted cap's `Drop`. Two `LogCapability`
-    /// instances both claim `aether.log`; the second hits the
+    /// every already-booted cap's `Drop`. Two `StubCap` instances both
+    /// claim `test.legacy_chassis_builder.stub`; the second hits the
     /// duplicate-claim guard and the chassis tears the first down.
-    /// Per-cap mailbox-claim and mail-receive coverage lives in
-    /// `crate::capabilities::log::tests` and the equivalents for
-    /// the other facade caps.
+    /// Per-cap mailbox-claim and mail-receive coverage lives in each
+    /// cap's own test module.
     #[test]
     fn boot_failure_shuts_down_already_booted_capabilities() {
-        use crate::capabilities::LogCapability;
-
         let (registry, mailer) = fresh_substrate();
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(LogCapability::new())
-            .with(LogCapability::new())
+            .with(StubCap)
+            .with(StubCap)
             .build()
-            .expect_err("second LogCapability must fail with duplicate claim");
+            .expect_err("second cap must fail with duplicate claim");
         assert!(
-            matches!(err, BootError::MailboxAlreadyClaimed { ref name } if name == LogCapability::NAMESPACE)
+            matches!(err, BootError::MailboxAlreadyClaimed { ref name } if name == StubCap::NAMESPACE)
         );
     }
 
@@ -1086,36 +1100,31 @@ mod tests {
     /// (`with(cap).build()` succeeds, `shutdown()` joins).
     #[test]
     fn chassis_builder_boots_one_cap_and_shuts_down_clean() {
-        use crate::capabilities::LogCapability;
-        use aether_data::Kind;
-
         let (registry, mailer) = fresh_substrate();
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(LogCapability::new())
+            .with(StubCap)
             .build()
             .expect("build succeeds");
         assert_eq!(chassis.len(), 1);
 
         let id = registry
-            .lookup(LogCapability::NAMESPACE)
-            .expect("log mailbox registered");
+            .lookup(StubCap::NAMESPACE)
+            .expect("stub mailbox registered");
         let crate::registry::MailboxEntry::Sink(handler) =
             registry.entry(id).expect("entry exists")
         else {
             panic!("expected sink entry");
         };
-        let event = LogEvent {
-            level: 3,
-            target: "aether_test".into(),
-            message: "boot smoke".into(),
-        };
-        let bytes = postcard::to_allocvec(&event).expect("encode");
+        // Push an empty payload at an arbitrary kind id; StubCap's
+        // dispatch returns None unconditionally, but the test only
+        // cares that the sink handler exists and the chassis shuts
+        // down cleanly afterward.
         handler(
-            <LogEvent as Kind>::ID,
-            "aether.log",
+            aether_data::KindId(0xDEAD_BEEF_DEAD_BEEF),
+            StubCap::NAMESPACE,
             None,
             ReplyTo::NONE,
-            &bytes,
+            &[],
             1,
         );
 

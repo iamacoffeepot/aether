@@ -25,6 +25,16 @@
 //! `decode_payload` and `resolve_bundle` are pub so chassis dispatch
 //! can validate mail bundles the same way core does.
 
+// Issue 552 stage 2: the `#[actor] impl NativeActor for X` macro
+// emits `impl ::aether_substrate::NativeDispatch for X` so external
+// callers (caps in user crates, `aether-capabilities` once the move
+// in stage 2c lands) resolve unambiguously. For caps written *inside*
+// aether-substrate (today: every cap under `capabilities/`) the
+// `::aether_substrate` prefix is in-crate; the self-alias makes
+// absolute paths resolve without a separate "internal vs external"
+// macro arm.
+extern crate self as aether_substrate;
+
 pub mod boot;
 pub mod capabilities;
 pub mod capability;

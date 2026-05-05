@@ -282,7 +282,7 @@ impl TestBenchChassis {
 
         let passive =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
-                .with(LogCapability::new())
+                .with_actor::<LogCapability>(())
                 .with(render_cap)
                 .build_passive()
                 .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
