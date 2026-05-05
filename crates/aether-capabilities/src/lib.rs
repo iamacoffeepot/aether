@@ -15,20 +15,15 @@
 //! impls live alongside the structs); the header-only wasm build is
 //! a follow-up.
 //!
-//! [`HubBroadcast`] is a synthetic actor — there is no
-//! `NativeActor` impl, just an [`Actor`] marker. The actual
-//! broadcast sink is registered as a closure in
-//! `aether_substrate::SubstrateBoot::build`. The marker exists so
-//! typed-send-to-broadcast (Stage 3) compiles against the same
-//! `R: HandlesKind<K>` shape every other actor uses once the
-//! relevant `HandlesKind<K>` impls are wired.
+//! Stage 3 (issue 552) moved the `HubBroadcast` synthetic-actor
+//! marker into `aether-substrate` itself, next to the broadcast
+//! sink it names. Reach there for typed sends to broadcast.
 //!
 //! [`NativeActor`]: aether_substrate::native_actor::NativeActor
 //! [`Actor`]: aether_actor::Actor
 
 #[cfg(feature = "audio")]
 pub mod audio;
-pub mod broadcast;
 pub mod handle;
 pub mod io;
 pub mod log;
@@ -38,7 +33,6 @@ pub mod render;
 
 #[cfg(feature = "audio")]
 pub use audio::{AudioCapability, AudioConfig};
-pub use broadcast::HubBroadcast;
 pub use handle::HandleCapability;
 pub use io::IoCapability;
 pub use log::LogCapability;

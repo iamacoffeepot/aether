@@ -24,9 +24,7 @@ use aether_kinds::Tick;
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::{
-    HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop,
-    mail::{Mail, MailboxId},
-    subscribers_for,
+    HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop, mail::Mail, subscribers_for,
 };
 
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
@@ -75,7 +73,6 @@ pub struct HeadlessTimerCapability {
 pub struct HeadlessTimerRunning {
     queue: Arc<Mailer>,
     input_subscribers: InputSubscribers,
-    broadcast_mbox: MailboxId,
     kind_tick: KindId,
     kind_frame_stats: KindId,
     tick_period: Duration,
@@ -103,7 +100,6 @@ impl DriverCapability for HeadlessTimerCapability {
         Ok(HeadlessTimerRunning {
             queue: Arc::clone(&boot.queue),
             input_subscribers: Arc::clone(&boot.input_subscribers),
-            broadcast_mbox: boot.broadcast_mbox,
             kind_tick,
             kind_frame_stats,
             tick_period,
@@ -119,7 +115,6 @@ impl DriverRunning for HeadlessTimerRunning {
         let HeadlessTimerRunning {
             queue,
             input_subscribers,
-            broadcast_mbox,
             kind_tick,
             kind_frame_stats,
             tick_period,
@@ -154,14 +149,7 @@ impl DriverRunning for HeadlessTimerRunning {
             frame_loop::drain_or_abort(&queue, &outbound);
 
             if frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
-                frame_loop::emit_frame_stats(
-                    &queue,
-                    broadcast_mbox,
-                    broadcast_mbox,
-                    kind_frame_stats,
-                    frame,
-                    0,
-                );
+                frame_loop::emit_frame_stats(&queue, kind_frame_stats, frame, 0);
                 let elapsed = started.elapsed().as_secs_f64().max(0.001);
                 tracing::info!(
                     target: "aether_substrate::frame_loop",

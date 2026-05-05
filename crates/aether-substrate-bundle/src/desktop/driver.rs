@@ -62,7 +62,6 @@ pub struct App {
     /// the platform thread reads on each event. Empty sets — the
     /// boot state — mean the event is dropped at the source.
     input_subscribers: InputSubscribers,
-    broadcast_mbox: MailboxId,
     kind_tick: aether_data::KindId,
     kind_key: aether_data::KindId,
     kind_key_release: aether_data::KindId,
@@ -605,8 +604,6 @@ impl ApplicationHandler<UserEvent> for App {
                     );
                     frame_loop::emit_frame_stats(
                         &self.queue,
-                        self.broadcast_mbox,
-                        self.broadcast_mbox,
                         self.kind_frame_stats,
                         self.frame,
                         triangles,
@@ -778,7 +775,6 @@ impl DriverCapability for DesktopDriverCapability {
         let app = App {
             queue: Arc::clone(&boot.queue),
             input_subscribers: Arc::clone(&boot.input_subscribers),
-            broadcast_mbox: boot.broadcast_mbox,
             kind_tick,
             kind_key,
             kind_key_release,

@@ -36,6 +36,7 @@
 extern crate self as aether_substrate;
 
 pub mod boot;
+pub mod broadcast;
 pub mod capability;
 pub mod capture;
 pub mod chassis;
@@ -65,6 +66,7 @@ pub mod scheduler;
 
 pub use aether_actor::Actor;
 pub use boot::{ChassisHandlerContext, SubstrateBoot, SubstrateBootBuilder};
+pub use broadcast::HubBroadcast;
 pub use capability::{
     ActorErased, BootError, BootedChassis, ChassisBuilder, ChassisCtx, DropOnShutdownClaim,
     Envelope, FallbackRouter, FrameBoundClaim, MailboxClaim, SinkSender, WedgedFrameBound,
@@ -88,12 +90,6 @@ pub use outbound::{
 pub use panic_hook::init_panic_hook;
 pub use registry::{MailboxEntry, Registry, SinkHandler};
 pub use scheduler::Scheduler;
-
-/// Well-known mailbox name for fan-out to every attached Claude
-/// session (ADR-0008). A component or substrate-owned sink sends to
-/// this name the same way it sends to any local sink; the forwarder
-/// translates to `EngineToHub::Mail { address: Broadcast, ... }`.
-pub const HUB_CLAUDE_BROADCAST: &str = "hub.claude.broadcast";
 
 /// Well-known mailbox name for substrate-level diagnostic events
 /// delivered back to this engine. Today the only kind delivered here

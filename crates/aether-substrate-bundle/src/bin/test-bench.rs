@@ -136,7 +136,6 @@ fn drive_events_loop(
     let queue = Arc::clone(&boot.queue);
     let outbound = Arc::clone(&boot.outbound);
     let input_subscribers = Arc::clone(&boot.input_subscribers);
-    let broadcast_mbox = boot.broadcast_mbox;
     let frame_bound_pending = passive.frame_bound_pending();
     let started = Instant::now();
     let mut frame: u64 = 0;
@@ -153,7 +152,6 @@ fn drive_events_loop(
                         &queue,
                         &outbound,
                         &input_subscribers,
-                        broadcast_mbox,
                         kind_tick,
                         kind_frame_stats,
                         &capture_queue,
@@ -178,7 +176,6 @@ fn drive_events_loop(
                     &queue,
                     &outbound,
                     &input_subscribers,
-                    broadcast_mbox,
                     kind_tick,
                     kind_frame_stats,
                     &capture_queue,
@@ -208,7 +205,6 @@ fn run_frame(
     queue: &Arc<aether_substrate::Mailer>,
     outbound: &Arc<aether_substrate::HubOutbound>,
     input_subscribers: &aether_substrate::InputSubscribers,
-    broadcast_mbox: aether_substrate::MailboxId,
     kind_tick: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
     capture_queue: &CaptureQueue,
@@ -249,14 +245,7 @@ fn run_frame(
 
     if frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
         let triangles = render_handles.triangles_rendered.load(Ordering::Relaxed);
-        frame_loop::emit_frame_stats(
-            queue,
-            broadcast_mbox,
-            broadcast_mbox,
-            kind_frame_stats,
-            frame,
-            triangles,
-        );
+        frame_loop::emit_frame_stats(queue, kind_frame_stats, frame, triangles);
         let elapsed = started.elapsed().as_secs_f64().max(0.001);
         tracing::info!(
             target: "aether_substrate::frame_loop",

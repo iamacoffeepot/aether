@@ -598,9 +598,8 @@ fn kill_actor(
         }
     };
 
-    let broadcast_mbox = MailboxId::from_name(crate::HUB_CLAUDE_BROADCAST);
     let mail = Mail {
-        recipient: broadcast_mbox,
+        recipient: crate::HubBroadcast::MAILBOX_ID,
         kind: ComponentDied::ID,
         payload,
         count: 1,
@@ -779,6 +778,7 @@ mod tests {
     use crate::ctx::SubstrateCtx;
     use crate::input;
     use crate::outbound::HubOutbound;
+    use aether_actor::Actor;
 
     /// Minimal guest: just exports `memory` and a no-op `receive_p32`.
     /// Enough to satisfy `Component::instantiate`; these tests only
@@ -943,7 +943,7 @@ mod tests {
         let broadcast_count = Arc::new(AtomicU32::new(0));
         let bc = Arc::clone(&broadcast_count);
         registry.register_sink(
-            crate::HUB_CLAUDE_BROADCAST,
+            crate::HubBroadcast::NAMESPACE,
             Arc::new(move |_, _, _, _, _, _| {
                 bc.fetch_add(1, Ordering::SeqCst);
             }),
@@ -1017,7 +1017,7 @@ mod tests {
         let captured: Arc<Mutex<Vec<ComponentDied>>> = Arc::new(Mutex::new(Vec::new()));
         let cap = Arc::clone(&captured);
         registry.register_sink(
-            crate::HUB_CLAUDE_BROADCAST,
+            crate::HubBroadcast::NAMESPACE,
             Arc::new(move |kind, _, _, _, bytes, _| {
                 if kind == ComponentDied::ID
                     && let Ok(d) = postcard::from_bytes::<ComponentDied>(bytes)
@@ -1068,7 +1068,10 @@ mod tests {
     fn is_dead_starts_false_and_transitions_after_trap() {
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new());
-        registry.register_sink(crate::HUB_CLAUDE_BROADCAST, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(
+            crate::HubBroadcast::NAMESPACE,
+            Arc::new(|_, _, _, _, _, _| {}),
+        );
         let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
         mailer.wire(Arc::clone(&registry), Arc::clone(&components));
 
@@ -1169,7 +1172,10 @@ mod tests {
         // Broadcast sink: the dispatcher's death push goes through
         // it; without a registered sink the broadcast warn-drops as
         // an unknown mailbox, harmless but noisy.
-        registry.register_sink(crate::HUB_CLAUDE_BROADCAST, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(
+            crate::HubBroadcast::NAMESPACE,
+            Arc::new(|_, _, _, _, _, _| {}),
+        );
         let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
         mailer.wire(Arc::clone(&registry), Arc::clone(&components));
 
@@ -1234,7 +1240,10 @@ mod tests {
         let mailbox_ok = registry.register_component("alive");
         let mailbox_dies = registry.register_component("dies");
         let mailer = Arc::new(Mailer::new());
-        registry.register_sink(crate::HUB_CLAUDE_BROADCAST, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(
+            crate::HubBroadcast::NAMESPACE,
+            Arc::new(|_, _, _, _, _, _| {}),
+        );
         let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
         mailer.wire(Arc::clone(&registry), Arc::clone(&components));
 
@@ -1283,7 +1292,10 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let mailbox = registry.register_component("rep");
         let mailer = Arc::new(Mailer::new());
-        registry.register_sink(crate::HUB_CLAUDE_BROADCAST, Arc::new(|_, _, _, _, _, _| {}));
+        registry.register_sink(
+            crate::HubBroadcast::NAMESPACE,
+            Arc::new(|_, _, _, _, _, _| {}),
+        );
         let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
         mailer.wire(Arc::clone(&registry), Arc::clone(&components));
 

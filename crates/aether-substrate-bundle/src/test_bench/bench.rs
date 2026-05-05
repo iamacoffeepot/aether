@@ -116,7 +116,6 @@ pub struct TestBench {
     triangles_rendered: Arc<AtomicU64>,
 
     input_subscribers: InputSubscribers,
-    broadcast_mbox: MailboxId,
     kind_tick: KindId,
     kind_frame_stats: KindId,
     /// Snapshot of every frame-bound capability's pending counter
@@ -305,7 +304,6 @@ impl TestBench {
         let outbound = Arc::clone(&boot.outbound);
         let registry = Arc::clone(&boot.registry);
         let input_subscribers = boot.input_subscribers.clone();
-        let broadcast_mbox = boot.broadcast_mbox;
         let frame_bound_pending = passive.frame_bound_pending();
 
         Ok(Self {
@@ -318,7 +316,6 @@ impl TestBench {
             gpu,
             triangles_rendered: render_handles.triangles_rendered,
             input_subscribers,
-            broadcast_mbox,
             kind_tick,
             kind_frame_stats,
             frame_bound_pending,
@@ -651,14 +648,7 @@ impl TestBench {
 
         if self.frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
             let triangles = self.triangles_rendered.load(Ordering::Relaxed);
-            frame_loop::emit_frame_stats(
-                &self.queue,
-                self.broadcast_mbox,
-                self.broadcast_mbox,
-                self.kind_frame_stats,
-                self.frame,
-                triangles,
-            );
+            frame_loop::emit_frame_stats(&self.queue, self.kind_frame_stats, self.frame, triangles);
             let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             tracing::info!(
                 target: "aether_substrate::frame_loop",

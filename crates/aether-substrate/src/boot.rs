@@ -38,14 +38,14 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use aether_actor::Actor;
 use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::{
     AETHER_CONTROL, AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ChassisControlHandler,
-    ControlPlane, HUB_CLAUDE_BROADCAST, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler,
+    ControlPlane, HubBroadcast, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler,
     SubstrateCtx, handle_store::HandleStore, host_fns, input::new_subscribers, log_capture,
-    mail::MailboxId,
 };
 
 /// Everything a chassis needs after shared boot setup. Fields are
@@ -61,7 +61,6 @@ pub struct SubstrateBoot {
     pub queue: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
     pub input_subscribers: InputSubscribers,
-    pub broadcast_mbox: MailboxId,
     pub scheduler: Scheduler,
     /// ADR-0045 typed-handle store. Sized from
     /// `AETHER_HANDLE_STORE_MAX_BYTES` (default 256 MB). Wired into
@@ -241,10 +240,14 @@ impl<'a> SubstrateBootBuilder<'a> {
                 .expect("duplicate kind in substrate init");
         }
 
-        let broadcast_mbox = {
+        // The broadcast mailbox id is `HubBroadcast::MAILBOX_ID` —
+        // const-evaluated at compile time and equal to whatever this
+        // `register_sink` call returns. Stored once so callers reach
+        // for the symbol instead of holding a runtime field.
+        {
             let outbound = Arc::clone(&outbound);
             registry.register_sink(
-                HUB_CLAUDE_BROADCAST,
+                HubBroadcast::NAMESPACE,
                 Arc::new(
                     move |_kind: aether_data::KindId,
                           kind_name: &str,
@@ -255,7 +258,8 @@ impl<'a> SubstrateBootBuilder<'a> {
                         if kind_name.is_empty() {
                             tracing::warn!(
                                 target: "aether_substrate::broadcast",
-                                "{HUB_CLAUDE_BROADCAST} received mail with unregistered kind — dropping",
+                                "{} received mail with unregistered kind — dropping",
+                                HubBroadcast::NAMESPACE,
                             );
                             return;
                         }
@@ -273,8 +277,8 @@ impl<'a> SubstrateBootBuilder<'a> {
                         );
                     },
                 ),
-            )
-        };
+            );
+        }
 
         // Diagnostic sink for hub → originating-engine typo reports
         // (ADR-0037 follow-up, issue #185). Re-emits the unresolved-
@@ -370,7 +374,6 @@ impl<'a> SubstrateBootBuilder<'a> {
             queue,
             outbound,
             input_subscribers,
-            broadcast_mbox,
             scheduler,
             handle_store,
             boot_descriptors,
