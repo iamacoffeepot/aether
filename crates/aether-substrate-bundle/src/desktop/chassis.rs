@@ -354,14 +354,12 @@ impl DesktopChassis {
         // capabilities' boot tracing routes through the log capture;
         // render last so it claims its mailboxes after every other
         // chassis cap.
-        let io_cap = IoCapability::new(namespace_roots, Arc::clone(&mailer))
-            .map_err(|e| BootError::Other(Box::new(e)))?;
         Builder::<DesktopChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
             .with_actor::<LogCapability>(())
-            .with(io_cap)
-            .with(NetCapability::new(net, Arc::clone(&mailer)))
-            .with(AudioCapability::new(audio, Arc::clone(&mailer)))
+            .with_actor::<IoCapability>(namespace_roots)
+            .with_actor::<NetCapability>(net)
+            .with_actor::<AudioCapability>(audio)
             .with(render_cap)
             .driver(driver)
             .build()

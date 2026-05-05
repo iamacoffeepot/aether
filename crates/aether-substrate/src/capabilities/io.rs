@@ -1,38 +1,39 @@
-//! Issue 545 PR E1: collapsed `aether.io` cap. Pre-PR-E1 the cap
-//! lived split across `aether-kinds::io::IoCapability<B>` (facade
-//! generic) and this file (concrete `IoAdapterBackend`). The facade
-//! pattern (ADR-0075) is retired — caps are now regular `#[actor]`
-//! blocks, same shape as wasm components.
+//! Issue 552 stage 2: `aether.io` cap migrated onto `NativeActor`.
+//! Pre-stage-2 the cap was an `Actor + Singleton + Dispatch` shape
+//! taking `&mut self` handlers with `sender: ReplyTo` parameters and
+//! routing replies through `self.mailer.send_reply(sender, &result)`.
+//! Stage 2 collapses that into the symmetric authoring shape:
+//! `#[derive(Singleton)] struct + #[actor] impl NativeActor for X
+//! { type Config = NamespaceRoots; fn init; #[handler] fn (&self,
+//! ctx: &mut NativeCtx<'_>, mail) }`. Replies route via
+//! `ctx.reply(&result)`.
 //!
 //! Owns the full ADR-0041 stack — `FileAdapter` trait,
 //! `LocalFileAdapter`, `AdapterRegistry`, env-driven `NamespaceRoots`,
 //! and the [`IoCapability`] itself. Chassis mains resolve a
-//! [`NamespaceRoots`] (typically via [`NamespaceRoots::from_env`]),
-//! call [`IoCapability::new`], and hand the cap to the chassis
-//! builder.
+//! [`NamespaceRoots`] (typically via [`NamespaceRoots::from_env`])
+//! and pass it through `with_actor::<IoCapability>(roots)` —
+//! `init` builds the adapter registry and returns `BootError` on
+//! failure (per ADR-0063 fail-fast).
 //!
-//! Boot error policy: per ADR-0063 fail-fast, adapter init failure
-//! surfaces at [`IoCapability::new`] (returns `std::io::Result`) so
-//! chassis mains propagate via `?` to abort startup.
-//!
-//! Threading: chassis-side dispatcher thread (`spawn_actor_dispatcher`)
-//! pulls envelopes from the `aether.io` mailbox and routes them to
-//! the matching `#[handler]` method. Adapter calls run synchronously
-//! on the dispatcher thread; ADR-0041 flagged a future host-fn fast
-//! path for asset-sized streaming.
+//! Threading: the new actor dispatcher thread pulls envelopes from
+//! the `aether.io` mailbox and routes them through the macro-emitted
+//! `NativeDispatch::__aether_dispatch_envelope`. Adapter calls run
+//! synchronously on that thread; ADR-0041 flagged a future host-fn
+//! fast path for asset-sized streaming.
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aether_actor::{Actor, Singleton};
-use aether_data::ReplyTo;
+use aether_actor::{MailCtx, Singleton};
 use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 
-use crate::mailer::Mailer;
+use crate::capability::BootError;
+use crate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// Result shape used throughout the adapter layer. The variants of
 /// `IoError` map directly onto ADR-0041 §1's reply enums, so the
@@ -309,23 +310,31 @@ pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, Namesp
 }
 
 /// `aether.io` mailbox cap. Owns the resolved adapter registry +
-/// namespace roots and the chassis [`Arc<Mailer>`] for routing
-/// replies. The dispatcher thread owns this through the macro-emitted
-/// `Dispatch` impl.
+/// namespace roots. The dispatcher thread holds an `Arc<Self>` and
+/// routes envelopes through the macro-emitted `NativeDispatch` impl;
+/// replies route via `ctx.reply(&result)` through the substrate's
+/// `Mailer::send_reply`.
+#[derive(Singleton)]
 pub struct IoCapability {
     registry: Arc<AdapterRegistry>,
-    mailer: Arc<Mailer>,
 }
 
-impl IoCapability {
-    /// Construct from explicit [`NamespaceRoots`] (resolved by the
-    /// chassis main, typically via [`NamespaceRoots::from_env`]) and
-    /// the chassis's [`Mailer`]. Returns `Err(std::io::Error)` if the
-    /// adapter registry can't be built — chassis mains propagate via
-    /// `?` so misconfiguration aborts the chassis at startup
-    /// (ADR-0063 fail-fast).
-    pub fn new(roots: NamespaceRoots, mailer: Arc<Mailer>) -> std::io::Result<Self> {
-        let (registry, roots) = build_registry(roots)?;
+#[aether_data::actor]
+impl NativeActor for IoCapability {
+    /// Resolved namespace roots threaded through to `init`. Chassis
+    /// mains build this via [`NamespaceRoots::from_env`] (or hand-roll
+    /// for tests) and pass to `with_actor::<IoCapability>(roots)`.
+    type Config = NamespaceRoots;
+
+    /// ADR-0041 + ADR-0074 Phase 5 chassis-owned mailbox.
+    const NAMESPACE: &'static str = "aether.io";
+
+    /// Build the adapter registry from the resolved roots. Adapter
+    /// init failure surfaces as `BootError::Other(io::Error)` so
+    /// chassis mains propagate via `?` to abort startup (ADR-0063
+    /// fail-fast).
+    fn init(roots: NamespaceRoots, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        let (registry, roots) = build_registry(roots).map_err(|e| BootError::Other(Box::new(e)))?;
         tracing::info!(
             target: "aether_substrate::io",
             save = %roots.save.display(),
@@ -333,41 +342,21 @@ impl IoCapability {
             config = %roots.config.display(),
             "io adapters registered",
         );
-        Ok(Self { registry, mailer })
+        Ok(Self { registry })
     }
 
-    /// Construct from an explicit pre-built registry. Used by tests
-    /// that supply a save-only registry against a tempdir.
-    #[cfg(test)]
-    pub fn from_registry(registry: Arc<AdapterRegistry>, mailer: Arc<Mailer>) -> Self {
-        Self { registry, mailer }
-    }
-}
-
-impl Actor for IoCapability {
-    /// ADR-0041 + ADR-0074 Phase 5 chassis-owned mailbox.
-    const NAMESPACE: &'static str = "aether.io";
-}
-
-impl Singleton for IoCapability {}
-
-#[aether_data::actor]
-impl IoCapability {
     /// Read bytes from a logical namespace path.
     ///
     /// # Agent
     /// Reply: `ReadResult`. Echoes namespace + path on both arms.
     #[aether_data::handler]
-    fn on_read(&mut self, sender: ReplyTo, mail: Read) {
+    fn on_read(&self, ctx: &mut NativeCtx<'_>, mail: Read) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
-            self.mailer.send_reply(
-                sender,
-                &ReadResult::Err {
-                    namespace: mail.namespace,
-                    path: mail.path,
-                    error: IoError::UnknownNamespace,
-                },
-            );
+            ctx.reply(&ReadResult::Err {
+                namespace: mail.namespace,
+                path: mail.path,
+                error: IoError::UnknownNamespace,
+            });
             return;
         };
         let reply = match adapter.read(&mail.path) {
@@ -382,7 +371,7 @@ impl IoCapability {
                 error,
             },
         };
-        self.mailer.send_reply(sender, &reply);
+        ctx.reply(&reply);
     }
 
     /// Write bytes to a logical namespace path. Atomic via tmp+rename
@@ -392,16 +381,13 @@ impl IoCapability {
     /// # Agent
     /// Reply: `WriteResult`. Echoes namespace + path (NOT bytes).
     #[aether_data::handler]
-    fn on_write(&mut self, sender: ReplyTo, mail: Write) {
+    fn on_write(&self, ctx: &mut NativeCtx<'_>, mail: Write) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
-            self.mailer.send_reply(
-                sender,
-                &WriteResult::Err {
-                    namespace: mail.namespace,
-                    path: mail.path,
-                    error: IoError::UnknownNamespace,
-                },
-            );
+            ctx.reply(&WriteResult::Err {
+                namespace: mail.namespace,
+                path: mail.path,
+                error: IoError::UnknownNamespace,
+            });
             return;
         };
         let reply = match adapter.write(&mail.path, &mail.bytes) {
@@ -415,7 +401,7 @@ impl IoCapability {
                 error,
             },
         };
-        self.mailer.send_reply(sender, &reply);
+        ctx.reply(&reply);
     }
 
     /// Delete a path under a namespace.
@@ -423,16 +409,13 @@ impl IoCapability {
     /// # Agent
     /// Reply: `DeleteResult`. Echoes namespace + path.
     #[aether_data::handler]
-    fn on_delete(&mut self, sender: ReplyTo, mail: Delete) {
+    fn on_delete(&self, ctx: &mut NativeCtx<'_>, mail: Delete) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
-            self.mailer.send_reply(
-                sender,
-                &DeleteResult::Err {
-                    namespace: mail.namespace,
-                    path: mail.path,
-                    error: IoError::UnknownNamespace,
-                },
-            );
+            ctx.reply(&DeleteResult::Err {
+                namespace: mail.namespace,
+                path: mail.path,
+                error: IoError::UnknownNamespace,
+            });
             return;
         };
         let reply = match adapter.delete(&mail.path) {
@@ -446,7 +429,7 @@ impl IoCapability {
                 error,
             },
         };
-        self.mailer.send_reply(sender, &reply);
+        ctx.reply(&reply);
     }
 
     /// List entries under a namespace prefix.
@@ -454,16 +437,13 @@ impl IoCapability {
     /// # Agent
     /// Reply: `ListResult`. Echoes namespace + prefix.
     #[aether_data::handler]
-    fn on_list(&mut self, sender: ReplyTo, mail: List) {
+    fn on_list(&self, ctx: &mut NativeCtx<'_>, mail: List) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
-            self.mailer.send_reply(
-                sender,
-                &ListResult::Err {
-                    namespace: mail.namespace,
-                    prefix: mail.prefix,
-                    error: IoError::UnknownNamespace,
-                },
-            );
+            ctx.reply(&ListResult::Err {
+                namespace: mail.namespace,
+                prefix: mail.prefix,
+                error: IoError::UnknownNamespace,
+            });
             return;
         };
         let reply = match adapter.list(&mail.prefix) {
@@ -478,7 +458,18 @@ impl IoCapability {
                 error,
             },
         };
-        self.mailer.send_reply(sender, &reply);
+        ctx.reply(&reply);
+    }
+}
+
+#[cfg(test)]
+impl IoCapability {
+    /// Test-only direct constructor. Production boots through
+    /// `Builder::with_actor::<IoCapability>(roots)` which calls `init`;
+    /// tests that want to drive handlers without spinning up a full
+    /// chassis hand a pre-built registry directly.
+    pub(crate) fn from_registry(registry: Arc<AdapterRegistry>) -> Self {
+        Self { registry }
     }
 }
 
@@ -488,8 +479,41 @@ mod tests {
 
     use super::*;
     use crate::capability::{BootError, ChassisBuilder};
+    use crate::mail::ReplyTo;
+    use crate::mailer::Mailer;
+    use crate::native_actor::NativeCtx;
+    use crate::native_transport::NativeTransport;
     use crate::registry::Registry;
-    use aether_data::Kind;
+    use aether_actor::Actor;
+    use aether_data::{Kind, MailboxId};
+
+    /// Test fixture that bundles the cap, a fully-wired test mailer,
+    /// and a `NativeTransport` long enough for handlers to borrow.
+    /// Pre-stage-2 the tests called `cap.on_read(sender, mail)`
+    /// directly; the new shape requires a `NativeCtx` borrowed from a
+    /// transport, so the fixture owns the transport and hands out
+    /// fresh ctxs per invocation.
+    struct TestFixture {
+        cap: IoCapability,
+        rx: std::sync::mpsc::Receiver<EgressEvent>,
+        transport: NativeTransport,
+    }
+
+    impl TestFixture {
+        fn new(reg: Arc<AdapterRegistry>) -> Self {
+            let (mailer, rx) = test_mailer_and_rx();
+            let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+            Self {
+                cap: IoCapability::from_registry(reg),
+                rx,
+                transport,
+            }
+        }
+
+        fn ctx(&self, sender: ReplyTo) -> NativeCtx<'_> {
+            NativeCtx::new(&self.transport, sender)
+        }
+    }
 
     /// Manual tempdir helper to avoid pulling in the `tempfile`
     /// crate. Caller cleans up via [`cleanup`] after the test asserts.
@@ -742,10 +766,8 @@ mod tests {
     fn capability_boots_and_registers_mailbox() {
         let root = scratch_root("boots");
         let (registry, mailer) = fresh_substrate();
-        let cap =
-            IoCapability::new(roots_under(&root), Arc::clone(&mailer)).expect("adapters init");
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(cap)
+            .with_actor::<IoCapability>(roots_under(&root))
             .build()
             .expect("io capability boots");
         assert!(
@@ -758,8 +780,8 @@ mod tests {
 
     /// Cap init fails when the adapter registry can't be built —
     /// provoke `LocalFileAdapter::new` failure by pointing the save
-    /// root at a regular file rather than a directory. Constructor
-    /// returns `std::io::Result`, chassis main propagates via `?`.
+    /// root at a regular file rather than a directory. `init` returns
+    /// `BootError::Other(io::Error)`, the chassis builder propagates.
     #[test]
     fn cap_init_fails_when_adapter_init_fails() {
         let root = scratch_root("init-fails");
@@ -773,8 +795,10 @@ mod tests {
         std::fs::create_dir_all(&roots.assets).unwrap();
         std::fs::create_dir_all(&roots.config).unwrap();
 
-        let (_, mailer) = fresh_substrate();
-        let result = IoCapability::new(roots, mailer);
+        let (registry, mailer) = fresh_substrate();
+        let result = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<IoCapability>(roots)
+            .build();
         assert!(result.is_err(), "save root being a file must fail cap init");
         cleanup(&root);
     }
@@ -787,10 +811,8 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         registry.register_sink(IoCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
-        let cap =
-            IoCapability::new(roots_under(&root), Arc::clone(&mailer)).expect("adapters init");
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(cap)
+            .with_actor::<IoCapability>(roots_under(&root))
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(
@@ -805,20 +827,20 @@ mod tests {
     fn cap_read_ok_replies_with_bytes() {
         let root = scratch_root("cap-read");
         let reg = build_save_only_registry(&root, true);
-        let (mailer, rx) = test_mailer_and_rx();
         reg.get("save")
             .unwrap()
             .write("slot.bin", &[9, 9, 9])
             .unwrap();
-        let mut cap = IoCapability::from_registry(reg, mailer);
-        cap.on_read(
-            session_sender(),
+        let fix = TestFixture::new(reg);
+        let mut ctx = fix.ctx(session_sender());
+        fix.cap.on_read(
+            &mut ctx,
             Read {
                 namespace: "save".to_string(),
                 path: "slot.bin".to_string(),
             },
         );
-        match decode_reply::<ReadResult>(&rx) {
+        match decode_reply::<ReadResult>(&fix.rx) {
             ReadResult::Ok {
                 namespace,
                 path,
@@ -837,16 +859,16 @@ mod tests {
     fn cap_read_unknown_namespace_replies_err() {
         let root = scratch_root("cap-ns");
         let reg = build_save_only_registry(&root, true);
-        let (mailer, rx) = test_mailer_and_rx();
-        let mut cap = IoCapability::from_registry(reg, mailer);
-        cap.on_read(
-            session_sender(),
+        let fix = TestFixture::new(reg);
+        let mut ctx = fix.ctx(session_sender());
+        fix.cap.on_read(
+            &mut ctx,
             Read {
                 namespace: "nope".to_string(),
                 path: "x.bin".to_string(),
             },
         );
-        match decode_reply::<ReadResult>(&rx) {
+        match decode_reply::<ReadResult>(&fix.rx) {
             ReadResult::Err {
                 namespace,
                 path,
@@ -864,17 +886,17 @@ mod tests {
     fn cap_read_not_found_replies_err() {
         let root = scratch_root("cap-nf");
         let reg = build_save_only_registry(&root, true);
-        let (mailer, rx) = test_mailer_and_rx();
-        let mut cap = IoCapability::from_registry(reg, mailer);
-        cap.on_read(
-            session_sender(),
+        let fix = TestFixture::new(reg);
+        let mut ctx = fix.ctx(session_sender());
+        fix.cap.on_read(
+            &mut ctx,
             Read {
                 namespace: "save".to_string(),
                 path: "ghost.bin".to_string(),
             },
         );
         assert!(matches!(
-            decode_reply::<ReadResult>(&rx),
+            decode_reply::<ReadResult>(&fix.rx),
             ReadResult::Err {
                 error: IoError::NotFound,
                 ..
@@ -888,17 +910,17 @@ mod tests {
         let root = scratch_root("cap-write");
         let reg = build_save_only_registry(&root, true);
         let reg_clone = Arc::clone(&reg);
-        let (mailer, rx) = test_mailer_and_rx();
-        let mut cap = IoCapability::from_registry(reg, mailer);
-        cap.on_write(
-            session_sender(),
+        let fix = TestFixture::new(reg);
+        let mut ctx = fix.ctx(session_sender());
+        fix.cap.on_write(
+            &mut ctx,
             Write {
                 namespace: "save".to_string(),
                 path: "slot.bin".to_string(),
                 bytes: vec![1, 2, 3],
             },
         );
-        match decode_reply::<WriteResult>(&rx) {
+        match decode_reply::<WriteResult>(&fix.rx) {
             WriteResult::Ok { namespace, path } => {
                 assert_eq!(namespace, "save");
                 assert_eq!(path, "slot.bin");
@@ -916,10 +938,10 @@ mod tests {
     fn cap_write_read_only_namespace_replies_forbidden() {
         let root = scratch_root("cap-ro");
         let reg = build_save_only_registry(&root, false);
-        let (mailer, rx) = test_mailer_and_rx();
-        let mut cap = IoCapability::from_registry(reg, mailer);
-        cap.on_write(
-            session_sender(),
+        let fix = TestFixture::new(reg);
+        let mut ctx = fix.ctx(session_sender());
+        fix.cap.on_write(
+            &mut ctx,
             Write {
                 namespace: "save".to_string(),
                 path: "slot.bin".to_string(),
@@ -927,7 +949,7 @@ mod tests {
             },
         );
         assert!(matches!(
-            decode_reply::<WriteResult>(&rx),
+            decode_reply::<WriteResult>(&fix.rx),
             WriteResult::Err {
                 error: IoError::Forbidden,
                 ..
@@ -941,17 +963,17 @@ mod tests {
         let root = scratch_root("cap-del");
         let reg = build_save_only_registry(&root, true);
         let reg_clone = Arc::clone(&reg);
-        let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("x.bin", b"x").unwrap();
-        let mut cap = IoCapability::from_registry(reg, mailer);
-        cap.on_delete(
-            session_sender(),
+        let fix = TestFixture::new(reg);
+        let mut ctx = fix.ctx(session_sender());
+        fix.cap.on_delete(
+            &mut ctx,
             Delete {
                 namespace: "save".to_string(),
                 path: "x.bin".to_string(),
             },
         );
-        match decode_reply::<DeleteResult>(&rx) {
+        match decode_reply::<DeleteResult>(&fix.rx) {
             DeleteResult::Ok { namespace, path } => {
                 assert_eq!(namespace, "save");
                 assert_eq!(path, "x.bin");
@@ -969,18 +991,18 @@ mod tests {
     fn cap_list_returns_sorted_entries() {
         let root = scratch_root("cap-list");
         let reg = build_save_only_registry(&root, true);
-        let (mailer, rx) = test_mailer_and_rx();
         reg.get("save").unwrap().write("b.bin", b"").unwrap();
         reg.get("save").unwrap().write("a.bin", b"").unwrap();
-        let mut cap = IoCapability::from_registry(reg, mailer);
-        cap.on_list(
-            session_sender(),
+        let fix = TestFixture::new(reg);
+        let mut ctx = fix.ctx(session_sender());
+        fix.cap.on_list(
+            &mut ctx,
             List {
                 namespace: "save".to_string(),
                 prefix: "".to_string(),
             },
         );
-        match decode_reply::<ListResult>(&rx) {
+        match decode_reply::<ListResult>(&fix.rx) {
             ListResult::Ok {
                 namespace,
                 prefix,
@@ -1068,9 +1090,14 @@ mod tests {
             .unwrap()
             .insert(caller_mailbox, Arc::clone(&entry));
 
-        let mut cap = IoCapability::from_registry(reg, Arc::clone(&mailer));
-        cap.on_read(
+        let cap = IoCapability::from_registry(reg);
+        let transport = NativeTransport::new_for_test(Arc::clone(&mailer), MailboxId(0));
+        let mut ctx = NativeCtx::new(
+            &transport,
             ReplyTo::to(aether_data::ReplyTarget::Component(caller_mailbox)),
+        );
+        cap.on_read(
+            &mut ctx,
             Read {
                 namespace: "save".to_string(),
                 path: "slot.bin".to_string(),

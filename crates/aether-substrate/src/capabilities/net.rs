@@ -22,11 +22,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_actor::{Actor, Singleton};
-use aether_data::ReplyTo;
+use aether_actor::{MailCtx, Singleton};
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
-use crate::mailer::Mailer;
+use crate::capability::BootError;
+use crate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// Default response-body cap when `AETHER_NET_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -352,62 +352,57 @@ fn parse_default_timeout_env() -> Duration {
     Duration::from_millis(ms as u64)
 }
 
-/// `aether.net` mailbox cap. Owns the resolved adapter, the chassis
-/// [`Arc<Mailer>`] for routing replies, and the default per-request
-/// timeout applied when `Fetch.timeout_ms` is `None`. The dispatcher
-/// thread owns this through the macro-emitted `Dispatch` impl.
+/// `aether.net` mailbox cap. Owns the resolved adapter and the
+/// default per-request timeout applied when `Fetch.timeout_ms` is
+/// `None`. The dispatcher thread holds an `Arc<Self>` and routes
+/// envelopes through the macro-emitted `NativeDispatch` impl;
+/// replies route via `ctx.reply(&result)` through the substrate's
+/// `Mailer::send_reply`.
+#[derive(Singleton)]
 pub struct NetCapability {
     adapter: Arc<dyn NetAdapter>,
-    mailer: Arc<Mailer>,
     default_timeout: Duration,
 }
 
+#[cfg(test)]
 impl NetCapability {
-    /// Construct from a [`NetConfig`] (resolved by the chassis main
-    /// — typically via [`NetConfig::from_env`]) and the chassis's
-    /// [`Mailer`]. The adapter is built immediately so any
-    /// configuration error surfaces at chassis-builder time, not at
-    /// first fetch.
-    pub fn new(config: NetConfig, mailer: Arc<Mailer>) -> Self {
-        let default_timeout = config.default_timeout;
-        Self {
-            adapter: build_net_adapter(config),
-            mailer,
-            default_timeout,
-        }
-    }
-
-    /// Construct from an explicit adapter. Used by tests that supply
-    /// a stub.
-    pub fn from_adapter(
-        adapter: Arc<dyn NetAdapter>,
-        mailer: Arc<Mailer>,
-        default_timeout: Duration,
-    ) -> Self {
+    /// Test-only direct constructor. Production boots through
+    /// `Builder::with_actor::<NetCapability>(config)` which calls
+    /// `init`; tests that drive the cap with a stub adapter hand it
+    /// in directly.
+    pub(crate) fn from_adapter(adapter: Arc<dyn NetAdapter>, default_timeout: Duration) -> Self {
         Self {
             adapter,
-            mailer,
             default_timeout,
         }
     }
 }
 
-impl Actor for NetCapability {
+#[aether_data::actor]
+impl NativeActor for NetCapability {
+    type Config = NetConfig;
+
     /// ADR-0043 + ADR-0074 Phase 5 chassis-owned mailbox.
     const NAMESPACE: &'static str = "aether.net";
-}
 
-impl Singleton for NetCapability {}
+    /// Build the net adapter from the resolved config. The adapter is
+    /// built immediately so configuration errors surface at chassis-
+    /// builder time, not at first fetch.
+    fn init(config: NetConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        let default_timeout = config.default_timeout;
+        Ok(Self {
+            adapter: build_net_adapter(config),
+            default_timeout,
+        })
+    }
 
-#[aether_data::actor]
-impl NetCapability {
     /// Run a fetch request and reply with the response.
     ///
     /// # Agent
     /// Reply: `FetchResult`. Synchronous on the dispatcher thread —
     /// long-running fetches block other net mail until they finish.
     #[aether_data::handler]
-    fn on_fetch(&mut self, sender: ReplyTo, mail: Fetch) {
+    fn on_fetch(&self, ctx: &mut NativeCtx<'_>, mail: Fetch) {
         let timeout = mail
             .timeout_ms
             .map(|ms| Duration::from_millis(ms as u64))
@@ -431,7 +426,7 @@ impl NetCapability {
             },
             Err(error) => FetchResult::Err { url, error },
         };
-        self.mailer.send_reply(sender, &reply);
+        ctx.reply(&reply);
     }
 }
 
@@ -439,8 +434,12 @@ impl NetCapability {
 mod tests {
     use super::*;
     use crate::capability::{BootError, ChassisBuilder};
+    use crate::mail::ReplyTo;
+    use crate::mailer::Mailer;
+    use crate::native_transport::NativeTransport;
     use crate::registry::Registry;
-    use aether_data::Kind;
+    use aether_actor::Actor;
+    use aether_data::{Kind, MailboxId};
     use std::sync::Mutex;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
@@ -528,7 +527,7 @@ mod tests {
             ..NetConfig::default()
         };
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(NetCapability::new(config, Arc::clone(&mailer)))
+            .with_actor::<NetCapability>(config)
             .build()
             .expect("net capability boots");
         assert!(
@@ -549,7 +548,7 @@ mod tests {
         };
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(NetCapability::new(config, Arc::clone(&mailer)))
+            .with_actor::<NetCapability>(config)
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(
@@ -562,13 +561,14 @@ mod tests {
     #[test]
     fn disabled_adapter_replies_disabled() {
         let (mailer, rx) = test_mailer_and_rx();
-        let mut cap = NetCapability::from_adapter(
+        let cap = NetCapability::from_adapter(
             Arc::new(DisabledNetAdapter),
-            mailer,
             NetConfig::default().default_timeout,
         );
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+        let mut ctx = NativeCtx::new(&transport, session_sender());
         cap.on_fetch(
-            session_sender(),
+            &mut ctx,
             Fetch {
                 url: "https://api.example.com/".to_string(),
                 method: HttpMethod::Get,
@@ -670,13 +670,14 @@ mod tests {
             }],
             body: b"{}".to_vec(),
         }));
-        let mut cap = NetCapability::from_adapter(
+        let cap = NetCapability::from_adapter(
             stub as Arc<dyn NetAdapter>,
-            mailer,
             NetConfig::default().default_timeout,
         );
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+        let mut ctx = NativeCtx::new(&transport, session_sender());
         cap.on_fetch(
-            session_sender(),
+            &mut ctx,
             Fetch {
                 url: "https://api.example.com/v1".to_string(),
                 method: HttpMethod::Get,
@@ -704,13 +705,14 @@ mod tests {
     #[test]
     fn cap_fetch_err_echoes_url_and_error() {
         let (mailer, rx) = test_mailer_and_rx();
-        let mut cap = NetCapability::from_adapter(
+        let cap = NetCapability::from_adapter(
             StubAdapter::with(Err(NetError::Timeout)) as Arc<dyn NetAdapter>,
-            mailer,
             NetConfig::default().default_timeout,
         );
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+        let mut ctx = NativeCtx::new(&transport, session_sender());
         cap.on_fetch(
-            session_sender(),
+            &mut ctx,
             Fetch {
                 url: "https://slow.example.com/".to_string(),
                 method: HttpMethod::Get,
@@ -737,13 +739,14 @@ mod tests {
             body: vec![],
         }));
         let stub_clone = Arc::clone(&stub);
-        let mut cap = NetCapability::from_adapter(
+        let cap = NetCapability::from_adapter(
             stub as Arc<dyn NetAdapter>,
-            mailer,
             NetConfig::default().default_timeout,
         );
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+        let mut ctx = NativeCtx::new(&transport, session_sender());
         cap.on_fetch(
-            session_sender(),
+            &mut ctx,
             Fetch {
                 url: "https://api.example.com/".to_string(),
                 method: HttpMethod::Get,
