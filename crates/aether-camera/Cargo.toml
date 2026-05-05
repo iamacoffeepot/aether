@@ -19,6 +19,21 @@ edition.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Stage 1.5 footgun mitigation: the `runtime` feature pulls in the
+# `runtime` module that calls `aether_actor::export!()`. The macro
+# emits `#[unsafe(no_mangle)] pub unsafe extern "C" fn init` (and
+# siblings `receive_p32` / `on_drop` / etc.) into the rlib output
+# unconditionally — wasm-lld then forces these symbols into any
+# cdylib that transitively links this rlib, colliding with that
+# cdylib's own `export!()`. Trunk-type consumers (sokoban) opt out
+# via `default-features = false` so their wasm builds see only the
+# kind types and no FFI exports. The feature is on by default so a
+# bare `cargo build -p aether-camera --target wasm32-unknown-unknown`
+# still produces the full component artifact.
+default = ["runtime"]
+runtime = []
+
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data", features = ["derive"] }

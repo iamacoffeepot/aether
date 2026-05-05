@@ -16,6 +16,7 @@ extern crate alloc;
 use alloc::string::String;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "runtime")]
 pub mod runtime;
 
 /// Per-mode parameters for the orbit camera. Every field is

@@ -12,7 +12,12 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aether-actor = { path = "../../crates/aether-actor" }
-aether-camera = { path = "../../crates/aether-camera" }
+# `default-features = false` keeps the camera trunk's `runtime` module
+# (and its `aether_actor::export!()` FFI exports) out of sokoban's
+# wasm build. Without this, both crates' `init` / `receive_p32`
+# symbols would collide at wasm-lld time. See
+# `aether-camera/Cargo.toml`'s `[features]` block for the rationale.
+aether-camera = { path = "../../crates/aether-camera", default-features = false }
 aether-kinds = { path = "../../crates/aether-kinds" }
 aether-data = { path = "../../crates/aether-data", features = ["derive"] }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
