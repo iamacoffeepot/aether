@@ -1,18 +1,23 @@
-//! Camera component trunk (ADR-0066). Hosts the kind types that
-//! `aether-camera-component` receives and that other components emit
-//! to drive it. The runtime cdylib lives in `aether-camera-component`.
+//! Camera component crate (issue 552 stage 1.5 consolidated). Hosts
+//! both the trunk types (kind structs, parameter shapes) at the crate
+//! root and the runtime `CameraComponent` in [`runtime`]. Other
+//! components and demos that need to *talk to* a camera depend on
+//! this crate for the wire shapes; the cdylib FFI exports the
+//! substrate loads at runtime are emitted by `runtime`'s
+//! `aether_actor::export!()` invocation under wasm32.
 //!
-//! `aether.camera` (the singular `view_proj` sink kind consumed by
-//! the desktop chassis's `aether.render` mailbox per ADR-0074
+//! `aether.camera` (the singular `view_proj` kind consumed by the
+//! desktop chassis's `aether.render` mailbox per ADR-0074
 //! §Decision 7) is *not* here — it's a chassis sink contract and
 //! lives in `aether-kinds` alongside the other substrate primitives.
-
-#![no_std]
 
 extern crate alloc;
 
 use alloc::string::String;
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "runtime")]
+pub mod runtime;
 
 /// Per-mode parameters for the orbit camera. Every field is
 /// `Option<...>`: present → apply, absent → leave whatever the

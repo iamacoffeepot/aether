@@ -92,6 +92,16 @@ jobs:
       # `AETHER_REQUIRE_RUNTIME=1` on the test step turns any missing
       # wasm into a hard failure so a discovery miss is loud, not silent.
       - name: Pre-build component wasm for scenario tests
+        # Issue 552 stage 1.5: build each component crate in its own
+        # cargo invocation so feature unification stays per-package.
+        # Consolidated component crates (e.g. `aether-camera`) gate
+        # their `aether_actor::export!()` FFI emission behind a default
+        # `runtime` feature; trunk-type consumers (sokoban) opt out via
+        # `default-features = false`. A multi-package `-p A -p B` build
+        # would feature-unify, re-enabling `runtime` for the trunk
+        # consumer's transitive view → wasm-lld duplicate-symbol on
+        # `init` / `receive_p32`. Per-package invocations keep each
+        # build's feature resolve independent.
         run: |
           set -euo pipefail
           pkgs=$(cargo metadata --format-version=1 --no-deps |
@@ -103,8 +113,10 @@ jobs:
             echo "no wasm component crates discovered"; exit 1
           fi
           echo "Building wasm for:"; echo "$pkgs"
-          args=$(echo "$pkgs" | xargs -n1 -I{} echo -p {})
-          cargo build --target wasm32-unknown-unknown $args
+          while read -r pkg; do
+            [ -z "$pkg" ] && continue
+            cargo build --target wasm32-unknown-unknown -p "$pkg"
+          done <<< "$pkgs"
       - run: cargo test --workspace --all-targets
         env:
           AETHER_REQUIRE_RUNTIME: "1"

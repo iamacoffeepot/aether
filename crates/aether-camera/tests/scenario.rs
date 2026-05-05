@@ -1,5 +1,5 @@
-//! Camera-component scenario tests. Each test boots a `TestBench`,
-//! loads this crate's own wasm artifact (built separately for
+//! Camera scenario tests. Each test boots a `TestBench`, loads this
+//! crate's own wasm artifact (built separately for
 //! `wasm32-unknown-unknown`), drives the component through its
 //! `aether.camera.*` mail surface, and asserts mail-flow / render
 //! survivability via `aether-scenario`'s `Check` vocabulary.
@@ -8,7 +8,7 @@
 //! - No wgpu adapter is available (driverless Linux runners without
 //!   `mesa-vulkan-drivers`).
 //! - The component's wasm hasn't been built — tests read
-//!   `target/wasm32-unknown-unknown/{debug,release}/aether_camera_component.wasm`
+//!   `target/wasm32-unknown-unknown/{debug,release}/aether_camera.wasm`
 //!   and skip with an `eprintln!` when both paths are absent. CI
 //!   builds the wasm before invoking `cargo test`.
 //!
@@ -20,18 +20,17 @@ use aether_scenario::test_helpers::{require_runtime, run_or_panic};
 use aether_scenario::{Check, Script, Step};
 use aether_substrate_bundle::test_bench::TestBench;
 
-// Force linkage of `aether-camera` so its `inventory::submit!`
-// `KindDescriptor` entries reach `aether_kinds::descriptors::all()`
-// in the test binary. Without this reference the linker strips the
-// transitive crate (host builds of `aether-camera-component` don't
-// emit the FFI exports that would otherwise pull camera kinds in),
-// and `Step::SendMail` for `aether.camera.*` kinds fails with
-// "unknown kind".
+// Force linkage of `aether-camera`'s `inventory::submit!` `KindDescriptor`
+// entries into this test binary. Cargo treats integration tests as
+// separate crates that link against the test target's host rlib, but
+// the linker strips inventory submits for kinds the test code doesn't
+// statically reference. Without this anchor, `Step::SendMail` for
+// `aether.camera.*` kinds fails with "unknown kind".
 use aether_camera as _;
 
 #[test]
 fn camera_component_lifecycle() {
-    let Some(wasm_path) = require_runtime("aether_camera_component") else {
+    let Some(wasm_path) = require_runtime("aether_camera") else {
         return;
     };
 
@@ -68,7 +67,7 @@ fn camera_component_lifecycle() {
 /// `TestBench::count_observed`.
 #[test]
 fn camera_default_orbit_publishes_view_proj() {
-    let Some(wasm_path) = require_runtime("aether_camera_component") else {
+    let Some(wasm_path) = require_runtime("aether_camera") else {
         return;
     };
 
@@ -107,7 +106,7 @@ fn camera_default_orbit_publishes_view_proj() {
 /// shouldn't take down the chassis.
 #[test]
 fn camera_destroy_main_keeps_substrate_alive() {
-    let Some(wasm_path) = require_runtime("aether_camera_component") else {
+    let Some(wasm_path) = require_runtime("aether_camera") else {
         return;
     };
 
