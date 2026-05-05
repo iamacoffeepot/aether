@@ -415,6 +415,16 @@ macro_rules! __export_internal {
         /// substrate surfaces the message in `LoadResult::Err`
         /// instead of a generic instantiation error. Issue 525
         /// Phase 4b / issue 531.
+        ///
+        /// Issue 552 stage 1.5: each FFI shim below is gated on
+        /// `cfg(target_arch = "wasm32")` so the no_mangle extern fn
+        /// only emits in the wasm cdylib output. Host rlib builds
+        /// (used by the consolidated component crate's own integration
+        /// tests + by transitive trunk-type consumers like sokoban)
+        /// would otherwise expose multiple `init` / `receive_p32` /
+        /// etc. symbols at host link time, which Linux's `ld` rejects
+        /// as duplicates even though macOS dropped them silently.
+        #[cfg(target_arch = "wasm32")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
             $crate::wasm::log::install_global_default();
@@ -455,6 +465,7 @@ macro_rules! __export_internal {
         /// `#[actor]`-synthesized `__aether_dispatch` produces —
         /// `DISPATCH_HANDLED` on match, `DISPATCH_UNKNOWN_KIND` on a
         /// strict-receiver miss (ADR-0033 §Strict receivers).
+        #[cfg(target_arch = "wasm32")]
         #[unsafe(export_name = "receive_p32")]
         pub unsafe extern "C" fn receive(
             kind: u64,
@@ -478,6 +489,7 @@ macro_rules! __export_internal {
         /// [`Replaceable::on_replace`] when [`export!`] was called
         /// with the `replaceable` flag; otherwise the body is a
         /// no-op (the substrate still invokes it for ABI stability).
+        #[cfg(target_arch = "wasm32")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn on_replace() -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
@@ -492,6 +504,7 @@ macro_rules! __export_internal {
         /// # Safety
         /// Called by the substrate exactly once on the instance being
         /// dropped, immediately before linear memory is torn down.
+        #[cfg(target_arch = "wasm32")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn on_drop() -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
@@ -511,6 +524,7 @@ macro_rules! __export_internal {
         /// `_p32` suffix per ADR-0024 Phase 1. Same opt-in shape as
         /// `on_replace`: dispatches into [`Replaceable::on_rehydrate`]
         /// when `replaceable` was passed; no-op otherwise.
+        #[cfg(target_arch = "wasm32")]
         #[unsafe(export_name = "on_rehydrate_p32")]
         pub unsafe extern "C" fn on_rehydrate(version: u32, ptr: u32, len: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
