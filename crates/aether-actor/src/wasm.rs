@@ -196,8 +196,6 @@ pub type WasmInitCtx<'a> = crate::InitCtx<'a, WasmTransport>;
 /// Wasm-flavoured [`crate::DropCtx`]. Issue 552 stage 0 renamed the
 /// prior `DropCtx` alias to `WasmDropCtx`.
 pub type WasmDropCtx<'a> = crate::DropCtx<'a, WasmTransport>;
-/// Wasm-flavoured [`crate::handle::Handle`].
-pub type Handle<K> = crate::handle::Handle<K, WasmTransport>;
 
 /// Wasm-flavoured `resolve_mailbox` — pins `T = WasmTransport` so the
 /// 1-turbofish-arg call shape `resolve_mailbox::<MyKind>(name)` works
