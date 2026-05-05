@@ -39,7 +39,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprLit, Fields, FnArg,
-    GenericArgument, ImplItem, ItemImpl, Lit, Meta, PathArguments, Signature, Type,
+    GenericArgument, ImplItem, Item, ItemImpl, ItemMod, Lit, Meta, PathArguments, Signature, Type,
     parse_macro_input, spanned::Spanned,
 };
 
@@ -741,19 +741,286 @@ fn to_screaming_snake_case(s: &str) -> String {
 /// a follow-up).
 #[proc_macro_attribute]
 pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let opts = match parse_actor_opts(attr.into()) {
+        Ok(opts) => opts,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    let item = parse_macro_input!(item as ItemImpl);
+    match expand_handlers(item, opts) {
+        Ok(ts) => ts.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Parsed `#[actor(...)]` attribute arguments. Only `skip_markers` is
+/// recognised today (issue 565: tells the expander not to emit
+/// `Actor` + `HandlesKind` impls because a wrapping `#[bridge]`
+/// already emitted them as siblings of a cfg-gated module).
+#[derive(Default, Clone, Copy)]
+struct ActorOpts {
+    skip_markers: bool,
+}
+
+fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
+    let mut opts = ActorOpts::default();
+    if attr.is_empty() {
+        return Ok(opts);
+    }
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("skip_markers") {
+            opts.skip_markers = true;
+            Ok(())
+        } else {
+            Err(meta.error("unrecognised #[actor] argument; only `skip_markers` is supported"))
+        }
+    });
+    syn::parse::Parser::parse2(parser, attr)?;
+    Ok(opts)
+}
+
+/// `#[bridge]` — attribute on a `mod foo { ... }` block holding the
+/// native-side implementation of an actor (issue 565).
+///
+/// The mod hosts substrate-side imports, helpers, and a single
+/// `#[actor] impl NativeActor for X { ... }` block. Wasm consumers
+/// (loading the cap crate via `aether-capabilities` with
+/// `default-features = false`) must still see the always-on `Actor`
+/// and `HandlesKind<K>` markers so typed sends like
+/// `ctx.send_to::<X, _>(&kind)` compile-check, but the substrate-side
+/// trait impls and helpers can't be in scope on wasm32.
+///
+/// `#[bridge]`'s expansion splits across that boundary:
+///
+/// 1. The marker impls (`Actor` + `HandlesKind<K>` per handler kind)
+///    are emitted at sibling level to the mod, **outside** any cfg
+///    gate — wasm consumers see them.
+/// 2. The original mod is emitted with `#[cfg(not(target_arch =
+///    "wasm32"))]` injected, with the inner `#[actor]` rewritten to
+///    `#[actor(skip_markers)]` so it doesn't duplicate the markers.
+///
+/// Naming follows the `cxx::bridge` precedent — an attribute on a
+/// mod that splits emission across a boundary.
+#[proc_macro_attribute]
+pub fn bridge(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
         return syn::Error::new(
             proc_macro2::Span::call_site(),
-            "#[actor] takes no arguments",
+            "#[bridge] takes no arguments",
         )
         .to_compile_error()
         .into();
     }
-    let item = parse_macro_input!(item as ItemImpl);
-    match expand_handlers(item) {
+    let item = parse_macro_input!(item as ItemMod);
+    match expand_bridge(item) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
+}
+
+fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
+    let Some((brace, items)) = item_mod.content.take() else {
+        return Err(syn::Error::new_spanned(
+            &item_mod,
+            "#[bridge] must be applied to an inline `mod foo { ... }` block, not a file-backed mod",
+        ));
+    };
+    let mod_ident = item_mod.ident.clone();
+
+    // Find the `#[actor] impl NativeActor for X { ... }` block.
+    // Collect its index (so we can rewrite the attribute in place) and
+    // walk its items to extract X, NAMESPACE, and handler kinds.
+    let mut actor_idx: Option<usize> = None;
+    for (idx, it) in items.iter().enumerate() {
+        if let Item::Impl(impl_block) = it
+            && impl_block.attrs.iter().any(attr_is_actor)
+        {
+            actor_idx = Some(idx);
+            break;
+        }
+    }
+    let Some(actor_idx) = actor_idx else {
+        return Err(syn::Error::new_spanned(
+            &item_mod,
+            "#[bridge] expects exactly one `#[actor] impl NativeActor for X { ... }` block \
+             inside the wrapped mod",
+        ));
+    };
+
+    // Collect everything we need from the inner actor impl into owned
+    // values so the borrow on `items` ends before we mutate it below.
+    let (self_ty, type_ident, generics, namespace_expr, frame_barrier_expr, handler_kinds) = {
+        let Item::Impl(actor_impl) = &items[actor_idx] else {
+            unreachable!("actor_idx points to an Item::Impl by construction");
+        };
+
+        // Reject `impl Trait for X` shapes that aren't `NativeActor`.
+        let trait_path = actor_impl.trait_.as_ref().ok_or_else(|| {
+            syn::Error::new_spanned(
+                actor_impl,
+                "#[bridge]'s inner #[actor] block must be `impl NativeActor for X`, \
+                 not an inherent `impl X { ... }`",
+            )
+        })?;
+        let last_seg = trait_path
+            .1
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
+        if last_seg != "NativeActor" {
+            return Err(syn::Error::new_spanned(
+                &trait_path.1,
+                format!(
+                    "#[bridge]'s inner #[actor] block must be `impl NativeActor for X` — got `{last_seg}`",
+                ),
+            ));
+        }
+
+        // Pull the bare struct ident out of `self_ty`. Required for the
+        // wasm-stub + re-export emission, where we need to write
+        // `pub struct X;` and `pub use <mod>::X;` referencing X by name.
+        let type_ident = match &*actor_impl.self_ty {
+            Type::Path(tp) if tp.qself.is_none() && tp.path.segments.len() == 1 => {
+                tp.path.segments[0].ident.clone()
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &actor_impl.self_ty,
+                    "#[bridge]'s actor type must be a bare ident (`HandleCapability`), not a \
+                     path or generic — the macro emits a wasm-stub `pub struct X;` and a \
+                     `pub use <mod>::X;` re-export referencing it by name",
+                ));
+            }
+        };
+
+        // Walk the impl items to collect handler kind types and the
+        // `NAMESPACE` const expression. The const lives on the supertrait
+        // `Actor`, but the user wrote it inside `impl NativeActor for X`
+        // — same source-of-truth contract `expand_native_actor_trait`
+        // uses.
+        let mut handler_kinds: Vec<Type> = Vec::new();
+        let mut namespace_expr: Option<Expr> = None;
+        let mut frame_barrier_expr: Option<Expr> = None;
+        for impl_item in &actor_impl.items {
+            match impl_item {
+                ImplItem::Fn(f) if f.attrs.iter().any(attr_is_handler) => {
+                    let (kind_ty, _is_slice) = extract_native_actor_handler_kind(&f.sig)?;
+                    handler_kinds.push(kind_ty);
+                }
+                ImplItem::Const(c) => {
+                    if c.ident == "NAMESPACE" {
+                        namespace_expr = Some(c.expr.clone());
+                    } else if c.ident == "FRAME_BARRIER" {
+                        frame_barrier_expr = Some(c.expr.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let namespace_expr = namespace_expr.ok_or_else(|| {
+            syn::Error::new_spanned(
+                actor_impl,
+                "#[bridge]'s inner #[actor] block must declare \
+                 `const NAMESPACE: &'static str = ...` so the marker `impl Actor` can carry it",
+            )
+        })?;
+        if handler_kinds.is_empty() {
+            return Err(syn::Error::new_spanned(
+                actor_impl,
+                "#[bridge]'s inner #[actor] block must declare at least one #[handler] method",
+            ));
+        }
+        (
+            (*actor_impl.self_ty).clone(),
+            type_ident,
+            actor_impl.generics.clone(),
+            namespace_expr,
+            frame_barrier_expr,
+            handler_kinds,
+        )
+    };
+
+    let (impl_generics, _, where_clause) = generics.split_for_impl();
+
+    // Always-on marker surface, emitted as siblings of the mod.
+    //
+    // - On wasm, the real struct (inside `mod native`) is cfg-stripped;
+    //   a unit-struct stub takes its place at file root so the marker
+    //   impls below have a type to reference. Wasm consumers never
+    //   construct caps — they only address them by type via
+    //   `ctx.send_to::<X, _>(&kind)` — so the stub being uninhabited
+    //   is fine.
+    // - On native, the `pub use` re-exports the real struct from `mod
+    //   native` to file root, so callers writing `crate::log::LogCapability`
+    //   (chassis builders, tests in sibling mods) keep working.
+    // - Singleton, Actor, and HandlesKind impls are always-on so wasm
+    //   consumers compile typed sends without the substrate runtime.
+    let frame_barrier_const = frame_barrier_expr.map(|expr| {
+        quote! { const FRAME_BARRIER: bool = #expr; }
+    });
+    let stub_and_reexport = quote! {
+        #[cfg(target_arch = "wasm32")]
+        pub struct #type_ident;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        pub use #mod_ident::#type_ident;
+    };
+    let singleton_marker = quote! {
+        impl #impl_generics ::aether_actor::Singleton for #self_ty #where_clause {}
+    };
+    let actor_marker = quote! {
+        impl #impl_generics ::aether_actor::Actor for #self_ty #where_clause {
+            const NAMESPACE: &'static str = #namespace_expr;
+            #frame_barrier_const
+        }
+    };
+    let handles_kind_markers = handler_kinds.iter().map(|kind_ty| {
+        quote! {
+            impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
+                for #self_ty #where_clause {}
+        }
+    });
+
+    // Rewrite the inner `#[actor]` to `#[actor(skip_markers)]` so the
+    // expander inside the cfg-gated mod doesn't duplicate the markers
+    // we just emitted. Preserve the user's original path token so a
+    // `use aether_actor::actor;` line remains "used" — replacing with
+    // an absolute path would silently produce unused-import warnings
+    // in caller code.
+    let mut items = items;
+    if let Item::Impl(actor_impl_mut) = &mut items[actor_idx] {
+        for attr in actor_impl_mut.attrs.iter_mut() {
+            if attr_is_actor(attr) {
+                let path = attr.path().clone();
+                *attr = syn::parse_quote!(#[#path(skip_markers)]);
+            }
+        }
+    }
+
+    // Reassemble the mod with the rewritten contents and prepend the
+    // cfg gate.
+    item_mod.content = Some((brace, items));
+    let mod_attrs = std::mem::take(&mut item_mod.attrs);
+    Ok(quote! {
+        #stub_and_reexport
+        #singleton_marker
+        #actor_marker
+        #(#handles_kind_markers)*
+
+        #(#mod_attrs)*
+        #[cfg(not(target_arch = "wasm32"))]
+        #item_mod
+    })
+}
+
+/// Match `#[actor]` or `#[crate::actor]` or `#[aether_actor::actor]` —
+/// any path whose last segment is `actor`.
+fn attr_is_actor(attr: &Attribute) -> bool {
+    attr.path()
+        .segments
+        .last()
+        .is_some_and(|s| s.ident == "actor")
 }
 
 #[proc_macro_attribute]
@@ -884,7 +1151,7 @@ struct FallbackFn {
     agent_doc: Option<String>,
 }
 
-fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
+fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2> {
     if let Some((_, trait_path, _)) = item.trait_.as_ref() {
         // Pattern-match the trait path's last identifier so the macro
         // works regardless of the user's import style — bare
@@ -896,10 +1163,19 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
             .map(|s| s.ident.to_string())
             .unwrap_or_default();
         match last.as_str() {
-            "NativeActor" => expand_native_actor_trait(item),
+            "NativeActor" => expand_native_actor_trait(item, opts),
             // `WasmActor` is the post-552 trait name; `Component` is
             // the back-compat alias retained until stage 4.
-            "WasmActor" | "Component" => expand_wasm_actor(item),
+            "WasmActor" | "Component" => {
+                if opts.skip_markers {
+                    return Err(syn::Error::new_spanned(
+                        trait_path,
+                        "#[actor(skip_markers)] is only meaningful on \
+                         `impl NativeActor for X` blocks wrapped by `#[bridge]`",
+                    ));
+                }
+                expand_wasm_actor(item)
+            }
             other => Err(syn::Error::new_spanned(
                 trait_path,
                 format!(
@@ -909,6 +1185,13 @@ fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
             )),
         }
     } else {
+        if opts.skip_markers {
+            return Err(syn::Error::new_spanned(
+                &item.self_ty,
+                "#[actor(skip_markers)] is only meaningful on \
+                 `impl NativeActor for X` blocks wrapped by `#[bridge]`",
+            ));
+        }
         // Inherent `impl X { … }` is the legacy native-cap shape used
         // by post-545 capabilities (LogCapability et al.). Stays
         // available through stage 1; stage 2 migrates caps onto the
@@ -1322,7 +1605,7 @@ fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
 ///
 /// `#[fallback]` is rejected — native actors are typed receivers;
 /// unknown kinds are programming errors, not fallback paths.
-fn expand_native_actor_trait(item: ItemImpl) -> syn::Result<TokenStream2> {
+fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2> {
     let self_ty = &item.self_ty;
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
@@ -1414,8 +1697,15 @@ fn expand_native_actor_trait(item: ItemImpl) -> syn::Result<TokenStream2> {
     // for the symmetric authoring shape. Route the consts onto a
     // sibling `impl Actor for X` block so satisfying the supertrait
     // bound works without making the user split the impl.
+    //
+    // `skip_markers` (issue 565): when `#[bridge]` wraps a cfg-gated
+    // `mod native` containing the actor block, it emits the always-on
+    // `Actor` + `HandlesKind` impls itself as siblings of the mod and
+    // rewrites this `#[actor]` to `#[actor(skip_markers)]` so this
+    // expansion does not duplicate them. The native-only impls below
+    // still emit unchanged.
     let const_tokens = consts.iter();
-    let actor_impl = if consts.is_empty() {
+    let actor_impl = if opts.skip_markers || consts.is_empty() {
         quote! {}
     } else {
         quote! {
@@ -1425,13 +1715,20 @@ fn expand_native_actor_trait(item: ItemImpl) -> syn::Result<TokenStream2> {
         }
     };
 
-    let handles_kind_impls = handlers.iter().map(|h| {
-        let kind_ty = &h.kind_ty;
-        quote! {
-            impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
-                for #self_ty #where_clause {}
-        }
-    });
+    let handles_kind_impls: Vec<TokenStream2> = if opts.skip_markers {
+        Vec::new()
+    } else {
+        handlers
+            .iter()
+            .map(|h| {
+                let kind_ty = &h.kind_ty;
+                quote! {
+                    impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
+                        for #self_ty #where_clause {}
+                }
+            })
+            .collect()
+    };
 
     let dispatch_arms = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;

@@ -1,14 +1,8 @@
-//! Issue 545 PR E1: collapsed `aether.net` cap. Pre-PR-E1 the cap
-//! lived split across `aether-kinds::net::NetCapability<B>` (facade
-//! generic) and this file (concrete `NetAdapterBackend`). The facade
-//! pattern (ADR-0075) is retired — caps are now regular `#[actor]`
-//! blocks, same shape as wasm components.
-//!
-//! Owns the full HTTP egress stack — `NetAdapter` trait, the `ureq`-
-//! backed `UreqNetAdapter`, env-driven `NetConfig`, and the
-//! [`NetCapability`] itself. Chassis mains resolve a [`NetConfig`]
-//! (typically via [`NetConfig::from_env`]), call
-//! [`NetCapability::new`], and hand the cap to the chassis builder.
+//! `aether.net` cap. Owns the full HTTP egress stack — `NetAdapter`
+//! trait, the `ureq`-backed `UreqNetAdapter`, env-driven `NetConfig`,
+//! and the [`NetCapability`] itself. Chassis mains resolve a
+//! [`NetConfig`] (typically via [`NetConfig::from_env`]) and pass it
+//! to `with_actor::<NetCapability>(config)`.
 //!
 //! v1 semantics (ADR-0043):
 //! - Blocking on the dispatcher thread (one request at a time).
@@ -21,19 +15,10 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use aether_actor::{Singleton, actor, capability};
-// Handler-signature kind stays always-on; reply-side `FetchResult`
-// + ureq error types live in the `native_only!` block.
+// Handler-signature kinds must be importable at file root because
+// `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
+// of the mod (always-on, outside the cfg gate).
 use aether_kinds::{Fetch, HttpHeader, HttpMethod, NetError};
-
-aether_actor::native_only! {
-    use std::sync::Arc;
-
-    use aether_actor::MailCtx;
-    use aether_kinds::FetchResult;
-    use aether_substrate::capability::BootError;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
-}
 
 /// Default response-body cap when `AETHER_NET_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -80,164 +65,6 @@ pub struct DisabledNetAdapter;
 impl NetAdapter for DisabledNetAdapter {
     fn fetch(&self, _req: FetchRequest) -> Result<FetchResponse, NetError> {
         Err(NetError::Disabled)
-    }
-}
-
-/// `ureq`-backed adapter. Holds the shared agent, the allowlist
-/// (empty = deny all), the response cap, and the `require_https`
-/// flag. Thread-safe: `ureq::Agent` is cheaply cloneable and
-/// internally synchronised, so the same adapter drives the cap from
-/// one dispatch thread today and would parallelise cleanly behind a
-/// multi-thread dispatcher later.
-#[cfg(not(target_arch = "wasm32"))]
-pub struct UreqNetAdapter {
-    agent: ureq::Agent,
-    allowlist: HashSet<String>,
-    require_https: bool,
-    max_body_bytes: usize,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl UreqNetAdapter {
-    /// Construct an adapter with explicit knobs. Chassis code uses
-    /// [`build_default_adapter`] for env-derived construction;
-    /// tests build adapters directly to avoid env contamination.
-    pub fn new(allowlist: HashSet<String>, require_https: bool, max_body_bytes: usize) -> Self {
-        let config = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .build();
-        let agent = ureq::Agent::new_with_config(config);
-        Self {
-            agent,
-            allowlist,
-            require_https,
-            max_body_bytes,
-        }
-    }
-
-    fn check_allowlist(&self, host: &str) -> Result<(), NetError> {
-        if self.allowlist.contains(host) {
-            Ok(())
-        } else {
-            Err(NetError::AllowlistDenied)
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl NetAdapter for UreqNetAdapter {
-    fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, NetError> {
-        let parsed = url::Url::parse(&req.url).map_err(|e| NetError::InvalidUrl(format!("{e}")))?;
-
-        if self.require_https && parsed.scheme() != "https" {
-            return Err(NetError::InvalidUrl(
-                "http scheme not allowed (AETHER_NET_REQUIRE_HTTPS=1)".to_string(),
-            ));
-        }
-
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| NetError::InvalidUrl("no host in url".to_string()))?;
-        self.check_allowlist(host)?;
-
-        if req.body.len() > self.max_body_bytes {
-            return Err(NetError::BodyTooLarge);
-        }
-
-        let mut builder = ureq::http::Request::builder()
-            .method(http_method_to_http_crate(req.method))
-            .uri(&req.url);
-
-        // Host header is derived from the URL by ureq; reject any
-        // caller-set Host so it can't be used to bypass the
-        // allowlist (component requests allowlisted A, TLS SNI is A,
-        // but `Host: B` routes the vhost to B server-side). User-
-        // Agent defaults to `aether/<version>` if not set.
-        let mut saw_user_agent = false;
-        for h in &req.headers {
-            if h.name.eq_ignore_ascii_case("host") {
-                tracing::warn!(
-                    target: "aether_substrate::net",
-                    value = %h.value,
-                    "stripping caller-set Host header",
-                );
-                continue;
-            }
-            if h.name.eq_ignore_ascii_case("user-agent") {
-                saw_user_agent = true;
-            }
-            builder = builder.header(&h.name, &h.value);
-        }
-        if !saw_user_agent {
-            builder = builder.header("User-Agent", concat!("aether/", env!("CARGO_PKG_VERSION")));
-        }
-
-        let http_req = builder
-            .body(req.body)
-            .map_err(|e| NetError::InvalidUrl(format!("{e}")))?;
-
-        use ureq::RequestExt;
-        let mut response = http_req
-            .with_agent(&self.agent)
-            .configure()
-            .timeout_global(Some(req.timeout))
-            .build()
-            .run()
-            .map_err(ureq_error_to_net_error)?;
-
-        let status = response.status().as_u16();
-
-        let mut headers = Vec::with_capacity(response.headers().len());
-        for (name, value) in response.headers() {
-            // Non-UTF8 header values are rare but real (binary
-            // cookies, broken servers). Skip rather than fail the
-            // whole fetch.
-            if let Ok(value_str) = value.to_str() {
-                headers.push(HttpHeader {
-                    name: name.as_str().to_string(),
-                    value: value_str.to_string(),
-                });
-            }
-        }
-
-        let body = match response
-            .body_mut()
-            .with_config()
-            .limit(self.max_body_bytes as u64)
-            .read_to_vec()
-        {
-            Ok(b) => b,
-            Err(ureq::Error::BodyExceedsLimit(_)) => return Err(NetError::BodyTooLarge),
-            Err(e) => return Err(NetError::AdapterError(format!("body read: {e}"))),
-        };
-
-        Ok(FetchResponse {
-            status,
-            headers,
-            body,
-        })
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn http_method_to_http_crate(m: HttpMethod) -> ureq::http::Method {
-    match m {
-        HttpMethod::Get => ureq::http::Method::GET,
-        HttpMethod::Post => ureq::http::Method::POST,
-        HttpMethod::Put => ureq::http::Method::PUT,
-        HttpMethod::Delete => ureq::http::Method::DELETE,
-        HttpMethod::Patch => ureq::http::Method::PATCH,
-        HttpMethod::Head => ureq::http::Method::HEAD,
-        HttpMethod::Options => ureq::http::Method::OPTIONS,
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn ureq_error_to_net_error(e: ureq::Error) -> NetError {
-    match e {
-        ureq::Error::Timeout(_) => NetError::Timeout,
-        ureq::Error::BodyExceedsLimit(_) => NetError::BodyTooLarge,
-        other => NetError::AdapterError(format!("{other}")),
     }
 }
 
@@ -294,38 +121,6 @@ impl NetConfig {
     }
 }
 
-/// Build a net adapter from explicit configuration.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn build_net_adapter(config: NetConfig) -> Arc<dyn NetAdapter> {
-    if config.disabled {
-        tracing::info!(
-            target: "aether_substrate::net",
-            "net adapter disabled — every fetch replies Disabled",
-        );
-        return Arc::new(DisabledNetAdapter);
-    }
-
-    tracing::info!(
-        target: "aether_substrate::net",
-        allowlist_size = config.allowlist.len(),
-        require_https = config.require_https,
-        max_body_bytes = config.max_body_bytes,
-        "net adapter configured",
-    );
-
-    Arc::new(UreqNetAdapter::new(
-        config.allowlist,
-        config.require_https,
-        config.max_body_bytes,
-    ))
-}
-
-/// Env-driven wrapper around [`build_net_adapter`].
-#[cfg(not(target_arch = "wasm32"))]
-pub fn build_default_adapter() -> Arc<dyn NetAdapter> {
-    build_net_adapter(NetConfig::from_env())
-}
-
 fn disable_flag_env() -> bool {
     std::env::var("AETHER_NET_DISABLE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -366,438 +161,644 @@ fn parse_default_timeout_env() -> Duration {
     Duration::from_millis(ms as u64)
 }
 
-/// `aether.net` mailbox cap. Owns the resolved adapter and the
-/// default per-request timeout applied when `Fetch.timeout_ms` is
-/// `None`. The dispatcher thread holds an `Arc<Self>` and routes
-/// envelopes through the macro-emitted `NativeDispatch` impl;
-/// replies route via `ctx.reply(&result)` through the substrate's
-/// `Mailer::send_reply`.
-#[capability]
-#[derive(Singleton)]
-pub struct NetCapability {
-    adapter: Arc<dyn NetAdapter>,
-    default_timeout: Duration,
-}
+#[aether_actor::bridge]
+mod native {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::time::Duration;
 
-#[cfg(test)]
-impl NetCapability {
-    /// Test-only direct constructor. Production boots through
-    /// `Builder::with_actor::<NetCapability>(config)` which calls
-    /// `init`; tests that drive the cap with a stub adapter hand it
-    /// in directly.
-    pub(crate) fn from_adapter(adapter: Arc<dyn NetAdapter>, default_timeout: Duration) -> Self {
-        Self {
-            adapter,
-            default_timeout,
+    use super::{
+        DisabledNetAdapter, Fetch, FetchRequest, FetchResponse, HttpHeader, HttpMethod, NetAdapter,
+        NetConfig, NetError,
+    };
+    use aether_actor::{MailCtx, actor};
+    use aether_kinds::FetchResult;
+    use aether_substrate::capability::BootError;
+    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+
+    /// `ureq`-backed adapter. Holds the shared agent, the allowlist
+    /// (empty = deny all), the response cap, and the `require_https`
+    /// flag. Thread-safe: `ureq::Agent` is cheaply cloneable and
+    /// internally synchronised, so the same adapter drives the cap from
+    /// one dispatch thread today and would parallelise cleanly behind a
+    /// multi-thread dispatcher later.
+    pub struct UreqNetAdapter {
+        agent: ureq::Agent,
+        allowlist: HashSet<String>,
+        require_https: bool,
+        max_body_bytes: usize,
+    }
+
+    impl UreqNetAdapter {
+        /// Construct an adapter with explicit knobs. Chassis code uses
+        /// [`build_net_adapter`] for env-derived construction;
+        /// tests build adapters directly to avoid env contamination.
+        pub fn new(allowlist: HashSet<String>, require_https: bool, max_body_bytes: usize) -> Self {
+            let config = ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build();
+            let agent = ureq::Agent::new_with_config(config);
+            Self {
+                agent,
+                allowlist,
+                require_https,
+                max_body_bytes,
+            }
+        }
+
+        fn check_allowlist(&self, host: &str) -> Result<(), NetError> {
+            if self.allowlist.contains(host) {
+                Ok(())
+            } else {
+                Err(NetError::AllowlistDenied)
+            }
         }
     }
-}
 
-#[actor]
-impl NativeActor for NetCapability {
-    type Config = NetConfig;
+    impl NetAdapter for UreqNetAdapter {
+        fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, NetError> {
+            let parsed =
+                url::Url::parse(&req.url).map_err(|e| NetError::InvalidUrl(format!("{e}")))?;
 
-    /// ADR-0043 + ADR-0074 Phase 5 chassis-owned mailbox.
-    const NAMESPACE: &'static str = "aether.net";
+            if self.require_https && parsed.scheme() != "https" {
+                return Err(NetError::InvalidUrl(
+                    "http scheme not allowed (AETHER_NET_REQUIRE_HTTPS=1)".to_string(),
+                ));
+            }
 
-    /// Build the net adapter from the resolved config. The adapter is
-    /// built immediately so configuration errors surface at chassis-
-    /// builder time, not at first fetch.
-    fn init(config: NetConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        let default_timeout = config.default_timeout;
-        Ok(Self {
-            adapter: build_net_adapter(config),
-            default_timeout,
-        })
-    }
+            let host = parsed
+                .host_str()
+                .ok_or_else(|| NetError::InvalidUrl("no host in url".to_string()))?;
+            self.check_allowlist(host)?;
 
-    /// Run a fetch request and reply with the response.
-    ///
-    /// # Agent
-    /// Reply: `FetchResult`. Synchronous on the dispatcher thread —
-    /// long-running fetches block other net mail until they finish.
-    #[handler]
-    fn on_fetch(&self, ctx: &mut NativeCtx<'_>, mail: Fetch) {
-        let timeout = mail
-            .timeout_ms
-            .map(|ms| Duration::from_millis(ms as u64))
-            .unwrap_or(self.default_timeout);
+            if req.body.len() > self.max_body_bytes {
+                return Err(NetError::BodyTooLarge);
+            }
 
-        let url = mail.url.clone();
-        let adapter_req = FetchRequest {
-            url: mail.url,
-            method: mail.method,
-            headers: mail.headers,
-            body: mail.body,
-            timeout,
-        };
+            let mut builder = ureq::http::Request::builder()
+                .method(http_method_to_http_crate(req.method))
+                .uri(&req.url);
 
-        let reply = match self.adapter.fetch(adapter_req) {
-            Ok(r) => FetchResult::Ok {
-                url,
-                status: r.status,
-                headers: r.headers,
-                body: r.body,
-            },
-            Err(error) => FetchResult::Err { url, error },
-        };
-        ctx.reply(&reply);
-    }
-}
+            // Host header is derived from the URL by ureq; reject any
+            // caller-set Host so it can't be used to bypass the
+            // allowlist (component requests allowlisted A, TLS SNI is A,
+            // but `Host: B` routes the vhost to B server-side). User-
+            // Agent defaults to `aether/<version>` if not set.
+            let mut saw_user_agent = false;
+            for h in &req.headers {
+                if h.name.eq_ignore_ascii_case("host") {
+                    tracing::warn!(
+                        target: "aether_substrate::net",
+                        value = %h.value,
+                        "stripping caller-set Host header",
+                    );
+                    continue;
+                }
+                if h.name.eq_ignore_ascii_case("user-agent") {
+                    saw_user_agent = true;
+                }
+                builder = builder.header(&h.name, &h.value);
+            }
+            if !saw_user_agent {
+                builder =
+                    builder.header("User-Agent", concat!("aether/", env!("CARGO_PKG_VERSION")));
+            }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aether_actor::Actor;
-    use aether_data::{Kind, MailboxId};
-    use aether_substrate::capability::{BootError, ChassisBuilder};
-    use aether_substrate::mail::ReplyTo;
-    use aether_substrate::mailer::Mailer;
-    use aether_substrate::native_transport::NativeTransport;
-    use aether_substrate::registry::Registry;
-    use std::sync::Mutex;
+            let http_req = builder
+                .body(req.body)
+                .map_err(|e| NetError::InvalidUrl(format!("{e}")))?;
 
-    fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-        let registry = Arc::new(Registry::new());
-        for d in aether_kinds::descriptors::all() {
-            let _ = registry.register_kind_with_descriptor(d);
-        }
-        (registry, Arc::new(Mailer::new()))
-    }
+            use ureq::RequestExt;
+            let mut response = http_req
+                .with_agent(&self.agent)
+                .configure()
+                .timeout_global(Some(req.timeout))
+                .build()
+                .run()
+                .map_err(ureq_error_to_net_error)?;
 
-    struct StubAdapter {
-        response: Mutex<Option<Result<FetchResponse, NetError>>>,
-        last_request: Mutex<Option<FetchRequest>>,
-    }
+            let status = response.status().as_u16();
 
-    impl StubAdapter {
-        fn with(response: Result<FetchResponse, NetError>) -> Arc<Self> {
-            Arc::new(Self {
-                response: Mutex::new(Some(response)),
-                last_request: Mutex::new(None),
+            let mut headers = Vec::with_capacity(response.headers().len());
+            for (name, value) in response.headers() {
+                // Non-UTF8 header values are rare but real (binary
+                // cookies, broken servers). Skip rather than fail the
+                // whole fetch.
+                if let Ok(value_str) = value.to_str() {
+                    headers.push(HttpHeader {
+                        name: name.as_str().to_string(),
+                        value: value_str.to_string(),
+                    });
+                }
+            }
+
+            let body = match response
+                .body_mut()
+                .with_config()
+                .limit(self.max_body_bytes as u64)
+                .read_to_vec()
+            {
+                Ok(b) => b,
+                Err(ureq::Error::BodyExceedsLimit(_)) => return Err(NetError::BodyTooLarge),
+                Err(e) => return Err(NetError::AdapterError(format!("body read: {e}"))),
+            };
+
+            Ok(FetchResponse {
+                status,
+                headers,
+                body,
             })
         }
     }
 
-    impl NetAdapter for StubAdapter {
-        fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, NetError> {
-            *self.last_request.lock().unwrap() = Some(FetchRequest {
-                url: req.url.clone(),
-                method: req.method,
-                headers: req.headers.clone(),
-                body: req.body.clone(),
-                timeout: req.timeout,
+    fn http_method_to_http_crate(m: HttpMethod) -> ureq::http::Method {
+        match m {
+            HttpMethod::Get => ureq::http::Method::GET,
+            HttpMethod::Post => ureq::http::Method::POST,
+            HttpMethod::Put => ureq::http::Method::PUT,
+            HttpMethod::Delete => ureq::http::Method::DELETE,
+            HttpMethod::Patch => ureq::http::Method::PATCH,
+            HttpMethod::Head => ureq::http::Method::HEAD,
+            HttpMethod::Options => ureq::http::Method::OPTIONS,
+        }
+    }
+
+    fn ureq_error_to_net_error(e: ureq::Error) -> NetError {
+        match e {
+            ureq::Error::Timeout(_) => NetError::Timeout,
+            ureq::Error::BodyExceedsLimit(_) => NetError::BodyTooLarge,
+            other => NetError::AdapterError(format!("{other}")),
+        }
+    }
+
+    /// Build a net adapter from explicit configuration.
+    pub fn build_net_adapter(config: NetConfig) -> Arc<dyn NetAdapter> {
+        if config.disabled {
+            tracing::info!(
+                target: "aether_substrate::net",
+                "net adapter disabled — every fetch replies Disabled",
+            );
+            return Arc::new(DisabledNetAdapter);
+        }
+
+        tracing::info!(
+            target: "aether_substrate::net",
+            allowlist_size = config.allowlist.len(),
+            require_https = config.require_https,
+            max_body_bytes = config.max_body_bytes,
+            "net adapter configured",
+        );
+
+        Arc::new(UreqNetAdapter::new(
+            config.allowlist,
+            config.require_https,
+            config.max_body_bytes,
+        ))
+    }
+
+    /// `aether.net` mailbox cap. Owns the resolved adapter and the
+    /// default per-request timeout applied when `Fetch.timeout_ms` is
+    /// `None`. The dispatcher thread holds an `Arc<Self>` and routes
+    /// envelopes through the macro-emitted `NativeDispatch` impl;
+    /// replies route via `ctx.reply(&result)` through the substrate's
+    /// `Mailer::send_reply`.
+    pub struct NetCapability {
+        adapter: Arc<dyn NetAdapter>,
+        default_timeout: Duration,
+    }
+
+    #[cfg(test)]
+    impl NetCapability {
+        /// Test-only direct constructor. Production boots through
+        /// `Builder::with_actor::<NetCapability>(config)` which calls
+        /// `init`; tests that drive the cap with a stub adapter hand it
+        /// in directly.
+        pub(crate) fn from_adapter(
+            adapter: Arc<dyn NetAdapter>,
+            default_timeout: Duration,
+        ) -> Self {
+            Self {
+                adapter,
+                default_timeout,
+            }
+        }
+    }
+
+    #[actor]
+    impl NativeActor for NetCapability {
+        type Config = NetConfig;
+
+        /// ADR-0043 + ADR-0074 Phase 5 chassis-owned mailbox.
+        const NAMESPACE: &'static str = "aether.net";
+
+        /// Build the net adapter from the resolved config. The adapter is
+        /// built immediately so configuration errors surface at chassis-
+        /// builder time, not at first fetch.
+        fn init(config: NetConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            let default_timeout = config.default_timeout;
+            Ok(Self {
+                adapter: build_net_adapter(config),
+                default_timeout,
+            })
+        }
+
+        /// Run a fetch request and reply with the response.
+        ///
+        /// # Agent
+        /// Reply: `FetchResult`. Synchronous on the dispatcher thread —
+        /// long-running fetches block other net mail until they finish.
+        #[handler]
+        fn on_fetch(&self, ctx: &mut NativeCtx<'_>, mail: Fetch) {
+            let timeout = mail
+                .timeout_ms
+                .map(|ms| Duration::from_millis(ms as u64))
+                .unwrap_or(self.default_timeout);
+
+            let url = mail.url.clone();
+            let adapter_req = FetchRequest {
+                url: mail.url,
+                method: mail.method,
+                headers: mail.headers,
+                body: mail.body,
+                timeout,
+            };
+
+            let reply = match self.adapter.fetch(adapter_req) {
+                Ok(r) => FetchResult::Ok {
+                    url,
+                    status: r.status,
+                    headers: r.headers,
+                    body: r.body,
+                },
+                Err(error) => FetchResult::Err { url, error },
+            };
+            ctx.reply(&reply);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::sync::Mutex;
+
+        use super::super::{
+            DEFAULT_MAX_BODY_BYTES, DisabledNetAdapter, FetchRequest, FetchResponse, HttpHeader,
+            HttpMethod, NetAdapter, NetConfig, NetError,
+        };
+        use super::{
+            Arc, Duration, Fetch, FetchResult, HashSet, NetCapability, UreqNetAdapter,
+            build_net_adapter,
+        };
+        use aether_actor::Actor;
+        use aether_data::{Kind, MailboxId};
+        use aether_substrate::capability::{BootError, ChassisBuilder};
+        use aether_substrate::mail::ReplyTo;
+        use aether_substrate::mailer::Mailer;
+        use aether_substrate::native_actor::NativeCtx;
+        use aether_substrate::native_transport::NativeTransport;
+        use aether_substrate::registry::Registry;
+
+        fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
+            let registry = Arc::new(Registry::new());
+            for d in aether_kinds::descriptors::all() {
+                let _ = registry.register_kind_with_descriptor(d);
+            }
+            (registry, Arc::new(Mailer::new()))
+        }
+
+        struct StubAdapter {
+            response: Mutex<Option<Result<FetchResponse, NetError>>>,
+            last_request: Mutex<Option<FetchRequest>>,
+        }
+
+        impl StubAdapter {
+            fn with(response: Result<FetchResponse, NetError>) -> Arc<Self> {
+                Arc::new(Self {
+                    response: Mutex::new(Some(response)),
+                    last_request: Mutex::new(None),
+                })
+            }
+        }
+
+        impl NetAdapter for StubAdapter {
+            fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, NetError> {
+                *self.last_request.lock().unwrap() = Some(FetchRequest {
+                    url: req.url.clone(),
+                    method: req.method,
+                    headers: req.headers.clone(),
+                    body: req.body.clone(),
+                    timeout: req.timeout,
+                });
+                self.response
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("stub response already consumed")
+            }
+        }
+
+        use aether_data::{ReplyTarget, SessionToken, Uuid};
+
+        use aether_substrate::outbound::EgressEvent;
+
+        fn session_sender() -> ReplyTo {
+            ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
+        }
+
+        fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
+            use std::collections::HashMap;
+            use std::sync::RwLock;
+
+            let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
+            let mailer = Arc::new(Mailer::new());
+            mailer.wire(
+                Arc::new(aether_substrate::registry::Registry::new()),
+                Arc::new(RwLock::new(HashMap::new())),
+            );
+            mailer.wire_outbound(outbound);
+            (mailer, rx)
+        }
+
+        fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
+            rx: &std::sync::mpsc::Receiver<EgressEvent>,
+        ) -> K {
+            let event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            let EgressEvent::ToSession {
+                kind_name, payload, ..
+            } = event
+            else {
+                panic!("expected ToSession egress, got {event:?}");
+            };
+            assert_eq!(kind_name, K::NAME);
+            postcard::from_bytes(&payload).unwrap()
+        }
+
+        /// Boot the cap against a default disabled NetConfig and confirm
+        /// the mailbox is registered.
+        #[test]
+        fn capability_boots_and_registers_mailbox() {
+            let (registry, mailer) = fresh_substrate();
+            let config = NetConfig {
+                disabled: true,
+                ..NetConfig::default()
+            };
+            let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<NetCapability>(config)
+                .build()
+                .expect("net capability boots");
+            assert!(
+                registry.lookup(NetCapability::NAMESPACE).is_some(),
+                "net mailbox registered"
+            );
+            chassis.shutdown();
+        }
+
+        /// Builder rejects a duplicate claim.
+        #[test]
+        fn duplicate_claim_rejects_with_typed_error() {
+            let (registry, mailer) = fresh_substrate();
+            registry.register_sink(NetCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            let config = NetConfig {
+                disabled: true,
+                ..NetConfig::default()
+            };
+
+            let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<NetCapability>(config)
+                .build()
+                .expect_err("collision must surface as BootError");
+            assert!(matches!(
+                err,
+                BootError::MailboxAlreadyClaimed { ref name }
+                    if name == NetCapability::NAMESPACE
+            ));
+        }
+
+        #[test]
+        fn disabled_adapter_replies_disabled() {
+            let (mailer, rx) = test_mailer_and_rx();
+            let cap = NetCapability::from_adapter(
+                Arc::new(DisabledNetAdapter),
+                NetConfig::default().default_timeout,
+            );
+            let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+            let mut ctx = NativeCtx::new(&transport, session_sender());
+            cap.on_fetch(
+                &mut ctx,
+                Fetch {
+                    url: "https://api.example.com/".to_string(),
+                    method: HttpMethod::Get,
+                    headers: vec![],
+                    body: vec![],
+                    timeout_ms: None,
+                },
+            );
+            match decode_reply::<FetchResult>(&rx) {
+                FetchResult::Err {
+                    url,
+                    error: NetError::Disabled,
+                } => {
+                    assert_eq!(url, "https://api.example.com/");
+                }
+                other => panic!("expected Err Disabled, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn allowlist_empty_rejects_every_host() {
+            let adapter = UreqNetAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES);
+            let resp = adapter.fetch(FetchRequest {
+                url: "https://api.example.com/".to_string(),
+                method: HttpMethod::Get,
+                headers: vec![],
+                body: vec![],
+                timeout: Duration::from_secs(30),
             });
-            self.response
+            assert!(matches!(resp, Err(NetError::AllowlistDenied)));
+        }
+
+        #[test]
+        fn allowlist_miss_returns_denied_without_making_request() {
+            let mut allowlist = HashSet::new();
+            allowlist.insert("allowed.example.com".to_string());
+            let adapter = UreqNetAdapter::new(allowlist, false, DEFAULT_MAX_BODY_BYTES);
+            let resp = adapter.fetch(FetchRequest {
+                url: "https://denied.example.com/".to_string(),
+                method: HttpMethod::Get,
+                headers: vec![],
+                body: vec![],
+                timeout: Duration::from_secs(30),
+            });
+            assert!(matches!(resp, Err(NetError::AllowlistDenied)));
+        }
+
+        #[test]
+        fn invalid_url_returns_invalid_url_variant() {
+            let adapter = UreqNetAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES);
+            let resp = adapter.fetch(FetchRequest {
+                url: "not-a-url".to_string(),
+                method: HttpMethod::Get,
+                headers: vec![],
+                body: vec![],
+                timeout: Duration::from_secs(30),
+            });
+            assert!(matches!(resp, Err(NetError::InvalidUrl(_))));
+        }
+
+        #[test]
+        fn require_https_rejects_http_scheme() {
+            let mut allowlist = HashSet::new();
+            allowlist.insert("example.com".to_string());
+            let adapter = UreqNetAdapter::new(allowlist, true, DEFAULT_MAX_BODY_BYTES);
+            let resp = adapter.fetch(FetchRequest {
+                url: "http://example.com/".to_string(),
+                method: HttpMethod::Get,
+                headers: vec![],
+                body: vec![],
+                timeout: Duration::from_secs(30),
+            });
+            assert!(matches!(resp, Err(NetError::InvalidUrl(_))));
+        }
+
+        #[test]
+        fn oversize_request_body_returns_body_too_large() {
+            let mut allowlist = HashSet::new();
+            allowlist.insert("example.com".to_string());
+            let adapter = UreqNetAdapter::new(allowlist, false, 10);
+            let resp = adapter.fetch(FetchRequest {
+                url: "https://example.com/".to_string(),
+                method: HttpMethod::Post,
+                headers: vec![],
+                body: vec![0u8; 20],
+                timeout: Duration::from_secs(30),
+            });
+            assert!(matches!(resp, Err(NetError::BodyTooLarge)));
+        }
+
+        #[test]
+        fn cap_fetch_ok_replies_with_response() {
+            let (mailer, rx) = test_mailer_and_rx();
+            let stub = StubAdapter::with(Ok(FetchResponse {
+                status: 200,
+                headers: vec![HttpHeader {
+                    name: "content-type".to_string(),
+                    value: "application/json".to_string(),
+                }],
+                body: b"{}".to_vec(),
+            }));
+            let cap = NetCapability::from_adapter(
+                stub as Arc<dyn NetAdapter>,
+                NetConfig::default().default_timeout,
+            );
+            let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+            let mut ctx = NativeCtx::new(&transport, session_sender());
+            cap.on_fetch(
+                &mut ctx,
+                Fetch {
+                    url: "https://api.example.com/v1".to_string(),
+                    method: HttpMethod::Get,
+                    headers: vec![],
+                    body: vec![],
+                    timeout_ms: Some(5000),
+                },
+            );
+            match decode_reply::<FetchResult>(&rx) {
+                FetchResult::Ok {
+                    url,
+                    status,
+                    headers,
+                    body,
+                } => {
+                    assert_eq!(url, "https://api.example.com/v1");
+                    assert_eq!(status, 200);
+                    assert_eq!(headers.len(), 1);
+                    assert_eq!(body, b"{}".to_vec());
+                }
+                FetchResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            }
+        }
+
+        #[test]
+        fn cap_fetch_err_echoes_url_and_error() {
+            let (mailer, rx) = test_mailer_and_rx();
+            let cap = NetCapability::from_adapter(
+                StubAdapter::with(Err(NetError::Timeout)) as Arc<dyn NetAdapter>,
+                NetConfig::default().default_timeout,
+            );
+            let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+            let mut ctx = NativeCtx::new(&transport, session_sender());
+            cap.on_fetch(
+                &mut ctx,
+                Fetch {
+                    url: "https://slow.example.com/".to_string(),
+                    method: HttpMethod::Get,
+                    headers: vec![],
+                    body: vec![],
+                    timeout_ms: None,
+                },
+            );
+            match decode_reply::<FetchResult>(&rx) {
+                FetchResult::Err { url, error } => {
+                    assert_eq!(url, "https://slow.example.com/");
+                    assert_eq!(error, NetError::Timeout);
+                }
+                FetchResult::Ok { .. } => panic!("expected Err"),
+            }
+        }
+
+        #[test]
+        fn cap_uses_default_timeout_when_none_provided() {
+            let (mailer, _rx) = test_mailer_and_rx();
+            let stub = StubAdapter::with(Ok(FetchResponse {
+                status: 200,
+                headers: vec![],
+                body: vec![],
+            }));
+            let stub_clone = Arc::clone(&stub);
+            let cap = NetCapability::from_adapter(
+                stub as Arc<dyn NetAdapter>,
+                NetConfig::default().default_timeout,
+            );
+            let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+            let mut ctx = NativeCtx::new(&transport, session_sender());
+            cap.on_fetch(
+                &mut ctx,
+                Fetch {
+                    url: "https://api.example.com/".to_string(),
+                    method: HttpMethod::Get,
+                    headers: vec![],
+                    body: vec![],
+                    timeout_ms: None,
+                },
+            );
+            let observed = stub_clone
+                .last_request
                 .lock()
                 .unwrap()
                 .take()
-                .expect("stub response already consumed")
+                .expect("adapter was not called");
+            assert!(observed.timeout > Duration::ZERO);
         }
-    }
 
-    use aether_data::{ReplyTarget, SessionToken, Uuid};
-
-    use aether_substrate::outbound::EgressEvent;
-
-    fn session_sender() -> ReplyTo {
-        ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
-    }
-
-    fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
-        use std::collections::HashMap;
-        use std::sync::RwLock;
-
-        let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(
-            Arc::new(aether_substrate::registry::Registry::new()),
-            Arc::new(RwLock::new(HashMap::new())),
-        );
-        mailer.wire_outbound(outbound);
-        (mailer, rx)
-    }
-
-    fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
-        rx: &std::sync::mpsc::Receiver<EgressEvent>,
-    ) -> K {
-        let event = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        let EgressEvent::ToSession {
-            kind_name, payload, ..
-        } = event
-        else {
-            panic!("expected ToSession egress, got {event:?}");
-        };
-        assert_eq!(kind_name, K::NAME);
-        postcard::from_bytes(&payload).unwrap()
-    }
-
-    /// Boot the cap against a default disabled NetConfig and confirm
-    /// the mailbox is registered.
-    #[test]
-    fn capability_boots_and_registers_mailbox() {
-        let (registry, mailer) = fresh_substrate();
-        let config = NetConfig {
-            disabled: true,
-            ..NetConfig::default()
-        };
-        let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<NetCapability>(config)
-            .build()
-            .expect("net capability boots");
-        assert!(
-            registry.lookup(NetCapability::NAMESPACE).is_some(),
-            "net mailbox registered"
-        );
-        chassis.shutdown();
-    }
-
-    /// Builder rejects a duplicate claim.
-    #[test]
-    fn duplicate_claim_rejects_with_typed_error() {
-        let (registry, mailer) = fresh_substrate();
-        registry.register_sink(NetCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
-        let config = NetConfig {
-            disabled: true,
-            ..NetConfig::default()
-        };
-
-        let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<NetCapability>(config)
-            .build()
-            .expect_err("collision must surface as BootError");
-        assert!(matches!(
-            err,
-            BootError::MailboxAlreadyClaimed { ref name }
-                if name == NetCapability::NAMESPACE
-        ));
-    }
-
-    #[test]
-    fn disabled_adapter_replies_disabled() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let cap = NetCapability::from_adapter(
-            Arc::new(DisabledNetAdapter),
-            NetConfig::default().default_timeout,
-        );
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
-        let mut ctx = NativeCtx::new(&transport, session_sender());
-        cap.on_fetch(
-            &mut ctx,
-            Fetch {
-                url: "https://api.example.com/".to_string(),
+        #[test]
+        fn build_net_adapter_with_disable_returns_disabled() {
+            let cfg = NetConfig {
+                disabled: true,
+                ..NetConfig::default()
+            };
+            let a = build_net_adapter(cfg);
+            let resp = a.fetch(FetchRequest {
+                url: "https://example.com/".to_string(),
                 method: HttpMethod::Get,
                 headers: vec![],
                 body: vec![],
-                timeout_ms: None,
-            },
-        );
-        match decode_reply::<FetchResult>(&rx) {
-            FetchResult::Err {
-                url,
-                error: NetError::Disabled,
-            } => {
-                assert_eq!(url, "https://api.example.com/");
-            }
-            other => panic!("expected Err Disabled, got {other:?}"),
+                timeout: Duration::from_secs(30),
+            });
+            assert!(matches!(resp, Err(NetError::Disabled)));
         }
-    }
 
-    #[test]
-    fn allowlist_empty_rejects_every_host() {
-        let adapter = UreqNetAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES);
-        let resp = adapter.fetch(FetchRequest {
-            url: "https://api.example.com/".to_string(),
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: vec![],
-            timeout: Duration::from_secs(30),
-        });
-        assert!(matches!(resp, Err(NetError::AllowlistDenied)));
+        /// Silence `Kind` unused-import (handy for the test mod's
+        /// `decode_reply` bound).
+        #[allow(dead_code)]
+        fn _silence_kind<K: Kind>() {}
     }
-
-    #[test]
-    fn allowlist_miss_returns_denied_without_making_request() {
-        let mut allowlist = HashSet::new();
-        allowlist.insert("allowed.example.com".to_string());
-        let adapter = UreqNetAdapter::new(allowlist, false, DEFAULT_MAX_BODY_BYTES);
-        let resp = adapter.fetch(FetchRequest {
-            url: "https://denied.example.com/".to_string(),
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: vec![],
-            timeout: Duration::from_secs(30),
-        });
-        assert!(matches!(resp, Err(NetError::AllowlistDenied)));
-    }
-
-    #[test]
-    fn invalid_url_returns_invalid_url_variant() {
-        let adapter = UreqNetAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES);
-        let resp = adapter.fetch(FetchRequest {
-            url: "not-a-url".to_string(),
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: vec![],
-            timeout: Duration::from_secs(30),
-        });
-        assert!(matches!(resp, Err(NetError::InvalidUrl(_))));
-    }
-
-    #[test]
-    fn require_https_rejects_http_scheme() {
-        let mut allowlist = HashSet::new();
-        allowlist.insert("example.com".to_string());
-        let adapter = UreqNetAdapter::new(allowlist, true, DEFAULT_MAX_BODY_BYTES);
-        let resp = adapter.fetch(FetchRequest {
-            url: "http://example.com/".to_string(),
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: vec![],
-            timeout: Duration::from_secs(30),
-        });
-        assert!(matches!(resp, Err(NetError::InvalidUrl(_))));
-    }
-
-    #[test]
-    fn oversize_request_body_returns_body_too_large() {
-        let mut allowlist = HashSet::new();
-        allowlist.insert("example.com".to_string());
-        let adapter = UreqNetAdapter::new(allowlist, false, 10);
-        let resp = adapter.fetch(FetchRequest {
-            url: "https://example.com/".to_string(),
-            method: HttpMethod::Post,
-            headers: vec![],
-            body: vec![0u8; 20],
-            timeout: Duration::from_secs(30),
-        });
-        assert!(matches!(resp, Err(NetError::BodyTooLarge)));
-    }
-
-    #[test]
-    fn cap_fetch_ok_replies_with_response() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let stub = StubAdapter::with(Ok(FetchResponse {
-            status: 200,
-            headers: vec![HttpHeader {
-                name: "content-type".to_string(),
-                value: "application/json".to_string(),
-            }],
-            body: b"{}".to_vec(),
-        }));
-        let cap = NetCapability::from_adapter(
-            stub as Arc<dyn NetAdapter>,
-            NetConfig::default().default_timeout,
-        );
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
-        let mut ctx = NativeCtx::new(&transport, session_sender());
-        cap.on_fetch(
-            &mut ctx,
-            Fetch {
-                url: "https://api.example.com/v1".to_string(),
-                method: HttpMethod::Get,
-                headers: vec![],
-                body: vec![],
-                timeout_ms: Some(5000),
-            },
-        );
-        match decode_reply::<FetchResult>(&rx) {
-            FetchResult::Ok {
-                url,
-                status,
-                headers,
-                body,
-            } => {
-                assert_eq!(url, "https://api.example.com/v1");
-                assert_eq!(status, 200);
-                assert_eq!(headers.len(), 1);
-                assert_eq!(body, b"{}".to_vec());
-            }
-            FetchResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
-        }
-    }
-
-    #[test]
-    fn cap_fetch_err_echoes_url_and_error() {
-        let (mailer, rx) = test_mailer_and_rx();
-        let cap = NetCapability::from_adapter(
-            StubAdapter::with(Err(NetError::Timeout)) as Arc<dyn NetAdapter>,
-            NetConfig::default().default_timeout,
-        );
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
-        let mut ctx = NativeCtx::new(&transport, session_sender());
-        cap.on_fetch(
-            &mut ctx,
-            Fetch {
-                url: "https://slow.example.com/".to_string(),
-                method: HttpMethod::Get,
-                headers: vec![],
-                body: vec![],
-                timeout_ms: None,
-            },
-        );
-        match decode_reply::<FetchResult>(&rx) {
-            FetchResult::Err { url, error } => {
-                assert_eq!(url, "https://slow.example.com/");
-                assert_eq!(error, NetError::Timeout);
-            }
-            FetchResult::Ok { .. } => panic!("expected Err"),
-        }
-    }
-
-    #[test]
-    fn cap_uses_default_timeout_when_none_provided() {
-        let (mailer, _rx) = test_mailer_and_rx();
-        let stub = StubAdapter::with(Ok(FetchResponse {
-            status: 200,
-            headers: vec![],
-            body: vec![],
-        }));
-        let stub_clone = Arc::clone(&stub);
-        let cap = NetCapability::from_adapter(
-            stub as Arc<dyn NetAdapter>,
-            NetConfig::default().default_timeout,
-        );
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
-        let mut ctx = NativeCtx::new(&transport, session_sender());
-        cap.on_fetch(
-            &mut ctx,
-            Fetch {
-                url: "https://api.example.com/".to_string(),
-                method: HttpMethod::Get,
-                headers: vec![],
-                body: vec![],
-                timeout_ms: None,
-            },
-        );
-        let observed = stub_clone
-            .last_request
-            .lock()
-            .unwrap()
-            .take()
-            .expect("adapter was not called");
-        assert!(observed.timeout > Duration::ZERO);
-    }
-
-    #[test]
-    fn build_net_adapter_with_disable_returns_disabled() {
-        let cfg = NetConfig {
-            disabled: true,
-            ..NetConfig::default()
-        };
-        let a = build_net_adapter(cfg);
-        let resp = a.fetch(FetchRequest {
-            url: "https://example.com/".to_string(),
-            method: HttpMethod::Get,
-            headers: vec![],
-            body: vec![],
-            timeout: Duration::from_secs(30),
-        });
-        assert!(matches!(resp, Err(NetError::Disabled)));
-    }
-
-    /// Silence `Kind` unused-import (handy for the test mod's
-    /// `decode_reply` bound).
-    #[allow(dead_code)]
-    fn _silence_kind<K: Kind>() {}
 }
