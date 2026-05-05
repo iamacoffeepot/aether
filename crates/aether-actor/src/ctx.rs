@@ -21,6 +21,7 @@ use aether_data::{Kind, Schema};
 use crate::actor::{Actor, HandlesKind, Singleton};
 use crate::handle::{self, Handle, SyncHandleError};
 use crate::mail::ReplyTo;
+use crate::sender::{MailCtx, Sender};
 use crate::sink::{
     ActorMailbox, KindId, Mailbox, resolve, resolve_actor, resolve_actor_named, resolve_mailbox,
 };
@@ -346,6 +347,77 @@ impl<'a, T: MailTransport> DropCtx<'a, T> {
         let payload = postcard::to_allocvec(value).expect("postcard encode to Vec is infallible");
         out.extend_from_slice(&payload);
         self.save_state(version, &out);
+    }
+}
+
+/// Issue 552 stage 1: cross-transport [`Sender`] impl. Routes through
+/// the actor-typed sink (`resolve_actor::<R, T>`) for typed sends and
+/// through the kind-typed sink (`resolve_mailbox::<K, T>`) for the
+/// string-keyed escape hatch. The wasm path's `Ctx<'a, WasmTransport>`
+/// inherits this impl through the [`crate::WasmCtx`] alias; the native
+/// `NativeCtx<'a>` (in `aether-substrate`) writes its own `Sender`
+/// impl since it doesn't go through `Ctx<'a, T>` (extra per-mail state
+/// — origin mailbox + reply target — that the universal ctx doesn't
+/// carry).
+impl<'a, T: MailTransport> Sender for Ctx<'a, T> {
+    fn send<R, K>(&mut self, payload: &K)
+    where
+        R: Actor + HandlesKind<K>,
+        K: aether_data::Kind,
+    {
+        resolve_actor::<R, T>().send(self.transport, payload);
+    }
+
+    fn send_many<R, K>(&mut self, payloads: &[K])
+    where
+        R: Actor + HandlesKind<K>,
+        K: aether_data::Kind + bytemuck::NoUninit,
+    {
+        resolve_actor::<R, T>().send_many(self.transport, payloads);
+    }
+
+    fn send_to_named<K: aether_data::Kind>(&mut self, name: &str, payload: &K) {
+        resolve_mailbox::<K, T>(name).send(self.transport, payload);
+    }
+}
+
+/// Issue 552 stage 1: per-handler reply surface on top of [`Sender`].
+/// `reply::<K>(...)` re-encodes through `Kind::encode_into_bytes` and
+/// dispatches via `T::reply_mail`. No-op when the inbound has no
+/// reply target (component-origin / broadcast mail).
+impl<'a, T: MailTransport> MailCtx for Ctx<'a, T> {
+    fn reply<K: aether_data::Kind>(&mut self, payload: &K) {
+        if let Some(raw) = self.sender {
+            let bytes = payload.encode_into_bytes();
+            self.transport.reply_mail(raw, K::ID.0, &bytes, 1);
+        }
+        // No-op on no-sender mail (broadcast or peer-component).
+    }
+}
+
+/// Issue 552 stage 1: init-time [`Sender`] impl. Same routing as
+/// per-handler `Sender`. Init contexts deliberately don't implement
+/// [`MailCtx`] — there is no inbound mail at boot, so no sender or
+/// reply target is defined.
+impl<'a, T: MailTransport> Sender for InitCtx<'a, T> {
+    fn send<R, K>(&mut self, payload: &K)
+    where
+        R: Actor + HandlesKind<K>,
+        K: aether_data::Kind,
+    {
+        resolve_actor::<R, T>().send(self.transport, payload);
+    }
+
+    fn send_many<R, K>(&mut self, payloads: &[K])
+    where
+        R: Actor + HandlesKind<K>,
+        K: aether_data::Kind + bytemuck::NoUninit,
+    {
+        resolve_actor::<R, T>().send_many(self.transport, payloads);
+    }
+
+    fn send_to_named<K: aether_data::Kind>(&mut self, name: &str, payload: &K) {
+        resolve_mailbox::<K, T>(name).send(self.transport, payload);
     }
 }
 

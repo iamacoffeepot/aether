@@ -44,6 +44,7 @@ pub mod log_capture;
 pub mod log_sink;
 pub mod mail;
 pub mod mailer;
+pub mod native_actor;
 pub mod native_transport;
 pub mod outbound;
 pub mod panic_hook;
@@ -70,6 +71,7 @@ pub use ctx::SubstrateCtx;
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
 pub use mail::{KindId, Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 pub use mailer::Mailer;
+pub use native_actor::{Actors, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx};
 pub use native_transport::NativeTransport;
 pub use outbound::{
     DroppingBackend, EgressBackend, EgressEvent, HubOutbound, LogEntry, LogLevel, RecordingBackend,

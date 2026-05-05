@@ -70,3 +70,10 @@ wasmparser = "0.224"
 
 [dev-dependencies]
 wat = "1"
+# Issue 552 stage 1: integration tests for the macro-emitted
+# NativeActor/NativeDispatch path use the Kind/Schema derives + Pod
+# derives. Dev-deps merge with the regular deps' feature sets, so the
+# test binary picks up the derive macros without the lib pulling them
+# in for non-test builds.
+aether-data = { path = "../aether-data", features = ["derive"] }
+bytemuck = { version = "1.19", features = ["derive"] }
