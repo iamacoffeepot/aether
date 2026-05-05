@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_capabilities::{
-    HandleCapability, IoCapability, LogCapability, NetCapability, io::NamespaceRoots,
-    net::NetConfig as NetConf,
+    BroadcastCapability, HandleCapability, IoCapability, LogCapability, NetCapability,
+    io::NamespaceRoots, net::NetConfig as NetConf,
 };
 use aether_data::{Kind, KindId};
 use aether_kinds::{
@@ -229,6 +229,7 @@ impl HeadlessChassis {
         // through the log capture.
         Builder::<HeadlessChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
+            .with_actor::<BroadcastCapability>(())
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
             .with_actor::<IoCapability>(namespace_roots)

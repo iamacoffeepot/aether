@@ -36,7 +36,6 @@
 extern crate self as aether_substrate;
 
 pub mod boot;
-pub mod broadcast;
 pub mod capability;
 pub mod capture;
 pub mod chassis;
@@ -66,7 +65,6 @@ pub mod scheduler;
 
 pub use aether_actor::Actor;
 pub use boot::{ChassisHandlerContext, SubstrateBoot, SubstrateBootBuilder};
-pub use broadcast::HubBroadcast;
 pub use capability::{
     ActorErased, BootError, BootedChassis, ChassisBuilder, ChassisCtx, DropOnShutdownClaim,
     Envelope, FallbackRouter, FrameBoundClaim, MailboxClaim, SinkSender, WedgedFrameBound,

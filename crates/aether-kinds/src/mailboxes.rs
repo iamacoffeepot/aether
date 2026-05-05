@@ -51,3 +51,20 @@ pub const LOG: MailboxId = mailbox_id_from_name("aether.log");
 /// Handle store mailbox (ADR-0045). Publish / Drop / Resolve route
 /// against the substrate-owned refcounted byte cache.
 pub const HANDLE: MailboxId = mailbox_id_from_name("aether.handle");
+
+/// Hub broadcast mailbox name (ADR-0008 observation path). Issue 576
+/// promoted broadcast into a real catch-all chassis cap living in
+/// `aether-capabilities`; substrate-internal code (scheduler death
+/// paths, frame loop frame_stats push) keeps a typed handle on the
+/// id without depending on the capabilities crate, so the constant
+/// lives here in `aether-kinds` — the layer both `aether-substrate`
+/// and `aether-capabilities` already pull. The cap reuses
+/// `HUB_BROADCAST_MAILBOX_NAME` as its `Actor::NAMESPACE` so name and
+/// id stay in lockstep without a second source of truth.
+pub const HUB_BROADCAST_MAILBOX_NAME: &str = "hub.claude.broadcast";
+
+/// Const-evaluated mailbox id matching [`HUB_BROADCAST_MAILBOX_NAME`].
+/// Same value any `mailbox_id_from_name` lookup at this name lands at,
+/// folded into a single symbol so chassis code reaches one place
+/// instead of recomputing the hash.
+pub const HUB_BROADCAST: MailboxId = mailbox_id_from_name(HUB_BROADCAST_MAILBOX_NAME);

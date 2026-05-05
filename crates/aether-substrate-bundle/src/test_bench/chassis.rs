@@ -22,7 +22,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::hub::HubClient;
 use aether_capabilities::{
-    HandleCapability, LogCapability, RenderCapability, RenderConfig, RenderHandles,
+    BroadcastCapability, HandleCapability, LogCapability, RenderCapability, RenderConfig,
+    RenderHandles,
 };
 use aether_data::{Kind, KindId};
 use aether_kinds::{
@@ -271,6 +272,7 @@ impl TestBenchChassis {
         };
         let passive =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
+                .with_actor::<BroadcastCapability>(())
                 .with_actor::<HandleCapability>(())
                 .with_actor::<LogCapability>(())
                 .with_actor::<RenderCapability>(render_config)

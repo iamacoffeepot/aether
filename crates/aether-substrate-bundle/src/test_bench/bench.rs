@@ -649,6 +649,20 @@ impl TestBench {
         if self.frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
             let triangles = self.triangles_rendered.load(Ordering::Relaxed);
             frame_loop::emit_frame_stats(&self.queue, self.kind_frame_stats, self.frame, triangles);
+            // Issue 576: pre-cap-promotion the broadcast sink ran inline on
+            // the caller thread, so `emit_frame_stats` synchronously
+            // produced an `EngineToHub::Mail` on outbound. Post-576
+            // broadcast is `BroadcastCapability` with its own dispatcher
+            // thread (FRAME_BARRIER, so the chassis tracks its pending
+            // counter). Without this drain, `pump_until_reply` would see
+            // `AdvanceResult` first and return before the broadcast
+            // dispatcher's `egress_broadcast` reached outbound, dropping
+            // `aether.observation.frame_stats` from `observed_kinds`.
+            // `drain_frame_bound_or_abort` waits on the broadcast cap's
+            // pending counter directly — caps register as sinks, not
+            // components, so `drain_or_abort` (which only drains
+            // `MailboxEntry::Component` entries) wouldn't help.
+            frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
             let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             tracing::info!(
                 target: "aether_substrate::frame_loop",

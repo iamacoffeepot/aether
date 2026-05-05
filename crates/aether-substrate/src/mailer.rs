@@ -103,6 +103,16 @@ impl Mailer {
         self.handle_store.get()
     }
 
+    /// Borrow the wired [`HubOutbound`], or `None` if no outbound was
+    /// wired (test paths, or chassis that skip hub connection).
+    /// Issue 576: surfaced so the broadcast cap's `init` can grab the
+    /// outbound at boot and lift catch-all envelopes through
+    /// [`HubOutbound::egress_broadcast`] without the substrate
+    /// holding a closure-sink for it.
+    pub fn outbound(&self) -> Option<&Arc<HubOutbound>> {
+        self.outbound.get()
+    }
+
     /// Hand `mail` to the substrate for dispatch. Sinks run on the
     /// caller thread; component mail forwards into the recipient's
     /// inbox (which bumps the per-entry drain counter); dropped /

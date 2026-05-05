@@ -38,14 +38,13 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use aether_actor::Actor;
 use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::{
     AETHER_CONTROL, AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ChassisControlHandler,
-    ControlPlane, HubBroadcast, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler,
-    SubstrateCtx, handle_store::HandleStore, host_fns, input::new_subscribers, log_capture,
+    ControlPlane, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
+    handle_store::HandleStore, host_fns, input::new_subscribers, log_capture,
 };
 
 /// Everything a chassis needs after shared boot setup. Fields are
@@ -240,45 +239,15 @@ impl<'a> SubstrateBootBuilder<'a> {
                 .expect("duplicate kind in substrate init");
         }
 
-        // The broadcast mailbox id is `HubBroadcast::MAILBOX_ID` —
-        // const-evaluated at compile time and equal to whatever this
-        // `register_sink` call returns. Stored once so callers reach
-        // for the symbol instead of holding a runtime field.
-        {
-            let outbound = Arc::clone(&outbound);
-            registry.register_sink(
-                HubBroadcast::NAMESPACE,
-                Arc::new(
-                    move |_kind: aether_data::KindId,
-                          kind_name: &str,
-                          origin: Option<&str>,
-                          sender: crate::mail::ReplyTo,
-                          bytes: &[u8],
-                          _count: u32| {
-                        if kind_name.is_empty() {
-                            tracing::warn!(
-                                target: "aether_substrate::broadcast",
-                                "{} received mail with unregistered kind — dropping",
-                                HubBroadcast::NAMESPACE,
-                            );
-                            return;
-                        }
-                        // ADR-0042: preserve the auto-minted
-                        // correlation end-to-end so MCP-side tooling
-                        // can correlate broadcasts with their
-                        // originating sends if it wants to. Most
-                        // broadcast uses are fire-and-forget and
-                        // ignore it.
-                        outbound.egress_broadcast(
-                            kind_name,
-                            bytes.to_vec(),
-                            origin.map(str::to_owned),
-                            sender.correlation_id,
-                        );
-                    },
-                ),
-            );
-        }
+        // Issue 576: broadcast moved out of substrate into the
+        // `BroadcastCapability` cap in `aether-capabilities`. Chassis bins
+        // chain `with_actor::<BroadcastCapability>(())` like every other
+        // cap; the cap's `init` grabs the wired `HubOutbound` from
+        // the mailer and its `#[fallback]` handler lifts every
+        // received envelope into `egress_broadcast`. The mailbox id
+        // matching `HUB_BROADCAST_MAILBOX_NAME` stays available to
+        // substrate-internal pushers (frame_stats, component_died)
+        // through `aether_kinds::mailboxes::HUB_BROADCAST`.
 
         // Diagnostic sink for hub → originating-engine typo reports
         // (ADR-0037 follow-up, issue #185). Re-emits the unresolved-

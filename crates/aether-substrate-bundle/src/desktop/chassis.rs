@@ -16,9 +16,9 @@
 use std::sync::Arc;
 
 use aether_capabilities::{
-    AudioCapability, HandleCapability, IoCapability, LogCapability, NetCapability,
-    RenderCapability, RenderConfig, audio::AudioConfig as AudioConf, io::NamespaceRoots,
-    net::NetConfig as NetConf,
+    AudioCapability, BroadcastCapability, HandleCapability, IoCapability, LogCapability,
+    NetCapability, RenderCapability, RenderConfig, audio::AudioConfig as AudioConf,
+    io::NamespaceRoots, net::NetConfig as NetConf,
 };
 use aether_data::Kind;
 use aether_kinds::{
@@ -351,6 +351,7 @@ impl DesktopChassis {
         // chassis cap.
         Builder::<DesktopChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
+            .with_actor::<BroadcastCapability>(())
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
             .with_actor::<IoCapability>(namespace_roots)
