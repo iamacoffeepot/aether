@@ -31,7 +31,7 @@ pub mod test_bench;
 
 pub use aether_capabilities as capabilities;
 pub use aether_substrate::{
-    AETHER_CONTROL, Chassis, ChassisControlHandler, Component, ControlPlane, HUB_CLAUDE_BROADCAST,
+    AETHER_CONTROL, Chassis, ChassisControlHandler, Component, ControlPlane, HubBroadcast,
     HubOutbound, InputSubscribers, KindId, Mail, MailKind, MailboxEntry, MailboxId, Mailer,
     Registry, ReplyTarget, ReplyTo, Scheduler, SinkHandler, SubstrateBoot, SubstrateCtx,
     capture::{CaptureQueue, PendingCapture},

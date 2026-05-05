@@ -165,27 +165,23 @@ fn abort_reason(summary: &DrainSummary) -> Option<String> {
 /// specific context (FPS, elapsed) the helper shouldn't decide
 /// the schema for.
 ///
-/// `sender` is the chassis substrate's mailbox identity (today the
-/// broadcast mailbox itself when the chassis owns the broadcast
-/// sink). It rides in the signature so future ReplyTo decoration
-/// (chassis-side observation routing) doesn't have to thread a new
-/// param through every call site; current routing for the broadcast
-/// kind is target-by-mailbox + fan-out, so the helper doesn't read
-/// it.
+/// Stage 3 of issue 552 retired the `broadcast_mbox` parameter:
+/// the recipient is `crate::HubBroadcast::MAILBOX_ID`, a const-
+/// evaluated id matching whatever `register_sink(HubBroadcast::NAMESPACE,
+/// ...)` returns at boot. `sender` likewise retired — the broadcast
+/// path is target-by-mailbox + fan-out, no reply, so a sender
+/// identity wasn't read by any consumer.
 pub fn emit_frame_stats(
     queue: &Mailer,
-    broadcast_mbox: MailboxId,
-    sender: MailboxId,
     kind_frame_stats: aether_data::KindId,
     frame: u64,
     triangles: u64,
 ) {
-    let _ = sender;
     if !frame.is_multiple_of(LOG_EVERY_FRAMES) {
         return;
     }
     queue.push(Mail::new(
-        broadcast_mbox,
+        crate::HubBroadcast::MAILBOX_ID,
         kind_frame_stats,
         encode(&FrameStats { frame, triangles }),
         1,
@@ -389,11 +385,12 @@ mod tests {
     /// zero deliveries.
     #[test]
     fn emit_frame_stats_skips_non_multiples() {
+        use aether_actor::Actor;
         let registry = Arc::new(Registry::new());
         let captured: Arc<RwLock<Vec<Vec<u8>>>> = Arc::new(RwLock::new(Vec::new()));
         let captured_for_sink = Arc::clone(&captured);
-        let broadcast = registry.register_sink(
-            crate::HUB_CLAUDE_BROADCAST,
+        registry.register_sink(
+            crate::HubBroadcast::NAMESPACE,
             Arc::new(
                 move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {
                     captured_for_sink.write().unwrap().push(bytes.to_vec());
@@ -405,8 +402,8 @@ mod tests {
         mailer.wire(Arc::clone(&registry), components);
 
         let kind_id = FrameStats::ID;
-        emit_frame_stats(&mailer, broadcast, MailboxId(0), kind_id, 1, 0);
-        emit_frame_stats(&mailer, broadcast, MailboxId(0), kind_id, 119, 0);
+        emit_frame_stats(&mailer, kind_id, 1, 0);
+        emit_frame_stats(&mailer, kind_id, 119, 0);
         assert!(captured.read().unwrap().is_empty());
     }
 
@@ -415,11 +412,12 @@ mod tests {
     /// through the cast decoder back to the input values.
     #[test]
     fn emit_frame_stats_emits_on_multiple() {
+        use aether_actor::Actor;
         let registry = Arc::new(Registry::new());
         let captured: Arc<RwLock<Vec<Vec<u8>>>> = Arc::new(RwLock::new(Vec::new()));
         let captured_for_sink = Arc::clone(&captured);
-        let broadcast = registry.register_sink(
-            crate::HUB_CLAUDE_BROADCAST,
+        registry.register_sink(
+            crate::HubBroadcast::NAMESPACE,
             Arc::new(
                 move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {
                     captured_for_sink.write().unwrap().push(bytes.to_vec());
@@ -430,14 +428,7 @@ mod tests {
         let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
         mailer.wire(Arc::clone(&registry), components);
 
-        emit_frame_stats(
-            &mailer,
-            broadcast,
-            MailboxId(0),
-            FrameStats::ID,
-            LOG_EVERY_FRAMES,
-            42,
-        );
+        emit_frame_stats(&mailer, FrameStats::ID, LOG_EVERY_FRAMES, 42);
         let frames = captured.read().unwrap();
         assert_eq!(frames.len(), 1, "one delivery on the boundary");
         let stats: FrameStats = aether_data::decode(&frames[0]).expect("decode FrameStats");
