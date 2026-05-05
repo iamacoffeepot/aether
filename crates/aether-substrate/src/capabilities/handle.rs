@@ -1,65 +1,79 @@
-//! Issue 545 PR E1: collapsed `aether.handle` cap. Pre-PR-E1 the cap
-//! lived split across `aether-kinds::handle::HandleCapability<B>`
-//! (facade generic) and this file (concrete `HandleStoreBackend`).
-//! The facade pattern (ADR-0075) is retired — caps are now regular
-//! `#[actor]` blocks, same shape as wasm components.
+//! Issue 552 stage 2: `aether.handle` cap migrated onto `NativeActor`.
+//! Pre-stage-2 the cap was an `Actor + Singleton + Dispatch` shape
+//! taking `&mut self` handlers with `sender: ReplyTo` parameters and
+//! routing replies through `self.mailer.send_reply(sender, &result)`.
+//! Stage 2 collapses that into the symmetric authoring shape:
+//! `#[capability] #[derive(Singleton)] struct + #[actor] impl
+//! NativeActor for X { type Config; fn init; #[handler] fn (&self,
+//! ctx: &mut NativeCtx<'_>, mail) }` — the same source shape wasm
+//! components write. Replies route through `ctx.reply(&result)`,
+//! which the per-mail `NativeCtx` walks back through the substrate's
+//! `Mailer::send_reply` to the originator (Component / Session /
+//! EngineMailbox / silent drop).
 //!
 //! Owns the shared [`HandleStore`] (the same instance the substrate's
-//! `Mailer::wire_handle_store` references for `Ref<Handle>` resolution)
-//! and an [`Arc<Mailer>`] for routing reply mail. The dispatcher
-//! thread owns the cap through the macro-emitted `Dispatch` impl;
-//! channel-drop on shutdown disconnects the inbox and the cap drops
-//! on the dispatcher thread.
+//! `Mailer::wire_handle_store` references for `Ref<Handle>` resolution).
+//! The store now flows in through `NativeInitCtx::mailer().handle_store()`
+//! at boot — caps no longer need their own `new(store, mailer)`
+//! constructor; the chassis builder's `with_actor::<HandleCapability>(())`
+//! is the boot site.
 
 use std::sync::Arc;
 
-use aether_actor::{Actor, Singleton};
-use aether_data::ReplyTo;
+use aether_actor::Singleton;
 use aether_kinds::{
     HandleError, HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
     HandleReleaseResult, HandleUnpin, HandleUnpinResult,
 };
 
+use crate::capability::BootError;
 use crate::handle_store::{HandleStore, PutError};
-use crate::mailer::Mailer;
+use crate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_actor::MailCtx;
 
 /// `aether.handle` mailbox cap. Owns the substrate's `HandleStore`
-/// and routes ADR-0045 publish/release/pin/unpin requests, replying
-/// via `Mailer::send_reply`. Decode failure on a malformed payload
-/// goes through the macro miss path (warn-log, no reply, sender's
+/// and routes ADR-0045 publish/release/pin/unpin requests via
+/// `ctx.reply(&result)`. Decode failure on a malformed payload goes
+/// through the macro miss path (warn-log, no reply, sender's
 /// `wait_reply` times out) — substrate-level invariant violation, not
 /// user-recoverable input.
+#[derive(Singleton)]
 pub struct HandleCapability {
     store: Arc<HandleStore>,
-    mailer: Arc<Mailer>,
 }
 
-impl HandleCapability {
-    /// Construct against the substrate's [`HandleStore`] and
-    /// [`Mailer`]. The store is shared with `Mailer::wire_handle_store`
-    /// so dispatch-time `Ref<Handle>` resolution and capability-handled
-    /// publish/release/pin/unpin observe the same entries.
-    pub fn new(store: Arc<HandleStore>, mailer: Arc<Mailer>) -> Self {
-        Self { store, mailer }
-    }
-}
-
-impl Actor for HandleCapability {
+#[aether_data::actor]
+impl NativeActor for HandleCapability {
+    type Config = ();
     /// ADR-0045 + ADR-0074 Phase 5: chassis-owned mailbox under the
     /// `aether.<name>` namespace.
     const NAMESPACE: &'static str = "aether.handle";
-}
 
-impl Singleton for HandleCapability {}
+    /// Pull the shared [`HandleStore`] off the substrate's wired
+    /// [`crate::Mailer`]. The store is wired by `SubstrateBoot::build`
+    /// before the chassis builder runs, so a `None` here is a
+    /// substrate-level boot ordering bug rather than user input —
+    /// surface it as a `BootError`.
+    fn init(_: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        let store = ctx
+            .mailer()
+            .handle_store()
+            .ok_or_else(|| {
+                BootError::Other(Box::new(std::io::Error::other(
+                    "HandleCapability::init: substrate Mailer has no HandleStore wired \
+                     (call wire_handle_store before chassis build)",
+                )))
+            })?
+            .clone();
+        Ok(Self { store })
+    }
 
-#[aether_data::actor]
-impl HandleCapability {
     /// Publish bytes under a fresh handle id.
     ///
     /// # Agent
     /// Reply: `HandlePublishResult`.
     #[aether_data::handler]
-    fn on_publish(&mut self, sender: ReplyTo, mail: HandlePublish) {
+    fn on_publish(&self, ctx: &mut NativeCtx<'_>, mail: HandlePublish) {
         let id = self.store.next_ephemeral();
         match self.store.put(id, mail.kind_id, mail.bytes) {
             Ok(()) => {
@@ -68,22 +82,16 @@ impl HandleCapability {
                 // zero the entry stays in the store (subject to LRU
                 // eviction under pressure).
                 self.store.inc_ref(id);
-                self.mailer.send_reply(
-                    sender,
-                    &HandlePublishResult::Ok {
-                        kind_id: mail.kind_id,
-                        id,
-                    },
-                );
+                ctx.reply(&HandlePublishResult::Ok {
+                    kind_id: mail.kind_id,
+                    id,
+                });
             }
             Err(e) => {
-                self.mailer.send_reply(
-                    sender,
-                    &HandlePublishResult::Err {
-                        kind_id: mail.kind_id,
-                        error: put_error_to_handle_error(e),
-                    },
-                );
+                ctx.reply(&HandlePublishResult::Err {
+                    kind_id: mail.kind_id,
+                    error: put_error_to_handle_error(e),
+                });
             }
         }
     }
@@ -94,18 +102,14 @@ impl HandleCapability {
     /// # Agent
     /// Reply: `HandleReleaseResult`.
     #[aether_data::handler]
-    fn on_release(&mut self, sender: ReplyTo, mail: HandleRelease) {
+    fn on_release(&self, ctx: &mut NativeCtx<'_>, mail: HandleRelease) {
         if self.store.dec_ref(mail.id) {
-            self.mailer
-                .send_reply(sender, &HandleReleaseResult::Ok { id: mail.id });
+            ctx.reply(&HandleReleaseResult::Ok { id: mail.id });
         } else {
-            self.mailer.send_reply(
-                sender,
-                &HandleReleaseResult::Err {
-                    id: mail.id,
-                    error: HandleError::UnknownHandle,
-                },
-            );
+            ctx.reply(&HandleReleaseResult::Err {
+                id: mail.id,
+                error: HandleError::UnknownHandle,
+            });
         }
     }
 
@@ -114,18 +118,14 @@ impl HandleCapability {
     /// # Agent
     /// Reply: `HandlePinResult`.
     #[aether_data::handler]
-    fn on_pin(&mut self, sender: ReplyTo, mail: HandlePin) {
+    fn on_pin(&self, ctx: &mut NativeCtx<'_>, mail: HandlePin) {
         if self.store.pin(mail.id) {
-            self.mailer
-                .send_reply(sender, &HandlePinResult::Ok { id: mail.id });
+            ctx.reply(&HandlePinResult::Ok { id: mail.id });
         } else {
-            self.mailer.send_reply(
-                sender,
-                &HandlePinResult::Err {
-                    id: mail.id,
-                    error: HandleError::UnknownHandle,
-                },
-            );
+            ctx.reply(&HandlePinResult::Err {
+                id: mail.id,
+                error: HandleError::UnknownHandle,
+            });
         }
     }
 
@@ -134,18 +134,14 @@ impl HandleCapability {
     /// # Agent
     /// Reply: `HandleUnpinResult`.
     #[aether_data::handler]
-    fn on_unpin(&mut self, sender: ReplyTo, mail: HandleUnpin) {
+    fn on_unpin(&self, ctx: &mut NativeCtx<'_>, mail: HandleUnpin) {
         if self.store.unpin(mail.id) {
-            self.mailer
-                .send_reply(sender, &HandleUnpinResult::Ok { id: mail.id });
+            ctx.reply(&HandleUnpinResult::Ok { id: mail.id });
         } else {
-            self.mailer.send_reply(
-                sender,
-                &HandleUnpinResult::Err {
-                    id: mail.id,
-                    error: HandleError::UnknownHandle,
-                },
-            );
+            ctx.reply(&HandleUnpinResult::Err {
+                id: mail.id,
+                error: HandleError::UnknownHandle,
+            });
         }
     }
 }
@@ -170,6 +166,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use aether_actor::Actor;
     use aether_data::{HandleId, Kind, KindId};
     use aether_data::{SessionToken, Uuid};
 
@@ -203,19 +200,18 @@ mod tests {
         ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::from_u128(0xfeed))))
     }
 
-    /// End-to-end through the cap: boot it, push a `HandlePublish`
-    /// mail at the registered mailbox, the dispatcher thread runs the
-    /// macro-emitted `Dispatch::__dispatch` which calls `on_publish`,
-    /// the reply lands on the hub-outbound channel.
+    /// End-to-end through the cap: boot it via `with_actor`, push a
+    /// `HandlePublish` mail at the registered mailbox, the dispatcher
+    /// thread runs the macro-emitted `NativeDispatch::__aether_dispatch_envelope`
+    /// which calls `on_publish`, the reply lands on the hub-outbound
+    /// channel via `ctx.reply(&HandlePublishResult::Ok)` →
+    /// `Mailer::send_reply` → `outbound.send_reply`.
     #[test]
     fn capability_routes_publish_through_dispatcher_thread() {
         let (store, mailer, registry, rx) = fresh_substrate();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(HandleCapability::new(
-                Arc::clone(&store),
-                Arc::clone(&mailer),
-            ))
+            .with_actor::<HandleCapability>(())
             .build()
             .expect("capability boots");
 
@@ -277,13 +273,10 @@ mod tests {
     /// thread exits within a generous deadline.
     #[test]
     fn shutdown_joins_dispatcher_thread() {
-        let (store, mailer, registry, _rx) = fresh_substrate();
+        let (_store, mailer, registry, _rx) = fresh_substrate();
 
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(HandleCapability::new(
-                Arc::clone(&store),
-                Arc::clone(&mailer),
-            ))
+            .with_actor::<HandleCapability>(())
             .build()
             .expect("capability boots");
 
@@ -300,14 +293,11 @@ mod tests {
     /// name was already registered.
     #[test]
     fn duplicate_claim_rejects_with_typed_error() {
-        let (store, mailer, registry, _rx) = fresh_substrate();
+        let (_store, mailer, registry, _rx) = fresh_substrate();
         registry.register_sink(HandleCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
         let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(HandleCapability::new(
-                Arc::clone(&store),
-                Arc::clone(&mailer),
-            ))
+            .with_actor::<HandleCapability>(())
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(

@@ -183,28 +183,16 @@ impl<'a> Sender for NativeCtx<'a> {
 }
 
 impl<'a> MailCtx for NativeCtx<'a> {
-    fn reply<K: Kind>(&mut self, payload: &K) {
-        // Stage 1: the trait method exists and dispatches through
-        // `NativeTransport::reply_mail`, which is itself a stage-2
-        // stub today. So `ctx.reply(...)` from a stage-1 native
-        // handler logs an `ERR_NOT_IMPLEMENTED` warning rather than
-        // routing — exactly the behaviour the macro+ctx infra
-        // promises. Stage 2 fleshes out `reply_mail` and the entire
-        // call site lights up without changing trait shape.
-        let bytes = payload.encode_into_bytes();
-        // The transport's `reply_mail` takes a u32 sender; the
-        // substrate-side `ReplyTo` carries richer routing info.
-        // Stage 2 either grows `reply_mail` to take the full
-        // ReplyTo (via a side channel) or routes through the
-        // mailer here directly. Today the no-op stub is fine.
-        let _ = bytes;
-        let _ = self.sender;
-        let _ = self.transport;
-        tracing::trace!(
-            target: "aether_substrate::native_actor",
-            kind = K::NAME,
-            "NativeCtx::reply called — wired to NativeTransport::reply_mail (stage 2 will route)"
-        );
+    /// Stage 2: route the reply through the substrate's `Mailer::send_reply`
+    /// (Component recipient → push as Mail with the originator's
+    /// correlation echoed and reply-to None; Session / EngineMailbox
+    /// → outbound bridge; None → silent drop). This is the same path
+    /// pre-stage-2 caps walked manually via `self.mailer.send_reply(sender, &result)`
+    /// — caps now reach for `ctx.reply(&result)` and the per-mail
+    /// ctx already holds both the mailer reference (via the transport)
+    /// and the inbound's reply target.
+    fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
+        self.transport.send_reply_for_handler(self.sender, payload);
     }
 }
 
