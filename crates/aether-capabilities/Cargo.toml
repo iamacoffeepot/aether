@@ -27,7 +27,8 @@ edition.workspace = true
 [features]
 # Default-on: chassis-target builds get the full cap set with their
 # substrate-side runtime impls. Wasm consumers do
-# `default-features = false`.
+# `default-features = false` and opt into per-cap marker features
+# (`render` / `audio`) for the caps they typed-send to.
 default = ["native"]
 
 # Pulls every wasm-incompatible dep + the `aether-substrate` runtime
@@ -43,11 +44,21 @@ native = [
     "dep:url",
 ]
 
-# Per-cap toggles for the GPU / audio backends. Each implies
-# `native` because the cap modules these gate are themselves
-# substrate-bound.
-render = ["native", "aether-substrate/render", "dep:wgpu", "dep:png"]
-audio = ["native", "aether-substrate/audio", "dep:cpal", "dep:crossbeam-queue"]
+# Wasm-safe marker layers. Activate from a wasm component that wants to
+# address the cap via `ctx.actor::<RenderCapability>().send(&kind)` —
+# the feature gates the cap module so its always-on `Actor` /
+# `Singleton` / `HandlesKind` impls + wasm-stub `pub struct` are
+# reachable, without dragging the GPU / audio native deps in.
+# Empty bodies on purpose: the markers compile from pure-Rust sources
+# already pulled in unconditionally (`aether-actor`, `aether-kinds`).
+render = []
+audio = []
+
+# Native impl layers — adds the substrate-side runtime + heavy deps
+# atop the marker layer. Chassis bins activate these. Each implies its
+# marker layer + `native` so chassis builds still see the full cap.
+render-native = ["render", "native", "aether-substrate/render", "dep:wgpu", "dep:png"]
+audio-native = ["audio", "native", "aether-substrate/audio", "dep:cpal", "dep:crossbeam-queue"]
 
 [dependencies]
 # Always-on: target-agnostic SDK + data layer + kind types. These

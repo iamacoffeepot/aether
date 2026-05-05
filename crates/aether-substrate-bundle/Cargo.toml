@@ -36,7 +36,7 @@ path = "src/bin/test-bench.rs"
 
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render", "audio"] }
-aether-capabilities = { path = "../aether-capabilities", features = ["render", "audio"] }
+aether-capabilities = { path = "../aether-capabilities", features = ["render-native", "audio-native"] }
 aether-data = { path = "../aether-data" }
 aether-codec = { path = "../aether-codec" }
 aether-kinds = { path = "../aether-kinds" }

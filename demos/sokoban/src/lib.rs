@@ -11,8 +11,9 @@
 //!
 //! Grid is still capped at 16×16 (pre-ADR-0028 carryover).
 
-use aether_actor::{BootError, KindId, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, KindId, Sender, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_camera::{CameraTopdownSet, TopdownParams};
+use aether_capabilities::RenderCapability;
 use aether_data::{Kind, Schema};
 use aether_kinds::{DrawTriangle, Key, Tick, Vertex, keycode};
 use bytemuck::{Pod, Zeroable};
@@ -117,8 +118,6 @@ const LEVELS: &[&[&str]] = &[
 pub struct Sokoban {
     state: SokobanState,
     state_kind: KindId<SokobanState>,
-    render: Mailbox<DrawTriangle>,
-    camera_follow: Mailbox<CameraTopdownSet>,
     /// Cached camera-follow envelope. The `name` field is set once at
     /// init and reused every tick to avoid re-allocating the String;
     /// only `params.center` is mutated per frame.
@@ -145,8 +144,6 @@ impl WasmActor for Sokoban {
         let mut me = Sokoban {
             state: SokobanState::default(),
             state_kind: ctx.resolve::<SokobanState>(),
-            render: ctx.resolve_mailbox::<DrawTriangle>("aether.render"),
-            camera_follow: ctx.resolve_mailbox::<CameraTopdownSet>("camera"),
             follow_msg: CameraTopdownSet {
                 name: "main".to_owned(),
                 params: TopdownParams {
@@ -165,7 +162,11 @@ impl WasmActor for Sokoban {
         let (px, py) = self.player_world_pos();
         self.render_player(ctx, px, py);
         self.follow_msg.params.center = Some([px, py]);
-        ctx.send(&self.camera_follow, &self.follow_msg);
+        // Camera component lives in a sibling cdylib whose runtime
+        // type isn't reachable here (enabling its `runtime` feature
+        // would emit duplicate FFI exports), so we stay on the
+        // string-keyed escape hatch for this peer-component send.
+        ctx.send_to_named("camera", &self.follow_msg);
     }
 
     /// Movement key. Tile-step on press; release is ignored.
@@ -346,7 +347,7 @@ impl Sokoban {
                 },
             ],
         };
-        ctx.send(&self.render, &body);
+        ctx.actor::<RenderCapability>().send(&body);
     }
 
     fn reply_state(&self, ctx: &mut WasmCtx<'_>) {
@@ -436,7 +437,7 @@ impl Sokoban {
                 n += 2;
             }
         }
-        ctx.send_many(&self.render, &tris[..n]);
+        ctx.actor::<RenderCapability>().send_many(&tris[..n]);
     }
 }
 

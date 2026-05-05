@@ -800,24 +800,61 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
 ///
 /// Naming follows the `cxx::bridge` precedent — an attribute on a
 /// mod that splits emission across a boundary.
+///
+/// ## `#[bridge(feature = "name")]`
+///
+/// Caps whose native impl pulls heavy native-only deps (`render` →
+/// wgpu+png, `audio` → cpal) live behind a cargo feature. Without the
+/// feature, the inner `#[actor]` block can't compile (its imports are
+/// gone). The optional `feature = "name"` argument adds the feature
+/// to the cfg keying both the wasm stub vs. native re-export and the
+/// inner `mod native` itself: stub when wasm32 OR the feature is off;
+/// re-export when native AND the feature is on. This keeps the
+/// always-on markers reachable for wasm components (so they can write
+/// `ctx.actor::<RenderCapability>().send(&triangle)`) without the
+/// feature pulling its native dep set in.
 #[proc_macro_attribute]
 pub fn bridge(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if !attr.is_empty() {
-        return syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[bridge] takes no arguments",
-        )
-        .to_compile_error()
-        .into();
-    }
+    let feature = match parse_bridge_attr(attr) {
+        Ok(f) => f,
+        Err(e) => return e.to_compile_error().into(),
+    };
     let item = parse_macro_input!(item as ItemMod);
-    match expand_bridge(item) {
+    match expand_bridge(item, feature) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
-fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
+/// Parse the optional `feature = "name"` argument on `#[bridge]`.
+/// Empty attr returns `None` (the default no-feature mode); anything
+/// else parses as a `syn::MetaNameValue` whose path must be `feature`
+/// and value must be a string literal.
+fn parse_bridge_attr(attr: TokenStream) -> syn::Result<Option<String>> {
+    if attr.is_empty() {
+        return Ok(None);
+    }
+    let meta: syn::MetaNameValue = syn::parse(attr)?;
+    if !meta.path.is_ident("feature") {
+        return Err(syn::Error::new_spanned(
+            &meta.path,
+            "#[bridge] only accepts `feature = \"name\"`",
+        ));
+    }
+    let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(s),
+        ..
+    }) = meta.value
+    else {
+        return Err(syn::Error::new_spanned(
+            &meta.path,
+            "#[bridge(feature = ...)] expects a string literal",
+        ));
+    };
+    Ok(Some(s.value()))
+}
+
+fn expand_bridge(mut item_mod: ItemMod, feature: Option<String>) -> syn::Result<TokenStream2> {
     let Some((brace, items)) = item_mod.content.take() else {
         return Err(syn::Error::new_spanned(
             &item_mod,
@@ -987,11 +1024,26 @@ fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
     let frame_barrier_const = frame_barrier_expr.map(|expr| {
         quote! { const FRAME_BARRIER: bool = #expr; }
     });
+    // When the bridge declares `feature = "X"`, the wasm stub also
+    // covers "native target without the feature" so consumers that
+    // build with `default-features = false` keep a reachable type for
+    // the always-on markers below. The native re-export and the inner
+    // `mod native` then key on `feature = "X"` too.
+    let (stub_cfg, native_cfg) = match feature.as_deref() {
+        None => (
+            quote! { #[cfg(target_arch = "wasm32")] },
+            quote! { #[cfg(not(target_arch = "wasm32"))] },
+        ),
+        Some(feat) => (
+            quote! { #[cfg(any(target_arch = "wasm32", not(feature = #feat)))] },
+            quote! { #[cfg(all(not(target_arch = "wasm32"), feature = #feat))] },
+        ),
+    };
     let stub_and_reexport = quote! {
-        #[cfg(target_arch = "wasm32")]
+        #stub_cfg
         pub struct #type_ident;
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #native_cfg
         pub use #mod_ident::#type_ident;
     };
     let singleton_marker = quote! {
@@ -1047,7 +1099,10 @@ fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
     }
 
     // Reassemble the mod with the rewritten contents and prepend the
-    // cfg gate.
+    // cfg gate. `native_cfg` keys on the optional feature too — without
+    // a feature it's the original `not(target_arch = "wasm32")`; with
+    // one it adds `feature = "X"` so the inner `mod native` only
+    // compiles when both the target and the feature say to.
     item_mod.content = Some((brace, items));
     let mod_attrs = std::mem::take(&mut item_mod.attrs);
     Ok(quote! {
@@ -1057,7 +1112,7 @@ fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
         #(#handles_kind_markers)*
 
         #(#mod_attrs)*
-        #[cfg(not(target_arch = "wasm32"))]
+        #native_cfg
         #item_mod
     })
 }

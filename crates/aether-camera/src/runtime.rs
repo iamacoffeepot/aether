@@ -35,7 +35,8 @@
 
 use std::collections::HashMap;
 
-use aether_actor::{BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::RenderCapability;
 use aether_kinds::{Camera, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, Vec2, Vec3};
 
@@ -224,7 +225,6 @@ pub struct CameraComponent {
     cameras: HashMap<String, CameraState>,
     active: Option<String>,
     aspect: f32,
-    camera: Mailbox<Camera>,
 }
 
 /// Multi-camera component. Hosts N named cameras, ticks all, publishes
@@ -249,7 +249,7 @@ pub struct CameraComponent {
 impl WasmActor for CameraComponent {
     const NAMESPACE: &'static str = "camera";
 
-    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         let mut cameras = HashMap::new();
         cameras.insert(
             "main".to_owned(),
@@ -261,7 +261,6 @@ impl WasmActor for CameraComponent {
             cameras,
             active: Some("main".to_owned()),
             aspect: DEFAULT_ASPECT,
-            camera: ctx.resolve_mailbox::<Camera>("aether.render"),
         })
     }
 
@@ -281,7 +280,7 @@ impl WasmActor for CameraComponent {
             && let Some(cam) = self.cameras.get(name)
         {
             let view_proj = cam.mode.view_proj(self.aspect);
-            ctx.send(&self.camera, &Camera { view_proj });
+            ctx.actor::<RenderCapability>().send(&Camera { view_proj });
         }
     }
 

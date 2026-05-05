@@ -36,11 +36,15 @@ pub mod net;
 pub mod render;
 
 #[cfg(feature = "audio")]
-pub use audio::{AudioCapability, AudioConfig};
+pub use audio::AudioCapability;
+#[cfg(feature = "audio-native")]
+pub use audio::AudioConfig;
 pub use broadcast::BroadcastCapability;
 pub use handle::HandleCapability;
 pub use io::IoCapability;
 pub use log::LogCapability;
 pub use net::{NetCapability, NetConfig};
 #[cfg(feature = "render")]
-pub use render::{RenderCapability, RenderConfig, RenderGpu, RenderHandles};
+pub use render::RenderCapability;
+#[cfg(feature = "render-native")]
+pub use render::{RenderConfig, RenderGpu, RenderHandles};
