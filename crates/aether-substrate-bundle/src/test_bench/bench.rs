@@ -649,6 +649,17 @@ impl TestBench {
         if self.frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
             let triangles = self.triangles_rendered.load(Ordering::Relaxed);
             frame_loop::emit_frame_stats(&self.queue, self.kind_frame_stats, self.frame, triangles);
+            // Issue 576: pre-cap-promotion the broadcast sink ran inline on
+            // the caller thread, so `emit_frame_stats` synchronously
+            // produced an `EngineToHub::Mail` on outbound. Now broadcast is
+            // an async `BroadcastCapability` dispatcher, so the FrameStats
+            // mail sits in its inbox until that thread runs. The test
+            // bench's `pump_until_reply` would otherwise see `AdvanceResult`
+            // first and return before broadcast produced its outbound
+            // frame, dropping `aether.observation.frame_stats` from
+            // `observed_kinds`. Drain after the push so any same-frame
+            // broadcast reaches outbound before `run_frame` returns.
+            frame_loop::drain_or_abort(&self.queue, &self.outbound);
             let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             tracing::info!(
                 target: "aether_substrate::frame_loop",
