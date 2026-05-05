@@ -19,7 +19,6 @@ use core::marker::PhantomData;
 use aether_data::{Kind, Schema, mailbox_id_from_name};
 
 use crate::actor::{Actor, HandlesKind, Singleton};
-use crate::handle::{self, Handle, SyncHandleError};
 use crate::mail::ReplyTo;
 use crate::sender::{MailCtx, Sender};
 use crate::sink::{ActorMailbox, KindId, Mailbox, resolve, resolve_mailbox};
@@ -81,16 +80,6 @@ impl<'a, T: MailTransport> InitCtx<'a, T> {
     /// typed `Mailbox<K, T>`. Pure compile-time construction.
     pub const fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K, T> {
         resolve_mailbox::<K, T>(name)
-    }
-
-    /// Publish `value` into the substrate's handle store at init.
-    /// See [`handle::publish`] for full semantics — this is the
-    /// init-time twin of [`Ctx::publish`] / [`DropCtx::publish`].
-    pub fn publish<K: Kind + serde::Serialize>(
-        &self,
-        value: &K,
-    ) -> Result<Handle<K, T>, SyncHandleError> {
-        handle::publish::<K, T>(self.transport, value)
     }
 
     /// Send `aether.control.subscribe_input` with this component's
@@ -201,17 +190,6 @@ impl<'a, T: MailTransport> Ctx<'a, T> {
         sink.send_many(self.transport, payloads);
     }
 
-    /// Publish `value` into the substrate's handle store. Returns
-    /// the typed [`Handle<K, T>`] — no auto-release on drop (see
-    /// [`Handle`] for the rationale); call `handle.release(ctx.transport())`
-    /// or let the substrate's LRU evict.
-    pub fn publish<K: Kind + serde::Serialize>(
-        &self,
-        value: &K,
-    ) -> Result<Handle<K, T>, SyncHandleError> {
-        handle::publish::<K, T>(self.transport, value)
-    }
-
     /// Reply to the Claude session that originated the inbound mail
     /// (ADR-0013). `sender` came from `mail.reply_to()` on the current
     /// receive — pass it back as the routing handle. The kind is
@@ -308,17 +286,6 @@ impl<'a, T: MailTransport> DropCtx<'a, T> {
     /// see [`Sink::send_many`] for the wire-shape rationale.
     pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Mailbox<K, T>, payloads: &[K]) {
         sink.send_many(self.transport, payloads);
-    }
-
-    /// Publish `value` into the substrate's handle store during a
-    /// shutdown hook. Common pattern at `on_replace`: pin the
-    /// returned handle so the cached bytes survive the hand-off
-    /// to the next instance, then drop it.
-    pub fn publish<K: Kind + serde::Serialize>(
-        &self,
-        value: &K,
-    ) -> Result<Handle<K, T>, SyncHandleError> {
-        handle::publish::<K, T>(self.transport, value)
     }
 
     /// Deposit a migration bundle for the substrate to hand to the

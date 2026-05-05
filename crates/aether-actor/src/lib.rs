@@ -32,9 +32,6 @@
 //!   - [`WaitError`] + [`wait_reply`] + [`decode_wait_reply`] —
 //!     ADR-0042 sync round-trip helper, generic over the reply kind,
 //!     the error enum, and the transport.
-//!   - [`handle`] — typed-handle SDK (ADR-0045) generic over `T`;
-//!     `Handle<K, T>::release` / `pin` / `unpin` and the `publish`
-//!     helper share one code body across guest and native.
 //!   - [`wasm`] — wasm-guest impl: [`WasmTransport`] +
 //!     [`WasmActor`] trait + [`Replaceable`] hook trait + the
 //!     [`export!`] macro that pins `init` / `receive` / lifecycle FFI
@@ -53,7 +50,6 @@ extern crate alloc;
 
 mod actor;
 mod ctx;
-pub mod handle;
 mod mail;
 mod sender;
 mod sink;
@@ -66,12 +62,11 @@ pub use actor::{Actor, Dispatch, HandlesKind, Singleton};
 pub use ctx::{Ctx, DropCtx, InitCtx};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
 pub use sender::{MailCtx, Sender};
-// Generic 2-arg `Mailbox<K, T>` and `Handle<K, T>` stay accessible
-// as `aether_actor::sink::Mailbox` / `aether_actor::handle::Handle`.
-// At the crate root we re-export the 1-arg wasm aliases (defined in
-// `wasm`) under the same `Mailbox` / `Handle` names so existing
-// `aether_component::Mailbox<K>` consumers keep their call shape
-// when migrating to `aether_actor::*`.
+// Generic 2-arg `Mailbox<K, T>` stays accessible as
+// `aether_actor::sink::Mailbox`. At the crate root we re-export the
+// 1-arg wasm alias (defined in `wasm`) under the same `Mailbox` name
+// so existing `aether_component::Mailbox<K>` consumers keep their
+// call shape when migrating to `aether_actor::*`.
 pub use sink::{ActorMailbox, KindId, resolve, resolve_mailbox};
 pub use slot::Slot;
 pub use sync::{WaitError, decode_wait_reply, wait_reply};
@@ -80,12 +75,11 @@ pub use transport::MailTransport;
 // Wasm-guest surface promoted to the crate root so consumers see
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc.
 // without an extra `wasm::` segment. Replaces the prior crate-root
-// re-exports `aether-component` provided. `Mailbox<K>` / `Handle<K>`
-// here are the wasm 1-arg aliases — generic forms are reachable
-// through the `sink` / `handle` modules.
+// re-exports `aether-component` provided. `Mailbox<K>` here is the
+// wasm 1-arg alias — the generic form is reachable through `sink`.
 pub use wasm::{
-    BootError, Component, Handle, Mailbox, Replaceable, WASM_TRANSPORT, WasmActor, WasmCtx,
-    WasmDropCtx, WasmInitCtx, WasmTransport,
+    BootError, Component, Mailbox, Replaceable, WASM_TRANSPORT, WasmActor, WasmCtx, WasmDropCtx,
+    WasmInitCtx, WasmTransport,
 };
 // Wasm helper modules (file I/O, HTTP egress, tracing → mail bridge)
 // surface at the crate root so existing `aether_component::io::*`

@@ -68,13 +68,6 @@ crate-type = ["cdylib"]
 name = "save_counter"
 crate-type = ["cdylib"]
 
-# ADR-0045 typed-handle SDK demo. Publishes a `Note`, broadcasts a
-# `HeldNote { held: Ref<Note> }` whose handle the substrate
-# resolves inline before forwarding through `hub.claude.broadcast`.
-[[example]]
-name = "handle_demo"
-crate-type = ["cdylib"]
-
 # Postcard receive smoke test (sibling of `echoer.rs`). Demonstrates
 # `#[handler]` dispatching through `Mail::decode_postcard` for kinds
 # whose schema isn't bytemuck-castable (here: `String` + `Vec<u8>`
