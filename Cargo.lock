@@ -194,22 +194,15 @@ dependencies = [
 name = "aether-mesh-viewer"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-data",
- "inventory",
- "serde",
-]
-
-[[package]]
-name = "aether-mesh-viewer-component"
-version = "0.2.0-alpha"
-dependencies = [
  "aether-actor",
+ "aether-data",
  "aether-kinds",
  "aether-math",
  "aether-mesh",
- "aether-mesh-viewer",
  "aether-scenario",
  "aether-substrate-bundle",
+ "inventory",
+ "serde",
  "serde_yml",
  "tracing",
 ]

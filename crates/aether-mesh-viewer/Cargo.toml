@@ -3,15 +3,46 @@ name = "aether-mesh-viewer"
 version.workspace = true
 edition.workspace = true
 
-# Trunk rlib for the mesh viewer component (ADR-0066). The runtime
-# cdylib lives in `aether-mesh-viewer-component`; consumers that want
-# to drive a viewer (mail kinds, parameter structs) depend on this
-# crate. This crate never depends on `aether-component` and never
-# emits FFI exports.
+# Issue 552 stage 1.5: consolidated dual-output crate. Trunk types
+# (kind structs, parameter shapes) live at the crate root for
+# consumers that need to *talk to* a mesh viewer; the runtime
+# `MeshViewer` lives in the `runtime` module and `export!()` emits
+# the cdylib FFI exports under wasm32. Host builds compile the
+# runtime as part of the rlib (FFI exports inert) so integration
+# tests can link the same artifact.
+#
+# Pre-stage-1.5 split: this was the trunk rlib only and a sibling
+# `aether-mesh-viewer-component` held the cdylib. ADR-0066's
+# two-crate convention is superseded by ADR-0075 §Stage-1.5 — the
+# trunk and the runtime cohabit one crate.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Stage 1.5 footgun mitigation (mirrors `aether-camera`'s [features]):
+# the `runtime` feature pulls in the `runtime` module that calls
+# `aether_actor::export!()`. The macro emits `#[unsafe(no_mangle)]
+# pub unsafe extern "C" fn init` (and siblings) into the rlib output
+# unconditionally — wasm-lld then forces these symbols into any
+# cdylib that transitively links this rlib, colliding with that
+# cdylib's own `export!()`. No workspace crate currently deps on
+# `aether-mesh-viewer` for trunk types, but the gate keeps the
+# pattern consistent so future trunk-type consumers can opt out via
+# `default-features = false` without a follow-up refactor here.
+default = ["runtime"]
+runtime = []
 
 [dependencies]
+aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data", features = ["derive"] }
+aether-kinds = { path = "../aether-kinds" }
+aether-mesh = { path = "../aether-mesh" }
+aether-math = { path = "../aether-math" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+# ADR-0060: tracing facade reaches the substrate's `aether.log` via
+# the SDK's `MailSubscriber` (installed by `export!`).
+tracing = { version = "0.1", default-features = false }
 
 # Issue #243: every crate that derives `Kind` needs `inventory` reachable
 # on native builds so the `aether.kinds` substrate descriptor list picks
@@ -19,3 +50,12 @@ serde = { version = "1", default-features = false, features = ["derive", "alloc"
 # `cfg(not(target_arch = "wasm32"))` gate.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 inventory = "0.3"
+
+# Integration tests boot a `TestBench`, load this crate's own wasm
+# artifact, and assert mail-flow + render properties via `aether-scenario`.
+# Tests run host-side; the wasm is built separately for `wasm32-unknown-unknown`
+# and discovered at runtime under `target/wasm32-unknown-unknown/{debug,release}/`.
+[dev-dependencies]
+aether-scenario = { path = "../aether-scenario" }
+aether-substrate-bundle = { path = "../aether-substrate-bundle" }
+serde_yml = "0.0.12"

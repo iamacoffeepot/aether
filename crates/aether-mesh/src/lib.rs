@@ -2,7 +2,7 @@
 //! primitive-composition format defined by ADR-0026 and ADR-0051.
 //!
 //! Library-only (per ADR-0053): produces triangles, doesn't render. The
-//! `aether-mesh-viewer-component` consumes this crate to mesh DSL text
+//! `aether-mesh-viewer` runtime consumes this crate to mesh DSL text
 //! loaded from disk; the `dsl_to_obj` example converts a `.dsl` file to
 //! Wavefront OBJ for inspection in any external viewer.
 //!

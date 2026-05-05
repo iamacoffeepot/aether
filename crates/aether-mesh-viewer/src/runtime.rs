@@ -1,6 +1,6 @@
-//! Mesh viewer. Loads a mesh file from the substrate's I/O surface
-//! (ADR-0041), parses it into `DrawTriangle`s, and replays the cached
-//! list to the `"aether.render"` sink every tick.
+//! Mesh viewer runtime. Loads a mesh file from the substrate's I/O
+//! surface (ADR-0041), parses it into `DrawTriangle`s, and replays the
+//! cached list to the `"aether.render"` sink every tick.
 //!
 //! Dispatches on the file extension echoed back on `aether.io.read_result`:
 //!
@@ -13,7 +13,7 @@
 //!   no wireframe is emitted because the n-gon source is already
 //!   tessellated by the time it arrives.
 //!
-//! This component supersedes the old `aether-mesh-editor-component`
+//! This runtime supersedes the old `aether-mesh-editor-component`
 //! (its inline `set_text` path is gone — write the DSL to a file via
 //! `aether.io.write` and call `aether.mesh.load` instead) and the
 //! `aether-static-mesh-component` (its `aether.static_mesh.load` kind
@@ -35,7 +35,8 @@ use aether_actor::{BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor, i
 use aether_kinds::{DrawTriangle, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
-use aether_mesh_viewer::LoadMesh;
+
+use crate::LoadMesh;
 
 const OUTLINE_WIDTH: f32 = 0.012;
 const OUTLINE_LIFT: f32 = 0.002;
