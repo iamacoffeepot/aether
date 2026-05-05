@@ -311,6 +311,7 @@ name = "aether-test-fixture-probe"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-capabilities",
  "aether-data",
  "aether-kinds",
  "bytemuck",

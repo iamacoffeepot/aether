@@ -10,5 +10,9 @@ crate-type = ["cdylib", "rlib"]
 aether-actor = { path = "../aether-actor" }
 aether-kinds = { path = "../aether-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
+# `default-features = false` exercises the issue 552 stage 4 wasm-header-only
+# build of aether-capabilities — the cap markers (Actor / Singleton /
+# HandlesKind) compile for wasm without dragging the native runtime in.
+aether-capabilities = { path = "../aether-capabilities", default-features = false }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
 serde = { version = "1", default-features = false, features = ["derive"] }
