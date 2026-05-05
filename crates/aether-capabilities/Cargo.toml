@@ -13,31 +13,61 @@ edition.workspace = true
 # resolved through `R::NAMESPACE` — without pulling in
 # `aether-substrate`'s wasmtime / wgpu / cpal stack. Splitting the
 # cap structs and their `Actor` markers off `aether-substrate`
-# keeps the wasm-component compile graph small. Today the crate
-# always pulls `aether-substrate` (the `NativeActor` impls live
-# alongside the structs); the wasm-side header-only build is a
-# follow-up that will cfg-gate the native impls.
+# keeps the wasm-component compile graph small.
+#
+# Stage 4 (this PR, issue 563) feature-gates everything substrate-
+# adjacent under `native` so wasm components can dep with
+# `default-features = false` and pick up only the target-agnostic
+# Actor / Singleton / HandlesKind markers. The `#[actor]` macro
+# emits `NativeActor` + `NativeDispatch` + handler-method impls
+# under `#[cfg(not(target_arch = "wasm32"))]`, so the feature gate
+# here matches: cfg cleanly elides on wasm regardless of how the
+# consumer flips features.
 
 [features]
-# Mirrors `aether-substrate`'s feature shape: chassis that draw
-# enable `render`, chassis with an audio device enable `audio`.
-# Headless and hub leave both off.
-render = ["aether-substrate/render", "dep:wgpu", "dep:png"]
-audio = ["aether-substrate/audio", "dep:cpal", "dep:crossbeam-queue"]
+# Default-on: chassis-target builds get the full cap set with their
+# substrate-side runtime impls. Wasm consumers do
+# `default-features = false`.
+default = ["native"]
+
+# Pulls every wasm-incompatible dep + the `aether-substrate` runtime
+# the `NativeActor` macro arm references. Always on for chassis.
+native = [
+    "dep:aether-substrate",
+    "dep:bytemuck",
+    "dep:dirs",
+    "dep:log",
+    "dep:postcard",
+    "dep:tracing",
+    "dep:ureq",
+    "dep:url",
+]
+
+# Per-cap toggles for the GPU / audio backends. Each implies
+# `native` because the cap modules these gate are themselves
+# substrate-bound.
+render = ["native", "aether-substrate/render", "dep:wgpu", "dep:png"]
+audio = ["native", "aether-substrate/audio", "dep:cpal", "dep:crossbeam-queue"]
 
 [dependencies]
+# Always-on: target-agnostic SDK + data layer + kind types. These
+# compile fine for `wasm32-unknown-unknown` and carry the markers
+# wasm components rely on.
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
-aether-substrate = { path = "../aether-substrate" }
-bytemuck = "1.19"
-dirs = "5"
-log = "0.4"
-postcard = { version = "1.1", features = ["alloc"] }
-serde = { version = "1", features = ["derive"] }
-tracing = "0.1"
-ureq = { version = "3", features = ["rustls"] }
-url = "2"
+serde = { version = "1", default-features = false, features = ["derive"] }
+
+# Native-only: gated behind the `native` feature so wasm builds
+# don't drag in wasmtime / cpal / wgpu transitively.
+aether-substrate = { path = "../aether-substrate", optional = true }
+bytemuck = { version = "1.19", optional = true }
+dirs = { version = "5", optional = true }
+log = { version = "0.4", optional = true }
+postcard = { version = "1.1", optional = true, features = ["alloc"] }
+tracing = { version = "0.1", optional = true }
+ureq = { version = "3", optional = true, features = ["rustls"] }
+url = { version = "2", optional = true }
 wgpu = { version = "29.0.1", optional = true }
 png = { version = "0.17", optional = true }
 cpal = { version = "0.15", optional = true }

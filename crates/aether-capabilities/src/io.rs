@@ -27,12 +27,19 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aether_actor::{MailCtx, Singleton};
-use aether_kinds::{
-    Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use aether_actor::MailCtx;
+use aether_actor::{Singleton, capability};
+// Kind imports split: handler-signature kinds stay always-on so the
+// macro-emitted `HandlesKind<K>` impls can reference them; reply-side
+// `*Result` types are body-only and gate with the rest.
+use aether_kinds::{Delete, IoError, List, Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
+use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
 
+#[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::capability::BootError;
+#[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// Result shape used throughout the adapter layer. The variants of
@@ -228,6 +235,7 @@ pub struct NamespaceRoots {
     pub config: PathBuf,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NamespaceRoots {
     /// Resolve each root from its env-var override, falling back to
     /// the `dirs`-crate platform default. v1 ships the env layer;
@@ -277,6 +285,7 @@ impl NamespaceRoots {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn env_or_default(var: &str, default: impl FnOnce() -> PathBuf) -> PathBuf {
     match std::env::var(var) {
         Ok(s) if !s.is_empty() => PathBuf::from(s),
@@ -305,6 +314,7 @@ pub fn build_registry(
 
 /// Env-driven wrapper around [`build_registry`]. Resolves
 /// [`NamespaceRoots::from_env`] then delegates.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
     build_registry(NamespaceRoots::from_env())
 }
@@ -314,6 +324,7 @@ pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, Namesp
 /// routes envelopes through the macro-emitted `NativeDispatch` impl;
 /// replies route via `ctx.reply(&result)` through the substrate's
 /// `Mailer::send_reply`.
+#[capability]
 #[derive(Singleton)]
 pub struct IoCapability {
     registry: Arc<AdapterRegistry>,

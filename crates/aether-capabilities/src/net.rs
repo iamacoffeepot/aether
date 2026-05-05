@@ -19,13 +19,22 @@
 //!   `Fetch.timeout_ms`.
 
 use std::collections::HashSet;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 use std::time::Duration;
 
-use aether_actor::{MailCtx, Singleton};
-use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
+#[cfg(not(target_arch = "wasm32"))]
+use aether_actor::MailCtx;
+use aether_actor::{Singleton, capability};
+// Handler-signature kind stays always-on; reply-side `FetchResult`
+// + ureq error types are body-only.
+#[cfg(not(target_arch = "wasm32"))]
+use aether_kinds::FetchResult;
+use aether_kinds::{Fetch, HttpHeader, HttpMethod, NetError};
 
+#[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::capability::BootError;
+#[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// Default response-body cap when `AETHER_NET_MAX_BODY_BYTES` is
@@ -82,6 +91,7 @@ impl NetAdapter for DisabledNetAdapter {
 /// internally synchronised, so the same adapter drives the cap from
 /// one dispatch thread today and would parallelise cleanly behind a
 /// multi-thread dispatcher later.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct UreqNetAdapter {
     agent: ureq::Agent,
     allowlist: HashSet<String>,
@@ -89,6 +99,7 @@ pub struct UreqNetAdapter {
     max_body_bytes: usize,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl UreqNetAdapter {
     /// Construct an adapter with explicit knobs. Chassis code uses
     /// [`build_default_adapter`] for env-derived construction;
@@ -115,6 +126,7 @@ impl UreqNetAdapter {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl NetAdapter for UreqNetAdapter {
     fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, NetError> {
         let parsed = url::Url::parse(&req.url).map_err(|e| NetError::InvalidUrl(format!("{e}")))?;
@@ -209,6 +221,7 @@ impl NetAdapter for UreqNetAdapter {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn http_method_to_http_crate(m: HttpMethod) -> ureq::http::Method {
     match m {
         HttpMethod::Get => ureq::http::Method::GET,
@@ -221,6 +234,7 @@ fn http_method_to_http_crate(m: HttpMethod) -> ureq::http::Method {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn ureq_error_to_net_error(e: ureq::Error) -> NetError {
     match e {
         ureq::Error::Timeout(_) => NetError::Timeout,
@@ -283,6 +297,7 @@ impl NetConfig {
 }
 
 /// Build a net adapter from explicit configuration.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_net_adapter(config: NetConfig) -> Arc<dyn NetAdapter> {
     if config.disabled {
         tracing::info!(
@@ -308,6 +323,7 @@ pub fn build_net_adapter(config: NetConfig) -> Arc<dyn NetAdapter> {
 }
 
 /// Env-driven wrapper around [`build_net_adapter`].
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_default_adapter() -> Arc<dyn NetAdapter> {
     build_net_adapter(NetConfig::from_env())
 }
@@ -358,6 +374,7 @@ fn parse_default_timeout_env() -> Duration {
 /// envelopes through the macro-emitted `NativeDispatch` impl;
 /// replies route via `ctx.reply(&result)` through the substrate's
 /// `Mailer::send_reply`.
+#[capability]
 #[derive(Singleton)]
 pub struct NetCapability {
     adapter: Arc<dyn NetAdapter>,

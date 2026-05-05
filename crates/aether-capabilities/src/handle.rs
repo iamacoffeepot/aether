@@ -18,17 +18,27 @@
 //! constructor; the chassis builder's `with_actor::<HandleCapability>(())`
 //! is the boot site.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
-use aether_actor::Singleton;
+use aether_actor::{Singleton, capability};
+// Kind imports split: handler-signature kinds stay always-on so the
+// macro-emitted `HandlesKind<K>` impls can reference them; reply-side
+// `*Result` + `HandleError` types are referenced only inside handler
+// bodies (gated by the macro emission), so their imports gate too.
+#[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::{
-    HandleError, HandlePin, HandlePinResult, HandlePublish, HandlePublishResult, HandleRelease,
-    HandleReleaseResult, HandleUnpin, HandleUnpinResult,
+    HandleError, HandlePinResult, HandlePublishResult, HandleReleaseResult, HandleUnpinResult,
 };
+use aether_kinds::{HandlePin, HandlePublish, HandleRelease, HandleUnpin};
 
+#[cfg(not(target_arch = "wasm32"))]
 use aether_actor::MailCtx;
+#[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::capability::BootError;
+#[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::handle_store::{HandleStore, PutError};
+#[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// `aether.handle` mailbox cap. Owns the substrate's `HandleStore`
@@ -37,6 +47,7 @@ use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 /// through the macro miss path (warn-log, no reply, sender's
 /// `wait_reply` times out) — substrate-level invariant violation, not
 /// user-recoverable input.
+#[capability]
 #[derive(Singleton)]
 pub struct HandleCapability {
     store: Arc<HandleStore>,
@@ -146,6 +157,7 @@ impl NativeActor for HandleCapability {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn put_error_to_handle_error(e: PutError) -> HandleError {
     match e {
         PutError::EvictionFailed { .. } => HandleError::EvictionFailed,

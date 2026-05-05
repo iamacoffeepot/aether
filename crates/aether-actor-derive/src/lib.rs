@@ -840,6 +840,11 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
     let mut item = parse_macro_input!(item as syn::ItemStruct);
+    // Issue 552 stage 4: gate fields on `not(target_arch = "wasm32")`
+    // to match the macro-emitted `NativeActor` / `NativeDispatch`
+    // impls. Wasm builds see the cap struct with no fields (a pure
+    // marker), which is what typed `ctx.send_to::<R>(...)` needs;
+    // host builds see the full struct.
     match &mut item.fields {
         syn::Fields::Named(fields) => {
             for field in fields.named.iter_mut() {
@@ -847,7 +852,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
                 if !already_cfg {
                     field
                         .attrs
-                        .push(syn::parse_quote!(#[cfg(feature = "native")]));
+                        .push(syn::parse_quote!(#[cfg(not(target_arch = "wasm32"))]));
                 }
             }
         }
@@ -857,7 +862,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
                 if !already_cfg {
                     field
                         .attrs
-                        .push(syn::parse_quote!(#[cfg(feature = "native")]));
+                        .push(syn::parse_quote!(#[cfg(not(target_arch = "wasm32"))]));
                 }
             }
         }
@@ -1465,16 +1470,32 @@ fn expand_native_actor_trait(item: ItemImpl) -> syn::Result<TokenStream2> {
     let handler_methods = handlers.iter().map(|h| &h.method);
     let helper_methods = helpers.iter();
 
+    // Issue 552 stage 4: NativeActor + NativeDispatch + the inherent
+    // handler-method impl all reach for `::aether_substrate::*` paths
+    // and native-only types in their bodies. They're emitted under
+    // `#[cfg(not(target_arch = "wasm32"))]` so `aether-capabilities`
+    // can compile for `wasm32-unknown-unknown` without the substrate
+    // dep — wasm consumers see only the always-on Actor +
+    // HandlesKind markers, which is enough for typed
+    // `ctx.send_to::<R>` against cap markers.
+    //
+    // Gate is `target_arch` not `feature = "native"` because
+    // NativeActor/NativeDispatch are wasm-incompatible by definition;
+    // there's no realistic case where a host build wants to skip
+    // them. Pinning the cfg in the macro means consumer crates never
+    // have to define matching feature flags.
     Ok(quote! {
         #actor_impl
 
         #(#handles_kind_impls)*
 
+        #[cfg(not(target_arch = "wasm32"))]
         impl #impl_generics #trait_path for #self_ty #where_clause {
             #config_type
             #init_method
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         impl #impl_generics ::aether_substrate::NativeDispatch for #self_ty #where_clause {
             fn __aether_dispatch_envelope(
                 &self,
@@ -1487,6 +1508,7 @@ fn expand_native_actor_trait(item: ItemImpl) -> syn::Result<TokenStream2> {
             }
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         impl #impl_generics #self_ty #where_clause {
             #(#handler_methods)*
             #(#helper_methods)*
