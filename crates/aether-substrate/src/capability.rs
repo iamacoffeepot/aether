@@ -761,20 +761,23 @@ fn boot_native_actor<A>(
 where
     A: crate::NativeActor + crate::NativeDispatch,
 {
-    if A::FRAME_BARRIER {
-        return Err(BootError::Other(Box::new(std::io::Error::other(format!(
-            "with_actor::<{}> rejected: FRAME_BARRIER caps must use the legacy with(cap) path \
-             until stage 2 wires frame-bound claims through with_actor",
-            A::NAMESPACE
-        )))));
-    }
-
-    let claim = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
-    let DropOnShutdownClaim {
-        id: mailbox_id,
-        receiver,
-        sink_sender,
-    } = claim;
+    // Stage 2d: frame-bound caps go through `claim_frame_bound_mailbox`
+    // so the chassis's `frame_bound_pending` Vec sees the pending
+    // counter; the dispatcher decrements after each handler dispatch
+    // so the per-frame drain barrier (ADR-0074 §Decision 5) sees the
+    // counter drop in lock-step with handler progress.
+    let (mailbox_id, receiver, sink_sender, pending) = if A::FRAME_BARRIER {
+        let claim = ctx.claim_frame_bound_mailbox::<A>()?;
+        (
+            claim.id,
+            claim.receiver,
+            claim.sink_sender,
+            Some(claim.pending),
+        )
+    } else {
+        let claim = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
+        (claim.id, claim.receiver, claim.sink_sender, None)
+    };
 
     let transport = Arc::new(crate::NativeTransport::from_ctx(
         ctx,
@@ -785,10 +788,10 @@ where
 
     // The legacy path doesn't carry a chassis-side `Actors` map; init
     // contexts that don't need peer lookups (today: every cap migrating
-    // through this path — Handle, Audio, Io, Net) work fine against an
-    // empty map. The new `Builder::with_actor` path threads a real map
-    // for caps that DO need peer lookups; both end up using the same
-    // NativeInitCtx + dispatcher trampoline shape.
+    // through this path — Handle, Audio, Io, Net, Render) work fine
+    // against an empty map. The new `Builder::with_actor` path threads
+    // a real map for caps that DO need peer lookups; both end up using
+    // the same NativeInitCtx + dispatcher trampoline shape.
     let empty_actors = crate::Actors::new();
     let actor = {
         let mailer_clone = ctx.mail_send_handle();
@@ -819,6 +822,12 @@ where
                         kind = env.kind_name.as_str(),
                         "native actor dispatch missed: kind not handled or decode failed"
                     );
+                }
+                // Decrement matches the sink-handler's increment —
+                // the chassis frame-bound drain barrier reads this
+                // counter to know when the dispatcher is caught up.
+                if let Some(p) = &pending {
+                    p.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                 }
             }
         })
@@ -1069,6 +1078,18 @@ impl BootedChassis {
 
     pub fn is_empty(&self) -> bool {
         self.running.is_empty()
+    }
+
+    /// Snapshot of every frame-bound mailbox's pending counter
+    /// collected at boot. Pre-stage-2d only the legacy `with(cap)`
+    /// path populated this; with stage 2d's FRAME_BARRIER plumbing
+    /// through `with_actor`, native-actor caps booted here also
+    /// register. Used by render-touching tests to assert the
+    /// frame-bound claim machinery wired up; production paths read
+    /// the `pending` counter through
+    /// [`crate::frame_loop::drain_frame_bound_or_abort`].
+    pub fn frame_bound_pending(&self) -> &[(MailboxId, Arc<AtomicU64>)] {
+        &self.frame_bound_pending
     }
 
     /// Boot one more capability into an already-built chassis. The

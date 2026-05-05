@@ -28,9 +28,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
-use crate::capability::{
-    BootError, ChassisCtx, DropOnShutdownClaim, FacadeHandle, FallbackRouter, MailboxClaim,
-};
+use crate::capability::{BootError, ChassisCtx, FacadeHandle, FallbackRouter, MailboxClaim};
 use crate::chassis::Chassis;
 use crate::lifecycle::{FatalAborter, PanicAborter};
 use crate::mail::MailboxId;
@@ -284,31 +282,35 @@ fn make_fallback_router_boot(handler: FallbackRouter) -> PassiveBoot {
 /// the sum dispatch trait the `#[actor] impl NativeActor for A`
 /// macro emits.
 ///
-/// FRAME_BARRIER caps aren't supported by this entry yet (today only
-/// `RenderCapability` is frame-bound, and it stays on the legacy
-/// `with(cap)` path until stage 2 migrates render onto `NativeActor`).
-/// The fast-fail is intentional: a frame-bound cap booted through
-/// the non-frame-bound claim would silently miss the per-frame drain
-/// barrier, reintroducing the race FRAME_BARRIER exists to close.
+/// Stage 2d: FRAME_BARRIER caps now go through this path too. The
+/// frame-bound claim (`claim_frame_bound_mailbox_with_override`)
+/// registers the per-mailbox `pending` counter into the chassis's
+/// `frame_bound_pending` Vec; the dispatcher thread decrements after
+/// each successful handler dispatch so the chassis frame loop's
+/// `drain_frame_bound_or_abort` (ADR-0074 §Decision 5) sees the
+/// counter drop to zero alongside component drains.
 fn make_native_actor_boot<A>(config: A::Config) -> PassiveBoot
 where
     A: NativeActor + NativeDispatch,
 {
     Box::new(move |ctx, actors| {
-        if A::FRAME_BARRIER {
-            return Err(BootError::Other(Box::new(std::io::Error::other(format!(
-                "with_actor::<{}> rejected: FRAME_BARRIER caps must use the legacy with(cap) path \
-                 until stage 2 wires frame-bound claims through with_actor",
-                A::NAMESPACE
-            )))));
-        }
-
-        let claim = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
-        let DropOnShutdownClaim {
-            id: mailbox_id,
-            receiver,
-            sink_sender,
-        } = claim;
+        // Frame-bound caps (today: render) claim through the
+        // frame-bound path so the `pending` counter feeds the chassis
+        // frame loop. Free-running caps take the regular drop-on-
+        // shutdown claim. Both share the same dispatcher trampoline
+        // shape apart from the post-dispatch decrement.
+        let (mailbox_id, receiver, sink_sender, pending) = if A::FRAME_BARRIER {
+            let claim = ctx.claim_frame_bound_mailbox::<A>()?;
+            (
+                claim.id,
+                claim.receiver,
+                claim.sink_sender,
+                Some(claim.pending),
+            )
+        } else {
+            let claim = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
+            (claim.id, claim.receiver, claim.sink_sender, None)
+        };
 
         // Per-cap transport. `NativeTransport::from_ctx` pulls the
         // chassis's frame-bound set + aborter so the cross-class
@@ -355,6 +357,13 @@ where
                             kind = env.kind_name.as_str(),
                             "native actor dispatch missed: kind not handled or decode failed"
                         );
+                    }
+                    // Decrement matches the sink-handler's increment —
+                    // the chassis frame-bound drain barrier
+                    // (`drain_frame_bound_or_abort`) reads this counter
+                    // to know when the dispatcher is caught up.
+                    if let Some(p) = &pending {
+                        p.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                     }
                 }
             })
@@ -992,12 +1001,15 @@ mod tests {
         drop(chassis);
     }
 
-    /// Issue 552 stage 1: with_actor rejects FRAME_BARRIER caps with
-    /// a typed error rather than silently missing the per-frame
-    /// drain barrier. Stage 2 (or later) wires the frame-bound claim
-    /// path through with_actor when render migrates onto NativeActor.
+    /// Issue 552 stage 2d: with_actor accepts FRAME_BARRIER caps.
+    /// The chassis claims through `claim_frame_bound_mailbox`, the
+    /// pending counter feeds the chassis's `frame_bound_pending` Vec,
+    /// and the dispatcher decrements after each handler dispatch so
+    /// the per-frame drain barrier sees the counter drop in lock-step.
+    /// Pre-2d the entry point hard-rejected; the prior reject-test
+    /// retired alongside that branch.
     #[test]
-    fn with_actor_rejects_frame_barrier_caps() {
+    fn with_actor_supports_frame_barrier_caps() {
         struct FrameBoundProbe;
         impl aether_actor::Actor for FrameBoundProbe {
             const NAMESPACE: &'static str = "test.with_actor.frame_bound";
@@ -1027,10 +1039,16 @@ mod tests {
         }
 
         let (registry, mailer) = fresh_substrate();
-        let err = Builder::<TestChassis>::new(registry, mailer)
+        let chassis = Builder::<TestChassis>::new(registry, mailer)
             .with_actor::<FrameBoundProbe>(())
             .build_passive()
-            .expect_err("FRAME_BARRIER caps must reject");
-        assert!(matches!(err, BootError::Other(_)));
+            .expect("FRAME_BARRIER caps boot through with_actor");
+        // Frame-bound claim populated the chassis's pending Vec.
+        assert_eq!(
+            chassis.frame_bound_pending().len(),
+            1,
+            "FRAME_BARRIER cap registered its pending counter for the drain barrier"
+        );
+        drop(chassis);
     }
 }

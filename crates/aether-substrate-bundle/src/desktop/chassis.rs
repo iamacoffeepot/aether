@@ -331,13 +331,11 @@ impl DesktopChassis {
             aether_substrate::lifecycle::OutboundFatalAborter::new(Arc::clone(&boot.outbound)),
         );
 
-        // PR E2: render is now a `#[actor]` cap. Extract the
-        // driver-facing accumulator + GPU bundle before the cap moves
-        // into the chassis builder; the dispatcher thread takes the
-        // cap by value and the driver retains the Arc-shared handles.
-        let render_cap = RenderCapability::new(RenderConfig::default());
-        let render_handles = render_cap.handles();
-
+        // Issue 552 stage 2d: render is a NativeActor. The chassis
+        // builder constructs the cap inside `init` (called from
+        // `with_actor::<RenderCapability>(config)`); the driver pulls
+        // `Arc<RenderCapability>` via `DriverCtx::actor` and clones
+        // `.handles()` from there.
         let driver = DesktopDriverCapability {
             event_loop,
             boot,
@@ -347,7 +345,6 @@ impl DesktopChassis {
             boot_size,
             boot_title,
             hub,
-            render_handles,
         };
 
         // Boot order is declaration order — log first so other
@@ -360,7 +357,7 @@ impl DesktopChassis {
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<NetCapability>(net)
             .with_actor::<AudioCapability>(audio)
-            .with(render_cap)
+            .with_actor::<RenderCapability>(RenderConfig::default())
             .driver(driver)
             .build()
     }
