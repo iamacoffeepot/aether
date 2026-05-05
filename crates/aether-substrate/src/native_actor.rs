@@ -49,8 +49,8 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aether_actor::{Actor, HandlesKind, MailCtx, Sender};
-use aether_data::Kind;
+use aether_actor::{Actor, ActorMailbox, HandlesKind, MailCtx, Sender, Singleton};
+use aether_data::{Kind, mailbox_id_from_name};
 
 use crate::mail::KindId;
 
@@ -156,6 +156,20 @@ impl<'a> NativeCtx<'a> {
     pub fn reply_target(&self) -> ReplyTo {
         self.sender
     }
+
+    /// Singleton sender shortcut: returns a typed [`ActorMailbox`]
+    /// addressing the unique instance of receiver actor `R`. Mirrors
+    /// [`aether_actor::Ctx::actor`]; same `&self`-receiver `send` /
+    /// `send_many` ergonomics.
+    pub fn actor<R: Singleton>(&self) -> ActorMailbox<'_, R, NativeTransport> {
+        ActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.transport)
+    }
+
+    /// Multi-instance sender: resolve a typed [`ActorMailbox`] from a
+    /// runtime instance name. Mirrors [`aether_actor::Ctx::resolve_actor`].
+    pub fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<'_, R, NativeTransport> {
+        ActorMailbox::__new(mailbox_id_from_name(name).0, self.transport)
+    }
 }
 
 impl<'a> Sender for NativeCtx<'a> {
@@ -164,7 +178,11 @@ impl<'a> Sender for NativeCtx<'a> {
         R: Actor + HandlesKind<K>,
         K: Kind,
     {
-        aether_actor::resolve_actor::<R, NativeTransport>().send(self.transport, payload);
+        ActorMailbox::<R, NativeTransport>::__new(
+            mailbox_id_from_name(R::NAMESPACE).0,
+            self.transport,
+        )
+        .send(payload);
     }
 
     fn send_many<R, K>(&mut self, payloads: &[K])
@@ -172,7 +190,11 @@ impl<'a> Sender for NativeCtx<'a> {
         R: Actor + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
-        aether_actor::resolve_actor::<R, NativeTransport>().send_many(self.transport, payloads);
+        ActorMailbox::<R, NativeTransport>::__new(
+            mailbox_id_from_name(R::NAMESPACE).0,
+            self.transport,
+        )
+        .send_many(payloads);
     }
 
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
@@ -202,15 +224,17 @@ impl<'a> MailCtx for NativeCtx<'a> {
 /// Boot-time context for [`NativeActor::init`]. Carries a borrow of
 /// the actor's transport (for init-time mail), a borrow of the
 /// actors-so-far [`Actors`] map (so init can peer at caps booted
-/// earlier in the chain via [`Self::actor`]), and a clone of the
+/// earlier in the chain via [`Self::peer`]), and a clone of the
 /// substrate's mailer for caps that need to register an outbound
 /// hook at boot.
 ///
-/// Stage-1 doesn't expose the handle store directly — caps that
-/// migrate in stage 2 retrieve it through
-/// `ctx.actor::<HandleCapability>()` once `HandleCapability` itself
-/// has migrated and surfaces an `Arc<HandleStore>` field. Boot order
-/// (chain order) ensures the lookup succeeds.
+/// `peer::<HandleCapability>()` (the type-keyed `Arc` lookup) is
+/// distinct from `actor::<R>()` (the typed sender shortcut, mirror of
+/// [`aether_actor::Ctx::actor`]) — peer is for boot-time setup that
+/// genuinely needs to inspect a sibling cap's `Arc`-shared state;
+/// actor is for sending mail. Memory: "actor::<A>() lookup is
+/// bootstrap-only" stays in force for `peer`; messaging is the
+/// runtime shape.
 pub struct NativeInitCtx<'a> {
     transport: &'a NativeTransport,
     actors: &'a Actors,
@@ -250,11 +274,25 @@ impl<'a> NativeInitCtx<'a> {
     /// Look up an earlier-booted cap by type and clone its `Arc`.
     /// `None` if the cap hasn't booted yet (chain order matters —
     /// `with::<A>(…)` → `with::<B>(…)` lets B's `init` see A but
-    /// not vice versa). Stage-1 use cases are limited to the boot
-    /// trampoline itself; stage-2 migrations may use this for
-    /// driver pre-build.
-    pub fn actor<A: NativeActor>(&self) -> Option<Arc<A>> {
+    /// not vice versa). Use cases are limited to boot-time wiring
+    /// (driver pre-build, capability chains that genuinely need a
+    /// sibling's `Arc`-shared state); for sending mail to a sibling,
+    /// reach for [`Self::actor`] / [`Self::resolve_actor`] instead.
+    pub fn peer<A: NativeActor>(&self) -> Option<Arc<A>> {
         self.actors.get::<A>()
+    }
+
+    /// Singleton sender shortcut: returns a typed [`ActorMailbox`]
+    /// addressing the unique instance of receiver actor `R`. Mirrors
+    /// [`aether_actor::Ctx::actor`].
+    pub fn actor<R: Singleton>(&self) -> ActorMailbox<'_, R, NativeTransport> {
+        ActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.transport)
+    }
+
+    /// Multi-instance sender: resolve a typed [`ActorMailbox`] from a
+    /// runtime instance name. Mirrors [`aether_actor::Ctx::resolve_actor`].
+    pub fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<'_, R, NativeTransport> {
+        ActorMailbox::__new(mailbox_id_from_name(name).0, self.transport)
     }
 }
 
@@ -264,7 +302,11 @@ impl<'a> Sender for NativeInitCtx<'a> {
         R: Actor + HandlesKind<K>,
         K: Kind,
     {
-        aether_actor::resolve_actor::<R, NativeTransport>().send(self.transport, payload);
+        ActorMailbox::<R, NativeTransport>::__new(
+            mailbox_id_from_name(R::NAMESPACE).0,
+            self.transport,
+        )
+        .send(payload);
     }
 
     fn send_many<R, K>(&mut self, payloads: &[K])
@@ -272,7 +314,11 @@ impl<'a> Sender for NativeInitCtx<'a> {
         R: Actor + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
-        aether_actor::resolve_actor::<R, NativeTransport>().send_many(self.transport, payloads);
+        ActorMailbox::<R, NativeTransport>::__new(
+            mailbox_id_from_name(R::NAMESPACE).0,
+            self.transport,
+        )
+        .send_many(payloads);
     }
 
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {

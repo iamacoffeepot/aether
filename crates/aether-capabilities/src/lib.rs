@@ -9,8 +9,9 @@
 //! Pre-stage-2e these modules lived under
 //! `aether_substrate::capabilities`. The split decouples the
 //! cap-marker layer from the substrate runtime so wasm components
-//! can address caps via `ctx.send_to::<R>` (resolved through
-//! `R::NAMESPACE`) without dragging in wasmtime / wgpu / cpal. Today
+//! can address caps via `ctx.actor::<R>().send(&kind)` (resolved
+//! through `R::NAMESPACE`) without dragging in wasmtime / wgpu /
+//! cpal. Today
 //! the crate always pulls `aether-substrate` (the `NativeActor`
 //! impls live alongside the structs); the header-only wasm build is
 //! a follow-up.
