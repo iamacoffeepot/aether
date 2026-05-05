@@ -47,7 +47,7 @@ use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability}
 use wasmparser::{Parser, Payload};
 
 /// Section name the derive writes to for canonical schema bytes.
-/// Must match `aether-data-derive`'s
+/// Must match `aether-actor-derive`'s
 /// `#[link_section = "aether.kinds"]`.
 pub const MANIFEST_SECTION: &str = "aether.kinds";
 

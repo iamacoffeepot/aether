@@ -22,7 +22,7 @@
 //! on the trunk for those without pulling in this crate's
 //! `Component` impl. Per ADR-0066.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, KindId, Mailbox, actor};
+use aether_actor::{BootError, KindId, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, CLIENT_OBSERVER, GAME_DRAW, GAME_PLAYING, GAME_WON_O, GAME_WON_X, GameState,
     MOVE_CELL_OCCUPIED, MOVE_GAME_OVER, MOVE_OK, MOVE_OUT_OF_BOUNDS, MoveResult, PLAYER_NONE,
@@ -56,10 +56,10 @@ pub struct TicTacToe {
 /// every session. Send `tic_tac_toe.reset` (empty payload) to start a
 /// fresh game.
 #[actor]
-impl Component for TicTacToe {
+impl WasmActor for TicTacToe {
     const NAMESPACE: &'static str = "tic_tac_toe";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(TicTacToe {
             state: GameState::new_game(),
             move_result_kind: ctx.resolve::<MoveResult>(),
@@ -80,7 +80,7 @@ impl Component for TicTacToe {
     /// whose turn it is, and the resulting `state.last_move_player`
     /// tells you which side actually got placed.
     #[handler]
-    fn on_play_move(&mut self, ctx: &mut Ctx<'_>, mv: PlayMove) {
+    fn on_play_move(&mut self, ctx: &mut WasmCtx<'_>, mv: PlayMove) {
         let status = self.apply_move(mv.row, mv.col);
         self.reply(ctx, status);
         if status == MOVE_OK {
@@ -97,7 +97,7 @@ impl Component for TicTacToe {
     /// in-progress game. The reply always has `status == MOVE_OK`
     /// and the broadcast is fire-and-forget.
     #[handler]
-    fn on_reset(&mut self, ctx: &mut Ctx<'_>, _r: Reset) {
+    fn on_reset(&mut self, ctx: &mut WasmCtx<'_>, _r: Reset) {
         self.state = GameState::new_game();
         self.reply(ctx, MOVE_OK);
         ctx.send(&self.broadcast, &self.state);
@@ -144,7 +144,7 @@ impl TicTacToe {
         MOVE_OK
     }
 
-    fn reply(&self, ctx: &mut Ctx<'_>, status: u8) {
+    fn reply(&self, ctx: &mut WasmCtx<'_>, status: u8) {
         let Some(sender) = ctx.reply_to() else {
             return;
         };
@@ -185,7 +185,7 @@ fn is_board_full(board: &[[u8; 3]; 3]) -> bool {
 }
 
 #[cfg(target_arch = "wasm32")]
-aether_component::export!(TicTacToe);
+aether_actor::export!(TicTacToe);
 
 #[cfg(test)]
 mod tests {
@@ -198,9 +198,9 @@ mod tests {
         // handles are dummies — `apply_move` never touches them.
         TicTacToe {
             state: GameState::new_game(),
-            move_result_kind: aether_component::resolve::<MoveResult>(),
-            broadcast: aether_component::resolve_mailbox::<GameState>("hub.claude.broadcast"),
-            client_observer: aether_component::resolve_mailbox::<GameState>(CLIENT_OBSERVER),
+            move_result_kind: aether_actor::resolve::<MoveResult>(),
+            broadcast: aether_actor::wasm::resolve_mailbox::<GameState>("hub.claude.broadcast"),
+            client_observer: aether_actor::wasm::resolve_mailbox::<GameState>(CLIENT_OBSERVER),
         }
     }
 

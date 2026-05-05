@@ -22,7 +22,9 @@
 //! thin RAII wrapper over the same wire surface as `io::*` and
 //! `net::*`.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor, resolve_mailbox};
+use aether_actor::{
+    BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor, wasm::resolve_mailbox,
+};
 use aether_data::Ref;
 use aether_kinds::Tick;
 
@@ -51,10 +53,10 @@ pub struct HandleDemo {
 }
 
 #[actor]
-impl Component for HandleDemo {
+impl WasmActor for HandleDemo {
     const NAMESPACE: &'static str = "handle_demo";
 
-    fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(HandleDemo { fired: false })
     }
 
@@ -69,7 +71,7 @@ impl Component for HandleDemo {
     /// `{"Inline": { ... }}` because the substrate resolved the
     /// handle on dispatch.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         if self.fired {
             return;
         }
@@ -99,4 +101,4 @@ impl Component for HandleDemo {
     }
 }
 
-aether_component::export!(HandleDemo);
+aether_actor::export!(HandleDemo);

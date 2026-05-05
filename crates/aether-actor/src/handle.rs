@@ -23,14 +23,14 @@
 //! Quick tour (wasm guest):
 //!
 //! ```ignore
-//! use aether_component::{Component, Ctx, InitCtx};
+//! use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
 //!
 //! #[actor]
-//! impl Component for MyComp {
-//!     fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> { Ok(Self) }
+//! impl WasmActor for MyComp {
+//!     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> { Ok(Self) }
 //!
 //!     #[handler]
-//!     fn on_tick(&mut self, ctx: &mut Ctx<'_>, _t: Tick) {
+//!     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
 //!         let inner = MyValue { ... };
 //!         let Ok(handle) = ctx.publish(&inner) else { return };
 //!         let outer = MyParent {

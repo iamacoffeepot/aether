@@ -40,8 +40,24 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "bytemuck",
+ "inventory",
  "postcard",
  "serde",
+ "tracing",
+]
+
+[[package]]
+name = "aether-actor-derive"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "bytemuck",
+ "inventory",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn",
 ]
 
 [[package]]
@@ -57,8 +73,8 @@ dependencies = [
 name = "aether-camera-component"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-actor",
  "aether-camera",
- "aether-component",
  "aether-kinds",
  "aether-math",
  "aether-scenario",
@@ -80,24 +96,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-component"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-data",
- "aether-kinds",
- "bytemuck",
- "inventory",
- "postcard",
- "serde",
- "tracing",
-]
-
-[[package]]
 name = "aether-data"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-data-derive",
+ "aether-actor-derive",
  "bytemuck",
  "inventory",
  "postcard",
@@ -106,25 +108,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-data-derive"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-data",
- "bytemuck",
- "inventory",
- "proc-macro2",
- "quote",
- "serde",
- "syn",
-]
-
-[[package]]
 name = "aether-demo-sokoban"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-actor",
  "aether-camera",
- "aether-component",
  "aether-data",
  "aether-kinds",
  "aether-scenario",
@@ -148,7 +136,7 @@ dependencies = [
 name = "aether-demo-tic-tac-toe-client"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-component",
+ "aether-actor",
  "aether-demo-tic-tac-toe",
  "aether-kinds",
  "aether-scenario",
@@ -162,7 +150,7 @@ dependencies = [
 name = "aether-demo-tic-tac-toe-server"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-component",
+ "aether-actor",
  "aether-data",
  "aether-demo-tic-tac-toe",
  "aether-scenario",
@@ -215,7 +203,7 @@ dependencies = [
 name = "aether-mesh-viewer-component"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-component",
+ "aether-actor",
  "aether-kinds",
  "aether-math",
  "aether-mesh",
@@ -313,7 +301,7 @@ dependencies = [
 name = "aether-test-fixture-probe"
 version = "0.2.0-alpha"
 dependencies = [
- "aether-component",
+ "aether-actor",
  "aether-data",
  "aether-kinds",
  "bytemuck",

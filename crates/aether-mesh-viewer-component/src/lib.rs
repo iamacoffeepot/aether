@@ -31,7 +31,7 @@
 //! 4. Every `aether.tick` re-emits the cached triangles to
 //!    `"aether.render"`.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor, io};
+use aether_actor::{BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor, io};
 use aether_kinds::{DrawTriangle, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
@@ -70,10 +70,10 @@ pub struct MeshViewer {
 /// via `aether.io.write` and re-sending `aether.mesh.load` against the
 /// same path.
 #[actor]
-impl Component for MeshViewer {
+impl WasmActor for MeshViewer {
     const NAMESPACE: &'static str = "mesh_viewer";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MeshViewer {
             triangles: Vec::new(),
             render: ctx.resolve_mailbox::<DrawTriangle>("aether.render"),
@@ -87,7 +87,7 @@ impl Component for MeshViewer {
     /// after a `load`, the file failed to read / parse / mesh — check
     /// `engine_logs`.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         if !self.triangles.is_empty() {
             ctx.send_many(&self.render, &self.triangles);
         }
@@ -102,7 +102,7 @@ impl Component for MeshViewer {
     /// `"assets"`, `"config"`. `path` is relative to the namespace
     /// root and must end in `.dsl` or `.obj`.
     #[handler]
-    fn on_load(&mut self, _ctx: &mut Ctx<'_>, msg: LoadMesh) {
+    fn on_load(&mut self, _ctx: &mut WasmCtx<'_>, msg: LoadMesh) {
         tracing::info!(
             target: "aether_mesh_viewer",
             namespace = %msg.namespace,
@@ -121,7 +121,7 @@ impl Component for MeshViewer {
     /// # Agent
     /// Substrate-driven; do not send manually.
     #[handler]
-    fn on_read_result(&mut self, _ctx: &mut Ctx<'_>, r: ReadResult) {
+    fn on_read_result(&mut self, _ctx: &mut WasmCtx<'_>, r: ReadResult) {
         let (path, bytes) = match r {
             ReadResult::Ok { path, bytes, .. } => (path, bytes),
             ReadResult::Err {
@@ -454,4 +454,4 @@ mod tests {
     }
 }
 
-aether_component::export!(MeshViewer);
+aether_actor::export!(MeshViewer);

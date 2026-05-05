@@ -54,10 +54,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # Workspace-wide tests run on linux only. Non-chassis crates
-  # (aether-kinds, aether-data, aether-hub-protocol, aether-component,
-  # aether-data-derive, aether-substrate-core, demo components) are
-  # pure Rust with no per-OS behavior — a matrix triples CI time without
-  # catching anything new. See ADR-0035 § CI matrix scope.
+  # (aether-kinds, aether-data, aether-actor, aether-actor-derive,
+  # demo components) are pure Rust with no per-OS behavior — a matrix
+  # triples CI time without catching anything new. See ADR-0035 § CI
+  # matrix scope.
   test:
     name: Test (workspace, linux)
     needs: changes
@@ -82,11 +82,13 @@ jobs:
       # rust-cache picks up the wasm artifacts on subsequent runs.
       # Component crates are discovered from `cargo metadata` by two
       # structural signals (issue 439): the package declares a
-      # `cdylib` lib target AND depends on `aether-component`. The dep
+      # `cdylib` lib target AND depends on `aether-actor`. The dep
       # IS the component contract — anything that imports the SDK
-      # (init, receive_p32, Mailer, etc.) deps on it; anything that
-      # doesn't isn't a component. No filename convention to remember
-      # and no static list to keep in sync.
+      # (init, receive_p32, MailTransport, etc.) deps on it; anything
+      # that doesn't isn't a component. No filename convention to
+      # remember and no static list to keep in sync. (Pre issue-552
+      # the dep signal was `aether-component`; that crate folded into
+      # `aether-actor` in stage 0, so the marker name moves with it.)
       # `AETHER_REQUIRE_RUNTIME=1` on the test step turns any missing
       # wasm into a hard failure so a discovery miss is loud, not silent.
       - name: Pre-build component wasm for scenario tests
@@ -95,7 +97,7 @@ jobs:
           pkgs=$(cargo metadata --format-version=1 --no-deps |
             jq -r '.packages[]
               | select(.targets[] | .kind | contains(["cdylib"]))
-              | select([.dependencies[] | .name] | contains(["aether-component"]))
+              | select([.dependencies[] | .name] | contains(["aether-actor"]))
               | .name')
           if [ -z "$pkgs" ]; then
             echo "no wasm component crates discovered"; exit 1

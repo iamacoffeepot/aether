@@ -1,34 +1,39 @@
-//! aether-component: WASM-guest facade over the actor SDK.
+//! WASM-guest facade over the actor SDK. Folded into `aether-actor`
+//! by issue 552 stage 0 — the prior standalone `aether-component`
+//! crate retired so the SDK and its wasm shim share one home, which
+//! breaks the circular re-export the old layout would have required
+//! when proc-macros emit `::aether_actor::WasmCtx<'_>` paths.
 //!
-//! Post-ADR-0074 Phase 1, the SDK types (`MailTransport`, `Mail`,
-//! `Ctx`, `Sink`, `InitCtx`, `DropCtx`, `Slot`, `WaitError`, the
-//! `wait_reply` helper, and the typed-handle module) live in
-//! `aether-actor`. This crate keeps the wasm-specific shim:
+//! Surface kept stable from the prior `aether-component` crate so
+//! existing components migrate by swapping `aether_component::*`
+//! for `aether_actor::*` in their `use` lines:
 //!
 //!   - [`raw`] — `extern "C"` host-fn imports + host-target panic
 //!     stubs (the only place the `_p32` symbols are named).
 //!   - [`WasmTransport`] — ZST that implements
-//!     `aether_actor::MailTransport` by delegating each method to the
+//!     [`crate::MailTransport`] by delegating each method to the
 //!     matching `raw::*` host fn.
-//!   - 1-arg type aliases — `Sink<K>` = `aether_actor::Sink<K,
-//!     WasmTransport>`, `Ctx<'a>` = `aether_actor::Ctx<'a,
-//!     WasmTransport>`, etc. Existing component code keeps writing
-//!     the un-parameterised types; the alias pins `T = WasmTransport`
-//!     for the wasm guest path.
-//!   - [`Component`] trait — wasm-flavoured entry point. Methods take
-//!     the aliased types, so user impls compile unchanged. A
+//!   - 1-arg type aliases — [`Mailbox<K>`] = [`crate::Mailbox<K, WasmTransport>`],
+//!     [`WasmCtx<'a>`] = [`crate::Ctx<'a, WasmTransport>`], etc.
+//!     Existing component code keeps writing the un-parameterised
+//!     types; the alias pins `T = WasmTransport` for the wasm guest
+//!     path. Issue 552 stage 0 renamed `Ctx` / `InitCtx` / `DropCtx`
+//!     to `WasmCtx` / `WasmInitCtx` / `WasmDropCtx` to leave room for
+//!     a sibling `NativeCtx` family in stage 1.
+//!   - [`WasmActor`] trait — wasm-flavoured entry point. Methods take
+//!     the aliased types, so user impls compile unchanged. The
 //!     companion native-actor trait will land in `aether-substrate`
-//!     when ADR-0074 Phase 2 introduces `NativeTransport`.
+//!     when stage 1 introduces `NativeTransport`.
 //!   - [`io`], [`net`], [`log`] — wasm-specific helper modules. They
-//!     specialise `aether_actor::wait_reply` to `WasmTransport`
-//!     internally so the existing `io::read_sync(...)` /
+//!     specialise `crate::wait_reply` to `WasmTransport` internally
+//!     so the existing `io::read_sync(...)` /
 //!     `net::fetch_blocking(...)` call shapes don't grow turbofish.
-//!     `log` installs the global `tracing` default the `export!`
+//!     `log` installs the global `tracing` default the [`export!`]
 //!     macro plumbs into the `init` shim.
 //!   - [`export!`] — `#[no_mangle]` `init` / `receive` / lifecycle
 //!     shims plus the `aether.kinds.inputs` custom-section pin (issue
-//!     442). Builds `WasmTransport`-flavoured `InitCtx`/`Ctx`/`DropCtx`
-//!     for the user's `Component` impl.
+//!     442). Builds `WasmTransport`-flavoured `WasmInitCtx` /
+//!     `WasmCtx` / `WasmDropCtx` for the user's `WasmActor` impl.
 //!
 //! Original ADR coverage (history retained for the surfaces the
 //! moved types still implement): ADR-0012 (typed sinks), ADR-0013
@@ -40,13 +45,15 @@
 //! ADR-0045 (typed handles), ADR-0058 (`aether.sink.*` namespace),
 //! ADR-0060 (tracing→mail bridge), ADR-0074 (this restructure).
 
-#![no_std]
-
-extern crate alloc;
-
-use aether_actor::MailTransport;
 use alloc::borrow::Cow;
 use alloc::string::String;
+
+use crate::transport::MailTransport;
+
+pub mod io;
+pub mod log;
+pub mod net;
+pub mod raw;
 
 /// Error returned by [`WasmActor::init`] when the component cannot
 /// start (config parse failure, required handle missing, malformed
@@ -73,7 +80,7 @@ impl BootError {
         }
     }
 
-    /// Borrow the error text. Used by the `export!` shim to copy
+    /// Borrow the error text. Used by the [`export!`] shim to copy
     /// bytes into the substrate via `init_failed_p32`.
     pub fn message(&self) -> &str {
         &self.message
@@ -98,28 +105,23 @@ impl From<String> for BootError {
     }
 }
 
-pub mod io;
-pub mod log;
-pub mod net;
-pub mod raw;
-
 /// ZST `MailTransport` impl for the WASM guest path. Each method
-/// forwards to the matching `raw::*` host-fn import. The `&self`
+/// forwards to the matching [`raw`]`::*` host-fn import. The `&self`
 /// receiver is unused — `WasmTransport` carries no per-instance
 /// state because the FFI imports are global to the wasm instance —
 /// so there's no overhead beyond the host-fn call itself.
 ///
 /// `aether_substrate::NativeTransport` is the native counterpart;
-/// both impls share the same SDK in `aether-actor` and the same
-/// trait surface.
+/// both impls share the same SDK and the same trait surface.
 pub struct WasmTransport;
 
-/// Process-wide `WasmTransport` instance. The type is a ZST, so
+/// Process-wide [`WasmTransport`] instance. The type is a ZST, so
 /// this `static` occupies zero bytes; its only purpose is giving
-/// `&WASM_TRANSPORT` callers (the `export!`-emitted Ctx/InitCtx/
-/// DropCtx constructors, the `io` / `net` / `log` helper modules,
-/// component examples) a stable address to borrow without each
-/// call site having to write `&WasmTransport` inline.
+/// `&WASM_TRANSPORT` callers (the [`export!`]-emitted `WasmCtx` /
+/// `WasmInitCtx` / `WasmDropCtx` constructors, the [`io`] / [`net`] /
+/// [`log`] helper modules, component examples) a stable address to
+/// borrow without each call site having to write `&WasmTransport`
+/// inline.
 pub static WASM_TRANSPORT: WasmTransport = WasmTransport;
 
 impl MailTransport for WasmTransport {
@@ -175,82 +177,49 @@ impl MailTransport for WasmTransport {
 }
 
 // 1-arg specialisations of the actor SDK's transport-generic types.
-// Component code writes `Mailbox<MyKind>`, `Ctx<'_>`, `InitCtx<'_>`,
-// `DropCtx<'_>` — the alias pins `T = WasmTransport`.
+// Component code writes `Mailbox<MyKind>`, `WasmCtx<'_>`,
+// `WasmInitCtx<'_>`, `WasmDropCtx<'_>` — the alias pins
+// `T = WasmTransport`.
 
-/// Wasm-flavoured [`aether_actor::Mailbox`].
-pub type Mailbox<K> = aether_actor::Mailbox<K, WasmTransport>;
-/// Wasm-flavoured [`aether_actor::Ctx`].
-pub type Ctx<'a> = aether_actor::Ctx<'a, WasmTransport>;
-/// Wasm-flavoured [`aether_actor::InitCtx`].
-pub type InitCtx<'a> = aether_actor::InitCtx<'a, WasmTransport>;
-/// Wasm-flavoured [`aether_actor::DropCtx`].
-pub type DropCtx<'a> = aether_actor::DropCtx<'a, WasmTransport>;
-/// Wasm-flavoured [`aether_actor::handle::Handle`]. Re-exposed at the
-/// crate root so existing `aether_component::Handle<MyKind>` paths
-/// keep resolving.
-pub type Handle<K> = aether_actor::handle::Handle<K, WasmTransport>;
-
-// Re-exports — these types have no transport coupling, so they pass
-// through unchanged from the SDK.
-pub use aether_actor::{
-    DISPATCH_HANDLED, DISPATCH_UNKNOWN_KIND, HandlesKind, KindId, Mail,
-    MailTransport as MailTransportTrait, NO_REPLY_HANDLE, PriorState, ReplyTo, Singleton, Slot,
-    WaitError, decode_wait_reply, resolve, wait_reply,
-};
+/// Wasm-flavoured [`crate::sink::Mailbox`]. Pinned via the original
+/// module path (not the crate-root re-export) so this alias doesn't
+/// recurse onto itself when the same `Mailbox` name is re-exported at
+/// the crate root.
+pub type Mailbox<K> = crate::sink::Mailbox<K, WasmTransport>;
+/// Wasm-flavoured [`crate::Ctx`]. Issue 552 stage 0 renamed the prior
+/// `Ctx` alias to `WasmCtx` so the public surface mirrors the
+/// upcoming `NativeCtx` (stage 1) symmetrically.
+pub type WasmCtx<'a> = crate::Ctx<'a, WasmTransport>;
+/// Wasm-flavoured [`crate::InitCtx`]. Issue 552 stage 0 renamed the
+/// prior `InitCtx` alias to `WasmInitCtx`.
+pub type WasmInitCtx<'a> = crate::InitCtx<'a, WasmTransport>;
+/// Wasm-flavoured [`crate::DropCtx`]. Issue 552 stage 0 renamed the
+/// prior `DropCtx` alias to `WasmDropCtx`.
+pub type WasmDropCtx<'a> = crate::DropCtx<'a, WasmTransport>;
+/// Wasm-flavoured [`crate::handle::Handle`].
+pub type Handle<K> = crate::handle::Handle<K, WasmTransport>;
 
 /// Wasm-flavoured `resolve_mailbox` — pins `T = WasmTransport` so the
 /// 1-turbofish-arg call shape `resolve_mailbox::<MyKind>(name)` works
 /// without spelling out the transport. The transport-generic version
-/// is at [`aether_actor::resolve_mailbox`] for hand-rolled callers
-/// that want a non-wasm transport.
+/// is at [`crate::resolve_mailbox`] for hand-rolled callers that want
+/// a non-wasm transport.
 pub const fn resolve_mailbox<K: aether_data::Kind>(mailbox_name: &str) -> Mailbox<K> {
-    aether_actor::resolve_mailbox::<K, WasmTransport>(mailbox_name)
+    crate::sink::resolve_mailbox::<K, WasmTransport>(mailbox_name)
 }
-/// Re-export the typed-handle module path so existing
-/// `aether_component::handle::publish` callers compile unchanged.
-pub use aether_actor::handle;
-pub use aether_actor::handle::SyncHandleError;
-
-/// ADR-0033 attribute macros. Applied to `impl Component for C`
-/// blocks: `#[actor]` at the impl level; `#[handler]` on each typed
-/// handler method; `#[fallback]` on an optional catchall. Forwarded
-/// from `aether-data-derive` so the full component vocabulary sits
-/// behind one `use aether_component::*` line.
-pub use aether_data::{actor, fallback, handler};
-
-/// Re-exports the `#[actor]` macro relies on at expansion sites
-/// that don't depend on `aether-data` directly. The macro emits
-/// `::aether_component::__macro_internals::*` paths so the consumer
-/// crate only needs `aether-component` in its dependency list; this
-/// alias forwards into the SDK module that owns the symbols.
-///
-/// Not part of the public API; the macro is the only intended caller.
-#[doc(hidden)]
-pub mod __macro_internals {
-    pub use aether_actor::__macro_internals::*;
-}
-
-/// Re-export the [`Actor`] super-trait so component crates pick it up
-/// from `aether_component::Actor` without a separate `aether-actor`
-/// dependency entry. Issue 525 Phase 3 introduced `Actor`; Phase 4
-/// folds `WasmActor: Actor` into the wasm-side surface.
-pub use aether_actor::Actor;
 
 /// User-implemented WASM component. ADR-0014 commits to `Self`-is-state —
 /// cached kind ids, cached sinks, and any domain fields live on the
 /// implementor. `init` runs once before any `receive`; receive is
 /// driven by the synthesised `__aether_dispatch` from `#[actor]`.
 ///
-/// Renamed from `Component` to `WasmActor` in issue 525 Phase 4 — the
-/// wasm-side leaf of the unified [`Actor`] trait, mirroring the
-/// substrate-side `aether_substrate::NativeActor`. The [`Actor`]
-/// super-trait owns the symmetric bits (`NAMESPACE`,
-/// `FRAME_BARRIER`); `WasmActor` adds the wasm lifecycle methods
-/// (`init`, `on_drop`). Hot-swap hooks (`on_replace`,
-/// `on_rehydrate`) moved to the opt-in [`Replaceable`] sub-trait so
-/// component authors who don't participate in hot-swap aren't asked
-/// to know the hooks exist.
+/// Issue 525 Phase 4 split the trait surface: the [`crate::Actor`]
+/// super-trait owns the symmetric bits (`NAMESPACE`, `FRAME_BARRIER`)
+/// shared with the substrate-side `NativeActor`; `WasmActor` adds the
+/// wasm lifecycle methods (`init`, `on_drop`). Hot-swap hooks
+/// (`on_replace`, `on_rehydrate`) moved to the opt-in [`Replaceable`]
+/// sub-trait so component authors who don't participate in hot-swap
+/// aren't asked to know the hooks exist.
 ///
 /// `Component` stays as a backwards-compatibility alias so the
 /// `impl Component for X` shape that pre-Phase-4 components write
@@ -259,8 +228,9 @@ pub use aether_actor::Actor;
 /// The `#[no_mangle]` `init` / `receive` exports that actually cross
 /// the WASM FFI are generated by `export!(MyComponent)`; implementors
 /// do not write `extern "C"` by hand. The trait stays specialised to
-/// `WasmTransport` via the `Ctx` / `InitCtx` / `DropCtx` aliases.
-pub trait WasmActor: Actor {
+/// [`WasmTransport`] via the [`WasmCtx`] / [`WasmInitCtx`] /
+/// [`WasmDropCtx`] aliases.
+pub trait WasmActor: crate::Actor {
     /// Runs once. Resolve kinds and sinks via `ctx` and return the
     /// initial component state. ADR-0033: `#[actor]` prepends
     /// `ctx.subscribe_input::<K>()` for every `K::IS_INPUT` handler
@@ -274,7 +244,7 @@ pub trait WasmActor: Actor {
     /// issue 531. Most components have no meaningful failure mode and
     /// return `Ok(Self { ... })` unconditionally. A failed `resolve`
     /// inside `init` still panics — see ADR-0012 §2 ("loud at init").
-    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError>;
+    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError>;
 
     /// Called once on the instance being dropped — both for
     /// `drop_component` and for the old instance of
@@ -282,7 +252,7 @@ pub trait WasmActor: Actor {
     /// down linear memory. Default is no-op; override for cleanup
     /// (sending "goodbye" mail, flushing work to a sibling component,
     /// logging).
-    fn on_drop(&mut self, ctx: &mut DropCtx<'_>) {
+    fn on_drop(&mut self, ctx: &mut WasmDropCtx<'_>) {
         let _ = ctx;
     }
 }
@@ -295,10 +265,10 @@ pub use WasmActor as Component;
 /// Opt-in trait for components that participate in hot-swap (ADR-0040
 /// `replace_component`). Components that don't impl `Replaceable`
 /// behave as if both methods were no-ops — the FFI shim emitted by
-/// the default `export!()` macro returns `0` for `on_replace` /
+/// the default [`export!`] macro returns `0` for `on_replace` /
 /// `on_rehydrate` without dispatching into the trait. To wire the
 /// hooks, declare `impl Replaceable for X` and emit via
-/// `aether_component::export!(X, replaceable)`.
+/// `aether_actor::export!(X, replaceable)`.
 ///
 /// Issue 525 Phase 4 split: pre-Phase-4 every `Component` impl
 /// inherited default-noop `on_replace` / `on_rehydrate`, so
@@ -311,69 +281,70 @@ pub trait Replaceable: WasmActor {
     /// `replace_component` swap (ADR-0015 §3). Default is no-op;
     /// override to serialize state that the new instance can consume
     /// through `on_rehydrate`, or to emit farewell mail. Prefer
-    /// `DropCtx::save_state_kind::<K>` (ADR-0040) to let the kind
+    /// `WasmDropCtx::save_state_kind::<K>` (ADR-0040) to let the kind
     /// system carry schema identity; reach for the raw
-    /// `DropCtx::save_state` only when persisting a non-kind blob or
-    /// driving an explicit migration off the leading id.
-    fn on_replace(&mut self, ctx: &mut DropCtx<'_>) {
+    /// `WasmDropCtx::save_state` only when persisting a non-kind blob
+    /// or driving an explicit migration off the leading id.
+    fn on_replace(&mut self, ctx: &mut WasmDropCtx<'_>) {
         let _ = ctx;
     }
 
     /// Called after `init` on a freshly-instantiated component that
     /// is replacing an older instance, if and only if the predecessor
-    /// produced a state bundle via `DropCtx::save_state` (ADR-0016 §3)
-    /// or `DropCtx::save_state_kind` (ADR-0040). Default ignores the
-    /// prior state; components that persist across replace override to
-    /// rehydrate — typically `prior.as_kind::<MyState>()` for kind-
-    /// typed saves, or `prior.bytes()` + `prior.schema_version()` for
-    /// the raw path.
-    fn on_rehydrate(&mut self, ctx: &mut Ctx<'_>, prior: PriorState<'_>) {
+    /// produced a state bundle via `WasmDropCtx::save_state` (ADR-0016
+    /// §3) or `WasmDropCtx::save_state_kind` (ADR-0040). Default
+    /// ignores the prior state; components that persist across replace
+    /// override to rehydrate — typically `prior.as_kind::<MyState>()`
+    /// for kind-typed saves, or `prior.bytes()` +
+    /// `prior.schema_version()` for the raw path.
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: crate::PriorState<'_>) {
         let _ = ctx;
         let _ = prior;
     }
 }
 
-/// Bind a `Component` implementor to the guest's `#[no_mangle]`
+/// Bind a `WasmActor` implementor to the guest's `#[no_mangle]`
 /// `init` / `receive` exports. Expands to:
 ///
-/// - A `static` `Slot<T>` that backs the component instance.
-/// - `extern "C" fn init(mailbox_id: u64) -> u32` — builds an
-///   `InitCtx`, calls `T::init`, stashes the result in the slot.
+/// - A `static` [`crate::Slot<T>`] that backs the component instance.
+/// - `extern "C" fn init(mailbox_id: u64) -> u32` — builds a
+///   [`WasmInitCtx`], calls `T::init`, stashes the result in the slot.
 /// - `extern "C" fn receive(kind, ptr, byte_len, count, sender) -> u32`
-///   — builds `Ctx` and `Mail`, calls the `#[actor]`-synthesized
-///   `__aether_dispatch` on the stashed instance.
+///   — builds [`WasmCtx`] and [`crate::Mail`], calls the
+///   `#[actor]`-synthesized `__aether_dispatch` on the stashed
+///   instance.
 /// - `#[link_section = "aether.kinds.inputs"]` static that pins the
 ///   component's handler manifest into the wasm custom section the
 ///   substrate reads at `load_component`. The manifest *bytes* are
 ///   emitted as associated consts on `T`'s inherent impl by
 ///   `#[actor]`; this macro is the only place they get a
 ///   `link_section` attribute, which means the section can only land
-///   in the cdylib root that calls `export!()` — never in transitive
+///   in the cdylib root that calls [`export!`] — never in transitive
 ///   rlib pulls of a `#[actor]`-using crate (issue 442).
 /// - `#[link_section = "aether.namespace"]` static that pins the
-///   component's `Component::NAMESPACE` bytes (issue 525 Phase 1B).
+///   component's `WasmActor::NAMESPACE` bytes (issue 525 Phase 1B).
 ///   The substrate reads this at `load_component` and uses it as the
 ///   default mailbox name when the load payload omits an explicit
 ///   `name`. Same one-place-per-cdylib invariant as the inputs
 ///   section — emit only here, never in transitive rlib pulls.
 ///
-/// Only one component per guest crate. A second `export!` call in
+/// Only one component per guest crate. A second [`export!`] call in
 /// the same crate is a duplicate-symbol compile error on the shared
 /// `init` / `receive` names — ADR-0014 §4 parks multi-component
 /// crates as out of scope.
 ///
 /// ```ignore
 /// pub struct Hello { /* fields */ }
-/// impl aether_component::Component for Hello { /* init + receive */ }
-/// aether_component::export!(Hello);
+/// impl aether_actor::WasmActor for Hello { /* init + receive */ }
+/// aether_actor::export!(Hello);
 /// ```
 ///
 /// Components that participate in hot-swap (ADR-0040) opt in via the
-/// `replaceable` flag — `aether_component::export!(Hello,
-/// replaceable);` — which wires the FFI exports through the
-/// component's [`Replaceable`] impl. Without the flag, `on_replace`
-/// and `on_rehydrate` are emitted as no-ops; the substrate still
-/// calls them but the bodies do nothing. Issue 525 Phase 4 made this
+/// `replaceable` flag — `aether_actor::export!(Hello, replaceable);`
+/// — which wires the FFI exports through the component's
+/// [`Replaceable`] impl. Without the flag, `on_replace` and
+/// `on_rehydrate` are emitted as no-ops; the substrate still calls
+/// them but the bodies do nothing. Issue 525 Phase 4 made this
 /// opt-in explicit so the trait surface tells you which components
 /// actually persist across `replace_component`.
 #[macro_export]
@@ -407,7 +378,7 @@ macro_rules! __export_internal {
         static __AETHER_INPUTS_SECTION: [u8; <$component>::__AETHER_INPUTS_MANIFEST_LEN] =
             <$component>::__AETHER_INPUTS_MANIFEST;
 
-        // Issue 525 Phase 1B: pin the component's `Component::NAMESPACE`
+        // Issue 525 Phase 1B: pin the component's `WasmActor::NAMESPACE`
         // bytes into a sibling `aether.namespace` custom section. The
         // substrate reads this at load time as the default mailbox
         // name when the load payload omits an explicit `name`. Length
@@ -446,10 +417,10 @@ macro_rules! __export_internal {
         /// Phase 4b / issue 531.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
-            $crate::log::install_global_default();
-            let mut ctx: $crate::InitCtx<'_> =
-                $crate::InitCtx::__new(&$crate::WASM_TRANSPORT, mailbox_id);
-            match <$component as $crate::Component>::init(&mut ctx) {
+            $crate::wasm::log::install_global_default();
+            let mut ctx: $crate::WasmInitCtx<'_> =
+                $crate::WasmInitCtx::__new(&$crate::WASM_TRANSPORT, mailbox_id);
+            match <$component as $crate::WasmActor>::init(&mut ctx) {
                 Ok(instance) => {
                     unsafe {
                         __AETHER_COMPONENT.set(instance);
@@ -460,7 +431,7 @@ macro_rules! __export_internal {
                     let msg = err.message();
                     let bytes = msg.as_bytes();
                     unsafe {
-                        $crate::raw::init_failed(
+                        $crate::wasm::raw::init_failed(
                             bytes.as_ptr().addr() as u32,
                             bytes.len() as u32,
                         );
@@ -495,7 +466,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::Ctx<'_> = $crate::Ctx::__new(&$crate::WASM_TRANSPORT);
+            let mut ctx: $crate::WasmCtx<'_> = $crate::WasmCtx::__new(&$crate::WASM_TRANSPORT);
             let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
             instance.__aether_dispatch(&mut ctx, mail)
         }
@@ -504,7 +475,7 @@ macro_rules! __export_internal {
         /// Called by the substrate exactly once, on the old instance,
         /// immediately before a `replace_component` swap. Issue 525
         /// Phase 4: dispatches into the component's
-        /// [`Replaceable::on_replace`] when `export!()` was called
+        /// [`Replaceable::on_replace`] when [`export!`] was called
         /// with the `replaceable` flag; otherwise the body is a
         /// no-op (the substrate still invokes it for ABI stability).
         #[unsafe(no_mangle)]
@@ -512,7 +483,8 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::DropCtx<'_> = $crate::DropCtx::__new(&$crate::WASM_TRANSPORT);
+            let mut ctx: $crate::WasmDropCtx<'_> =
+                $crate::WasmDropCtx::__new(&$crate::WASM_TRANSPORT);
             $crate::__export_internal!(@on_replace $replaceable, $component, instance, ctx);
             0
         }
@@ -525,7 +497,8 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::DropCtx<'_> = $crate::DropCtx::__new(&$crate::WASM_TRANSPORT);
+            let mut ctx: $crate::WasmDropCtx<'_> =
+                $crate::WasmDropCtx::__new(&$crate::WASM_TRANSPORT);
             <$component as $crate::WasmActor>::on_drop(instance, &mut ctx);
             0
         }
@@ -534,7 +507,7 @@ macro_rules! __export_internal {
         /// Called by the substrate after `init` on a freshly
         /// instantiated replacement, with `(version, ptr, len)`
         /// describing the prior-state bundle the old instance
-        /// produced via `DropCtx::save_state`. Exported under the
+        /// produced via `WasmDropCtx::save_state`. Exported under the
         /// `_p32` suffix per ADR-0024 Phase 1. Same opt-in shape as
         /// `on_replace`: dispatches into [`Replaceable::on_rehydrate`]
         /// when `replaceable` was passed; no-op otherwise.
@@ -543,7 +516,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::Ctx<'_> = $crate::Ctx::__new(&$crate::WASM_TRANSPORT);
+            let mut ctx: $crate::WasmCtx<'_> = $crate::WasmCtx::__new(&$crate::WASM_TRANSPORT);
             let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
             $crate::__export_internal!(@on_rehydrate $replaceable, $component, instance, ctx, prior);
             0
@@ -568,94 +541,4 @@ macro_rules! __export_internal {
     (@on_rehydrate replaceable, $component:ty, $instance:ident, $ctx:ident, $prior:ident) => {
         <$component as $crate::Replaceable>::on_rehydrate($instance, &mut $ctx, $prior);
     };
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aether_data::Kind;
-
-    // Mail / Sink / KindId / PriorState / DropCtx unit coverage moved
-    // to `aether-actor` along with the types they exercise. The tests
-    // that stay here cover surfaces unique to this crate:
-    //   - `Kind::encode_into_bytes` round-trip (issue #240) — the
-    //     derive lives in `aether-data`, but the smoke test sits
-    //     here because `aether-component`'s `Sink::send` /
-    //     `Ctx::send` are the consumer.
-    //   - The wasm-aliased `Sink<K>` resolves to `Sink<K, WasmTransport>`
-    //     via the type alias — a regression guard against an
-    //     accidental alias break.
-
-    #[derive(
-        aether_data::Kind,
-        aether_data::Schema,
-        serde::Serialize,
-        serde::Deserialize,
-        Debug,
-        Clone,
-        PartialEq,
-    )]
-    #[kind(name = "test.fake_postcard")]
-    struct FakePostcard {
-        tag: alloc::string::String,
-        ids: alloc::vec::Vec<u32>,
-    }
-
-    #[test]
-    fn kind_encode_into_bytes_postcard_roundtrip() {
-        let value = FakePostcard {
-            tag: alloc::string::String::from("hello"),
-            ids: alloc::vec![10, 20, 30],
-        };
-        let bytes = value.encode_into_bytes();
-        // Wire-shape contract: postcard encode matches what the
-        // pre-#240 `Sink::send_postcard` path would have written.
-        assert_eq!(bytes, postcard::to_allocvec(&value).unwrap());
-        let decoded = FakePostcard::decode_from_bytes(&bytes).expect("decode");
-        assert_eq!(decoded, value);
-    }
-
-    #[test]
-    fn kind_encode_into_bytes_cast_roundtrip() {
-        #[repr(C)]
-        #[derive(
-            Copy,
-            Clone,
-            Debug,
-            PartialEq,
-            bytemuck::Pod,
-            bytemuck::Zeroable,
-            aether_data::Kind,
-            aether_data::Schema,
-        )]
-        #[kind(name = "test.encode_cast")]
-        struct EncodeCast {
-            a: u32,
-            b: u32,
-        }
-
-        let value = EncodeCast { a: 11, b: 22 };
-        let bytes = value.encode_into_bytes();
-        // Wire-shape contract: cast encode matches `bytemuck::bytes_of`
-        // — what the pre-#240 `Sink::send` path wrote zero-copy.
-        assert_eq!(bytes.as_slice(), bytemuck::bytes_of(&value));
-        let decoded = EncodeCast::decode_from_bytes(&bytes).expect("decode");
-        assert_eq!(decoded, value);
-    }
-
-    /// Regression guard for the 1-arg `Sink<K>` alias. If the alias
-    /// breaks (e.g. someone parameterises it with a different default
-    /// transport) this test fails to compile.
-    #[test]
-    fn mailbox_alias_resolves_to_wasm_transport() {
-        use core::any::TypeId;
-        // Building a `Mailbox<FakePostcard>` value via the const
-        // resolver is enough — its type identity is what matters
-        // here, not the mailbox lookup.
-        let _: Mailbox<FakePostcard> = resolve_mailbox::<FakePostcard>("test.smoke");
-        assert_eq!(
-            TypeId::of::<Mailbox<FakePostcard>>(),
-            TypeId::of::<aether_actor::Mailbox<FakePostcard, WasmTransport>>(),
-        );
-    }
 }

@@ -1,0 +1,19 @@
+[package]
+name = "aether-actor-derive"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+bytemuck = { version = "1.19", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+inventory = "0.3"
+aether-actor = { path = "../aether-actor" }

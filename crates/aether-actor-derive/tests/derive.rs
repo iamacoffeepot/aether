@@ -1,5 +1,5 @@
 // Integration tests for `#[derive(Kind)]` and `#[derive(Schema)]`. Run
-// with `cargo test -p aether-data-derive`. The `aether-data` dev-dep
+// with `cargo test -p aether-actor-derive`. The `aether-data` dev-dep
 // has the `derive` feature enabled (Cargo.toml of this crate), so the
 // macros expand and the runtime traits resolve.
 //

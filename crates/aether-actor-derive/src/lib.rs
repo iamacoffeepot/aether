@@ -705,7 +705,7 @@ fn to_screaming_snake_case(s: &str) -> String {
 //       component-level doc if present, each prefixed with the section
 //       version byte). The `#[link_section]` static that pins these
 //       bytes into the wasm custom section is emitted by
-//       `aether_component::export!()` in the cdylib root crate, NOT
+//       `aether_actor::export!()` in the cdylib root crate, NOT
 //       here. Sections only land where `export!()` runs (the cdylib
 //       root); transitive rlib pulls of a `#[actor]`-using crate
 //       carry only the const data and contribute no section bytes —
@@ -783,6 +783,91 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     .into()
 }
 
+/// `#[derive(Singleton)]` — emits `impl ::aether_actor::Singleton for T {}`.
+///
+/// Issue 552 stage 0: explicit opt-in marker that an actor type is
+/// the sole instance of its kind in a chassis. The trait itself is a
+/// simple marker — no methods. Future stages may grow `Singleton`
+/// into a richer trait (e.g. an associated `unique_name() -> &str`)
+/// at which point this derive emits the additional bodies; today
+/// it's just the marker.
+///
+/// Kept as `#[derive(Singleton)]` rather than auto-emitted by
+/// `#[actor]` so opting OUT (multi-instance actors, when stage 5+
+/// introduces them) is non-breaking — the absence of the derive
+/// becomes the opt-out signal instead of a new attribute syntax.
+#[proc_macro_derive(Singleton)]
+pub fn derive_singleton(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    quote! {
+        impl #impl_generics ::aether_actor::Singleton for #name #ty_generics #where_clause {}
+    }
+    .into()
+}
+
+/// `#[capability]` — attribute macro for native chassis capability
+/// structs. Cfg-gates every field with `#[cfg(feature = "native")]`
+/// so the cap's runtime fields disappear from non-native builds (wasm
+/// guests linking the cap's depable rlib for type/marker visibility
+/// don't pay for `cpal::Stream`, `Arc<HandleStore>`, etc.).
+///
+/// Issue 552 stage 0 ships the macro as a thin shim — fields get the
+/// blanket `#[cfg(feature = "native")]` gate and the struct itself
+/// passes through unchanged. Stage 1 may extend the macro to gate
+/// trait impls, derive `Default`, or pre-emit the empty
+/// stage-0-required `Singleton` marker; this skeleton lands now so
+/// capability authors can adopt the new shape without waiting on
+/// stage 1 details.
+///
+/// ```ignore
+/// #[capability]
+/// pub struct AudioCapability {
+///     // Both fields gain `#[cfg(feature = "native")]` automatically.
+///     audio_sender: Option<AudioEventSender>,
+///     audio_thread: Option<JoinHandle<()>>,
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[capability] takes no arguments",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let mut item = parse_macro_input!(item as syn::ItemStruct);
+    match &mut item.fields {
+        syn::Fields::Named(fields) => {
+            for field in fields.named.iter_mut() {
+                let already_cfg = field.attrs.iter().any(|a| a.path().is_ident("cfg"));
+                if !already_cfg {
+                    field
+                        .attrs
+                        .push(syn::parse_quote!(#[cfg(feature = "native")]));
+                }
+            }
+        }
+        syn::Fields::Unnamed(fields) => {
+            for field in fields.unnamed.iter_mut() {
+                let already_cfg = field.attrs.iter().any(|a| a.path().is_ident("cfg"));
+                if !already_cfg {
+                    field
+                        .attrs
+                        .push(syn::parse_quote!(#[cfg(feature = "native")]));
+                }
+            }
+        }
+        syn::Fields::Unit => {
+            // Marker structs: nothing to gate.
+        }
+    }
+    quote! { #item }.into()
+}
+
 struct HandlerFn {
     method: syn::ImplItemFn,
     kind_ty: Type,
@@ -823,7 +908,7 @@ fn attr_is_fallback(attr: &Attribute) -> bool {
 
 /// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
 /// the back-compat `impl Component for X`). Emits the full wasm
-/// surface: dispatch table referencing `aether_component::Ctx<'_>`,
+/// surface: dispatch table referencing `aether_actor::WasmCtx<'_>`,
 /// init wrapper, `aether.kinds.inputs` manifest consts, kind retention
 /// statics, plus the `HandlesKind<K>` and `Actor` impls common to both
 /// shapes.
@@ -956,7 +1041,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     // Issue 525 Phase 4: trait consts (NAMESPACE, FRAME_BARRIER) live
     // on the `Actor` super-trait, not `Component` / `WasmActor`. Route
     // any const items the user declared inside `#[actor] impl
-    // Component for X` to a sibling `impl ::aether_component::Actor`
+    // Component for X` to a sibling `impl ::aether_actor::Actor`
     // block so satisfying `WasmActor: Actor` works without making the
     // user split the impl manually.
     let const_tokens = consts.iter();
@@ -964,7 +1049,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         quote! {}
     } else {
         quote! {
-            impl #impl_generics ::aether_component::Actor for #self_ty #where_clause {
+            impl #impl_generics ::aether_actor::Actor for #self_ty #where_clause {
                 #(#const_tokens)*
             }
         }
@@ -979,7 +1064,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     let handles_kind_impls = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         quote! {
-            impl #impl_generics ::aether_component::HandlesKind<#kind_ty>
+            impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
                 for #self_ty #where_clause {}
         }
     });
@@ -999,8 +1084,8 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             #[doc(hidden)]
             pub fn __aether_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_component::Ctx<'_>,
-                __aether_mail: ::aether_component::Mail<'_>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_>,
+                __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #dispatch_body
             }
@@ -1286,7 +1371,7 @@ fn extract_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
 
 /// Soft validation that a `#[fallback]` method's signature is shaped
 /// for `Mail<'_>`. We don't do deep type equality against
-/// `::aether_component::Mail<'_>` — the synthesized dispatcher's call
+/// `::aether_actor::Mail<'_>` — the synthesized dispatcher's call
 /// to `self.<fallback>(ctx, mail)` will type-check at the call site
 /// and produce a clear error if the user wrote the wrong arg type.
 fn validate_fallback_sig(sig: &Signature) -> syn::Result<()> {
@@ -1330,13 +1415,13 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
         // is typed `KindId` post-issue 466, so we drop into `.0` for the
         // comparison.
         quote! {
-            if __aether_kind == <#k as ::aether_component::__macro_internals::Kind>::ID.0 {
+            if __aether_kind == <#k as ::aether_actor::__macro_internals::Kind>::ID.0 {
                 if let ::core::option::Option::Some(__aether_decoded) =
                     __aether_mail.decode_kind::<#k>()
                 {
                     self.#method(__aether_ctx, __aether_decoded);
                 }
-                return ::aether_component::DISPATCH_HANDLED;
+                return ::aether_actor::DISPATCH_HANDLED;
             }
         }
     });
@@ -1346,10 +1431,10 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
             let method = &f.method.sig.ident;
             quote! {
                 self.#method(__aether_ctx, __aether_mail);
-                ::aether_component::DISPATCH_HANDLED
+                ::aether_actor::DISPATCH_HANDLED
             }
         }
-        None => quote! { ::aether_component::DISPATCH_UNKNOWN_KIND },
+        None => quote! { ::aether_actor::DISPATCH_UNKNOWN_KIND },
     };
 
     quote! {
@@ -1366,7 +1451,7 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
 /// concatenated `aether.kinds.inputs` record bytes. Each record is
 /// `[INPUTS_SECTION_VERSION (0x01), ..postcard(InputsRecord)..]`,
 /// assembled at const-eval via the hub-protocol const-fn encoders.
-/// `aether_component::export!()` reads these consts and emits the
+/// `aether_actor::export!()` reads these consts and emits the
 /// `#[unsafe(link_section = "aether.kinds.inputs")]` static in the
 /// cdylib root crate. Keeping the section emission out of this macro
 /// is what prevents the section from stacking when a `#[actor]`-
@@ -1387,24 +1472,24 @@ fn build_inputs_manifest_consts(
         // for the wire bytes; `Kind::ID` is `KindId` post-issue 466 so
         // we drop into `.0` here.
         len_terms.push(quote! {
-            (1 + ::aether_component::__macro_internals::canonical::inputs_handler_len(
-                <#k as ::aether_component::__macro_internals::Kind>::ID.0,
-                <#k as ::aether_component::__macro_internals::Kind>::NAME,
+            (1 + ::aether_actor::__macro_internals::canonical::inputs_handler_len(
+                <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
+                <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                 #doc_expr,
             ))
         });
         copy_blocks.push(quote! {
             {
                 const REC_LEN: usize =
-                    ::aether_component::__macro_internals::canonical::inputs_handler_len(
-                        <#k as ::aether_component::__macro_internals::Kind>::ID.0,
-                        <#k as ::aether_component::__macro_internals::Kind>::NAME,
+                    ::aether_actor::__macro_internals::canonical::inputs_handler_len(
+                        <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
+                        <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                         #doc_expr,
                     );
                 const REC_BYTES: [u8; REC_LEN] =
-                    ::aether_component::__macro_internals::canonical::write_inputs_handler::<REC_LEN>(
-                        <#k as ::aether_component::__macro_internals::Kind>::ID.0,
-                        <#k as ::aether_component::__macro_internals::Kind>::NAME,
+                    ::aether_actor::__macro_internals::canonical::write_inputs_handler::<REC_LEN>(
+                        <#k as ::aether_actor::__macro_internals::Kind>::ID.0,
+                        <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                         #doc_expr,
                     );
                 out[pos] = 0x01;
@@ -1422,14 +1507,14 @@ fn build_inputs_manifest_consts(
     if let Some(f) = fallback {
         let doc_expr = option_str_token(&f.agent_doc);
         len_terms.push(quote! {
-            (1 + ::aether_component::__macro_internals::canonical::inputs_fallback_len(#doc_expr))
+            (1 + ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr))
         });
         copy_blocks.push(quote! {
             {
                 const REC_LEN: usize =
-                    ::aether_component::__macro_internals::canonical::inputs_fallback_len(#doc_expr);
+                    ::aether_actor::__macro_internals::canonical::inputs_fallback_len(#doc_expr);
                 const REC_BYTES: [u8; REC_LEN] =
-                    ::aether_component::__macro_internals::canonical::write_inputs_fallback::<REC_LEN>(#doc_expr);
+                    ::aether_actor::__macro_internals::canonical::write_inputs_fallback::<REC_LEN>(#doc_expr);
                 out[pos] = 0x01;
                 pos += 1;
                 let mut i = 0;
@@ -1445,14 +1530,14 @@ fn build_inputs_manifest_consts(
     if let Some(doc) = component_doc.as_ref() {
         let doc_lit = doc.as_str();
         len_terms.push(quote! {
-            (1 + ::aether_component::__macro_internals::canonical::inputs_component_len(#doc_lit))
+            (1 + ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit))
         });
         copy_blocks.push(quote! {
             {
                 const REC_LEN: usize =
-                    ::aether_component::__macro_internals::canonical::inputs_component_len(#doc_lit);
+                    ::aether_actor::__macro_internals::canonical::inputs_component_len(#doc_lit);
                 const REC_BYTES: [u8; REC_LEN] =
-                    ::aether_component::__macro_internals::canonical::write_inputs_component::<REC_LEN>(#doc_lit);
+                    ::aether_actor::__macro_internals::canonical::write_inputs_component::<REC_LEN>(#doc_lit);
                 out[pos] = 0x01;
                 pos += 1;
                 let mut i = 0;
@@ -1569,16 +1654,16 @@ fn build_kinds_section_retention_statics(self_ty: &Type, handlers: &[HandlerFn])
             // sees a `&'static SchemaType` / `&'static KindLabels`
             // instead of materializing a temporary whose non-trivial
             // Drop can't run at compile time.
-            static #schema_ident: ::aether_component::__macro_internals::SchemaType =
-                <#k as ::aether_component::__macro_internals::Schema>::SCHEMA;
+            static #schema_ident: ::aether_actor::__macro_internals::SchemaType =
+                <#k as ::aether_actor::__macro_internals::Schema>::SCHEMA;
             const #len_ident: usize =
-                ::aether_component::__macro_internals::canonical::canonical_len_kind(
-                    <#k as ::aether_component::__macro_internals::Kind>::NAME,
+                ::aether_actor::__macro_internals::canonical::canonical_len_kind(
+                    <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                     &#schema_ident,
                 );
             const #bytes_ident: [u8; #len_ident] =
-                ::aether_component::__macro_internals::canonical::canonical_serialize_kind::<#len_ident>(
-                    <#k as ::aether_component::__macro_internals::Kind>::NAME,
+                ::aether_actor::__macro_internals::canonical::canonical_serialize_kind::<#len_ident>(
+                    <#k as ::aether_actor::__macro_internals::Kind>::NAME,
                     &#schema_ident,
                 );
             // ADR-0068 v0x03: trailing byte after canonical bytes
@@ -1598,7 +1683,7 @@ fn build_kinds_section_retention_statics(self_ty: &Type, handlers: &[HandlerFn])
                     out[i + 1] = #bytes_ident[i];
                     i += 1;
                 }
-                out[#len_ident + 1] = if <#k as ::aether_component::__macro_internals::Kind>::IS_STREAM { 1 } else { 0 };
+                out[#len_ident + 1] = if <#k as ::aether_actor::__macro_internals::Kind>::IS_STREAM { 1 } else { 0 };
                 out
             };
 
@@ -1612,25 +1697,25 @@ fn build_kinds_section_retention_statics(self_ty: &Type, handlers: &[HandlerFn])
             // without a `Schema::LABEL` (none today — every derived
             // Kind sets one — but defensive against future hand-rolled
             // Schema impls).
-            static #labels_static_ident: ::aether_component::__macro_internals::KindLabels =
-                ::aether_component::__macro_internals::KindLabels {
+            static #labels_static_ident: ::aether_actor::__macro_internals::KindLabels =
+                ::aether_actor::__macro_internals::KindLabels {
                     // Issue 469: `KindLabels.kind_id` is typed
                     // `KindId` end-to-end; pass through directly.
-                    kind_id: <#k as ::aether_component::__macro_internals::Kind>::ID,
-                    kind_label: ::aether_component::__macro_internals::Cow::Borrowed(
-                        match <#k as ::aether_component::__macro_internals::Schema>::LABEL {
+                    kind_id: <#k as ::aether_actor::__macro_internals::Kind>::ID,
+                    kind_label: ::aether_actor::__macro_internals::Cow::Borrowed(
+                        match <#k as ::aether_actor::__macro_internals::Schema>::LABEL {
                             ::core::option::Option::Some(s) => s,
                             ::core::option::Option::None => "",
                         },
                     ),
-                    root: <#k as ::aether_component::__macro_internals::Schema>::LABEL_NODE,
+                    root: <#k as ::aether_actor::__macro_internals::Schema>::LABEL_NODE,
                 };
             const #labels_len_ident: usize =
-                ::aether_component::__macro_internals::canonical::canonical_len_labels(
+                ::aether_actor::__macro_internals::canonical::canonical_len_labels(
                     &#labels_static_ident,
                 );
             const #labels_bytes_ident: [u8; #labels_len_ident] =
-                ::aether_component::__macro_internals::canonical::canonical_serialize_labels::<#labels_len_ident>(
+                ::aether_actor::__macro_internals::canonical::canonical_serialize_labels::<#labels_len_ident>(
                     &#labels_static_ident,
                 );
             #[cfg(target_arch = "wasm32")]

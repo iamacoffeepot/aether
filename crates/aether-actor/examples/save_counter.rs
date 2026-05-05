@@ -21,7 +21,9 @@
 //! 3. `terminate_substrate`, spawn another, observe the count
 //!    bumped by one.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor, io, resolve_mailbox};
+use aether_actor::{
+    BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor, io, wasm::resolve_mailbox,
+};
 use aether_kinds::{IoError, Tick};
 
 /// Broadcast payload the Claude session (or any component listening
@@ -60,10 +62,10 @@ pub struct SaveCounter {
 /// `spawn_substrate` with this component and poll `receive_mail`;
 /// each fresh instance bumps the counter by one.
 #[actor]
-impl Component for SaveCounter {
+impl WasmActor for SaveCounter {
     const NAMESPACE: &'static str = "save_counter";
 
-    fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(SaveCounter { initialized: false })
     }
 
@@ -74,7 +76,7 @@ impl Component for SaveCounter {
     /// this. Watch `receive_mail` for a `demo.save_counter.count`
     /// frame after the component loads.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         if self.initialized {
             return;
         }
@@ -92,7 +94,7 @@ impl Component for SaveCounter {
     }
 }
 
-aether_component::export!(SaveCounter);
+aether_actor::export!(SaveCounter);
 
 /// Read the counter from disk. On first run the file doesn't exist;
 /// we treat `NotFound` as "start at zero" rather than an error. Any

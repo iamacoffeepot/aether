@@ -7,7 +7,7 @@ edition.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-aether-component = { path = "../aether-component" }
+aether-actor = { path = "../aether-actor" }
 aether-kinds = { path = "../aether-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
