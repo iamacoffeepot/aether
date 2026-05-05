@@ -71,7 +71,9 @@ pub use wire_id::{EngineId, SessionToken, Uuid};
 /// split into a single `aether-actor-derive` proc-macro crate so the
 /// SDK and the derive share a home.
 #[cfg(feature = "derive")]
-pub use aether_actor_derive::{Kind, Schema, Singleton, actor, capability, fallback, handler};
+pub use aether_actor_derive::{
+    Kind, Schema, Singleton, actor, bridge, capability, fallback, handler,
+};
 
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
 /// `"aether.tick"`, `"hello.npc_health"`) and a `u64` id derived from

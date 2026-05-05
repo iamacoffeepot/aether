@@ -139,7 +139,9 @@ pub mod __macro_internals {
 /// and `#[derive(Singleton)]` (emits the `Singleton` marker) sit
 /// alongside the existing actor derives so component / capability
 /// authors only need `aether-actor` in their dep list.
-pub use aether_data::{Kind, KindId as DataKindId, Schema, actor, capability, fallback, handler};
+pub use aether_data::{
+    Kind, KindId as DataKindId, Schema, actor, bridge, capability, fallback, handler,
+};
 // `Singleton` lives in two namespaces:
 //   - the type namespace for the marker trait (`Actor` super-trait),
 //     re-exported above as part of `actor::*`.

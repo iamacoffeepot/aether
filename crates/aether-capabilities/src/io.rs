@@ -1,23 +1,13 @@
-//! Issue 552 stage 2: `aether.io` cap migrated onto `NativeActor`.
-//! Pre-stage-2 the cap was an `Actor + Singleton + Dispatch` shape
-//! taking `&mut self` handlers with `sender: ReplyTo` parameters and
-//! routing replies through `self.mailer.send_reply(sender, &result)`.
-//! Stage 2 collapses that into the symmetric authoring shape:
-//! `#[derive(Singleton)] struct + #[actor] impl NativeActor for X
-//! { type Config = NamespaceRoots; fn init; #[handler] fn (&self,
-//! ctx: &mut NativeCtx<'_>, mail) }`. Replies route via
-//! `ctx.reply(&result)`.
-//!
-//! Owns the full ADR-0041 stack — `FileAdapter` trait,
+//! `aether.io` cap. Owns the full ADR-0041 stack — `FileAdapter` trait,
 //! `LocalFileAdapter`, `AdapterRegistry`, env-driven `NamespaceRoots`,
 //! and the [`IoCapability`] itself. Chassis mains resolve a
-//! [`NamespaceRoots`] (typically via [`NamespaceRoots::from_env`])
-//! and pass it through `with_actor::<IoCapability>(roots)` —
-//! `init` builds the adapter registry and returns `BootError` on
-//! failure (per ADR-0063 fail-fast).
+//! [`NamespaceRoots`] (typically via [`NamespaceRoots::from_env`]) and
+//! pass it through `with_actor::<IoCapability>(roots)` — `init` builds
+//! the adapter registry and returns `BootError` on failure (per
+//! ADR-0063 fail-fast).
 //!
-//! Threading: the new actor dispatcher thread pulls envelopes from
-//! the `aether.io` mailbox and routes them through the macro-emitted
+//! Threading: the actor dispatcher thread pulls envelopes from the
+//! `aether.io` mailbox and routes them through the macro-emitted
 //! `NativeDispatch::__aether_dispatch_envelope`. Adapter calls run
 //! synchronously on that thread; ADR-0041 flagged a future host-fn
 //! fast path for asset-sized streaming.
@@ -27,18 +17,10 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aether_actor::{Singleton, actor, capability};
-// Kind imports split: handler-signature kinds stay always-on so the
-// macro-emitted `HandlesKind<K>` impls can reference them; reply-side
-// `*Result` types are body-only and live in the `native_only!` block.
+// Handler-signature kinds must be importable at file root because
+// `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
+// of the mod (always-on, outside the cfg gate).
 use aether_kinds::{Delete, IoError, List, Read, Write};
-
-aether_actor::native_only! {
-    use aether_actor::MailCtx;
-    use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
-    use aether_substrate::capability::BootError;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
-}
 
 /// Result shape used throughout the adapter layer. The variants of
 /// `IoError` map directly onto ADR-0041 §1's reply enums, so the
@@ -233,64 +215,6 @@ pub struct NamespaceRoots {
     pub config: PathBuf,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-impl NamespaceRoots {
-    /// Resolve each root from its env-var override, falling back to
-    /// the `dirs`-crate platform default. v1 ships the env layer;
-    /// ADR-0041's precedence order (CLI > env > TOML > defaults)
-    /// leaves room for TOML and CLI to sit in front of this without
-    /// changing the cap or adapter code.
-    ///
-    /// Defaults:
-    /// - `save` → `data_dir()/aether/save`
-    /// - `assets` → `{current_exe}/../assets`
-    /// - `config` → `config_dir()/aether`
-    ///
-    /// If a platform directory lookup fails (e.g. no HOME) or
-    /// `current_exe()` can't resolve, the fallback is `temp_dir()/aether/...`
-    /// so a boot always finishes even on headless CI.
-    ///
-    /// Per issue 464, this is the chassis-main edge — substrate-core
-    /// itself never reads env. The builder
-    /// (`SubstrateBootBuilder::namespace_roots`) accepts a resolved
-    /// `NamespaceRoots` directly so tests and chassis-as-library
-    /// embedders can supply their own roots without process-env
-    /// mutation.
-    pub fn from_env() -> Self {
-        let save = env_or_default("AETHER_SAVE_DIR", || {
-            dirs::data_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join("aether")
-                .join("save")
-        });
-        let assets = env_or_default("AETHER_ASSETS_DIR", || {
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(Path::to_path_buf))
-                .map(|p| p.join("assets"))
-                .unwrap_or_else(|| std::env::temp_dir().join("aether").join("assets"))
-        });
-        let config = env_or_default("AETHER_CONFIG_DIR", || {
-            dirs::config_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join("aether")
-        });
-        Self {
-            save,
-            assets,
-            config,
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn env_or_default(var: &str, default: impl FnOnce() -> PathBuf) -> PathBuf {
-    match std::env::var(var) {
-        Ok(s) if !s.is_empty() => PathBuf::from(s),
-        _ => default(),
-    }
-}
-
 /// Populate a fresh `AdapterRegistry` with `LocalFileAdapter`s for
 /// each of the three ADR-0041 namespaces using the supplied
 /// [`NamespaceRoots`]. `save` and `config` are writable; `assets` is
@@ -310,735 +234,798 @@ pub fn build_registry(
     Ok((Arc::new(registry), roots))
 }
 
-/// Env-driven wrapper around [`build_registry`]. Resolves
-/// [`NamespaceRoots::from_env`] then delegates.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn build_default_registry() -> std::io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
-    build_registry(NamespaceRoots::from_env())
-}
+#[aether_actor::bridge]
+mod native {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
 
-/// `aether.io` mailbox cap. Owns the resolved adapter registry +
-/// namespace roots. The dispatcher thread holds an `Arc<Self>` and
-/// routes envelopes through the macro-emitted `NativeDispatch` impl;
-/// replies route via `ctx.reply(&result)` through the substrate's
-/// `Mailer::send_reply`.
-#[capability]
-#[derive(Singleton)]
-pub struct IoCapability {
-    registry: Arc<AdapterRegistry>,
-}
+    use super::{
+        AdapterRegistry, Delete, IoError, List, NamespaceRoots, Read, Write, build_registry,
+    };
+    use aether_actor::{MailCtx, actor};
+    use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
+    use aether_substrate::capability::BootError;
+    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
-#[actor]
-impl NativeActor for IoCapability {
-    /// Resolved namespace roots threaded through to `init`. Chassis
-    /// mains build this via [`NamespaceRoots::from_env`] (or hand-roll
-    /// for tests) and pass to `with_actor::<IoCapability>(roots)`.
-    type Config = NamespaceRoots;
-
-    /// ADR-0041 + ADR-0074 Phase 5 chassis-owned mailbox.
-    const NAMESPACE: &'static str = "aether.io";
-
-    /// Build the adapter registry from the resolved roots. Adapter
-    /// init failure surfaces as `BootError::Other(io::Error)` so
-    /// chassis mains propagate via `?` to abort startup (ADR-0063
-    /// fail-fast).
-    fn init(roots: NamespaceRoots, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        let (registry, roots) = build_registry(roots).map_err(|e| BootError::Other(Box::new(e)))?;
-        tracing::info!(
-            target: "aether_substrate::io",
-            save = %roots.save.display(),
-            assets = %roots.assets.display(),
-            config = %roots.config.display(),
-            "io adapters registered",
-        );
-        Ok(Self { registry })
-    }
-
-    /// Read bytes from a logical namespace path.
-    ///
-    /// # Agent
-    /// Reply: `ReadResult`. Echoes namespace + path on both arms.
-    #[handler]
-    fn on_read(&self, ctx: &mut NativeCtx<'_>, mail: Read) {
-        let Some(adapter) = self.registry.get(&mail.namespace) else {
-            ctx.reply(&ReadResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                error: IoError::UnknownNamespace,
+    impl NamespaceRoots {
+        /// Resolve each root from its env-var override, falling back to
+        /// the `dirs`-crate platform default. v1 ships the env layer;
+        /// ADR-0041's precedence order (CLI > env > TOML > defaults)
+        /// leaves room for TOML and CLI to sit in front of this without
+        /// changing the cap or adapter code.
+        ///
+        /// Defaults:
+        /// - `save` → `data_dir()/aether/save`
+        /// - `assets` → `{current_exe}/../assets`
+        /// - `config` → `config_dir()/aether`
+        ///
+        /// If a platform directory lookup fails (e.g. no HOME) or
+        /// `current_exe()` can't resolve, the fallback is `temp_dir()/aether/...`
+        /// so a boot always finishes even on headless CI.
+        ///
+        /// Per issue 464, this is the chassis-main edge — substrate-core
+        /// itself never reads env. The builder
+        /// (`SubstrateBootBuilder::namespace_roots`) accepts a resolved
+        /// `NamespaceRoots` directly so tests and chassis-as-library
+        /// embedders can supply their own roots without process-env
+        /// mutation.
+        pub fn from_env() -> Self {
+            let save = env_or_default("AETHER_SAVE_DIR", || {
+                dirs::data_dir()
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("aether")
+                    .join("save")
             });
-            return;
-        };
-        let reply = match adapter.read(&mail.path) {
-            Ok(bytes) => ReadResult::Ok {
-                namespace: mail.namespace,
-                path: mail.path,
-                bytes,
-            },
-            Err(error) => ReadResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                error,
-            },
-        };
-        ctx.reply(&reply);
-    }
-
-    /// Write bytes to a logical namespace path. Atomic via tmp+rename
-    /// in the local file adapter; semantics may differ in future
-    /// adapters (cloud, in-memory).
-    ///
-    /// # Agent
-    /// Reply: `WriteResult`. Echoes namespace + path (NOT bytes).
-    #[handler]
-    fn on_write(&self, ctx: &mut NativeCtx<'_>, mail: Write) {
-        let Some(adapter) = self.registry.get(&mail.namespace) else {
-            ctx.reply(&WriteResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                error: IoError::UnknownNamespace,
+            let assets = env_or_default("AETHER_ASSETS_DIR", || {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(Path::to_path_buf))
+                    .map(|p| p.join("assets"))
+                    .unwrap_or_else(|| std::env::temp_dir().join("aether").join("assets"))
             });
-            return;
-        };
-        let reply = match adapter.write(&mail.path, &mail.bytes) {
-            Ok(()) => WriteResult::Ok {
-                namespace: mail.namespace,
-                path: mail.path,
-            },
-            Err(error) => WriteResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                error,
-            },
-        };
-        ctx.reply(&reply);
-    }
-
-    /// Delete a path under a namespace.
-    ///
-    /// # Agent
-    /// Reply: `DeleteResult`. Echoes namespace + path.
-    #[handler]
-    fn on_delete(&self, ctx: &mut NativeCtx<'_>, mail: Delete) {
-        let Some(adapter) = self.registry.get(&mail.namespace) else {
-            ctx.reply(&DeleteResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                error: IoError::UnknownNamespace,
+            let config = env_or_default("AETHER_CONFIG_DIR", || {
+                dirs::config_dir()
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("aether")
             });
-            return;
-        };
-        let reply = match adapter.delete(&mail.path) {
-            Ok(()) => DeleteResult::Ok {
-                namespace: mail.namespace,
-                path: mail.path,
-            },
-            Err(error) => DeleteResult::Err {
-                namespace: mail.namespace,
-                path: mail.path,
-                error,
-            },
-        };
-        ctx.reply(&reply);
-    }
-
-    /// List entries under a namespace prefix.
-    ///
-    /// # Agent
-    /// Reply: `ListResult`. Echoes namespace + prefix.
-    #[handler]
-    fn on_list(&self, ctx: &mut NativeCtx<'_>, mail: List) {
-        let Some(adapter) = self.registry.get(&mail.namespace) else {
-            ctx.reply(&ListResult::Err {
-                namespace: mail.namespace,
-                prefix: mail.prefix,
-                error: IoError::UnknownNamespace,
-            });
-            return;
-        };
-        let reply = match adapter.list(&mail.prefix) {
-            Ok(entries) => ListResult::Ok {
-                namespace: mail.namespace,
-                prefix: mail.prefix,
-                entries,
-            },
-            Err(error) => ListResult::Err {
-                namespace: mail.namespace,
-                prefix: mail.prefix,
-                error,
-            },
-        };
-        ctx.reply(&reply);
-    }
-}
-
-#[cfg(test)]
-impl IoCapability {
-    /// Test-only direct constructor. Production boots through
-    /// `Builder::with_actor::<IoCapability>(roots)` which calls `init`;
-    /// tests that want to drive handlers without spinning up a full
-    /// chassis hand a pre-built registry directly.
-    pub(crate) fn from_registry(registry: Arc<AdapterRegistry>) -> Self {
-        Self { registry }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::env::temp_dir;
-
-    use super::*;
-    use aether_actor::Actor;
-    use aether_data::MailboxId;
-    use aether_substrate::capability::{BootError, ChassisBuilder};
-    use aether_substrate::mail::ReplyTo;
-    use aether_substrate::mailer::Mailer;
-    use aether_substrate::native_actor::NativeCtx;
-    use aether_substrate::native_transport::NativeTransport;
-    use aether_substrate::registry::Registry;
-
-    /// Test fixture that bundles the cap, a fully-wired test mailer,
-    /// and a `NativeTransport` long enough for handlers to borrow.
-    /// Pre-stage-2 the tests called `cap.on_read(sender, mail)`
-    /// directly; the new shape requires a `NativeCtx` borrowed from a
-    /// transport, so the fixture owns the transport and hands out
-    /// fresh ctxs per invocation.
-    struct TestFixture {
-        cap: IoCapability,
-        rx: std::sync::mpsc::Receiver<EgressEvent>,
-        transport: NativeTransport,
-    }
-
-    impl TestFixture {
-        fn new(reg: Arc<AdapterRegistry>) -> Self {
-            let (mailer, rx) = test_mailer_and_rx();
-            let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
             Self {
-                cap: IoCapability::from_registry(reg),
-                rx,
-                transport,
+                save,
+                assets,
+                config,
             }
         }
+    }
 
-        fn ctx(&self, sender: ReplyTo) -> NativeCtx<'_> {
-            NativeCtx::new(&self.transport, sender)
+    fn env_or_default(var: &str, default: impl FnOnce() -> PathBuf) -> PathBuf {
+        match std::env::var(var) {
+            Ok(s) if !s.is_empty() => PathBuf::from(s),
+            _ => default(),
         }
     }
 
-    /// Manual tempdir helper to avoid pulling in the `tempfile`
-    /// crate. Caller cleans up via [`cleanup`] after the test asserts.
-    fn scratch_root(tag: &str) -> PathBuf {
-        let pid = std::process::id();
-        let nonce: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        let path = temp_dir().join(format!("aether-io-cap-{tag}-{pid}-{nonce}"));
-        std::fs::create_dir_all(&path).unwrap();
-        path
+    /// `aether.io` mailbox cap. Owns the resolved adapter registry +
+    /// namespace roots. The dispatcher thread holds an `Arc<Self>` and
+    /// routes envelopes through the macro-emitted `NativeDispatch` impl;
+    /// replies route via `ctx.reply(&result)` through the substrate's
+    /// `Mailer::send_reply`.
+    pub struct IoCapability {
+        registry: Arc<AdapterRegistry>,
     }
 
-    fn cleanup(path: &Path) {
-        let _ = std::fs::remove_dir_all(path);
-    }
+    #[actor]
+    impl NativeActor for IoCapability {
+        /// Resolved namespace roots threaded through to `init`. Chassis
+        /// mains build this via [`NamespaceRoots::from_env`] (or hand-roll
+        /// for tests) and pass to `with_actor::<IoCapability>(roots)`.
+        type Config = NamespaceRoots;
 
-    fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-        let registry = Arc::new(Registry::new());
-        for d in aether_kinds::descriptors::all() {
-            let _ = registry.register_kind_with_descriptor(d);
+        /// ADR-0041 + ADR-0074 Phase 5 chassis-owned mailbox.
+        const NAMESPACE: &'static str = "aether.io";
+
+        /// Build the adapter registry from the resolved roots. Adapter
+        /// init failure surfaces as `BootError::Other(io::Error)` so
+        /// chassis mains propagate via `?` to abort startup (ADR-0063
+        /// fail-fast).
+        fn init(roots: NamespaceRoots, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            let (registry, roots) =
+                build_registry(roots).map_err(|e| BootError::Other(Box::new(e)))?;
+            tracing::info!(
+                target: "aether_substrate::io",
+                save = %roots.save.display(),
+                assets = %roots.assets.display(),
+                config = %roots.config.display(),
+                "io adapters registered",
+            );
+            Ok(Self { registry })
         }
-        (registry, Arc::new(Mailer::new()))
+
+        /// Read bytes from a logical namespace path.
+        ///
+        /// # Agent
+        /// Reply: `ReadResult`. Echoes namespace + path on both arms.
+        #[handler]
+        fn on_read(&self, ctx: &mut NativeCtx<'_>, mail: Read) {
+            let Some(adapter) = self.registry.get(&mail.namespace) else {
+                ctx.reply(&ReadResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: IoError::UnknownNamespace,
+                });
+                return;
+            };
+            let reply = match adapter.read(&mail.path) {
+                Ok(bytes) => ReadResult::Ok {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    bytes,
+                },
+                Err(error) => ReadResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error,
+                },
+            };
+            ctx.reply(&reply);
+        }
+
+        /// Write bytes to a logical namespace path. Atomic via tmp+rename
+        /// in the local file adapter; semantics may differ in future
+        /// adapters (cloud, in-memory).
+        ///
+        /// # Agent
+        /// Reply: `WriteResult`. Echoes namespace + path (NOT bytes).
+        #[handler]
+        fn on_write(&self, ctx: &mut NativeCtx<'_>, mail: Write) {
+            let Some(adapter) = self.registry.get(&mail.namespace) else {
+                ctx.reply(&WriteResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: IoError::UnknownNamespace,
+                });
+                return;
+            };
+            let reply = match adapter.write(&mail.path, &mail.bytes) {
+                Ok(()) => WriteResult::Ok {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                },
+                Err(error) => WriteResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error,
+                },
+            };
+            ctx.reply(&reply);
+        }
+
+        /// Delete a path under a namespace.
+        ///
+        /// # Agent
+        /// Reply: `DeleteResult`. Echoes namespace + path.
+        #[handler]
+        fn on_delete(&self, ctx: &mut NativeCtx<'_>, mail: Delete) {
+            let Some(adapter) = self.registry.get(&mail.namespace) else {
+                ctx.reply(&DeleteResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error: IoError::UnknownNamespace,
+                });
+                return;
+            };
+            let reply = match adapter.delete(&mail.path) {
+                Ok(()) => DeleteResult::Ok {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                },
+                Err(error) => DeleteResult::Err {
+                    namespace: mail.namespace,
+                    path: mail.path,
+                    error,
+                },
+            };
+            ctx.reply(&reply);
+        }
+
+        /// List entries under a namespace prefix.
+        ///
+        /// # Agent
+        /// Reply: `ListResult`. Echoes namespace + prefix.
+        #[handler]
+        fn on_list(&self, ctx: &mut NativeCtx<'_>, mail: List) {
+            let Some(adapter) = self.registry.get(&mail.namespace) else {
+                ctx.reply(&ListResult::Err {
+                    namespace: mail.namespace,
+                    prefix: mail.prefix,
+                    error: IoError::UnknownNamespace,
+                });
+                return;
+            };
+            let reply = match adapter.list(&mail.prefix) {
+                Ok(entries) => ListResult::Ok {
+                    namespace: mail.namespace,
+                    prefix: mail.prefix,
+                    entries,
+                },
+                Err(error) => ListResult::Err {
+                    namespace: mail.namespace,
+                    prefix: mail.prefix,
+                    error,
+                },
+            };
+            ctx.reply(&reply);
+        }
     }
 
-    fn roots_under(root: &Path) -> NamespaceRoots {
-        let r = NamespaceRoots {
-            save: root.join("save"),
-            assets: root.join("assets"),
-            config: root.join("config"),
+    #[cfg(test)]
+    impl IoCapability {
+        /// Test-only direct constructor. Production boots through
+        /// `Builder::with_actor::<IoCapability>(roots)` which calls `init`;
+        /// tests that want to drive handlers without spinning up a full
+        /// chassis hand a pre-built registry directly.
+        pub(crate) fn from_registry(registry: Arc<AdapterRegistry>) -> Self {
+            Self { registry }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::env::temp_dir;
+
+        use super::super::{
+            AdapterRegistry, Delete, FileAdapter, IoError, List, LocalFileAdapter, NamespaceRoots,
+            Read, Write,
         };
-        std::fs::create_dir_all(&r.save).unwrap();
-        std::fs::create_dir_all(&r.assets).unwrap();
-        std::fs::create_dir_all(&r.config).unwrap();
-        r
-    }
+        use super::{Arc, IoCapability, Path, PathBuf};
+        use aether_actor::Actor;
+        use aether_data::MailboxId;
+        use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
+        use aether_substrate::capability::{BootError, ChassisBuilder};
+        use aether_substrate::mail::ReplyTo;
+        use aether_substrate::mailer::Mailer;
+        use aether_substrate::native_actor::NativeCtx;
+        use aether_substrate::native_transport::NativeTransport;
+        use aether_substrate::registry::Registry;
 
-    #[test]
-    fn resolve_rejects_parent_traversal() {
-        let root = scratch_root("resolve-parent");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        assert!(matches!(a.read("../etc/passwd"), Err(IoError::Forbidden)));
-        assert!(matches!(
-            a.read("sub/../../escape"),
-            Err(IoError::Forbidden)
-        ));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn resolve_rejects_absolute() {
-        let root = scratch_root("resolve-abs");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        assert!(matches!(a.read("/etc/passwd"), Err(IoError::Forbidden)));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn resolve_permits_dot_segments() {
-        let root = scratch_root("resolve-dot");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        assert!(matches!(a.read("./nonexistent"), Err(IoError::NotFound)));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn read_missing_file_returns_not_found() {
-        let root = scratch_root("read-missing");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        assert!(matches!(a.read("slot.bin"), Err(IoError::NotFound)));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn write_then_read_roundtrip() {
-        let root = scratch_root("write-read");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        a.write("slot.bin", &[1, 2, 3, 4]).unwrap();
-        assert_eq!(a.read("slot.bin").unwrap(), vec![1, 2, 3, 4]);
-        cleanup(&root);
-    }
-
-    #[test]
-    fn write_creates_parent_directories() {
-        let root = scratch_root("write-parents");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        a.write("deep/sub/dir/slot.bin", b"hi").unwrap();
-        assert_eq!(a.read("deep/sub/dir/slot.bin").unwrap(), b"hi");
-        cleanup(&root);
-    }
-
-    #[test]
-    fn write_is_atomic_no_tmp_left_behind() {
-        let root = scratch_root("write-atomic");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        a.write("slot.bin", &[0u8; 16]).unwrap();
-        let siblings: Vec<String> = std::fs::read_dir(a.root())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-            .collect();
-        assert!(
-            !siblings.iter().any(|s| s.contains(".tmp-")),
-            "unexpected tmp file left behind: {siblings:?}",
-        );
-        cleanup(&root);
-    }
-
-    #[test]
-    fn write_on_read_only_returns_forbidden() {
-        let root = scratch_root("write-readonly");
-        let a = LocalFileAdapter::new(root.clone(), false).unwrap();
-        assert!(matches!(a.write("x.bin", &[]), Err(IoError::Forbidden)));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn delete_missing_returns_not_found() {
-        let root = scratch_root("delete-missing");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        assert!(matches!(a.delete("ghost.bin"), Err(IoError::NotFound)));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn delete_removes_file() {
-        let root = scratch_root("delete-works");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        a.write("slot.bin", b"x").unwrap();
-        a.delete("slot.bin").unwrap();
-        assert!(matches!(a.read("slot.bin"), Err(IoError::NotFound)));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn delete_on_read_only_returns_forbidden() {
-        let root = scratch_root("delete-readonly");
-        let a = LocalFileAdapter::new(root.clone(), false).unwrap();
-        assert!(matches!(a.delete("x.bin"), Err(IoError::Forbidden)));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn list_empty_root_returns_empty_vec() {
-        let root = scratch_root("list-empty");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        assert_eq!(a.list("").unwrap(), Vec::<String>::new());
-        cleanup(&root);
-    }
-
-    #[test]
-    fn list_returns_sorted_names_at_root() {
-        let root = scratch_root("list-root");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        a.write("c.bin", b"").unwrap();
-        a.write("a.bin", b"").unwrap();
-        a.write("b.bin", b"").unwrap();
-        assert_eq!(a.list("").unwrap(), vec!["a.bin", "b.bin", "c.bin"]);
-        cleanup(&root);
-    }
-
-    #[test]
-    fn list_under_subdirectory() {
-        let root = scratch_root("list-sub");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        a.write("saves/slot1.bin", b"").unwrap();
-        a.write("saves/slot2.bin", b"").unwrap();
-        a.write("cfg/keys.toml", b"").unwrap();
-        let saves = a.list("saves").unwrap();
-        assert_eq!(saves, vec!["slot1.bin", "slot2.bin"]);
-        cleanup(&root);
-    }
-
-    #[test]
-    fn list_missing_directory_returns_not_found() {
-        let root = scratch_root("list-missing");
-        let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-        assert!(matches!(a.list("nope"), Err(IoError::NotFound)));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn registry_returns_none_for_unknown_namespace() {
-        let reg = AdapterRegistry::new();
-        assert!(reg.get("save").is_none());
-        assert!(!reg.has("save"));
-    }
-
-    #[test]
-    fn registry_registers_and_retrieves_adapter() {
-        let root = scratch_root("reg-basic");
-        let adapter: Arc<dyn FileAdapter> =
-            Arc::new(LocalFileAdapter::new(root.clone(), true).unwrap());
-        let mut reg = AdapterRegistry::new();
-        reg.register("save", adapter);
-        assert!(reg.has("save"));
-        assert!(reg.get("save").is_some());
-        cleanup(&root);
-    }
-
-    use aether_data::{SessionToken, Uuid};
-    use aether_substrate::outbound::EgressEvent;
-
-    fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
-        let adapter: Arc<dyn FileAdapter> =
-            Arc::new(LocalFileAdapter::new(root.to_path_buf(), writable).unwrap());
-        let mut r = AdapterRegistry::new();
-        r.register("save", adapter);
-        Arc::new(r)
-    }
-
-    fn session_sender() -> ReplyTo {
-        ReplyTo::to(aether_substrate::mail::ReplyTarget::Session(SessionToken(
-            Uuid::nil(),
-        )))
-    }
-
-    /// Build a fully-wired `Mailer` connected to a fresh test
-    /// outbound channel.
-    fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
-        use std::collections::HashMap;
-        use std::sync::RwLock;
-
-        let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(
-            Arc::new(Registry::new()),
-            Arc::new(RwLock::new(HashMap::new())),
-        );
-        mailer.wire_outbound(outbound);
-        (mailer, rx)
-    }
-
-    fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
-        rx: &std::sync::mpsc::Receiver<EgressEvent>,
-    ) -> K {
-        let event = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
-        let EgressEvent::ToSession {
-            kind_name, payload, ..
-        } = event
-        else {
-            panic!("expected ToSession egress, got {event:?}");
-        };
-        assert_eq!(kind_name, K::NAME);
-        postcard::from_bytes(&payload).unwrap()
-    }
-
-    /// Boot the cap against a fresh tempdir; assert the mailbox
-    /// is registered.
-    #[test]
-    fn capability_boots_and_registers_mailbox() {
-        let root = scratch_root("boots");
-        let (registry, mailer) = fresh_substrate();
-        let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<IoCapability>(roots_under(&root))
-            .build()
-            .expect("io capability boots");
-        assert!(
-            registry.lookup(IoCapability::NAMESPACE).is_some(),
-            "io mailbox registered"
-        );
-        chassis.shutdown();
-        cleanup(&root);
-    }
-
-    /// Cap init fails when the adapter registry can't be built —
-    /// provoke `LocalFileAdapter::new` failure by pointing the save
-    /// root at a regular file rather than a directory. `init` returns
-    /// `BootError::Other(io::Error)`, the chassis builder propagates.
-    #[test]
-    fn cap_init_fails_when_adapter_init_fails() {
-        let root = scratch_root("init-fails");
-        let save_path = root.join("save_is_actually_a_file");
-        std::fs::write(&save_path, b"not a dir").unwrap();
-        let roots = NamespaceRoots {
-            save: save_path,
-            assets: root.join("assets"),
-            config: root.join("config"),
-        };
-        std::fs::create_dir_all(&roots.assets).unwrap();
-        std::fs::create_dir_all(&roots.config).unwrap();
-
-        let (registry, mailer) = fresh_substrate();
-        let result = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<IoCapability>(roots)
-            .build();
-        assert!(result.is_err(), "save root being a file must fail cap init");
-        cleanup(&root);
-    }
-
-    /// Builder rejects a duplicate claim. Same protection as the
-    /// other capabilities.
-    #[test]
-    fn duplicate_claim_rejects_with_typed_error() {
-        let root = scratch_root("collide");
-        let (registry, mailer) = fresh_substrate();
-        registry.register_sink(IoCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
-
-        let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<IoCapability>(roots_under(&root))
-            .build()
-            .expect_err("collision must surface as BootError");
-        assert!(matches!(
-            err,
-            BootError::MailboxAlreadyClaimed { ref name }
-                if name == IoCapability::NAMESPACE
-        ));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn cap_read_ok_replies_with_bytes() {
-        let root = scratch_root("cap-read");
-        let reg = build_save_only_registry(&root, true);
-        reg.get("save")
-            .unwrap()
-            .write("slot.bin", &[9, 9, 9])
-            .unwrap();
-        let fix = TestFixture::new(reg);
-        let mut ctx = fix.ctx(session_sender());
-        fix.cap.on_read(
-            &mut ctx,
-            Read {
-                namespace: "save".to_string(),
-                path: "slot.bin".to_string(),
-            },
-        );
-        match decode_reply::<ReadResult>(&fix.rx) {
-            ReadResult::Ok {
-                namespace,
-                path,
-                bytes,
-            } => {
-                assert_eq!(namespace, "save");
-                assert_eq!(path, "slot.bin");
-                assert_eq!(bytes, vec![9, 9, 9]);
-            }
-            ReadResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+        /// Test fixture that bundles the cap, a fully-wired test mailer,
+        /// and a `NativeTransport` long enough for handlers to borrow.
+        struct TestFixture {
+            cap: IoCapability,
+            rx: std::sync::mpsc::Receiver<EgressEvent>,
+            transport: NativeTransport,
         }
-        cleanup(&root);
-    }
 
-    #[test]
-    fn cap_read_unknown_namespace_replies_err() {
-        let root = scratch_root("cap-ns");
-        let reg = build_save_only_registry(&root, true);
-        let fix = TestFixture::new(reg);
-        let mut ctx = fix.ctx(session_sender());
-        fix.cap.on_read(
-            &mut ctx,
-            Read {
-                namespace: "nope".to_string(),
-                path: "x.bin".to_string(),
-            },
-        );
-        match decode_reply::<ReadResult>(&fix.rx) {
-            ReadResult::Err {
-                namespace,
-                path,
-                error: IoError::UnknownNamespace,
-            } => {
-                assert_eq!(namespace, "nope");
-                assert_eq!(path, "x.bin");
+        impl TestFixture {
+            fn new(reg: Arc<AdapterRegistry>) -> Self {
+                let (mailer, rx) = test_mailer_and_rx();
+                let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+                Self {
+                    cap: IoCapability::from_registry(reg),
+                    rx,
+                    transport,
+                }
             }
-            other => panic!("expected Err UnknownNamespace echoing request, got {other:?}"),
+
+            fn ctx(&self, sender: ReplyTo) -> NativeCtx<'_> {
+                NativeCtx::new(&self.transport, sender)
+            }
         }
-        cleanup(&root);
-    }
 
-    #[test]
-    fn cap_read_not_found_replies_err() {
-        let root = scratch_root("cap-nf");
-        let reg = build_save_only_registry(&root, true);
-        let fix = TestFixture::new(reg);
-        let mut ctx = fix.ctx(session_sender());
-        fix.cap.on_read(
-            &mut ctx,
-            Read {
-                namespace: "save".to_string(),
-                path: "ghost.bin".to_string(),
-            },
-        );
-        assert!(matches!(
-            decode_reply::<ReadResult>(&fix.rx),
-            ReadResult::Err {
-                error: IoError::NotFound,
-                ..
-            }
-        ));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn cap_write_ok_persists_bytes() {
-        let root = scratch_root("cap-write");
-        let reg = build_save_only_registry(&root, true);
-        let reg_clone = Arc::clone(&reg);
-        let fix = TestFixture::new(reg);
-        let mut ctx = fix.ctx(session_sender());
-        fix.cap.on_write(
-            &mut ctx,
-            Write {
-                namespace: "save".to_string(),
-                path: "slot.bin".to_string(),
-                bytes: vec![1, 2, 3],
-            },
-        );
-        match decode_reply::<WriteResult>(&fix.rx) {
-            WriteResult::Ok { namespace, path } => {
-                assert_eq!(namespace, "save");
-                assert_eq!(path, "slot.bin");
-            }
-            WriteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+        /// Manual tempdir helper to avoid pulling in the `tempfile`
+        /// crate. Caller cleans up via [`cleanup`] after the test asserts.
+        fn scratch_root(tag: &str) -> PathBuf {
+            let pid = std::process::id();
+            let nonce: u64 = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            let path = temp_dir().join(format!("aether-io-cap-{tag}-{pid}-{nonce}"));
+            std::fs::create_dir_all(&path).unwrap();
+            path
         }
-        assert_eq!(
-            reg_clone.get("save").unwrap().read("slot.bin").unwrap(),
-            vec![1, 2, 3]
-        );
-        cleanup(&root);
-    }
 
-    #[test]
-    fn cap_write_read_only_namespace_replies_forbidden() {
-        let root = scratch_root("cap-ro");
-        let reg = build_save_only_registry(&root, false);
-        let fix = TestFixture::new(reg);
-        let mut ctx = fix.ctx(session_sender());
-        fix.cap.on_write(
-            &mut ctx,
-            Write {
-                namespace: "save".to_string(),
-                path: "slot.bin".to_string(),
-                bytes: vec![],
-            },
-        );
-        assert!(matches!(
-            decode_reply::<WriteResult>(&fix.rx),
-            WriteResult::Err {
-                error: IoError::Forbidden,
-                ..
-            }
-        ));
-        cleanup(&root);
-    }
-
-    #[test]
-    fn cap_delete_then_read_surfaces_not_found() {
-        let root = scratch_root("cap-del");
-        let reg = build_save_only_registry(&root, true);
-        let reg_clone = Arc::clone(&reg);
-        reg.get("save").unwrap().write("x.bin", b"x").unwrap();
-        let fix = TestFixture::new(reg);
-        let mut ctx = fix.ctx(session_sender());
-        fix.cap.on_delete(
-            &mut ctx,
-            Delete {
-                namespace: "save".to_string(),
-                path: "x.bin".to_string(),
-            },
-        );
-        match decode_reply::<DeleteResult>(&fix.rx) {
-            DeleteResult::Ok { namespace, path } => {
-                assert_eq!(namespace, "save");
-                assert_eq!(path, "x.bin");
-            }
-            DeleteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+        fn cleanup(path: &Path) {
+            let _ = std::fs::remove_dir_all(path);
         }
-        assert!(matches!(
-            reg_clone.get("save").unwrap().read("x.bin"),
-            Err(IoError::NotFound)
-        ));
-        cleanup(&root);
-    }
 
-    #[test]
-    fn cap_list_returns_sorted_entries() {
-        let root = scratch_root("cap-list");
-        let reg = build_save_only_registry(&root, true);
-        reg.get("save").unwrap().write("b.bin", b"").unwrap();
-        reg.get("save").unwrap().write("a.bin", b"").unwrap();
-        let fix = TestFixture::new(reg);
-        let mut ctx = fix.ctx(session_sender());
-        fix.cap.on_list(
-            &mut ctx,
-            List {
-                namespace: "save".to_string(),
-                prefix: "".to_string(),
-            },
-        );
-        match decode_reply::<ListResult>(&fix.rx) {
-            ListResult::Ok {
-                namespace,
-                prefix,
-                entries,
-            } => {
-                assert_eq!(namespace, "save");
-                assert_eq!(prefix, "");
-                assert_eq!(entries, vec!["a.bin".to_string(), "b.bin".to_string()]);
+        fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
+            let registry = Arc::new(Registry::new());
+            for d in aether_kinds::descriptors::all() {
+                let _ = registry.register_kind_with_descriptor(d);
             }
-            ListResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            (registry, Arc::new(Mailer::new()))
         }
-        cleanup(&root);
-    }
 
-    // The end-to-end "component pushes Read, dispatcher delivers
-    // ReadResult to the component's receive_p32" test that lived here
-    // pre-stage-2e (issue 552) reached deep into `aether_substrate`
-    // privates (`Component::read_u32`, `ComponentEntry`, `host_fns`)
-    // plus wasmtime + wat. With the cap extracted to its own crate
-    // those internals are no longer reachable as crate-locals. The
-    // path it exercised is now covered by:
-    //   - `aether-scenario` declarative scenarios (they go through
-    //     the same Mailer + dispatch reply machinery), and
-    //   - the substrate's own `mailer` / `scheduler` unit tests for
-    //     `Mailer::send_reply` → component delivery.
-    // Reach for the in-bundle integration suite if a future change
-    // wants the full WAT roundtrip back as targeted coverage.
+        fn roots_under(root: &Path) -> NamespaceRoots {
+            let r = NamespaceRoots {
+                save: root.join("save"),
+                assets: root.join("assets"),
+                config: root.join("config"),
+            };
+            std::fs::create_dir_all(&r.save).unwrap();
+            std::fs::create_dir_all(&r.assets).unwrap();
+            std::fs::create_dir_all(&r.config).unwrap();
+            r
+        }
+
+        #[test]
+        fn resolve_rejects_parent_traversal() {
+            let root = scratch_root("resolve-parent");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            assert!(matches!(a.read("../etc/passwd"), Err(IoError::Forbidden)));
+            assert!(matches!(
+                a.read("sub/../../escape"),
+                Err(IoError::Forbidden)
+            ));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn resolve_rejects_absolute() {
+            let root = scratch_root("resolve-abs");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            assert!(matches!(a.read("/etc/passwd"), Err(IoError::Forbidden)));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn resolve_permits_dot_segments() {
+            let root = scratch_root("resolve-dot");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            assert!(matches!(a.read("./nonexistent"), Err(IoError::NotFound)));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn read_missing_file_returns_not_found() {
+            let root = scratch_root("read-missing");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            assert!(matches!(a.read("slot.bin"), Err(IoError::NotFound)));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn write_then_read_roundtrip() {
+            let root = scratch_root("write-read");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            a.write("slot.bin", &[1, 2, 3, 4]).unwrap();
+            assert_eq!(a.read("slot.bin").unwrap(), vec![1, 2, 3, 4]);
+            cleanup(&root);
+        }
+
+        #[test]
+        fn write_creates_parent_directories() {
+            let root = scratch_root("write-parents");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            a.write("deep/sub/dir/slot.bin", b"hi").unwrap();
+            assert_eq!(a.read("deep/sub/dir/slot.bin").unwrap(), b"hi");
+            cleanup(&root);
+        }
+
+        #[test]
+        fn write_is_atomic_no_tmp_left_behind() {
+            let root = scratch_root("write-atomic");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            a.write("slot.bin", &[0u8; 16]).unwrap();
+            let siblings: Vec<String> = std::fs::read_dir(a.root())
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                .collect();
+            assert!(
+                !siblings.iter().any(|s| s.contains(".tmp-")),
+                "unexpected tmp file left behind: {siblings:?}",
+            );
+            cleanup(&root);
+        }
+
+        #[test]
+        fn write_on_read_only_returns_forbidden() {
+            let root = scratch_root("write-readonly");
+            let a = LocalFileAdapter::new(root.clone(), false).unwrap();
+            assert!(matches!(a.write("x.bin", &[]), Err(IoError::Forbidden)));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn delete_missing_returns_not_found() {
+            let root = scratch_root("delete-missing");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            assert!(matches!(a.delete("ghost.bin"), Err(IoError::NotFound)));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn delete_removes_file() {
+            let root = scratch_root("delete-works");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            a.write("slot.bin", b"x").unwrap();
+            a.delete("slot.bin").unwrap();
+            assert!(matches!(a.read("slot.bin"), Err(IoError::NotFound)));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn delete_on_read_only_returns_forbidden() {
+            let root = scratch_root("delete-readonly");
+            let a = LocalFileAdapter::new(root.clone(), false).unwrap();
+            assert!(matches!(a.delete("x.bin"), Err(IoError::Forbidden)));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn list_empty_root_returns_empty_vec() {
+            let root = scratch_root("list-empty");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            assert_eq!(a.list("").unwrap(), Vec::<String>::new());
+            cleanup(&root);
+        }
+
+        #[test]
+        fn list_returns_sorted_names_at_root() {
+            let root = scratch_root("list-root");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            a.write("c.bin", b"").unwrap();
+            a.write("a.bin", b"").unwrap();
+            a.write("b.bin", b"").unwrap();
+            assert_eq!(a.list("").unwrap(), vec!["a.bin", "b.bin", "c.bin"]);
+            cleanup(&root);
+        }
+
+        #[test]
+        fn list_under_subdirectory() {
+            let root = scratch_root("list-sub");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            a.write("saves/slot1.bin", b"").unwrap();
+            a.write("saves/slot2.bin", b"").unwrap();
+            a.write("cfg/keys.toml", b"").unwrap();
+            let saves = a.list("saves").unwrap();
+            assert_eq!(saves, vec!["slot1.bin", "slot2.bin"]);
+            cleanup(&root);
+        }
+
+        #[test]
+        fn list_missing_directory_returns_not_found() {
+            let root = scratch_root("list-missing");
+            let a = LocalFileAdapter::new(root.clone(), true).unwrap();
+            assert!(matches!(a.list("nope"), Err(IoError::NotFound)));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn registry_returns_none_for_unknown_namespace() {
+            let reg = AdapterRegistry::new();
+            assert!(reg.get("save").is_none());
+            assert!(!reg.has("save"));
+        }
+
+        #[test]
+        fn registry_registers_and_retrieves_adapter() {
+            let root = scratch_root("reg-basic");
+            let adapter: Arc<dyn FileAdapter> =
+                Arc::new(LocalFileAdapter::new(root.clone(), true).unwrap());
+            let mut reg = AdapterRegistry::new();
+            reg.register("save", adapter);
+            assert!(reg.has("save"));
+            assert!(reg.get("save").is_some());
+            cleanup(&root);
+        }
+
+        use aether_data::{SessionToken, Uuid};
+        use aether_substrate::outbound::EgressEvent;
+
+        fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
+            let adapter: Arc<dyn FileAdapter> =
+                Arc::new(LocalFileAdapter::new(root.to_path_buf(), writable).unwrap());
+            let mut r = AdapterRegistry::new();
+            r.register("save", adapter);
+            Arc::new(r)
+        }
+
+        fn session_sender() -> ReplyTo {
+            ReplyTo::to(aether_substrate::mail::ReplyTarget::Session(SessionToken(
+                Uuid::nil(),
+            )))
+        }
+
+        /// Build a fully-wired `Mailer` connected to a fresh test
+        /// outbound channel.
+        fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
+            use std::collections::HashMap;
+            use std::sync::RwLock;
+
+            let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
+            let mailer = Arc::new(Mailer::new());
+            mailer.wire(
+                Arc::new(Registry::new()),
+                Arc::new(RwLock::new(HashMap::new())),
+            );
+            mailer.wire_outbound(outbound);
+            (mailer, rx)
+        }
+
+        fn decode_reply<K: aether_data::Kind + serde::de::DeserializeOwned>(
+            rx: &std::sync::mpsc::Receiver<EgressEvent>,
+        ) -> K {
+            let event = rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+            let EgressEvent::ToSession {
+                kind_name, payload, ..
+            } = event
+            else {
+                panic!("expected ToSession egress, got {event:?}");
+            };
+            assert_eq!(kind_name, K::NAME);
+            postcard::from_bytes(&payload).unwrap()
+        }
+
+        /// Boot the cap against a fresh tempdir; assert the mailbox
+        /// is registered.
+        #[test]
+        fn capability_boots_and_registers_mailbox() {
+            let root = scratch_root("boots");
+            let (registry, mailer) = fresh_substrate();
+            let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<IoCapability>(roots_under(&root))
+                .build()
+                .expect("io capability boots");
+            assert!(
+                registry.lookup(IoCapability::NAMESPACE).is_some(),
+                "io mailbox registered"
+            );
+            chassis.shutdown();
+            cleanup(&root);
+        }
+
+        /// Cap init fails when the adapter registry can't be built —
+        /// provoke `LocalFileAdapter::new` failure by pointing the save
+        /// root at a regular file rather than a directory. `init` returns
+        /// `BootError::Other(io::Error)`, the chassis builder propagates.
+        #[test]
+        fn cap_init_fails_when_adapter_init_fails() {
+            let root = scratch_root("init-fails");
+            let save_path = root.join("save_is_actually_a_file");
+            std::fs::write(&save_path, b"not a dir").unwrap();
+            let roots = NamespaceRoots {
+                save: save_path,
+                assets: root.join("assets"),
+                config: root.join("config"),
+            };
+            std::fs::create_dir_all(&roots.assets).unwrap();
+            std::fs::create_dir_all(&roots.config).unwrap();
+
+            let (registry, mailer) = fresh_substrate();
+            let result = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<IoCapability>(roots)
+                .build();
+            assert!(result.is_err(), "save root being a file must fail cap init");
+            cleanup(&root);
+        }
+
+        /// Builder rejects a duplicate claim. Same protection as the
+        /// other capabilities.
+        #[test]
+        fn duplicate_claim_rejects_with_typed_error() {
+            let root = scratch_root("collide");
+            let (registry, mailer) = fresh_substrate();
+            registry.register_sink(IoCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+
+            let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<IoCapability>(roots_under(&root))
+                .build()
+                .expect_err("collision must surface as BootError");
+            assert!(matches!(
+                err,
+                BootError::MailboxAlreadyClaimed { ref name }
+                    if name == IoCapability::NAMESPACE
+            ));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn cap_read_ok_replies_with_bytes() {
+            let root = scratch_root("cap-read");
+            let reg = build_save_only_registry(&root, true);
+            reg.get("save")
+                .unwrap()
+                .write("slot.bin", &[9, 9, 9])
+                .unwrap();
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            fix.cap.on_read(
+                &mut ctx,
+                Read {
+                    namespace: "save".to_string(),
+                    path: "slot.bin".to_string(),
+                },
+            );
+            match decode_reply::<ReadResult>(&fix.rx) {
+                ReadResult::Ok {
+                    namespace,
+                    path,
+                    bytes,
+                } => {
+                    assert_eq!(namespace, "save");
+                    assert_eq!(path, "slot.bin");
+                    assert_eq!(bytes, vec![9, 9, 9]);
+                }
+                ReadResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            }
+            cleanup(&root);
+        }
+
+        #[test]
+        fn cap_read_unknown_namespace_replies_err() {
+            let root = scratch_root("cap-ns");
+            let reg = build_save_only_registry(&root, true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            fix.cap.on_read(
+                &mut ctx,
+                Read {
+                    namespace: "nope".to_string(),
+                    path: "x.bin".to_string(),
+                },
+            );
+            match decode_reply::<ReadResult>(&fix.rx) {
+                ReadResult::Err {
+                    namespace,
+                    path,
+                    error: IoError::UnknownNamespace,
+                } => {
+                    assert_eq!(namespace, "nope");
+                    assert_eq!(path, "x.bin");
+                }
+                other => panic!("expected Err UnknownNamespace echoing request, got {other:?}"),
+            }
+            cleanup(&root);
+        }
+
+        #[test]
+        fn cap_read_not_found_replies_err() {
+            let root = scratch_root("cap-nf");
+            let reg = build_save_only_registry(&root, true);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            fix.cap.on_read(
+                &mut ctx,
+                Read {
+                    namespace: "save".to_string(),
+                    path: "ghost.bin".to_string(),
+                },
+            );
+            assert!(matches!(
+                decode_reply::<ReadResult>(&fix.rx),
+                ReadResult::Err {
+                    error: IoError::NotFound,
+                    ..
+                }
+            ));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn cap_write_ok_persists_bytes() {
+            let root = scratch_root("cap-write");
+            let reg = build_save_only_registry(&root, true);
+            let reg_clone = Arc::clone(&reg);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            fix.cap.on_write(
+                &mut ctx,
+                Write {
+                    namespace: "save".to_string(),
+                    path: "slot.bin".to_string(),
+                    bytes: vec![1, 2, 3],
+                },
+            );
+            match decode_reply::<WriteResult>(&fix.rx) {
+                WriteResult::Ok { namespace, path } => {
+                    assert_eq!(namespace, "save");
+                    assert_eq!(path, "slot.bin");
+                }
+                WriteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            }
+            assert_eq!(
+                reg_clone.get("save").unwrap().read("slot.bin").unwrap(),
+                vec![1, 2, 3]
+            );
+            cleanup(&root);
+        }
+
+        #[test]
+        fn cap_write_read_only_namespace_replies_forbidden() {
+            let root = scratch_root("cap-ro");
+            let reg = build_save_only_registry(&root, false);
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            fix.cap.on_write(
+                &mut ctx,
+                Write {
+                    namespace: "save".to_string(),
+                    path: "slot.bin".to_string(),
+                    bytes: vec![],
+                },
+            );
+            assert!(matches!(
+                decode_reply::<WriteResult>(&fix.rx),
+                WriteResult::Err {
+                    error: IoError::Forbidden,
+                    ..
+                }
+            ));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn cap_delete_then_read_surfaces_not_found() {
+            let root = scratch_root("cap-del");
+            let reg = build_save_only_registry(&root, true);
+            let reg_clone = Arc::clone(&reg);
+            reg.get("save").unwrap().write("x.bin", b"x").unwrap();
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            fix.cap.on_delete(
+                &mut ctx,
+                Delete {
+                    namespace: "save".to_string(),
+                    path: "x.bin".to_string(),
+                },
+            );
+            match decode_reply::<DeleteResult>(&fix.rx) {
+                DeleteResult::Ok { namespace, path } => {
+                    assert_eq!(namespace, "save");
+                    assert_eq!(path, "x.bin");
+                }
+                DeleteResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            }
+            assert!(matches!(
+                reg_clone.get("save").unwrap().read("x.bin"),
+                Err(IoError::NotFound)
+            ));
+            cleanup(&root);
+        }
+
+        #[test]
+        fn cap_list_returns_sorted_entries() {
+            let root = scratch_root("cap-list");
+            let reg = build_save_only_registry(&root, true);
+            reg.get("save").unwrap().write("b.bin", b"").unwrap();
+            reg.get("save").unwrap().write("a.bin", b"").unwrap();
+            let fix = TestFixture::new(reg);
+            let mut ctx = fix.ctx(session_sender());
+            fix.cap.on_list(
+                &mut ctx,
+                List {
+                    namespace: "save".to_string(),
+                    prefix: "".to_string(),
+                },
+            );
+            match decode_reply::<ListResult>(&fix.rx) {
+                ListResult::Ok {
+                    namespace,
+                    prefix,
+                    entries,
+                } => {
+                    assert_eq!(namespace, "save");
+                    assert_eq!(prefix, "");
+                    assert_eq!(entries, vec!["a.bin".to_string(), "b.bin".to_string()]);
+                }
+                ListResult::Err { error, .. } => panic!("expected Ok, got Err({error:?})"),
+            }
+            cleanup(&root);
+        }
+
+        // The end-to-end "component pushes Read, dispatcher delivers
+        // ReadResult to the component's receive_p32" test that lived here
+        // pre-stage-2e (issue 552) reached deep into `aether_substrate`
+        // privates (`Component::read_u32`, `ComponentEntry`, `host_fns`)
+        // plus wasmtime + wat. With the cap extracted to its own crate
+        // those internals are no longer reachable as crate-locals. The
+        // path it exercised is now covered by:
+        //   - `aether-scenario` declarative scenarios (they go through
+        //     the same Mailer + dispatch reply machinery), and
+        //   - the substrate's own `mailer` / `scheduler` unit tests for
+        //     `Mailer::send_reply` → component delivery.
+        // Reach for the in-bundle integration suite if a future change
+        // wants the full WAT roundtrip back as targeted coverage.
+    }
 }
