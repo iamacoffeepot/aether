@@ -848,7 +848,15 @@ fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
 
     // Collect everything we need from the inner actor impl into owned
     // values so the borrow on `items` ends before we mutate it below.
-    let (self_ty, type_ident, generics, namespace_expr, frame_barrier_expr, handler_kinds) = {
+    let (
+        self_ty,
+        type_ident,
+        generics,
+        namespace_expr,
+        frame_barrier_expr,
+        handler_kinds,
+        catch_all,
+    ) = {
         let Item::Impl(actor_impl) = &items[actor_idx] else {
             unreachable!("actor_idx points to an Item::Impl by construction");
         };
@@ -899,6 +907,7 @@ fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
         // — same source-of-truth contract `expand_native_actor_trait`
         // uses.
         let mut handler_kinds: Vec<Type> = Vec::new();
+        let mut has_fallback = false;
         let mut namespace_expr: Option<Expr> = None;
         let mut frame_barrier_expr: Option<Expr> = None;
         for impl_item in &actor_impl.items {
@@ -906,6 +915,9 @@ fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
                 ImplItem::Fn(f) if f.attrs.iter().any(attr_is_handler) => {
                     let (kind_ty, _is_slice) = extract_native_actor_handler_kind(&f.sig)?;
                     handler_kinds.push(kind_ty);
+                }
+                ImplItem::Fn(f) if f.attrs.iter().any(attr_is_fallback) => {
+                    has_fallback = true;
                 }
                 ImplItem::Const(c) => {
                     if c.ident == "NAMESPACE" {
@@ -925,10 +937,25 @@ fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
                  `const NAMESPACE: &'static str = ...` so the marker `impl Actor` can carry it",
             )
         })?;
-        if handler_kinds.is_empty() {
+        // Issue 576: bridge-wrapped actors come in two flavours —
+        // strict typed receiver (only #[handler]s) or catch-all cap
+        // (only #[fallback]). Hybrid is rejected for the same reason
+        // the inner expander rejects it (the always-on blanket
+        // `HandlesKind<K>` would overlap with per-handler impls, and
+        // strict receivers shouldn't silently swallow unknown kinds).
+        if !handler_kinds.is_empty() && has_fallback {
             return Err(syn::Error::new_spanned(
                 actor_impl,
-                "#[bridge]'s inner #[actor] block must declare at least one #[handler] method",
+                "#[bridge]'s inner #[actor] block cannot mix #[handler] and #[fallback] — \
+                 pick one shape: strict typed receiver (only #[handler]s) or catch-all cap \
+                 (only #[fallback])",
+            ));
+        }
+        if handler_kinds.is_empty() && !has_fallback {
+            return Err(syn::Error::new_spanned(
+                actor_impl,
+                "#[bridge]'s inner #[actor] block must declare at least one #[handler] method \
+                 or a #[fallback] method",
             ));
         }
         (
@@ -938,6 +965,7 @@ fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
             namespace_expr,
             frame_barrier_expr,
             handler_kinds,
+            has_fallback,
         )
     };
 
@@ -975,12 +1003,32 @@ fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
             #frame_barrier_const
         }
     };
-    let handles_kind_markers = handler_kinds.iter().map(|kind_ty| {
-        quote! {
-            impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
-                for #self_ty #where_clause {}
-        }
-    });
+    // Issue 576: catch-all caps (only #[fallback]) emit one blanket
+    // `impl<K: Kind> HandlesKind<K> for X {}` so typed sends compile
+    // for every K. Strict receivers (only #[handler]s) keep
+    // per-handler impls. Mixed shape was already rejected above.
+    let handles_kind_markers: Vec<TokenStream2> = if catch_all {
+        let kind_param: syn::Ident = syn::parse_quote!(__AetherCatchAllK);
+        let mut blanket_generics = generics.clone();
+        blanket_generics.params.push(syn::parse_quote!(
+            #kind_param: ::aether_actor::__macro_internals::Kind
+        ));
+        let (blanket_impl, _, blanket_where) = blanket_generics.split_for_impl();
+        vec![quote! {
+            impl #blanket_impl ::aether_actor::HandlesKind<#kind_param>
+                for #self_ty #blanket_where {}
+        }]
+    } else {
+        handler_kinds
+            .iter()
+            .map(|kind_ty| {
+                quote! {
+                    impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
+                        for #self_ty #where_clause {}
+                }
+            })
+            .collect()
+    };
 
     // Rewrite the inner `#[actor]` to `#[actor(skip_markers)]` so the
     // expander inside the cfg-gated mod doesn't duplicate the markers
@@ -1619,6 +1667,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     let mut init_method: Option<syn::ImplItemFn> = None;
     let mut config_type: Option<syn::ImplItemType> = None;
     let mut handlers: Vec<NativeActorHandlerFn> = Vec::new();
+    let mut fallback: Option<NativeFallbackFn> = None;
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
     let mut consts: Vec<syn::ImplItemConst> = Vec::new();
 
@@ -1638,15 +1687,15 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                 consts.push(c);
             }
             ImplItem::Fn(mut f) => {
-                if f.attrs.iter().any(attr_is_fallback) {
+                let handler_attr_idx = f.attrs.iter().position(attr_is_handler);
+                let fallback_attr_idx = f.attrs.iter().position(attr_is_fallback);
+                if handler_attr_idx.is_some() && fallback_attr_idx.is_some() {
                     return Err(syn::Error::new_spanned(
                         &f,
-                        "#[fallback] is not supported on `impl NativeActor for X` blocks — \
-                         every kind a native actor accepts is declared via #[handler]",
+                        "method cannot be both #[handler] and #[fallback]",
                     ));
                 }
-                let handler_idx = f.attrs.iter().position(attr_is_handler);
-                if let Some(idx) = handler_idx {
+                if let Some(idx) = handler_attr_idx {
                     let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig)?;
                     f.attrs.remove(idx);
                     handlers.push(NativeActorHandlerFn {
@@ -1654,6 +1703,16 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                         kind_ty,
                         is_slice,
                     });
+                } else if let Some(idx) = fallback_attr_idx {
+                    if fallback.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            &f,
+                            "at most one #[fallback] method per native actor",
+                        ));
+                    }
+                    validate_native_fallback_sig(&f.sig)?;
+                    f.attrs.remove(idx);
+                    fallback = Some(NativeFallbackFn { method: f });
                 } else if f.sig.ident == "init" {
                     init_method = Some(f);
                 } else {
@@ -1686,10 +1745,25 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         )
     })?;
 
-    if handlers.is_empty() {
+    // Issue 576: native actors come in two flavours — strict typed
+    // receiver (only #[handler]s) or catch-all cap (only #[fallback]).
+    // Hybrid (typed + fallback as runtime safety net) is forbidden:
+    // strict receivers shouldn't silently swallow unknown kinds, and
+    // the type-system catch-all blanket `HandlesKind<K>` would overlap
+    // with per-handler impls anyway.
+    if !handlers.is_empty() && fallback.is_some() {
         return Err(syn::Error::new_spanned(
             self_ty,
-            "#[actor] impl NativeActor requires at least one #[handler] method",
+            "#[actor] impl NativeActor cannot mix #[handler] and #[fallback] — \
+             pick one shape: strict typed receiver (only #[handler]s) or catch-all cap \
+             (only #[fallback])",
+        ));
+    }
+    if handlers.is_empty() && fallback.is_none() {
+        return Err(syn::Error::new_spanned(
+            self_ty,
+            "#[actor] impl NativeActor requires at least one #[handler] method \
+             or a #[fallback] method",
         ));
     }
 
@@ -1716,8 +1790,24 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         }
     };
 
+    // Issue 576: catch-all caps (only #[fallback], no #[handler]s) get
+    // a single blanket `impl<K: Kind> HandlesKind<K> for X {}` so any
+    // typed `ctx.actor::<X>().send(&payload)` compiles for every K.
+    // The orphan rule allows this because the self type is local. For
+    // strict receivers (only #[handler]s) we keep per-handler impls.
     let handles_kind_impls: Vec<TokenStream2> = if opts.skip_markers {
         Vec::new()
+    } else if fallback.is_some() {
+        let kind_param: syn::Ident = syn::parse_quote!(__AetherCatchAllK);
+        let mut blanket_generics = generics.clone();
+        blanket_generics.params.push(syn::parse_quote!(
+            #kind_param: ::aether_actor::__macro_internals::Kind
+        ));
+        let (blanket_impl, _, blanket_where) = blanket_generics.split_for_impl();
+        vec![quote! {
+            impl #blanket_impl ::aether_actor::HandlesKind<#kind_param>
+                for #self_ty #blanket_where {}
+        }]
     } else {
         handlers
             .iter()
@@ -1765,8 +1855,29 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         }
     });
 
-    let handler_methods = handlers.iter().map(|h| &h.method);
+    let handler_methods: Vec<&syn::ImplItemFn> = handlers.iter().map(|h| &h.method).collect();
+    let fallback_method = fallback.as_ref().map(|f| &f.method);
     let helper_methods = helpers.iter();
+
+    // Issue 576: catch-all caps override `__aether_dispatch_fallback`
+    // (the default-method on `NativeDispatch` returns `false`). The
+    // strict-receiver path keeps the default. Catch-all caps also
+    // emit an empty `__aether_dispatch_envelope` since there are no
+    // typed handlers — the trampoline routes straight to the fallback
+    // override on every envelope.
+    let fallback_dispatch_override = fallback.as_ref().map(|f| {
+        let method_ident = &f.method.sig.ident;
+        quote! {
+            fn __aether_dispatch_fallback(
+                &self,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
+                __aether_env: &::aether_substrate::capability::Envelope,
+            ) -> bool {
+                self.#method_ident(__aether_ctx, __aether_env);
+                true
+            }
+        }
+    });
 
     // Issue 552 stage 4: NativeActor + NativeDispatch + the inherent
     // handler-method impl all reach for `::aether_substrate::*` paths
@@ -1804,11 +1915,14 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                 #(#dispatch_arms)*
                 ::core::option::Option::None
             }
+
+            #fallback_dispatch_override
         }
 
         #[cfg(not(target_arch = "wasm32"))]
         impl #impl_generics #self_ty #where_clause {
             #(#handler_methods)*
+            #fallback_method
             #(#helper_methods)*
         }
     })
@@ -1821,6 +1935,57 @@ struct NativeActorHandlerFn {
     /// than `K`. The dispatcher decodes via `decode_cast_slice` so a
     /// single envelope with `count > 1` reaches the handler intact.
     is_slice: bool,
+}
+
+/// Issue 576: native-side `#[fallback]` collected on a
+/// `#[actor] impl NativeActor for X` block. Mirrors the wasm-side
+/// [`FallbackFn`] but the native handler signature pivots on
+/// [`Envelope`] — it carries the kind id, kind name, origin, sender,
+/// and payload in one borrow so catch-all caps (broadcast, future
+/// hub-as-actor) can lift the whole envelope into a downstream call
+/// without rebuilding fields the trampoline already has.
+///
+/// [`Envelope`]: aether_substrate::capability::Envelope
+struct NativeFallbackFn {
+    method: syn::ImplItemFn,
+}
+
+/// Validate a native `#[fallback]` method signature. Required shape:
+/// `(&self, ctx: &mut NativeCtx<'_>, env: &Envelope)`. The third
+/// argument's exact type isn't checked here — the synthesized
+/// override calls `self.<fallback>(ctx, env)` and the user's fn body
+/// will type-error against `&Envelope` if they wrote the wrong
+/// parameter type.
+fn validate_native_fallback_sig(sig: &Signature) -> syn::Result<()> {
+    if sig.inputs.len() != 3 {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[fallback] on `impl NativeActor for X` must have signature \
+             `(&self, ctx: &mut NativeCtx<'_>, env: &Envelope)`",
+        ));
+    }
+    let first = &sig.inputs[0];
+    let FnArg::Receiver(recv) = first else {
+        return Err(syn::Error::new_spanned(
+            first,
+            "#[fallback] first parameter must be `&self`",
+        ));
+    };
+    if recv.mutability.is_some() {
+        return Err(syn::Error::new_spanned(
+            recv,
+            "#[fallback] receiver must be `&self`, not `&mut self` — \
+             native caps share state across threads via interior mutability behind `Arc<Self>`",
+        ));
+    }
+    let third = &sig.inputs[2];
+    if !matches!(third, FnArg::Typed(_)) {
+        return Err(syn::Error::new_spanned(
+            third,
+            "#[fallback] third parameter must be `env: &Envelope`",
+        ));
+    }
+    Ok(())
 }
 
 /// Extract `K` from a `#[actor] impl NativeActor` handler method's

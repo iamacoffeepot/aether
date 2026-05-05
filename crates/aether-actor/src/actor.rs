@@ -47,7 +47,7 @@ pub trait Actor: Sized + Send + 'static {
 /// per `R::NAMESPACE`" at registration time, and senders address by
 /// type rather than by name.
 ///
-/// Chassis caps and synthetic actors like `HubBroadcast` are always
+/// Chassis caps (including catch-all caps like `BroadcastCapability`) are always
 /// singletons. User components are singletons when their cdylib loads
 /// at the default name (`R::NAMESPACE` from the wasm custom section);
 /// multi-instance loads use `ctx.resolve_actor::<R>(name)` instead and

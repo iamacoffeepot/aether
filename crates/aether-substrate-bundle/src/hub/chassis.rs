@@ -26,6 +26,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_capabilities::BroadcastCapability;
 use aether_substrate::Chassis;
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{
@@ -141,6 +142,7 @@ impl HubChassis {
         };
 
         Builder::<HubChassis>::new(registry_arc, mailer_arc)
+            .with_actor::<BroadcastCapability>(())
             .driver(driver)
             .build()
     }

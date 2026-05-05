@@ -16,15 +16,18 @@
 //! impls live alongside the structs); the header-only wasm build is
 //! a follow-up.
 //!
-//! Stage 3 (issue 552) moved the `HubBroadcast` synthetic-actor
-//! marker into `aether-substrate` itself, next to the broadcast
-//! sink it names. Reach there for typed sends to broadcast.
+//! Issue 576 promoted `BroadcastCapability` into a real catch-all chassis
+//! cap — it lives here alongside the rest, holds an
+//! `Arc<HubOutbound>`, and dispatches every kind it receives through
+//! a `#[fallback]` handler that fans the envelope out to every
+//! attached MCP session.
 //!
 //! [`NativeActor`]: aether_substrate::native_actor::NativeActor
 //! [`Actor`]: aether_actor::Actor
 
 #[cfg(feature = "audio")]
 pub mod audio;
+pub mod broadcast;
 pub mod handle;
 pub mod io;
 pub mod log;
@@ -34,6 +37,7 @@ pub mod render;
 
 #[cfg(feature = "audio")]
 pub use audio::{AudioCapability, AudioConfig};
+pub use broadcast::BroadcastCapability;
 pub use handle::HandleCapability;
 pub use io::IoCapability;
 pub use log::LogCapability;

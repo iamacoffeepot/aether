@@ -166,11 +166,14 @@ fn abort_reason(summary: &DrainSummary) -> Option<String> {
 /// the schema for.
 ///
 /// Stage 3 of issue 552 retired the `broadcast_mbox` parameter:
-/// the recipient is `crate::HubBroadcast::MAILBOX_ID`, a const-
-/// evaluated id matching whatever `register_sink(HubBroadcast::NAMESPACE,
-/// ...)` returns at boot. `sender` likewise retired — the broadcast
-/// path is target-by-mailbox + fan-out, no reply, so a sender
-/// identity wasn't read by any consumer.
+/// the recipient is `aether_kinds::mailboxes::HUB_BROADCAST`, a const-
+/// evaluated id matching the broadcast cap's claim under
+/// `HUB_BROADCAST_MAILBOX_NAME` (issue 576 promoted broadcast into a
+/// real chassis cap; the const stayed in `aether-kinds` so substrate-
+/// internal pushes don't depend on `aether-capabilities`). `sender`
+/// likewise retired — the broadcast path is target-by-mailbox +
+/// fan-out, no reply, so a sender identity wasn't read by any
+/// consumer.
 pub fn emit_frame_stats(
     queue: &Mailer,
     kind_frame_stats: aether_data::KindId,
@@ -181,7 +184,7 @@ pub fn emit_frame_stats(
         return;
     }
     queue.push(Mail::new(
-        crate::HubBroadcast::MAILBOX_ID,
+        aether_kinds::mailboxes::HUB_BROADCAST,
         kind_frame_stats,
         encode(&FrameStats { frame, triangles }),
         1,
@@ -385,12 +388,11 @@ mod tests {
     /// zero deliveries.
     #[test]
     fn emit_frame_stats_skips_non_multiples() {
-        use aether_actor::Actor;
         let registry = Arc::new(Registry::new());
         let captured: Arc<RwLock<Vec<Vec<u8>>>> = Arc::new(RwLock::new(Vec::new()));
         let captured_for_sink = Arc::clone(&captured);
         registry.register_sink(
-            crate::HubBroadcast::NAMESPACE,
+            aether_kinds::mailboxes::HUB_BROADCAST_MAILBOX_NAME,
             Arc::new(
                 move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {
                     captured_for_sink.write().unwrap().push(bytes.to_vec());
@@ -412,12 +414,11 @@ mod tests {
     /// through the cast decoder back to the input values.
     #[test]
     fn emit_frame_stats_emits_on_multiple() {
-        use aether_actor::Actor;
         let registry = Arc::new(Registry::new());
         let captured: Arc<RwLock<Vec<Vec<u8>>>> = Arc::new(RwLock::new(Vec::new()));
         let captured_for_sink = Arc::clone(&captured);
         registry.register_sink(
-            crate::HubBroadcast::NAMESPACE,
+            aether_kinds::mailboxes::HUB_BROADCAST_MAILBOX_NAME,
             Arc::new(
                 move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {
                     captured_for_sink.write().unwrap().push(bytes.to_vec());

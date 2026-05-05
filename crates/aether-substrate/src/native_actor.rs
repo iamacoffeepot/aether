@@ -41,9 +41,19 @@
 //!   sibling state recreates the shared-state coupling the actor
 //!   model is designed to eliminate. Lookups live on
 //!   [`NativeInitCtx`], `DriverCtx`, and `PassiveChassis` only.
-//! - `#[fallback]` on a `NativeActor` impl. Native caps are typed
-//!   receivers; an unknown-kind delivery is a programming error,
-//!   not a fallback path. The macro rejects this at expansion time.
+//!
+//! ## Catch-all caps (issue 576)
+//!
+//! Caps that fan-out every kind they're addressed at — broadcast
+//! today, hub-as-actor in the future — author with a `#[fallback]`
+//! method instead of `#[handler]`s. The macro emits a blanket
+//! `impl<K: Kind> HandlesKind<K> for X {}` so typed sends like
+//! `ctx.actor::<BroadcastCapability>().send(&payload)` compile for every K,
+//! and overrides [`NativeDispatch::__aether_dispatch_fallback`] to
+//! route every envelope through the user's fallback method. Hybrid
+//! shape (typed handlers + fallback as a runtime safety net) is
+//! rejected by the macro: strict receivers shouldn't silently swallow
+//! unknown kinds.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -54,7 +64,7 @@ use aether_data::{Kind, mailbox_id_from_name};
 
 use crate::mail::KindId;
 
-use crate::capability::BootError;
+use crate::capability::{BootError, Envelope};
 use crate::mail::ReplyTo;
 use crate::mailer::Mailer;
 use crate::native_transport::NativeTransport;
@@ -113,6 +123,17 @@ pub trait NativeDispatch: Send + Sync + 'static {
         kind: KindId,
         payload: &[u8],
     ) -> Option<()>;
+
+    /// Catch-all fallback for envelopes whose kind doesn't match any
+    /// `#[handler]` (issue 576). Default returns `false` — the
+    /// chassis trampoline warn-logs the unknown-kind miss as today.
+    /// The `#[actor]` macro overrides this when the impl carries a
+    /// `#[fallback]` method, returning `true` after the user's
+    /// fallback runs so the trampoline knows to suppress the warn
+    /// log.
+    fn __aether_dispatch_fallback(&self, _ctx: &mut NativeCtx<'_>, _envelope: &Envelope) -> bool {
+        false
+    }
 }
 
 /// Per-mail context for a [`NativeActor`] handler. Borrows the

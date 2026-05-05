@@ -350,7 +350,13 @@ where
                     if actor_for_thread
                         .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
                         .is_none()
+                        && !actor_for_thread.__aether_dispatch_fallback(&mut ctx, &env)
                     {
+                        // Issue 576: catch-all caps override
+                        // `__aether_dispatch_fallback` and return
+                        // `true` after their fallback runs, suppressing
+                        // this warn. Strict receivers keep the default
+                        // (returns `false`) and surface the miss.
                         tracing::warn!(
                             target: "aether_substrate::chassis_builder",
                             actor = A::NAMESPACE,
