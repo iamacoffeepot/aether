@@ -19,8 +19,11 @@
 use aether_actor::{Singleton, capability};
 use aether_kinds::LogEvent;
 
+#[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::capability::BootError;
+#[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::log_sink;
+#[cfg(not(target_arch = "wasm32"))]
 use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// `aether.log` mailbox cap. Stateless beyond the process-wide
