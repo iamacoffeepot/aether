@@ -34,10 +34,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_actor::{MailTransport, WaitError, wait_reply};
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
-use crate::{WASM_TRANSPORT, WasmTransport, resolve_mailbox};
+use super::{WASM_TRANSPORT, WasmTransport, resolve_mailbox};
+use crate::{MailTransport, WaitError, wait_reply};
 
 /// Mailbox name the substrate registers its net adapter under
 /// (ADR-0043). ADR-0074 Phase 5 retired the `aether.sink.*` namespace;
@@ -124,7 +124,7 @@ impl WaitError for SyncNetError {
 /// # Example
 ///
 /// ```ignore
-/// use aether_component::net::fetch_blocking;
+/// use aether_actor::net::fetch_blocking;
 /// use aether_kinds::{Fetch, HttpMethod};
 ///
 /// let resp = fetch_blocking(

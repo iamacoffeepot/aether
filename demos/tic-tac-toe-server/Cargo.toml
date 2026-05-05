@@ -13,7 +13,7 @@ edition.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-aether-component = { path = "../../crates/aether-component" }
+aether-actor = { path = "../../crates/aether-actor" }
 aether-demo-tic-tac-toe = { path = "../tic-tac-toe" }
 aether-data = { path = "../../crates/aether-data" }
 

@@ -12,7 +12,7 @@
 //! cares about and match on the `Ok` / `Err` variant. Example:
 //!
 //! ```ignore
-//! use aether_component::io;
+//! use aether_actor::io;
 //! use aether_kinds::{ReadResult, IoError};
 //!
 //! #[actor]
@@ -42,13 +42,13 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use aether_actor::{MailTransport, WaitError, wait_reply};
 use aether_data::Kind;
 use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 
-use crate::{WASM_TRANSPORT, WasmTransport, resolve_mailbox};
+use super::{WASM_TRANSPORT, WasmTransport, resolve_mailbox};
+use crate::{MailTransport, WaitError, wait_reply};
 
 /// Mailbox name the substrate registers its I/O store under
 /// (ADR-0041). ADR-0074 Phase 5 retired the `aether.sink.*` namespace;

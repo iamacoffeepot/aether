@@ -34,7 +34,7 @@ use tracing::{
     span,
 };
 
-use crate::resolve_mailbox;
+use super::resolve_mailbox;
 
 /// Hard cap on the mail payload's `message` field. Protects the queue
 /// from a misbehaving component flooding multi-megabyte log frames; the

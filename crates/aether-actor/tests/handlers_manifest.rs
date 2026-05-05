@@ -1,7 +1,7 @@
 //! Issue 442 regression: `#[actor]` emits the
 //! `aether.kinds.inputs` payload as associated consts on the
 //! component type's inherent impl, NOT as `#[link_section]` statics.
-//! `aether_component::export!()` is the only place that pins those
+//! `aether_actor::export!()` is the only place that pins those
 //! bytes into the wasm custom section, so the section can only land
 //! in the cdylib root that calls `export!()` — never in transitive
 //! rlib pulls of a `#[actor]`-using crate.
@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use aether_component::{BootError, Component, Ctx, DropCtx, InitCtx, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor};
 use aether_data::Kind;
 use aether_data::{INPUTS_SECTION_VERSION, InputsRecord};
 use bytemuck::{Pod, Zeroable};
@@ -44,27 +44,27 @@ struct Ping {
 struct ManifestProbe;
 
 #[actor]
-impl Component for ManifestProbe {
+impl WasmActor for ManifestProbe {
     const NAMESPACE: &'static str = "manifest_probe";
 
-    fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self)
     }
 
     /// # Agent
     /// Increments the tick counter.
     #[handler]
-    fn on_tick(&mut self, _ctx: &mut Ctx<'_>, _tick: Tick) {}
+    fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {}
 
     #[handler]
-    fn on_ping(&mut self, _ctx: &mut Ctx<'_>, _ping: Ping) {}
+    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 
     /// # Agent
     /// Catch-all for anything else.
     #[fallback]
-    fn on_other(&mut self, _ctx: &mut Ctx<'_>, _mail: aether_component::Mail<'_>) {}
+    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 
-    fn on_drop(&mut self, _ctx: &mut DropCtx<'_>) {}
+    fn on_drop(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
 }
 
 fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {

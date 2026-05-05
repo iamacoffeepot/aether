@@ -45,7 +45,7 @@
 //! That's as shape-y as this first pass gets; proper X / O glyphs
 //! are a rendering-polish pass for later.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor};
+use aether_actor::{BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, GameState, LAST_MOVE_NONE, MoveResult, PLAYER_X, PlayMove, SERVER,
 };
@@ -105,8 +105,8 @@ impl Default for TicTacToeClient {
             state: GameState::new_game(),
             mouse: None,
             window: None,
-            render: aether_component::resolve_mailbox::<DrawTriangle>("aether.render"),
-            server: aether_component::resolve_mailbox::<PlayMove>(SERVER),
+            render: aether_actor::wasm::resolve_mailbox::<DrawTriangle>("aether.render"),
+            server: aether_actor::wasm::resolve_mailbox::<PlayMove>(SERVER),
         }
     }
 }
@@ -126,10 +126,10 @@ impl Default for TicTacToeClient {
 /// component; the board updates the same way either route. Use
 /// `capture_frame` to verify rendering.
 #[actor]
-impl Component for TicTacToeClient {
+impl WasmActor for TicTacToeClient {
     const NAMESPACE: &'static str = "tic_tac_toe_client";
 
-    fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(TicTacToeClient::default())
     }
 
@@ -145,7 +145,7 @@ impl Component for TicTacToeClient {
     /// `tic_tac_toe` server's `client_observer` fan-out whenever a
     /// move or reset applies.
     #[handler]
-    fn on_game_state(&mut self, _ctx: &mut Ctx<'_>, state: GameState) {
+    fn on_game_state(&mut self, _ctx: &mut WasmCtx<'_>, state: GameState) {
         self.state = state;
     }
 
@@ -161,7 +161,7 @@ impl Component for TicTacToeClient {
     /// component receives after mailing `tic_tac_toe.play_move` or
     /// `tic_tac_toe.reset` to the server.
     #[handler]
-    fn on_move_result(&mut self, _ctx: &mut Ctx<'_>, result: MoveResult) {
+    fn on_move_result(&mut self, _ctx: &mut WasmCtx<'_>, result: MoveResult) {
         self.state = result.state;
     }
 
@@ -172,7 +172,7 @@ impl Component for TicTacToeClient {
     /// # Agent
     /// Not useful to mail directly — the desktop chassis drives this.
     #[handler]
-    fn on_mouse_move(&mut self, _ctx: &mut Ctx<'_>, mv: MouseMove) {
+    fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, mv: MouseMove) {
         self.mouse = Some((mv.x, mv.y));
     }
 
@@ -183,7 +183,7 @@ impl Component for TicTacToeClient {
     /// # Agent
     /// Not useful to mail directly — the desktop chassis drives this.
     #[handler]
-    fn on_window_size(&mut self, _ctx: &mut Ctx<'_>, sz: WindowSize) {
+    fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_>, sz: WindowSize) {
         self.window = Some((sz.width, sz.height));
     }
 
@@ -199,7 +199,7 @@ impl Component for TicTacToeClient {
     /// addressed to the `tic_tac_toe` server to drive moves from
     /// Claude.
     #[handler]
-    fn on_mouse_button(&mut self, ctx: &mut Ctx<'_>, _: MouseButton) {
+    fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, _: MouseButton) {
         let Some((mx, my)) = self.mouse else { return };
         let Some((w, h)) = self.window else { return };
         if let Some((row, col)) = hit_test(mx, my, w, h) {
@@ -222,13 +222,13 @@ impl Component for TicTacToeClient {
     /// Not useful to mail directly — the substrate drives ticks.
     /// Use `capture_frame` to observe the output.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         self.render(ctx);
     }
 }
 
 impl TicTacToeClient {
-    fn render(&self, ctx: &mut Ctx<'_>) {
+    fn render(&self, ctx: &mut WasmCtx<'_>) {
         // 9 cell quads + up to 9 mark quads; each quad is 2
         // triangles. Budget 36 slots.
         let mut tris: [DrawTriangle; 36] = [DrawTriangle::default(); 36];
@@ -381,7 +381,7 @@ fn push_quad(
 // `export!` — host test builds link against the server rlib and
 // would hit duplicate `init` / `receive_p32` / ... symbols.
 #[cfg(target_arch = "wasm32")]
-aether_component::export!(TicTacToeClient);
+aether_actor::export!(TicTacToeClient);
 
 #[cfg(test)]
 mod tests {

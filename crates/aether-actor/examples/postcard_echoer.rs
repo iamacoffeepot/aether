@@ -13,7 +13,7 @@
 //! to wasm; load via `mcp__aether-hub__load_component` and send
 //! `demo.postcard_request` to verify the dispatch.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor};
+use aether_actor::{BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
@@ -44,10 +44,10 @@ pub struct PostcardEchoer {
 }
 
 #[actor]
-impl Component for PostcardEchoer {
+impl WasmActor for PostcardEchoer {
     const NAMESPACE: &'static str = "postcard_echoer";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(PostcardEchoer {
             broadcast: ctx.resolve_mailbox::<PostcardObserved>("hub.claude.broadcast"),
         })
@@ -58,7 +58,7 @@ impl Component for PostcardEchoer {
     /// (synthesised by the Kind derive on `PostcardRequest` based on
     /// the absence of `#[repr(C)]`) already knows the wire shape.
     #[handler]
-    fn on_request(&mut self, ctx: &mut Ctx<'_>, req: PostcardRequest) {
+    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, req: PostcardRequest) {
         ctx.send(
             &self.broadcast,
             &PostcardObserved {
@@ -69,4 +69,4 @@ impl Component for PostcardEchoer {
     }
 }
 
-aether_component::export!(PostcardEchoer);
+aether_actor::export!(PostcardEchoer);

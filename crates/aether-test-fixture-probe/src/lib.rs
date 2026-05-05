@@ -15,7 +15,9 @@
 //!   `capture_frame` scenarios can observe pre-mail effects in the
 //!   captured PNG.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor, resolve_mailbox};
+use aether_actor::{
+    BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor, wasm::resolve_mailbox,
+};
 use aether_kinds::{DrawTriangle, Tick, Vertex};
 use bytemuck::{Pod, Zeroable};
 
@@ -55,10 +57,10 @@ pub struct Probe {
 }
 
 #[actor]
-impl Component for Probe {
+impl WasmActor for Probe {
     const NAMESPACE: &'static str = "test_fixture_probe";
 
-    fn init(_ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Probe {
             tick_count: 0,
             render: SetRender::default(),
@@ -77,7 +79,7 @@ impl Component for Probe {
     /// `receive_mail` for `aether.test_fixture.tick_observed` to see
     /// the count climbing.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         self.tick_count += 1;
         BROADCAST.send(
             ctx.transport(),
@@ -114,9 +116,9 @@ impl Component for Probe {
     /// and params `{ r, g, b, visible }`. Used by capture_frame
     /// scenarios to flip the fixture's render output between frames.
     #[handler]
-    fn on_set_render(&mut self, _ctx: &mut Ctx<'_>, mail: SetRender) {
+    fn on_set_render(&mut self, _ctx: &mut WasmCtx<'_>, mail: SetRender) {
         self.render = mail;
     }
 }
 
-aether_component::export!(Probe);
+aether_actor::export!(Probe);

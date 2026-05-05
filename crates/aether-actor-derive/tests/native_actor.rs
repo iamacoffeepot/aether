@@ -9,7 +9,7 @@
 //     `(&mut self, sender: ReplyTo, K)` handler signatures are
 //     supported (issue 533 PR D1).
 //
-// Compiles native-only — `aether-data-derive` runs as a proc-macro
+// Compiles native-only — `aether-actor-derive` runs as a proc-macro
 // crate, so these tests exercise the generated code on the host.
 
 use aether_actor::{Actor, Dispatch};

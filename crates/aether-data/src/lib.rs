@@ -59,16 +59,19 @@ pub use schema::*;
 pub use tagged_id::{Tag, with_tag};
 pub use wire_id::{EngineId, SessionToken, Uuid};
 
-/// Re-exported derive macros from `aether-data-derive`. Behind the
+/// Re-exported derive macros from `aether-actor-derive`. Behind the
 /// `derive` feature so `cargo build` on a guest that hand-writes
 /// `impl Kind` doesn't pay the proc-macro compile cost. The
 /// `#[actor]` / `#[handler]` / `#[fallback]` attribute macros
 /// (ADR-0033) ride in the same crate because adding a second proc-
 /// macro crate would double consumer compile cost for no separation
 /// gain — both derives and attributes expand into the same runtime
-/// surface.
+/// surface. Issue 552 stage 0 consolidated the prior
+/// `aether-data-derive` + `aether-component`-internal-only macro
+/// split into a single `aether-actor-derive` proc-macro crate so the
+/// SDK and the derive share a home.
 #[cfg(feature = "derive")]
-pub use aether_data_derive::{Kind, Schema, actor, fallback, handler};
+pub use aether_actor_derive::{Kind, Schema, Singleton, actor, capability, fallback, handler};
 
 /// Identifies a mail kind by a stable, namespaced string name (e.g.
 /// `"aether.tick"`, `"hello.npc_health"`) and a `u64` id derived from

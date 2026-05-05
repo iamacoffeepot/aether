@@ -14,7 +14,7 @@
 //! kind at init, so the test harness just loads the component and
 //! starts driving input — no manual `subscribe_input` needed.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor};
+use aether_actor::{BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::{Kind, Schema};
 use aether_kinds::{Key, MouseButton, MouseMove, Tick};
 use bytemuck::{Pod, Zeroable};
@@ -32,22 +32,22 @@ pub struct InputLogger {
 }
 
 #[actor]
-impl Component for InputLogger {
+impl WasmActor for InputLogger {
     const NAMESPACE: &'static str = "input_logger";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(InputLogger {
             observe: ctx.resolve_mailbox::<InputObserved>("hub.claude.broadcast"),
         })
     }
 
     #[handler]
-    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         ctx.send(&self.observe, &InputObserved { stream: 0, code: 0 });
     }
 
     #[handler]
-    fn on_key(&mut self, ctx: &mut Ctx<'_>, key: Key) {
+    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         ctx.send(
             &self.observe,
             &InputObserved {
@@ -58,12 +58,12 @@ impl Component for InputLogger {
     }
 
     #[handler]
-    fn on_mouse_button(&mut self, ctx: &mut Ctx<'_>, _mb: MouseButton) {
+    fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, _mb: MouseButton) {
         ctx.send(&self.observe, &InputObserved { stream: 2, code: 0 });
     }
 
     #[handler]
-    fn on_mouse_move(&mut self, ctx: &mut Ctx<'_>, m: MouseMove) {
+    fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, m: MouseMove) {
         ctx.send(
             &self.observe,
             &InputObserved {
@@ -74,4 +74,4 @@ impl Component for InputLogger {
     }
 }
 
-aether_component::export!(InputLogger);
+aether_actor::export!(InputLogger);

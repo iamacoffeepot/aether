@@ -3,24 +3,92 @@ name = "aether-actor"
 version.workspace = true
 edition.workspace = true
 
-# ADR-0074 Phase 1: target-agnostic actor SDK shared by WASM components
-# (via `aether-component`'s `WasmTransport`) and, eventually, native
-# capabilities (via `aether-substrate`'s `NativeTransport`). Holds the
-# `MailTransport` trait, the typed mail/ctx/sink machinery generic over
-# `T: MailTransport`, and the `wait_reply` helper. No FFI imports, no
-# `extern "C"`, no panic handlers — those live with the transport-
-# specific shim that wraps the SDK.
+# Actor SDK shared by WASM components (via `wasm::WasmTransport` —
+# folded in from the prior `aether-component` crate by issue 552 stage
+# 0) and, eventually, native capabilities (via
+# `aether-substrate::NativeTransport`). Holds the `MailTransport`
+# trait, the typed mail/ctx/sink machinery generic over `T:
+# MailTransport`, the `wait_reply` helper, and the wasm-guest impl
+# (`WasmTransport`, `WasmActor`, `Replaceable`, `export!` macro plus
+# the `aether.kinds.inputs` / `aether.namespace` custom-section pins).
+# Native-target stubs in `wasm::raw` panic if invoked, so the crate
+# compiles for `cargo test --workspace` on the host without dragging
+# the wasm FFI into the linker.
 [dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
 # ADR-0030 Phase 2: `InitCtx::subscribe_input` self-addresses
 # `aether.control.subscribe_input` for every `K::IS_INPUT` handler kind.
-# That mail's payload type lives in `aether-kinds`.
+# The wasm-shim helpers in `wasm::{io, net, log}` (folded in by issue
+# 552 stage 0) also build `aether.io.*` / `aether.net.*` / `aether.log.*`
+# request kinds — that whole vocabulary lives in `aether-kinds`.
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { version = "1", default-features = false }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # `wait_reply` decodes typed reply payloads via postcard, which is
 # serde-driven. The crate stays `no_std`-friendly with `default-features = false`.
 serde = { version = "1", default-features = false, features = ["alloc"] }
+# ADR-0060: the wasm shim installs a `tracing::Subscriber`
+# (`MailSubscriber`) at component boot that turns `tracing::warn!` /
+# `error!` / `info!` inside the wasm sandbox into `aether.log` mail.
+# The facade itself is `no_std`-friendly with `default-features = false`;
+# we don't pull `tracing-subscriber`.
+tracing = { version = "0.1", default-features = false }
 
 [dev-dependencies]
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+bytemuck = { version = "1", features = ["derive"] }
+postcard = { version = "1.1", features = ["alloc"] }
+# Issue #243: `#[derive(Kind)]` test fixtures emit `inventory::submit!`
+# on native targets; the macro path needs `::inventory` reachable.
+# Tests run native, so an unconditional dev-dep is fine.
+inventory = "0.3"
+
+# ADR-0017 (component-to-component reply) smoke pair: caller sends
+# `demo.request` to "echoer" and observes the reply.
+[[example]]
+name = "echoer"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "caller"
+crate-type = ["cdylib"]
+
+# ADR-0021 input subscriptions smoke. Resolves all four substrate input
+# kinds and broadcasts a `demo.input_observed` per event so
+# `receive_mail` shows the dispatch landing.
+[[example]]
+name = "input_logger"
+crate-type = ["cdylib"]
+
+# ADR-0042 sync-I/O demo. On first tick reads a counter from
+# `save://counter.bin`, increments, writes back, broadcasts the new
+# value. Respawn the substrate and the count persists — end-to-end
+# sync read + write in ~a dozen straight-line lines.
+[[example]]
+name = "save_counter"
+crate-type = ["cdylib"]
+
+# ADR-0045 typed-handle SDK demo. Publishes a `Note`, broadcasts a
+# `HeldNote { held: Ref<Note> }` whose handle the substrate
+# resolves inline before forwarding through `hub.claude.broadcast`.
+[[example]]
+name = "handle_demo"
+crate-type = ["cdylib"]
+
+# Postcard receive smoke test (sibling of `echoer.rs`). Demonstrates
+# `#[handler]` dispatching through `Mail::decode_postcard` for kinds
+# whose schema isn't bytemuck-castable (here: `String` + `Vec<u8>`
+# fields). Closes the gap in ADR-0033's design intent that
+# `#[actor]` accepts any declared kind regardless of wire shape.
+[[example]]
+name = "postcard_echoer"
+crate-type = ["cdylib"]
+
+# First end-to-end component (formerly `aether-hello-component`):
+# emits a fixed world-space triangle to the render sink each tick and
+# echoes `aether.ping` back as `aether.pong`. Doubles as a minimal
+# `#[actor]` reference and the canary referenced from
+# ADR-0012/0013/0014/0033.
+[[example]]
+name = "hello"
+crate-type = ["cdylib"]

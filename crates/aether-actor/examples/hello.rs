@@ -16,7 +16,7 @@
 //! MCP via the same section so the harness sees typed capabilities
 //! plus author-written intent for each inbox.
 
-use aether_component::{BootError, Component, Ctx, InitCtx, KindId, Mailbox, actor};
+use aether_actor::{BootError, KindId, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
@@ -63,10 +63,10 @@ pub struct Hello {
 /// `aether.ping` with an incrementing `seq` to exercise reply-to-
 /// sender; the matching `aether.pong` lands back at your session.
 #[actor]
-impl Component for Hello {
+impl WasmActor for Hello {
     const NAMESPACE: &'static str = "hello";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Hello {
             pong: ctx.resolve::<Pong>(),
             render: ctx.resolve_mailbox::<DrawTriangle>("aether.render"),
@@ -80,7 +80,7 @@ impl Component for Hello {
     /// its own tick loop. The effect is visible in `capture_frame`
     /// output.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         ctx.send(&self.render, &TRIANGLE);
     }
 
@@ -93,11 +93,11 @@ impl Component for Hello {
     /// The seq echo lets you pair requests and replies when multiple
     /// are in flight.
     #[handler]
-    fn on_ping(&mut self, ctx: &mut Ctx<'_>, ping: Ping) {
+    fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, ping: Ping) {
         if let Some(sender) = ctx.reply_to() {
             ctx.reply(sender, self.pong, &Pong { seq: ping.seq });
         }
     }
 }
 
-aether_component::export!(Hello);
+aether_actor::export!(Hello);

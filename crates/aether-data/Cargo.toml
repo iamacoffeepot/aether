@@ -5,12 +5,14 @@ edition.workspace = true
 
 [features]
 # Re-export `#[derive(Kind)]` and `#[derive(Schema)]` from
-# `aether-data-derive`. Off by default so guests that hand-write
+# `aether-actor-derive` (ADR-0077 / issue 552 stage 0: the kind +
+# actor proc-macros consolidated into one crate so the derive home
+# matches the SDK home). Off by default so guests that hand-write
 # `impl Kind for ...` don't pay the proc-macro compile cost.
-derive = ["dep:aether-data-derive"]
+derive = ["dep:aether-actor-derive"]
 
 [dependencies]
-aether-data-derive = { path = "../aether-data-derive", optional = true }
+aether-actor-derive = { path = "../aether-actor-derive", optional = true }
 bytemuck = { version = "1.19", features = ["derive"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }

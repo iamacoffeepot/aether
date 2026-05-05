@@ -10,7 +10,7 @@
 //! the `#[actor]`-decorated impl; `Mailbox<K>` still carries the
 //! send-side mailbox name (data, not type).
 
-use aether_component::{BootError, Component, Ctx, InitCtx, Mailbox, actor};
+use aether_actor::{BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::{Kind, Schema};
 use aether_kinds::Tick;
 use bytemuck::{Pod, Zeroable};
@@ -43,10 +43,10 @@ pub struct Caller {
 }
 
 #[actor]
-impl Component for Caller {
+impl WasmActor for Caller {
     const NAMESPACE: &'static str = "caller";
 
-    fn init(ctx: &mut InitCtx<'_>) -> Result<Self, BootError> {
+    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Caller {
             request: ctx.resolve_mailbox::<Request>("echoer"),
             observe: ctx.resolve_mailbox::<Observation>("hub.claude.broadcast"),
@@ -55,16 +55,16 @@ impl Component for Caller {
     }
 
     #[handler]
-    fn on_tick(&mut self, ctx: &mut Ctx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         ctx.send(&self.request, &Request { seq });
     }
 
     #[handler]
-    fn on_response(&mut self, ctx: &mut Ctx<'_>, resp: Response) {
+    fn on_response(&mut self, ctx: &mut WasmCtx<'_>, resp: Response) {
         ctx.send(&self.observe, &Observation { seq: resp.seq });
     }
 }
 
-aether_component::export!(Caller);
+aether_actor::export!(Caller);
