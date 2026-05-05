@@ -9,6 +9,12 @@
 //!   with a monotonic counter. Lets scenarios count tick deliveries
 //!   via `TestBench::count_observed` (broadcasts arrive on the
 //!   loopback and get recorded by kind name).
+//! - On the first tick, fires a typed `ctx.send_to::<LogCapability>`
+//!   call carrying a `LogEvent`. This is the issue 563 stage-5 demo:
+//!   the probe deps on `aether-capabilities` with
+//!   `default-features = false`, so the typed-sender path resolves
+//!   `LogCapability: Singleton + HandlesKind<LogEvent>` against the
+//!   wasm-header-only build with no native runtime in scope.
 //! - Receives `aether.test_fixture.set_render { r, g, b, visible }`
 //!   to update render state. When `visible` is non-zero, on_tick
 //!   emits a colored `DrawTriangle` to the chassis render sink, so
@@ -18,7 +24,8 @@
 use aether_actor::{
     BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor, wasm::resolve_mailbox,
 };
-use aether_kinds::{DrawTriangle, Tick, Vertex};
+use aether_capabilities::LogCapability;
+use aether_kinds::{DrawTriangle, LogEvent, Tick, Vertex};
 use bytemuck::{Pod, Zeroable};
 
 /// Broadcast payload emitted on each tick. Postcard-shaped — schema
@@ -87,6 +94,13 @@ impl WasmActor for Probe {
                 count: self.tick_count,
             },
         );
+        if self.tick_count == 1 {
+            ctx.send_to::<LogCapability, _>(&LogEvent {
+                level: 2,
+                target: "aether_test_fixture_probe".into(),
+                message: "typed_send_alive".into(),
+            });
+        }
         if self.render.visible != 0 {
             let r = self.render.r as f32 / 255.0;
             let g = self.render.g as f32 / 255.0;
