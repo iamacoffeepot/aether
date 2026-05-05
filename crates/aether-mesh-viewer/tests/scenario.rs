@@ -9,7 +9,7 @@
 //! - No wgpu adapter is available (driverless Linux runners without
 //!   `mesa-vulkan-drivers`).
 //! - The component's wasm hasn't been built — tests read
-//!   `target/wasm32-unknown-unknown/{debug,release}/aether_mesh_viewer_component.wasm`
+//!   `target/wasm32-unknown-unknown/{debug,release}/aether_mesh_viewer.wasm`
 //!   and skip with an `eprintln!` when both paths are absent. CI
 //!   builds the wasm before invoking `cargo test`.
 //!
@@ -26,12 +26,12 @@ use aether_scenario::test_helpers::{
 use aether_scenario::{Check, Script, Step};
 use aether_substrate_bundle::test_bench::TestBench;
 
-// Force linkage of `aether-mesh-viewer` so its `inventory::submit!`
-// `KindDescriptor` entries reach `aether_kinds::descriptors::all()`
-// in the test binary. Without this reference the linker strips the
-// transitive crate (host builds of `aether-mesh-viewer-component`
-// don't emit the FFI exports that would otherwise pull viewer kinds
-// in), and `Step::SendMail` for `aether.mesh.load` fails with
+// Force linkage of `aether-mesh-viewer`'s `inventory::submit!`
+// `KindDescriptor` entries into this test binary. Cargo treats
+// integration tests as separate crates that link against the test
+// target's host rlib, but the linker strips inventory submits for
+// kinds the test code doesn't statically reference. Without this
+// anchor, `Step::SendMail` for `aether.mesh.load` fails with
 // "unknown kind".
 use aether_mesh_viewer as _;
 
@@ -52,7 +52,7 @@ const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 /// emission, and the per-tick render-sink replay.
 #[test]
 fn dsl_box_loads_and_renders() {
-    let Some(wasm_path) = require_runtime("aether_mesh_viewer_component") else {
+    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
         return;
     };
     let sandbox = init_save_sandbox("mesh-viewer");
@@ -104,7 +104,7 @@ fn dsl_box_loads_and_renders() {
 /// regressing while the DSL branch keeps working.
 #[test]
 fn obj_quad_loads_and_renders() {
-    let Some(wasm_path) = require_runtime("aether_mesh_viewer_component") else {
+    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
         return;
     };
     let sandbox = init_save_sandbox("mesh-viewer");
@@ -155,7 +155,7 @@ fn obj_quad_loads_and_renders() {
 /// diverges from the clear color.
 #[test]
 fn parse_failure_keeps_prior_mesh() {
-    let Some(wasm_path) = require_runtime("aether_mesh_viewer_component") else {
+    let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
         return;
     };
     let sandbox = init_save_sandbox("mesh-viewer");

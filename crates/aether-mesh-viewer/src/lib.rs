@@ -1,6 +1,10 @@
-//! Mesh viewer component trunk (ADR-0066). Hosts the kind types that
-//! `aether-mesh-viewer-component` receives. The runtime cdylib lives in
-//! `aether-mesh-viewer-component`.
+//! Mesh viewer crate (issue 552 stage 1.5 consolidated). Hosts both
+//! the trunk types (kind structs) at the crate root and the runtime
+//! `MeshViewer` in [`runtime`]. Other components and demos that need
+//! to *talk to* a mesh viewer depend on this crate for the wire
+//! shapes; the cdylib FFI exports the substrate loads at runtime are
+//! emitted by `runtime`'s `aether_actor::export!()` invocation under
+//! wasm32.
 //!
 //! The viewer loads a mesh file from the substrate's I/O surface
 //! (ADR-0041 namespace + path) and replays it as `DrawTriangle` mail
@@ -9,12 +13,12 @@
 //! polygon-edge wireframes alongside filled triangles; `.obj` is parsed
 //! as triangulated Wavefront geometry with no wireframe.
 
-#![no_std]
-
 extern crate alloc;
 
 use alloc::string::String;
 use serde::{Deserialize, Serialize};
+
+pub mod runtime;
 
 /// `aether.mesh.load` — instruct the mesh viewer to load and display
 /// the file at `namespace://path`. The viewer dispatches on the
