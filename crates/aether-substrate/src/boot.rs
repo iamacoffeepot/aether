@@ -180,6 +180,21 @@ impl SubstrateBoot {
             .add(&self.registry, &self.queue, cap)
             .map_err(|e| wasmtime::Error::msg(format!("capability boot failed: {e}")))
     }
+
+    /// Issue 552 stage 2: post-build entry for a `NativeActor`.
+    /// Mirror of [`Self::add_capability`] for the new cap shape.
+    pub fn add_actor<A>(&mut self, config: A::Config) -> wasmtime::Result<()>
+    where
+        A: crate::NativeActor + crate::NativeDispatch,
+    {
+        let chassis = self
+            .chassis
+            .as_mut()
+            .expect("SubstrateBoot::build always installs a BootedChassis");
+        chassis
+            .add_actor::<A>(&self.registry, &self.queue, config)
+            .map_err(|e| wasmtime::Error::msg(format!("capability boot failed: {e}")))
+    }
 }
 
 impl<'a> SubstrateBootBuilder<'a> {

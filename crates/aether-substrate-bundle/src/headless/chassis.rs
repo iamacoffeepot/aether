@@ -228,13 +228,11 @@ impl HeadlessChassis {
         // chassis_builder `.with()` chain. Boot order is declaration
         // order — log first so other capabilities' boot tracing routes
         // through the log capture.
-        let io_cap = IoCapability::new(namespace_roots, Arc::clone(&mailer))
-            .map_err(|e| BootError::Other(Box::new(e)))?;
         Builder::<HeadlessChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
             .with_actor::<LogCapability>(())
-            .with(io_cap)
-            .with(NetCapability::new(net, Arc::clone(&mailer)))
+            .with_actor::<IoCapability>(namespace_roots)
+            .with_actor::<NetCapability>(net)
             .driver(driver)
             .build()
     }

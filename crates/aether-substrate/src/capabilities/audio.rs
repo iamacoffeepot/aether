@@ -55,11 +55,12 @@ use std::thread::{self, JoinHandle};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
-use aether_actor::{Actor, Singleton};
+use aether_actor::{MailCtx, Singleton};
 use aether_data::{MailboxId, ReplyTarget, ReplyTo};
 use aether_kinds::{NoteOff, NoteOn, SetMasterGain, SetMasterGainResult};
 
-use crate::mailer::Mailer;
+use crate::capability::BootError;
+use crate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// Capacity of the event queue between the cap's handlers and the
 /// audio-callback consumer. 1024 slots hold ~10 seconds of a dense
@@ -640,8 +641,7 @@ fn sender_mailbox_id(sender: ReplyTo) -> MailboxId {
     }
 }
 
-/// `aether.audio` mailbox cap. Holds the chassis [`Arc<Mailer>`] for
-/// `SetMasterGainResult` replies, the producer side of the synth
+/// `aether.audio` mailbox cap. Holds the producer side of the synth
 /// event queue ([`AudioEventSender`]), the audio worker thread that
 /// owns the [`cpal::Stream`] (see module-level "per-cap audio worker"
 /// docs for the `!Send` rationale), and a shutdown channel that
@@ -650,60 +650,36 @@ fn sender_mailbox_id(sender: ReplyTo) -> MailboxId {
 /// `audio_sender` is `None` when the cpal pipeline isn't running
 /// (`AETHER_AUDIO_DISABLE=1`, no audio device, init failure). In
 /// that mode `NoteOn` / `NoteOff` no-op and `SetMasterGain` replies
-/// `Err`.
+/// `Err`. The audio_thread / shutdown handles live behind a `Mutex`
+/// so the `Drop` impl can take ownership during teardown without
+/// requiring `&mut self` everywhere — handlers run with `&self`
+/// (Arc-shared) per the `NativeActor` contract.
+#[derive(Singleton)]
 pub struct AudioCapability {
-    mailer: Arc<Mailer>,
     audio_sender: Option<AudioEventSender>,
-    /// Worker thread holding the [`cpal::Stream`]. `None` in nop
-    /// mode (no pipeline to hold).
+    /// Worker thread holding the [`cpal::Stream`] + drop-on-shutdown
+    /// sender. Mutex-wrapped so `Drop` can `.take()` the JoinHandle
+    /// and Sender on `&mut self` while normal handlers (`&self`)
+    /// don't need to touch them.
+    teardown: std::sync::Mutex<AudioTeardown>,
+}
+
+/// Teardown state pulled aside so `Drop` can take ownership of the
+/// JoinHandle and shutdown sender without poisoning the rest of the
+/// cap struct.
+struct AudioTeardown {
     audio_thread: Option<JoinHandle<()>>,
-    /// Drop-on-shutdown sender; dropping it disconnects the channel
-    /// the worker is parked on, the worker exits, and the cpal
-    /// stream tears down on thread exit.
     audio_shutdown: Option<mpsc::Sender<()>>,
 }
 
 impl AudioCapability {
-    /// Construct from an [`AudioConfig`] (resolved by the chassis
-    /// main, typically via [`AudioConfig::from_env`]) and the
-    /// chassis [`Mailer`]. Always returns a cap instance — cpal init
-    /// failure logs a warning and falls back to nop mode (per
-    /// ADR-0039: audio is a peripheral, not infrastructure). The
-    /// cap always claims its mailbox so agents on chassis without
-    /// audio still get loud `Err` replies for `SetMasterGain` instead
-    /// of timing out.
-    pub fn new(config: AudioConfig, mailer: Arc<Mailer>) -> Self {
-        if config.disabled {
-            tracing::info!(
-                target: "aether_substrate::audio",
-                "AETHER_AUDIO_DISABLE=1 — skipping cpal init",
-            );
-            return Self::nop(mailer);
-        }
-        match spawn_audio_worker(config.requested_sample_rate) {
-            Ok((audio_sender, audio_thread, audio_shutdown)) => Self {
-                mailer,
-                audio_sender: Some(audio_sender),
-                audio_thread: Some(audio_thread),
-                audio_shutdown: Some(audio_shutdown),
-            },
-            Err(e) => {
-                tracing::warn!(
-                    target: "aether_substrate::audio",
-                    error = %e,
-                    "audio pipeline init failed — NoteOn/NoteOff will be nop, SetMasterGain will reply Err",
-                );
-                Self::nop(mailer)
-            }
-        }
-    }
-
-    fn nop(mailer: Arc<Mailer>) -> Self {
+    fn nop() -> Self {
         Self {
-            mailer,
             audio_sender: None,
-            audio_thread: None,
-            audio_shutdown: None,
+            teardown: std::sync::Mutex::new(AudioTeardown {
+                audio_thread: None,
+                audio_shutdown: None,
+            }),
         }
     }
 }
@@ -712,23 +688,58 @@ impl Drop for AudioCapability {
     fn drop(&mut self) {
         // Drop the shutdown sender first; the worker's `recv()`
         // returns, it drops the cpal::Stream on its own thread, and
-        // exits. Then we join.
-        self.audio_shutdown.take();
-        if let Some(t) = self.audio_thread.take() {
+        // exits. Then we join. Mutex contention is impossible here —
+        // Drop runs only when the last Arc is released.
+        let mut tear = self
+            .teardown
+            .lock()
+            .expect("AudioCapability teardown mutex poisoned");
+        tear.audio_shutdown.take();
+        if let Some(t) = tear.audio_thread.take() {
             let _ = t.join();
         }
     }
 }
 
-impl Actor for AudioCapability {
+#[aether_data::actor]
+impl NativeActor for AudioCapability {
+    type Config = AudioConfig;
+
     /// ADR-0039 + ADR-0074 Phase 5 chassis-owned mailbox.
     const NAMESPACE: &'static str = "aether.audio";
-}
 
-impl Singleton for AudioCapability {}
+    /// Boot the cap. Always succeeds — cpal init failure logs a
+    /// warning and falls back to nop mode (per ADR-0039: audio is a
+    /// peripheral, not infrastructure). The cap always claims its
+    /// mailbox so agents on chassis without audio still get loud
+    /// `Err` replies for `SetMasterGain` instead of timing out.
+    fn init(config: AudioConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        if config.disabled {
+            tracing::info!(
+                target: "aether_substrate::audio",
+                "AETHER_AUDIO_DISABLE=1 — skipping cpal init",
+            );
+            return Ok(Self::nop());
+        }
+        match spawn_audio_worker(config.requested_sample_rate) {
+            Ok((audio_sender, audio_thread, audio_shutdown)) => Ok(Self {
+                audio_sender: Some(audio_sender),
+                teardown: std::sync::Mutex::new(AudioTeardown {
+                    audio_thread: Some(audio_thread),
+                    audio_shutdown: Some(audio_shutdown),
+                }),
+            }),
+            Err(e) => {
+                tracing::warn!(
+                    target: "aether_substrate::audio",
+                    error = %e,
+                    "audio pipeline init failed — NoteOn/NoteOff will be nop, SetMasterGain will reply Err",
+                );
+                Ok(Self::nop())
+            }
+        }
+    }
 
-#[aether_data::actor]
-impl AudioCapability {
     /// Start a note.
     ///
     /// # Agent
@@ -736,12 +747,12 @@ impl AudioCapability {
     /// `(sender, instrument_id, pitch)`; sending two `NoteOn`s with
     /// the same triple is a no-op.
     #[aether_data::handler]
-    fn on_note_on(&mut self, sender: ReplyTo, mail: NoteOn) {
+    fn on_note_on(&self, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
         let Some(s) = self.audio_sender.as_ref() else {
             return;
         };
         let ev = AudioEvent::NoteOn {
-            sender_mailbox: sender_mailbox_id(sender),
+            sender_mailbox: sender_mailbox_id(ctx.reply_target()),
             pitch: mail.pitch,
             velocity: mail.velocity,
             instrument_id: mail.instrument_id,
@@ -759,12 +770,12 @@ impl AudioCapability {
     /// # Agent
     /// Fire-and-forget.
     #[aether_data::handler]
-    fn on_note_off(&mut self, sender: ReplyTo, mail: NoteOff) {
+    fn on_note_off(&self, ctx: &mut NativeCtx<'_>, mail: NoteOff) {
         let Some(s) = self.audio_sender.as_ref() else {
             return;
         };
         let ev = AudioEvent::NoteOff {
-            sender_mailbox: sender_mailbox_id(sender),
+            sender_mailbox: sender_mailbox_id(ctx.reply_target()),
             pitch: mail.pitch,
             instrument_id: mail.instrument_id,
         };
@@ -782,17 +793,14 @@ impl AudioCapability {
     /// Reply: `SetMasterGainResult`. `Ok { applied_gain }` clamps to
     /// `0.0..=1.0`; `Err` on chassis without audio.
     #[aether_data::handler]
-    fn on_set_master_gain(&mut self, sender: ReplyTo, mail: SetMasterGain) {
+    fn on_set_master_gain(&self, ctx: &mut NativeCtx<'_>, mail: SetMasterGain) {
         let applied = mail.gain.clamp(0.0, 1.0);
         match self.audio_sender.as_ref() {
             Some(s) => {
                 let _ = s.push(AudioEvent::SetMasterGain { gain: applied });
-                self.mailer.send_reply(
-                    sender,
-                    &SetMasterGainResult::Ok {
-                        applied_gain: applied,
-                    },
-                );
+                ctx.reply(&SetMasterGainResult::Ok {
+                    applied_gain: applied,
+                });
                 tracing::info!(
                     target: "aether_substrate::audio",
                     requested = mail.gain,
@@ -801,13 +809,9 @@ impl AudioCapability {
                 );
             }
             None => {
-                self.mailer.send_reply(
-                    sender,
-                    &SetMasterGainResult::Err {
-                        error: "audio pipeline not initialised on this desktop substrate"
-                            .to_owned(),
-                    },
-                );
+                ctx.reply(&SetMasterGainResult::Err {
+                    error: "audio pipeline not initialised on this desktop substrate".to_owned(),
+                });
             }
         }
     }
@@ -868,7 +872,9 @@ fn spawn_audio_worker(
 mod tests {
     use super::*;
     use crate::capability::{BootError, ChassisBuilder};
+    use crate::mailer::Mailer;
     use crate::registry::Registry;
+    use aether_actor::Actor;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         let registry = Arc::new(Registry::new());
@@ -1013,15 +1019,11 @@ mod tests {
     #[test]
     fn capability_boots_and_registers_mailbox() {
         let (registry, mailer) = fresh_substrate();
-        let cap = AudioCapability::new(
-            AudioConfig {
+        let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<AudioCapability>(AudioConfig {
                 disabled: true,
                 ..AudioConfig::default()
-            },
-            Arc::clone(&mailer),
-        );
-        let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(cap)
+            })
             .build()
             .expect("audio capability boots");
         assert!(
@@ -1037,15 +1039,11 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         registry.register_sink(AudioCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
-        let cap = AudioCapability::new(
-            AudioConfig {
+        let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<AudioCapability>(AudioConfig {
                 disabled: true,
                 ..AudioConfig::default()
-            },
-            Arc::clone(&mailer),
-        );
-        let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with(cap)
+            })
             .build()
             .expect_err("collision must surface as BootError");
         assert!(matches!(

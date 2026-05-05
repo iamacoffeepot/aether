@@ -285,28 +285,17 @@ impl TestBench {
         boot.outbound
             .attach_backend(Arc::new(HubProtocolBackend::new(loopback_tx)));
 
-        // Io cap on the `boot.add_capability` path. Silent-skip on init
-        // failure preserves prior behavior so tests on systems without
-        // writable default roots don't fail at the harness layer;
-        // tests that care about io supply tempdir roots via the
+        // Io cap booted post-build via `SubstrateBoot::add_actor` so
+        // adapter init failures (no writable default roots, missing
+        // env, etc.) warn-and-skip rather than failing the harness.
+        // Tests that care about io supply tempdir roots through the
         // builder.
-        match IoCapability::new(boot.namespace_roots.clone(), Arc::clone(&boot.queue)) {
-            Ok(io_cap) => {
-                if let Err(e) = boot.add_capability(io_cap) {
-                    tracing::warn!(
-                        target: "aether_substrate::io",
-                        error = %e,
-                        "io cap boot failed in TestBench (expected on systems without writable default roots)",
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "aether_substrate::io",
-                    error = %e,
-                    "io adapter init failed in TestBench (expected on systems without writable default roots)",
-                );
-            }
+        if let Err(e) = boot.add_actor::<IoCapability>(boot.namespace_roots.clone()) {
+            tracing::warn!(
+                target: "aether_substrate::io",
+                error = %e,
+                "io cap boot failed in TestBench (expected on systems without writable default roots)",
+            );
         }
 
         let gpu = Gpu::new(width, height, render_handles.clone());

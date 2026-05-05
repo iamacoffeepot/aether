@@ -1111,6 +1111,34 @@ impl BootedChassis {
         Ok(())
     }
 
+    /// Issue 552 stage 2: post-build entry for booting a `NativeActor`.
+    /// Mirror of [`Self::add`] for the new cap shape; same boot
+    /// trampoline as [`ChassisBuilder::with_actor`] but addressed
+    /// through the post-build path that `SubstrateBoot::add_actor`
+    /// surfaces. Used for chassis-conditional caps (Io / Net / Audio
+    /// when the chassis carries them) booted after the initial build.
+    pub fn add_actor<A>(
+        &mut self,
+        registry: &Arc<Registry>,
+        mailer: &Arc<Mailer>,
+        config: A::Config,
+    ) -> Result<(), BootError>
+    where
+        A: crate::NativeActor + crate::NativeDispatch,
+    {
+        let mut ctx = ChassisCtx::new(
+            registry,
+            mailer,
+            &mut self._fallback,
+            &mut self.frame_bound_pending,
+            &self.frame_bound_set,
+            &self.aborter,
+        );
+        let erased = boot_native_actor::<A>(&mut ctx, config)?;
+        self.running.push(erased);
+        Ok(())
+    }
+
     /// Wait for every frame-bound capability's inbox to drain (the
     /// pending counter on each [`FrameBoundClaim`] hits zero) within
     /// `budget`. Returns `Ok(())` on clean drain, or
