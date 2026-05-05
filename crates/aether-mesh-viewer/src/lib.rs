@@ -18,6 +18,7 @@ extern crate alloc;
 use alloc::string::String;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "runtime")]
 pub mod runtime;
 
 /// `aether.mesh.load` — instruct the mesh viewer to load and display

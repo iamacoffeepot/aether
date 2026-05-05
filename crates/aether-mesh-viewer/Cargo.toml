@@ -19,6 +19,20 @@ edition.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Stage 1.5 footgun mitigation (mirrors `aether-camera`'s [features]):
+# the `runtime` feature pulls in the `runtime` module that calls
+# `aether_actor::export!()`. The macro emits `#[unsafe(no_mangle)]
+# pub unsafe extern "C" fn init` (and siblings) into the rlib output
+# unconditionally — wasm-lld then forces these symbols into any
+# cdylib that transitively links this rlib, colliding with that
+# cdylib's own `export!()`. No workspace crate currently deps on
+# `aether-mesh-viewer` for trunk types, but the gate keeps the
+# pattern consistent so future trunk-type consumers can opt out via
+# `default-features = false` without a follow-up refactor here.
+default = ["runtime"]
+runtime = []
+
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data", features = ["derive"] }
