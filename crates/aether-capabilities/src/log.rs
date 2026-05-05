@@ -16,15 +16,14 @@
 //! and let `tracing-subscriber`'s `tracing-log` integration lift each
 //! record back into the tracing pipeline.
 
-use aether_actor::{Singleton, capability};
+use aether_actor::{Singleton, actor, capability};
 use aether_kinds::LogEvent;
 
-#[cfg(not(target_arch = "wasm32"))]
-use aether_substrate::capability::BootError;
-#[cfg(not(target_arch = "wasm32"))]
-use aether_substrate::log_sink;
-#[cfg(not(target_arch = "wasm32"))]
-use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+aether_actor::native_only! {
+    use aether_substrate::capability::BootError;
+    use aether_substrate::log_sink;
+    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+}
 
 /// `aether.log` mailbox cap. Stateless beyond the process-wide
 /// `tracing` subscriber set up by [`aether_substrate::log_capture::init`] —
@@ -34,7 +33,7 @@ use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 #[derive(Singleton)]
 pub struct LogCapability;
 
-#[aether_data::actor]
+#[actor]
 impl NativeActor for LogCapability {
     type Config = ();
     const NAMESPACE: &'static str = "aether.log";
@@ -49,7 +48,7 @@ impl NativeActor for LogCapability {
     /// # Agent
     /// Components mail `aether.log` `LogEvent { level, target, message }`
     /// to this mailbox. Fire-and-forget; no reply.
-    #[aether_data::handler]
+    #[handler]
     fn on_log_event(&self, _ctx: &mut NativeCtx<'_>, event: LogEvent) {
         log_sink::handle_log_mail_decoded(event);
     }

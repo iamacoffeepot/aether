@@ -27,20 +27,18 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-#[cfg(not(target_arch = "wasm32"))]
-use aether_actor::MailCtx;
-use aether_actor::{Singleton, capability};
+use aether_actor::{Singleton, actor, capability};
 // Kind imports split: handler-signature kinds stay always-on so the
 // macro-emitted `HandlesKind<K>` impls can reference them; reply-side
-// `*Result` types are body-only and gate with the rest.
+// `*Result` types are body-only and live in the `native_only!` block.
 use aether_kinds::{Delete, IoError, List, Read, Write};
-#[cfg(not(target_arch = "wasm32"))]
-use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
 
-#[cfg(not(target_arch = "wasm32"))]
-use aether_substrate::capability::BootError;
-#[cfg(not(target_arch = "wasm32"))]
-use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+aether_actor::native_only! {
+    use aether_actor::MailCtx;
+    use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
+    use aether_substrate::capability::BootError;
+    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+}
 
 /// Result shape used throughout the adapter layer. The variants of
 /// `IoError` map directly onto ADR-0041 §1's reply enums, so the
@@ -330,7 +328,7 @@ pub struct IoCapability {
     registry: Arc<AdapterRegistry>,
 }
 
-#[aether_data::actor]
+#[actor]
 impl NativeActor for IoCapability {
     /// Resolved namespace roots threaded through to `init`. Chassis
     /// mains build this via [`NamespaceRoots::from_env`] (or hand-roll
@@ -360,7 +358,7 @@ impl NativeActor for IoCapability {
     ///
     /// # Agent
     /// Reply: `ReadResult`. Echoes namespace + path on both arms.
-    #[aether_data::handler]
+    #[handler]
     fn on_read(&self, ctx: &mut NativeCtx<'_>, mail: Read) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
             ctx.reply(&ReadResult::Err {
@@ -391,7 +389,7 @@ impl NativeActor for IoCapability {
     ///
     /// # Agent
     /// Reply: `WriteResult`. Echoes namespace + path (NOT bytes).
-    #[aether_data::handler]
+    #[handler]
     fn on_write(&self, ctx: &mut NativeCtx<'_>, mail: Write) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
             ctx.reply(&WriteResult::Err {
@@ -419,7 +417,7 @@ impl NativeActor for IoCapability {
     ///
     /// # Agent
     /// Reply: `DeleteResult`. Echoes namespace + path.
-    #[aether_data::handler]
+    #[handler]
     fn on_delete(&self, ctx: &mut NativeCtx<'_>, mail: Delete) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
             ctx.reply(&DeleteResult::Err {
@@ -447,7 +445,7 @@ impl NativeActor for IoCapability {
     ///
     /// # Agent
     /// Reply: `ListResult`. Echoes namespace + prefix.
-    #[aether_data::handler]
+    #[handler]
     fn on_list(&self, ctx: &mut NativeCtx<'_>, mail: List) {
         let Some(adapter) = self.registry.get(&mail.namespace) else {
             ctx.reply(&ListResult::Err {

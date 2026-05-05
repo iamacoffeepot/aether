@@ -19,23 +19,21 @@
 //!   `Fetch.timeout_ms`.
 
 use std::collections::HashSet;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(not(target_arch = "wasm32"))]
-use aether_actor::MailCtx;
-use aether_actor::{Singleton, capability};
+use aether_actor::{Singleton, actor, capability};
 // Handler-signature kind stays always-on; reply-side `FetchResult`
-// + ureq error types are body-only.
-#[cfg(not(target_arch = "wasm32"))]
-use aether_kinds::FetchResult;
+// + ureq error types live in the `native_only!` block.
 use aether_kinds::{Fetch, HttpHeader, HttpMethod, NetError};
 
-#[cfg(not(target_arch = "wasm32"))]
-use aether_substrate::capability::BootError;
-#[cfg(not(target_arch = "wasm32"))]
-use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+aether_actor::native_only! {
+    use std::sync::Arc;
+
+    use aether_actor::MailCtx;
+    use aether_kinds::FetchResult;
+    use aether_substrate::capability::BootError;
+    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+}
 
 /// Default response-body cap when `AETHER_NET_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -395,7 +393,7 @@ impl NetCapability {
     }
 }
 
-#[aether_data::actor]
+#[actor]
 impl NativeActor for NetCapability {
     type Config = NetConfig;
 
@@ -418,7 +416,7 @@ impl NativeActor for NetCapability {
     /// # Agent
     /// Reply: `FetchResult`. Synchronous on the dispatcher thread —
     /// long-running fetches block other net mail until they finish.
-    #[aether_data::handler]
+    #[handler]
     fn on_fetch(&self, ctx: &mut NativeCtx<'_>, mail: Fetch) {
         let timeout = mail
             .timeout_ms

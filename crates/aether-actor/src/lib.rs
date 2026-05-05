@@ -155,3 +155,27 @@ pub use aether_data::{Kind, KindId as DataKindId, Schema, actor, capability, fal
 // rather than under a synthetic re-export shim.
 #[doc(inline)]
 pub use aether_data::Singleton;
+
+/// Wrap one-or-more items in `#[cfg(not(target_arch = "wasm32"))]`.
+/// Issue 552 stage 4's wasm-header-only build of `aether-capabilities`
+/// gates per-cap native imports + helpers + impls behind that cfg;
+/// this macro compresses what would otherwise be 5-7 sprinkled
+/// attributes per cap file into one block per native-only chunk.
+///
+/// ```ignore
+/// aether_actor::native_only! {
+///     use aether_substrate::capability::BootError;
+///     use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+///
+///     fn put_error_to_handle_error(e: PutError) -> HandleError { ... }
+/// }
+/// ```
+///
+/// expands to each `$item` annotated with `#[cfg(not(target_arch = "wasm32"))]`.
+/// Pure mechanical wrap — no clever cfg, no feature flags.
+#[macro_export]
+macro_rules! native_only {
+    ($($item:item)*) => {
+        $( #[cfg(not(target_arch = "wasm32"))] $item )*
+    };
+}
