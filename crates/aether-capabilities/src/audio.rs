@@ -55,7 +55,7 @@ use std::thread::{self, JoinHandle};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_queue::ArrayQueue;
 
-use aether_actor::{MailCtx, Singleton};
+use aether_actor::{MailCtx, Singleton, actor};
 use aether_data::{MailboxId, ReplyTarget, ReplyTo};
 use aether_kinds::{NoteOff, NoteOn, SetMasterGain, SetMasterGainResult};
 
@@ -701,7 +701,7 @@ impl Drop for AudioCapability {
     }
 }
 
-#[aether_data::actor]
+#[actor]
 impl NativeActor for AudioCapability {
     type Config = AudioConfig;
 
@@ -746,7 +746,7 @@ impl NativeActor for AudioCapability {
     /// Fire-and-forget. The synth keys voices on
     /// `(sender, instrument_id, pitch)`; sending two `NoteOn`s with
     /// the same triple is a no-op.
-    #[aether_data::handler]
+    #[handler]
     fn on_note_on(&self, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
         let Some(s) = self.audio_sender.as_ref() else {
             return;
@@ -769,7 +769,7 @@ impl NativeActor for AudioCapability {
     ///
     /// # Agent
     /// Fire-and-forget.
-    #[aether_data::handler]
+    #[handler]
     fn on_note_off(&self, ctx: &mut NativeCtx<'_>, mail: NoteOff) {
         let Some(s) = self.audio_sender.as_ref() else {
             return;
@@ -792,7 +792,7 @@ impl NativeActor for AudioCapability {
     /// # Agent
     /// Reply: `SetMasterGainResult`. `Ok { applied_gain }` clamps to
     /// `0.0..=1.0`; `Err` on chassis without audio.
-    #[aether_data::handler]
+    #[handler]
     fn on_set_master_gain(&self, ctx: &mut NativeCtx<'_>, mail: SetMasterGain) {
         let applied = mail.gain.clamp(0.0, 1.0);
         match self.audio_sender.as_ref() {

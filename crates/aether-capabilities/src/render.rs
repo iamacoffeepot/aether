@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use aether_actor::Singleton;
+use aether_actor::{Singleton, actor};
 use aether_data::Kind;
 use aether_kinds::{Camera, DRAW_TRIANGLE_BYTES, DrawTriangle};
 
@@ -90,7 +90,7 @@ impl RenderCapability {
     }
 }
 
-#[aether_data::actor]
+#[actor]
 impl NativeActor for RenderCapability {
     type Config = RenderConfig;
 
@@ -142,7 +142,7 @@ impl NativeActor for RenderCapability {
     /// `DRAW_TRIANGLE_BYTES` per triangle, batched via `send_many`)
     /// per tick. Fire-and-forget; the cap accumulates into
     /// `frame_vertices` until the chassis driver records the frame.
-    #[aether_data::handler]
+    #[handler]
     fn on_draw_triangle(&self, _ctx: &mut NativeCtx<'_>, mails: &[DrawTriangle]) {
         if let Some(obs) = &self.config.observed_kinds {
             obs.lock()
@@ -181,7 +181,7 @@ impl NativeActor for RenderCapability {
     /// # Agent
     /// Camera components mail `aether.camera { view_proj: [f32; 16] }`
     /// to this mailbox. Fire-and-forget; latest value wins.
-    #[aether_data::handler]
+    #[handler]
     fn on_camera(&self, _ctx: &mut NativeCtx<'_>, mail: Camera) {
         if let Some(obs) = &self.config.observed_kinds {
             obs.lock().unwrap().push(<Camera as Kind>::NAME.into());

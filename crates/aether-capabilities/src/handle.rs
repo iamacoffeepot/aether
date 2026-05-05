@@ -18,28 +18,26 @@
 //! constructor; the chassis builder's `with_actor::<HandleCapability>(())`
 //! is the boot site.
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::Arc;
-
-use aether_actor::{Singleton, capability};
+use aether_actor::{Singleton, actor, capability};
 // Kind imports split: handler-signature kinds stay always-on so the
 // macro-emitted `HandlesKind<K>` impls can reference them; reply-side
 // `*Result` + `HandleError` types are referenced only inside handler
-// bodies (gated by the macro emission), so their imports gate too.
-#[cfg(not(target_arch = "wasm32"))]
-use aether_kinds::{
-    HandleError, HandlePinResult, HandlePublishResult, HandleReleaseResult, HandleUnpinResult,
-};
+// bodies (gated by the macro emission), so they live in the
+// `native_only!` block below.
 use aether_kinds::{HandlePin, HandlePublish, HandleRelease, HandleUnpin};
 
-#[cfg(not(target_arch = "wasm32"))]
-use aether_actor::MailCtx;
-#[cfg(not(target_arch = "wasm32"))]
-use aether_substrate::capability::BootError;
-#[cfg(not(target_arch = "wasm32"))]
-use aether_substrate::handle_store::{HandleStore, PutError};
-#[cfg(not(target_arch = "wasm32"))]
-use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+aether_actor::native_only! {
+    use std::sync::Arc;
+
+    use aether_actor::MailCtx;
+    use aether_kinds::{
+        HandleError, HandlePinResult, HandlePublishResult, HandleReleaseResult,
+        HandleUnpinResult,
+    };
+    use aether_substrate::capability::BootError;
+    use aether_substrate::handle_store::{HandleStore, PutError};
+    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+}
 
 /// `aether.handle` mailbox cap. Owns the substrate's `HandleStore`
 /// and routes ADR-0045 publish/release/pin/unpin requests via
@@ -53,7 +51,7 @@ pub struct HandleCapability {
     store: Arc<HandleStore>,
 }
 
-#[aether_data::actor]
+#[actor]
 impl NativeActor for HandleCapability {
     type Config = ();
     /// ADR-0045 + ADR-0074 Phase 5: chassis-owned mailbox under the
@@ -83,7 +81,7 @@ impl NativeActor for HandleCapability {
     ///
     /// # Agent
     /// Reply: `HandlePublishResult`.
-    #[aether_data::handler]
+    #[handler]
     fn on_publish(&self, ctx: &mut NativeCtx<'_>, mail: HandlePublish) {
         let id = self.store.next_ephemeral();
         match self.store.put(id, mail.kind_id, mail.bytes) {
@@ -112,7 +110,7 @@ impl NativeActor for HandleCapability {
     ///
     /// # Agent
     /// Reply: `HandleReleaseResult`.
-    #[aether_data::handler]
+    #[handler]
     fn on_release(&self, ctx: &mut NativeCtx<'_>, mail: HandleRelease) {
         if self.store.dec_ref(mail.id) {
             ctx.reply(&HandleReleaseResult::Ok { id: mail.id });
@@ -128,7 +126,7 @@ impl NativeActor for HandleCapability {
     ///
     /// # Agent
     /// Reply: `HandlePinResult`.
-    #[aether_data::handler]
+    #[handler]
     fn on_pin(&self, ctx: &mut NativeCtx<'_>, mail: HandlePin) {
         if self.store.pin(mail.id) {
             ctx.reply(&HandlePinResult::Ok { id: mail.id });
@@ -144,7 +142,7 @@ impl NativeActor for HandleCapability {
     ///
     /// # Agent
     /// Reply: `HandleUnpinResult`.
-    #[aether_data::handler]
+    #[handler]
     fn on_unpin(&self, ctx: &mut NativeCtx<'_>, mail: HandleUnpin) {
         if self.store.unpin(mail.id) {
             ctx.reply(&HandleUnpinResult::Ok { id: mail.id });
@@ -157,16 +155,17 @@ impl NativeActor for HandleCapability {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn put_error_to_handle_error(e: PutError) -> HandleError {
-    match e {
-        PutError::EvictionFailed { .. } => HandleError::EvictionFailed,
-        PutError::KindMismatch {
-            existing_kind,
-            requested_kind,
-        } => HandleError::AdapterError(format!(
-            "kind id mismatch: existing={existing_kind} requested={requested_kind}"
-        )),
+aether_actor::native_only! {
+    fn put_error_to_handle_error(e: PutError) -> HandleError {
+        match e {
+            PutError::EvictionFailed { .. } => HandleError::EvictionFailed,
+            PutError::KindMismatch {
+                existing_kind,
+                requested_kind,
+            } => HandleError::AdapterError(format!(
+                "kind id mismatch: existing={existing_kind} requested={requested_kind}"
+            )),
+        }
     }
 }
 
