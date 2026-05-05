@@ -28,11 +28,15 @@ use std::marker::PhantomData;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
-use crate::capability::{BootError, ChassisCtx, FacadeHandle, FallbackRouter, MailboxClaim};
+use crate::capability::{
+    BootError, ChassisCtx, DropOnShutdownClaim, FacadeHandle, FallbackRouter, MailboxClaim,
+};
 use crate::chassis::Chassis;
 use crate::lifecycle::{FatalAborter, PanicAborter};
 use crate::mail::MailboxId;
 use crate::mailer::Mailer;
+use crate::native_actor::{Actors, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx};
+use crate::native_transport::NativeTransport;
 use crate::registry::Registry;
 use aether_actor::Actor;
 use aether_actor::Dispatch;
@@ -165,13 +169,18 @@ impl DynShutdown for FallbackShutdown {
 /// typed-runnings map retired alongside `Capability` so drivers
 /// wanting cap state get it through pre-build accessors (today only
 /// render via `RenderHandles`).
+///
+/// Issue 552 stage 1: also borrows the chassis's [`Actors`] map so
+/// drivers can pull `Arc<A>` for caps booted via [`Builder::with_actor`].
+/// `actor::<A>()` returns `None` if `A` wasn't booted.
 pub struct DriverCtx<'a> {
     inner: ChassisCtx<'a>,
+    actors: &'a Actors,
 }
 
 impl<'a> DriverCtx<'a> {
-    fn new(inner: ChassisCtx<'a>) -> Self {
-        Self { inner }
+    fn new(inner: ChassisCtx<'a>, actors: &'a Actors) -> Self {
+        Self { inner, actors }
     }
 
     /// Drivers have no `NAMESPACE` const to delegate against — claim
@@ -200,6 +209,17 @@ impl<'a> DriverCtx<'a> {
     pub fn frame_bound_pending(&self) -> Vec<(MailboxId, Arc<AtomicU64>)> {
         self.inner.frame_bound_pending().to_vec()
     }
+
+    /// Issue 552 stage 1: look up an earlier-booted [`NativeActor`]
+    /// by type and clone its `Arc`. `None` if the cap wasn't booted
+    /// through [`Builder::with_actor`] (legacy `with(cap)` boots
+    /// don't populate the actors map). Drivers reach for this when
+    /// they need to clone a cap-owned handle (today: render's
+    /// `RenderHandles` once `RenderCapability` migrates to
+    /// `NativeActor` in stage 2).
+    pub fn actor<A: NativeActor>(&self) -> Option<Arc<A>> {
+        self.actors.get::<A>()
+    }
 }
 
 mod sealed {
@@ -225,14 +245,21 @@ impl sealed::Sealed for HasDriver {}
 impl BuilderState for NoDriver {}
 impl BuilderState for HasDriver {}
 
-type PassiveBoot = Box<dyn FnOnce(&mut ChassisCtx<'_>) -> Result<Box<dyn DynShutdown>, BootError>>;
+/// Issue 552 stage 1: every `PassiveBoot` closure now receives both a
+/// [`ChassisCtx`] (registry / mailer / fallback / frame-bound state)
+/// and a `&mut Actors` view so the new [`Builder::with_actor::<A>`]
+/// path can insert booted `Arc<A>` instances. Closures from
+/// [`make_passive_boot`] / [`make_fallback_router_boot`] ignore the
+/// second arg; the new [`make_native_actor_boot`] uses it.
+type PassiveBoot =
+    Box<dyn FnOnce(&mut ChassisCtx<'_>, &mut Actors) -> Result<Box<dyn DynShutdown>, BootError>>;
 type DriverBoot = Box<dyn FnOnce(&mut DriverCtx<'_>) -> Result<Box<dyn DriverRunning>, BootError>>;
 
 fn make_passive_boot<C>(cap: C) -> PassiveBoot
 where
     C: Actor + Dispatch + Send + 'static,
 {
-    Box::new(move |ctx| {
+    Box::new(move |ctx, _actors| {
         let handle = ctx.spawn_actor_dispatcher(cap)?;
         Ok(Box::new(FacadeShutdown {
             handle: Some(handle),
@@ -241,10 +268,136 @@ where
 }
 
 fn make_fallback_router_boot(handler: FallbackRouter) -> PassiveBoot {
-    Box::new(move |ctx| {
+    Box::new(move |ctx, _actors| {
         ctx.claim_fallback_router(handler)?;
         Ok(Box::new(FallbackShutdown) as Box<dyn DynShutdown>)
     })
+}
+
+/// Issue 552 stage 1: factory for the new [`NativeActor`] boot path.
+/// Claims the cap's mailbox under `A::NAMESPACE`, builds a fresh
+/// per-cap [`NativeTransport`], constructs a [`NativeInitCtx`], calls
+/// `A::init(config, &mut init_ctx)`, wraps the returned cap in an
+/// `Arc<A>`, inserts into the chassis-side [`Actors`] map, and spawns
+/// a dispatcher thread that pulls from the transport's inbox and
+/// routes through [`NativeDispatch::__aether_dispatch_envelope`] —
+/// the sum dispatch trait the `#[actor] impl NativeActor for A`
+/// macro emits.
+///
+/// FRAME_BARRIER caps aren't supported by this entry yet (today only
+/// `RenderCapability` is frame-bound, and it stays on the legacy
+/// `with(cap)` path until stage 2 migrates render onto `NativeActor`).
+/// The fast-fail is intentional: a frame-bound cap booted through
+/// the non-frame-bound claim would silently miss the per-frame drain
+/// barrier, reintroducing the race FRAME_BARRIER exists to close.
+fn make_native_actor_boot<A>(config: A::Config) -> PassiveBoot
+where
+    A: NativeActor + NativeDispatch,
+{
+    Box::new(move |ctx, actors| {
+        if A::FRAME_BARRIER {
+            return Err(BootError::Other(Box::new(std::io::Error::other(format!(
+                "with_actor::<{}> rejected: FRAME_BARRIER caps must use the legacy with(cap) path \
+                 until stage 2 wires frame-bound claims through with_actor",
+                A::NAMESPACE
+            )))));
+        }
+
+        let claim = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
+        let DropOnShutdownClaim {
+            id: mailbox_id,
+            receiver,
+            sink_sender,
+        } = claim;
+
+        // Per-cap transport. `NativeTransport::from_ctx` pulls the
+        // chassis's frame-bound set + aborter so the cross-class
+        // wait_reply guard wires automatically.
+        let transport = Arc::new(NativeTransport::from_ctx(ctx, mailbox_id, A::FRAME_BARRIER));
+        transport.install_inbox(receiver);
+
+        // Boot the cap through `init`. The NativeInitCtx borrows the
+        // actors-so-far map (read-only) plus the transport (read-only)
+        // plus a mailer clone for outbound hooks.
+        let actor = {
+            let mailer_clone = ctx.mail_send_handle();
+            let mut init_ctx = NativeInitCtx::new(&transport, actors, mailer_clone);
+            A::init(config, &mut init_ctx)?
+        };
+        let actor_arc: Arc<A> = Arc::new(actor);
+
+        // Insert into the chassis lookup map. Earlier-booted caps
+        // already inserted; later-booted caps will. Double-insert
+        // can't happen because mailbox name is the dedup key (the
+        // claim above would have failed first).
+        actors.insert::<A>(Arc::clone(&actor_arc));
+
+        // Spawn the dispatcher thread. The thread owns one Arc<A>
+        // and one Arc<NativeTransport>; it loops `recv_blocking()`
+        // on the transport (which pulls from the installed inbox
+        // and disconnects when the chassis drops its `sink_sender`)
+        // and routes through `__aether_dispatch_envelope`.
+        let actor_for_thread = Arc::clone(&actor_arc);
+        let transport_for_thread = Arc::clone(&transport);
+        let thread_name = alloc_native_actor_thread_name::<A>();
+        let thread = std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                while let Some(env) = transport_for_thread.recv_blocking() {
+                    let mut ctx = NativeCtx::new(&transport_for_thread, env.sender);
+                    if actor_for_thread
+                        .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
+                        .is_none()
+                    {
+                        tracing::warn!(
+                            target: "aether_substrate::chassis_builder",
+                            actor = A::NAMESPACE,
+                            kind = env.kind_name.as_str(),
+                            "native actor dispatch missed: kind not handled or decode failed"
+                        );
+                    }
+                }
+            })
+            .map_err(|e| BootError::Other(Box::new(e)))?;
+
+        Ok(Box::new(NativeActorShutdown {
+            thread: Some(thread),
+            sink_sender: Some(sink_sender),
+        }) as Box<dyn DynShutdown>)
+    })
+}
+
+/// Build a stable `aether-actor-<namespace>` thread name for the
+/// dispatcher. Mirrors the legacy capability path's helper but lives
+/// in this module so `make_native_actor_boot` doesn't depend on a
+/// `pub(crate)` shim from `capability.rs`.
+fn alloc_native_actor_thread_name<A: Actor>() -> String {
+    let mut name = String::with_capacity("aether-actor-".len() + A::NAMESPACE.len());
+    name.push_str("aether-actor-");
+    name.push_str(A::NAMESPACE);
+    name
+}
+
+/// Shutdown adapter for a [`NativeActor`] booted through
+/// [`Builder::with_actor`]. Drops the [`crate::capability::SinkSender`]
+/// to disconnect the channel (the dispatcher's `recv_blocking` returns
+/// `None` and the thread exits), then joins the thread. Mirrors
+/// [`FacadeShutdown`] for the legacy facade path.
+struct NativeActorShutdown {
+    thread: Option<std::thread::JoinHandle<()>>,
+    sink_sender: Option<crate::capability::SinkSender>,
+}
+
+impl DynShutdown for NativeActorShutdown {
+    fn shutdown_dyn(mut self: Box<Self>) {
+        // Sender first — disconnects the channel and lets the
+        // dispatcher's `recv_blocking` return None so the thread
+        // exits. Joining a still-attached sender would hang.
+        self.sink_sender.take();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 fn make_driver_boot<D: DriverCapability>(driver: D) -> DriverBoot {
@@ -326,6 +479,28 @@ impl<C: Chassis> Builder<C, NoDriver> {
         self
     }
 
+    /// Issue 552 stage 1: boot a [`NativeActor`] with its associated
+    /// `Config`. The chassis claims the cap's mailbox under
+    /// `A::NAMESPACE`, runs `A::init(config, ctx)`, stores `Arc<A>`
+    /// in the chassis-side [`Actors`] map, and spawns a dispatcher
+    /// thread that drives the cap via [`NativeDispatch`].
+    ///
+    /// Boot order is declaration order; `.with_actor` calls before
+    /// and after `.driver(_)` boot together before the driver runs.
+    /// Init-time peer lookups via `ctx.actor::<EarlierCap>()` see
+    /// every cap inserted earlier in the chain.
+    ///
+    /// FRAME_BARRIER caps aren't supported on this entry yet — see
+    /// [`make_native_actor_boot`] for the fast-fail rationale. The
+    /// legacy `with(cap)` path stays available for them.
+    pub fn with_actor<A>(mut self, config: A::Config) -> Self
+    where
+        A: NativeActor + NativeDispatch,
+    {
+        self.passives.push(make_native_actor_boot::<A>(config));
+        self
+    }
+
     /// Supply the chassis's driver. Transitions to [`HasDriver`] —
     /// further `.driver(_)` calls are forbidden by the type system.
     /// Per ADR-0071 the driver type is fixed by `C::Driver`, so the
@@ -374,6 +549,18 @@ impl<C: Chassis> Builder<C, HasDriver> {
         self
     }
 
+    /// Mirror of [`Builder::with_actor`][Builder<C, NoDriver>::with_actor]
+    /// for the post-driver state — same semantics, accepted because
+    /// declaration-order before/after `.driver(_)` doesn't change
+    /// boot order (passives boot before the driver regardless).
+    pub fn with_actor<A>(mut self, config: A::Config) -> Self
+    where
+        A: NativeActor + NativeDispatch,
+    {
+        self.passives.push(make_native_actor_boot::<A>(config));
+        self
+    }
+
     /// Boot every passive in declaration order, then boot the driver
     /// against a [`DriverCtx`]. Any failure aborts the build and
     /// shuts down the passives that already booted (via
@@ -399,7 +586,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
                 &booted.frame_bound_set,
                 &booted.aborter,
             );
-            let mut driver_ctx = DriverCtx::new(chassis_ctx);
+            let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.actors);
             driver_boot(&mut driver_ctx)?
         };
 
@@ -415,6 +602,13 @@ impl<C: Chassis> Builder<C, HasDriver> {
 struct BootedPassives {
     shutdowns: Vec<Box<dyn DynShutdown>>,
     fallback: Option<FallbackRouter>,
+    /// Issue 552 stage 1: type-keyed map of booted [`NativeActor`]s.
+    /// Populated by [`Builder::with_actor`] entries; the legacy
+    /// `with(cap)` path leaves it empty. Borrowed (read-only) into
+    /// [`DriverCtx`] and surfaced through [`PassiveChassis::actor`]
+    /// / [`BuiltChassis`]'s lookup so drivers / embedders can pull
+    /// `Arc<A>` for cap state without going through mail.
+    actors: Actors,
     /// Per-mailbox pending counters from
     /// [`ChassisCtx::claim_frame_bound_mailbox`] calls — collected
     /// during passive boot, exposed to the driver via
@@ -456,6 +650,7 @@ fn boot_passives(
 ) -> Result<BootedPassives, BootError> {
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
     let mut fallback: Option<FallbackRouter> = None;
+    let mut actors = Actors::new();
     let mut frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)> = Vec::new();
     let frame_bound_set: Arc<RwLock<HashSet<MailboxId>>> = Arc::new(RwLock::new(HashSet::new()));
     for boot in passives {
@@ -467,7 +662,7 @@ fn boot_passives(
             &frame_bound_set,
             aborter,
         );
-        match boot(&mut ctx) {
+        match boot(&mut ctx, &mut actors) {
             Ok(shutdown) => shutdowns.push(shutdown),
             Err(e) => {
                 while let Some(s) = shutdowns.pop() {
@@ -480,6 +675,7 @@ fn boot_passives(
     Ok(BootedPassives {
         shutdowns,
         fallback,
+        actors,
         frame_bound_pending,
         frame_bound_set,
         aborter: Arc::clone(aborter),
@@ -505,6 +701,15 @@ impl<C: Chassis> fmt::Debug for BuiltChassis<C> {
 }
 
 impl<C: Chassis> BuiltChassis<C> {
+    /// Issue 552 stage 1: look up a [`NativeActor`] booted via
+    /// [`Builder::with_actor`]. `None` if `A` wasn't booted on this
+    /// chassis. Useful for embedders that hold a [`BuiltChassis`]
+    /// directly (today: hand-written test harnesses; bin chassis
+    /// hand off to `run()` and don't keep the chassis around).
+    pub fn actor<A: NativeActor>(&self) -> Option<Arc<A>> {
+        self.booted.actors.get::<A>()
+    }
+
     /// Block on the driver's run loop. On clean return, shut down
     /// every passive in reverse boot order. Driver errors propagate
     /// as [`RunError`]; passives still tear down before the error
@@ -557,6 +762,15 @@ impl<C: Chassis> PassiveChassis<C> {
     /// on the driver-build path.
     pub fn frame_bound_pending(&self) -> Vec<(MailboxId, Arc<AtomicU64>)> {
         self.booted.frame_bound_pending.clone()
+    }
+
+    /// Issue 552 stage 1: look up a [`NativeActor`] booted via
+    /// [`Builder::with_actor`]. `None` if `A` wasn't booted on this
+    /// chassis. Embedders (TestBench, integration tests) reach for
+    /// this when they need to peer at cap state without going
+    /// through mail.
+    pub fn actor<A: NativeActor>(&self) -> Option<Arc<A>> {
+        self.booted.actors.get::<A>()
     }
 }
 
@@ -651,5 +865,172 @@ mod tests {
             .expect_err("second passive must fail with duplicate claim");
 
         assert!(matches!(err, BootError::MailboxAlreadyClaimed { .. }));
+    }
+
+    /// Issue 552 stage 1: end-to-end smoke for the new
+    /// [`Builder::with_actor`] boot path. Boots a hand-rolled
+    /// `NativeActor + NativeDispatch` fixture, looks it up via
+    /// [`PassiveChassis::actor`], pushes one envelope at the cap's
+    /// mailbox, and asserts the dispatcher routed it to the right
+    /// handler. Stage 1 lands the infrastructure; stage 2 migrates
+    /// real caps onto it. This test is the load-bearing acceptance
+    /// gate.
+    #[test]
+    fn with_actor_boots_dispatches_and_tears_down() {
+        use crate::registry::MailboxEntry;
+        use aether_data::{Kind, ReplyTo as DataReplyTo};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        // Fixture kind: a 4-byte cast-shape payload so encode_into_bytes
+        // lands on the bytemuck path.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Ping {
+            tag: u32,
+        }
+        impl Kind for Ping {
+            const NAME: &'static str = "test.with_actor.ping";
+            const ID: aether_data::KindId = aether_data::KindId(0xA1B2_C3D4_E5F6_0001);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        // Fixture cap. State behind interior mutability so `&self`
+        // dispatch can mutate it (the post-552 norm).
+        struct ProbeCap {
+            received: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for ProbeCap {
+            const NAMESPACE: &'static str = "test.with_actor.probe";
+        }
+        impl aether_actor::Singleton for ProbeCap {}
+        impl aether_actor::HandlesKind<Ping> for ProbeCap {}
+
+        impl crate::native_actor::NativeActor for ProbeCap {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self { received: config })
+            }
+        }
+
+        // Hand-rolled NativeDispatch — what the macro arm emits in
+        // task #731. The if-arm decodes Ping bytes, calls the
+        // handler, returns Some(()) on success.
+        impl crate::native_actor::NativeDispatch for ProbeCap {
+            fn __aether_dispatch_envelope(
+                &self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Ping::ID.0 {
+                    let _decoded = Ping::decode_from_bytes(payload)?;
+                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let received = Arc::new(AtomicU32::new(0));
+
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<ProbeCap>(Arc::clone(&received))
+            .build_passive()
+            .expect("with_actor boot succeeds");
+
+        // PassiveChassis lookup returns the booted Arc.
+        let probe: Arc<ProbeCap> = chassis
+            .actor::<ProbeCap>()
+            .expect("ProbeCap registered in the actors map");
+        assert!(Arc::ptr_eq(&probe.received, &received));
+
+        // Push one envelope at the cap's mailbox via the registry's
+        // sink handler. The dispatcher thread pulls from its inbox
+        // and routes through __aether_dispatch_envelope → on_ping.
+        let mailbox_id = registry
+            .lookup(<ProbeCap as aether_actor::Actor>::NAMESPACE)
+            .expect("with_actor claimed the mailbox");
+        let MailboxEntry::Sink(handler) = registry.entry(mailbox_id).expect("sink registered")
+        else {
+            panic!("ProbeCap claim must be a sink entry");
+        };
+
+        let payload = Ping { tag: 0xDEAD_BEEF };
+        let bytes = payload.encode_into_bytes();
+        handler(
+            <Ping as Kind>::ID,
+            Ping::NAME,
+            None,
+            DataReplyTo::NONE,
+            &bytes,
+            1,
+        );
+
+        // Wait briefly for the dispatcher thread to dispatch.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while received.load(AtomicOrdering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            received.load(AtomicOrdering::SeqCst),
+            1,
+            "dispatcher should have routed Ping → on_ping within the wait budget"
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 552 stage 1: with_actor rejects FRAME_BARRIER caps with
+    /// a typed error rather than silently missing the per-frame
+    /// drain barrier. Stage 2 (or later) wires the frame-bound claim
+    /// path through with_actor when render migrates onto NativeActor.
+    #[test]
+    fn with_actor_rejects_frame_barrier_caps() {
+        struct FrameBoundProbe;
+        impl aether_actor::Actor for FrameBoundProbe {
+            const NAMESPACE: &'static str = "test.with_actor.frame_bound";
+            const FRAME_BARRIER: bool = true;
+        }
+        impl aether_actor::Singleton for FrameBoundProbe {}
+
+        impl crate::native_actor::NativeActor for FrameBoundProbe {
+            type Config = ();
+            fn init(
+                _: (),
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self)
+            }
+        }
+
+        impl crate::native_actor::NativeDispatch for FrameBoundProbe {
+            fn __aether_dispatch_envelope(
+                &self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let err = Builder::<TestChassis>::new(registry, mailer)
+            .with_actor::<FrameBoundProbe>(())
+            .build_passive()
+            .expect_err("FRAME_BARRIER caps must reject");
+        assert!(matches!(err, BootError::Other(_)));
     }
 }

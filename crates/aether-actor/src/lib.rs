@@ -55,6 +55,7 @@ mod actor;
 mod ctx;
 pub mod handle;
 mod mail;
+mod sender;
 mod sink;
 mod slot;
 mod sync;
@@ -64,6 +65,7 @@ pub mod wasm;
 pub use actor::{Actor, Dispatch, HandlesKind, Singleton};
 pub use ctx::{Ctx, DropCtx, InitCtx};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
+pub use sender::{MailCtx, Sender};
 // Generic 2-arg `Mailbox<K, T>` and `Handle<K, T>` stay accessible
 // as `aether_actor::sink::Mailbox` / `aether_actor::handle::Handle`.
 // At the crate root we re-export the 1-arg wasm aliases (defined in

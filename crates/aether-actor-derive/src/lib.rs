@@ -880,9 +880,34 @@ struct FallbackFn {
 }
 
 fn expand_handlers(item: ItemImpl) -> syn::Result<TokenStream2> {
-    if item.trait_.is_some() {
-        expand_wasm_actor(item)
+    if let Some((_, trait_path, _)) = item.trait_.as_ref() {
+        // Pattern-match the trait path's last identifier so the macro
+        // works regardless of the user's import style — bare
+        // `WasmActor` / `NativeActor`, `aether_actor::WasmActor`,
+        // `aether_substrate::NativeActor`, etc. all resolve here.
+        let last = trait_path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
+        match last.as_str() {
+            "NativeActor" => expand_native_actor_trait(item),
+            // `WasmActor` is the post-552 trait name; `Component` is
+            // the back-compat alias retained until stage 4.
+            "WasmActor" | "Component" => expand_wasm_actor(item),
+            other => Err(syn::Error::new_spanned(
+                trait_path,
+                format!(
+                    "#[actor] expects `impl WasmActor for X`, `impl NativeActor for X`, or \
+                     `impl Component for X` (back-compat alias) — got `{other}`",
+                ),
+            )),
+        }
     } else {
+        // Inherent `impl X { … }` is the legacy native-cap shape used
+        // by post-545 capabilities (LogCapability et al.). Stays
+        // available through stage 1; stage 2 migrates caps onto the
+        // `impl NativeActor for X` shape so this arm retires.
         expand_native_actor(item)
     }
 }
@@ -1268,6 +1293,225 @@ fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             #(#helper_methods_tokens)*
         }
     })
+}
+
+/// Issue 552 stage 1: expansion for `#[actor] impl NativeActor for X`
+/// — the new native chassis-cap shape. Per-handler ctx + `&self`
+/// (Arc-shared) + typed `init`. Mirrors `expand_wasm_actor`'s shape
+/// across the wasm/native split.
+///
+/// Emits, all rooted in the consumer crate's namespace:
+///   - `impl Actor for X` carrying the user-declared `const NAMESPACE`
+///     / `const FRAME_BARRIER` (extracted from the impl block so the
+///     `NativeActor: Actor` supertrait bound is satisfied).
+///   - `impl HandlesKind<K> for X` per `#[handler]` method — the
+///     compile-time gate `Sender::send::<R, K>` consults.
+///   - `impl NativeActor for X { type Config; fn init }` (the user's
+///     bodies, attribute-stripped).
+///   - `impl ::aether_substrate::NativeDispatch for X` whose body is
+///     a kind-id if-chain that decodes payload via
+///     `Kind::decode_from_bytes` and dispatches to the matching
+///     handler method.
+///   - The handler methods themselves (and any helper fns) on a
+///     sibling inherent `impl X { … }`.
+///
+/// `#[fallback]` is rejected — native actors are typed receivers;
+/// unknown kinds are programming errors, not fallback paths.
+fn expand_native_actor_trait(item: ItemImpl) -> syn::Result<TokenStream2> {
+    let self_ty = &item.self_ty;
+    let generics = &item.generics;
+    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+    let trait_path = item
+        .trait_
+        .as_ref()
+        .map(|(_, p, _)| p)
+        .expect("trait_ checked above");
+
+    let mut init_method: Option<syn::ImplItemFn> = None;
+    let mut config_type: Option<syn::ImplItemType> = None;
+    let mut handlers: Vec<NativeActorHandlerFn> = Vec::new();
+    let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
+    let mut consts: Vec<syn::ImplItemConst> = Vec::new();
+
+    for impl_item in item.items {
+        match impl_item {
+            ImplItem::Type(it) if it.ident == "Config" => {
+                config_type = Some(it);
+            }
+            ImplItem::Type(it) => {
+                return Err(syn::Error::new_spanned(
+                    it,
+                    "#[actor] impl NativeActor for X accepts only `type Config = …` — \
+                     other associated types aren't part of the trait",
+                ));
+            }
+            ImplItem::Const(c) => {
+                consts.push(c);
+            }
+            ImplItem::Fn(mut f) => {
+                if f.attrs.iter().any(attr_is_fallback) {
+                    return Err(syn::Error::new_spanned(
+                        &f,
+                        "#[fallback] is not supported on `impl NativeActor for X` blocks — \
+                         every kind a native actor accepts is declared via #[handler]",
+                    ));
+                }
+                let handler_idx = f.attrs.iter().position(attr_is_handler);
+                if let Some(idx) = handler_idx {
+                    let kind_ty = extract_native_actor_handler_kind(&f.sig)?;
+                    f.attrs.remove(idx);
+                    handlers.push(NativeActorHandlerFn { method: f, kind_ty });
+                } else if f.sig.ident == "init" {
+                    init_method = Some(f);
+                } else {
+                    helpers.push(f);
+                }
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    other,
+                    "unexpected item in #[actor] impl NativeActor for X (only fns, \
+                     `type Config = …`, and `const` items are accepted)",
+                ));
+            }
+        }
+    }
+
+    let init_method = init_method.ok_or_else(|| {
+        syn::Error::new_spanned(
+            self_ty,
+            "#[actor] impl NativeActor requires \
+             `fn init(config: Self::Config, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError>`",
+        )
+    })?;
+
+    let config_type = config_type.ok_or_else(|| {
+        syn::Error::new_spanned(
+            self_ty,
+            "#[actor] impl NativeActor requires `type Config = …` — \
+             use `()` for caps without configuration",
+        )
+    })?;
+
+    if handlers.is_empty() {
+        return Err(syn::Error::new_spanned(
+            self_ty,
+            "#[actor] impl NativeActor requires at least one #[handler] method",
+        ));
+    }
+
+    // `NAMESPACE` / `FRAME_BARRIER` are declared on the supertrait
+    // `Actor`, but the user wrote them inside `impl NativeActor for X`
+    // for the symmetric authoring shape. Route the consts onto a
+    // sibling `impl Actor for X` block so satisfying the supertrait
+    // bound works without making the user split the impl.
+    let const_tokens = consts.iter();
+    let actor_impl = if consts.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            impl #impl_generics ::aether_actor::Actor for #self_ty #where_clause {
+                #(#const_tokens)*
+            }
+        }
+    };
+
+    let handles_kind_impls = handlers.iter().map(|h| {
+        let kind_ty = &h.kind_ty;
+        quote! {
+            impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
+                for #self_ty #where_clause {}
+        }
+    });
+
+    let dispatch_arms = handlers.iter().map(|h| {
+        let kind_ty = &h.kind_ty;
+        let method_ident = &h.method.sig.ident;
+        quote! {
+            if __aether_kind.0 == <#kind_ty as ::aether_data::Kind>::ID.0 {
+                if let Some(__aether_decoded) =
+                    <#kind_ty as ::aether_data::Kind>::decode_from_bytes(__aether_payload)
+                {
+                    self.#method_ident(__aether_ctx, __aether_decoded);
+                    return ::core::option::Option::Some(());
+                }
+                return ::core::option::Option::None;
+            }
+        }
+    });
+
+    let handler_methods = handlers.iter().map(|h| &h.method);
+    let helper_methods = helpers.iter();
+
+    Ok(quote! {
+        #actor_impl
+
+        #(#handles_kind_impls)*
+
+        impl #impl_generics #trait_path for #self_ty #where_clause {
+            #config_type
+            #init_method
+        }
+
+        impl #impl_generics ::aether_substrate::NativeDispatch for #self_ty #where_clause {
+            fn __aether_dispatch_envelope(
+                &self,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
+                __aether_kind: ::aether_substrate::mail::KindId,
+                __aether_payload: &[u8],
+            ) -> ::core::option::Option<()> {
+                #(#dispatch_arms)*
+                ::core::option::Option::None
+            }
+        }
+
+        impl #impl_generics #self_ty #where_clause {
+            #(#handler_methods)*
+            #(#helper_methods)*
+        }
+    })
+}
+
+struct NativeActorHandlerFn {
+    method: syn::ImplItemFn,
+    kind_ty: Type,
+}
+
+/// Extract `K` from a `#[actor] impl NativeActor` handler method's
+/// third parameter. Required signature: `(&self, ctx: &mut NativeCtx<'_>, mail: K)`.
+/// The `&self` (vs `&mut self`) is load-bearing — the actor lives
+/// behind `Arc<Self>` and shares the ref across dispatcher / lookup
+/// consumers.
+fn extract_native_actor_handler_kind(sig: &Signature) -> syn::Result<Type> {
+    if sig.inputs.len() != 3 {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[actor] impl NativeActor #[handler] method must have signature \
+             `(&self, ctx: &mut NativeCtx<'_>, arg: K)`",
+        ));
+    }
+    let first = &sig.inputs[0];
+    let FnArg::Receiver(recv) = first else {
+        return Err(syn::Error::new_spanned(
+            first,
+            "#[handler] first parameter must be `&self` (NativeActor caps share state via Arc)",
+        ));
+    };
+    if recv.mutability.is_some() {
+        return Err(syn::Error::new_spanned(
+            recv,
+            "#[actor] impl NativeActor #[handler] receiver must be `&self`, not `&mut self` — \
+             native caps share state across threads via interior mutability behind `Arc<Self>`",
+        ));
+    }
+    let third = &sig.inputs[2];
+    let FnArg::Typed(pt) = third else {
+        return Err(syn::Error::new_spanned(
+            third,
+            "#[handler] third parameter must be a typed `arg: K`",
+        ));
+    };
+    Ok((*pt.ty).clone())
 }
 
 struct NativeHandlerFn {
