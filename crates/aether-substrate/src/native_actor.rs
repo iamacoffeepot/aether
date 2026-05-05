@@ -131,9 +131,12 @@ pub struct NativeCtx<'a> {
 }
 
 impl<'a> NativeCtx<'a> {
-    /// Internal constructor — only the chassis dispatcher trampoline
-    /// (in `chassis_builder`) builds these.
-    pub(crate) fn new(transport: &'a NativeTransport, sender: ReplyTo) -> Self {
+    /// Internal constructor — the chassis dispatcher trampoline (in
+    /// `chassis_builder`) builds these. Cap-side test fixtures in
+    /// `aether-capabilities` also reach for it directly so they can
+    /// drive a handler without spinning up a full chassis; that's why
+    /// it's `pub` rather than `pub(crate)`.
+    pub fn new(transport: &'a NativeTransport, sender: ReplyTo) -> Self {
         Self { transport, sender }
     }
 

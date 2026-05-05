@@ -30,9 +30,9 @@ use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tic
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use crate::hub::HubProtocolBackend;
+use aether_capabilities::{IoCapability, io::NamespaceRoots};
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
-    capabilities::{IoCapability, io::NamespaceRoots},
     capture::CaptureQueue,
     frame_loop,
     mail::{Mail, MailboxId},
@@ -261,7 +261,6 @@ impl TestBench {
             name: "test-bench".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             workers: WORKERS,
-            namespace_roots,
             // In-process bench doesn't dial a hub; replies route to
             // the loopback attached below.
             hub_url: None,
@@ -288,9 +287,11 @@ impl TestBench {
         // Io cap booted post-build via `SubstrateBoot::add_actor` so
         // adapter init failures (no writable default roots, missing
         // env, etc.) warn-and-skip rather than failing the harness.
-        // Tests that care about io supply tempdir roots through the
-        // builder.
-        if let Err(e) = boot.add_actor::<IoCapability>(boot.namespace_roots.clone()) {
+        // Tests that care about io supply tempdir roots through
+        // `start_with_namespace_roots`; otherwise the bench skips Io.
+        if let Some(roots) = namespace_roots
+            && let Err(e) = boot.add_actor::<IoCapability>(roots)
+        {
             tracing::warn!(
                 target: "aether_substrate::io",
                 error = %e,

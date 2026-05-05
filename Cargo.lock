@@ -77,6 +77,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-capabilities"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "bytemuck",
+ "cpal",
+ "crossbeam-queue",
+ "dirs",
+ "log",
+ "png",
+ "postcard",
+ "serde",
+ "tracing",
+ "ureq",
+ "url",
+ "wgpu",
+]
+
+[[package]]
 name = "aether-codec"
 version = "0.2.0-alpha"
 dependencies = [
@@ -255,6 +277,7 @@ dependencies = [
 name = "aether-substrate-bundle"
 version = "0.2.0-alpha"
 dependencies = [
+ "aether-capabilities",
  "aether-codec",
  "aether-data",
  "aether-kinds",

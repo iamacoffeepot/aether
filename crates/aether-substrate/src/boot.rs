@@ -28,10 +28,12 @@
 //! (issue #262).
 //!
 //! **Env-var reading is the chassis's job.** Per issue 464,
-//! substrate-core takes config explicitly (`connect_hub` accepts an
-//! optional URL; `SubstrateBootBuilder::namespace_roots` accepts
-//! resolved roots) and chassis `main()` is the single edge that
-//! reads env vars. Tests pass config in directly, never touch env.
+//! substrate-core takes config explicitly and chassis `main()` is
+//! the single edge that reads env vars. Tests pass config in
+//! directly, never touch env. Stage 2e (issue 552) extracted every
+//! cap to `aether-capabilities`; the cap-specific config readers
+//! (e.g. `NamespaceRoots::from_env`) live there now and chassis
+//! mains reach for them when calling [`SubstrateBoot::add_actor`].
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -42,8 +44,8 @@ use wasmtime::{Engine, Linker};
 use crate::{
     AETHER_CONTROL, AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ChassisControlHandler,
     ControlPlane, HUB_CLAUDE_BROADCAST, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler,
-    SubstrateCtx, capabilities::HandleCapability, handle_store::HandleStore, host_fns,
-    input::new_subscribers, log_capture, mail::MailboxId,
+    SubstrateCtx, handle_store::HandleStore, host_fns, input::new_subscribers, log_capture,
+    mail::MailboxId,
 };
 
 /// Everything a chassis needs after shared boot setup. Fields are
@@ -72,20 +74,14 @@ pub struct SubstrateBoot {
     /// log the count, etc. Same `Vec` that was registered with the
     /// `Registry`.
     pub boot_descriptors: Vec<KindDescriptor>,
-    /// Resolved ADR-0041 filesystem roots. Either the override
-    /// supplied to `SubstrateBootBuilder::namespace_roots` or
-    /// [`crate::capabilities::io::NamespaceRoots::from_env`] when no override was
-    /// set. Chassis mains pass this to `crate::capabilities::io::build_registry`
-    /// when wiring the `aether.io` sink.
-    pub namespace_roots: crate::capabilities::io::NamespaceRoots,
     /// ADR-0070 native capabilities booted during shared bring-up.
-    /// Phase 2: holds the [`HandleCapability`] dispatcher thread.
-    /// Phases 3-5 grow this as more sinks migrate. Drop runs
-    /// shutdown on every booted capability in reverse boot order, so
-    /// the chassis doesn't need to call `shutdown` explicitly unless
-    /// it wants to bound shutdown latency. Exposed publicly so
-    /// chassis binaries that want explicit control can `take()` and
-    /// call [`BootedChassis::shutdown`] themselves.
+    /// Stage 2e (issue 552) extracted every cap to `aether-capabilities`,
+    /// so the substrate boot no longer pre-installs any cap — chassis
+    /// mains call [`Self::add_actor`] for each one (HandleCapability is
+    /// universal and goes first; chassis-conditional Audio / Render /
+    /// Log / Net / Io follow). Exposed publicly so chassis binaries
+    /// that want explicit control can `take()` and call
+    /// [`BootedChassis::shutdown`] themselves.
     pub chassis: Option<BootedChassis>,
     /// Substrate identity passed to the boot builder. Chassis crates
     /// thread these through to `aether_hub::HubClientCapability` (via
@@ -112,7 +108,6 @@ pub struct SubstrateBootBuilder<'a> {
     name: &'a str,
     version: &'a str,
     workers: usize,
-    namespace_roots: Option<crate::capabilities::io::NamespaceRoots>,
     build_handler: ChassisHandlerFactory,
 }
 
@@ -126,7 +121,6 @@ impl SubstrateBoot {
             name,
             version,
             workers: 2,
-            namespace_roots: None,
             build_handler: Box::new(|_| None),
         }
     }
@@ -156,8 +150,10 @@ impl SubstrateBoot {
     /// one line per capability:
     ///
     /// ```ignore
-    /// boot.add_capability(LogCapability::new())?;
-    /// boot.add_capability(IoCapability::new(boot.namespace_roots.clone(), Arc::clone(&boot.queue)))?;
+    /// // Stage 2e: caps live in `aether-capabilities`; chassis mains
+    /// // reach in there for the type and call `add_actor` per-cap.
+    /// boot.add_actor::<aether_capabilities::HandleCapability>(())?;
+    /// boot.add_actor::<aether_capabilities::LogCapability>(())?;
     /// ```
     ///
     /// Boot order is call order; shutdown order is the reverse, the
@@ -201,22 +197,6 @@ impl<'a> SubstrateBootBuilder<'a> {
     /// Scheduler worker count. Default 2.
     pub fn workers(mut self, workers: usize) -> Self {
         self.workers = workers;
-        self
-    }
-
-    /// Override the ADR-0041 namespace roots used at boot. When not
-    /// set, the builder defaults to [`crate::capabilities::io::NamespaceRoots::from_env`]
-    /// — same behaviour as before issue 464. Tests and chassis-as-
-    /// library embedders pass an explicit `NamespaceRoots` here so
-    /// no env mutation is required to redirect `save://` / `config://`
-    /// / `assets://` at a tempdir.
-    ///
-    /// The override doesn't itself wire the `aether.io` sink —
-    /// the chassis still drives that via `crate::capabilities::io::build_registry`,
-    /// reading [`SubstrateBoot::namespace_roots`] for the resolved
-    /// paths.
-    pub fn namespace_roots(mut self, roots: crate::capabilities::io::NamespaceRoots) -> Self {
-        self.namespace_roots = Some(roots);
         self
     }
 
@@ -339,24 +319,17 @@ impl<'a> SubstrateBootBuilder<'a> {
         queue.wire_outbound(Arc::clone(&outbound));
         let handle_store = Arc::new(HandleStore::from_env());
         queue.wire_handle_store(Arc::clone(&handle_store));
-        // ADR-0045 handle mailbox. ADR-0070 Phase 2 moved this out of
-        // an inline `register_sink` call and into a native capability;
-        // ADR-0075 / issue 533 PR D2 moved the cap onto the facade
-        // pattern (cap shape + handler list in `aether-kinds`, runtime
-        // state in `aether-substrate::capabilities::handle`). Booting
-        // the chassis here registers the mailbox + spawns the
-        // dispatcher thread before the control plane is wired so any
-        // control-side code that wants to publish at load can reach
-        // it.
-        // HandleCapability pulls its `Arc<HandleStore>` from the
-        // `Mailer::handle_store()` accessor at init — the store is
-        // wired above before chassis build, so the lookup succeeds.
-        // The Arc<HandleStore> we hold locally stays so subsequent
-        // wires / control-plane resolution paths can read it; the cap
-        // and the local reference share the same backing store.
+        // Issue 552 stage 2e: every chassis-policy cap (including
+        // `HandleCapability`) lives in `aether-capabilities` and is
+        // installed by the chassis main post-`build()` via
+        // [`SubstrateBoot::add_actor`]. The substrate boot stays cap-
+        // agnostic — it only wires the runtime pieces every cap reads
+        // from (`Mailer::handle_store` etc.). The chassis returned
+        // here is empty; chassis mains chain `boot.add_actor::<X>(...)`
+        // to install Handle / Io / Net / Audio / Render in whatever
+        // combination their profile needs.
         let _ = &handle_store;
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&queue))
-            .with_actor::<HandleCapability>(())
             .build()
             .map_err(|e| wasmtime::Error::msg(format!("chassis capability boot: {e}")))?;
 
@@ -390,10 +363,6 @@ impl<'a> SubstrateBootBuilder<'a> {
         };
         registry.register_sink(AETHER_CONTROL, control_plane.into_sink_handler());
 
-        let namespace_roots = self
-            .namespace_roots
-            .unwrap_or_else(crate::capabilities::io::NamespaceRoots::from_env);
-
         Ok(SubstrateBoot {
             engine,
             registry,
@@ -405,7 +374,6 @@ impl<'a> SubstrateBootBuilder<'a> {
             scheduler,
             handle_store,
             boot_descriptors,
-            namespace_roots,
             chassis: Some(chassis),
             name: self.name.to_owned(),
             version: self.version.to_owned(),

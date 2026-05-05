@@ -29,9 +29,9 @@ use aether_actor::Singleton;
 use aether_data::Kind;
 use aether_kinds::{Camera, DRAW_TRIANGLE_BYTES, DrawTriangle};
 
-use crate::capability::BootError;
-use crate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
-use crate::render::{
+use aether_substrate::capability::BootError;
+use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::render::{
     CaptureMeta, IDENTITY_VIEW_PROJ, Pipeline, RenderError, Targets, build_main_pipeline,
     finish_capture, prepare_capture_copy, record_main_pass,
 };
@@ -39,7 +39,7 @@ use crate::render::{
 /// Configuration for [`RenderCapability`]. `vertex_buffer_bytes` is
 /// the maximum bytes the render accumulator will hold before
 /// truncating with a warn — desktop and test-bench both pass
-/// [`crate::render::VERTEX_BUFFER_BYTES`].
+/// [`aether_substrate::render::VERTEX_BUFFER_BYTES`].
 ///
 /// `observed_kinds`, when set, has every successfully-dispatched
 /// inbound mail's kind name pushed to it from the cap's `#[handler]`
@@ -60,7 +60,7 @@ pub struct RenderConfig {
 impl Default for RenderConfig {
     fn default() -> Self {
         Self {
-            vertex_buffer_bytes: crate::render::VERTEX_BUFFER_BYTES,
+            vertex_buffer_bytes: aether_substrate::render::VERTEX_BUFFER_BYTES,
             observed_kinds: None,
         }
     }
@@ -391,11 +391,11 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::capability::ChassisBuilder;
-    use crate::mail::{KindId, ReplyTo};
-    use crate::mailer::Mailer;
-    use crate::registry::{MailboxEntry, Registry};
     use aether_actor::Actor;
+    use aether_substrate::capability::ChassisBuilder;
+    use aether_substrate::mail::{KindId, ReplyTo};
+    use aether_substrate::mailer::Mailer;
+    use aether_substrate::registry::{MailboxEntry, Registry};
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         (Arc::new(Registry::new()), Arc::new(Mailer::new()))

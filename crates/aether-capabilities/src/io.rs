@@ -32,8 +32,8 @@ use aether_kinds::{
     Delete, DeleteResult, IoError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
 
-use crate::capability::BootError;
-use crate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::capability::BootError;
+use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// Result shape used throughout the adapter layer. The variants of
 /// `IoError` map directly onto ADR-0041 §1's reply enums, so the
@@ -478,14 +478,14 @@ mod tests {
     use std::env::temp_dir;
 
     use super::*;
-    use crate::capability::{BootError, ChassisBuilder};
-    use crate::mail::ReplyTo;
-    use crate::mailer::Mailer;
-    use crate::native_actor::NativeCtx;
-    use crate::native_transport::NativeTransport;
-    use crate::registry::Registry;
     use aether_actor::Actor;
-    use aether_data::{Kind, MailboxId};
+    use aether_data::MailboxId;
+    use aether_substrate::capability::{BootError, ChassisBuilder};
+    use aether_substrate::mail::ReplyTo;
+    use aether_substrate::mailer::Mailer;
+    use aether_substrate::native_actor::NativeCtx;
+    use aether_substrate::native_transport::NativeTransport;
+    use aether_substrate::registry::Registry;
 
     /// Test fixture that bundles the cap, a fully-wired test mailer,
     /// and a `NativeTransport` long enough for handlers to borrow.
@@ -715,8 +715,8 @@ mod tests {
         cleanup(&root);
     }
 
-    use crate::outbound::EgressEvent;
     use aether_data::{SessionToken, Uuid};
+    use aether_substrate::outbound::EgressEvent;
 
     fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
         let adapter: Arc<dyn FileAdapter> =
@@ -727,7 +727,9 @@ mod tests {
     }
 
     fn session_sender() -> ReplyTo {
-        ReplyTo::to(crate::mail::ReplyTarget::Session(SessionToken(Uuid::nil())))
+        ReplyTo::to(aether_substrate::mail::ReplyTarget::Session(SessionToken(
+            Uuid::nil(),
+        )))
     }
 
     /// Build a fully-wired `Mailer` connected to a fresh test
@@ -736,7 +738,7 @@ mod tests {
         use std::collections::HashMap;
         use std::sync::RwLock;
 
-        let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
+        let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(
             Arc::new(Registry::new()),
@@ -1017,105 +1019,17 @@ mod tests {
         cleanup(&root);
     }
 
-    /// End-to-end: a component pushes a `Read` at the io cap and
-    /// receives the `ReadResult` via `Mailer::send_reply` →
-    /// `Mailer::push` → its own dispatcher's `deliver`. The WAT
-    /// guest records the inbound kind id at a known offset so the
-    /// test can confirm the reply actually reached receive.
-    #[test]
-    fn component_reply_roundtrip_delivers_readresult_to_originator() {
-        use std::collections::HashMap;
-        use std::sync::RwLock;
-
-        use wasmtime::{Engine, Linker, Module};
-
-        use crate::component::Component;
-        use crate::ctx::SubstrateCtx;
-        use crate::scheduler::{ComponentEntry, close_and_join};
-
-        const WAT_RECORDS_KIND: &str = r#"
-            (module
-                (memory (export "memory") 1)
-                (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
-                    i32.const 200
-                    local.get 0
-                    i32.wrap_i64
-                    i32.store
-                    i32.const 204
-                    local.get 0
-                    i64.const 32
-                    i64.shr_u
-                    i32.wrap_i64
-                    i32.store
-                    i32.const 0))
-        "#;
-
-        let root = scratch_root("dispatch-component-reply");
-        let reg = build_save_only_registry(&root, true);
-        reg.get("save")
-            .unwrap()
-            .write("slot.bin", &[1, 2, 3])
-            .unwrap();
-
-        let registry = Arc::new(Registry::new());
-        let caller_mailbox = registry.register_component("test_caller");
-        let components: crate::scheduler::ComponentTable = Arc::new(RwLock::new(HashMap::new()));
-        let (outbound, _outbound_rx) = crate::outbound::HubOutbound::attached_loopback();
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry), Arc::clone(&components));
-        mailer.wire_outbound(Arc::clone(&outbound));
-
-        let engine = Engine::default();
-        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
-        crate::host_fns::register(&mut linker).expect("register host fns");
-        let wasm = wat::parse_str(WAT_RECORDS_KIND).expect("compile WAT");
-        let module = Module::new(&engine, &wasm).expect("compile module");
-        let ctx = SubstrateCtx::new(
-            caller_mailbox,
-            Arc::clone(&registry),
-            Arc::clone(&mailer),
-            Arc::clone(&outbound),
-            crate::input::new_subscribers(),
-        );
-        let component =
-            Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
-        let entry = Arc::new(ComponentEntry::spawn(
-            component,
-            Arc::clone(&registry),
-            Arc::clone(&mailer),
-            caller_mailbox,
-        ));
-        components
-            .write()
-            .unwrap()
-            .insert(caller_mailbox, Arc::clone(&entry));
-
-        let cap = IoCapability::from_registry(reg);
-        let transport = NativeTransport::new_for_test(Arc::clone(&mailer), MailboxId(0));
-        let mut ctx = NativeCtx::new(
-            &transport,
-            ReplyTo::to(aether_data::ReplyTarget::Component(caller_mailbox)),
-        );
-        cap.on_read(
-            &mut ctx,
-            Read {
-                namespace: "save".to_string(),
-                path: "slot.bin".to_string(),
-            },
-        );
-
-        mailer.drain_all();
-
-        let mut component = close_and_join(entry);
-        let lo = component.read_u32(200) as u64;
-        let hi = component.read_u32(204) as u64;
-        let observed_kind = lo | (hi << 32);
-        assert_eq!(
-            observed_kind,
-            <ReadResult as Kind>::ID.0,
-            "component received a kind id different from ReadResult",
-        );
-
-        cleanup(&root);
-    }
+    // The end-to-end "component pushes Read, dispatcher delivers
+    // ReadResult to the component's receive_p32" test that lived here
+    // pre-stage-2e (issue 552) reached deep into `aether_substrate`
+    // privates (`Component::read_u32`, `ComponentEntry`, `host_fns`)
+    // plus wasmtime + wat. With the cap extracted to its own crate
+    // those internals are no longer reachable as crate-locals. The
+    // path it exercised is now covered by:
+    //   - `aether-scenario` declarative scenarios (they go through
+    //     the same Mailer + dispatch reply machinery), and
+    //   - the substrate's own `mailer` / `scheduler` unit tests for
+    //     `Mailer::send_reply` → component delivery.
+    // Reach for the in-bundle integration suite if a future change
+    // wants the full WAT roundtrip back as targeted coverage.
 }

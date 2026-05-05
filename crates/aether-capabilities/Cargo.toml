@@ -1,0 +1,48 @@
+[package]
+name = "aether-capabilities"
+version.workspace = true
+edition.workspace = true
+
+# Issue 552 stage 2e: the chassis-cap layer extracted out of
+# `aether-substrate`. Hosts the six native chassis capabilities
+# (Log, Handle, Io, Net, Audio, Render) plus the `HubBroadcast`
+# synthetic actor marker.
+#
+# Why a separate crate: the load-bearing motivation is that wasm
+# components want to address chassis caps via `ctx.send_to::<R>` —
+# resolved through `R::NAMESPACE` — without pulling in
+# `aether-substrate`'s wasmtime / wgpu / cpal stack. Splitting the
+# cap structs and their `Actor` markers off `aether-substrate`
+# keeps the wasm-component compile graph small. Today the crate
+# always pulls `aether-substrate` (the `NativeActor` impls live
+# alongside the structs); the wasm-side header-only build is a
+# follow-up that will cfg-gate the native impls.
+
+[features]
+# Mirrors `aether-substrate`'s feature shape: chassis that draw
+# enable `render`, chassis with an audio device enable `audio`.
+# Headless and hub leave both off.
+render = ["aether-substrate/render", "dep:wgpu", "dep:png"]
+audio = ["aether-substrate/audio", "dep:cpal", "dep:crossbeam-queue"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+aether-substrate = { path = "../aether-substrate" }
+bytemuck = "1.19"
+dirs = "5"
+log = "0.4"
+postcard = { version = "1.1", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+ureq = { version = "3", features = ["rustls"] }
+url = "2"
+wgpu = { version = "29.0.1", optional = true }
+png = { version = "0.17", optional = true }
+cpal = { version = "0.15", optional = true }
+crossbeam-queue = { version = "0.3", optional = true }
+
+[dev-dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+bytemuck = { version = "1.19", features = ["derive"] }

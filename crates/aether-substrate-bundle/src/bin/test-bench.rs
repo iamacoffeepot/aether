@@ -16,12 +16,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use aether_capabilities::IoCapability;
 use aether_data::{Kind, encode_empty};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
-use aether_substrate::{
-    Chassis, capabilities::IoCapability, capture::CaptureQueue, frame_loop, mail::Mail,
-    subscribers_for,
-};
+use aether_substrate::{Chassis, capture::CaptureQueue, frame_loop, mail::Mail, subscribers_for};
 use aether_substrate_bundle::test_bench::{
     TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
     events::{self, ChassisEvent},
@@ -66,13 +64,12 @@ fn main() -> wasmtime::Result<()> {
 
     // Per issue 464, this `main()` is the env-reading edge.
     let hub_url = std::env::var("AETHER_HUB_URL").ok();
-    let namespace_roots = aether_substrate::capabilities::io::NamespaceRoots::from_env();
+    let namespace_roots = aether_capabilities::io::NamespaceRoots::from_env();
 
     let env = TestBenchEnv {
         name: "test-bench".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         workers: WORKERS,
-        namespace_roots: Some(namespace_roots),
         hub_url,
         observed_kinds: None,
         events_tx,
@@ -91,7 +88,7 @@ fn main() -> wasmtime::Result<()> {
     // Io cap on the `boot.add_actor` path — the binary fails fast on
     // adapter init failure (the in-process API silent-skips for
     // systems without writable default roots).
-    boot.add_actor::<IoCapability>(boot.namespace_roots.clone())?;
+    boot.add_actor::<IoCapability>(namespace_roots)?;
 
     let (width, height) = parse_size_env();
     let gpu = Gpu::new(width, height, render_handles.clone());
@@ -130,7 +127,7 @@ fn drive_events_loop(
     capture_queue: CaptureQueue,
     boot: aether_substrate::SubstrateBoot,
     passive: aether_substrate::PassiveChassis<TestBenchChassis>,
-    render_handles: aether_substrate::capabilities::RenderHandles,
+    render_handles: aether_capabilities::RenderHandles,
     mut gpu: Gpu,
     kind_tick: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
@@ -215,7 +212,7 @@ fn run_frame(
     kind_tick: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
     capture_queue: &CaptureQueue,
-    render_handles: &aether_substrate::capabilities::RenderHandles,
+    render_handles: &aether_capabilities::RenderHandles,
     frame_bound_pending: &[(
         aether_substrate::MailboxId,
         Arc<std::sync::atomic::AtomicU64>,

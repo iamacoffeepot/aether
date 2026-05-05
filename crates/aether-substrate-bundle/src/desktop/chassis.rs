@@ -15,6 +15,11 @@
 
 use std::sync::Arc;
 
+use aether_capabilities::{
+    AudioCapability, HandleCapability, IoCapability, LogCapability, NetCapability,
+    RenderCapability, RenderConfig, audio::AudioConfig as AudioConf, io::NamespaceRoots,
+    net::NetConfig as NetConf,
+};
 use aether_data::Kind;
 use aether_kinds::{
     Advance, CaptureFrame, PlatformInfo, SetWindowMode, SetWindowModeResult, SetWindowTitle,
@@ -24,11 +29,6 @@ use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
-    capabilities::{
-        AudioCapability, IoCapability, LogCapability, NetCapability, RenderCapability,
-        RenderConfig, audio::AudioConfig as AudioConf, io::NamespaceRoots,
-        net::NetConfig as NetConf,
-    },
     capture::{CaptureQueue, begin_capture_request, reply_unsupported_advance},
     control::decode_payload,
 };
@@ -287,7 +287,6 @@ impl DesktopChassis {
 
         let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
             .workers(WORKERS)
-            .namespace_roots(namespace_roots)
             .chassis_handler({
                 let proxy = event_loop.create_proxy();
                 let cq = capture_queue.clone();
@@ -322,7 +321,6 @@ impl DesktopChassis {
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
-        let namespace_roots = boot.namespace_roots.clone();
         // ADR-0074 §Decision 5: production chassis configures the
         // cross-class `wait_reply` aborter to broadcast
         // `SubstrateDying` before exit. Built before `boot` moves
@@ -353,6 +351,7 @@ impl DesktopChassis {
         // chassis cap.
         Builder::<DesktopChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
+            .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<NetCapability>(net)

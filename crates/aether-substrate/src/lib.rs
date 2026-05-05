@@ -36,7 +36,6 @@
 extern crate self as aether_substrate;
 
 pub mod boot;
-pub mod capabilities;
 pub mod capability;
 pub mod capture;
 pub mod chassis;

@@ -59,8 +59,8 @@ use aether_actor::{MailCtx, Singleton};
 use aether_data::{MailboxId, ReplyTarget, ReplyTo};
 use aether_kinds::{NoteOff, NoteOn, SetMasterGain, SetMasterGainResult};
 
-use crate::capability::BootError;
-use crate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::capability::BootError;
+use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// Capacity of the event queue between the cap's handlers and the
 /// audio-callback consumer. 1024 slots hold ~10 seconds of a dense
@@ -871,10 +871,10 @@ fn spawn_audio_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::{BootError, ChassisBuilder};
-    use crate::mailer::Mailer;
-    use crate::registry::Registry;
     use aether_actor::Actor;
+    use aether_substrate::capability::{BootError, ChassisBuilder};
+    use aether_substrate::mailer::Mailer;
+    use aether_substrate::registry::Registry;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         let registry = Arc::new(Registry::new());

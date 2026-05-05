@@ -10,7 +10,7 @@
 //! path before the larger caps follow in 2b/2c.
 //!
 //! Bridging via the `log` crate facade (rather than `tracing::event!`)
-//! is load-bearing — see [`crate::log_sink`] for the rationale.
+//! is load-bearing — see [`aether_substrate::log_sink`] for the rationale.
 //! `tracing::event!` requires a `&'static str` target; the
 //! guest-supplied target is dynamic, so we route through `log::log!`
 //! and let `tracing-subscriber`'s `tracing-log` integration lift each
@@ -19,12 +19,12 @@
 use aether_actor::{Singleton, capability};
 use aether_kinds::LogEvent;
 
-use crate::capability::BootError;
-use crate::log_sink;
-use crate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::capability::BootError;
+use aether_substrate::log_sink;
+use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// `aether.log` mailbox cap. Stateless beyond the process-wide
-/// `tracing` subscriber set up by [`crate::log_capture::init`] —
+/// `tracing` subscriber set up by [`aether_substrate::log_capture::init`] —
 /// every cap instance bridges decoded `LogEvent` mail through the
 /// `log` facade and `tracing-log` re-emits it.
 #[capability]
@@ -59,12 +59,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::chassis::Chassis;
-    use crate::chassis_builder::{Builder, BuiltChassis, NeverDriver};
-    use crate::mailer::Mailer;
-    use crate::registry::{MailboxEntry, Registry};
     use aether_actor::Actor;
     use aether_data::Kind;
+    use aether_substrate::chassis::Chassis;
+    use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver};
+    use aether_substrate::mailer::Mailer;
+    use aether_substrate::registry::{MailboxEntry, Registry};
 
     /// Stand-in chassis for the passive boot path. The Log cap doesn't
     /// need a driver, so `build_passive()` is the natural test entry
@@ -113,7 +113,7 @@ mod tests {
             <LogEvent as Kind>::ID,
             "aether.log",
             None,
-            crate::mail::ReplyTo::NONE,
+            aether_substrate::mail::ReplyTo::NONE,
             &bytes,
             1,
         );
