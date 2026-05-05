@@ -705,13 +705,6 @@ pub struct DesktopDriverCapability {
     /// Held for the chassis lifetime so the hub reader + heartbeat
     /// threads stay spawned. `None` when `AETHER_HUB_URL` was unset.
     pub hub: Option<HubClient>,
-    /// Cloned out of `RenderCapability::handles()` before the cap
-    /// moves into the chassis builder. Pre-PR-E2 the driver's `boot`
-    /// pulled `Arc<RenderCapability>` from `DriverCtx::expect`; post-
-    /// E2 the cap is owned by its dispatcher thread (ADR-0076's
-    /// unified `#[actor]` pattern) and only the Arc-shared handles
-    /// bundle is reachable from the driver side.
-    pub render_handles: RenderHandles,
 }
 
 pub struct DesktopDriverRunning {
@@ -739,16 +732,24 @@ impl DriverCapability for DesktopDriverCapability {
             boot_size,
             boot_title,
             hub,
-            render_handles,
         } = self;
 
-        // Render is a facade cap (PR E2) so its dispatcher owns the
-        // cap; the Arc-shared accumulator state was extracted via
-        // `cap.handles()` before the cap moved into the chassis
-        // builder, and the chassis main passed the bundle through
-        // `DesktopDriverCapability.render_handles`. The frame-bound
-        // pending counter is registered separately in the chassis's
-        // `frame_bound_pending` list, queryable here via `ctx`.
+        // Issue 552 stage 2d: render migrated onto NativeActor. The
+        // chassis builder constructs the cap inside `init`; the driver
+        // pulls the booted `Arc<RenderCapability>` here via
+        // `DriverCtx::actor` and clones the cheap Arc-shared handles.
+        // The frame-bound pending counter is registered through the
+        // FRAME_BARRIER claim machinery and surfaces via
+        // `ctx.frame_bound_pending()`.
+        let render_cap = ctx
+            .actor::<aether_substrate::capabilities::RenderCapability>()
+            .ok_or_else(|| {
+                BootError::Other(Box::new(std::io::Error::other(
+                    "DesktopDriverCapability::boot: RenderCapability must be booted before the driver \
+                     (verify the chassis builder calls `with_actor::<RenderCapability>(config)` before `driver(...)`)",
+                )))
+            })?;
+        let render_handles = render_cap.handles();
         let triangles_rendered = Arc::clone(&render_handles.triangles_rendered);
         let frame_bound_pending = ctx.frame_bound_pending();
 

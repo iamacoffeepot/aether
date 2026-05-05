@@ -274,18 +274,31 @@ impl TestBenchChassis {
             .kind_id(FrameStats::NAME)
             .expect("FrameStats registered");
 
-        let render_cap = RenderCapability::new(RenderConfig {
+        let render_config = RenderConfig {
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
             observed_kinds,
-        });
-        let render_handles = render_cap.handles();
-
+        };
         let passive =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
                 .with_actor::<LogCapability>(())
-                .with(render_cap)
+                .with_actor::<RenderCapability>(render_config)
                 .build_passive()
                 .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
+
+        // Issue 552 stage 2d: pull the booted `Arc<RenderCapability>`
+        // out of the `PassiveChassis` actors map and clone the
+        // Arc-shared handles. Pre-2d the chassis main extracted handles
+        // before moving the cap into the chassis builder; with the
+        // NativeActor shape, init runs inside `with_actor::<...>` so
+        // there's no pre-build cap to call `handles()` on.
+        let render_handles = passive
+            .actor::<RenderCapability>()
+            .ok_or_else(|| {
+                wasmtime::Error::msg(
+                    "TestBenchChassis::build: RenderCapability not booted via with_actor",
+                )
+            })?
+            .handles();
 
         let hub = crate::hub::connect_hub_client(&boot, hub_url.as_deref())?;
 
