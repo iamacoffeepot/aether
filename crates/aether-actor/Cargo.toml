@@ -35,6 +35,12 @@ serde = { version = "1", default-features = false, features = ["alloc"] }
 tracing = { version = "0.1", default-features = false }
 
 [dev-dependencies]
+# Examples migrate from kind-typed `Mailbox` resolutions to actor-
+# typed `ctx.actor::<R>()` calls (issue 575) — needs the cap markers
+# in scope. `default-features = false, features = ["render"]` pulls
+# the marker layer only (cycle-safe via dev-dep, no cargo build of
+# `aether-substrate` from this crate's build graph).
+aether-capabilities = { path = "../aether-capabilities", default-features = false, features = ["render"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 bytemuck = { version = "1", features = ["derive"] }
 postcard = { version = "1.1", features = ["alloc"] }

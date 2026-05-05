@@ -45,7 +45,8 @@
 //! That's as shape-y as this first pass gets; proper X / O glyphs
 //! are a rendering-polish pass for later.
 
-use aether_actor::{BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, Sender, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::RenderCapability;
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, GameState, LAST_MOVE_NONE, MoveResult, PLAYER_X, PlayMove, SERVER,
 };
@@ -89,8 +90,6 @@ pub struct TicTacToeClient {
     /// mapped to a cell, so they're dropped until the first publish
     /// lands (happens within one tick of subscribing).
     window: Option<(u32, u32)>,
-    render: Mailbox<DrawTriangle>,
-    server: Mailbox<PlayMove>,
 }
 
 impl Default for TicTacToeClient {
@@ -105,8 +104,6 @@ impl Default for TicTacToeClient {
             state: GameState::new_game(),
             mouse: None,
             window: None,
-            render: aether_actor::wasm::resolve_mailbox::<DrawTriangle>("aether.render"),
-            server: aether_actor::wasm::resolve_mailbox::<PlayMove>(SERVER),
         }
     }
 }
@@ -203,8 +200,8 @@ impl WasmActor for TicTacToeClient {
         let Some((mx, my)) = self.mouse else { return };
         let Some((w, h)) = self.window else { return };
         if let Some((row, col)) = hit_test(mx, my, w, h) {
-            ctx.send(
-                &self.server,
+            ctx.send_to_named(
+                SERVER,
                 &PlayMove {
                     row,
                     col,
@@ -272,7 +269,7 @@ impl TicTacToeClient {
             }
         }
 
-        ctx.send_many(&self.render, &tris[..n]);
+        ctx.actor::<RenderCapability>().send_many(&tris[..n]);
     }
 }
 

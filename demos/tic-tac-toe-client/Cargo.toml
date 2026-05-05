@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aether-actor = { path = "../../crates/aether-actor" }
+aether-capabilities = { path = "../../crates/aether-capabilities", default-features = false, features = ["render"] }
 # Trunk rlib for the demo (ADR-0066) — wire types + well-known names.
 # The server's runtime `Component` impl + FFI exports live in the
 # sibling `aether-demo-tic-tac-toe-server` cdylib, which this crate

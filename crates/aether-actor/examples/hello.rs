@@ -16,7 +16,8 @@
 //! MCP via the same section so the harness sees typed capabilities
 //! plus author-written intent for each inbox.
 
-use aether_actor::{BootError, KindId, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, KindId, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::RenderCapability;
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
@@ -51,7 +52,6 @@ static TRIANGLE: DrawTriangle = DrawTriangle {
 /// Per-instance state for the hello component.
 pub struct Hello {
     pong: KindId<Pong>,
-    render: Mailbox<DrawTriangle>,
 }
 
 /// Minimal end-to-end smoke component: draws a static triangle every
@@ -69,7 +69,6 @@ impl WasmActor for Hello {
     fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Hello {
             pong: ctx.resolve::<Pong>(),
-            render: ctx.resolve_mailbox::<DrawTriangle>("aether.render"),
         })
     }
 
@@ -81,7 +80,7 @@ impl WasmActor for Hello {
     /// output.
     #[handler]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
-        ctx.send(&self.render, &TRIANGLE);
+        ctx.actor::<RenderCapability>().send(&TRIANGLE);
     }
 
     /// Replies to a ping with a pong carrying the same sequence

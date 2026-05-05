@@ -13,7 +13,8 @@
 //! to wasm; load via `mcp__aether-hub__load_component` and send
 //! `demo.postcard_request` to verify the dispatch.
 
-use aether_actor::{BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::BroadcastCapability;
 use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
@@ -39,18 +40,14 @@ pub struct PostcardObserved {
     pub payload_len: u32,
 }
 
-pub struct PostcardEchoer {
-    broadcast: Mailbox<PostcardObserved>,
-}
+pub struct PostcardEchoer;
 
 #[actor]
 impl WasmActor for PostcardEchoer {
     const NAMESPACE: &'static str = "postcard_echoer";
 
-    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(PostcardEchoer {
-            broadcast: ctx.resolve_mailbox::<PostcardObserved>("hub.claude.broadcast"),
-        })
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(PostcardEchoer)
     }
 
     /// Decoded postcard payload arrives as the third parameter. No
@@ -59,13 +56,10 @@ impl WasmActor for PostcardEchoer {
     /// the absence of `#[repr(C)]`) already knows the wire shape.
     #[handler]
     fn on_request(&mut self, ctx: &mut WasmCtx<'_>, req: PostcardRequest) {
-        ctx.send(
-            &self.broadcast,
-            &PostcardObserved {
-                tag_len: req.tag.len() as u32,
-                payload_len: req.payload.len() as u32,
-            },
-        );
+        ctx.actor::<BroadcastCapability>().send(&PostcardObserved {
+            tag_len: req.tag.len() as u32,
+            payload_len: req.payload.len() as u32,
+        });
     }
 }
 

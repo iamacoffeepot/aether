@@ -31,7 +31,8 @@
 //! 4. Every `aether.tick` re-emits the cached triangles to
 //!    `"aether.render"`.
 
-use aether_actor::{BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor, io};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor, io};
+use aether_capabilities::RenderCapability;
 use aether_kinds::{DrawTriangle, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
@@ -57,7 +58,6 @@ const OBJ_DEFAULT_COLOR: (f32, f32, f32) = PALETTE[0];
 
 pub struct MeshViewer {
     triangles: Vec<DrawTriangle>,
-    render: Mailbox<DrawTriangle>,
 }
 
 /// Mesh viewer component.
@@ -74,10 +74,9 @@ pub struct MeshViewer {
 impl WasmActor for MeshViewer {
     const NAMESPACE: &'static str = "mesh_viewer";
 
-    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MeshViewer {
             triangles: Vec::new(),
-            render: ctx.resolve_mailbox::<DrawTriangle>("aether.render"),
         })
     }
 
@@ -90,7 +89,7 @@ impl WasmActor for MeshViewer {
     #[handler]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
         if !self.triangles.is_empty() {
-            ctx.send_many(&self.render, &self.triangles);
+            ctx.actor::<RenderCapability>().send_many(&self.triangles);
         }
     }
 

@@ -21,9 +21,8 @@
 //! 3. `terminate_substrate`, spawn another, observe the count
 //!    bumped by one.
 
-use aether_actor::{
-    BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor, io, wasm::resolve_mailbox,
-};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor, io};
+use aether_capabilities::BroadcastCapability;
 use aether_kinds::{IoError, Tick};
 
 /// Broadcast payload the Claude session (or any component listening
@@ -45,11 +44,6 @@ const SAVE_PATH: &str = "counter.bin";
 /// should complete in sub-ms; larger backends (future cloud adapter)
 /// would want a bigger budget.
 const IO_TIMEOUT_MS: u32 = 1_000;
-/// Broadcast sink — `hub.claude.broadcast` fans out to every
-/// attached Claude session. `Count` is postcard-shaped; the unified
-/// `Mailbox::send` routes through `Kind::encode_into_bytes`, which the
-/// derive specializes to postcard here (issue #240).
-const BROADCAST: Mailbox<Count> = resolve_mailbox::<Count>("hub.claude.broadcast");
 
 pub struct SaveCounter {
     initialized: bool,
@@ -90,7 +84,8 @@ impl WasmActor for SaveCounter {
             &next.to_le_bytes(),
             IO_TIMEOUT_MS,
         );
-        BROADCAST.send(ctx.transport(), &Count { count: next });
+        ctx.actor::<BroadcastCapability>()
+            .send(&Count { count: next });
     }
 }
 

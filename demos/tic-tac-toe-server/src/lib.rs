@@ -22,21 +22,22 @@
 //! on the trunk for those without pulling in this crate's
 //! `Component` impl. Per ADR-0066.
 
-use aether_actor::{BootError, KindId, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, KindId, Sender, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::BroadcastCapability;
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, CLIENT_OBSERVER, GAME_DRAW, GAME_PLAYING, GAME_WON_O, GAME_WON_X, GameState,
     MOVE_CELL_OCCUPIED, MOVE_GAME_OVER, MOVE_OK, MOVE_OUT_OF_BOUNDS, MoveResult, PLAYER_NONE,
     PLAYER_O, PLAYER_X, PlayMove, Reset,
 };
 
-/// Per-instance component state. Holds the live game board plus cached
-/// kind / sink handles — resolved once in `init` and reused across
-/// every move.
+/// Per-instance component state. Holds the live game board plus the
+/// cached kind id used for replies. Receivers are addressed via
+/// `ctx.actor::<R>()` (broadcast) or `ctx.send_to_named` (the
+/// observer client, whose Rust type is in a sibling cdylib the server
+/// can't import).
 pub struct TicTacToe {
     state: GameState,
     move_result_kind: KindId<MoveResult>,
-    broadcast: Mailbox<GameState>,
-    client_observer: Mailbox<GameState>,
 }
 
 /// Authoritative tic-tac-toe server. Accepts `PlayMove` and `Reset`
@@ -63,8 +64,6 @@ impl WasmActor for TicTacToe {
         Ok(TicTacToe {
             state: GameState::new_game(),
             move_result_kind: ctx.resolve::<MoveResult>(),
-            broadcast: ctx.resolve_mailbox::<GameState>("hub.claude.broadcast"),
-            client_observer: ctx.resolve_mailbox::<GameState>(CLIENT_OBSERVER),
         })
     }
 
@@ -84,8 +83,8 @@ impl WasmActor for TicTacToe {
         let status = self.apply_move(mv.row, mv.col);
         self.reply(ctx, status);
         if status == MOVE_OK {
-            ctx.send(&self.broadcast, &self.state);
-            ctx.send(&self.client_observer, &self.state);
+            ctx.actor::<BroadcastCapability>().send(&self.state);
+            ctx.send_to_named(CLIENT_OBSERVER, &self.state);
         }
     }
 
@@ -100,8 +99,8 @@ impl WasmActor for TicTacToe {
     fn on_reset(&mut self, ctx: &mut WasmCtx<'_>, _r: Reset) {
         self.state = GameState::new_game();
         self.reply(ctx, MOVE_OK);
-        ctx.send(&self.broadcast, &self.state);
-        ctx.send(&self.client_observer, &self.state);
+        ctx.actor::<BroadcastCapability>().send(&self.state);
+        ctx.send_to_named(CLIENT_OBSERVER, &self.state);
     }
 }
 
@@ -194,13 +193,11 @@ mod tests {
     fn new_component() -> TicTacToe {
         // Host-side unit tests can't route through the SDK's
         // `InitCtx`, so fabricate a minimal instance with the same
-        // starting state the runtime would build. The kind / sink
-        // handles are dummies — `apply_move` never touches them.
+        // starting state the runtime would build. `apply_move` only
+        // touches `state`; the kind handle is a placeholder.
         TicTacToe {
             state: GameState::new_game(),
             move_result_kind: aether_actor::resolve::<MoveResult>(),
-            broadcast: aether_actor::wasm::resolve_mailbox::<GameState>("hub.claude.broadcast"),
-            client_observer: aether_actor::wasm::resolve_mailbox::<GameState>(CLIENT_OBSERVER),
         }
     }
 

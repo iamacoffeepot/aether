@@ -19,11 +19,14 @@ use aether_kinds::{Camera, DrawTriangle};
 
 // Auxiliary native-only types the chassis driver consumes alongside
 // `RenderCapability`. `#[bridge]` only re-exports the actor type
-// itself; these need explicit re-exports.
-#[cfg(not(target_arch = "wasm32"))]
+// itself; these need explicit re-exports. Keyed on the `render-native`
+// feature so wasm components that opt into the marker-only `render`
+// feature see only the cap stub + Actor / HandlesKind impls, not
+// these heavy GPU-bound types.
+#[cfg(all(not(target_arch = "wasm32"), feature = "render-native"))]
 pub use native::{RenderConfig, RenderGpu, RenderHandles};
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(feature = "render-native")]
 mod native {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};

@@ -12,6 +12,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aether-actor = { path = "../../crates/aether-actor" }
+# Marker-only opt-in so `ctx.actor::<RenderCapability>()` resolves
+# without dragging wgpu/png into sokoban's wasm graph.
+aether-capabilities = { path = "../../crates/aether-capabilities", default-features = false, features = ["render"] }
 # `default-features = false` keeps the camera trunk's `runtime` module
 # (and its `aether_actor::export!()` FFI exports) out of sokoban's
 # wasm build. Without this, both crates' `init` / `receive_p32`

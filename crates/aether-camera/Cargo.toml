@@ -36,6 +36,7 @@ runtime = []
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
+aether-capabilities = { path = "../aether-capabilities", default-features = false, features = ["render"] }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }

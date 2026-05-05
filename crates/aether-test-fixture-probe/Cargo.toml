@@ -13,6 +13,8 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # `default-features = false` exercises the issue 552 stage 4 wasm-header-only
 # build of aether-capabilities — the cap markers (Actor / Singleton /
 # HandlesKind) compile for wasm without dragging the native runtime in.
-aether-capabilities = { path = "../aether-capabilities", default-features = false }
+# `render` opts into the marker layer for `RenderCapability`; `audio`
+# is unused here, omitted on purpose.
+aether-capabilities = { path = "../aether-capabilities", default-features = false, features = ["render"] }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
 serde = { version = "1", default-features = false, features = ["derive"] }

@@ -23,10 +23,8 @@
 //!   `capture_frame` scenarios can observe pre-mail effects in the
 //!   captured PNG.
 
-use aether_actor::{
-    BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor, wasm::resolve_mailbox,
-};
-use aether_capabilities::LogCapability;
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::{BroadcastCapability, LogCapability, RenderCapability};
 use aether_kinds::{DrawTriangle, LogEvent, Tick, Vertex};
 use bytemuck::{Pod, Zeroable};
 
@@ -56,9 +54,6 @@ pub struct SetRender {
     pub b: u8,
     pub visible: u8,
 }
-
-const BROADCAST: Mailbox<TickObserved> = resolve_mailbox::<TickObserved>("hub.claude.broadcast");
-const RENDER: Mailbox<DrawTriangle> = resolve_mailbox::<DrawTriangle>("aether.render");
 
 pub struct Probe {
     tick_count: u64,
@@ -90,12 +85,9 @@ impl WasmActor for Probe {
     #[handler]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         self.tick_count += 1;
-        BROADCAST.send(
-            ctx.transport(),
-            &TickObserved {
-                count: self.tick_count,
-            },
-        );
+        ctx.actor::<BroadcastCapability>().send(&TickObserved {
+            count: self.tick_count,
+        });
         if self.tick_count == 1 {
             ctx.actor::<LogCapability>().send(&LogEvent {
                 level: 2,
@@ -115,12 +107,9 @@ impl WasmActor for Probe {
                 g,
                 b,
             };
-            RENDER.send(
-                ctx.transport(),
-                &DrawTriangle {
-                    verts: [v(-0.9, -0.9), v(0.9, -0.9), v(0.0, 0.9)],
-                },
-            );
+            ctx.actor::<RenderCapability>().send(&DrawTriangle {
+                verts: [v(-0.9, -0.9), v(0.9, -0.9), v(0.0, 0.9)],
+            });
         }
     }
 

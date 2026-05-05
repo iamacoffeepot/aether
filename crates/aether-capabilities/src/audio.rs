@@ -52,51 +52,16 @@
 // of the mod (always-on, outside the cfg gate).
 use aether_kinds::{NoteOff, NoteOn, SetMasterGain};
 
-/// Capacity of the event queue between the cap's handlers and the
-/// audio-callback consumer. 1024 slots hold ~10 seconds of a dense
-/// 100-note-per-second stream; overflow is warn-dropped, which the
-/// ADR-0039 timing-quantization section already documents as a v1
-/// limitation (tight-burst percussion may drop notes under load).
-pub const EVENT_QUEUE_CAPACITY: usize = 1024;
+// `AudioConfig` rides through file root for chassis-bin consumers
+// that build it from env (`from_env`) and pass it to
+// `with_actor::<AudioCapability>(cfg)`. Native-only re-export — wasm
+// components opting into the marker-only `audio` feature don't need
+// the config struct (sends are typed; config is the chassis's
+// concern).
+#[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
+pub use native::AudioConfig;
 
-/// Maximum concurrent voices before voice-stealing kicks in. Chosen
-/// as "more than a string section fits in one component" — if we
-/// exceed it regularly the symptom is oldest-note cut-off, not audio
-/// glitches.
-pub const MAX_VOICES: usize = 64;
-
-/// Resolved configuration for the audio synth. Chassis mains read
-/// env vars (`AETHER_AUDIO_DISABLE`, `AETHER_AUDIO_SAMPLE_RATE`)
-/// into an `AudioConfig` and pass it to [`AudioCapability::new`]
-/// (issue 464). Tests build an `AudioConfig` directly.
-#[derive(Clone, Debug, Default)]
-pub struct AudioConfig {
-    /// `AETHER_AUDIO_DISABLE=1` skips cpal init entirely. The cap
-    /// still claims its mailbox and replies `Err` to `SetMasterGain`
-    /// so agents fail fast instead of hanging.
-    pub disabled: bool,
-    /// `AETHER_AUDIO_SAMPLE_RATE=<hz>` requests a specific rate. If
-    /// the device doesn't support it, boot falls back to nop
-    /// (ADR-0039 — non-fatal).
-    pub requested_sample_rate: Option<u32>,
-}
-
-impl AudioConfig {
-    pub fn from_env() -> Self {
-        let disabled = std::env::var("AETHER_AUDIO_DISABLE")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let requested_sample_rate = std::env::var("AETHER_AUDIO_SAMPLE_RATE")
-            .ok()
-            .and_then(|s| s.parse::<u32>().ok());
-        Self {
-            disabled,
-            requested_sample_rate,
-        }
-    }
-}
-
-#[aether_actor::bridge]
+#[aether_actor::bridge(feature = "audio-native")]
 mod native {
     use std::f32::consts::TAU;
     use std::sync::Arc;
@@ -113,7 +78,51 @@ mod native {
     use aether_substrate::capability::BootError;
     use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
-    use super::{AudioConfig, EVENT_QUEUE_CAPACITY, MAX_VOICES, NoteOff, NoteOn, SetMasterGain};
+    use super::{NoteOff, NoteOn, SetMasterGain};
+
+    /// Capacity of the event queue between the cap's handlers and the
+    /// audio-callback consumer. 1024 slots hold ~10 seconds of a dense
+    /// 100-note-per-second stream; overflow is warn-dropped, which the
+    /// ADR-0039 timing-quantization section already documents as a v1
+    /// limitation (tight-burst percussion may drop notes under load).
+    const EVENT_QUEUE_CAPACITY: usize = 1024;
+
+    /// Maximum concurrent voices before voice-stealing kicks in. Chosen
+    /// as "more than a string section fits in one component" — if we
+    /// exceed it regularly the symptom is oldest-note cut-off, not audio
+    /// glitches.
+    const MAX_VOICES: usize = 64;
+
+    /// Resolved configuration for the audio synth. Chassis mains read
+    /// env vars (`AETHER_AUDIO_DISABLE`, `AETHER_AUDIO_SAMPLE_RATE`)
+    /// into an `AudioConfig` and pass it to `with_actor::<AudioCapability>(cfg)`
+    /// (issue 464). Tests build an `AudioConfig` directly.
+    #[derive(Clone, Debug, Default)]
+    pub struct AudioConfig {
+        /// `AETHER_AUDIO_DISABLE=1` skips cpal init entirely. The cap
+        /// still claims its mailbox and replies `Err` to `SetMasterGain`
+        /// so agents fail fast instead of hanging.
+        pub disabled: bool,
+        /// `AETHER_AUDIO_SAMPLE_RATE=<hz>` requests a specific rate. If
+        /// the device doesn't support it, boot falls back to nop
+        /// (ADR-0039 — non-fatal).
+        pub requested_sample_rate: Option<u32>,
+    }
+
+    impl AudioConfig {
+        pub fn from_env() -> Self {
+            let disabled = std::env::var("AETHER_AUDIO_DISABLE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let requested_sample_rate = std::env::var("AETHER_AUDIO_SAMPLE_RATE")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok());
+            Self {
+                disabled,
+                requested_sample_rate,
+            }
+        }
+    }
 
     /// Event a handler pushes into the audio callback's queue. The
     /// `sender_mailbox` is baked in here (not re-derived on the callback

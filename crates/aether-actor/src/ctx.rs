@@ -123,8 +123,8 @@ impl<'a, T: MailTransport> InitCtx<'a, T> {
 /// Resolution is intentionally absent — runtime resolution after init
 /// is not a supported shape.
 ///
-/// Holds the transport borrow so `ctx.send(&sink, &payload)` is the
-/// natural call shape inside a handler — no need for the user to
+/// Holds the transport borrow so `ctx.actor::<R>().send(&payload)` is
+/// the natural call shape inside a handler — no need for the user to
 /// thread a transport reference through every send. ADR-0033: typed
 /// handlers receive `K` by value, so they no longer hold a `Mail<'_>`
 /// to call `mail.reply_to()` on. The synthesized dispatcher threads
@@ -158,10 +158,10 @@ impl<'a, T: MailTransport> Ctx<'a, T> {
         self.sender = sender.map(|s| s.raw());
     }
 
-    /// Borrow the actor's transport. Exposed for callers that want to
-    /// call `Sink::send` or one of the `handle::publish` family
-    /// helpers directly with the transport ref instead of going
-    /// through `Ctx::send` / `Ctx::publish`.
+    /// Borrow the actor's transport. Exposed for the few SDK helper
+    /// modules (`aether-actor::wasm::{io,net,log}`) that resolve a
+    /// kind-typed `Mailbox<K, T>` internally and call its `send`
+    /// directly with the transport ref.
     pub fn transport(&self) -> &T {
         self.transport
     }
@@ -173,21 +173,6 @@ impl<'a, T: MailTransport> Ctx<'a, T> {
     /// session (ADR-0013).
     pub fn reply_to(&self) -> Option<ReplyTo> {
         self.sender.map(ReplyTo::__from_raw)
-    }
-
-    /// Send a single payload to `sink`. Typed wrapper around
-    /// `Sink::send` — having the same entry point through both
-    /// `Ctx` and `Sink` is deliberate: `Ctx` is the receive-time
-    /// vocabulary, `Sink::send` is the universal one. Wire shape
-    /// (cast or postcard) is the kind's, not the call's (issue #240).
-    pub fn send<K: Kind>(&self, sink: &Mailbox<K, T>, payload: &K) {
-        sink.send(self.transport, payload);
-    }
-
-    /// Send a slice of payloads as a contiguous batch. Cast-only —
-    /// see [`Sink::send_many`] for the wire-shape rationale.
-    pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Mailbox<K, T>, payloads: &[K]) {
-        sink.send_many(self.transport, payloads);
     }
 
     /// Reply to the Claude session that originated the inbound mail
@@ -243,9 +228,10 @@ impl<'a, T: MailTransport> Ctx<'a, T> {
 /// Narrowed capability handle for shutdown hooks (`on_replace`,
 /// `on_drop`). Like `Ctx`, but deliberately smaller:
 ///
-/// - `send` / `send_many` still work — outbound mail during shutdown
-///   is a valid and useful pattern ("I'm going away, here's the last
-///   thing I observed").
+/// - Outbound mail still works through the [`Sender`] trait
+///   (`ctx.send::<R, _>(&kind)` / `ctx.send_to_named(name, &kind)`)
+///   — outbound mail during shutdown is a valid pattern ("I'm going
+///   away, here's the last thing I observed").
 /// - `save_state` is only meaningful in `on_replace` — it deposits a
 ///   version-tagged byte bundle the substrate hands to the new
 ///   instance via `on_rehydrate`. Calling it from `on_drop` is
@@ -274,18 +260,6 @@ impl<'a, T: MailTransport> DropCtx<'a, T> {
     /// [`Ctx::transport`].
     pub fn transport(&self) -> &T {
         self.transport
-    }
-
-    /// Send a single payload during a shutdown hook. Wire shape (cast
-    /// or postcard) follows `Kind::encode_into_bytes`.
-    pub fn send<K: Kind>(&self, sink: &Mailbox<K, T>, payload: &K) {
-        sink.send(self.transport, payload);
-    }
-
-    /// Send a slice of payloads during a shutdown hook. Cast-only —
-    /// see [`Sink::send_many`] for the wire-shape rationale.
-    pub fn send_many<K: Kind + bytemuck::NoUninit>(&self, sink: &Mailbox<K, T>, payloads: &[K]) {
-        sink.send_many(self.transport, payloads);
     }
 
     /// Deposit a migration bundle for the substrate to hand to the
