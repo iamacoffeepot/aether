@@ -840,7 +840,7 @@ mod tests {
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let chassis = Builder::<DrivenTestChassis<RanDriver>>::new(registry, mailer)
-            .with(LogCapability::new())
+            .with_actor::<LogCapability>(())
             .driver(RanDriver {
                 ran: Arc::clone(&ran),
             })
@@ -859,8 +859,8 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
 
         let err = Builder::<TestChassis>::new(registry, mailer)
-            .with(LogCapability::new())
-            .with(LogCapability::new())
+            .with_actor::<LogCapability>(())
+            .with_actor::<LogCapability>(())
             .build_passive()
             .expect_err("second passive must fail with duplicate claim");
 

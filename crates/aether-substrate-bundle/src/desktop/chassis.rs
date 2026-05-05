@@ -358,7 +358,7 @@ impl DesktopChassis {
             .map_err(|e| BootError::Other(Box::new(e)))?;
         Builder::<DesktopChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
-            .with(LogCapability::new())
+            .with_actor::<LogCapability>(())
             .with(io_cap)
             .with(NetCapability::new(net, Arc::clone(&mailer)))
             .with(AudioCapability::new(audio, Arc::clone(&mailer)))
