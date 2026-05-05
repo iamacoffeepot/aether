@@ -25,8 +25,8 @@ use std::time::Duration;
 use aether_actor::{MailCtx, Singleton};
 use aether_kinds::{Fetch, FetchResult, HttpHeader, HttpMethod, NetError};
 
-use crate::capability::BootError;
-use crate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::capability::BootError;
+use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// Default response-body cap when `AETHER_NET_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -433,13 +433,13 @@ impl NativeActor for NetCapability {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::{BootError, ChassisBuilder};
-    use crate::mail::ReplyTo;
-    use crate::mailer::Mailer;
-    use crate::native_transport::NativeTransport;
-    use crate::registry::Registry;
     use aether_actor::Actor;
     use aether_data::{Kind, MailboxId};
+    use aether_substrate::capability::{BootError, ChassisBuilder};
+    use aether_substrate::mail::ReplyTo;
+    use aether_substrate::mailer::Mailer;
+    use aether_substrate::native_transport::NativeTransport;
+    use aether_substrate::registry::Registry;
     use std::sync::Mutex;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
@@ -483,7 +483,7 @@ mod tests {
 
     use aether_data::{ReplyTarget, SessionToken, Uuid};
 
-    use crate::outbound::EgressEvent;
+    use aether_substrate::outbound::EgressEvent;
 
     fn session_sender() -> ReplyTo {
         ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
@@ -493,10 +493,10 @@ mod tests {
         use std::collections::HashMap;
         use std::sync::RwLock;
 
-        let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
+        let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(
-            Arc::new(crate::registry::Registry::new()),
+            Arc::new(aether_substrate::registry::Registry::new()),
             Arc::new(RwLock::new(HashMap::new())),
         );
         mailer.wire_outbound(outbound);

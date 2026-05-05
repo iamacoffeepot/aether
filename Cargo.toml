@@ -13,6 +13,7 @@ members = [
     "crates/aether-actor-derive",
     "crates/aether-mesh",
     "crates/aether-camera",
+    "crates/aether-capabilities",
     "crates/aether-mesh-viewer",
     "crates/aether-test-fixture-probe",
     "demos/sokoban",

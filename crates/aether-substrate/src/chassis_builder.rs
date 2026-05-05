@@ -786,7 +786,37 @@ impl<C: Chassis> PassiveChassis<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capabilities::LogCapability;
+
+    /// Lightweight passive-cap fixture for chassis-level boot tests.
+    /// The chassis-builder tests don't care about handler dispatch
+    /// (per-cap dispatch coverage lives in `aether-capabilities`); the
+    /// real caps would force a circular dep, so this stub stands in.
+    struct StubLog;
+    impl aether_actor::Actor for StubLog {
+        const NAMESPACE: &'static str = "test.chassis_builder.stub_log";
+    }
+    impl aether_actor::Singleton for StubLog {}
+
+    impl crate::native_actor::NativeActor for StubLog {
+        type Config = ();
+        fn init(
+            _: Self::Config,
+            _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+        ) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+    }
+
+    impl crate::native_actor::NativeDispatch for StubLog {
+        fn __aether_dispatch_envelope(
+            &self,
+            _ctx: &mut crate::native_actor::NativeCtx<'_>,
+            _kind: crate::mail::KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
+            None
+        }
+    }
 
     /// Fixture chassis for passive-build tests.
     struct TestChassis;
@@ -849,7 +879,7 @@ mod tests {
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let chassis = Builder::<DrivenTestChassis<RanDriver>>::new(registry, mailer)
-            .with_actor::<LogCapability>(())
+            .with_actor::<StubLog>(())
             .driver(RanDriver {
                 ran: Arc::clone(&ran),
             })
@@ -861,15 +891,16 @@ mod tests {
     }
 
     /// Boot-time mailbox-claim collision aborts the build (and runs
-    /// the prior cap's drop). Two `LogCapability` instances both
-    /// claim `aether.log`; the second hits the duplicate-claim guard.
+    /// the prior cap's drop). Two `StubLog` instances both claim
+    /// `test.chassis_builder.stub_log`; the second hits the
+    /// duplicate-claim guard.
     #[test]
     fn duplicate_passive_mailbox_aborts_build_and_shuts_down_prior() {
         let (registry, mailer) = fresh_substrate();
 
         let err = Builder::<TestChassis>::new(registry, mailer)
-            .with_actor::<LogCapability>(())
-            .with_actor::<LogCapability>(())
+            .with_actor::<StubLog>(())
+            .with_actor::<StubLog>(())
             .build_passive()
             .expect_err("second passive must fail with duplicate claim");
 

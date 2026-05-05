@@ -21,6 +21,9 @@
 use std::sync::{Arc, Mutex};
 
 use crate::hub::HubClient;
+use aether_capabilities::{
+    HandleCapability, LogCapability, RenderCapability, RenderConfig, RenderHandles,
+};
 use aether_data::{Kind, KindId};
 use aether_kinds::{
     Advance, AdvanceResult, CaptureFrame, FrameStats, PlatformInfo, SetWindowMode, SetWindowTitle,
@@ -30,9 +33,6 @@ use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
-    capabilities::{
-        LogCapability, RenderCapability, RenderConfig, RenderHandles, io::NamespaceRoots,
-    },
     capture::{
         CaptureQueue, begin_capture_request, reply_unsupported_platform_info,
         reply_unsupported_window_mode, reply_unsupported_window_title,
@@ -175,11 +175,6 @@ pub struct TestBenchEnv {
     /// Number of workers for the wire-stable `EngineInfo.workers`
     /// field. Defaults to [`WORKERS`].
     pub workers: usize,
-    /// Override for the io adapter's filesystem roots; `None` reads
-    /// from env via [`NamespaceRoots::from_env`]. The in-process
-    /// API uses `Some(tempdir-based)` for isolation; the binary
-    /// passes `None`.
-    pub namespace_roots: Option<NamespaceRoots>,
     /// Hub URL for `connect_hub`. Binary reads `AETHER_HUB_URL`;
     /// in-process API typically passes `None`.
     pub hub_url: Option<String>,
@@ -241,14 +236,13 @@ impl TestBenchChassis {
             name,
             version,
             workers,
-            namespace_roots,
             hub_url,
             observed_kinds,
             events_tx,
             capture_queue,
         } = env;
 
-        let mut builder = SubstrateBoot::builder(&name, &version)
+        let boot = SubstrateBoot::builder(&name, &version)
             .workers(workers)
             .chassis_handler({
                 let cq = capture_queue.clone();
@@ -262,11 +256,8 @@ impl TestBenchChassis {
                         Arc::clone(ctx.outbound),
                     ))
                 }
-            });
-        if let Some(roots) = namespace_roots {
-            builder = builder.namespace_roots(roots);
-        }
-        let boot = builder.build()?;
+            })
+            .build()?;
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_frame_stats = boot
@@ -280,6 +271,7 @@ impl TestBenchChassis {
         };
         let passive =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
+                .with_actor::<HandleCapability>(())
                 .with_actor::<LogCapability>(())
                 .with_actor::<RenderCapability>(render_config)
                 .build_passive()

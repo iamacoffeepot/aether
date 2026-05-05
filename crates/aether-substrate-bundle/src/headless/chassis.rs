@@ -13,6 +13,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_capabilities::{
+    HandleCapability, IoCapability, LogCapability, NetCapability, io::NamespaceRoots,
+    net::NetConfig as NetConf,
+};
 use aether_data::{Kind, KindId};
 use aether_kinds::{
     Advance, CaptureFrame, FrameStats, PlatformInfo, SetMasterGain, SetMasterGainResult,
@@ -22,9 +26,6 @@ use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{
     Chassis, ChassisControlHandler, HubOutbound, ReplyTo, SubstrateBoot,
-    capabilities::{
-        IoCapability, LogCapability, NetCapability, io::NamespaceRoots, net::NetConfig as NetConf,
-    },
     capture::{
         reply_unsupported_advance, reply_unsupported_capture_frame,
         reply_unsupported_platform_info, reply_unsupported_window_mode,
@@ -137,7 +138,6 @@ impl HeadlessChassis {
 
         let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION"))
             .workers(WORKERS)
-            .namespace_roots(namespace_roots)
             .chassis_handler(|ctx| Some(chassis_control_handler(Arc::clone(ctx.outbound))))
             .build()?;
 
@@ -208,7 +208,6 @@ impl HeadlessChassis {
 
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
-        let namespace_roots = boot.namespace_roots.clone();
         // ADR-0074 §Decision 5: production chassis configures the
         // cross-class `wait_reply` aborter to broadcast
         // `SubstrateDying` before exit.
@@ -230,6 +229,7 @@ impl HeadlessChassis {
         // through the log capture.
         Builder::<HeadlessChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
+            .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<NetCapability>(net)

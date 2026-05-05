@@ -48,7 +48,7 @@ pub(crate) fn handle_log_mail(bytes: &[u8]) {
 /// Emit an already-decoded `LogEvent` through the `log::log!` facade.
 /// Called from the substrate-side `LogTracingBackend::on_log_event`
 /// after the macro-emitted `Dispatch::__dispatch` decoded the bytes.
-pub(crate) fn handle_log_mail_decoded(event: LogEvent) {
+pub fn handle_log_mail_decoded(event: LogEvent) {
     let level = match event.level {
         0 => log::Level::Trace,
         1 => log::Level::Debug,

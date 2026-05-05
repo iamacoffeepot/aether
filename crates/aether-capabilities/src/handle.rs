@@ -26,10 +26,10 @@ use aether_kinds::{
     HandleReleaseResult, HandleUnpin, HandleUnpinResult,
 };
 
-use crate::capability::BootError;
-use crate::handle_store::{HandleStore, PutError};
-use crate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_actor::MailCtx;
+use aether_substrate::capability::BootError;
+use aether_substrate::handle_store::{HandleStore, PutError};
+use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
 /// `aether.handle` mailbox cap. Owns the substrate's `HandleStore`
 /// and routes ADR-0045 publish/release/pin/unpin requests via
@@ -50,7 +50,7 @@ impl NativeActor for HandleCapability {
     const NAMESPACE: &'static str = "aether.handle";
 
     /// Pull the shared [`HandleStore`] off the substrate's wired
-    /// [`crate::Mailer`]. The store is wired by `SubstrateBoot::build`
+    /// [`aether_substrate::Mailer`]. The store is wired by `SubstrateBoot::build`
     /// before the chassis builder runs, so a `None` here is a
     /// substrate-level boot ordering bug rather than user input —
     /// surface it as a `BootError`.
@@ -171,11 +171,11 @@ mod tests {
     use aether_data::{SessionToken, Uuid};
 
     use super::*;
-    use crate::capability::{BootError, ChassisBuilder};
-    use crate::mail::{ReplyTarget, ReplyTo};
-    use crate::mailer::Mailer;
-    use crate::outbound::EgressEvent;
-    use crate::registry::{MailboxEntry, Registry};
+    use aether_substrate::capability::{BootError, ChassisBuilder};
+    use aether_substrate::mail::{ReplyTarget, ReplyTo};
+    use aether_substrate::mailer::Mailer;
+    use aether_substrate::outbound::EgressEvent;
+    use aether_substrate::registry::{MailboxEntry, Registry};
 
     fn fresh_substrate() -> (
         Arc<HandleStore>,
@@ -188,7 +188,7 @@ mod tests {
         for d in aether_kinds::descriptors::all() {
             let _ = registry.register_kind_with_descriptor(d);
         }
-        let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
+        let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new());
         mailer.wire(Arc::clone(&registry), Arc::new(RwLock::new(HashMap::new())));
         mailer.wire_outbound(outbound);

@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::hub::HubClient;
+use aether_capabilities::RenderHandles;
 use aether_data::Kind;
 use aether_data::{encode, encode_empty};
 use aether_kinds::{
@@ -32,9 +33,7 @@ use aether_kinds::{
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::{
-    HubOutbound, InputSubscribers, Mailer, SubstrateBoot,
-    capabilities::RenderHandles,
-    frame_loop,
+    HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
@@ -742,7 +741,7 @@ impl DriverCapability for DesktopDriverCapability {
         // FRAME_BARRIER claim machinery and surfaces via
         // `ctx.frame_bound_pending()`.
         let render_cap = ctx
-            .actor::<aether_substrate::capabilities::RenderCapability>()
+            .actor::<aether_capabilities::RenderCapability>()
             .ok_or_else(|| {
                 BootError::Other(Box::new(std::io::Error::other(
                     "DesktopDriverCapability::boot: RenderCapability must be booted before the driver \

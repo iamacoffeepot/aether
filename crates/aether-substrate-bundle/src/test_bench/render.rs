@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use aether_substrate::capabilities::{RenderGpu, RenderHandles};
+use aether_capabilities::{RenderGpu, RenderHandles};
 use aether_substrate::render::RenderError;
 
 pub use aether_substrate::render::VERTEX_BUFFER_BYTES;
