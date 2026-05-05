@@ -50,6 +50,19 @@ mod native {
         type Config = ();
         const NAMESPACE: &'static str = HUB_BROADCAST_MAILBOX_NAME;
 
+        /// Broadcast is a frame-bound cap so the chassis's per-frame
+        /// `drain_frame_bound_or_abort` waits for its pending counter
+        /// to hit zero. Without this the cap registers as
+        /// drop-on-shutdown only — the chassis has no synchronization
+        /// hook to wait for the dispatcher thread, and observation
+        /// mail emitted at end-of-frame (the test bench's frame_stats
+        /// at tick 120, ADR-0023 substrate logs, etc.) can race the
+        /// frame's reply path. FRAME_BARRIER closes the race: chassis
+        /// callers waiting on a drain barrier see the broadcast cap
+        /// quiesced before the next observation is read off the
+        /// outbound channel.
+        const FRAME_BARRIER: bool = true;
+
         fn init(_: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             // The substrate boot wires `HubOutbound` into the mailer
             // before chassis caps run their `init`. Caps that boot on

@@ -651,15 +651,18 @@ impl TestBench {
             frame_loop::emit_frame_stats(&self.queue, self.kind_frame_stats, self.frame, triangles);
             // Issue 576: pre-cap-promotion the broadcast sink ran inline on
             // the caller thread, so `emit_frame_stats` synchronously
-            // produced an `EngineToHub::Mail` on outbound. Now broadcast is
-            // an async `BroadcastCapability` dispatcher, so the FrameStats
-            // mail sits in its inbox until that thread runs. The test
-            // bench's `pump_until_reply` would otherwise see `AdvanceResult`
-            // first and return before broadcast produced its outbound
-            // frame, dropping `aether.observation.frame_stats` from
-            // `observed_kinds`. Drain after the push so any same-frame
-            // broadcast reaches outbound before `run_frame` returns.
-            frame_loop::drain_or_abort(&self.queue, &self.outbound);
+            // produced an `EngineToHub::Mail` on outbound. Post-576
+            // broadcast is `BroadcastCapability` with its own dispatcher
+            // thread (FRAME_BARRIER, so the chassis tracks its pending
+            // counter). Without this drain, `pump_until_reply` would see
+            // `AdvanceResult` first and return before the broadcast
+            // dispatcher's `egress_broadcast` reached outbound, dropping
+            // `aether.observation.frame_stats` from `observed_kinds`.
+            // `drain_frame_bound_or_abort` waits on the broadcast cap's
+            // pending counter directly — caps register as sinks, not
+            // components, so `drain_or_abort` (which only drains
+            // `MailboxEntry::Component` entries) wouldn't help.
+            frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
             let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             tracing::info!(
                 target: "aether_substrate::frame_loop",
