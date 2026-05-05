@@ -1,7 +1,8 @@
-//! Multi-camera component. Hosts N named cameras (each in one of two
+//! Multi-camera runtime. Hosts N named cameras (each in one of two
 //! modes — orbit or orthographic top-down), advances every camera each
 //! tick, and publishes the active camera's `view_proj` to
-//! `"aether.render"` (the camera mailbox folded into render per ADR-0074 §Decision 7; the kind name `aether.camera` is unchanged).
+//! `"aether.render"` (the camera mailbox folded into render per
+//! ADR-0074 §Decision 7; the kind name `aether.camera` is unchanged).
 //!
 //! Boots with one default camera, `name = "main"`, in orbit mode and
 //! marked active, so loading the component still produces a visible
@@ -35,12 +36,13 @@
 use std::collections::HashMap;
 
 use aether_actor::{BootError, Mailbox, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_camera::{
+use aether_kinds::{Camera, Tick, WindowSize};
+use aether_math::{Mat4, PI, Quat, Vec2, Vec3};
+
+use crate::{
     CameraCreate, CameraDestroy, CameraOrbitSet, CameraSetActive, CameraSetMode, CameraTopdownSet,
     ModeInit, OrbitParams, TopdownParams,
 };
-use aether_kinds::{Camera, Tick, WindowSize};
-use aether_math::{Mat4, PI, Quat, Vec2, Vec3};
 
 const Z_NEAR: f32 = 0.1;
 const Z_FAR: f32 = 100.0;

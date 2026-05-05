@@ -86,7 +86,7 @@ pub fn has_wgpu_adapter() -> bool {
 /// Returns `None` if neither exists.
 ///
 /// `crate_name` is the underscore-cased crate name as it appears in
-/// the wasm filename (e.g. `"aether_camera_component"`,
+/// the wasm filename (e.g. `"aether_camera"`,
 /// `"aether_test_fixture_probe"`). The workspace target dir is
 /// resolved via `CARGO_MANIFEST_DIR` of the calling integration test
 /// (`crates/<crate>` → workspace root two levels up); helper's own

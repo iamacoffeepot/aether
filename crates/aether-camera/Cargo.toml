@@ -3,14 +3,32 @@ name = "aether-camera"
 version.workspace = true
 edition.workspace = true
 
-# Trunk rlib for the camera component (ADR-0066). The runtime cdylib
-# lives in `aether-camera-component`; consumers that want to *talk to*
-# a camera (mail kinds, parameter structs) depend on this crate. This
-# crate never depends on `aether-component` and never emits FFI exports.
+# Issue 552 stage 1.5: consolidated dual-output crate. Trunk types
+# (kind structs, parameter shapes) live at the crate root for
+# consumers that need to *talk to* a camera; the runtime
+# `CameraComponent` lives in the `runtime` module and `export!()`
+# emits the cdylib FFI exports under wasm32. Host builds compile the
+# runtime as part of the rlib (FFI exports inert) so integration
+# tests can link the same artifact.
+#
+# Pre-stage-1.5 split: this was the trunk rlib only and a sibling
+# `aether-camera-component` held the cdylib. ADR-0066's two-crate
+# convention is superseded by ADR-0075 §Stage-1.5 — the trunk and
+# the runtime cohabit one crate.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data", features = ["derive"] }
+aether-kinds = { path = "../aether-kinds" }
+aether-math = { path = "../aether-math" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+# Substrate-side `aether.log` (ADR-0060) for warn-log on rejected
+# mail (unknown camera, mode mismatch, etc.). Default-features-off to
+# match the rest of the SDK pattern.
+tracing = { version = "0.1", default-features = false }
 
 # Issue #243: every crate that derives `Kind` needs `inventory` reachable
 # on native builds so the `aether.kinds` substrate descriptor list picks
@@ -18,3 +36,12 @@ serde = { version = "1", default-features = false, features = ["derive", "alloc"
 # `cfg(not(target_arch = "wasm32"))` gate.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 inventory = "0.3"
+
+# Integration tests boot a `TestBench`, load this crate's own wasm
+# artifact, and assert mail-flow + render properties via `aether-scenario`.
+# Tests run host-side; the wasm is built separately for `wasm32-unknown-unknown`
+# and discovered at runtime under `target/wasm32-unknown-unknown/{debug,release}/`.
+[dev-dependencies]
+aether-scenario = { path = "../aether-scenario" }
+aether-substrate-bundle = { path = "../aether-substrate-bundle" }
+serde_yml = "0.0.12"
