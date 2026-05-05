@@ -42,7 +42,7 @@ pub trait Actor: Sized + Send + 'static {
 }
 
 /// Marker: only one instance of this actor can be live per substrate.
-/// Required by `Ctx::send_to::<R>` so the type → mailbox lookup is
+/// Required by `Ctx::actor::<R>()` so the type → mailbox lookup is
 /// unambiguous — the substrate enforces "at most one Singleton actor
 /// per `R::NAMESPACE`" at registration time, and senders address by
 /// type rather than by name.
@@ -59,8 +59,9 @@ pub trait Singleton: Actor {}
 /// `#[actor]` proc-macro alongside the dispatch table — one impl per
 /// handler kind. Authors never write these by hand.
 ///
-/// Gates `Ctx::send_to::<R>(&K)` and `ActorMailbox<R, T>::send::<K>` so
-/// the compiler rejects sends to a kind the receiver doesn't handle.
+/// Gates `ActorMailbox<'_, R, T>::send::<K>` (constructed via
+/// `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(name)`) so the compiler
+/// rejects sends to a kind the receiver doesn't handle.
 /// The single source of truth is the handler list on the actor's
 /// `impl` block; adding a `#[handler]` updates senders' compile-time
 /// checks automatically. ADR-0075 §Decision 1.

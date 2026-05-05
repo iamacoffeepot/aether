@@ -72,9 +72,7 @@ pub use sender::{MailCtx, Sender};
 // `wasm`) under the same `Mailbox` / `Handle` names so existing
 // `aether_component::Mailbox<K>` consumers keep their call shape
 // when migrating to `aether_actor::*`.
-pub use sink::{
-    ActorMailbox, KindId, resolve, resolve_actor, resolve_actor_named, resolve_mailbox,
-};
+pub use sink::{ActorMailbox, KindId, resolve, resolve_mailbox};
 pub use slot::Slot;
 pub use sync::{WaitError, decode_wait_reply, wait_reply};
 pub use transport::MailTransport;

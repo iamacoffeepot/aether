@@ -786,7 +786,7 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
 /// (loading the cap crate via `aether-capabilities` with
 /// `default-features = false`) must still see the always-on `Actor`
 /// and `HandlesKind<K>` markers so typed sends like
-/// `ctx.send_to::<X, _>(&kind)` compile-check, but the substrate-side
+/// `ctx.actor::<X>().send(&kind)` compile-check, but the substrate-side
 /// trait impls and helpers can't be in scope on wasm32.
 ///
 /// `#[bridge]`'s expansion splits across that boundary:
@@ -949,7 +949,7 @@ fn expand_bridge(mut item_mod: ItemMod) -> syn::Result<TokenStream2> {
     //   a unit-struct stub takes its place at file root so the marker
     //   impls below have a type to reference. Wasm consumers never
     //   construct caps — they only address them by type via
-    //   `ctx.send_to::<X, _>(&kind)` — so the stub being uninhabited
+    //   `ctx.actor::<X>().send(&kind)` — so the stub being uninhabited
     //   is fine.
     // - On native, the `pub use` re-exports the real struct from `mod
     //   native` to file root, so callers writing `crate::log::LogCapability`
@@ -1110,7 +1110,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Issue 552 stage 4: gate fields on `not(target_arch = "wasm32")`
     // to match the macro-emitted `NativeActor` / `NativeDispatch`
     // impls. Wasm builds see the cap struct with no fields (a pure
-    // marker), which is what typed `ctx.send_to::<R>(...)` needs;
+    // marker), which is what typed `ctx.actor::<R>().send(...)` needs;
     // host builds see the full struct.
     match &mut item.fields {
         syn::Fields::Named(fields) => {
@@ -1369,11 +1369,12 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     };
 
     // ADR-0075: emit one `impl HandlesKind<K> for Self {}` per handler
-    // kind. Auto-generated marker impls gate `Ctx::send_to::<R>(&K)` and
-    // `ActorMailbox<R, T>::send::<K>` so wrong-kind sends are compile
-    // errors at the call site. The handler list above is the single
-    // source of truth — adding a `#[handler]` automatically updates
-    // senders' compile-time checks.
+    // kind. Auto-generated marker impls gate
+    // `ActorMailbox<'_, R, T>::send::<K>` (constructed via
+    // `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(name)`) so wrong-kind
+    // sends are compile errors at the call site. The handler list above
+    // is the single source of truth — adding a `#[handler]` automatically
+    // updates senders' compile-time checks.
     let handles_kind_impls = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         quote! {
@@ -1774,7 +1775,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // can compile for `wasm32-unknown-unknown` without the substrate
     // dep — wasm consumers see only the always-on Actor +
     // HandlesKind markers, which is enough for typed
-    // `ctx.send_to::<R>` against cap markers.
+    // `ctx.actor::<R>().send(...)` against cap markers.
     //
     // Gate is `target_arch` not `feature = "native"` because
     // NativeActor/NativeDispatch are wasm-incompatible by definition;

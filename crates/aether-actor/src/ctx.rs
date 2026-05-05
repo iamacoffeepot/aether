@@ -16,15 +16,13 @@
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use aether_data::{Kind, Schema};
+use aether_data::{Kind, Schema, mailbox_id_from_name};
 
 use crate::actor::{Actor, HandlesKind, Singleton};
 use crate::handle::{self, Handle, SyncHandleError};
 use crate::mail::ReplyTo;
 use crate::sender::{MailCtx, Sender};
-use crate::sink::{
-    ActorMailbox, KindId, Mailbox, resolve, resolve_actor, resolve_actor_named, resolve_mailbox,
-};
+use crate::sink::{ActorMailbox, KindId, Mailbox, resolve, resolve_mailbox};
 use crate::transport::MailTransport;
 
 /// Init-only capability handle. The type split between `InitCtx` and
@@ -108,6 +106,27 @@ impl<'a, T: MailTransport> InitCtx<'a, T> {
             mailbox: ::aether_data::MailboxId(self.mailbox),
         };
         resolve_mailbox::<SubscribeInput, T>("aether.control").send(self.transport, &payload);
+    }
+
+    /// Singleton sender shortcut: returns a typed [`ActorMailbox`] that
+    /// addresses the unique instance of receiver actor `R`. The returned
+    /// handle borrows this ctx's transport for the duration of the call,
+    /// so subsequent `send` / `send_many` are `&self`-receiver and need
+    /// no transport thread-through.
+    ///
+    /// `R: Singleton` gates this call to actors loaded under their
+    /// `R::NAMESPACE` default name; multi-instance receivers go through
+    /// [`Self::resolve_actor`] with an explicit runtime name.
+    pub fn actor<R: Singleton>(&self) -> ActorMailbox<'_, R, T> {
+        ActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.transport)
+    }
+
+    /// Multi-instance sender: resolve a typed [`ActorMailbox`] from a
+    /// runtime instance name. The string surfaces ONCE per handle;
+    /// subsequent sends are string-free and compile-checked against
+    /// `R: HandlesKind<K>`.
+    pub fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<'_, R, T> {
+        ActorMailbox::__new(mailbox_id_from_name(name).0, self.transport)
     }
 }
 
@@ -210,34 +229,36 @@ impl<'a, T: MailTransport> Ctx<'a, T> {
             .reply_mail(sender.raw(), kind.raw(), &bytes, 1);
     }
 
-    /// ADR-0075 singleton path: send `payload` to the unique instance of
-    /// actor `R`, addressed by `R::NAMESPACE`. Compile-checked against
-    /// `R: Singleton + HandlesKind<K>` so wrong-receiver and wrong-kind
-    /// sends are caught at the call site instead of silent runtime
-    /// warn-drops.
+    /// Singleton sender shortcut: returns a typed [`ActorMailbox`] that
+    /// addresses the unique instance of receiver actor `R`. The
+    /// returned handle borrows this ctx's transport, so subsequent
+    /// `send` / `send_many` calls are `&self`-receiver and need no
+    /// explicit transport argument.
     ///
-    /// During the migration (Phases 1–3) this lives alongside the
-    /// kind-typed `Ctx::send(&sink, &payload)`. Phase 4 retires the old
-    /// form and renames `send_to` → `send`.
-    pub fn send_to<R, K>(&self, payload: &K)
-    where
-        R: Singleton + HandlesKind<K>,
-        K: Kind,
-    {
-        resolve_actor::<R, T>().send(self.transport, payload);
+    /// ```ignore
+    /// ctx.actor::<LogCapability>().send(&LogEvent { ... });
+    /// ```
+    ///
+    /// `R: Singleton` gates the shortcut to actors loaded under their
+    /// `R::NAMESPACE` default name; multi-instance receivers go through
+    /// [`Self::resolve_actor`] with an explicit runtime name. Wrong-
+    /// kind sends are compile errors via `R: HandlesKind<K>` on
+    /// [`ActorMailbox::send`].
+    pub fn actor<R: Singleton>(&self) -> ActorMailbox<'_, R, T> {
+        ActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.transport)
     }
 
-    /// ADR-0075 multi-instance path: resolve a typed `ActorMailbox<R, T>`
-    /// from a runtime instance name. The string surfaces ONCE per
-    /// handle; subsequent sends through the returned handle are
-    /// string-free and compile-checked against `R: HandlesKind<K>`.
+    /// Multi-instance sender: resolve a typed [`ActorMailbox`] from a
+    /// runtime instance name. The string surfaces ONCE per handle;
+    /// subsequent sends through the returned handle are string-free
+    /// and compile-checked against `R: HandlesKind<K>`.
     ///
     /// Use this when addressing one of several live instances of the
     /// same actor type (e.g. `"player_1"` vs `"player_2"`). For
     /// singletons (chassis caps, uniquely-loaded user components),
-    /// `send_to::<R>(&payload)` skips the explicit handle entirely.
-    pub fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<R, T> {
-        resolve_actor_named::<R, T>(name)
+    /// [`Self::actor`] skips the explicit name.
+    pub fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<'_, R, T> {
+        ActorMailbox::__new(mailbox_id_from_name(name).0, self.transport)
     }
 }
 
@@ -351,9 +372,9 @@ impl<'a, T: MailTransport> DropCtx<'a, T> {
 }
 
 /// Issue 552 stage 1: cross-transport [`Sender`] impl. Routes through
-/// the actor-typed sink (`resolve_actor::<R, T>`) for typed sends and
-/// through the kind-typed sink (`resolve_mailbox::<K, T>`) for the
-/// string-keyed escape hatch. The wasm path's `Ctx<'a, WasmTransport>`
+/// the actor-typed sink (`ActorMailbox::__new` bound to `self.transport`)
+/// for typed sends and through the kind-typed sink (`resolve_mailbox::<K, T>`)
+/// for the string-keyed escape hatch. The wasm path's `Ctx<'a, WasmTransport>`
 /// inherits this impl through the [`crate::WasmCtx`] alias; the native
 /// `NativeCtx<'a>` (in `aether-substrate`) writes its own `Sender`
 /// impl since it doesn't go through `Ctx<'a, T>` (extra per-mail state
@@ -365,7 +386,8 @@ impl<'a, T: MailTransport> Sender for Ctx<'a, T> {
         R: Actor + HandlesKind<K>,
         K: aether_data::Kind,
     {
-        resolve_actor::<R, T>().send(self.transport, payload);
+        ActorMailbox::<R, T>::__new(mailbox_id_from_name(R::NAMESPACE).0, self.transport)
+            .send(payload);
     }
 
     fn send_many<R, K>(&mut self, payloads: &[K])
@@ -373,7 +395,8 @@ impl<'a, T: MailTransport> Sender for Ctx<'a, T> {
         R: Actor + HandlesKind<K>,
         K: aether_data::Kind + bytemuck::NoUninit,
     {
-        resolve_actor::<R, T>().send_many(self.transport, payloads);
+        ActorMailbox::<R, T>::__new(mailbox_id_from_name(R::NAMESPACE).0, self.transport)
+            .send_many(payloads);
     }
 
     fn send_to_named<K: aether_data::Kind>(&mut self, name: &str, payload: &K) {
@@ -405,7 +428,8 @@ impl<'a, T: MailTransport> Sender for InitCtx<'a, T> {
         R: Actor + HandlesKind<K>,
         K: aether_data::Kind,
     {
-        resolve_actor::<R, T>().send(self.transport, payload);
+        ActorMailbox::<R, T>::__new(mailbox_id_from_name(R::NAMESPACE).0, self.transport)
+            .send(payload);
     }
 
     fn send_many<R, K>(&mut self, payloads: &[K])
@@ -413,7 +437,8 @@ impl<'a, T: MailTransport> Sender for InitCtx<'a, T> {
         R: Actor + HandlesKind<K>,
         K: aether_data::Kind + bytemuck::NoUninit,
     {
-        resolve_actor::<R, T>().send_many(self.transport, payloads);
+        ActorMailbox::<R, T>::__new(mailbox_id_from_name(R::NAMESPACE).0, self.transport)
+            .send_many(payloads);
     }
 
     fn send_to_named<K: aether_data::Kind>(&mut self, name: &str, payload: &K) {

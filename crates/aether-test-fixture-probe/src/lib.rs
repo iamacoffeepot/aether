@@ -9,12 +9,14 @@
 //!   with a monotonic counter. Lets scenarios count tick deliveries
 //!   via `TestBench::count_observed` (broadcasts arrive on the
 //!   loopback and get recorded by kind name).
-//! - On the first tick, fires a typed `ctx.send_to::<LogCapability>`
+//! - On the first tick, fires a typed `ctx.actor::<LogCapability>().send`
 //!   call carrying a `LogEvent`. This is the issue 563 stage-5 demo:
 //!   the probe deps on `aether-capabilities` with
 //!   `default-features = false`, so the typed-sender path resolves
 //!   `LogCapability: Singleton + HandlesKind<LogEvent>` against the
-//!   wasm-header-only build with no native runtime in scope.
+//!   wasm-header-only build with no native runtime in scope. Issue 567
+//!   collapsed the call site from `ctx.send_to::<R, _>(&p)` to
+//!   `ctx.actor::<R>().send(&p)`.
 //! - Receives `aether.test_fixture.set_render { r, g, b, visible }`
 //!   to update render state. When `visible` is non-zero, on_tick
 //!   emits a colored `DrawTriangle` to the chassis render sink, so
@@ -95,7 +97,7 @@ impl WasmActor for Probe {
             },
         );
         if self.tick_count == 1 {
-            ctx.send_to::<LogCapability, _>(&LogEvent {
+            ctx.actor::<LogCapability>().send(&LogEvent {
                 level: 2,
                 target: "aether_test_fixture_probe".into(),
                 message: "typed_send_alive".into(),
