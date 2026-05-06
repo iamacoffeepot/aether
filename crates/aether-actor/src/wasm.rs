@@ -24,12 +24,12 @@
 //!     the aliased types, so user impls compile unchanged. The
 //!     companion native-actor trait will land in `aether-substrate`
 //!     when stage 1 introduces `NativeTransport`.
-//!   - [`io`], [`net`], [`log`] — wasm-specific helper modules. They
-//!     specialise `crate::wait_reply` to `WasmTransport` internally
-//!     so the existing `io::read_sync(...)` /
-//!     `net::fetch_blocking(...)` call shapes don't grow turbofish.
-//!     `log` installs the global `tracing` default the [`export!`]
-//!     macro plumbs into the `init` shim.
+//!   - [`io`] — wasm-specific helper module. Specialises
+//!     `crate::wait_reply` to `WasmTransport` internally so the
+//!     existing `io::read_sync(...)` call shapes don't grow turbofish.
+//!     The sibling `net` helpers retired (issue #589 — zero callers);
+//!     the `log` shim retired in issue #581 (replaced by the unified
+//!     actor-aware path at the crate root).
 //!   - [`export!`] — `#[no_mangle]` `init` / `receive` / lifecycle
 //!     shims plus the `aether.kinds.inputs` custom-section pin (issue
 //!     442). Builds `WasmTransport`-flavoured `WasmInitCtx` /
@@ -51,7 +51,6 @@ use alloc::string::String;
 use crate::transport::MailTransport;
 
 pub mod io;
-pub mod net;
 pub mod raw;
 
 /// Error returned by [`WasmActor::init`] when the component cannot
@@ -117,10 +116,9 @@ pub struct WasmTransport;
 /// Process-wide [`WasmTransport`] instance. The type is a ZST, so
 /// this `static` occupies zero bytes; its only purpose is giving
 /// `&WASM_TRANSPORT` callers (the [`export!`]-emitted `WasmCtx` /
-/// `WasmInitCtx` / `WasmDropCtx` constructors, the [`io`] / [`net`] /
-/// [`log`] helper modules, component examples) a stable address to
-/// borrow without each call site having to write `&WasmTransport`
-/// inline.
+/// `WasmInitCtx` / `WasmDropCtx` constructors, the [`io`] helper
+/// module, component examples) a stable address to borrow without
+/// each call site having to write `&WasmTransport` inline.
 pub static WASM_TRANSPORT: WasmTransport = WasmTransport;
 
 impl MailTransport for WasmTransport {
