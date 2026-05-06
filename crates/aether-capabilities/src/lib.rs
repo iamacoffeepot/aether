@@ -28,6 +28,7 @@
 #[cfg(feature = "audio")]
 pub mod audio;
 pub mod broadcast;
+pub mod control;
 pub mod handle;
 pub mod io;
 pub mod log;
@@ -40,6 +41,7 @@ pub use audio::AudioCapability;
 #[cfg(feature = "audio-native")]
 pub use audio::AudioConfig;
 pub use broadcast::BroadcastCapability;
+pub use control::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
 pub use handle::HandleCapability;
 pub use io::IoCapability;
 pub use log::LogCapability;

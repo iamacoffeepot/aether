@@ -758,21 +758,19 @@ struct BootedPassives {
 }
 
 /// Issue #601: dispatch a `ConfigureLogDrain { mailbox: drain }` mail
-/// to every actor whose mailbox was claimed during boot, plus the
-/// well-known `aether.control` sink so the substrate's
-/// [`crate::control::ControlPlane`] can record the drain for the
-/// runtime `load_component` path. Called by `Builder::build` /
-/// `build_passive` after `boot_passives` returns. No-op if `drain` is
-/// `None` (chassis didn't declare a log target).
+/// to every actor whose mailbox was claimed during boot. Called by
+/// `Builder::build` / `build_passive` after `boot_passives` returns.
+/// No-op if `drain` is `None` (chassis didn't declare a log target).
 ///
-/// Sends through the same `Mailer` every other mail uses — every
-/// actor mailbox routes the envelope to the auto-emitted
-/// `ConfigureLogDrain` arm in `#[handlers]`, which installs the
-/// per-actor `LogDrainSlot`. `aether.control` routes through the
-/// `ControlPlane`'s explicit `ConfigureLogDrain` arm, which writes
-/// its own drain slot for `handle_load` to read.
+/// Sends through the same `Mailer` every other mail uses — each actor
+/// mailbox routes the envelope to the auto-emitted `ConfigureLogDrain`
+/// arm in `#[handlers]`, which installs the per-actor `LogDrainSlot`.
+/// Issue 603: `ControlPlaneCapability` is now a normal actor booted
+/// through this Builder, so its mailbox lands in
+/// `claimed_actor_mailboxes` like every other cap and the pre-603
+/// special-case lookup of `aether.control` retired.
 fn dispatch_configure_log_drain(
-    registry: &Arc<Registry>,
+    _registry: &Arc<Registry>,
     mailer: &Arc<Mailer>,
     targets: &[MailboxId],
     drain: Option<MailboxId>,
@@ -781,19 +779,10 @@ fn dispatch_configure_log_drain(
         return;
     };
     let kind = <ConfigureLogDrain as aether_data::Kind>::ID;
-    let mut recipients: Vec<MailboxId> = targets.to_vec();
-    // `aether.control` is registered by `SubstrateBoot::build` (a
-    // sink, not an actor claim), so it won't appear in the
-    // boot-tracked `claimed_actor_mailboxes` list. Look it up here so
-    // the runtime load path picks up the chassis-declared drain via
-    // the same mail flow every other recipient gets.
-    if let Some(control_id) = registry.lookup(crate::control::AETHER_CONTROL) {
-        recipients.push(control_id);
-    }
-    for target in recipients {
+    for target in targets {
         let cfg = ConfigureLogDrain { mailbox: drain };
         let payload = bytemuck::bytes_of(&cfg).to_vec();
-        let mail = crate::mail::Mail::new(target, kind, payload, 1);
+        let mail = crate::mail::Mail::new(*target, kind, payload, 1);
         mailer.push(mail);
     }
 }

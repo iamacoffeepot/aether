@@ -30,13 +30,14 @@ pub mod hub;
 pub mod test_bench;
 
 pub use aether_capabilities as capabilities;
-pub use aether_capabilities::BroadcastCapability;
+pub use aether_capabilities::{
+    BroadcastCapability, ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig,
+};
 pub use aether_substrate::{
-    AETHER_CONTROL, Chassis, ChassisControlHandler, Component, ControlPlane, HubOutbound,
-    InputSubscribers, KindId, Mail, MailKind, MailboxEntry, MailboxId, Mailer, Registry,
-    ReplyTarget, ReplyTo, Scheduler, SinkHandler, SubstrateBoot, SubstrateCtx,
+    Chassis, Component, HubOutbound, InputSubscribers, KindId, Mail, MailKind, MailboxEntry,
+    MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, SinkHandler, SubstrateBoot, SubstrateCtx,
     capture::{CaptureQueue, PendingCapture},
-    component, control, ctx, frame_loop, host_fns, input, kind_manifest, log_install, mail, mailer,
-    new_subscribers, registry, remove_from_all, reply_table, scheduler, subscribers_for,
+    component, ctx, frame_loop, host_fns, input, kind_manifest, log_install, mail, mailer,
+    new_subscribers, registry, remove_from_all, reply_table, subscribers_for,
 };
 pub use hub::{HubClient, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail};

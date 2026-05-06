@@ -1,21 +1,30 @@
-// End-to-end smoke for ADR-0021 publish/subscribe routing. The test
-// stands up the same triple the substrate binary uses — Registry,
-// Scheduler, ControlPlane sharing one `InputSubscribers` table —
-// loads a WAT component via the control-plane sink handler,
-// subscribes it, then drives "platform events" by calling the same
-// `subscribers_for` helper that `App::window_event` uses and pushing
-// one mail per subscriber. The WAT guest forwards every `receive`
-// into a counting sink so the test can observe end-to-end delivery
-// without peeking guest memory.
+// End-to-end smoke for ADR-0021 publish/subscribe routing. Stands up
+// the same triple a chassis main builds — Registry, Mailer, and
+// `ControlPlaneCapability` sharing one `InputSubscribers` table — loads
+// a WAT component via the cap's test-support entry, subscribes it,
+// then drives "platform events" by calling the same `subscribers_for`
+// helper that `App::window_event` uses and pushing one mail per
+// subscriber. The WAT guest forwards every `receive` into a counting
+// sink so the test observes end-to-end delivery without peeking
+// into guest memory.
+//
+// Issue 603 retired the standalone `aether-substrate::control::ControlPlane`
+// in favour of `aether-capabilities::ControlPlaneCapability`. The
+// harness here uses the cap's `for_test` constructor to build the cap
+// without spinning up a chassis dispatcher thread; the typed
+// `*_for_test` methods drive the cap's internal handlers
+// synchronously, which matches the pre-603 `dispatch(&plane, ...)`
+// shape end-to-end minus the dispatcher hop.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
+use aether_capabilities::{ControlPlaneCapability, ControlPlaneConfig};
 use aether_data::{Kind, KindId};
 use aether_kinds::{DropComponent, LoadComponent, SubscribeInput, Tick, UnsubscribeInput};
 use aether_substrate_bundle::{
-    ControlPlane, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
-    host_fns, mail::Mail, new_subscribers, subscribers_for,
+    HubOutbound, InputSubscribers, Mailer, Registry, host_fns, mail::Mail, new_subscribers,
+    subscribers_for,
 };
 use wasmtime::{Engine, Linker};
 
@@ -43,18 +52,17 @@ fn tally_forwarding_wat(tally_id: u64) -> String {
 }
 
 struct Harness {
-    plane: ControlPlane,
+    cap: ControlPlaneCapability,
     queue: Arc<Mailer>,
     input_subscribers: InputSubscribers,
     counter: Arc<AtomicU32>,
     kind_tick: KindId,
     wat: String,
-    _scheduler: Scheduler,
 }
 
 fn make_harness() -> Harness {
     let engine = Arc::new(Engine::default());
-    let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+    let mut linker: Linker<aether_substrate_bundle::SubstrateCtx> = Linker::new(&engine);
     host_fns::register(&mut linker).expect("register host fns");
     let linker = Arc::new(linker);
 
@@ -77,83 +85,67 @@ fn make_harness() -> Harness {
     let wat = tally_forwarding_wat(sink_mbox.0);
 
     let queue = Arc::new(Mailer::new());
-    let scheduler = Scheduler::new(Arc::clone(&registry), Arc::clone(&queue), 2);
+    queue.wire(Arc::clone(&registry));
 
     let input_subscribers = new_subscribers();
-    let plane = ControlPlane {
-        engine: Arc::clone(&engine),
-        linker: Arc::clone(&linker),
-        registry: Arc::clone(&registry),
-        queue: Arc::clone(&queue),
-        outbound: HubOutbound::disconnected(),
-        components: scheduler.components().clone(),
-        input_subscribers: Arc::clone(&input_subscribers),
-        default_name_counter: Arc::new(AtomicU64::new(0)),
-        chassis_handler: None,
-        log_drain: Arc::new(std::sync::OnceLock::new()),
-    };
+    let cap = ControlPlaneCapability::for_test(
+        ControlPlaneConfig {
+            engine,
+            linker,
+            hub_outbound: HubOutbound::disconnected(),
+            input_subscribers: Arc::clone(&input_subscribers),
+            chassis_handler: None,
+        },
+        Arc::clone(&registry),
+        Arc::clone(&queue),
+    );
 
     Harness {
-        plane,
+        cap,
         queue,
         input_subscribers,
         counter,
         kind_tick,
         wat,
-        _scheduler: scheduler,
     }
 }
 
-/// Dispatch a single control-plane kind by going through the public
-/// sink-handler surface. `ControlPlane::into_sink_handler` consumes
-/// its receiver, so the harness clones the plane (`Arc`-cheap) for
-/// each call. Mirrors how main.rs wires the handler at boot.
-fn dispatch<K: aether_data::Kind + serde::Serialize>(plane: &ControlPlane, payload: &K) {
-    let bytes = postcard::to_allocvec(payload).unwrap();
-    let handler = plane.clone().into_sink_handler();
-    handler(
-        K::ID,
-        K::NAME,
-        None,
-        aether_substrate_bundle::ReplyTo::NONE,
-        &bytes,
-        0,
-    );
+fn load_wat(cap: &ControlPlaneCapability, wat: &str, name: &str) -> aether_data::MailboxId {
+    let payload = LoadComponent {
+        wasm: wat::parse_str(wat).expect("compile WAT"),
+        name: Some(name.into()),
+    };
+    let result = cap.load_for_test(payload);
+    match result {
+        aether_kinds::LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        aether_kinds::LoadResult::Err { error } => panic!("load failed: {error}"),
+    }
 }
 
-fn load_wat(plane: &ControlPlane, wat: &str, name: &str) -> aether_data::MailboxId {
-    let before: std::collections::HashSet<aether_data::MailboxId> =
-        plane.components.read().unwrap().keys().copied().collect();
-    dispatch(
-        plane,
-        &LoadComponent {
-            wasm: wat::parse_str(wat).expect("compile WAT"),
-            name: Some(name.into()),
-        },
-    );
-    let after: std::collections::HashSet<aether_data::MailboxId> =
-        plane.components.read().unwrap().keys().copied().collect();
-    *after
-        .difference(&before)
-        .next()
-        .expect("load inserted a new component")
+fn subscribe(cap: &ControlPlaneCapability, kind: KindId, mailbox: aether_data::MailboxId) {
+    let r = cap.subscribe_for_test(SubscribeInput { kind, mailbox });
+    matches!(r, aether_kinds::SubscribeInputResult::Ok)
+        .then_some(())
+        .expect("subscribe succeeded");
 }
 
-fn subscribe(plane: &ControlPlane, kind: KindId, mailbox: aether_data::MailboxId) {
-    dispatch(plane, &SubscribeInput { kind, mailbox });
+fn unsubscribe(cap: &ControlPlaneCapability, kind: KindId, mailbox: aether_data::MailboxId) {
+    let r = cap.unsubscribe_for_test(UnsubscribeInput { kind, mailbox });
+    matches!(r, aether_kinds::SubscribeInputResult::Ok)
+        .then_some(())
+        .expect("unsubscribe succeeded");
 }
 
-fn unsubscribe(plane: &ControlPlane, kind: KindId, mailbox: aether_data::MailboxId) {
-    dispatch(plane, &UnsubscribeInput { kind, mailbox });
-}
-
-fn drop_component(plane: &ControlPlane, mailbox_id: aether_data::MailboxId) {
-    dispatch(plane, &DropComponent { mailbox_id });
+fn drop_component(cap: &ControlPlaneCapability, mailbox_id: aether_data::MailboxId) {
+    let r = cap.drop_for_test(DropComponent { mailbox_id });
+    matches!(r, aether_kinds::DropResult::Ok)
+        .then_some(())
+        .expect("drop succeeded");
 }
 
 /// Publish one Tick exactly as `App::window_event` does: snapshot the
 /// subscriber set, push one mail per subscriber, block until the
-/// scheduler drains.
+/// dispatcher drains.
 fn publish_tick(h: &Harness) {
     for mbox in subscribers_for(&h.input_subscribers, Tick::ID) {
         h.queue.push(Mail::new(mbox, h.kind_tick, vec![], 1));
@@ -173,8 +165,8 @@ fn empty_subscribers_means_no_delivery() {
 #[test]
 fn subscribed_component_receives_published_ticks() {
     let h = make_harness();
-    let id = load_wat(&h.plane, &h.wat, "listener");
-    subscribe(&h.plane, Tick::ID, id);
+    let id = load_wat(&h.cap, &h.wat, "listener");
+    subscribe(&h.cap, Tick::ID, id);
     assert_eq!(subscribers_for(&h.input_subscribers, Tick::ID), vec![id]);
     for _ in 0..3 {
         publish_tick(&h);
@@ -185,10 +177,10 @@ fn subscribed_component_receives_published_ticks() {
 #[test]
 fn two_subscribers_each_receive_every_tick() {
     let h = make_harness();
-    let a = load_wat(&h.plane, &h.wat, "a");
-    let b = load_wat(&h.plane, &h.wat, "b");
-    subscribe(&h.plane, Tick::ID, a);
-    subscribe(&h.plane, Tick::ID, b);
+    let a = load_wat(&h.cap, &h.wat, "a");
+    let b = load_wat(&h.cap, &h.wat, "b");
+    subscribe(&h.cap, Tick::ID, a);
+    subscribe(&h.cap, Tick::ID, b);
     publish_tick(&h);
     publish_tick(&h);
     // 2 subscribers × 2 ticks = 4 deliveries.
@@ -198,12 +190,12 @@ fn two_subscribers_each_receive_every_tick() {
 #[test]
 fn unsubscribe_stops_delivery() {
     let h = make_harness();
-    let id = load_wat(&h.plane, &h.wat, "listener");
-    subscribe(&h.plane, Tick::ID, id);
+    let id = load_wat(&h.cap, &h.wat, "listener");
+    subscribe(&h.cap, Tick::ID, id);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);
 
-    unsubscribe(&h.plane, Tick::ID, id);
+    unsubscribe(&h.cap, Tick::ID, id);
     publish_tick(&h);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);
@@ -212,12 +204,12 @@ fn unsubscribe_stops_delivery() {
 #[test]
 fn drop_clears_subscriptions() {
     let h = make_harness();
-    let id = load_wat(&h.plane, &h.wat, "victim");
-    subscribe(&h.plane, Tick::ID, id);
+    let id = load_wat(&h.cap, &h.wat, "victim");
+    subscribe(&h.cap, Tick::ID, id);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);
 
-    drop_component(&h.plane, id);
+    drop_component(&h.cap, id);
     assert!(subscribers_for(&h.input_subscribers, Tick::ID).is_empty());
     publish_tick(&h);
     publish_tick(&h);

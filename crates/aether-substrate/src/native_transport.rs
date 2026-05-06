@@ -459,16 +459,12 @@ fn write_payload(env: &Envelope, out: &mut [u8]) -> i32 {
 mod tests {
     use super::*;
     use crate::registry::Registry;
-    use crate::scheduler::ComponentTable;
-    use std::collections::HashMap;
-    use std::sync::RwLock;
     use std::sync::mpsc;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new());
-        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
-        mailer.wire(Arc::clone(&registry), components);
+        mailer.wire(Arc::clone(&registry));
         (registry, mailer)
     }
 

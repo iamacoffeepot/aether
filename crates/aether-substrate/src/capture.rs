@@ -30,7 +30,7 @@ use aether_kinds::{
     SetWindowTitleResult,
 };
 
-use crate::control::{decode_payload, resolve_bundle};
+use crate::control_helpers::{decode_payload, resolve_bundle};
 use crate::mail::{Mail, ReplyTo};
 use crate::mailer::Mailer;
 use crate::outbound::HubOutbound;

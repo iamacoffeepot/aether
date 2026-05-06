@@ -96,6 +96,7 @@ dependencies = [
  "tracing",
  "ureq",
  "url",
+ "wasmtime",
  "wgpu",
 ]
 
