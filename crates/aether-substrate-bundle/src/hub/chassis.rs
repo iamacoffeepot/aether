@@ -39,7 +39,6 @@ use crate::hub::process_capability::{ProcessCapability, ProcessCapabilityConfig}
 use crate::hub::loopback::{
     LoopbackEngine, LoopbackHandle, run_inbound_drainer, spawn_outbound_drainer,
 };
-use crate::hub::spawn::terminate_substrate;
 use crate::hub::{
     DEFAULT_ENGINE_PORT, DEFAULT_MCP_PORT, EngineRegistry, HubState, LogStore, PendingSpawns,
     SessionRegistry, run_engine_listener, run_mcp_server,
@@ -116,13 +115,7 @@ impl HubChassis {
         let pending = PendingSpawns::new();
         let logs = LogStore::new();
         let loopback = LoopbackEngine::boot(&registry)?;
-        let state = HubState::new(
-            registry.clone(),
-            sessions.clone(),
-            pending.clone(),
-            logs.clone(),
-            engine_addr,
-        );
+        let state = HubState::new(registry.clone(), sessions.clone(), logs.clone());
 
         // ADR-0078 Phase 1: ProcessCapability needs a tokio runtime
         // handle at cap-init time to drive its async spawn / wait /
@@ -207,12 +200,19 @@ pub struct HubServerDriverRunning {
     logs: LogStore,
     state: Arc<HubState>,
     loopback: LoopbackEngine,
+    /// Handle to the booted [`ProcessCapability`]. The shutdown
+    /// coordinator calls [`ProcessCapability::shutdown_all`] on this
+    /// to terminate every spawned child before dropping the loopback
+    /// substrate. `None` is unreachable in production (the cap is
+    /// always booted on the hub chassis); kept Optional only because
+    /// `DriverCtx::actor` returns Option for type-system purity.
+    process_cap: Option<Arc<ProcessCapability>>,
 }
 
 impl DriverCapability for HubServerDriverCapability {
     type Running = HubServerDriverRunning;
 
-    fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+    fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
         let HubServerDriverCapability {
             engine_addr,
             mcp_addr,
@@ -224,6 +224,7 @@ impl DriverCapability for HubServerDriverCapability {
             loopback,
             rt,
         } = self;
+        let process_cap = ctx.actor::<ProcessCapability>();
         Ok(HubServerDriverRunning {
             rt,
             engine_addr,
@@ -234,6 +235,7 @@ impl DriverCapability for HubServerDriverCapability {
             logs,
             state,
             loopback,
+            process_cap,
         })
     }
 }
@@ -250,6 +252,7 @@ impl DriverRunning for HubServerDriverRunning {
             logs,
             state,
             loopback,
+            process_cap,
         } = *self;
 
         rt.block_on(coordinator(
@@ -261,6 +264,7 @@ impl DriverRunning for HubServerDriverRunning {
             logs,
             state,
             loopback,
+            process_cap,
         ));
 
         Ok(())
@@ -270,8 +274,9 @@ impl DriverRunning for HubServerDriverRunning {
 /// The body that pre-Builder lived inside `HubChassis::run_async`.
 /// Spawns the inbound + outbound loopback drainers, the engine
 /// listener, and the MCP server; `tokio::select!`s on all four +
-/// the shutdown-signal future; then runs `terminate_all_children` and
-/// drops the substrate boot in deterministic order.
+/// the shutdown-signal future; then asks `ProcessCapability` to
+/// terminate every spawned child and drops the substrate boot in
+/// deterministic order.
 #[allow(clippy::too_many_arguments)]
 async fn coordinator(
     engine_addr: SocketAddr,
@@ -282,6 +287,7 @@ async fn coordinator(
     logs: LogStore,
     state: Arc<HubState>,
     loopback: LoopbackEngine,
+    process_cap: Option<Arc<ProcessCapability>>,
 ) {
     let LoopbackEngine {
         boot,
@@ -308,10 +314,6 @@ async fn coordinator(
         logs.clone(),
     );
 
-    // Hold a separate clone for the shutdown handler — the
-    // `registry` binding is moved into `run_engine_listener`.
-    let registry_for_shutdown = registry.clone();
-
     let engine_task = tokio::spawn(run_engine_listener(
         engine_addr,
         registry,
@@ -333,13 +335,15 @@ async fn coordinator(
 
     // Drain spawned children explicitly before dropping `boot` and
     // the tokio runtime. `kill_on_drop` would reap them on Arc
-    // drop, but the drop ordering across tasks holding registry
-    // clones isn't deterministic — an explicit pass guarantees
+    // drop, but the drop ordering across tasks holding the cap's
+    // children map isn't deterministic — an explicit pass guarantees
     // every child gets SIGTERM + a grace window (+ SIGKILL
     // escalation) regardless of which task drops its Arc last.
     // Skipping this is what orphaned children into init on hub
     // SIGTERM pre-fix.
-    terminate_all_children(&registry_for_shutdown).await;
+    if let Some(cap) = process_cap.as_ref() {
+        cap.shutdown_all(SHUTDOWN_CHILD_GRACE).await;
+    }
 
     // `boot` drops here — scheduler workers join, HubOutbound's
     // Sender drops (closing the outbound channel), which lets
@@ -392,35 +396,6 @@ async fn shutdown_signal() -> &'static str {
     }
 }
 
-/// Terminate every spawned substrate in parallel. Each call reuses
-/// the same SIGTERM → grace → SIGKILL machinery that the
-/// `terminate_substrate` MCP tool uses, so hub-shutdown cleanup and
-/// per-engine cleanup share a code path. Errors are logged per child
-/// but don't abort the loop — we want to reach every child.
-async fn terminate_all_children(registry: &EngineRegistry) {
-    let children = registry.drain_spawned_children();
-    if children.is_empty() {
-        return;
-    }
-    eprintln!(
-        "aether-substrate-hub: terminating {} spawned child(ren)",
-        children.len()
-    );
-    let handles: Vec<_> = children
-        .into_iter()
-        .map(|(id, child)| {
-            tokio::spawn(async move {
-                if let Err(e) = terminate_substrate(child, SHUTDOWN_CHILD_GRACE).await {
-                    eprintln!("aether-substrate-hub: shutdown terminate {id:?}: {e}");
-                }
-            })
-        })
-        .collect();
-    for h in handles {
-        let _ = h.await;
-    }
-}
-
 fn env_port(name: &str) -> Option<u16> {
     std::env::var(name).ok().and_then(|s| s.parse().ok())
 }
@@ -430,68 +405,5 @@ fn log_exit(label: &str, result: Result<std::io::Result<()>, tokio::task::JoinEr
         Ok(Ok(())) => eprintln!("aether-substrate-hub: {label} exited"),
         Ok(Err(e)) => eprintln!("aether-substrate-hub: {label} error: {e}"),
         Err(e) => eprintln!("aether-substrate-hub: {label} join error: {e}"),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::process::Stdio;
-
-    use aether_data::{EngineId, Uuid};
-    use tokio::process::Command;
-
-    use super::*;
-
-    /// Spawn a `sleep 60` child so the terminate path has something
-    /// real to signal + reap. Mirrors the pattern the
-    /// `terminate_substrate` tests use in `spawn.rs`.
-    fn spawn_sleep() -> tokio::process::Child {
-        Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 60")
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn sh")
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn terminate_all_children_reaps_every_adopted_child() {
-        let registry = EngineRegistry::new();
-        let ids: Vec<EngineId> = (0..3)
-            .map(|i| EngineId(Uuid::from_u128(0xC0FFEE + i as u128)))
-            .collect();
-        let children: Vec<_> = (0..3).map(|_| spawn_sleep()).collect();
-        let pids: Vec<u32> = children
-            .iter()
-            .map(|c| c.id().expect("pid available"))
-            .collect();
-        for (id, child) in ids.iter().zip(children) {
-            registry.adopt_child(*id, child);
-        }
-
-        terminate_all_children(&registry).await;
-
-        // Registry is drained — `terminate_all_children` removed every
-        // entry via `drain_spawned_children`.
-        assert_eq!(
-            registry.drain_spawned_children().len(),
-            0,
-            "terminate_all_children consumed everything"
-        );
-        // `libc::kill(pid, 0)` probes liveness: returns 0 if the
-        // process exists and we can signal it, `-1` + `ESRCH` when
-        // the pid is gone (reaped or never existed). `sh -c sleep 60`
-        // handles SIGTERM immediately, so all three should be dead by
-        // the time `terminate_all_children` returns.
-        for pid in pids {
-            let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
-            let errno = std::io::Error::last_os_error().raw_os_error();
-            assert!(
-                rc != 0 && errno == Some(libc::ESRCH),
-                "pid {pid} still signalable after shutdown (rc={rc}, errno={errno:?})"
-            );
-        }
     }
 }

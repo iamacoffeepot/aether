@@ -3,15 +3,20 @@
 //! arguments, looks up registry state, delegates to the helpers in
 //! `codecs.rs` for encode/decode work, and serializes the response.
 //! Business logic that isn't request/response glue belongs in
-//! `crate::hub::registry`, `crate::hub::spawn`, `crate::hub::session`, or the codec
-//! module — not here.
+//! `crate::hub::registry`, `crate::hub::process_capability`,
+//! `crate::hub::session`, or the codec module — not here.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::hub::wire::{EngineId, LogLevel, Uuid};
+use aether_actor::Actor;
+use aether_data::Kind;
 use aether_data::tagged_id::{self, Tag};
+use aether_kinds::{
+    EnvVar, Spawn as WireSpawn, SpawnResult as WireSpawnResult, Terminate as WireTerminate,
+    TerminateResult as WireTerminateResult,
+};
 use base64::Engine as _;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
@@ -23,8 +28,9 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::hub::log_store::{TOOL_DEFAULT_ENTRIES, TOOL_MAX_ENTRIES};
+use crate::hub::loopback::HUB_SELF_ENGINE_ID;
+use crate::hub::process_capability::ProcessCapability;
 use crate::hub::session::SessionHandle;
-use crate::hub::spawn::{DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, SpawnOpts};
 
 use super::args::{
     CaptureFrameArgs, CaptureFrameResultWire, DescribeComponentArgs, DescribeComponentResponse,
@@ -37,11 +43,12 @@ use super::codecs::{decode_inbound, deliver_one, encode_capture_bundle};
 use super::{Hub, HubState};
 use crate::hub::registry::ComponentRecord;
 
-/// Substrate control-plane kind name for a capture request. String
-/// constants rather than an `aether-kinds` dependency to keep the hub
-/// agnostic of the substrate's typed kind vocabulary at crate level —
-/// the schema-driven descriptor path already provides wire-level
-/// compatibility.
+/// Substrate control-plane kind names. Predate the `aether-kinds`
+/// dep this crate now carries (PR 596 introduced it for the process
+/// kinds); future cleanup migrates these to `<K as Kind>::NAME` at
+/// the call site. The process tools below already use that pattern;
+/// these survive to avoid expanding PR 2's diff into the existing
+/// capture / load / replace paths.
 const KIND_CAPTURE_FRAME: &str = "aether.control.capture_frame";
 const KIND_CAPTURE_FRAME_RESULT: &str = "aether.control.capture_frame_result";
 const KIND_LOAD_COMPONENT: &str = "aether.control.load_component";
@@ -67,6 +74,15 @@ const DEFAULT_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 /// is probably a bug on the substrate side; surfacing it as a bound
 /// rather than letting it hang preserves the harness's responsiveness.
 const MAX_CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Internal mirror of the wire `aether.process.terminate_result::Ok`
+/// variant. Returned by `Hub::do_terminate_via_cap` to both the
+/// public `terminate_substrate` MCP tool and the spawn-substrate
+/// preload-cleanup path.
+struct TerminateOutcomeWire {
+    exit_code: Option<i32>,
+    sigkilled: bool,
+}
 
 impl Hub {
     /// Construct a per-session `Hub`. Lives in this module (rather
@@ -167,36 +183,91 @@ impl Hub {
         &self,
         Parameters(args): Parameters<SpawnSubstrateArgs>,
     ) -> Result<String, McpError> {
-        let handshake_timeout = args
-            .timeout_ms
-            .map(|ms| Duration::from_millis(ms as u64))
-            .unwrap_or(DEFAULT_HANDSHAKE_TIMEOUT);
-        let opts = SpawnOpts {
-            binary_path: PathBuf::from(args.binary_path),
-            args: args.args,
-            env: args.env,
-            handshake_timeout,
-        };
-        let engine_id = crate::hub::spawn::spawn_substrate(
-            opts,
-            self.state.hub_engine_addr,
-            &self.state.pending_spawns,
-            &self.state.engines,
-        )
-        .await
-        .map_err(|e| McpError::internal_error(format!("spawn failed: {e}"), None))?;
+        // ADR-0078 Phase 1: route through `ProcessCapability` rather
+        // than calling `crate::hub::spawn::spawn_substrate` directly.
+        // The cap owns the freshly-spawned `Child` and the per-child
+        // reaper task; the MCP coordinator becomes a thin wrapper
+        // that mails the cap and awaits its reply via the same
+        // session-reply diversion `capture_frame` / `load_component`
+        // use.
+        let env: Vec<EnvVar> = args
+            .env
+            .into_iter()
+            .map(|(key, value)| EnvVar { key, value })
+            .collect();
+        let params = serde_json::json!({
+            "binary_path": args.binary_path,
+            "args": args.args,
+            "env": env,
+            "handshake_timeout_ms": args.timeout_ms,
+        });
 
-        let pid = self
-            .state
-            .engines
-            .get(&engine_id)
-            .map(|r| r.pid)
-            .unwrap_or(0);
-        let engine_id_str = engine_id.0.to_string();
+        let (_guard, rx) = self
+            .session
+            .replies
+            .register(WireSpawnResult::NAME.to_owned())
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    "a spawn_substrate is already in flight on this session; \
+                     wait for it to complete"
+                        .to_owned(),
+                    None,
+                )
+            })?;
+
+        let spec = MailSpec {
+            engine_id: HUB_SELF_ENGINE_ID.0.to_string(),
+            recipient_name: ProcessCapability::NAMESPACE.to_owned(),
+            kind_name: WireSpawn::NAME.to_owned(),
+            params: Some(params),
+            count: 1,
+        };
+        deliver_one(spec, &self.state.engines, self.session.token)
+            .await
+            .map_err(|e| McpError::internal_error(format!("send failed: {e}"), None))?;
+
+        let wait = args
+            .timeout_ms
+            .map(|ms| Duration::from_millis(ms as u64).min(MAX_REPLY_TIMEOUT))
+            .unwrap_or(DEFAULT_REPLY_TIMEOUT);
+        let queued = match timeout(wait, rx).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(_)) => {
+                return Err(McpError::internal_error(
+                    "spawn_result channel closed before reply arrived".to_owned(),
+                    None,
+                ));
+            }
+            Err(_) => {
+                return Err(McpError::internal_error(
+                    format!(
+                        "timed out after {}ms waiting for spawn_result",
+                        wait.as_millis()
+                    ),
+                    None,
+                ));
+            }
+        };
+
+        let (engine_id_str, pid) = match postcard::from_bytes::<WireSpawnResult>(&queued.payload)
+            .map_err(|e| McpError::internal_error(format!("decode reply: {e}"), None))?
+        {
+            WireSpawnResult::Ok { engine_id, pid } => (engine_id, pid),
+            WireSpawnResult::Err { error } => {
+                return Err(McpError::internal_error(
+                    format!("spawn failed: {error}"),
+                    None,
+                ));
+            }
+        };
+        let engine_uuid = Uuid::parse_str(&engine_id_str).map_err(|e| {
+            McpError::internal_error(format!("cap returned non-UUID engine_id: {e}"), None)
+        })?;
+        let engine_id = EngineId(engine_uuid);
 
         // Preload components sequentially. Any failure aborts the whole
-        // spawn: we SIGTERM the freshly-spawned child before bubbling
-        // the error so a half-loaded substrate never leaks back to the
+        // spawn: we mail `Terminate` to the cap before bubbling the
+        // error so a half-loaded substrate never leaks back to the
         // caller as a successful-looking `SpawnResult`.
         let mut components = Vec::with_capacity(args.components.len());
         for (idx, spec) in args.components.into_iter().enumerate() {
@@ -212,12 +283,7 @@ impl Hub {
             {
                 Ok(resp) => components.push(resp),
                 Err(load_err) => {
-                    let cleanup = self.state.engines.take_child(&engine_id).map(|child| {
-                        crate::hub::spawn::terminate_substrate(child, DEFAULT_TERMINATE_GRACE)
-                    });
-                    if let Some(fut) = cleanup {
-                        let _ = fut.await;
-                    }
+                    let _ = self.do_terminate_via_cap(&engine_id_str, None, None).await;
                     return Err(McpError::internal_error(
                         format!(
                             "preload #{idx} failed; spawned child terminated: {}",
@@ -244,36 +310,17 @@ impl Hub {
         &self,
         Parameters(args): Parameters<TerminateSubstrateArgs>,
     ) -> Result<String, McpError> {
-        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+        // ADR-0078 Phase 1: route through `ProcessCapability`. The cap
+        // owns the `Child`; the bespoke `crate::hub::spawn::terminate_substrate`
+        // is reserved for the chassis shutdown path and not addressable
+        // from MCP anymore.
+        let _ = Uuid::parse_str(&args.engine_id).map_err(|e| {
             McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
         })?;
-        let id = EngineId(uuid);
 
-        if self.state.engines.get(&id).is_none() {
-            return Err(McpError::invalid_params(
-                format!("unknown engine_id {}", args.engine_id),
-                None,
-            ));
-        }
-
-        let Some(child) = self.state.engines.take_child(&id) else {
-            return Err(McpError::invalid_params(
-                format!(
-                    "engine {} is not hub-spawned; terminate it externally",
-                    args.engine_id
-                ),
-                None,
-            ));
-        };
-
-        let grace = args
-            .grace_ms
-            .map(|ms| Duration::from_millis(ms as u64))
-            .unwrap_or(DEFAULT_TERMINATE_GRACE);
-
-        let outcome = crate::hub::spawn::terminate_substrate(child, grace)
-            .await
-            .map_err(|e| McpError::internal_error(format!("terminate failed: {e}"), None))?;
+        let outcome = self
+            .do_terminate_via_cap(&args.engine_id, args.grace_ms, None)
+            .await?;
 
         let result = TerminateResult {
             engine_id: args.engine_id,
@@ -281,6 +328,85 @@ impl Hub {
             exit_code: outcome.exit_code,
         };
         serde_json::to_string(&result).map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    /// Mail `aether.process.terminate` to the cap and await its
+    /// reply. Shared by the public [`Hub::terminate_substrate`] tool
+    /// and the spawn-substrate cleanup path that fires when a
+    /// component preload fails. Returns the wire `Ok` payload on
+    /// success.
+    async fn do_terminate_via_cap(
+        &self,
+        engine_id: &str,
+        grace_ms: Option<u32>,
+        timeout_ms: Option<u32>,
+    ) -> Result<TerminateOutcomeWire, McpError> {
+        let params = serde_json::json!({
+            "engine_id": engine_id,
+            "grace_ms": grace_ms,
+        });
+
+        let (_guard, rx) = self
+            .session
+            .replies
+            .register(WireTerminateResult::NAME.to_owned())
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    "a terminate_substrate is already in flight on this session; \
+                     wait for it to complete"
+                        .to_owned(),
+                    None,
+                )
+            })?;
+
+        let spec = MailSpec {
+            engine_id: HUB_SELF_ENGINE_ID.0.to_string(),
+            recipient_name: ProcessCapability::NAMESPACE.to_owned(),
+            kind_name: WireTerminate::NAME.to_owned(),
+            params: Some(params),
+            count: 1,
+        };
+        deliver_one(spec, &self.state.engines, self.session.token)
+            .await
+            .map_err(|e| McpError::internal_error(format!("send failed: {e}"), None))?;
+
+        let wait = timeout_ms
+            .map(|ms| Duration::from_millis(ms as u64).min(MAX_REPLY_TIMEOUT))
+            .unwrap_or(DEFAULT_REPLY_TIMEOUT);
+        let queued = match timeout(wait, rx).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(_)) => {
+                return Err(McpError::internal_error(
+                    "terminate_result channel closed before reply arrived".to_owned(),
+                    None,
+                ));
+            }
+            Err(_) => {
+                return Err(McpError::internal_error(
+                    format!(
+                        "timed out after {}ms waiting for terminate_result",
+                        wait.as_millis()
+                    ),
+                    None,
+                ));
+            }
+        };
+
+        match postcard::from_bytes::<WireTerminateResult>(&queued.payload)
+            .map_err(|e| McpError::internal_error(format!("decode reply: {e}"), None))?
+        {
+            WireTerminateResult::Ok {
+                exit_code,
+                sigkilled,
+            } => Ok(TerminateOutcomeWire {
+                exit_code,
+                sigkilled,
+            }),
+            WireTerminateResult::Err { error } => Err(McpError::internal_error(
+                format!("terminate failed: {error}"),
+                None,
+            )),
+        }
     }
 
     #[tool(

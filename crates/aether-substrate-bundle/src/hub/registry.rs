@@ -2,12 +2,14 @@
 // carry display metadata and a mail channel the Claude-facing tools
 // push `HubToEngine::Mail` frames into.
 //
-// For engines spawned by the hub (ADR-0009), the registry also owns a
-// `tokio::process::Child` handle in a side map keyed by the same
-// `EngineId`. Removing the engine drops the child, which — with
-// `kill_on_drop(true)` — reaps the process. Externally connected
-// engines have no entry in the side map; their lifecycle is owned by
-// whoever launched them.
+// Pre-ADR-0078 the registry also owned a side-map of
+// `tokio::process::Child` handles for hub-spawned engines. Phase 1
+// (PR 597) moved child ownership into
+// [`crate::hub::process_capability::ProcessCapability`]; the
+// registry now only carries display state. `EngineRecord::spawned`
+// stays as a boolean flag set on handshake-correlation match so
+// `list_engines` can still surface "hub-spawned vs externally
+// connected" without owning the `Child`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,7 +17,6 @@ use std::sync::{Arc, Mutex};
 use aether_data::KindDescriptor;
 
 use crate::hub::wire::{EngineId, HubToEngine};
-use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use crate::hub::mcp::args::ComponentCapabilitiesWire;
@@ -65,10 +66,6 @@ pub struct EngineRegistry {
 #[derive(Default)]
 struct Inner {
     records: HashMap<EngineId, EngineRecord>,
-    /// Child processes the hub owns. Entry lifetime matches the
-    /// corresponding record — `remove` drops both together, which
-    /// kills the child via `kill_on_drop`.
-    spawned_children: HashMap<EngineId, Child>,
 }
 
 impl EngineRegistry {
@@ -80,51 +77,8 @@ impl EngineRegistry {
         self.inner.lock().unwrap().records.insert(record.id, record);
     }
 
-    /// Attach a spawned `Child` to an already-registered engine. Called
-    /// by `spawn_substrate` after handshake correlation completes.
-    /// Silently replaces any prior child for the same id (which will
-    /// never happen in practice but keeps the API total).
-    pub fn adopt_child(&self, id: EngineId, child: Child) {
-        self.inner
-            .lock()
-            .unwrap()
-            .spawned_children
-            .insert(id, child);
-    }
-
-    /// Remove and return the `Child` for a spawned engine without
-    /// touching the record. Callers (notably `terminate_substrate`)
-    /// use this to take ownership of the child before signalling and
-    /// awaiting its exit — leaving the record in place so the engine
-    /// connection task can continue reading until the socket drops,
-    /// at which point the standard `remove` path fires.
-    ///
-    /// Returns `None` for unknown or externally connected engines.
-    pub fn take_child(&self, id: &EngineId) -> Option<Child> {
-        self.inner.lock().unwrap().spawned_children.remove(id)
-    }
-
-    /// Drain every adopted child, returning them for orderly shutdown.
-    /// Used by the hub's signal handler to explicitly terminate every
-    /// spawned substrate before the process exits, so a SIGTERM on the
-    /// hub doesn't orphan children into init. `take_child`'s per-id
-    /// path covers normal `terminate_substrate` calls; this bulk
-    /// variant exists for shutdown only.
-    pub fn drain_spawned_children(&self) -> Vec<(EngineId, Child)> {
-        self.inner
-            .lock()
-            .unwrap()
-            .spawned_children
-            .drain()
-            .collect()
-    }
-
     pub fn remove(&self, id: &EngineId) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.records.remove(id);
-        // Drop any adopted child alongside the record. `kill_on_drop`
-        // takes care of reaping if the process is still running.
-        inner.spawned_children.remove(id);
+        self.inner.lock().unwrap().records.remove(id);
     }
 
     /// Replace the cached kind descriptors for an engine. Called when
@@ -200,14 +154,6 @@ impl EngineRegistry {
     pub fn is_empty(&self) -> bool {
         self.inner.lock().unwrap().records.is_empty()
     }
-
-    /// Test-only inspection of the child-handle side map. The production
-    /// flow never needs to know whether a child is adopted separately
-    /// from the `spawned: bool` on the record.
-    #[cfg(test)]
-    pub fn has_child(&self, id: &EngineId) -> bool {
-        self.inner.lock().unwrap().spawned_children.contains_key(id)
-    }
 }
 
 #[cfg(test)]
@@ -241,12 +187,9 @@ mod tests {
     }
 
     #[test]
-    fn remove_without_child_is_harmless() {
+    fn remove_unknown_engine_is_harmless() {
         let reg = EngineRegistry::new();
-        let r = record(2);
-        let id = r.id;
-        reg.insert(r);
-        assert!(!reg.has_child(&id));
+        let id = EngineId(Uuid::from_u128(0xfeedface));
         reg.remove(&id);
         assert!(reg.get(&id).is_none());
     }

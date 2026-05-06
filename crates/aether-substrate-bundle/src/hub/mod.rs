@@ -86,7 +86,7 @@ pub use session::{
 };
 pub use spawn::{
     DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, PendingSpawns, SpawnError, SpawnOpts,
-    TerminateOutcome, spawn_substrate, spawn_substrate_no_adopt, terminate_substrate,
+    TerminateOutcome, spawn_substrate_no_adopt, terminate_substrate,
 };
 
 /// Default port the hub binds for engine TCP clients. ADR-0006 V0

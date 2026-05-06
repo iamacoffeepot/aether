@@ -29,7 +29,6 @@ use tokio::sync::{Mutex, mpsc};
 use crate::hub::log_store::LogStore;
 use crate::hub::registry::EngineRegistry;
 use crate::hub::session::{QueuedMail, SessionHandle, SessionRegistry};
-use crate::hub::spawn::PendingSpawns;
 
 pub(crate) mod args;
 mod codecs;
@@ -45,7 +44,7 @@ use crate::hub::wire::{HubToEngine, SessionToken, Uuid};
 #[cfg(test)]
 use args::{
     CaptureFrameArgs, DescribeKindsArgs, EngineInfo, MailSpec, MailStatus, ReceiveMailArgs,
-    ReceivedMail, SendMailArgs, SpawnSubstrateArgs, TerminateResult, TerminateSubstrateArgs,
+    ReceivedMail, SendMailArgs,
 };
 #[cfg(test)]
 use base64::Engine as _;
@@ -60,33 +59,27 @@ pub const DEFAULT_MCP_PORT: u16 = 8888;
 
 /// Shared state across all rmcp sessions. Cheap to `Arc::clone` into
 /// each per-session `Hub` instance.
+///
+/// Post-ADR-0078 Phase 1 (PR 596): `pending_spawns` and `hub_engine_addr`
+/// retired — process supervision moved into [`crate::hub::process_capability::ProcessCapability`],
+/// which is configured with both at chassis-builder time. The hub's
+/// engine handshake path still references the same `PendingSpawns`
+/// instance the cap owns, but the MCP tool surface no longer needs
+/// either field.
 pub struct HubState {
     pub(crate) engines: EngineRegistry,
     pub(crate) sessions: SessionRegistry,
-    pub(crate) pending_spawns: PendingSpawns,
     /// ADR-0023 per-engine log buffers. Outlives engine records so
     /// post-mortem `engine_logs` polls succeed after a substrate exit.
     pub(crate) logs: LogStore,
-    /// Address of the hub's engine TCP listener. Injected as
-    /// `AETHER_HUB_URL` into spawned substrates so they dial back to
-    /// this hub instance.
-    pub(crate) hub_engine_addr: SocketAddr,
 }
 
 impl HubState {
-    pub fn new(
-        engines: EngineRegistry,
-        sessions: SessionRegistry,
-        pending_spawns: PendingSpawns,
-        logs: LogStore,
-        hub_engine_addr: SocketAddr,
-    ) -> Arc<Self> {
+    pub fn new(engines: EngineRegistry, sessions: SessionRegistry, logs: LogStore) -> Arc<Self> {
         Arc::new(Self {
             engines,
             sessions,
-            pending_spawns,
             logs,
-            hub_engine_addr,
         })
     }
 }
@@ -136,18 +129,13 @@ mod tests {
     use crate::hub::wire::EngineId;
     use tokio::sync::mpsc;
 
-    /// Build a `HubState` with spawn fields stubbed for tests that don't
-    /// exercise the spawn path. Real spawn tests construct the state
-    /// with `HubState::new` directly so they can inject a listener
-    /// address.
+    /// Build a `HubState` for tests that don't exercise process
+    /// supervision. Post-ADR-0078 Phase 1, MCP tools route the
+    /// spawn / terminate path through `ProcessCapability`; tests
+    /// targeting that path do so via the cap's own unit tests in
+    /// `process_capability.rs`.
     fn test_state(engines: EngineRegistry, sessions: SessionRegistry) -> Arc<HubState> {
-        HubState::new(
-            engines,
-            sessions,
-            PendingSpawns::new(),
-            LogStore::new(),
-            "127.0.0.1:0".parse().unwrap(),
-        )
+        HubState::new(engines, sessions, LogStore::new())
     }
 
     fn record(id_u128: u128) -> (EngineRecord, mpsc::Receiver<HubToEngine>) {
@@ -1310,148 +1298,13 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn spawn_substrate_tool_surfaces_bad_path() {
-        let state = HubState::new(
-            EngineRegistry::new(),
-            SessionRegistry::new(),
-            PendingSpawns::new(),
-            LogStore::new(),
-            "127.0.0.1:1".parse().unwrap(),
-        );
-        let hub = Hub::new(state);
-
-        let err = hub
-            .spawn_substrate(Parameters(SpawnSubstrateArgs {
-                binary_path: "/this/path/definitely/does/not/exist".into(),
-                args: vec![],
-                env: HashMap::new(),
-                timeout_ms: None,
-                components: vec![],
-            }))
-            .await
-            .unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(msg.contains("spawn failed"), "unexpected error: {msg}");
-    }
-
-    #[tokio::test]
-    async fn terminate_substrate_rejects_unknown_engine() {
-        let state = HubState::new(
-            EngineRegistry::new(),
-            SessionRegistry::new(),
-            PendingSpawns::new(),
-            LogStore::new(),
-            "127.0.0.1:1".parse().unwrap(),
-        );
-        let hub = Hub::new(state);
-        let err = hub
-            .terminate_substrate(Parameters(TerminateSubstrateArgs {
-                engine_id: Uuid::from_u128(0xdead).to_string(),
-                grace_ms: None,
-            }))
-            .await
-            .unwrap_err();
-        assert!(format!("{err:?}").contains("unknown engine_id"));
-    }
-
-    #[tokio::test]
-    async fn terminate_substrate_rejects_externally_connected_engine() {
-        let engines = EngineRegistry::new();
-        let (rec, _rx) = record(77);
-        let id = rec.id;
-        // rec.spawned is false (default) and no child is adopted.
-        engines.insert(rec);
-        let state = HubState::new(
-            engines,
-            SessionRegistry::new(),
-            PendingSpawns::new(),
-            LogStore::new(),
-            "127.0.0.1:1".parse().unwrap(),
-        );
-        let hub = Hub::new(state);
-
-        let err = hub
-            .terminate_substrate(Parameters(TerminateSubstrateArgs {
-                engine_id: id.0.to_string(),
-                grace_ms: None,
-            }))
-            .await
-            .unwrap_err();
-        assert!(format!("{err:?}").contains("not hub-spawned"));
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn terminate_substrate_tool_kills_spawned_child() {
-        use std::process::Stdio;
-        use tokio::process::Command;
-
-        let engines = EngineRegistry::new();
-        let (mut rec, _rx) = record(88);
-        rec.spawned = true;
-        let id = rec.id;
-        engines.insert(rec);
-
-        let child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 60")
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn sh");
-        engines.adopt_child(id, child);
-
-        let state = HubState::new(
-            engines.clone(),
-            SessionRegistry::new(),
-            PendingSpawns::new(),
-            LogStore::new(),
-            "127.0.0.1:1".parse().unwrap(),
-        );
-        let hub = Hub::new(state);
-
-        let json = hub
-            .terminate_substrate(Parameters(TerminateSubstrateArgs {
-                engine_id: id.0.to_string(),
-                grace_ms: Some(2000),
-            }))
-            .await
-            .expect("terminate ok");
-        let result: TerminateResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(result.engine_id, id.0.to_string());
-        assert!(!result.sigkilled, "sh should exit on SIGTERM within grace");
-
-        // Child entry is gone from the registry (take_child fired).
-        assert!(!engines.has_child(&id));
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn spawn_substrate_tool_surfaces_timeout() {
-        // /bin/sh + sleep will never handshake; configured timeout
-        // fires and the tool turns the SpawnError into an MCP error.
-        let state = HubState::new(
-            EngineRegistry::new(),
-            SessionRegistry::new(),
-            PendingSpawns::new(),
-            LogStore::new(),
-            "127.0.0.1:1".parse().unwrap(),
-        );
-        let hub = Hub::new(state);
-
-        let err = hub
-            .spawn_substrate(Parameters(SpawnSubstrateArgs {
-                binary_path: "/bin/sh".into(),
-                args: vec!["-c".into(), "sleep 60".into()],
-                env: HashMap::new(),
-                timeout_ms: Some(150),
-                components: vec![],
-            }))
-            .await
-            .unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(msg.contains("spawn failed"), "unexpected error: {msg}");
-        assert!(msg.contains("handshake"), "expected timeout wording: {msg}");
-    }
+    // ADR-0078 Phase 1 (PR 596 + this PR): the spawn / terminate
+    // tool tests retired alongside the bespoke `spawn_substrate` /
+    // `terminate_substrate` helpers — both now route through
+    // `ProcessCapability`. The cap's own unit tests in
+    // `crate::hub::process_capability` cover spawn-handshake-timeout
+    // (`spawn_handshake_timeout_replies_err`), reaper broadcast
+    // (`reaper_emits_process_exited_when_child_exits`), and cap
+    // boot. End-to-end MCP→cap coverage rides on the smoke flow
+    // documented in the PR body.
 }

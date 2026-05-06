@@ -255,6 +255,52 @@ mod native {
                 broadcast_exited_via(out, engine_id, exit_code, reason);
             }
         }
+
+        /// Drain every spawned child and run the SIGTERM → grace →
+        /// SIGKILL escalation against each in parallel. Called by the
+        /// hub chassis's shutdown coordinator (driver runtime path) so
+        /// SIGINT / SIGTERM on the hub doesn't orphan children into
+        /// init. Each child's reaper task naturally observes the
+        /// `Child::wait` completion and broadcasts
+        /// `aether.process.exited`; this method is the bulk variant
+        /// of [`Self::on_terminate`].
+        ///
+        /// Errors per child are logged but don't abort the loop — we
+        /// want every child reached.
+        pub async fn shutdown_all(&self, grace: Duration) {
+            let drained: Vec<(EngineId, ChildSlot)> = {
+                let mut guard = self.children.lock().unwrap();
+                guard.drain().collect()
+            };
+            if drained.is_empty() {
+                return;
+            }
+            tracing::info!(
+                target: "aether_substrate::process",
+                count = drained.len(),
+                "terminating spawned child(ren) at chassis shutdown",
+            );
+            let mut handles = Vec::with_capacity(drained.len());
+            for (engine_id, slot) in drained {
+                let Some(child) = slot.lock().unwrap().take() else {
+                    // Reaper already took it; its broadcast will fire
+                    // on natural exit. Drop the join handle.
+                    self.reapers.lock().unwrap().remove(&engine_id);
+                    continue;
+                };
+                self.reapers.lock().unwrap().remove(&engine_id);
+                handles.push(self.runtime.spawn(terminate_substrate(child, grace)));
+            }
+            for h in handles {
+                if let Err(e) = h.await {
+                    tracing::warn!(
+                        target: "aether_substrate::process",
+                        error = %e,
+                        "shutdown terminate join failed",
+                    );
+                }
+            }
+        }
     }
 
     fn broadcast_exited_via(
