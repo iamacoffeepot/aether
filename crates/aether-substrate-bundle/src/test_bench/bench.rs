@@ -505,18 +505,19 @@ impl TestBench {
     where
         R: serde::de::DeserializeOwned,
     {
-        const MAX_ITERATIONS: u32 = 2_048;
+        const MAX_ITERATIONS: u32 = 8_192;
         // Sleep per quiet iteration. 10 ms × QUIET_BUDGET caps total
-        // wait around 10 s. Long enough to absorb wasm compile under
-        // parallel test contention (issue 603 made `aether.control`
-        // mail dispatch through `ControlPlaneCapability`'s thread
-        // instead of inline on the caller, so a slow `LoadComponent`
-        // step needs the wait to ride out the dispatcher hop +
-        // wasmtime compile under high CPU pressure).
+        // wait around 60 s. Long enough to absorb wasm compile under
+        // parallel test contention on a 2-core CI runner (issue 603
+        // made `aether.control` mail dispatch through
+        // `ControlPlaneCapability`'s thread instead of inline on the
+        // caller, so a `LoadComponent` step needs the wait to ride
+        // out the dispatcher hop + wasmtime compile under high CPU
+        // pressure when N test binaries run in parallel).
         const QUIET_SLEEP: Duration = Duration::from_millis(10);
         // How many consecutive quiet iterations to tolerate before
         // giving up.
-        const QUIET_BUDGET: u32 = 1_000;
+        const QUIET_BUDGET: u32 = 6_000;
 
         // Check the stash first.
         if let Some(frame) = self.stashed_replies.remove(&cid) {
