@@ -1,10 +1,14 @@
-//! Shared `wait_reply` helper used by every synchronous SDK wrapper
-//! (handle round-trips, the wasm-side `io::*_sync`). Each family
-//! carries its own error enum (`SyncIoError`, `SyncHandleError`), so
-//! the helper is generic over both the reply kind `K` and an error
-//! type that implements [`WaitError`]. The transport `T` is the third
-//! generic — picks `WasmTransport` for guests and `NativeTransport`
-//! for native capabilities (Phase 2).
+//! Shared `wait_reply` helper used by synchronous SDK wrappers (today
+//! only handle round-trips). Each family carries its own error enum
+//! (e.g. `SyncHandleError`), so the helper is generic over both the
+//! reply kind `K` and an error type that implements [`WaitError`].
+//! The transport `T` is the third generic — picks `WasmTransport` for
+//! guests and `NativeTransport` for native capabilities (Phase 2).
+//!
+//! The wasm-side `io::*_sync` / `net::fetch_blocking` wrappers that
+//! historically rode this helper retired across issues #589 (net) and
+//! #591 (io); the helper stays for the handle path and as the shared
+//! shape any future ctx-level `send_sync` lands on.
 //!
 //! ADR-0042: the substrate echoes the request's correlation id on the
 //! reply; the host fn `wait_reply` parks the actor thread until a
@@ -33,8 +37,6 @@ pub trait WaitError {
 /// Allocate a `capacity`-sized scratch buffer in actor memory, park
 /// on `transport.wait_reply` for a mail of kind `K` with the given
 /// `expected_correlation`, and postcard-decode the written bytes.
-/// Replaces the per-family duplicates that previously lived in
-/// `io.rs` and `handle.rs`.
 ///
 /// `transport` is the actor-bound `MailTransport` instance — see
 /// `transport.rs` for the `&self` receiver design and how it
@@ -85,9 +87,9 @@ mod tests {
     use super::*;
     use serde::Deserialize;
 
-    // Per-impl mapping tests cover `SyncIoError` and
-    // `SyncHandleError`. They live in their owning modules' test
-    // blocks so each enum's variant set stays next to its definition.
+    // Per-impl mapping tests cover `SyncHandleError` (and any future
+    // sync-wait error enum). They live in their owning module's test
+    // block so each enum's variant set stays next to its definition.
     // The helper-level tests below exercise the rc → branch mapping
     // itself via a dummy `WaitError` that just records which
     // constructor fired.

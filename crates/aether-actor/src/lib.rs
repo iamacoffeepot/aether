@@ -91,15 +91,17 @@ pub use wasm::{
     BootError, Component, Mailbox, Replaceable, WASM_TRANSPORT, WasmActor, WasmCtx, WasmDropCtx,
     WasmInitCtx, WasmTransport,
 };
-// Wasm helper module (file I/O) surfaces at the crate root so
-// existing `aether_component::io::*` call sites migrate to
-// `aether_actor::io::*` without growing a `wasm::` segment. Issue
-// #581 retired the wasm `log` shim (replaced by the unified
-// actor-aware path at `aether_actor::log`, available on both
-// targets); issue #589 retired the wasm `net` helpers (zero callers
-// — components send `Fetch` directly via
-// `ctx.actor::<NetCapability>().send(...)`).
-pub use wasm::io;
+// Wasm helper modules retired:
+//   - issue #581 — `log` shim replaced by the unified actor-aware
+//     path at `aether_actor::log` (both targets).
+//   - issue #589 — `net` helpers had zero callers; components now
+//     send `Fetch` directly via `ctx.actor::<NetCapability>().send(...)`.
+//   - issue #591 — `io` helpers replaced by the same typed-sender
+//     shape (`ctx.actor::<IoCapability>().send(&Read { .. })`); the
+//     sync wait_reply helpers (`*_sync` + `SyncIoError`) had a single
+//     consumer (the `save_counter` example) and were retired alongside
+//     it. Their placement against the ctx surface is being rethought
+//     before any sync round-trip surface returns.
 
 // Issue 442 / ADR-0033: `MailTransport` doubles as a re-export name
 // for the trait when consumers want to spell out the bound. Kept

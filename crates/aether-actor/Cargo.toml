@@ -66,14 +66,6 @@ crate-type = ["cdylib"]
 name = "input_logger"
 crate-type = ["cdylib"]
 
-# ADR-0042 sync-I/O demo. On first tick reads a counter from
-# `save://counter.bin`, increments, writes back, broadcasts the new
-# value. Respawn the substrate and the count persists — end-to-end
-# sync read + write in ~a dozen straight-line lines.
-[[example]]
-name = "save_counter"
-crate-type = ["cdylib"]
-
 # Postcard receive smoke test (sibling of `echoer.rs`). Demonstrates
 # `#[handler]` dispatching through `Mail::decode_postcard` for kinds
 # whose schema isn't bytemuck-castable (here: `String` + `Vec<u8>`
