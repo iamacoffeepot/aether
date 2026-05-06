@@ -14,23 +14,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_capabilities::{
-    BroadcastCapability, HandleCapability, HeadlessRenderCapability, IoCapability, LogCapability,
-    NetCapability, io::NamespaceRoots, net::NetConfig as NetConf,
+    BroadcastCapability, HandleCapability, HeadlessRenderCapability, HeadlessWindowCapability,
+    IoCapability, LogCapability, NetCapability, io::NamespaceRoots, net::NetConfig as NetConf,
 };
 use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
 use aether_data::{Kind, KindId};
-use aether_kinds::{
-    Advance, FrameStats, PlatformInfo, SetMasterGain, SetMasterGainResult, SetWindowMode,
-    SetWindowTitle, Tick,
-};
+use aether_kinds::{Advance, FrameStats, PlatformInfo, SetMasterGain, SetMasterGainResult, Tick};
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{
     Chassis, HubOutbound, ReplyTo, SubstrateBoot,
-    capture::{
-        reply_unsupported_advance, reply_unsupported_platform_info, reply_unsupported_window_mode,
-        reply_unsupported_window_title,
-    },
+    capture::{reply_unsupported_advance, reply_unsupported_platform_info},
 };
 
 use super::driver::{HeadlessTimerCapability, WORKERS, parse_tick_hz_env};
@@ -42,12 +36,6 @@ const UNSUPPORTED_ADVANCE: &str =
 pub fn chassis_control_handler(outbound: Arc<HubOutbound>) -> ChassisControlHandler {
     Arc::new(
         move |kind: KindId, kind_name: &str, sender: ReplyTo, _bytes: &[u8]| match kind {
-            SetWindowMode::ID => {
-                reply_unsupported_window_mode(&outbound, sender, UNSUPPORTED);
-            }
-            SetWindowTitle::ID => {
-                reply_unsupported_window_title(&outbound, sender, UNSUPPORTED);
-            }
             Advance::ID => {
                 reply_unsupported_advance(&outbound, sender, UNSUPPORTED_ADVANCE);
             }
@@ -227,6 +215,7 @@ impl HeadlessChassis {
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<NetCapability>(net)
             .with_actor::<HeadlessRenderCapability>(())
+            .with_actor::<HeadlessWindowCapability>(())
             .with_log_drain::<LogCapability>()
             .driver(driver)
             .build()

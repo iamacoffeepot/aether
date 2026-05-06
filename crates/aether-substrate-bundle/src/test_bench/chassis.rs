@@ -22,24 +22,19 @@ use std::sync::{Arc, Mutex};
 
 use crate::hub::HubClient;
 use aether_capabilities::{
-    BroadcastCapability, CaptureBackend, HandleCapability, LogCapability, RenderCapability,
-    RenderConfig, RenderHandles,
+    BroadcastCapability, CaptureBackend, HandleCapability, HeadlessWindowCapability, LogCapability,
+    RenderCapability, RenderConfig, RenderHandles,
 };
 use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
 use aether_data::Kind;
 use aether_data::KindId;
-use aether_kinds::{
-    Advance, AdvanceResult, FrameStats, PlatformInfo, SetWindowMode, SetWindowTitle, Tick,
-};
+use aether_kinds::{Advance, AdvanceResult, FrameStats, PlatformInfo, Tick};
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::control_helpers::decode_payload;
 use aether_substrate::{
     Chassis, HubOutbound, ReplyTo, SubstrateBoot,
-    capture::{
-        CaptureQueue, reply_unsupported_platform_info, reply_unsupported_window_mode,
-        reply_unsupported_window_title,
-    },
+    capture::{CaptureQueue, reply_unsupported_platform_info},
     render::VERTEX_BUFFER_BYTES,
 };
 
@@ -61,12 +56,6 @@ pub fn chassis_control_handler(
         move |kind: KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| match kind {
             Advance::ID => {
                 handle_advance(&events, &outbound, sender, bytes);
-            }
-            SetWindowMode::ID => {
-                reply_unsupported_window_mode(&outbound, sender, UNSUPPORTED_WINDOW);
-            }
-            SetWindowTitle::ID => {
-                reply_unsupported_window_title(&outbound, sender, UNSUPPORTED_WINDOW);
             }
             PlatformInfo::ID => {
                 reply_unsupported_platform_info(&outbound, sender, UNSUPPORTED_WINDOW);
@@ -268,6 +257,7 @@ impl TestBenchChassis {
                 .with_actor::<LogCapability>(())
                 .with_actor::<ControlPlaneCapability>(control_plane_config)
                 .with_actor::<RenderCapability>(render_config)
+                .with_actor::<HeadlessWindowCapability>(())
                 .with_log_drain::<LogCapability>()
                 .build_passive()
                 .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;

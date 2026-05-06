@@ -26,11 +26,11 @@ use aether_data::Kind;
 use aether_data::{encode, encode_empty};
 use aether_kinds::{
     CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, Key,
-    KeyRelease, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult,
-    SetWindowModeResult, SetWindowTitleResult, Tick, VideoMode, WindowInfo, WindowMode, WindowSize,
-    keycode,
+    KeyRelease, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult, SetWindowMode,
+    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, Tick, VideoMode, WindowInfo,
+    WindowMode, WindowSize, keycode,
 };
-use aether_substrate::capability::BootError;
+use aether_substrate::capability::{BootError, Envelope};
 use aether_substrate::chassis_builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop,
@@ -115,6 +115,19 @@ pub struct App {
     /// and read by `platform_info`'s window-state field. Starts as
     /// `boot_mode`.
     current_mode: WindowMode,
+    /// `aether.window` inbox claimed via `DriverCtx::claim_mailbox`
+    /// at boot (issue 603 Phase 3). The driver is the cap — drained
+    /// inside [`ApplicationHandler::about_to_wait`] between frames to
+    /// apply `SetWindowMode` / `SetWindowTitle` inline on the chassis
+    /// main thread (winit / macOS require window mutations there). No
+    /// dispatcher thread, no `EventLoopProxy` bounce; the receiver
+    /// is the wake. Under `ControlFlow::Wait` (set when the window
+    /// occludes) `about_to_wait` only fires after a winit event, so
+    /// window-kind mail can stall briefly until the user nudges the
+    /// window — accepted limitation for v1.
+    window_inbox: std::sync::mpsc::Receiver<Envelope>,
+    kind_set_window_mode: aether_data::KindId,
+    kind_set_window_title: aether_data::KindId,
 }
 
 /// Translate a winit `KeyCode` into the engine's stable named-key u32
@@ -447,6 +460,60 @@ impl App {
         SetWindowTitleResult::Ok { title }
     }
 
+    /// Drain the `aether.window` inbox without blocking. Called from
+    /// `about_to_wait` (per-frame cadence). Each envelope dispatches
+    /// inline against `kind_set_window_mode` / `kind_set_window_title`;
+    /// any other kind warns and drops.
+    fn drain_window_inbox(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        loop {
+            match self.window_inbox.try_recv() {
+                Ok(env) => self.dispatch_window_envelope(env),
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
+            }
+        }
+    }
+
+    fn dispatch_window_envelope(&mut self, env: Envelope) {
+        if env.kind == self.kind_set_window_mode {
+            let payload: SetWindowMode = match postcard::from_bytes(&env.payload) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.outbound.send_reply(
+                        env.sender,
+                        &SetWindowModeResult::Err {
+                            error: format!("postcard decode failed: {e}"),
+                        },
+                    );
+                    return;
+                }
+            };
+            let result = self.apply_window_mode(payload.mode, payload.width, payload.height);
+            self.outbound.send_reply(env.sender, &result);
+        } else if env.kind == self.kind_set_window_title {
+            let payload: SetWindowTitle = match postcard::from_bytes(&env.payload) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.outbound.send_reply(
+                        env.sender,
+                        &SetWindowTitleResult::Err {
+                            error: format!("postcard decode failed: {e}"),
+                        },
+                    );
+                    return;
+                }
+            };
+            let result = self.apply_window_title(payload.title);
+            self.outbound.send_reply(env.sender, &result);
+        } else {
+            tracing::warn!(
+                target: "aether_substrate::driver",
+                kind = %env.kind_name,
+                "desktop driver dropped unrecognised aether.window kind",
+            );
+        }
+    }
+
     fn publish_window_size(&self, width: u32, height: u32) {
         let subs = subscribers_for(&self.input_subscribers, WindowSize::ID);
         if subs.is_empty() {
@@ -487,20 +554,15 @@ impl ApplicationHandler<UserEvent> for App {
                 let result = self.snapshot_platform_info(event_loop);
                 self.outbound.send_reply(reply_to, &result);
             }
-            UserEvent::SetWindowMode {
-                reply_to,
-                mode,
-                width,
-                height,
-            } => {
-                let result = self.apply_window_mode(mode, width, height);
-                self.outbound.send_reply(reply_to, &result);
-            }
-            UserEvent::SetWindowTitle { reply_to, title } => {
-                let result = self.apply_window_title(title);
-                self.outbound.send_reply(reply_to, &result);
-            }
         }
+    }
+
+    /// winit fires this between events. Issue 603 Phase 3 makes the
+    /// driver itself the cap for `aether.window`, so the per-frame
+    /// drain happens here instead of riding through `EventLoopProxy`
+    /// from a separate dispatcher thread.
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.drain_window_inbox();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -771,6 +833,19 @@ impl DriverCapability for DesktopDriverCapability {
             .registry
             .kind_id(FrameStats::NAME)
             .expect("FrameStats registered");
+        let kind_set_window_mode = boot
+            .registry
+            .kind_id(SetWindowMode::NAME)
+            .expect("SetWindowMode registered");
+        let kind_set_window_title = boot
+            .registry
+            .kind_id(SetWindowTitle::NAME)
+            .expect("SetWindowTitle registered");
+
+        // Issue 603 Phase 3: the desktop driver is the cap for
+        // `aether.window`. Claim the inbox here; the receiver lives on
+        // `App` and `about_to_wait` drains it inline between frames.
+        let window_claim = ctx.claim_mailbox("aether.window")?;
 
         let app = App {
             queue: Arc::clone(&boot.queue),
@@ -797,6 +872,9 @@ impl DriverCapability for DesktopDriverCapability {
             boot_size,
             boot_title,
             current_mode: boot_mode,
+            window_inbox: window_claim.receiver,
+            kind_set_window_mode,
+            kind_set_window_title,
         };
 
         Ok(DesktopDriverRunning {

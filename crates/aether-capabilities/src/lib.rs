@@ -35,6 +35,7 @@ pub mod log;
 pub mod net;
 #[cfg(feature = "render")]
 pub mod render;
+pub mod window;
 
 #[cfg(feature = "audio")]
 pub use audio::AudioCapability;
@@ -60,3 +61,4 @@ pub use render::HeadlessRenderCapability;
 pub use render::RenderCapability;
 #[cfg(feature = "render-native")]
 pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
+pub use window::HeadlessWindowCapability;
