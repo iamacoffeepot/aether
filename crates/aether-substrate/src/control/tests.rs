@@ -150,6 +150,7 @@ fn make_plane() -> ControlPlane {
         input_subscribers: input::new_subscribers(),
         default_name_counter: Arc::new(AtomicU64::new(0)),
         chassis_handler: None,
+        log_drain: Arc::new(std::sync::OnceLock::new()),
     }
 }
 

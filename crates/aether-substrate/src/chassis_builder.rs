@@ -38,6 +38,9 @@ use crate::native_transport::NativeTransport;
 use crate::registry::Registry;
 use aether_actor::Actor;
 use aether_actor::Dispatch;
+use aether_actor::HandlesKind;
+use aether_data::mailbox_id_from_name;
+use aether_kinds::{ConfigureLogDrain, LogBatch};
 
 /// Failure mode raised by [`DriverRunning::run`].
 #[derive(Debug)]
@@ -472,6 +475,19 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     passives: Vec<PassiveBoot>,
     driver: Option<DriverBoot>,
     aborter: Arc<dyn FatalAborter>,
+    /// Issue #601: chassis-declared log-drain target. `None` until the
+    /// chassis calls [`Self::with_log_drain`]; on `build()` the
+    /// mailbox id is dispatched as `aether.control.configure_log_drain`
+    /// mail to every booted actor so each actor's `LogDrainSlot` is
+    /// installed. The same mail also goes to `aether.control` so the
+    /// [`crate::control::ControlPlane`]'s dispatch arm stores the
+    /// drain for the runtime `load_component` path — runtime-loaded
+    /// components receive `ConfigureLogDrain` themselves on
+    /// registration. The chassis Builder declares the drain; the
+    /// runtime state lives entirely in `ControlPlane` and per-actor
+    /// `LogDrainSlot`s, set the same way every actor's slot is set:
+    /// via mail.
+    log_drain: Option<MailboxId>,
     _chassis: PhantomData<fn() -> C>,
     _state: PhantomData<fn() -> S>,
 }
@@ -489,6 +505,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             passives: Vec::new(),
             driver: None,
             aborter: Arc::new(PanicAborter),
+            log_drain: None,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -554,6 +571,26 @@ impl<C: Chassis> Builder<C, NoDriver> {
         self
     }
 
+    /// Issue #601: declare the chassis-wide log drain target. `T` must
+    /// be a [`NativeActor`] that handles [`LogBatch`] (the cap's
+    /// mailbox id is derived from `T::NAMESPACE` at compile time).
+    /// On `build()` / `build_passive()` the chassis dispatches a
+    /// `aether.control.configure_log_drain` mail to every booted actor
+    /// so each actor's `LogDrainSlot` resolves to this mailbox; the
+    /// auto-emitted handler in `#[actor]` does the install.
+    ///
+    /// No call → `log_drain` stays `None`, no `ConfigureLogDrain`
+    /// dispatched, actors keep their default unset slot, and
+    /// `drain_buffer` is a silent no-op (chassis intentionally
+    /// skipping logging).
+    pub fn with_log_drain<T>(mut self) -> Self
+    where
+        T: NativeActor + HandlesKind<LogBatch>,
+    {
+        self.log_drain = Some(mailbox_id_from_name(T::NAMESPACE));
+        self
+    }
+
     /// Supply the chassis's driver. Transitions to [`HasDriver`] —
     /// further `.driver(_)` calls are forbidden by the type system.
     /// Per ADR-0071 the driver type is fixed by `C::Driver`, so the
@@ -567,6 +604,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
             passives: self.passives,
             driver: self.driver,
             aborter: self.aborter,
+            log_drain: self.log_drain,
             _chassis: PhantomData,
             _state: PhantomData,
         }
@@ -577,13 +615,16 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// for driving the loop manually (TestBench).
     pub fn build_passive(self) -> Result<PassiveChassis<C>, BootError> {
         let booted = boot_passives(&self.registry, &self.mailer, &self.aborter, self.passives)?;
-        // Issue #581: finalise actor-aware logging by wiring the
-        // host-branch dispatch + log mailbox id once `LogCapability`
-        // has claimed `"aether.log"`. No-op if the chassis skipped
-        // the cap.
-        crate::log_install::install_log_target_if_registered(
-            Arc::clone(&self.mailer),
+        // Issue #601: push `ConfigureLogDrain` to every booted actor
+        // and to `aether.control` so every per-actor `LogDrainSlot`
+        // (auto-emitted handler) plus the `ControlPlane`'s drain slot
+        // (for the runtime load path) resolve to the chassis-declared
+        // target. No-op if the chassis didn't call `with_log_drain`.
+        dispatch_configure_log_drain(
             &self.registry,
+            &self.mailer,
+            &booted.claimed_actor_mailboxes,
+            self.log_drain,
         );
         Ok(PassiveChassis {
             booted,
@@ -622,6 +663,16 @@ impl<C: Chassis> Builder<C, HasDriver> {
         self
     }
 
+    /// Mirror of [`Builder::with_log_drain`][Builder<C, NoDriver>::with_log_drain]
+    /// for the post-driver state. Issue #601.
+    pub fn with_log_drain<T>(mut self) -> Self
+    where
+        T: NativeActor + HandlesKind<LogBatch>,
+    {
+        self.log_drain = Some(mailbox_id_from_name(T::NAMESPACE));
+        self
+    }
+
     /// Boot every passive in declaration order, then boot the driver
     /// against a [`DriverCtx`]. Any failure aborts the build and
     /// shuts down the passives that already booted (via
@@ -638,10 +689,16 @@ impl<C: Chassis> Builder<C, HasDriver> {
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
 
         let mut booted = boot_passives(&registry, &mailer, &aborter, passives)?;
-        // Issue #581: finalise actor-aware logging once passives
-        // have booted. Lookups `"aether.log"`; no-op if the cap
-        // wasn't registered (chassis intentionally skipping logging).
-        crate::log_install::install_log_target_if_registered(Arc::clone(&mailer), &registry);
+        // Issue #601: push `ConfigureLogDrain` to every booted actor
+        // and to `aether.control` so the runtime load path picks up
+        // the chassis-declared drain through the same mail every
+        // actor receives.
+        dispatch_configure_log_drain(
+            &registry,
+            &mailer,
+            &booted.claimed_actor_mailboxes,
+            self.log_drain,
+        );
         let driver_running = {
             let chassis_ctx = ChassisCtx::new(
                 &registry,
@@ -650,6 +707,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
                 &mut booted.frame_bound_pending,
                 &booted.frame_bound_set,
                 &booted.aborter,
+                &mut booted.claimed_actor_mailboxes,
             );
             let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.actors);
             driver_boot(&mut driver_ctx)?
@@ -691,6 +749,53 @@ struct BootedPassives {
     /// guard has somewhere to abort to. Inherited from the
     /// [`Builder`]'s configured aborter.
     aborter: Arc<dyn FatalAborter>,
+    /// Issue #601: every actor mailbox claimed during passive boot.
+    /// `Builder::build` / `build_passive` reads this list to dispatch
+    /// `ConfigureLogDrain` mail to each actor before the driver runs,
+    /// installing every actor's `LogDrainSlot` to the chassis-declared
+    /// drain.
+    claimed_actor_mailboxes: Vec<MailboxId>,
+}
+
+/// Issue #601: dispatch a `ConfigureLogDrain { mailbox: drain }` mail
+/// to every actor whose mailbox was claimed during boot, plus the
+/// well-known `aether.control` sink so the substrate's
+/// [`crate::control::ControlPlane`] can record the drain for the
+/// runtime `load_component` path. Called by `Builder::build` /
+/// `build_passive` after `boot_passives` returns. No-op if `drain` is
+/// `None` (chassis didn't declare a log target).
+///
+/// Sends through the same `Mailer` every other mail uses — every
+/// actor mailbox routes the envelope to the auto-emitted
+/// `ConfigureLogDrain` arm in `#[handlers]`, which installs the
+/// per-actor `LogDrainSlot`. `aether.control` routes through the
+/// `ControlPlane`'s explicit `ConfigureLogDrain` arm, which writes
+/// its own drain slot for `handle_load` to read.
+fn dispatch_configure_log_drain(
+    registry: &Arc<Registry>,
+    mailer: &Arc<Mailer>,
+    targets: &[MailboxId],
+    drain: Option<MailboxId>,
+) {
+    let Some(drain) = drain else {
+        return;
+    };
+    let kind = <ConfigureLogDrain as aether_data::Kind>::ID;
+    let mut recipients: Vec<MailboxId> = targets.to_vec();
+    // `aether.control` is registered by `SubstrateBoot::build` (a
+    // sink, not an actor claim), so it won't appear in the
+    // boot-tracked `claimed_actor_mailboxes` list. Look it up here so
+    // the runtime load path picks up the chassis-declared drain via
+    // the same mail flow every other recipient gets.
+    if let Some(control_id) = registry.lookup(crate::control::AETHER_CONTROL) {
+        recipients.push(control_id);
+    }
+    for target in recipients {
+        let cfg = ConfigureLogDrain { mailbox: drain };
+        let payload = bytemuck::bytes_of(&cfg).to_vec();
+        let mail = crate::mail::Mail::new(target, kind, payload, 1);
+        mailer.push(mail);
+    }
 }
 
 impl BootedPassives {
@@ -718,6 +823,7 @@ fn boot_passives(
     let mut actors = Actors::new();
     let mut frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)> = Vec::new();
     let frame_bound_set: Arc<RwLock<HashSet<MailboxId>>> = Arc::new(RwLock::new(HashSet::new()));
+    let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
     for boot in passives {
         let mut ctx = ChassisCtx::new(
             registry,
@@ -726,6 +832,7 @@ fn boot_passives(
             &mut frame_bound_pending,
             &frame_bound_set,
             aborter,
+            &mut claimed_actor_mailboxes,
         );
         match boot(&mut ctx, &mut actors) {
             Ok(shutdown) => shutdowns.push(shutdown),
@@ -744,6 +851,7 @@ fn boot_passives(
         frame_bound_pending,
         frame_bound_set,
         aborter: Arc::clone(aborter),
+        claimed_actor_mailboxes,
     })
 }
 

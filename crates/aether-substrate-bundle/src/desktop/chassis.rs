@@ -358,6 +358,7 @@ impl DesktopChassis {
             .with_actor::<NetCapability>(net)
             .with_actor::<AudioCapability>(audio)
             .with_actor::<RenderCapability>(RenderConfig::default())
+            .with_log_drain::<LogCapability>()
             .driver(driver)
             .build()
     }

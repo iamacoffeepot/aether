@@ -234,6 +234,7 @@ impl HeadlessChassis {
             .with_actor::<LogCapability>(())
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<NetCapability>(net)
+            .with_log_drain::<LogCapability>()
             .driver(driver)
             .build()
     }

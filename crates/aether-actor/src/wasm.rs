@@ -425,7 +425,7 @@ macro_rules! __export_internal {
             $crate::log::install_wasm_subscriber();
             let mut ctx: $crate::WasmInitCtx<'_> =
                 $crate::WasmInitCtx::__new(&$crate::WASM_TRANSPORT, mailbox_id);
-            match <$component as $crate::WasmActor>::init(&mut ctx) {
+            let status = match <$component as $crate::WasmActor>::init(&mut ctx) {
                 Ok(instance) => {
                     unsafe {
                         __AETHER_COMPONENT.set(instance);
@@ -443,7 +443,16 @@ macro_rules! __export_internal {
                     }
                     1
                 }
-            }
+            };
+            // Issue #598: flush any tracing events emitted during init
+            // so the substrate can surface them. The drain is a no-op
+            // until the chassis-pushed `ConfigureLogDrain` mail arrives
+            // and the auto-emitted handler installs `LogDrainSlot`;
+            // events buffered here drain at the *first* dispatched
+            // handler instead. Trap-during-init still loses events
+            // (handled separately via the panic hook).
+            $crate::log::drain_buffer();
+            status
         }
 
         /// # Safety
@@ -474,7 +483,13 @@ macro_rules! __export_internal {
             };
             let mut ctx: $crate::WasmCtx<'_> = $crate::WasmCtx::__new(&$crate::WASM_TRANSPORT);
             let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
-            instance.__aether_dispatch(&mut ctx, mail)
+            let status = instance.__aether_dispatch(&mut ctx, mail);
+            // Issue #598: ship buffered tracing events at handler exit.
+            // Pre-#601 only WARN/ERROR drained (priority flush in the
+            // layer); INFO/DEBUG/TRACE buffered indefinitely. With the
+            // exit drain every level surfaces predictably.
+            $crate::log::drain_buffer();
+            status
         }
 
         /// # Safety
@@ -493,6 +508,9 @@ macro_rules! __export_internal {
             let mut ctx: $crate::WasmDropCtx<'_> =
                 $crate::WasmDropCtx::__new(&$crate::WASM_TRANSPORT);
             $crate::__export_internal!(@on_replace $replaceable, $component, instance, ctx);
+            // Issue #598: drain buffered tracing events emitted from
+            // the swap hook before linear memory is replaced.
+            $crate::log::drain_buffer();
             0
         }
 
@@ -508,6 +526,11 @@ macro_rules! __export_internal {
             let mut ctx: $crate::WasmDropCtx<'_> =
                 $crate::WasmDropCtx::__new(&$crate::WASM_TRANSPORT);
             <$component as $crate::WasmActor>::on_drop(instance, &mut ctx);
+            // Issue #598: drain buffered tracing events from the
+            // teardown hook before linear memory is torn down. Last
+            // chance to surface anything the cap logged on its way
+            // out.
+            $crate::log::drain_buffer();
             0
         }
 
@@ -528,6 +551,8 @@ macro_rules! __export_internal {
             let mut ctx: $crate::WasmCtx<'_> = $crate::WasmCtx::__new(&$crate::WASM_TRANSPORT);
             let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
             $crate::__export_internal!(@on_rehydrate $replaceable, $component, instance, ctx, prior);
+            // Issue #598: drain rehydrate-time tracing events.
+            $crate::log::drain_buffer();
             0
         }
     };

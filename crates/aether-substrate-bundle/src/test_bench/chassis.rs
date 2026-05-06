@@ -276,6 +276,7 @@ impl TestBenchChassis {
                 .with_actor::<HandleCapability>(())
                 .with_actor::<LogCapability>(())
                 .with_actor::<RenderCapability>(render_config)
+                .with_log_drain::<LogCapability>()
                 .build_passive()
                 .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
 

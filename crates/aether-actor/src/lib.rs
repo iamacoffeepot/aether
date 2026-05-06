@@ -135,6 +135,13 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 pub mod __macro_internals {
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_data::{Kind, Schema};
+    /// Issue #601: `#[actor]` / `#[handlers]` auto-emit a synthetic
+    /// dispatch arm for `ConfigureLogDrain` so every actor accepts the
+    /// chassis's log-drain push without user code declaring a handler.
+    /// Re-exported here so the macro emits a path through `aether-actor`
+    /// and consumer crates aren't forced to depend on `aether-kinds`
+    /// directly.
+    pub use aether_kinds::ConfigureLogDrain;
 }
 
 /// ADR-0033 attribute macros and `Kind` / `Schema` derives, behind

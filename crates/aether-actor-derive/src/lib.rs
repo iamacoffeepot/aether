@@ -1925,6 +1925,29 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             .collect()
     };
 
+    // Issue #601: auto-emitted dispatch arm for the chassis-pushed
+    // `ConfigureLogDrain` mail. Runs before user handlers AND before
+    // the `#[fallback]` envelope check. For catch-all caps
+    // (BroadcastCapability) this means chassis log-drain config is
+    // installed inline and never re-broadcast through the fallback.
+    let auto_log_drain_arm = quote! {
+        if __aether_kind.0 == <
+            ::aether_actor::__macro_internals::ConfigureLogDrain
+            as ::aether_data::Kind
+        >::ID.0 {
+            if let ::core::option::Option::Some(__aether_cfg) =
+                <
+                    ::aether_actor::__macro_internals::ConfigureLogDrain
+                    as ::aether_data::Kind
+                >::decode_from_bytes(__aether_payload)
+            {
+                ::aether_actor::log::set_drain(__aether_cfg.mailbox);
+                return ::core::option::Option::Some(());
+            }
+            return ::core::option::Option::None;
+        }
+    };
+
     let dispatch_arms = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         let method_ident = &h.method.sig.ident;
@@ -2016,6 +2039,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                 __aether_kind: ::aether_substrate::mail::KindId,
                 __aether_payload: &[u8],
             ) -> ::core::option::Option<()> {
+                #auto_log_drain_arm
                 #(#dispatch_arms)*
                 ::core::option::Option::None
             }
@@ -2313,9 +2337,33 @@ fn build_dispatch_body(handlers: &[HandlerFn], fallback: Option<&FallbackFn>) ->
         None => quote! { ::aether_actor::DISPATCH_UNKNOWN_KIND },
     };
 
+    // Issue #601: auto-emitted dispatch arm for the chassis-pushed
+    // `ConfigureLogDrain` mail. Runs before user handlers and the
+    // fallback so it preempts catch-all `#[fallback]` actors (issue
+    // 576's BroadcastCapability would otherwise re-broadcast chassis
+    // config). Decodes the mail and installs the slot via
+    // `aether_actor::log::set_drain`; user code never declares this
+    // handler.
+    let auto_log_drain_arm = quote! {
+        if __aether_kind == <
+            ::aether_actor::__macro_internals::ConfigureLogDrain
+            as ::aether_actor::__macro_internals::Kind
+        >::ID.0 {
+            if let ::core::option::Option::Some(__aether_cfg) =
+                __aether_mail.decode_kind::<
+                    ::aether_actor::__macro_internals::ConfigureLogDrain
+                >()
+            {
+                ::aether_actor::log::set_drain(__aether_cfg.mailbox);
+            }
+            return ::aether_actor::DISPATCH_HANDLED;
+        }
+    };
+
     quote! {
         let __aether_kind = __aether_mail.kind();
         __aether_ctx.__set_reply_to(__aether_mail.reply_to());
+        #auto_log_drain_arm
         #( #arms )*
         #tail
     }

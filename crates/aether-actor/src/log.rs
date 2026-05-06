@@ -1,36 +1,39 @@
-//! Issue #581 unified actor-aware logging.
+//! Issue #581 unified actor-aware logging — actor-bound only.
 //!
-//! Single tracing path across wasm and native: every `tracing::*`
-//! event (and every `aether::log_*!` macro call) flows into the
-//! per-actor [`LogBuffer`] via [`Local`]. The chassis dispatcher
-//! drains the buffer at handler exit (and on `WARN`/`ERROR` priority
-//! flush) by calling [`drain_buffer`], which ships a [`LogBatch`] to
-//! the well-known `aether.log` mailbox owned by `LogCapability`
-//! (`aether-capabilities`).
+//! Per-actor `tracing::*` events buffer into [`LogBuffer`] (a
+//! [`Local`]); the chassis-pushed `ConfigureLogDrain` mail (auto-
+//! handled by every `#[handlers]` derive, issue #601) installs
+//! [`LogDrainSlot`] with the chassis-declared drain mailbox.
+//! [`drain_buffer`] reads both slots and ships a [`LogBatch`] to that
+//! mailbox at handler exit (and on `WARN`/`ERROR` priority flush
+//! within the layer). The chassis dispatcher stamps the actor's own
+//! transport-backed dispatch per handler via [`with_actor_dispatch`],
+//! so the egress runs through the actor's own send path.
 //!
-//! `aether-actor` knows nothing about `LogCapability` — the cap
-//! registers a [`MailDispatch`] impl + the `aether.log` mailbox id
-//! at install time via [`install_log_target`]; the chassis dispatcher
-//! stamps the actor's own transport-backed dispatch per handler via
-//! [`with_actor_dispatch`]. Both branches funnel through the same
-//! trait surface.
+//! There is no host branch. `tracing::*` events fired outside any
+//! actor stamp (substrate boot, scheduler thread, panic hook) do NOT
+//! enter the mail system — they hit stderr via the substrate's
+//! registered fmt::Layer for operator visibility but never reach
+//! `engine_logs`. The actor model's invariant is that every piece of
+//! engine logic eventually runs as an actor; the host-branch shortcut
+//! retired in issue #601 alongside `PROCESS` / `install_log_target` /
+//! `ship_host_event`. Code that wants to surface in `engine_logs`
+//! emits its events from inside an actor.
 //!
-//! Recursion guard: code inside [`drain_buffer`] / [`ship_host_event`]
-//! routes through `Mailer::push`, which can emit its own
+//! Recursion guard: code inside [`drain_buffer`] routes through the
+//! stamped transport's `send_mail`, which can emit its own
 //! `tracing::*` events (e.g. the `capability mailbox sender dropped`
 //! warn fired from a dead sink handler). Without a guard, those
-//! events re-enter the layer, push the actor's buffer, priority-
-//! flush at WARN, and recurse — observable as a stack overflow
-//! during chassis shutdown. The [`in_log_pipeline`] TLS flag
-//! short-circuits the actor-aware path while a drain or host-ship
-//! is in flight; events still flow to the registered `tsfmt::Layer`
-//! so operators see them on stderr.
+//! events re-enter the layer, push the actor's buffer, priority-flush
+//! at WARN, and recurse — observable as a stack overflow during
+//! shutdown. The [`is_in_pipeline`] TLS flag short-circuits the
+//! actor-aware path while a drain is in flight; events still flow to
+//! the registered fmt::Layer so operators see them on stderr.
 
 extern crate alloc;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::cell::Cell;
 use core::fmt::Write as _;
 
 use aether_data::{Kind, KindId, MailboxId};
@@ -46,7 +49,7 @@ use tracing::{
 #[cfg(target_arch = "wasm32")]
 use tracing::{Subscriber, span};
 
-use crate::Local;
+use crate::{Local, local};
 
 /// Per-actor log buffer, drained by the chassis dispatcher at
 /// handler exit and on `WARN`/`ERROR` priority flush. Backed by
@@ -57,17 +60,54 @@ pub struct LogBuffer(pub Vec<LogEvent>);
 
 impl Local for LogBuffer {}
 
-/// Mail egress hook the actor-aware layer + drain path call into.
-/// `aether-actor` never names `LogCapability` or `"aether.log"`;
-/// the cap installs an impl + mailbox id at boot and we stash both
-/// behind the [`install_log_target`] / [`with_actor_dispatch`]
-/// surface.
+/// Per-actor log drain target — the `aether.log` (or chassis-
+/// configured override) mailbox id [`drain_buffer`] ships
+/// [`LogBatch`] mails to. Issue #601: replaces the retired
+/// `PROCESS.log_mailbox` cell with a per-actor slot the chassis
+/// installs via the `aether.control.configure_log_drain` mail
+/// every actor's `#[handlers]` derive auto-handles.
+///
+/// Default `MailboxId(0)` — meaning "no drain configured." Until
+/// the chassis-pushed `ConfigureLogDrain` mail arrives, drain calls
+/// are no-ops, so init-body events buffer in [`LogBuffer`] without
+/// being shipped (they flush at the first handler exit, which is
+/// the `ConfigureLogDrain` handler installing this slot).
+#[derive(Default)]
+#[local]
+pub struct LogDrainSlot(pub MailboxId);
+
+/// Install `mailbox` as this actor's log drain target. Called from
+/// the `#[handlers]`-derived `ConfigureLogDrain` handler the chassis
+/// dispatches at instantiation; user code never names this directly.
+///
+/// Idempotent — overwriting is fine; the chassis sends one
+/// `ConfigureLogDrain` per actor at boot, and a future per-actor
+/// override extension would call this from the actor's own init.
+pub fn set_drain(mailbox: MailboxId) {
+    let _ = LogDrainSlot::try_with_mut(|s| s.0 = mailbox);
+}
+
+/// The currently-installed drain mailbox for the active actor, if
+/// any. Returns `None` when no actor is stamped (host code, panic
+/// hook) or when the slot is still at its default `MailboxId(0)`
+/// (chassis hasn't dispatched `ConfigureLogDrain` yet, or chassis
+/// declared no drain).
+pub fn current_drain() -> Option<MailboxId> {
+    let raw = LogDrainSlot::try_with(|s| s.0)?;
+    if raw.0 == 0 { None } else { Some(raw) }
+}
+
+/// Mail egress hook the actor-aware drain path call into. The
+/// chassis stamps an actor's transport per-handler via
+/// [`with_actor_dispatch`]; [`drain_buffer`] reads the stamp to
+/// route the actor's [`LogBatch`] through the same transport every
+/// other outbound `send` uses. `aether-actor` doesn't name
+/// `LogCapability` — the destination mailbox is per-actor-stamped via
+/// [`LogDrainSlot`] (issue #601).
 pub trait MailDispatch: Send + Sync {
     /// Push `payload` (already postcard-encoded `LogBatch` bytes) to
-    /// the registered log mailbox. Implementer attaches the actor's
-    /// sender id automatically (when the dispatch wraps the actor's
-    /// own transport) or `None` (when the dispatch wraps the
-    /// substrate's process-global mailer for host-branch events).
+    /// `mailbox`. The implementer's `send_mail` attaches the actor's
+    /// sender id automatically.
     fn send(&self, mailbox: MailboxId, kind: KindId, payload: &[u8]);
 }
 
@@ -83,47 +123,6 @@ where
     fn send(&self, mailbox: MailboxId, kind: KindId, payload: &[u8]) {
         let _ = crate::transport::MailTransport::send_mail(self, mailbox.0, kind.0, payload, 1);
     }
-}
-
-/// Process-global host-branch dispatch + the registered `aether.log`
-/// mailbox id. Set once by [`install_log_target`]; the actor-aware
-/// layer reads them when a `tracing::*` event fires outside any
-/// actor's dispatch (substrate boot, scheduler, panic hook).
-///
-/// `Sync` is justified by the install contract: only the first
-/// [`install_log_target`] call mutates the cells, and that call
-/// happens on the boot thread before any subscriber observes them
-/// (see ADR-0023's `log_capture::init` predecessor for precedent).
-struct ProcessGlobals {
-    host: Cell<Option<&'static dyn MailDispatch>>,
-    log_mailbox: Cell<u64>,
-}
-
-unsafe impl Sync for ProcessGlobals {}
-
-static PROCESS: ProcessGlobals = ProcessGlobals {
-    host: Cell::new(None),
-    log_mailbox: Cell::new(0),
-};
-
-/// Install the registered log target — the `aether.log` mailbox id
-/// and the host-branch dispatch the actor-aware layer hits when a
-/// `tracing::*` event fires outside an actor's dispatch.
-///
-/// Idempotent: only the first call wins; subsequent calls are
-/// no-ops (substrate / wasm install paths may both reach this; the
-/// first one to win is the source of truth).
-pub fn install_log_target(host: &'static dyn MailDispatch, mailbox: MailboxId) {
-    if PROCESS.host.get().is_some() {
-        return;
-    }
-    PROCESS.host.set(Some(host));
-    PROCESS.log_mailbox.set(mailbox.0);
-}
-
-fn registered_log_mailbox() -> Option<MailboxId> {
-    let raw = PROCESS.log_mailbox.get();
-    if raw == 0 { None } else { Some(MailboxId(raw)) }
 }
 
 /// Native-only per-handler dispatch stamp. Wasm runs single-
@@ -183,9 +182,11 @@ pub fn with_actor_dispatch<R>(dispatch: &dyn MailDispatch, f: impl FnOnce() -> R
 }
 
 /// Pop the current actor's [`LogBuffer`] and ship the contents as
-/// one [`LogBatch`] mail to the registered target. No-op when the
-/// buffer is empty, the log target is unregistered, or (on native)
-/// no [`with_actor_dispatch`] is active.
+/// one [`LogBatch`] mail to the configured target. No-op when the
+/// buffer is empty, the [`LogDrainSlot`] is still at its default
+/// (chassis hasn't dispatched `ConfigureLogDrain` yet, or chassis
+/// declared no drain), or (on native) no [`with_actor_dispatch`] is
+/// active.
 pub fn drain_buffer() {
     let entries = match LogBuffer::try_with_mut(|b| core::mem::take(&mut b.0)) {
         Some(es) => es,
@@ -194,7 +195,12 @@ pub fn drain_buffer() {
     if entries.is_empty() {
         return;
     }
-    let Some(mailbox) = registered_log_mailbox() else {
+    // Issue #601: read the per-actor `LogDrainSlot` instead of the
+    // retired `PROCESS.log_mailbox` cell. The chassis-pushed
+    // `ConfigureLogDrain` mail (auto-handled by every `#[handlers]`
+    // derive) installs the slot at the actor's first dispatched
+    // handler.
+    let Some(mailbox) = current_drain() else {
         return;
     };
     let batch = LogBatch { entries };
@@ -216,13 +222,15 @@ pub fn drain_buffer() {
 }
 
 /// Re-entry guard for the log pipeline. While set, [`is_in_pipeline`]
-/// returns `true` and the actor-aware tracing layer skips the in-
-/// actor and host branches (events still reach the registered
-/// `tsfmt::Layer` for stderr). The guard wraps every code path that
-/// might trigger a `tracing::*` event from inside the egress
-/// machinery — chiefly [`drain_buffer`] / [`ship_host_event`], whose
-/// `Mailer::push` ↦ sink-handler chain emits its own warns when a
-/// recipient is dead.
+/// returns `true` and the actor-aware tracing layer skips its
+/// in-actor branch (events still reach the registered `tsfmt::Layer`
+/// for stderr). The guard wraps the [`drain_buffer`] code path,
+/// whose `MailDispatch::send` ↦ sink-handler chain can emit its own
+/// `tracing::*` events (e.g. the `capability mailbox sender dropped`
+/// warn fired from a dead sink handler). Without the guard, those
+/// events re-enter the layer, push the actor's buffer, priority-
+/// flush at WARN, and recurse — observable as a stack overflow
+/// during shutdown.
 #[cfg(not(target_arch = "wasm32"))]
 mod pipeline_tls {
     extern crate std;
@@ -281,27 +289,6 @@ fn ship_batch_via_wasm_transport(mailbox: MailboxId, batch: LogBatch) {
         Err(_) => return,
     };
     crate::WASM_TRANSPORT.send_mail(mailbox.0, <LogBatch as Kind>::ID.0, &bytes, 1);
-}
-
-/// Ship a single host-emitted event through the registered host
-/// dispatch. Called by the actor-aware layer when `tracing::*`
-/// fires outside any actor's dispatch (substrate boot, scheduler,
-/// panic hook). No-op if [`install_log_target`] hasn't run yet.
-pub fn ship_host_event(entry: LogEvent) {
-    let Some(host) = PROCESS.host.get() else {
-        return;
-    };
-    let Some(mailbox) = registered_log_mailbox() else {
-        return;
-    };
-    let _guard = PipelineGuard::enter();
-    ship_batch(
-        host,
-        mailbox,
-        LogBatch {
-            entries: alloc::vec![entry],
-        },
-    );
 }
 
 fn ship_batch(dispatch: &dyn MailDispatch, mailbox: MailboxId, batch: LogBatch) {

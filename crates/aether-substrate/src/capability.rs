@@ -281,6 +281,18 @@ pub struct ChassisCtx<'a> {
     /// [`ChassisBuilder::with_aborter`] /
     /// [`crate::chassis_builder::Builder::with_aborter`].
     aborter: &'a Arc<dyn FatalAborter>,
+    /// Issue #601: every actor-mailbox claim (`claim_mailbox_*`,
+    /// `claim_frame_bound_mailbox_*`, `claim_mailbox_drop_on_shutdown_*`)
+    /// appends its `MailboxId` here. The chassis builder reads the
+    /// list after `boot_passives` to dispatch
+    /// `aether.control.configure_log_drain` mail to each booted actor
+    /// so its `LogDrainSlot` resolves to the chassis's declared drain
+    /// (`Builder::with_log_drain<T>()`).
+    ///
+    /// Sink-only registrations (e.g. `AETHER_DIAGNOSTICS`) go through
+    /// `Registry::register_sink` directly and do *not* land here —
+    /// they're not actors and have no `LogDrainSlot` to install.
+    claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
 }
 
 impl<'a> ChassisCtx<'a> {
@@ -293,6 +305,7 @@ impl<'a> ChassisCtx<'a> {
         frame_bound_pending: &'a mut Vec<(MailboxId, Arc<AtomicU64>)>,
         frame_bound_set: &'a Arc<RwLock<HashSet<MailboxId>>>,
         aborter: &'a Arc<dyn FatalAborter>,
+        claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
     ) -> Self {
         Self {
             registry,
@@ -301,6 +314,7 @@ impl<'a> ChassisCtx<'a> {
             frame_bound_pending,
             frame_bound_set,
             aborter,
+            claimed_actor_mailboxes,
         }
     }
 
@@ -358,6 +372,7 @@ impl<'a> ChassisCtx<'a> {
                 },
             ),
         )?;
+        self.claimed_actor_mailboxes.push(id);
         Ok(MailboxClaim { id, receiver: rx })
     }
 
@@ -431,6 +446,7 @@ impl<'a> ChassisCtx<'a> {
                 },
             ),
         )?;
+        self.claimed_actor_mailboxes.push(id);
         Ok(DropOnShutdownClaim {
             id,
             receiver: rx,
@@ -519,6 +535,7 @@ impl<'a> ChassisCtx<'a> {
         // read-lock — without each transport having to scan the
         // pending-counter Vec on every check.
         self.frame_bound_set.write().unwrap().insert(id);
+        self.claimed_actor_mailboxes.push(id);
         Ok(FrameBoundClaim {
             id,
             receiver: rx,
@@ -1029,6 +1046,11 @@ impl ChassisBuilder {
         let mut frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)> = Vec::new();
         let frame_bound_set: Arc<RwLock<HashSet<MailboxId>>> =
             Arc::new(RwLock::new(HashSet::new()));
+        // Issue #601: legacy `ChassisBuilder` boot path doesn't carry a
+        // `log_drain` configuration (the new `chassis_builder::Builder`
+        // owns that surface). Track claims here for shape parity with
+        // the new path; the vec stays unused.
+        let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
         let mut booted: Vec<Box<dyn ActorErased>> = Vec::with_capacity(pending.len());
         for boot in pending {
             let mut ctx = ChassisCtx::new(
@@ -1038,6 +1060,7 @@ impl ChassisBuilder {
                 &mut frame_bound_pending,
                 &frame_bound_set,
                 &aborter,
+                &mut claimed_actor_mailboxes,
             );
             match boot(&mut ctx) {
                 Ok(actor) => booted.push(actor),
@@ -1054,10 +1077,15 @@ impl ChassisBuilder {
                 }
             }
         }
-        // Issue #581: legacy chassis-builder path also finalises
-        // the host-branch log dispatch. Same shape as the typed
-        // `Builder::build` path.
-        crate::log_install::install_log_target_if_registered(Arc::clone(&mailer), &registry);
+        // Issue #601 retired the host-branch dispatch shortcut. The
+        // legacy chassis-builder path used to wire a process-global
+        // egress here so out-of-actor `tracing::*` events surfaced
+        // in `engine_logs`; the new model is "log iff the emitter is
+        // an actor," so legacy callers either migrate to the
+        // `chassis_builder::Builder` path (which carries
+        // `with_log_drain<T>()` + per-actor `LogDrainSlot` through
+        // mail) or accept that out-of-actor events stay on stderr
+        // only. No install dance to run.
         Ok(BootedChassis {
             running: booted,
             _fallback: fallback,
@@ -1158,6 +1186,7 @@ impl BootedChassis {
     where
         C: Actor + Dispatch + Send + 'static,
     {
+        let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
         let mut ctx = ChassisCtx::new(
             registry,
             mailer,
@@ -1165,9 +1194,16 @@ impl BootedChassis {
             &mut self.frame_bound_pending,
             &self.frame_bound_set,
             &self.aborter,
+            &mut claimed_actor_mailboxes,
         );
         let handle = ctx.spawn_actor_dispatcher(cap)?;
         self.running.push(Box::new(handle));
+        // Issue #601: post-build `add` doesn't have access to a
+        // chassis-declared log_drain; runtime drain configuration via
+        // `ConfigureLogDrain` lands when the post-build dispatch path
+        // grows that surface. For now the claimed mailboxes are
+        // tracked-but-not-dispatched.
+        let _ = claimed_actor_mailboxes;
         Ok(())
     }
 
@@ -1186,6 +1222,7 @@ impl BootedChassis {
     where
         A: crate::NativeActor + crate::NativeDispatch,
     {
+        let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
         let mut ctx = ChassisCtx::new(
             registry,
             mailer,
@@ -1193,9 +1230,13 @@ impl BootedChassis {
             &mut self.frame_bound_pending,
             &self.frame_bound_set,
             &self.aborter,
+            &mut claimed_actor_mailboxes,
         );
         let erased = boot_native_actor::<A>(&mut ctx, config)?;
         self.running.push(erased);
+        // Same disposition as `add` above — runtime log-drain dispatch
+        // is a follow-up.
+        let _ = claimed_actor_mailboxes;
         Ok(())
     }
 

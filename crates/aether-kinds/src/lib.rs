@@ -600,6 +600,30 @@ mod control_plane {
         Err { error: String },
     }
 
+    /// `aether.control.configure_log_drain` — chassis-pushed mail every
+    /// actor handles to pick up the configured log drain mailbox
+    /// (issue #601). The chassis dispatches one of these to every
+    /// freshly-instantiated actor before any other inbound mail; the
+    /// SDK's `#[actor]` / `#[handlers]` derive auto-emits a handler
+    /// that installs `mailbox` into the per-actor `LogDrainSlot` so
+    /// `aether-actor::log::drain_buffer` knows where to ship the
+    /// `LogBatch`. Cast-shape — one `MailboxId`, fixed size.
+    ///
+    /// Fire-and-forget; no reply. If the chassis didn't declare a
+    /// drain via `Builder::with_log_drain<T>()` no `ConfigureLogDrain`
+    /// is dispatched and the slot stays at its default (`MailboxId(0)`,
+    /// drain disabled).
+    use bytemuck::{Pod, Zeroable};
+
+    #[repr(C)]
+    #[derive(
+        Copy, Clone, Debug, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
+    )]
+    #[kind(name = "aether.control.configure_log_drain")]
+    pub struct ConfigureLogDrain {
+        pub mailbox: aether_data::MailboxId,
+    }
+
     /// `aether.control.capture_frame` — request the substrate grab the
     /// current frame contents and reply-to-sender with an encoded
     /// PNG. Carries two optional bundles: `mails` dispatched *before*
