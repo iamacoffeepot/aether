@@ -23,8 +23,6 @@ use crate::hub::wire::EngineId;
 use tokio::process::{Child, Command};
 use tokio::sync::oneshot;
 
-use crate::hub::registry::EngineRegistry;
-
 /// Default grace period the hub waits for a spawned substrate to
 /// complete its `Hello` handshake before declaring the spawn failed.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -159,10 +157,15 @@ impl PendingSpawns {
 /// substrate's `Hello` frame can fulfil the registered slot keyed
 /// on the child's PID.
 ///
-/// Callers pick between this and [`spawn_substrate`]: this returns
-/// the `Child` for the cap to own (ADR-0078); [`spawn_substrate`]
-/// adopts it into the registry side-map for the bespoke pre-cap
-/// MCP coordinator path. Both share this body up to the handshake.
+/// Returns both the freshly minted `EngineId` and the live `Child`
+/// so [`crate::hub::process_capability::ProcessCapability`] can park
+/// the handle in its cap-local children map and tokio-spawn a per-
+/// child reaper task that converts `Child::wait` completion into
+/// [`aether_kinds::ProcessExited`] broadcast mail (ADR-0078 Phase 1).
+///
+/// Pre-PR-597 a sibling `spawn_substrate` wrapper also adopted into
+/// `EngineRegistry::spawned_children`. That wrapper retired alongside
+/// the registry side-map once the cap took over child ownership.
 pub async fn spawn_substrate_no_adopt(
     opts: SpawnOpts,
     hub_engine_addr: SocketAddr,
@@ -200,25 +203,6 @@ pub async fn spawn_substrate_no_adopt(
             Err(SpawnError::HandshakeTimeout(opts.handshake_timeout))
         }
     }
-}
-
-/// Spawn a substrate binary as a child process, wait for its `Hello`
-/// handshake, and adopt the `Child` into the engine registry so the
-/// child's lifetime is tied to the engine record. Returns the freshly
-/// minted `EngineId` on success; on any failure the child is killed
-/// before returning.
-///
-/// `hub_engine_addr` is the address the child should dial to reach the
-/// hub — it's injected as `AETHER_HUB_URL` in the child's environment.
-pub async fn spawn_substrate(
-    opts: SpawnOpts,
-    hub_engine_addr: SocketAddr,
-    pending: &PendingSpawns,
-    engines: &EngineRegistry,
-) -> Result<EngineId, SpawnError> {
-    let (engine_id, child) = spawn_substrate_no_adopt(opts, hub_engine_addr, pending).await?;
-    engines.adopt_child(engine_id, child);
-    Ok(engine_id)
 }
 
 /// Outcome of `terminate_substrate`. `sigkilled` is `true` if the
@@ -315,14 +299,13 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn spawn_times_out_when_child_never_handshakes() {
+    async fn spawn_no_adopt_times_out_when_child_never_handshakes() {
         // /bin/sh + sleep is present on macOS and every Linux we care
         // about. We point AETHER_HUB_URL at an unreachable address so
         // even if the child tried to dial back, it would fail — the
         // shape we actually test is that the pending entry times out,
         // the helper returns HandshakeTimeout, and no child leaks.
         let pending = PendingSpawns::new();
-        let engines = EngineRegistry::new();
         let opts = SpawnOpts {
             binary_path: PathBuf::from("/bin/sh"),
             args: vec!["-c".into(), "sleep 60".into()],
@@ -332,7 +315,7 @@ mod tests {
         let unreachable: SocketAddr = "127.0.0.1:1".parse().unwrap();
 
         let start = std::time::Instant::now();
-        let err = spawn_substrate(opts, unreachable, &pending, &engines)
+        let err = spawn_substrate_no_adopt(opts, unreachable, &pending)
             .await
             .expect_err("expected timeout");
         assert!(matches!(err, SpawnError::HandshakeTimeout(_)), "{err:?}");
