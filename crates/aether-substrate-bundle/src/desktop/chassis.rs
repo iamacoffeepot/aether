@@ -22,13 +22,9 @@ use aether_capabilities::{
     io::NamespaceRoots, net::NetConfig as NetConf,
 };
 use aether_data::Kind;
-use aether_kinds::{
-    Advance, PlatformInfo, SetWindowMode, SetWindowModeResult, SetWindowTitle,
-    SetWindowTitleResult, WindowMode,
-};
+use aether_kinds::{Advance, PlatformInfo, WindowMode};
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
-use aether_substrate::control_helpers::decode_payload;
 use aether_substrate::{
     Chassis, HubOutbound, ReplyTo, SubstrateBoot,
     capture::{CaptureQueue, reply_unsupported_advance},
@@ -39,8 +35,12 @@ use super::driver::{DesktopDriverCapability, WORKERS, parse_window_mode_env};
 
 /// Event the event-loop thread consumes from the desktop chassis.
 /// Either a chassis-originated request for work that needs winit/wgpu
-/// context (platform info, window mode, capture) or a wake-up so the
-/// loop picks up a queued capture on the next redraw.
+/// context (platform info, capture) or a wake-up so the loop picks up
+/// a queued capture on the next redraw.
+///
+/// `aether.window.set_mode` / `aether.window.set_title` (issue 603
+/// Phase 3) don't ride this enum any more — the desktop driver claims
+/// `aether.window` directly and drains the inbox in `about_to_wait`.
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     /// A capture was just enqueued on `CaptureQueue`; wake the loop
@@ -50,110 +50,45 @@ pub enum UserEvent {
     /// An MCP session asked for a `platform_info` snapshot. The
     /// event-loop thread snapshots + replies via outbound.
     PlatformInfo { reply_to: ReplyTo },
-    /// An MCP session asked to switch the window mode. The event
-    /// loop resolves fullscreen modes against the current monitor,
-    /// applies the change, and replies with the new state.
-    SetWindowMode {
-        reply_to: ReplyTo,
-        mode: WindowMode,
-        width: Option<u32>,
-        height: Option<u32>,
-    },
-    /// An MCP session asked to update the window title. The event
-    /// loop calls `Window::set_title` and echoes the applied title
-    /// back on the reply. A missing window (before `resumed`) replies
-    /// with an `Err`.
-    SetWindowTitle { reply_to: ReplyTo, title: String },
 }
 
 /// Build the `ChassisControlHandler` closure desktop installs on
-/// `ControlPlane::chassis_handler`. Captures the handles each
-/// chassis-specific kind needs: the event-loop proxy for hand-off to
-/// winit/wgpu context; the capture queue for render-thread handoff;
-/// the registry + queue for capture_frame's mail-bundle orchestration;
-/// the outbound handle for inline error replies.
+/// `ControlPlane::chassis_handler`. Today only `platform_info` and
+/// `advance` ride here — `set_window_mode` / `set_window_title` moved
+/// to the driver-as-actor `aether.window` mailbox in issue 603 Phase 3,
+/// `capture_frame` to `RenderCapability` in Phase 2, and Phase 4 will
+/// retire `platform_info` and the closure itself.
 pub fn chassis_control_handler(
     proxy: EventLoopProxy<UserEvent>,
     outbound: Arc<HubOutbound>,
 ) -> ChassisControlHandler {
     Arc::new(
-        move |kind: aether_data::KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| match kind
-        {
-            PlatformInfo::ID => {
-                // Empty payload; forward the sender straight to the
-                // event loop and let it snapshot + reply on its own
-                // thread (winit monitor / scale-factor APIs require it).
-                let _ = proxy.send_event(UserEvent::PlatformInfo { reply_to: sender });
-            }
-            SetWindowMode::ID => {
-                handle_set_window_mode(&proxy, &outbound, sender, bytes);
-            }
-            SetWindowTitle::ID => {
-                handle_set_window_title(&proxy, &outbound, sender, bytes);
-            }
-            Advance::ID => {
-                reply_unsupported_advance(
-                    &outbound,
-                    sender,
-                    "unsupported on desktop chassis — aether.test_bench.advance is \
-                     test-bench-only (ADR-0067)",
-                );
-            }
-            _ => {
-                tracing::warn!(
-                    target: "aether_substrate::chassis",
-                    kind = %kind_name,
-                    "desktop chassis has no handler for control kind — dropping",
-                );
+        move |kind: aether_data::KindId, kind_name: &str, sender: ReplyTo, _bytes: &[u8]| {
+            match kind {
+                PlatformInfo::ID => {
+                    // Empty payload; forward the sender straight to the
+                    // event loop and let it snapshot + reply on its own
+                    // thread (winit monitor / scale-factor APIs require it).
+                    let _ = proxy.send_event(UserEvent::PlatformInfo { reply_to: sender });
+                }
+                Advance::ID => {
+                    reply_unsupported_advance(
+                        &outbound,
+                        sender,
+                        "unsupported on desktop chassis — aether.test_bench.advance is \
+                         test-bench-only (ADR-0067)",
+                    );
+                }
+                _ => {
+                    tracing::warn!(
+                        target: "aether_substrate::chassis",
+                        kind = %kind_name,
+                        "desktop chassis has no handler for control kind — dropping",
+                    );
+                }
             }
         },
     )
-}
-
-/// Decode + forward to the event loop. Applying the mode requires
-/// winit APIs that only live on the main thread, so this handler
-/// doesn't reply inline on the happy path — the event loop does.
-fn handle_set_window_mode(
-    proxy: &EventLoopProxy<UserEvent>,
-    outbound: &HubOutbound,
-    sender: ReplyTo,
-    bytes: &[u8],
-) {
-    let payload: SetWindowMode = match decode_payload(bytes) {
-        Ok(p) => p,
-        Err(error) => {
-            outbound.send_reply(sender, &SetWindowModeResult::Err { error });
-            return;
-        }
-    };
-    let _ = proxy.send_event(UserEvent::SetWindowMode {
-        reply_to: sender,
-        mode: payload.mode,
-        width: payload.width,
-        height: payload.height,
-    });
-}
-
-/// Decode + forward to the event loop. `Window::set_title` needs to
-/// run on the main thread on every winit platform, so the same
-/// event-loop proxy hand-off `set_window_mode` uses.
-fn handle_set_window_title(
-    proxy: &EventLoopProxy<UserEvent>,
-    outbound: &HubOutbound,
-    sender: ReplyTo,
-    bytes: &[u8],
-) {
-    let payload: SetWindowTitle = match decode_payload(bytes) {
-        Ok(p) => p,
-        Err(error) => {
-            outbound.send_reply(sender, &SetWindowTitleResult::Err { error });
-            return;
-        }
-    };
-    let _ = proxy.send_event(UserEvent::SetWindowTitle {
-        reply_to: sender,
-        title: payload.title,
-    });
 }
 
 /// Marker type for the desktop chassis. Carries no fields — the

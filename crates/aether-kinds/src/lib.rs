@@ -845,7 +845,7 @@ mod control_plane {
         },
     }
 
-    /// `aether.control.set_window_mode` — switch the substrate's
+    /// `aether.window.set_mode` — switch the substrate's
     /// window presentation mode. `width` / `height` apply only when
     /// `mode == Windowed`; fullscreen modes size themselves from the
     /// monitor / requested video mode. Reply carries the new state
@@ -857,7 +857,7 @@ mod control_plane {
     /// height, refresh_mhz)` triple exactly. Use `platform_info`
     /// first to enumerate supported modes.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.set_window_mode")]
+    #[kind(name = "aether.window.set_mode")]
     pub struct SetWindowMode {
         pub mode: WindowMode,
         pub width: Option<u32>,
@@ -869,7 +869,7 @@ mod control_plane {
     /// request was rejected (unknown video mode, window not ready,
     /// etc.) with no state change.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.set_window_mode_result")]
+    #[kind(name = "aether.window.set_mode_result")]
     pub enum SetWindowModeResult {
         Ok {
             mode: WindowMode,
@@ -881,7 +881,7 @@ mod control_plane {
         },
     }
 
-    /// `aether.control.set_window_title` — update the substrate
+    /// `aether.window.set_title` — update the substrate
     /// window's title at runtime. `winit::Window::set_title` is
     /// infallible on every supported platform, so the desktop reply
     /// always echoes the applied title back on `Ok`. Headless and hub
@@ -889,7 +889,7 @@ mod control_plane {
     /// Boot-time default comes from `AETHER_WINDOW_TITLE`; unset falls
     /// back to the substrate's name.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.set_window_title")]
+    #[kind(name = "aether.window.set_title")]
     pub struct SetWindowTitle {
         pub title: String,
     }
@@ -900,7 +900,7 @@ mod control_plane {
     /// chassis that don't own a window (headless, hub) or for a
     /// pre-window-ready request.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.set_window_title_result")]
+    #[kind(name = "aether.window.set_title_result")]
     pub enum SetWindowTitleResult {
         Ok { title: String },
         Err { error: String },
@@ -1573,16 +1573,10 @@ mod tests {
             PlatformInfoResult::NAME,
             "aether.control.platform_info_result"
         );
-        assert_eq!(SetWindowMode::NAME, "aether.control.set_window_mode");
-        assert_eq!(
-            SetWindowModeResult::NAME,
-            "aether.control.set_window_mode_result"
-        );
-        assert_eq!(SetWindowTitle::NAME, "aether.control.set_window_title");
-        assert_eq!(
-            SetWindowTitleResult::NAME,
-            "aether.control.set_window_title_result"
-        );
+        assert_eq!(SetWindowMode::NAME, "aether.window.set_mode");
+        assert_eq!(SetWindowModeResult::NAME, "aether.window.set_mode_result");
+        assert_eq!(SetWindowTitle::NAME, "aether.window.set_title");
+        assert_eq!(SetWindowTitleResult::NAME, "aether.window.set_title_result");
         assert_eq!(Camera::NAME, "aether.camera");
         // ADR-0066: aether.camera.{create,destroy,set_active,set_mode,
         // orbit.set,topdown.set} kind-name asserts live in
