@@ -265,7 +265,6 @@ dependencies = [
  "cpal",
  "crossbeam-queue",
  "dirs",
- "log",
  "png",
  "postcard",
  "serde",
