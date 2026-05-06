@@ -18,6 +18,14 @@
 // stance (see `hub_client.rs`). Wakeup is a `Condvar` poked when the
 // ring crosses the batch threshold; otherwise the timer fires every
 // 250 ms.
+//
+// Issue #583: [`emit_decoded`] is a direct-emit path for already-
+// decoded `aether.log` mail that bypasses `tracing::dispatcher`
+// entirely — it writes to stderr and pushes the ring without going
+// back through `log::log!()` → `tracing-log` → the global subscriber.
+// `LogCapability` calls it instead of routing through the dispatcher
+// so the actor-aware subscriber issue #581 will install can't catch
+// the cap's own emissions and recurse back into the cap.
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -27,6 +35,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::outbound::{LogEntry, LogLevel};
+use aether_kinds::LogEvent;
+use tracing::level_filters::LevelFilter;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::field::Visit;
@@ -72,8 +82,17 @@ static CAPTURE: OnceLock<Arc<Inner>> = OnceLock::new();
 /// substrate boot.
 pub fn init(outbound: Arc<HubOutbound>) {
     let filter = EnvFilter::try_from_env(FILTER_ENV).unwrap_or_else(|_| EnvFilter::new("info"));
+    // Issue #583: derive the direct-emit threshold from the same env
+    // before the filter is moved into the registry. `max_level_hint`
+    // is the most-permissive level any directive in the env enables;
+    // per-target narrowing (e.g. `wgpu=warn`) intentionally widens
+    // rather than narrows the direct path — guests rarely match
+    // operator tuning targets and a target-aware filter would couple
+    // this path back to `tracing::Metadata`'s `&'static str` target
+    // requirement.
+    let direct_min_level = level_filter_to_log_level(filter.max_level_hint());
 
-    let inner = Arc::new(Inner::new(outbound));
+    let inner = Arc::new(Inner::new(outbound, direct_min_level));
     let capture = CaptureLayer {
         inner: Arc::clone(&inner),
     };
@@ -114,6 +133,113 @@ pub fn flush_now() {
     }
 }
 
+/// Direct-emit path for already-decoded `aether.log` mail (issue #583).
+///
+/// Bypasses [`tracing::dispatcher`] entirely. The event is filtered
+/// against the same `AETHER_LOG_FILTER` env that gates the global
+/// `EnvFilter` (see [`init`]), then written:
+///
+/// 1. to `stderr` in `[unix_ms] LEVEL target: message` form, and
+/// 2. into the engine_logs ring via [`Inner::push`] — same rotation
+///    and per-line cap as host-emitted tracing events.
+///
+/// This is the substrate-side hook
+/// [`crate::capabilities::log::LogCapability`] calls so guest log
+/// events stop round-tripping through `log::log!()` →
+/// `tracing-log` → the global subscriber. Issue #581's actor-aware
+/// subscriber would otherwise catch the cap's own emissions and
+/// recurse back into the cap.
+///
+/// Filter handling: `AETHER_LOG_FILTER`'s most-permissive directive
+/// level (computed at `init` via [`EnvFilter::max_level_hint`]) is
+/// the threshold. Per-target narrowing rules in the env (e.g.
+/// `wgpu=warn`) widen rather than narrow this path — see the comment
+/// in [`init`] for the rationale.
+///
+/// No-op if [`init`] hasn't been called (no global subscriber, no
+/// ring). Safe to call from any thread.
+pub fn emit_decoded(event: LogEvent) {
+    if let Some(inner) = CAPTURE.get() {
+        emit_decoded_into(inner, event);
+    }
+}
+
+/// Inner half of [`emit_decoded`] — does the level map + filter +
+/// stderr write + ring push against an explicit `Inner`. Pulled out
+/// the same way [`flush_into`] is, so tests can drive the path
+/// against a non-global ring without racing on `CAPTURE`'s
+/// once-per-process initialisation.
+fn emit_decoded_into(inner: &Inner, event: LogEvent) {
+    let level = log_event_level_to_log_level(event.level);
+    let Some(min) = inner.direct_min_level else {
+        return;
+    };
+    if level < min {
+        return;
+    }
+    write_console_line(level, &event.target, &event.message);
+    inner.push(level, event.target, event.message);
+}
+
+/// Map `LogEvent.level` (the wire u8 from `aether-kinds`) onto the
+/// substrate's [`LogLevel`]. Out-of-range values fold to `Info` —
+/// matches the historical `log_sink::handle_log_mail_decoded`
+/// disposition before issue #583 retired that path.
+fn log_event_level_to_log_level(level: u8) -> LogLevel {
+    match level {
+        0 => LogLevel::Trace,
+        1 => LogLevel::Debug,
+        2 => LogLevel::Info,
+        3 => LogLevel::Warn,
+        4 => LogLevel::Error,
+        _ => LogLevel::Info,
+    }
+}
+
+/// Project an `EnvFilter::max_level_hint` result onto our `LogLevel`.
+/// `None` (no hint, treat as INFO+) and `Some(LevelFilter::OFF)`
+/// (filter is off, drop everything) collapse to the natural
+/// representations for [`emit_decoded`].
+fn level_filter_to_log_level(hint: Option<LevelFilter>) -> Option<LogLevel> {
+    match hint {
+        // No directive at all -> match the `init` fallback `info`.
+        None => Some(LogLevel::Info),
+        Some(LevelFilter::OFF) => None,
+        Some(LevelFilter::ERROR) => Some(LogLevel::Error),
+        Some(LevelFilter::WARN) => Some(LogLevel::Warn),
+        Some(LevelFilter::INFO) => Some(LogLevel::Info),
+        Some(LevelFilter::DEBUG) => Some(LogLevel::Debug),
+        Some(LevelFilter::TRACE) => Some(LogLevel::Trace),
+    }
+}
+
+/// Console emitter for [`emit_decoded`]. Writes one line to `stderr`
+/// in `[unix_ms] LEVEL target: message` form. Format is intentionally
+/// distinct from the registered `tsfmt::Layer` (no ANSI, no full
+/// RFC3339 timestamp); operators reading the substrate terminal still
+/// see guest log events, and the structured wire shape over
+/// `engine_logs` (`LogEntry.timestamp_unix_ms`) is unchanged.
+fn write_console_line(level: LogLevel, target: &str, message: &str) {
+    use std::io::Write as _;
+    let level_str = match level {
+        LogLevel::Trace => "TRACE",
+        LogLevel::Debug => "DEBUG",
+        LogLevel::Info => "INFO ",
+        LogLevel::Warn => "WARN ",
+        LogLevel::Error => "ERROR",
+    };
+    // `lock()` keeps the write atomic against concurrent emissions;
+    // ignore `Err` (a closed stderr is not an event we report).
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "[{}] {} {}: {}",
+        now_unix_ms(),
+        level_str,
+        target,
+        message,
+    );
+}
+
 /// Inner half of `flush_now` — does the synchronous take + send
 /// against an explicit `Inner`. Pulled out so tests can drive the
 /// drain path against a test channel without touching the
@@ -134,6 +260,11 @@ struct Inner {
     cv: Condvar,
     outbound: Arc<HubOutbound>,
     shutdown: AtomicBool,
+    /// Issue #583: minimum level that survives [`emit_decoded`].
+    /// `Some(level)` drops events below `level`; `None` (filter == OFF)
+    /// drops every event. Computed once at [`init`] from the same
+    /// `AETHER_LOG_FILTER` env that drives the global `EnvFilter`.
+    direct_min_level: Option<LogLevel>,
 }
 
 struct RingState {
@@ -144,7 +275,7 @@ struct RingState {
 }
 
 impl Inner {
-    fn new(outbound: Arc<HubOutbound>) -> Self {
+    fn new(outbound: Arc<HubOutbound>, direct_min_level: Option<LogLevel>) -> Self {
         Self {
             state: Mutex::new(RingState {
                 entries: VecDeque::new(),
@@ -158,6 +289,7 @@ impl Inner {
             cv: Condvar::new(),
             outbound,
             shutdown: AtomicBool::new(false),
+            direct_min_level,
         }
     }
 
@@ -339,8 +471,16 @@ mod tests {
     use crate::outbound::EgressEvent;
 
     fn make_inner() -> (Arc<Inner>, std::sync::mpsc::Receiver<EgressEvent>) {
+        // Tests that don't need the direct-emit threshold tuned default to
+        // INFO+ — same as `init`'s fallback when `AETHER_LOG_FILTER` is unset.
+        make_inner_with_min(Some(LogLevel::Info))
+    }
+
+    fn make_inner_with_min(
+        min: Option<LogLevel>,
+    ) -> (Arc<Inner>, std::sync::mpsc::Receiver<EgressEvent>) {
         let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
-        (Arc::new(Inner::new(outbound)), rx)
+        (Arc::new(Inner::new(outbound, min)), rx)
     }
 
     #[test]
@@ -423,5 +563,133 @@ mod tests {
         assert!(truncated.ends_with(TRUNCATED_SUFFIX));
         // String is still valid UTF-8 (no multibyte char half-cut).
         assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
+
+    /// Issue #583: the direct-emit path lands a ring entry whose
+    /// target / level / message mirror the input `LogEvent` exactly.
+    /// This is the equivalence we care about with the retired
+    /// `log_sink::handle_log_mail_decoded` → `log::log!()` →
+    /// `tracing-log` round-trip — that path also produced an entry
+    /// where target / message survived verbatim and `level` mapped
+    /// 0..=4 onto Trace..=Error.
+    #[test]
+    fn emit_decoded_writes_decoded_fields_into_ring() {
+        let (inner, _rx) = make_inner_with_min(Some(LogLevel::Trace));
+        let event = LogEvent {
+            level: 3,
+            target: "aether_test_guest".into(),
+            message: "parse failed: missing close paren".into(),
+        };
+        emit_decoded_into(&inner, event);
+        let s = inner.state.lock().unwrap();
+        assert_eq!(s.entries.len(), 1);
+        let entry = &s.entries[0];
+        assert_eq!(entry.level, LogLevel::Warn);
+        assert_eq!(entry.target, "aether_test_guest");
+        assert_eq!(entry.message, "parse failed: missing close paren");
+    }
+
+    /// Each `LogEvent.level` 0..=4 maps onto the matching `LogLevel`.
+    /// Out-of-range bytes fall back to `Info` — preserves the parity
+    /// the old `log_sink::handle_log_mail_decoded` warn-and-treat-as-Info
+    /// branch enforced.
+    #[test]
+    fn emit_decoded_level_mapping_matches_old_log_sink() {
+        for (in_byte, want) in [
+            (0u8, LogLevel::Trace),
+            (1, LogLevel::Debug),
+            (2, LogLevel::Info),
+            (3, LogLevel::Warn),
+            (4, LogLevel::Error),
+            (255, LogLevel::Info),
+        ] {
+            let (inner, _rx) = make_inner_with_min(Some(LogLevel::Trace));
+            emit_decoded_into(
+                &inner,
+                LogEvent {
+                    level: in_byte,
+                    target: "t".into(),
+                    message: "m".into(),
+                },
+            );
+            let s = inner.state.lock().unwrap();
+            assert_eq!(s.entries.len(), 1, "level {in_byte}");
+            assert_eq!(s.entries[0].level, want, "level {in_byte}");
+        }
+    }
+
+    /// Filter floor is enforced: with the threshold at WARN, an Info
+    /// event leaves the ring untouched. Mirrors the pre-#583 EnvFilter
+    /// behaviour where `AETHER_LOG_FILTER=warn` would have dropped the
+    /// event before it reached `CaptureLayer`.
+    #[test]
+    fn emit_decoded_drops_below_min_level() {
+        let (inner, _rx) = make_inner_with_min(Some(LogLevel::Warn));
+        emit_decoded_into(
+            &inner,
+            LogEvent {
+                level: 2,
+                target: "t".into(),
+                message: "info-msg".into(),
+            },
+        );
+        emit_decoded_into(
+            &inner,
+            LogEvent {
+                level: 4,
+                target: "t".into(),
+                message: "error-msg".into(),
+            },
+        );
+        let s = inner.state.lock().unwrap();
+        assert_eq!(s.entries.len(), 1);
+        assert_eq!(s.entries[0].message, "error-msg");
+    }
+
+    /// `direct_min_level == None` represents `LevelFilter::OFF` — the
+    /// direct path drops every event so `engine_logs` matches the
+    /// EnvFilter-off behaviour.
+    #[test]
+    fn emit_decoded_drops_everything_when_filter_off() {
+        let (inner, _rx) = make_inner_with_min(None);
+        emit_decoded_into(
+            &inner,
+            LogEvent {
+                level: 4,
+                target: "t".into(),
+                message: "e".into(),
+            },
+        );
+        assert!(inner.state.lock().unwrap().entries.is_empty());
+    }
+
+    /// `EnvFilter::max_level_hint`'s shape projects onto our
+    /// `Option<LogLevel>` 1:1. Unset env (no hint) defaults to INFO+
+    /// — matches `init`'s `unwrap_or_else(|_| EnvFilter::new("info"))`
+    /// fallback.
+    #[test]
+    fn level_filter_to_log_level_projects_envfilter_shape() {
+        assert_eq!(level_filter_to_log_level(None), Some(LogLevel::Info));
+        assert_eq!(level_filter_to_log_level(Some(LevelFilter::OFF)), None);
+        assert_eq!(
+            level_filter_to_log_level(Some(LevelFilter::ERROR)),
+            Some(LogLevel::Error),
+        );
+        assert_eq!(
+            level_filter_to_log_level(Some(LevelFilter::WARN)),
+            Some(LogLevel::Warn),
+        );
+        assert_eq!(
+            level_filter_to_log_level(Some(LevelFilter::INFO)),
+            Some(LogLevel::Info),
+        );
+        assert_eq!(
+            level_filter_to_log_level(Some(LevelFilter::DEBUG)),
+            Some(LogLevel::Debug),
+        );
+        assert_eq!(
+            level_filter_to_log_level(Some(LevelFilter::TRACE)),
+            Some(LogLevel::Trace),
+        );
     }
 }

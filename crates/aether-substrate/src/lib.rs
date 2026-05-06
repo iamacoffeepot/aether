@@ -50,7 +50,6 @@ pub mod input;
 pub mod kind_manifest;
 pub mod lifecycle;
 pub mod log_capture;
-pub mod log_sink;
 pub mod mail;
 pub mod mailer;
 pub mod native_actor;

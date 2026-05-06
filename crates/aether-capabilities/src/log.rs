@@ -5,12 +5,13 @@
 //! HandlesKind markers, and re-exports the real struct from inside
 //! the mod on native.
 //!
-//! Bridging via the `log` crate facade (rather than `tracing::event!`)
-//! is load-bearing — see [`aether_substrate::log_sink`] for the rationale.
-//! `tracing::event!` requires a `&'static str` target; the
-//! guest-supplied target is dynamic, so we route through `log::log!`
-//! and let `tracing-subscriber`'s `tracing-log` integration lift each
-//! record back into the tracing pipeline.
+//! Issue #583 routed the cap onto [`aether_substrate::log_capture::emit_decoded`]
+//! so guest log events bypass `tracing::dispatcher` entirely. The
+//! pre-#583 path went `LogEvent` → `log::log!()` → `tracing-log` →
+//! global subscriber → engine_logs ring; under issue #581's planned
+//! actor-aware subscriber that round-trip would catch the cap's own
+//! emissions and recurse back into the cap. Direct emission writes
+//! the same ring entry without involving any tracing layer.
 
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
@@ -23,13 +24,15 @@ mod native {
     use super::LogEvent;
     use aether_actor::actor;
     use aether_substrate::capability::BootError;
-    use aether_substrate::log_sink;
+    use aether_substrate::log_capture;
     use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
     /// `aether.log` mailbox cap. Stateless beyond the process-wide
-    /// `tracing` subscriber set up by [`aether_substrate::log_capture::init`] —
-    /// every cap instance bridges decoded `LogEvent` mail through the
-    /// `log` facade and `tracing-log` re-emits it.
+    /// log-capture ring set up by [`aether_substrate::log_capture::init`] —
+    /// every cap instance forwards decoded `LogEvent` mail through
+    /// [`log_capture::emit_decoded`] (issue #583), which writes the
+    /// engine_logs ring and stderr without involving the global
+    /// `tracing` dispatcher.
     pub struct LogCapability;
 
     #[actor]
@@ -41,15 +44,15 @@ mod native {
             Ok(Self)
         }
 
-        /// Emit a decoded log event through the host's `tracing` pipeline
-        /// so `engine_logs` (ADR-0023) sees it.
+        /// Emit a decoded log event into the engine_logs ring (ADR-0023)
+        /// and stderr via [`log_capture::emit_decoded`].
         ///
         /// # Agent
         /// Components mail `aether.log` `LogEvent { level, target, message }`
         /// to this mailbox. Fire-and-forget; no reply.
         #[handler]
         fn on_log_event(&self, _ctx: &mut NativeCtx<'_>, event: LogEvent) {
-            log_sink::handle_log_mail_decoded(event);
+            log_capture::emit_decoded(event);
         }
     }
 
