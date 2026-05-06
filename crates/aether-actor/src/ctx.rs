@@ -158,10 +158,12 @@ impl<'a, T: MailTransport> Ctx<'a, T> {
         self.sender = sender.map(|s| s.raw());
     }
 
-    /// Borrow the actor's transport. Exposed for the few SDK helper
-    /// modules (`aether-actor::wasm::io`) that resolve a kind-typed
-    /// `Mailbox<K, T>` internally and call its `send` directly with
-    /// the transport ref.
+    /// Borrow the actor's transport. Exposed for hand-rolled callers
+    /// that resolve a kind-typed `Mailbox<K, T>` and invoke its `send`
+    /// directly with the transport ref. The retired `wasm::io` /
+    /// `wasm::net` helpers used this surface; today the typed-sender
+    /// path (`ctx.actor::<R>().send(...)`) covers the same ground at
+    /// the public API.
     pub fn transport(&self) -> &T {
         self.transport
     }

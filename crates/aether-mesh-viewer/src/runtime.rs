@@ -31,9 +31,9 @@
 //! 4. Every `aether.tick` re-emits the cached triangles to
 //!    `"aether.render"`.
 
-use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor, io};
-use aether_capabilities::RenderCapability;
-use aether_kinds::{DrawTriangle, ReadResult, Tick, Vertex};
+use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::{IoCapability, RenderCapability};
+use aether_kinds::{DrawTriangle, Read, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
@@ -102,14 +102,17 @@ impl WasmActor for MeshViewer {
     /// `"assets"`, `"config"`. `path` is relative to the namespace
     /// root and must end in `.dsl` or `.obj`.
     #[handler]
-    fn on_load(&mut self, _ctx: &mut WasmCtx<'_>, msg: LoadMesh) {
+    fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) {
         tracing::info!(
             target: "aether_mesh_viewer",
             namespace = %msg.namespace,
             path = %msg.path,
             "load requested; issuing read",
         );
-        io::read(&msg.namespace, &msg.path);
+        ctx.actor::<IoCapability>().send(&Read {
+            namespace: msg.namespace,
+            path: msg.path,
+        });
     }
 
     /// Consumes the substrate's I/O reply. Dispatches on the echoed
