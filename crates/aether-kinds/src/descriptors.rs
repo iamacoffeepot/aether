@@ -52,9 +52,9 @@ mod tests {
     use crate::{
         Delete, DeleteResult, DrawTriangle, DropComponent, DropResult, Fetch, FetchResult,
         FrameStats, Key, List, ListResult, LoadComponent, LoadResult, MouseButton, MouseMove,
-        NoteOff, NoteOn, Ping, Pong, Read, ReadResult, ReplaceComponent, ReplaceResult,
-        SetMasterGain, SubscribeInput, SubscribeInputResult, Tick, UnsubscribeInput, Write,
-        WriteResult,
+        NoteOff, NoteOn, Ping, Pong, ProcessExited, Read, ReadResult, ReplaceComponent,
+        ReplaceResult, SetMasterGain, Spawn, SpawnResult, SubscribeInput, SubscribeInputResult,
+        Terminate, TerminateResult, Tick, UnsubscribeInput, Write, WriteResult,
     };
 
     #[test]
@@ -120,6 +120,11 @@ mod tests {
         assert!(names.contains(&ListResult::NAME));
         assert!(names.contains(&Fetch::NAME));
         assert!(names.contains(&FetchResult::NAME));
+        assert!(names.contains(&Spawn::NAME));
+        assert!(names.contains(&SpawnResult::NAME));
+        assert!(names.contains(&Terminate::NAME));
+        assert!(names.contains(&TerminateResult::NAME));
+        assert!(names.contains(&ProcessExited::NAME));
     }
 
     #[test]

@@ -66,6 +66,7 @@ mod engine;
 mod log_store;
 mod loopback;
 mod mcp;
+mod process_capability;
 mod registry;
 mod session;
 mod spawn;
@@ -78,13 +79,14 @@ pub use engine::READ_TIMEOUT;
 pub use log_store::{LogStore, ReadResult as LogReadResult};
 pub use loopback::{HUB_SELF_ENGINE_ID, LoopbackEngine, LoopbackHandle};
 pub use mcp::{DEFAULT_MCP_PORT, HubState, run_mcp_server};
+pub use process_capability::{ProcessCapability, ProcessCapabilityConfig};
 pub use registry::{EngineRecord, EngineRegistry};
 pub use session::{
     QueuedMail, SESSION_CHANNEL_CAPACITY, SessionHandle, SessionRecord, SessionRegistry,
 };
 pub use spawn::{
     DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, PendingSpawns, SpawnError, SpawnOpts,
-    TerminateOutcome, spawn_substrate, terminate_substrate,
+    TerminateOutcome, spawn_substrate, spawn_substrate_no_adopt, terminate_substrate,
 };
 
 /// Default port the hub binds for engine TCP clients. ADR-0006 V0

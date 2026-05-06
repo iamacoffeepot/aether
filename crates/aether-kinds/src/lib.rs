@@ -1378,6 +1378,100 @@ mod control_plane {
         Ok { ticks_completed: u32 },
         Err { error: String },
     }
+
+    /// One environment variable pair carried in [`Spawn::env`]. Pairs
+    /// rather than a `HashMap` because postcard-shaped wire kinds
+    /// don't have a `Schema` impl for tuple element types and a
+    /// keyed-collection schema isn't load-bearing here — duplicate
+    /// keys aren't expected and last-write-wins matches the env
+    /// `HashMap` the hub builds anyway.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct EnvVar {
+        pub key: String,
+        pub value: String,
+    }
+
+    /// `aether.process.spawn` — request the hub chassis launch a
+    /// substrate binary as a child process and return the assigned
+    /// engine id once the child completes its `Hello` handshake
+    /// (ADR-0078 Phase 1, supersedes ADR-0009 §3 for the post-actor
+    /// model spawn path). `binary_path` is the absolute filesystem
+    /// path to the substrate binary. `args` and `env` are forwarded
+    /// to the child verbatim; the hub also injects `AETHER_HUB_URL`
+    /// pointing at its engine listener so the child dials back.
+    /// `handshake_timeout_ms` caps how long the hub waits for the
+    /// child's `Hello` before declaring the spawn failed (default
+    /// 5000 ms when `None`). Reply: `SpawnResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.process.spawn")]
+    pub struct Spawn {
+        pub binary_path: String,
+        pub args: Vec<String>,
+        pub env: Vec<EnvVar>,
+        pub handshake_timeout_ms: Option<u32>,
+    }
+
+    /// Reply to `Spawn`. `Ok` carries the freshly minted engine id
+    /// in tagged-string form (`eng-...` per ADR-0064 — `EngineId`
+    /// doesn't implement `Schema`, so the wire carries the
+    /// authoritative string the substrate registry already uses
+    /// at the MCP boundary). The hub adopted the child into its
+    /// registry; lifetime is tied to the connection until `Terminate`
+    /// or external exit. `Err` carries a free-form reason — io
+    /// failure, missing pid, handshake timeout.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.process.spawn_result")]
+    pub enum SpawnResult {
+        Ok { engine_id: String, pid: u32 },
+        Err { error: String },
+    }
+
+    /// `aether.process.terminate` — request the hub chassis shut down
+    /// a previously-spawned substrate. Sends SIGTERM, waits up to
+    /// `grace_ms` (default 2000 ms when `None`), then escalates to
+    /// SIGKILL if the child is still running. `engine_id` is the
+    /// Uuid string form the hub returned from `Spawn`. Reply:
+    /// `TerminateResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.process.terminate")]
+    pub struct Terminate {
+        pub engine_id: String,
+        pub grace_ms: Option<u32>,
+    }
+
+    /// Reply to `Terminate`. `Ok` reports the child's exit code (if
+    /// the kernel returned one) and whether escalation to SIGKILL
+    /// was needed. `Err` is for unknown engine ids, externally-
+    /// connected engines the hub didn't spawn, or os-level signal
+    /// failure.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.process.terminate_result")]
+    pub enum TerminateResult {
+        Ok {
+            exit_code: Option<i32>,
+            sigkilled: bool,
+        },
+        Err {
+            error: String,
+        },
+    }
+
+    /// `aether.process.exited` — broadcast emitted by the hub's
+    /// reaper when a spawned child terminates (whether via
+    /// `Terminate` mail or external exit). Fire-and-forget; lands
+    /// on every attached MCP session via `egress_broadcast`. The
+    /// reaper task converts `Child::wait` completion into this kind
+    /// so any cap or operator that wants to react to "engine X
+    /// exited" subscribes to broadcast rather than threading a
+    /// callback through `EngineRegistry`. `engine_id` is the
+    /// Uuid string form the hub used while the child was alive.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.process.exited")]
+    pub struct ProcessExited {
+        pub engine_id: String,
+        pub exit_code: Option<i32>,
+        pub reason: String,
+    }
 }
 
 #[cfg(test)]
