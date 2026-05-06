@@ -1,8 +1,16 @@
 # ADR-0023: Substrate log capture and the `engine_logs` MCP tool
 
-- **Status:** Accepted
+- **Status:** Superseded in part by ADR-0077
 - **Date:** 2026-04-17
 - **Accepted:** 2026-04-18
+
+> **Note (2026-05-06):** §1–§3 (substrate-side capture and forwarding) are
+> superseded by ADR-0077 — the ring + flush task retired in favour of
+> per-actor `LogBuffer` + actor-aware tracing layer + `LogCapability`
+> as forwarder. §4 (the hub-side `engine_logs` MCP tool) remains the
+> normative contract; only `LogEntry` grew an `origin: Option<MailboxId>`
+> field. Read this ADR for context on the original design and §4's wire
+> shape; read ADR-0077 for the substrate-side design that ships today.
 
 ## Context
 
