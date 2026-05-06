@@ -454,7 +454,12 @@ impl TestBench {
         after: Vec<aether_kinds::MailEnvelope>,
     ) -> Result<Vec<u8>, TestBenchError> {
         let cid = self.fresh_correlation_id();
-        self.push_control(
+        // Issue 603 Phase 2: capture_frame moved to the render
+        // capability's `aether.render` mailbox. Pre-Phase-2 the mail
+        // landed on `aether.control` and routed through the
+        // chassis_handler closure.
+        self.push_to_mailbox(
+            aether_kinds::mailboxes::RENDER,
             &CaptureFrame {
                 mails: pre,
                 after_mails: after,
@@ -475,7 +480,18 @@ impl TestBench {
     where
         K: Kind + serde::Serialize,
     {
-        let mailbox = aether_kinds::mailboxes::CONTROL;
+        self.push_to_mailbox(aether_kinds::mailboxes::CONTROL, mail, cid);
+    }
+
+    /// Push a typed mail addressed to a specific chassis-owned mailbox
+    /// with our session as the reply target and `cid` as the correlation
+    /// id. Generalises [`Self::push_control`] for kinds that landed on
+    /// `aether.control` pre-issue-603 and now route to their own caps
+    /// (`aether.render.capture_frame`, etc.).
+    fn push_to_mailbox<K>(&self, mailbox: aether_data::MailboxId, mail: &K, cid: u64)
+    where
+        K: Kind + serde::Serialize,
+    {
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Session(self.session), cid);
         let payload = encode_struct(mail);
         self.queue

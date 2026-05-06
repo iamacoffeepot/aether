@@ -11,11 +11,18 @@
 //! from there. Phase 4 keeps the GPU lifecycle, encoder creation, and
 //! presentation in the chassis driver — this capability owns only the
 //! mail surface and accumulator state.
+//!
+//! [`HeadlessRenderCapability`] is the chassis-without-GPU companion:
+//! same `aether.render` mailbox, no-op `DrawTriangle` / `Camera`
+//! handlers (so desktop-designed components don't warn-storm),
+//! `Err`-replying `CaptureFrame` handler. Headless chassis composes it
+//! in place of [`RenderCapability`] (issue 603 Phase 2 § Resolved
+//! Decision 5).
 
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_kinds::{Camera, DrawTriangle};
+use aether_kinds::{Camera, CaptureFrame, DrawTriangle};
 
 // Auxiliary native-only types the chassis driver consumes alongside
 // `RenderCapability`. `#[bridge]` only re-exports the actor type
@@ -24,7 +31,11 @@ use aether_kinds::{Camera, DrawTriangle};
 // feature see only the cap stub + Actor / HandlesKind impls, not
 // these heavy GPU-bound types.
 #[cfg(all(not(target_arch = "wasm32"), feature = "render-native"))]
-pub use native::{RenderConfig, RenderGpu, RenderHandles};
+pub use native::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
+
+// `HeadlessRenderCapability` is exported through `#[bridge]`'s
+// auto-emitted re-export. It carries no auxiliary native-only types,
+// so nothing extra to surface here.
 
 #[aether_actor::bridge(feature = "render-native")]
 mod native {
@@ -34,15 +45,20 @@ mod native {
 
     use aether_actor::actor;
     use aether_data::Kind;
-    use aether_kinds::DRAW_TRIANGLE_BYTES;
+    use aether_kinds::{CaptureFrameResult, DRAW_TRIANGLE_BYTES};
     use aether_substrate::capability::BootError;
+    use aether_substrate::capture::{CaptureQueue, PendingCapture};
+    use aether_substrate::control_helpers::resolve_bundle;
+    use aether_substrate::mailer::Mailer;
     use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::outbound::HubOutbound;
+    use aether_substrate::registry::Registry;
     use aether_substrate::render::{
         CaptureMeta, IDENTITY_VIEW_PROJ, Pipeline, RenderError, Targets, build_main_pipeline,
         finish_capture, prepare_capture_copy, record_main_pass,
     };
 
-    use super::{Camera, DrawTriangle};
+    use super::{Camera, CaptureFrame, DrawTriangle};
 
     /// Configuration for [`RenderCapability`]. `vertex_buffer_bytes` is
     /// the maximum bytes the render accumulator will hold before
@@ -63,6 +79,14 @@ mod native {
     pub struct RenderConfig {
         pub vertex_buffer_bytes: usize,
         pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
+        /// Driver-side capture backend. Desktop and test-bench populate
+        /// it with their `CaptureQueue` + chassis-loop wake hook;
+        /// chassis without a render thread (the in-crate tests below)
+        /// leave it `None` and `aether.render.capture_frame` mail
+        /// replies `Err`. Headless declines capture by composing a
+        /// distinct `HeadlessRenderCapability` instead, so this `None`
+        /// branch is exercised only in the test fixtures here.
+        pub capture_backend: Option<CaptureBackend>,
     }
 
     impl Default for RenderConfig {
@@ -70,8 +94,31 @@ mod native {
             Self {
                 vertex_buffer_bytes: aether_substrate::render::VERTEX_BUFFER_BYTES,
                 observed_kinds: None,
+                capture_backend: None,
             }
         }
+    }
+
+    /// Per-chassis plumbing the [`RenderCapability`] capture handler
+    /// needs to defer the readback to the chassis main thread. The
+    /// cap's dispatcher thread can't touch the wgpu `Device` (it lives
+    /// on the render thread); the handler resolves the request, parks
+    /// it on `queue`, and the chassis main loop reads from there on
+    /// the next redraw. `wake` nudges that loop — desktop fires an
+    /// `EventLoopProxy<UserEvent>::Capture`; test-bench sends on its
+    /// `EventSender`.
+    ///
+    /// `outbound` is the cap's reply edge for the inline-failure
+    /// paths (decode error, bundle-resolution error, queue full,
+    /// wake target dead). All four bail before parking the request,
+    /// so the only happy-path reply comes from the render thread
+    /// after readback completes — that path uses its own outbound
+    /// clone the chassis driver keeps.
+    #[derive(Clone)]
+    pub struct CaptureBackend {
+        pub queue: CaptureQueue,
+        pub wake: Arc<dyn Fn() -> Result<(), &'static str> + Send + Sync>,
+        pub outbound: Arc<HubOutbound>,
     }
 
     /// `aether.render` mailbox cap. Holds [`RenderHandles`] (the
@@ -85,6 +132,11 @@ mod native {
     pub struct RenderCapability {
         handles: RenderHandles,
         config: RenderConfig,
+        /// Substrate registry and mailer captured at init for the
+        /// `capture_frame` resolve-bundle / push-pre-mails path. Both
+        /// are Arc-shared with every other cap and the chassis loop.
+        registry: Arc<Registry>,
+        mailer: Arc<Mailer>,
     }
 
     impl RenderCapability {
@@ -123,7 +175,7 @@ mod native {
         /// `RenderConfig`; init only sets up the in-process buffers and
         /// the wgpu `OnceLock` (the driver fills it in `resumed` /
         /// post-`build_passive`).
-        fn init(config: RenderConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init(config: RenderConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let handles = RenderHandles {
                 frame_vertices: Arc::new(Mutex::new(Vec::<u8>::with_capacity(
                     config.vertex_buffer_bytes,
@@ -132,7 +184,18 @@ mod native {
                 camera_state: Arc::new(Mutex::new(IDENTITY_VIEW_PROJ)),
                 gpu: Arc::new(OnceLock::new()),
             };
-            Ok(Self { handles, config })
+            let mailer = ctx.mailer();
+            let registry = mailer.registry().cloned().ok_or_else(|| {
+                BootError::Other(Box::new(std::io::Error::other(
+                    "registry must be wired on Mailer before RenderCapability::init",
+                )))
+            })?;
+            Ok(Self {
+                handles,
+                config,
+                registry,
+                mailer,
+            })
         }
 
         /// `DrawTriangle` handler. Slice-typed because `Mailbox::send_many`
@@ -194,6 +257,93 @@ mod native {
                 obs.lock().unwrap().push(<Camera as Kind>::NAME.into());
             }
             *self.handles.camera_state.lock().unwrap() = mail.view_proj;
+        }
+
+        /// `CaptureFrame` handler. The cap dispatcher thread doesn't
+        /// own the wgpu `Device` — that lives on the chassis main
+        /// thread — so capture is a two-phase handoff: this handler
+        /// resolves the request and parks it on `CaptureBackend.queue`,
+        /// the chassis main loop takes from there on the next redraw,
+        /// performs the GPU readback, dispatches the `after_mails`
+        /// bundle, and replies to the original sender.
+        ///
+        /// Abort-on-first-failure: if either bundle has an unknown
+        /// kind / mailbox the whole request errors before any pre-mail
+        /// is pushed. Decode failure, queue full, and a dead wake
+        /// target also reply inline; only the readback path replies
+        /// from the render thread.
+        ///
+        /// # Agent
+        /// Mail `aether.render.capture_frame { mails, after_mails }`
+        /// for an atomic "set X, capture, restore X" call. Reply is
+        /// `aether.render.capture_frame_result` carrying the PNG on
+        /// success or a free-form reason on failure.
+        #[handler]
+        fn on_capture_frame(&self, ctx: &mut NativeCtx<'_>, mail: CaptureFrame) {
+            if let Some(obs) = &self.config.observed_kinds {
+                obs.lock()
+                    .unwrap()
+                    .push(<CaptureFrame as Kind>::NAME.into());
+            }
+
+            let sender = ctx.reply_target();
+            let Some(backend) = self.config.capture_backend.as_ref() else {
+                tracing::warn!(
+                    target: "aether_capabilities::render",
+                    "RenderCapability received capture_frame without capture_backend; replying Err",
+                );
+                return;
+            };
+
+            let pre = match resolve_bundle(&self.registry, &mail.mails, "capture bundle") {
+                Ok(v) => v,
+                Err(error) => {
+                    backend
+                        .outbound
+                        .send_reply(sender, &CaptureFrameResult::Err { error });
+                    return;
+                }
+            };
+            let after =
+                match resolve_bundle(&self.registry, &mail.after_mails, "capture after bundle") {
+                    Ok(v) => v,
+                    Err(error) => {
+                        backend
+                            .outbound
+                            .send_reply(sender, &CaptureFrameResult::Err { error });
+                        return;
+                    }
+                };
+
+            for envelope in pre {
+                self.mailer.push(envelope);
+            }
+
+            let pending = PendingCapture {
+                reply_to: sender,
+                after_mails: after,
+            };
+            if !backend.queue.request(pending) {
+                backend.outbound.send_reply(
+                    sender,
+                    &CaptureFrameResult::Err {
+                        error: "capture already pending; try again once the in-flight \
+                            request completes"
+                            .to_owned(),
+                    },
+                );
+                return;
+            }
+
+            if let Err(reason) = (backend.wake)() {
+                let _ = backend.queue.take();
+                backend.outbound.send_reply(
+                    sender,
+                    &CaptureFrameResult::Err {
+                        error: reason.to_owned(),
+                    },
+                );
+            }
         }
     }
 
@@ -405,7 +555,13 @@ mod native {
         use aether_substrate::registry::{MailboxEntry, Registry};
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-            (Arc::new(Registry::new()), Arc::new(Mailer::new()))
+            let registry = Arc::new(Registry::new());
+            let mailer = Arc::new(Mailer::new());
+            // Issue 603 Phase 2: `RenderCapability::init` reads
+            // `mailer.registry()` to keep the substrate registry handle
+            // for `capture_frame`'s resolve-bundle path.
+            mailer.wire(Arc::clone(&registry));
+            (registry, mailer)
         }
 
         fn deliver(registry: &Registry, name: &str, kind: KindId, payload: &[u8]) {
@@ -525,6 +681,79 @@ mod native {
             // warn-log; this test asserts shutdown still proceeds cleanly
             // (no dispatcher panic on malformed input).
             chassis.shutdown();
+        }
+    }
+}
+
+#[aether_actor::bridge]
+mod native_headless {
+    use std::sync::Arc;
+
+    use aether_actor::actor;
+    use aether_kinds::CaptureFrameResult;
+    use aether_substrate::capability::BootError;
+    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::outbound::HubOutbound;
+
+    use super::{Camera, CaptureFrame, DrawTriangle};
+
+    /// Chassis-without-GPU companion to [`super::RenderCapability`].
+    /// Claims the same `aether.render` mailbox so desktop-designed
+    /// components loaded on headless can mail `DrawTriangle` /
+    /// `aether.camera` / `aether.render.capture_frame` against a known
+    /// recipient — `DrawTriangle` and `Camera` no-op (the warn-storm
+    /// sink-replacement role pre-issue-603 Phase 2), `CaptureFrame`
+    /// replies `Err` so MCP `capture_frame` fails fast instead of
+    /// timing out.
+    ///
+    /// Headless chassis composes one of [`Self`] / [`super::RenderCapability`],
+    /// never both — the chassis builder rejects double-claiming a
+    /// mailbox.
+    pub struct HeadlessRenderCapability {
+        outbound: Arc<HubOutbound>,
+    }
+
+    #[actor]
+    impl NativeActor for HeadlessRenderCapability {
+        type Config = ();
+
+        const NAMESPACE: &'static str = "aether.render";
+
+        fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
+                BootError::Other(Box::new(std::io::Error::other(
+                    "HubOutbound must be wired on Mailer before \
+                         HeadlessRenderCapability::init (chassis main connects the hub before \
+                         the Builder chain)",
+                )))
+            })?;
+            Ok(Self { outbound })
+        }
+
+        /// `DrawTriangle` lands here as a no-op so headless boots of
+        /// desktop-designed components (which emit `DrawTriangle` every
+        /// tick) don't trip the unknown-mailbox warn path.
+        #[handler]
+        fn on_draw_triangle(&self, _ctx: &mut NativeCtx<'_>, _mails: &[DrawTriangle]) {}
+
+        /// `Camera` lands here as a no-op for the same reason as
+        /// `on_draw_triangle` — desktop-designed components publish
+        /// `aether.camera` every tick.
+        #[handler]
+        fn on_camera(&self, _ctx: &mut NativeCtx<'_>, _mail: Camera) {}
+
+        /// `CaptureFrame` replies `Err` inline so MCP `capture_frame`
+        /// fails fast on headless instead of hanging on a reply that
+        /// never comes. Mirrors ADR-0035 §Consequences fail-fast shape
+        /// for `set_window_mode`.
+        #[handler]
+        fn on_capture_frame(&self, ctx: &mut NativeCtx<'_>, _mail: CaptureFrame) {
+            self.outbound.send_reply(
+                ctx.reply_target(),
+                &CaptureFrameResult::Err {
+                    error: "unsupported on headless chassis — no GPU".to_owned(),
+                },
+            );
         }
     }
 }

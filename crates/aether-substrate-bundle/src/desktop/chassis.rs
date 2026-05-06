@@ -16,22 +16,22 @@
 use std::sync::Arc;
 
 use aether_capabilities::{
-    AudioCapability, BroadcastCapability, ChassisControlHandler, ControlPlaneCapability,
-    ControlPlaneConfig, HandleCapability, IoCapability, LogCapability, NetCapability,
-    RenderCapability, RenderConfig, audio::AudioConfig as AudioConf, io::NamespaceRoots,
-    net::NetConfig as NetConf,
+    AudioCapability, BroadcastCapability, CaptureBackend, ChassisControlHandler,
+    ControlPlaneCapability, ControlPlaneConfig, HandleCapability, IoCapability, LogCapability,
+    NetCapability, RenderCapability, RenderConfig, audio::AudioConfig as AudioConf,
+    io::NamespaceRoots, net::NetConfig as NetConf,
 };
 use aether_data::Kind;
 use aether_kinds::{
-    Advance, CaptureFrame, PlatformInfo, SetWindowMode, SetWindowModeResult, SetWindowTitle,
+    Advance, PlatformInfo, SetWindowMode, SetWindowModeResult, SetWindowTitle,
     SetWindowTitleResult, WindowMode,
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::control_helpers::decode_payload;
 use aether_substrate::{
-    Chassis, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
-    capture::{CaptureQueue, begin_capture_request, reply_unsupported_advance},
+    Chassis, HubOutbound, ReplyTo, SubstrateBoot,
+    capture::{CaptureQueue, reply_unsupported_advance},
 };
 use winit::event_loop::{EventLoop, EventLoopProxy};
 
@@ -74,33 +74,11 @@ pub enum UserEvent {
 /// the outbound handle for inline error replies.
 pub fn chassis_control_handler(
     proxy: EventLoopProxy<UserEvent>,
-    capture_queue: CaptureQueue,
-    registry: Arc<Registry>,
-    queue: Arc<Mailer>,
     outbound: Arc<HubOutbound>,
 ) -> ChassisControlHandler {
     Arc::new(
         move |kind: aether_data::KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| match kind
         {
-            CaptureFrame::ID => {
-                let proxy = proxy.clone();
-                begin_capture_request(
-                    &queue,
-                    &capture_queue,
-                    &registry,
-                    &outbound,
-                    sender,
-                    bytes,
-                    move || {
-                        // `send_event` only fails if the event loop
-                        // has shut down; in that case nothing listens
-                        // for captures anyway, so swallow the error
-                        // and let the queued capture sit until exit.
-                        let _ = proxy.send_event(UserEvent::Capture);
-                        Ok(())
-                    },
-                );
-            }
             PlatformInfo::ID => {
                 // Empty payload; forward the sender straight to the
                 // event loop and let it snapshot + reply on its own
@@ -290,19 +268,30 @@ impl DesktopChassis {
         let _ = WORKERS; // ADR-0038 retired the worker count knob; field
         // retained for `EngineInfo.workers` wire compat.
 
-        let chassis_handler = chassis_control_handler(
-            event_loop.create_proxy(),
-            capture_queue.clone(),
-            Arc::clone(&boot.registry),
-            Arc::clone(&boot.queue),
-            Arc::clone(&boot.outbound),
-        );
+        let chassis_handler =
+            chassis_control_handler(event_loop.create_proxy(), Arc::clone(&boot.outbound));
         let control_plane_config = ControlPlaneConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
             input_subscribers: Arc::clone(&boot.input_subscribers),
             chassis_handler: Some(chassis_handler),
+        };
+        // Capture handoff lives on `RenderCapability` post-issue-603
+        // Phase 2. The cap dispatcher runs `on_capture_frame`, parks
+        // the request on `capture_queue`, and pokes `UserEvent::Capture`
+        // so `RedrawRequested` picks it up on the next frame.
+        let proxy_for_render = event_loop.create_proxy();
+        let render_config = RenderConfig {
+            capture_backend: Some(CaptureBackend {
+                queue: capture_queue.clone(),
+                wake: Arc::new(move || {
+                    let _ = proxy_for_render.send_event(UserEvent::Capture);
+                    Ok(())
+                }),
+                outbound: Arc::clone(&boot.outbound),
+            }),
+            ..RenderConfig::default()
         };
 
         tracing::info!(
@@ -361,7 +350,7 @@ impl DesktopChassis {
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<NetCapability>(net)
             .with_actor::<AudioCapability>(audio)
-            .with_actor::<RenderCapability>(RenderConfig::default())
+            .with_actor::<RenderCapability>(render_config)
             .with_log_drain::<LogCapability>()
             .driver(driver)
             .build()

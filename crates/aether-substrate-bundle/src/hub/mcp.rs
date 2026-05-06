@@ -903,7 +903,7 @@ mod tests {
         assert_eq!(got_a[0].payload_bytes, vec![42]);
     }
 
-    /// Descriptor for `aether.control.capture_frame` that matches
+    /// Descriptor for `aether.render.capture_frame` that matches
     /// the real substrate's schema: a postcard struct with `mails`
     /// and `after_mails` fields, both `Vec<MailEnvelope>`. Used
     /// across capture_frame tests so they all exercise the same
@@ -933,7 +933,7 @@ mod tests {
             .into(),
         };
         KindDescriptor {
-            name: "aether.control.capture_frame".into(),
+            name: "aether.render.capture_frame".into(),
             schema: SchemaType::Struct {
                 repr_c: false,
                 fields: vec![
@@ -998,7 +998,7 @@ mod tests {
             // runs inside the engine_reader's `try_deliver`; in tests
             // we short-circuit by driving the diversion directly.
             let record = sessions_clone.get(&session_token).expect("session");
-            let kind: String = "aether.control.capture_frame_result".into();
+            let kind: String = "aether.render.capture_frame_result".into();
             let queued = QueuedMail {
                 engine_id: id,
                 kind_name: kind.clone(),
@@ -1068,7 +1068,7 @@ mod tests {
             })
             .expect("encode");
             let record = sessions_clone.get(&session_token).expect("session");
-            let kind: String = "aether.control.capture_frame_result".into();
+            let kind: String = "aether.render.capture_frame_result".into();
             let queued = QueuedMail {
                 engine_id: id,
                 kind_name: kind.clone(),
@@ -1111,7 +1111,7 @@ mod tests {
         let (_guard, _rx) = hub
             .session
             .replies
-            .register("aether.control.capture_frame_result".into())
+            .register("aether.render.capture_frame_result".into())
             .expect("first registration");
 
         let err = hub
@@ -1231,7 +1231,7 @@ mod tests {
             })
             .expect("encode");
             let record = sessions_clone.get(&session_token).expect("session");
-            let kind: String = "aether.control.capture_frame_result".into();
+            let kind: String = "aether.render.capture_frame_result".into();
             let queued = QueuedMail {
                 engine_id: id,
                 kind_name: kind.clone(),

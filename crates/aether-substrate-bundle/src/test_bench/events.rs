@@ -1,7 +1,7 @@
 //! Cross-thread channel from the chassis-control handler to the
 //! tick loop (ADR-0067). The handler runs on a scheduler worker;
 //! the tick loop runs on the main thread. Both `aether.test_bench.advance`
-//! and `aether.control.capture_frame` need to wake the tick loop —
+//! and `aether.render.capture_frame` need to wake the tick loop —
 //! this channel carries the wake.
 //!
 //! `Advance` carries the reply target so the loop can reply once
@@ -24,7 +24,7 @@ pub enum ChassisEvent {
     /// `ticks` full cycles (Tick fanout → drain → render or capture)
     /// then replies with `AdvanceResult::Ok { ticks_completed }`.
     Advance { reply_to: ReplyTo, ticks: u32 },
-    /// `aether.control.capture_frame`. The PendingCapture itself
+    /// `aether.render.capture_frame`. The PendingCapture itself
     /// was pushed into `CaptureQueue` by the chassis-control
     /// handler; this event just wakes the loop so the next idle
     /// cycle picks it up. The loop runs one drain → render-with-
