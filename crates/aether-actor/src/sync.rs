@@ -1,7 +1,6 @@
 //! Shared `wait_reply` helper used by every synchronous SDK wrapper
-//! (handle round-trips, the wasm-side `io::*_sync` / `net::fetch_blocking`
-//! that live in `aether-component`). Each family carries its own
-//! error enum (`SyncIoError`, `SyncHandleError`, `SyncNetError`), so
+//! (handle round-trips, the wasm-side `io::*_sync`). Each family
+//! carries its own error enum (`SyncIoError`, `SyncHandleError`), so
 //! the helper is generic over both the reply kind `K` and an error
 //! type that implements [`WaitError`]. The transport `T` is the third
 //! generic — picks `WasmTransport` for guests and `NativeTransport`
@@ -35,7 +34,7 @@ pub trait WaitError {
 /// on `transport.wait_reply` for a mail of kind `K` with the given
 /// `expected_correlation`, and postcard-decode the written bytes.
 /// Replaces the per-family duplicates that previously lived in
-/// `io.rs`, `handle.rs`, and inline in `net::fetch_blocking`.
+/// `io.rs` and `handle.rs`.
 ///
 /// `transport` is the actor-bound `MailTransport` instance — see
 /// `transport.rs` for the `&self` receiver design and how it
@@ -86,13 +85,12 @@ mod tests {
     use super::*;
     use serde::Deserialize;
 
-    // Per-impl mapping tests cover `SyncIoError`, `SyncHandleError`,
-    // and `SyncNetError`. They live in their owning modules' test
-    // blocks (handle.rs here; io.rs / net.rs in aether-component
-    // post-Phase 1) so each enum's variant set stays next to its
-    // definition. The helper-level tests below exercise the rc →
-    // branch mapping itself via a dummy `WaitError` that just records
-    // which constructor fired.
+    // Per-impl mapping tests cover `SyncIoError` and
+    // `SyncHandleError`. They live in their owning modules' test
+    // blocks so each enum's variant set stays next to its definition.
+    // The helper-level tests below exercise the rc → branch mapping
+    // itself via a dummy `WaitError` that just records which
+    // constructor fired.
 
     /// Tag-recording stub `WaitError` so [`decode_wait_reply`] tests
     /// can assert which sentinel branch the helper picked without

@@ -91,13 +91,15 @@ pub use wasm::{
     BootError, Component, Mailbox, Replaceable, WASM_TRANSPORT, WasmActor, WasmCtx, WasmDropCtx,
     WasmInitCtx, WasmTransport,
 };
-// Wasm helper modules (file I/O, HTTP egress) surface at the crate
-// root so existing `aether_component::io::*` call sites migrate to
+// Wasm helper module (file I/O) surfaces at the crate root so
+// existing `aether_component::io::*` call sites migrate to
 // `aether_actor::io::*` without growing a `wasm::` segment. Issue
-// #581 retired the wasm `log` shim — the unified actor-aware path
-// lives at the crate root in `aether_actor::log`, available on both
-// targets.
-pub use wasm::{io, net};
+// #581 retired the wasm `log` shim (replaced by the unified
+// actor-aware path at `aether_actor::log`, available on both
+// targets); issue #589 retired the wasm `net` helpers (zero callers
+// — components send `Fetch` directly via
+// `ctx.actor::<NetCapability>().send(...)`).
+pub use wasm::io;
 
 // Issue 442 / ADR-0033: `MailTransport` doubles as a re-export name
 // for the trait when consumers want to spell out the bound. Kept

@@ -159,9 +159,9 @@ impl<'a, T: MailTransport> Ctx<'a, T> {
     }
 
     /// Borrow the actor's transport. Exposed for the few SDK helper
-    /// modules (`aether-actor::wasm::{io,net,log}`) that resolve a
-    /// kind-typed `Mailbox<K, T>` internally and call its `send`
-    /// directly with the transport ref.
+    /// modules (`aether-actor::wasm::io`) that resolve a kind-typed
+    /// `Mailbox<K, T>` internally and call its `send` directly with
+    /// the transport ref.
     pub fn transport(&self) -> &T {
         self.transport
     }
