@@ -5,7 +5,7 @@
 //!
 //! Custom control-plane kinds:
 //!
-//! - `aether.control.capture_frame` — same two-phase resolve / push
+//! - `aether.render.capture_frame` — same two-phase resolve / push
 //!   / handoff desktop uses, but the handoff target is the chassis
 //!   event channel (not a winit `EventLoopProxy`). The `PendingCapture`
 //!   itself rides in `CaptureQueue`; the event channel just signals
@@ -22,23 +22,23 @@ use std::sync::{Arc, Mutex};
 
 use crate::hub::HubClient;
 use aether_capabilities::{
-    BroadcastCapability, HandleCapability, LogCapability, RenderCapability, RenderConfig,
-    RenderHandles,
+    BroadcastCapability, CaptureBackend, HandleCapability, LogCapability, RenderCapability,
+    RenderConfig, RenderHandles,
 };
 use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
-use aether_data::{Kind, KindId};
+use aether_data::Kind;
+use aether_data::KindId;
 use aether_kinds::{
-    Advance, AdvanceResult, CaptureFrame, FrameStats, PlatformInfo, SetWindowMode, SetWindowTitle,
-    Tick,
+    Advance, AdvanceResult, FrameStats, PlatformInfo, SetWindowMode, SetWindowTitle, Tick,
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::control_helpers::decode_payload;
 use aether_substrate::{
-    Chassis, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
+    Chassis, HubOutbound, ReplyTo, SubstrateBoot,
     capture::{
-        CaptureQueue, begin_capture_request, reply_unsupported_platform_info,
-        reply_unsupported_window_mode, reply_unsupported_window_title,
+        CaptureQueue, reply_unsupported_platform_info, reply_unsupported_window_mode,
+        reply_unsupported_window_title,
     },
     render::VERTEX_BUFFER_BYTES,
 };
@@ -54,30 +54,11 @@ const UNSUPPORTED_WINDOW: &str = "unsupported on test-bench chassis — no windo
      platform_info are desktop-only)";
 
 pub fn chassis_control_handler(
-    capture_queue: CaptureQueue,
     events: EventSender,
-    registry: Arc<Registry>,
-    queue: Arc<Mailer>,
     outbound: Arc<HubOutbound>,
 ) -> ChassisControlHandler {
     Arc::new(
         move |kind: KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| match kind {
-            CaptureFrame::ID => {
-                let events = events.clone();
-                begin_capture_request(
-                    &queue,
-                    &capture_queue,
-                    &registry,
-                    &outbound,
-                    sender,
-                    bytes,
-                    move || {
-                        events
-                            .send(ChassisEvent::CaptureRequested)
-                            .map_err(|_| "test-bench chassis shutting down — capture aborted")
-                    },
-                );
-            }
             Advance::ID => {
                 handle_advance(&events, &outbound, sender, bytes);
             }
@@ -246,13 +227,8 @@ impl TestBenchChassis {
 
         let boot = SubstrateBoot::builder(&name, &version).build()?;
         let _ = workers;
-        let chassis_handler = chassis_control_handler(
-            capture_queue.clone(),
-            events_tx.clone(),
-            Arc::clone(&boot.registry),
-            Arc::clone(&boot.queue),
-            Arc::clone(&boot.outbound),
-        );
+        let chassis_handler =
+            chassis_control_handler(events_tx.clone(), Arc::clone(&boot.outbound));
         let control_plane_config = ControlPlaneConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
@@ -267,9 +243,23 @@ impl TestBenchChassis {
             .kind_id(FrameStats::NAME)
             .expect("FrameStats registered");
 
+        // Capture handoff lives on `RenderCapability` post-issue-603
+        // Phase 2. The cap dispatcher parks the request on
+        // `capture_queue`; the embedder loop sees `CaptureRequested`
+        // and routes through `record_frame` + readback like before.
+        let events_for_render = events_tx.clone();
         let render_config = RenderConfig {
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
             observed_kinds,
+            capture_backend: Some(CaptureBackend {
+                queue: capture_queue.clone(),
+                wake: Arc::new(move || {
+                    events_for_render
+                        .send(ChassisEvent::CaptureRequested)
+                        .map_err(|_| "test-bench chassis shutting down — capture aborted")
+                }),
+                outbound: Arc::clone(&boot.outbound),
+            }),
         };
         let passive =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))

@@ -14,22 +14,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_capabilities::{
-    BroadcastCapability, HandleCapability, IoCapability, LogCapability, NetCapability,
-    io::NamespaceRoots, net::NetConfig as NetConf,
+    BroadcastCapability, HandleCapability, HeadlessRenderCapability, IoCapability, LogCapability,
+    NetCapability, io::NamespaceRoots, net::NetConfig as NetConf,
 };
 use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
 use aether_data::{Kind, KindId};
 use aether_kinds::{
-    Advance, CaptureFrame, FrameStats, PlatformInfo, SetMasterGain, SetMasterGainResult,
-    SetWindowMode, SetWindowTitle, Tick,
+    Advance, FrameStats, PlatformInfo, SetMasterGain, SetMasterGainResult, SetWindowMode,
+    SetWindowTitle, Tick,
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{
     Chassis, HubOutbound, ReplyTo, SubstrateBoot,
     capture::{
-        reply_unsupported_advance, reply_unsupported_capture_frame,
-        reply_unsupported_platform_info, reply_unsupported_window_mode,
+        reply_unsupported_advance, reply_unsupported_platform_info, reply_unsupported_window_mode,
         reply_unsupported_window_title,
     },
 };
@@ -43,9 +42,6 @@ const UNSUPPORTED_ADVANCE: &str =
 pub fn chassis_control_handler(outbound: Arc<HubOutbound>) -> ChassisControlHandler {
     Arc::new(
         move |kind: KindId, kind_name: &str, sender: ReplyTo, _bytes: &[u8]| match kind {
-            CaptureFrame::ID => {
-                reply_unsupported_capture_frame(&outbound, sender, UNSUPPORTED);
-            }
             SetWindowMode::ID => {
                 reply_unsupported_window_mode(&outbound, sender, UNSUPPORTED);
             }
@@ -154,23 +150,11 @@ impl HeadlessChassis {
             .kind_id(FrameStats::NAME)
             .expect("FrameStats registered");
 
-        // Silent drop for `aether.render` — desktop-designed
-        // components loaded on headless emit both `DrawTriangle` and
-        // (post-ADR-0074 §Decision 7) `aether.camera` at the tick
-        // rate; without this sink, core's mailbox-resolution warn
-        // fires every tick. The camera mailbox folded into render in
-        // Phase 3, so one nop sink covers both.
-        boot.registry.register_sink(
-            "aether.render",
-            Arc::new(
-                |_kind: KindId,
-                 _kind_name: &str,
-                 _origin: Option<&str>,
-                 _sender,
-                 _bytes: &[u8],
-                 _count: u32| {},
-            ),
-        );
+        // `aether.render` lands on `HeadlessRenderCapability` below
+        // (issue 603 Phase 2): no-op `DrawTriangle` / `Camera` so
+        // desktop-designed components don't warn-storm; `Err`-replying
+        // `CaptureFrame`. The pre-Phase-2 `register_sink("aether.render", nop)`
+        // shape retired with the cap extraction.
         // Audio nop sink — NoteOn/NoteOff fall through silently;
         // SetMasterGain replies Err so agents fail fast rather than
         // hang on a chassis with no audio device.
@@ -242,6 +226,7 @@ impl HeadlessChassis {
             .with_actor::<ControlPlaneCapability>(control_plane_config)
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<NetCapability>(net)
+            .with_actor::<HeadlessRenderCapability>(())
             .with_log_drain::<LogCapability>()
             .driver(driver)
             .build()

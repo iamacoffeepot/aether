@@ -1,40 +1,38 @@
-// Cross-thread handoff for `aether.control.capture_frame` requests.
+// Cross-thread handoff for `aether.render.capture_frame` requests.
 //
-// The chassis-side capture_frame handler runs on a scheduler worker;
+// The cap dispatcher thread runs `RenderCapability::on_capture_frame`;
 // the actual capture (offscreen texture → staging buffer → PNG)
 // happens on the render thread where the wgpu `Device` lives.
 // `CaptureQueue` is the single-slot mailbox between them.
 //
 // One in-flight capture at a time is plenty for v1. If a second
-// request arrives while one is pending, the chassis handler rejects
-// it immediately with `CaptureFrameResult::Err` rather than queuing —
+// request arrives while one is pending, the cap handler rejects it
+// immediately with `CaptureFrameResult::Err` rather than queuing —
 // keeps the slot a scalar and avoids unbounded buildup if the render
 // thread stalls.
 //
-// Waking the event loop on enqueue is the caller's job now — after a
-// successful `request()`, the desktop chassis handler pokes its
-// `EventLoopProxy<UserEvent>` directly. Keeping the wake out of
-// `CaptureQueue` means this type has zero chassis-awareness and could
-// live in any chassis crate that ever supports captures.
+// Waking the event loop on enqueue is the caller's job — after a
+// successful `request()`, `RenderCapability` pokes the
+// `CaptureBackend.wake` closure (desktop sends `UserEvent::Capture`
+// on the `EventLoopProxy`; test-bench sends `ChassisEvent::CaptureRequested`
+// on the embedder channel). Keeping the wake out of `CaptureQueue`
+// means this type has zero chassis-awareness and lives anywhere a
+// chassis cares about captures.
 //
-// `begin_capture_request` and the `reply_unsupported_*` helpers shave
-// ~50 lines off each chassis's control handler by collapsing the
-// resolve-bundle / push / enqueue / wake workflow (and the repeated
-// `XxxResult::Err { error: reason.to_owned() }` branches) into single
-// calls. See issue 429.
+// The `reply_unsupported_*` helpers shave repeated
+// `XxxResult::Err { error: reason.to_owned() }` branches across
+// chassis variants that don't own the matching peripheral.
+// `aether.render.capture_frame` doesn't appear in this list anymore:
+// post-issue-603 Phase 2 it lands on a real cap (`HeadlessRenderCapability`
+// on headless, `RenderCapability` on desktop / test-bench). See
+// issue 429 for the original consolidation.
 
 use std::sync::{Arc, Mutex};
 
-use aether_kinds::{
-    AdvanceResult, CaptureFrame, CaptureFrameResult, PlatformInfoResult, SetWindowModeResult,
-    SetWindowTitleResult,
-};
+use aether_kinds::{AdvanceResult, PlatformInfoResult, SetWindowModeResult, SetWindowTitleResult};
 
-use crate::control_helpers::{decode_payload, resolve_bundle};
 use crate::mail::{Mail, ReplyTo};
-use crate::mailer::Mailer;
 use crate::outbound::HubOutbound;
-use crate::registry::Registry;
 
 /// One pending capture request. Carries the reply handle so the
 /// render thread can reply once it has bytes, plus a resolved list
@@ -79,96 +77,6 @@ impl CaptureQueue {
     }
 }
 
-/// Run the full chassis-side capture-request workflow: decode the
-/// `CaptureFrame` payload, resolve both mail bundles atomically against
-/// the registry, push the pre-capture mails, install a `PendingCapture`
-/// on `capture_queue`, and invoke `wake` to nudge the chassis loop.
-///
-/// On any failure (decode, resolve, queue full, wake-channel down) the
-/// helper replies inline via `outbound` with `CaptureFrameResult::Err`
-/// and rolls back the queue install if the wake step is what failed.
-/// The caller doesn't see a `Result` — every error path is reported
-/// through the same reply channel the happy path uses, matching the
-/// rest of the control-plane shape.
-///
-/// The `wake` closure carries the chassis-specific bit. Desktop pokes
-/// its `EventLoopProxy<UserEvent>` (which only fails if the loop has
-/// shut down, and that case is a no-op anyway, so desktop returns
-/// `Ok`). Test-bench sends on its `EventSender`; if the receiver has
-/// been dropped (chassis shutting down), it returns the static reason
-/// string this helper attaches to the rollback reply.
-pub fn begin_capture_request(
-    queue: &Mailer,
-    capture_queue: &CaptureQueue,
-    registry: &Registry,
-    outbound: &HubOutbound,
-    sender: ReplyTo,
-    bytes: &[u8],
-    wake: impl FnOnce() -> Result<(), &'static str>,
-) {
-    let payload: CaptureFrame = match decode_payload(bytes) {
-        Ok(p) => p,
-        Err(error) => {
-            outbound.send_reply(sender, &CaptureFrameResult::Err { error });
-            return;
-        }
-    };
-
-    // Phase 1: resolve every envelope in both bundles before pushing
-    // anything or requesting a capture. Any failure aborts the whole
-    // request so a partial dispatch can't leak into the next frame.
-    let pre = match resolve_bundle(registry, &payload.mails, "capture bundle") {
-        Ok(v) => v,
-        Err(e) => {
-            outbound.send_reply(sender, &CaptureFrameResult::Err { error: e });
-            return;
-        }
-    };
-    let after = match resolve_bundle(registry, &payload.after_mails, "capture after bundle") {
-        Ok(v) => v,
-        Err(e) => {
-            outbound.send_reply(sender, &CaptureFrameResult::Err { error: e });
-            return;
-        }
-    };
-
-    // Phase 2: push resolved pre-mails, enqueue capture, wake loop.
-    // The chassis loop's per-mailbox drain (ADR-0038 Phase 3) is what
-    // enforces "capture after all mail processed".
-    for mail in pre {
-        queue.push(mail);
-    }
-
-    let pending = PendingCapture {
-        reply_to: sender,
-        after_mails: after,
-    };
-    if !capture_queue.request(pending) {
-        outbound.send_reply(
-            sender,
-            &CaptureFrameResult::Err {
-                error: "capture already pending; try again once the in-flight \
-                    request completes"
-                    .to_owned(),
-            },
-        );
-        return;
-    }
-
-    if let Err(reason) = wake() {
-        // Wake target is gone (chassis shutting down). Roll back the
-        // queue install so a stray capture doesn't leak into the next
-        // boot, and reply Err inline so the caller doesn't hang.
-        let _ = capture_queue.take();
-        outbound.send_reply(
-            sender,
-            &CaptureFrameResult::Err {
-                error: reason.to_owned(),
-            },
-        );
-    }
-}
-
 /// Reply `SetWindowModeResult::Err` with the given reason. Used by
 /// chassis variants that don't own a window (headless, test-bench).
 pub fn reply_unsupported_window_mode(outbound: &HubOutbound, sender: ReplyTo, reason: &str) {
@@ -210,17 +118,6 @@ pub fn reply_unsupported_advance(outbound: &HubOutbound, sender: ReplyTo, reason
     outbound.send_reply(
         sender,
         &AdvanceResult::Err {
-            error: reason.to_owned(),
-        },
-    );
-}
-
-/// Reply `CaptureFrameResult::Err` with the given reason. Used by
-/// chassis variants that have no GPU (headless).
-pub fn reply_unsupported_capture_frame(outbound: &HubOutbound, sender: ReplyTo, reason: &str) {
-    outbound.send_reply(
-        sender,
-        &CaptureFrameResult::Err {
             error: reason.to_owned(),
         },
     );

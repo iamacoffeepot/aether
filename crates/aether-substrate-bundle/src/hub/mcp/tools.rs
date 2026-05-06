@@ -49,8 +49,8 @@ use crate::hub::registry::ComponentRecord;
 /// the call site. The process tools below already use that pattern;
 /// these survive to avoid expanding PR 2's diff into the existing
 /// capture / load / replace paths.
-const KIND_CAPTURE_FRAME: &str = "aether.control.capture_frame";
-const KIND_CAPTURE_FRAME_RESULT: &str = "aether.control.capture_frame_result";
+const KIND_CAPTURE_FRAME: &str = "aether.render.capture_frame";
+const KIND_CAPTURE_FRAME_RESULT: &str = "aether.render.capture_frame_result";
 const KIND_LOAD_COMPONENT: &str = "aether.control.load_component";
 const KIND_LOAD_RESULT: &str = "aether.control.load_result";
 const KIND_REPLACE_COMPONENT: &str = "aether.control.replace_component";
@@ -512,7 +512,7 @@ impl Hub {
         // hub encoder wrote — postcard-equivalent round-trip.
         let spec = MailSpec {
             engine_id: args.engine_id.clone(),
-            recipient_name: "aether.control".to_owned(),
+            recipient_name: "aether.render".to_owned(),
             kind_name: KIND_CAPTURE_FRAME.to_owned(),
             params: Some(bundle_params),
             count: 1,

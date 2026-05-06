@@ -55,6 +55,8 @@ pub use io::IoCapability;
 pub use log::LogCapability;
 pub use net::{NetCapability, NetConfig};
 #[cfg(feature = "render")]
+pub use render::HeadlessRenderCapability;
+#[cfg(feature = "render")]
 pub use render::RenderCapability;
 #[cfg(feature = "render-native")]
-pub use render::{RenderConfig, RenderGpu, RenderHandles};
+pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};

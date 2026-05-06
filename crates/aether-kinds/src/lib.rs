@@ -624,7 +624,7 @@ mod control_plane {
         pub mailbox: aether_data::MailboxId,
     }
 
-    /// `aether.control.capture_frame` — request the substrate grab the
+    /// `aether.render.capture_frame` — request the substrate grab the
     /// current frame contents and reply-to-sender with an encoded
     /// PNG. Carries two optional bundles: `mails` dispatched *before*
     /// capturing (state-changing mail whose effects should appear in
@@ -644,7 +644,7 @@ mod control_plane {
     ///
     /// Reply: `CaptureFrameResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.capture_frame")]
+    #[kind(name = "aether.render.capture_frame")]
     pub struct CaptureFrame {
         pub mails: Vec<MailEnvelope>,
         pub after_mails: Vec<MailEnvelope>,
@@ -671,7 +671,7 @@ mod control_plane {
     /// bundle-resolution failure (unknown kind / mailbox) aborting
     /// before any mail was dispatched.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.capture_frame_result")]
+    #[kind(name = "aether.render.capture_frame_result")]
     pub enum CaptureFrameResult {
         Ok { png: Vec<u8> },
         Err { error: String },
@@ -1563,10 +1563,10 @@ mod tests {
             SubscribeInputResult::NAME,
             "aether.control.subscribe_input_result"
         );
-        assert_eq!(CaptureFrame::NAME, "aether.control.capture_frame");
+        assert_eq!(CaptureFrame::NAME, "aether.render.capture_frame");
         assert_eq!(
             CaptureFrameResult::NAME,
-            "aether.control.capture_frame_result"
+            "aether.render.capture_frame_result"
         );
         assert_eq!(PlatformInfo::NAME, "aether.control.platform_info");
         assert_eq!(
