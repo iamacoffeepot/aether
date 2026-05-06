@@ -25,12 +25,12 @@ use aether_capabilities::{
     BroadcastCapability, HandleCapability, LogCapability, RenderCapability, RenderConfig,
     RenderHandles,
 };
+use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
 use aether_data::{Kind, KindId};
 use aether_kinds::{
     Advance, AdvanceResult, CaptureFrame, FrameStats, PlatformInfo, SetWindowMode, SetWindowTitle,
     Tick,
 };
-use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::control_helpers::decode_payload;

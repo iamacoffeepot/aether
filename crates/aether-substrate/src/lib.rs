@@ -86,7 +86,9 @@ pub use outbound::{
 };
 pub use panic_hook::init_panic_hook;
 pub use registry::{MailboxEntry, Registry, SinkHandler};
-pub use supervisor::{ComponentRouter, ComponentSendOutcome, DrainDeath, DrainOutcome, DrainSummary};
+pub use supervisor::{
+    ComponentRouter, ComponentSendOutcome, DrainDeath, DrainOutcome, DrainSummary,
+};
 
 /// Well-known mailbox name for substrate-level diagnostic events
 /// delivered back to this engine. Today the only kind delivered here

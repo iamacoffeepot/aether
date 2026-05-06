@@ -288,7 +288,7 @@ impl DesktopChassis {
 
         let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
         let _ = WORKERS; // ADR-0038 retired the worker count knob; field
-                         // retained for `EngineInfo.workers` wire compat.
+        // retained for `EngineInfo.workers` wire compat.
 
         let chassis_handler = chassis_control_handler(
             event_loop.create_proxy(),

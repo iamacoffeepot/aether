@@ -17,12 +17,12 @@ use aether_capabilities::{
     BroadcastCapability, HandleCapability, IoCapability, LogCapability, NetCapability,
     io::NamespaceRoots, net::NetConfig as NetConf,
 };
+use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
 use aether_data::{Kind, KindId};
 use aether_kinds::{
     Advance, CaptureFrame, FrameStats, PlatformInfo, SetMasterGain, SetMasterGainResult,
     SetWindowMode, SetWindowTitle, Tick,
 };
-use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{

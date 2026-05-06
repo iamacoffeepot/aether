@@ -41,7 +41,15 @@ pub use audio::AudioCapability;
 #[cfg(feature = "audio-native")]
 pub use audio::AudioConfig;
 pub use broadcast::BroadcastCapability;
-pub use control::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
+pub use control::ControlPlaneCapability;
+// `ChassisControlHandler` + `ControlPlaneConfig` are wasmtime-bound
+// (the config holds `Arc<Engine>` / `Arc<Linker<SubstrateCtx>>`, the
+// closure type alias references substrate `ReplyTo`). They re-export
+// only on the native target — wasm-component consumers see the cap
+// stub via `ControlPlaneCapability` for typed `ctx.actor::<...>()`
+// addressing without dragging the wasmtime stack into the wasm graph.
+#[cfg(not(target_arch = "wasm32"))]
+pub use control::{ChassisControlHandler, ControlPlaneConfig};
 pub use handle::HandleCapability;
 pub use io::IoCapability;
 pub use log::LogCapability;

@@ -54,13 +54,13 @@ mod native {
 
     use aether_actor::actor;
     use aether_data::{Kind, KindDescriptor};
-    use aether_kinds::{ComponentCapabilities, ComponentDied, DropResult, LoadResult, ReplaceResult,
-        SubscribeInputResult};
+    use aether_kinds::{
+        ComponentCapabilities, ComponentDied, DropResult, LoadResult, ReplaceResult,
+        SubscribeInputResult,
+    };
     use wasmtime::{Engine, Linker, Module};
 
-    use super::{
-        DropComponent, LoadComponent, ReplaceComponent, SubscribeInput, UnsubscribeInput,
-    };
+    use super::{DropComponent, LoadComponent, ReplaceComponent, SubscribeInput, UnsubscribeInput};
 
     use aether_substrate::capability::{BootError, Envelope};
     use aether_substrate::component::{Component, DISPATCH_UNKNOWN_KIND};
@@ -232,7 +232,6 @@ mod native {
             let bytes = postcard::to_allocvec(&payload).expect("encode UnsubscribeInput");
             self.inner.handle_unsubscribe_bytes(&bytes)
         }
-
     }
 
     #[actor]
@@ -245,17 +244,14 @@ mod native {
             ctx: &mut NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
             let mailer = ctx.mailer();
-            let registry = mailer
-                .registry()
-                .cloned()
-                .ok_or_else(|| {
-                    BootError::Other(
-                        std::io::Error::other(
-                            "registry must be wired on Mailer before ControlPlaneCapability::init",
-                        )
-                        .into(),
+            let registry = mailer.registry().cloned().ok_or_else(|| {
+                BootError::Other(
+                    std::io::Error::other(
+                        "registry must be wired on Mailer before ControlPlaneCapability::init",
                     )
-                })?;
+                    .into(),
+                )
+            })?;
             let inner = Arc::new(ControlPlaneInner {
                 engine: config.engine,
                 linker: config.linker,
@@ -452,10 +448,11 @@ mod native {
         }
 
         fn handle_load(&self, payload: LoadComponent) -> LoadResult {
-            let descriptors: Vec<KindDescriptor> = match kind_manifest::read_from_bytes(&payload.wasm) {
-                Ok(d) => d,
-                Err(error) => return LoadResult::Err { error },
-            };
+            let descriptors: Vec<KindDescriptor> =
+                match kind_manifest::read_from_bytes(&payload.wasm) {
+                    Ok(d) => d,
+                    Err(error) => return LoadResult::Err { error },
+                };
             if let Err(error) = register_or_match_all(&self.registry, &descriptors) {
                 return LoadResult::Err { error };
             }
@@ -655,10 +652,11 @@ mod native {
                 }
             }
 
-            let descriptors: Vec<KindDescriptor> = match kind_manifest::read_from_bytes(&payload.wasm) {
-                Ok(d) => d,
-                Err(error) => return ReplaceResult::Err { error },
-            };
+            let descriptors: Vec<KindDescriptor> =
+                match kind_manifest::read_from_bytes(&payload.wasm) {
+                    Ok(d) => d,
+                    Err(error) => return ReplaceResult::Err { error },
+                };
             if let Err(error) = register_or_match_all(&self.registry, &descriptors) {
                 return ReplaceResult::Err { error };
             }
@@ -805,9 +803,7 @@ mod native {
             Some(MailboxEntry::Sink(_)) => {
                 Err(format!("mailbox {:?} is a sink, not a component", id))
             }
-            Some(MailboxEntry::Dropped) => {
-                Err(format!("mailbox {:?} already dropped", id))
-            }
+            Some(MailboxEntry::Dropped) => Err(format!("mailbox {:?} already dropped", id)),
             None => Err(format!("unknown mailbox id {:?}", id)),
         }
     }
@@ -1162,4 +1158,3 @@ mod native {
         }
     }
 }
-

@@ -202,9 +202,7 @@ mod tests {
     use super::*;
     use crate::mail::MailboxId;
     use crate::registry::Registry;
-    use crate::supervisor::{
-        ComponentRouter, ComponentSendOutcome, DrainDeath, DrainSummary,
-    };
+    use crate::supervisor::{ComponentRouter, ComponentSendOutcome, DrainDeath, DrainSummary};
 
     /// Mock router that returns a pre-configured `DrainSummary` from
     /// `drain_all_with_budget`. Lets the wedge / death format-string
