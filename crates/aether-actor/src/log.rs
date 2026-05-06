@@ -37,6 +37,12 @@ use tracing::{
     Event, Level,
     field::{Field, Visit},
 };
+// Wasm-only `tracing` imports needed by [`WasmSubscriber`]'s
+// `Subscriber` impl. Kept under cfg so the host build doesn't warn
+// about unused imports — `aether-substrate::log_install`'s
+// `ActorAwareLayer` is the host-target hookup, not this subscriber.
+#[cfg(target_arch = "wasm32")]
+use tracing::{Subscriber, span};
 
 use crate::Local;
 
