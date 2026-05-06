@@ -51,7 +51,6 @@ use alloc::string::String;
 use crate::transport::MailTransport;
 
 pub mod io;
-pub mod log;
 pub mod net;
 pub mod raw;
 
@@ -402,9 +401,10 @@ macro_rules! __export_internal {
         /// Receives the component's own mailbox id (ADR-0030 Phase 2)
         /// so `#[actor]`'s synthesized `init` prologue can self-
         /// address `subscribe_input` for every `K::IS_INPUT` handler
-        /// kind. ADR-0060: also installs `MailSubscriber` as the global
-        /// `tracing` default before user `init` runs, so logging from
-        /// inside `init` reaches the substrate's `aether.log` sink.
+        /// kind. Issue #581: also installs the actor-aware tracing
+        /// subscriber as the global default before user `init` runs,
+        /// so logging from inside `init` lands in the per-actor
+        /// `LogBuffer` and drains to `LogCapability` at handler exit.
         ///
         /// Returns `0` on success and non-zero when the component's
         /// `init` returned `Err(BootError)`. On the `Err` path the
@@ -425,7 +425,7 @@ macro_rules! __export_internal {
         #[cfg(target_arch = "wasm32")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
-            $crate::wasm::log::install_global_default();
+            $crate::log::install_wasm_subscriber();
             let mut ctx: $crate::WasmInitCtx<'_> =
                 $crate::WasmInitCtx::__new(&$crate::WASM_TRANSPORT, mailbox_id);
             match <$component as $crate::WasmActor>::init(&mut ctx) {

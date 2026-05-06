@@ -1290,29 +1290,47 @@ mod control_plane {
         },
     }
 
-    // ADR-0060 guest-side logging via mail sink. One postcard kind on
-    // the substrate-owned `"aether.log"` mailbox. The SDK installs
-    // a `tracing::Subscriber` that formats events into this shape and
-    // sends them; chassis sinks decode and re-emit through the host
-    // `tracing` subscriber so `engine_logs` (ADR-0023) sees them.
+    // Issue #581 unified actor-aware logging. `LogEvent` is the shape
+    // the actor-aware tracing subscriber buffers per-actor; the wire
+    // kind is `LogBatch` (one mail per drain rather than one mail per
+    // event). `LogEvent` itself is intentionally *not* a `Kind` — it
+    // can't be addressed as top-level mail, so the only authors are
+    // the in-crate subscriber and the `aether::log_*!` macros. The
+    // mailbox `"aether.log"` (kind id namespace `aether.log.*`) is
+    // owned by `LogCapability` (`aether-capabilities::log`) which
+    // forwards entries to the hub.
 
-    /// `aether.log` — a single tracing event the guest emitted, ready
-    /// for the substrate to re-emit into its own subscriber. Mailed to
-    /// the `"aether.log"` sink; fire-and-forget (no reply).
-    /// `level` maps to a `tracing::Level` substrate-side
-    /// (`0 = trace`, `1 = debug`, `2 = info`, `3 = warn`, `4 = error`).
-    /// `target` is a module-style string the chassis's `EnvFilter`
-    /// matches against; the SDK defaults it to the guest's crate name.
-    /// `message` is pre-formatted with structured fields collapsed into
-    /// the message body in fields-first form (e.g.
-    /// `"error=<Display> count=3 parse failed"`), capped at 4096 bytes
-    /// by the SDK with a `" [truncated]"` suffix on overflow.
-    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.log")]
+    /// One captured tracing event, ready to be batched into a
+    /// `LogBatch`. `level` maps `0 = trace .. 4 = error`. `target` is
+    /// a module-style string the chassis's `EnvFilter` matches against.
+    /// `message` is pre-formatted with structured fields collapsed
+    /// into the message body (e.g. `"error=<Display> count=3 parse
+    /// failed"`), capped by the subscriber with a `" [truncated]"`
+    /// suffix on overflow.
+    ///
+    /// Pre-#581 this carried `#[derive(aether_data::Kind,
+    /// aether_data::Schema)]` + `#[kind(name = "aether.log")]` and was
+    /// mailed one event at a time. The `Kind` derive was dropped to
+    /// make `LogEvent` unmailable on its own — every emission flows
+    /// through `LogBatch`. `Schema` stays so the derive on `LogBatch`
+    /// can describe its `Vec<LogEvent>` field's wire shape.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct LogEvent {
         pub level: u8,
         pub target: String,
         pub message: String,
+    }
+
+    /// `aether.log.batch` — a drained per-actor log buffer or a single
+    /// host-emitted event. Mailed to the `"aether.log"` mailbox by the
+    /// actor-aware subscriber (issue #581); fire-and-forget. The
+    /// originating `MailboxId` rides on the mail envelope (cap reads
+    /// `ctx.sender()`); empty `entries` is legal but produced by no
+    /// path the SDK exposes.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.log.batch")]
+    pub struct LogBatch {
+        pub entries: Vec<LogEvent>,
     }
 
     // ADR-0066: camera control kinds (`aether.camera.{create, destroy,

@@ -28,6 +28,12 @@ use crate::mail::{ReplyTarget, ReplyTo};
 /// in batches; the hub backend converts to `aether_data::LogEntry`
 /// at the wire boundary. Field shape matches the wire type so the
 /// conversion is a struct copy.
+///
+/// Issue #581 added `origin`: the `MailboxId` of the actor whose
+/// dispatch buffered this entry. `None` means host-emitted (substrate
+/// boot, scheduler, panic hook — no actor stamp at the time of
+/// emission). The hub's `engine_logs` MCP tool surfaces it for
+/// per-actor attribution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogEntry {
     pub timestamp_unix_ms: u64,
@@ -35,6 +41,7 @@ pub struct LogEntry {
     pub target: String,
     pub message: String,
     pub sequence: u64,
+    pub origin: Option<MailboxId>,
 }
 
 /// Severity for `LogEntry`. Mirrors `tracing::Level`. Ordered

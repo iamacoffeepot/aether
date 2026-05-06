@@ -49,7 +49,7 @@ pub mod host_fns;
 pub mod input;
 pub mod kind_manifest;
 pub mod lifecycle;
-pub mod log_capture;
+pub mod log_install;
 pub mod mail;
 pub mod mailer;
 pub mod native_actor;

@@ -327,11 +327,23 @@ where
 
         // Boot the cap through `init`. The NativeInitCtx borrows the
         // actors-so-far map (read-only) plus the transport (read-only)
-        // plus a mailer clone for outbound hooks.
+        // plus a mailer clone for outbound hooks. Issue #581: also
+        // stamp the actor's transport as the in-actor `MailDispatch`
+        // around `init` so any `tracing::*` event the cap fires
+        // during boot drains to LogCapability when init returns.
         let actor = {
             let mailer_clone = ctx.mail_send_handle();
             let mut init_ctx = NativeInitCtx::new(&transport, actors, mailer_clone);
-            aether_actor::local::with_stamped(&slots, || A::init(config, &mut init_ctx))?
+            aether_actor::local::with_stamped(&slots, || {
+                aether_actor::log::with_actor_dispatch(
+                    &*transport as &dyn aether_actor::log::MailDispatch,
+                    || {
+                        let r = A::init(config, &mut init_ctx);
+                        aether_actor::log::drain_buffer();
+                        r
+                    },
+                )
+            })?
         };
         let actor_arc: Arc<A> = Arc::new(actor);
 
@@ -357,25 +369,38 @@ where
             .spawn(move || {
                 while let Some(env) = transport_for_thread.recv_blocking() {
                     aether_actor::local::with_stamped(&slots, || {
-                        let mut ctx = NativeCtx::new(&transport_for_thread, env.sender);
-                        if actor_for_thread
-                            .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
-                            .is_none()
-                            && !actor_for_thread.__aether_dispatch_fallback(&mut ctx, &env)
-                        {
-                            // Issue 576: catch-all caps override
-                            // `__aether_dispatch_fallback` and return
-                            // `true` after their fallback runs,
-                            // suppressing this warn. Strict receivers
-                            // keep the default (returns `false`) and
-                            // surface the miss.
-                            tracing::warn!(
-                                target: "aether_substrate::chassis_builder",
-                                actor = A::NAMESPACE,
-                                kind = env.kind_name.as_str(),
-                                "native actor dispatch missed: kind not handled or decode failed"
-                            );
-                        }
+                        // Issue #581: stamp the actor's transport as
+                        // the in-actor `MailDispatch` so the actor-
+                        // aware tracing layer's priority flush + the
+                        // post-handler drain hook ship `LogBatch`
+                        // mail with sender attribution.
+                        aether_actor::log::with_actor_dispatch(
+                            &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                            || {
+                                let mut ctx =
+                                    NativeCtx::new(&transport_for_thread, env.sender);
+                                if actor_for_thread
+                                    .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
+                                    .is_none()
+                                    && !actor_for_thread
+                                        .__aether_dispatch_fallback(&mut ctx, &env)
+                                {
+                                    // Issue 576: catch-all caps override
+                                    // `__aether_dispatch_fallback` and return
+                                    // `true` after their fallback runs,
+                                    // suppressing this warn. Strict receivers
+                                    // keep the default (returns `false`) and
+                                    // surface the miss.
+                                    tracing::warn!(
+                                        target: "aether_substrate::chassis_builder",
+                                        actor = A::NAMESPACE,
+                                        kind = env.kind_name.as_str(),
+                                        "native actor dispatch missed: kind not handled or decode failed"
+                                    );
+                                }
+                                aether_actor::log::drain_buffer();
+                            },
+                        );
                     });
                     // Decrement matches the sink-handler's increment —
                     // the chassis frame-bound drain barrier
@@ -552,6 +577,14 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// for driving the loop manually (TestBench).
     pub fn build_passive(self) -> Result<PassiveChassis<C>, BootError> {
         let booted = boot_passives(&self.registry, &self.mailer, &self.aborter, self.passives)?;
+        // Issue #581: finalise actor-aware logging by wiring the
+        // host-branch dispatch + log mailbox id once `LogCapability`
+        // has claimed `"aether.log"`. No-op if the chassis skipped
+        // the cap.
+        crate::log_install::install_log_target_if_registered(
+            Arc::clone(&self.mailer),
+            &self.registry,
+        );
         Ok(PassiveChassis {
             booted,
             _chassis: PhantomData,
@@ -605,6 +638,10 @@ impl<C: Chassis> Builder<C, HasDriver> {
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
 
         let mut booted = boot_passives(&registry, &mailer, &aborter, passives)?;
+        // Issue #581: finalise actor-aware logging once passives
+        // have booted. Lookups `"aether.log"`; no-op if the cap
+        // wasn't registered (chassis intentionally skipping logging).
+        crate::log_install::install_log_target_if_registered(Arc::clone(&mailer), &registry);
         let driver_running = {
             let chassis_ctx = ChassisCtx::new(
                 &registry,

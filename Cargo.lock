@@ -90,7 +90,6 @@ dependencies = [
  "cpal",
  "crossbeam-queue",
  "dirs",
- "log",
  "png",
  "postcard",
  "serde",
@@ -321,6 +320,7 @@ dependencies = [
  "aether-kinds",
  "bytemuck",
  "serde",
+ "tracing",
 ]
 
 [[package]]
