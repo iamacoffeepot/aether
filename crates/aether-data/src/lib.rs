@@ -72,7 +72,7 @@ pub use wire_id::{EngineId, SessionToken, Uuid};
 /// SDK and the derive share a home.
 #[cfg(feature = "derive")]
 pub use aether_actor_derive::{
-    Kind, Schema, Singleton, actor, bridge, capability, fallback, handler,
+    Kind, Schema, Singleton, actor, bridge, capability, fallback, handler, local,
 };
 
 /// Identifies a mail kind by a stable, namespaced string name (e.g.

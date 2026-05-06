@@ -318,13 +318,20 @@ where
         let transport = Arc::new(NativeTransport::from_ctx(ctx, mailbox_id, A::FRAME_BARRIER));
         transport.install_inbox(receiver);
 
+        // Per-actor scratch storage (issue 582 / ADR-0074). Stamped
+        // into TLS via `local::with_stamped` for the duration
+        // of `init` and each handler dispatch so library code inside
+        // the actor (e.g., the issue-581 log buffer) can reach
+        // `Local::with_mut` without threading a ctx through.
+        let slots = Box::new(aether_actor::local::ActorSlots::new());
+
         // Boot the cap through `init`. The NativeInitCtx borrows the
         // actors-so-far map (read-only) plus the transport (read-only)
         // plus a mailer clone for outbound hooks.
         let actor = {
             let mailer_clone = ctx.mail_send_handle();
             let mut init_ctx = NativeInitCtx::new(&transport, actors, mailer_clone);
-            A::init(config, &mut init_ctx)?
+            aether_actor::local::with_stamped(&slots, || A::init(config, &mut init_ctx))?
         };
         let actor_arc: Arc<A> = Arc::new(actor);
 
@@ -334,11 +341,14 @@ where
         // claim above would have failed first).
         actors.insert::<A>(Arc::clone(&actor_arc));
 
-        // Spawn the dispatcher thread. The thread owns one Arc<A>
-        // and one Arc<NativeTransport>; it loops `recv_blocking()`
-        // on the transport (which pulls from the installed inbox
-        // and disconnects when the chassis drops its `sink_sender`)
-        // and routes through `__aether_dispatch_envelope`.
+        // Spawn the dispatcher thread. The thread owns one Arc<A>,
+        // one Arc<NativeTransport>, and the per-actor `ActorSlots`
+        // (moved in by value); it loops `recv_blocking()` on the
+        // transport (which pulls from the installed inbox and
+        // disconnects when the chassis drops its `sink_sender`) and
+        // routes each envelope through `__aether_dispatch_envelope`,
+        // wrapped in `local::with_stamped` so handler bodies
+        // see the per-actor storage.
         let actor_for_thread = Arc::clone(&actor_arc);
         let transport_for_thread = Arc::clone(&transport);
         let thread_name = alloc_native_actor_thread_name::<A>();
@@ -346,24 +356,27 @@ where
             .name(thread_name)
             .spawn(move || {
                 while let Some(env) = transport_for_thread.recv_blocking() {
-                    let mut ctx = NativeCtx::new(&transport_for_thread, env.sender);
-                    if actor_for_thread
-                        .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
-                        .is_none()
-                        && !actor_for_thread.__aether_dispatch_fallback(&mut ctx, &env)
-                    {
-                        // Issue 576: catch-all caps override
-                        // `__aether_dispatch_fallback` and return
-                        // `true` after their fallback runs, suppressing
-                        // this warn. Strict receivers keep the default
-                        // (returns `false`) and surface the miss.
-                        tracing::warn!(
-                            target: "aether_substrate::chassis_builder",
-                            actor = A::NAMESPACE,
-                            kind = env.kind_name.as_str(),
-                            "native actor dispatch missed: kind not handled or decode failed"
-                        );
-                    }
+                    aether_actor::local::with_stamped(&slots, || {
+                        let mut ctx = NativeCtx::new(&transport_for_thread, env.sender);
+                        if actor_for_thread
+                            .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
+                            .is_none()
+                            && !actor_for_thread.__aether_dispatch_fallback(&mut ctx, &env)
+                        {
+                            // Issue 576: catch-all caps override
+                            // `__aether_dispatch_fallback` and return
+                            // `true` after their fallback runs,
+                            // suppressing this warn. Strict receivers
+                            // keep the default (returns `false`) and
+                            // surface the miss.
+                            tracing::warn!(
+                                target: "aether_substrate::chassis_builder",
+                                actor = A::NAMESPACE,
+                                kind = env.kind_name.as_str(),
+                                "native actor dispatch missed: kind not handled or decode failed"
+                            );
+                        }
+                    });
                     // Decrement matches the sink-handler's increment —
                     // the chassis frame-bound drain barrier
                     // (`drain_frame_bound_or_abort`) reads this counter
@@ -1086,6 +1099,138 @@ mod tests {
             1,
             "FRAME_BARRIER cap registered its pending counter for the drain barrier"
         );
+        drop(chassis);
+    }
+
+    /// Issue 582: the chassis dispatcher trampoline stamps the
+    /// per-actor [`aether_actor::local::ActorSlots`] into TLS
+    /// for the duration of `init` and each handler call. A cap that
+    /// reaches for `Local::with_mut` from inside both lifecycle
+    /// stages must see its own state — verified end-to-end here so
+    /// the stamping wiring can't silently regress.
+    #[test]
+    fn with_actor_stamps_local_for_init_and_handler() {
+        use crate::registry::MailboxEntry;
+        use aether_actor::Local;
+        use aether_data::{Kind, ReplyTo as DataReplyTo};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Tick {
+            seq: u32,
+        }
+        impl Kind for Tick {
+            const NAME: &'static str = "test.local.tick";
+            const ID: aether_data::KindId = aether_data::KindId(0xA1B2_C3D4_E5F6_0002);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        // The cap holds an Arc<AtomicU32> the test reads after each
+        // dispatch. The actor-local counter is keyed by `TypeId<Counter>`
+        // — the chassis stamp is what makes `with_mut` resolve at
+        // all (outside a stamp it would `debug_assert!` panic).
+        struct LocalProbe {
+            observed: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for LocalProbe {
+            const NAMESPACE: &'static str = "test.local.probe";
+        }
+        impl aether_actor::Singleton for LocalProbe {}
+        impl aether_actor::HandlesKind<Tick> for LocalProbe {}
+
+        // Newtype-per-slot is the Local convention: each
+        // logical storage gets its own type, so two probes that
+        // both want a u32 don't alias under TypeId. The
+        // `#[local]` attribute is the shorthand for the
+        // marker impl.
+        #[derive(Default)]
+        #[aether_actor::local]
+        struct Counter(u32);
+
+        impl crate::native_actor::NativeActor for LocalProbe {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                // Init runs inside the chassis builder's stamp guard
+                // — write a sentinel so the handler test below proves
+                // the same slots are reused across init→dispatch.
+                Counter::with_mut(|c| c.0 = 100);
+                Ok(Self { observed: config })
+            }
+        }
+
+        impl crate::native_actor::NativeDispatch for LocalProbe {
+            fn __aether_dispatch_envelope(
+                &self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Tick::ID.0 {
+                    let _decoded = Tick::decode_from_bytes(payload)?;
+                    Counter::with_mut(|c| c.0 += 1);
+                    let snapshot = Counter::with(|c| c.0);
+                    self.observed.store(snapshot, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let observed = Arc::new(AtomicU32::new(0));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<LocalProbe>(Arc::clone(&observed))
+            .build_passive()
+            .expect("LocalProbe boots");
+
+        let mailbox_id = registry
+            .lookup(<LocalProbe as aether_actor::Actor>::NAMESPACE)
+            .expect("with_actor claimed the mailbox");
+        let MailboxEntry::Sink(handler) = registry.entry(mailbox_id).expect("sink registered")
+        else {
+            panic!("LocalProbe claim must be a sink entry");
+        };
+
+        // Three dispatches. Init seeded 100; the handler bumps once
+        // per dispatch and snapshots — so observed should walk
+        // 101, 102, 103 in order. We assert the final 103 with a
+        // wait budget to cover dispatcher-thread scheduling.
+        for seq in 0..3 {
+            let payload = Tick { seq };
+            let bytes = payload.encode_into_bytes();
+            handler(
+                <Tick as Kind>::ID,
+                Tick::NAME,
+                None,
+                DataReplyTo::NONE,
+                &bytes,
+                1,
+            );
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while observed.load(AtomicOrdering::SeqCst) != 103 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            observed.load(AtomicOrdering::SeqCst),
+            103,
+            "init seeded 100 + 3 handler bumps ⇒ Local at 103 (proves the same \
+             ActorSlots is stamped across init and dispatch)"
+        );
+
         drop(chassis);
     }
 }

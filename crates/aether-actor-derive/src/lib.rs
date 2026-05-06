@@ -1153,6 +1153,55 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     .into()
 }
 
+/// `#[local]` — attribute macro that declares a struct as
+/// per-actor scratch storage (issue 582). Passes the struct
+/// through unchanged and emits `impl ::aether_actor::Local for T
+/// {}` underneath.
+///
+/// The trait requires `Default + Send + 'static` (native) /
+/// `Default + 'static` (wasm) — the user supplies `Default` either
+/// via `#[derive(Default)]` or a hand-rolled impl, depending on
+/// whether the struct's fields default trivially. The macro
+/// deliberately does *not* auto-derive `Default` so types that
+/// need a custom default (e.g. a counter that starts at 1, a Vec
+/// with reserved capacity) aren't fighting the derive.
+///
+/// ```ignore
+/// #[derive(Default)]
+/// #[local]
+/// struct LogBuffer(Vec<LogEvent>);
+///
+/// #[derive(Default)]
+/// #[local]
+/// struct AppState {
+///     pending: u32,
+///     events: Vec<Event>,
+/// }
+///
+/// // Custom Default:
+/// #[local]
+/// struct Retries { count: u32 }
+/// impl Default for Retries {
+///     fn default() -> Self { Self { count: 3 } }
+/// }
+/// ```
+///
+/// Generics are forwarded — `#[local] struct Foo<T>(T);` emits
+/// `impl<T: Default + Send + 'static> Local for Foo<T>`. In
+/// practice Local types are concrete; the generics support is
+/// mostly for completeness.
+#[proc_macro_attribute]
+pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::ItemStruct);
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    quote! {
+        #input
+        impl #impl_generics ::aether_actor::Local for #name #ty_generics #where_clause {}
+    }
+    .into()
+}
+
 /// `#[derive(Singleton)]` — emits `impl ::aether_actor::Singleton for T {}`.
 ///
 /// Issue 552 stage 0: explicit opt-in marker that an actor type is

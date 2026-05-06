@@ -48,8 +48,16 @@
 
 extern crate alloc;
 
+// Self-alias so proc-macros (today: `#[local]` in
+// `aether-actor-derive`) that emit absolute paths like
+// `::aether_actor::Local` resolve when used inside this crate
+// itself — e.g., the `local` test module's probe newtypes.
+// Outside callers don't need this; it's a no-op for them.
+extern crate self as aether_actor;
+
 mod actor;
 mod ctx;
+pub mod local;
 mod mail;
 mod sender;
 mod sink;
@@ -60,6 +68,7 @@ pub mod wasm;
 
 pub use actor::{Actor, Dispatch, HandlesKind, Singleton};
 pub use ctx::{Ctx, DropCtx, InitCtx};
+pub use local::Local;
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
 pub use sender::{MailCtx, Sender};
 // Generic 2-arg `Mailbox<K, T>` stays accessible as
@@ -132,7 +141,7 @@ pub mod __macro_internals {
 /// alongside the existing actor derives so component / capability
 /// authors only need `aether-actor` in their dep list.
 pub use aether_data::{
-    Kind, KindId as DataKindId, Schema, actor, bridge, capability, fallback, handler,
+    Kind, KindId as DataKindId, Schema, actor, bridge, capability, fallback, handler, local,
 };
 // `Singleton` lives in two namespaces:
 //   - the type namespace for the marker trait (`Actor` super-trait),
