@@ -39,14 +39,26 @@ mod native {
 
     use crate::hub::spawn::{
         DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, SpawnOpts, spawn_substrate_no_adopt,
-        terminate_substrate,
     };
     use crate::hub::wire::{EngineId, Uuid};
 
-    /// Per-engine slot for a spawned child. The reaper task and the
-    /// terminate handler race to take ownership; whoever wins runs
-    /// the wait/signal sequence and the loser bows out.
-    type ChildSlot = Arc<Mutex<Option<Child>>>;
+    /// Per-engine bookkeeping for a spawned child. The reaper task
+    /// owns the `tokio::process::Child` outright (Child::wait needs
+    /// `&mut self` and is single-shot, so dual ownership doesn't
+    /// compose); the cap keeps the PID so the terminate handler can
+    /// signal the process directly via `libc::kill` and the reaper's
+    /// `JoinHandle` so terminate can await the reaped exit code.
+    ///
+    /// Reaper resolution publishes the exit code through the
+    /// `JoinHandle<Option<i32>>`. On natural exit the reaper itself
+    /// broadcasts `aether.process.exited`; on `Terminate` the
+    /// terminate handler reads the same exit code from the join
+    /// output (so the reply carries the actual status, not a stale
+    /// `None`) and the reaper still broadcasts.
+    struct ChildSlot {
+        pid: u32,
+        reaper: TokioJoinHandle<Option<i32>>,
+    }
 
     /// Resolved configuration `ProcessCapability::init` consumes. Every
     /// piece of hub state the cap needs to drive child lifecycle:
@@ -75,17 +87,14 @@ mod native {
         hub_engine_addr: SocketAddr,
         runtime: Handle,
         outbound: Option<Arc<HubOutbound>>,
-        /// Cap-local child handles. Per-spawn entry holds a
-        /// [`ChildSlot`] so the reaper task can take the `Child`
-        /// for `wait()` while the terminate handler can take it
-        /// for the SIGTERM/SIGKILL escalation. Whoever wins the
-        /// take leaves `None`; the loser sees `None` and bows out
-        /// gracefully.
+        /// Cap-local bookkeeping for every spawned child. Each
+        /// [`ChildSlot`] carries the child's PID (so the terminate
+        /// handler can signal it directly via `libc::kill`) and the
+        /// reaper task's `JoinHandle` (so terminate can await the
+        /// reaped exit code). The reaper task itself owns the
+        /// `tokio::process::Child` — it has to, because `Child::wait`
+        /// is `&mut self` and single-shot.
         children: Arc<Mutex<HashMap<EngineId, ChildSlot>>>,
-        /// Per-child reaper task handles. Tracked so terminate can
-        /// abort the reaper if it's still waiting (it shouldn't be,
-        /// but a stuck reaper leaves a tokio task pinned).
-        reapers: Arc<Mutex<HashMap<EngineId, TokioJoinHandle<()>>>>,
     }
 
     #[actor]
@@ -104,7 +113,6 @@ mod native {
                 runtime: cfg.runtime,
                 outbound: ctx.mailer().outbound().cloned(),
                 children: Arc::new(Mutex::new(HashMap::new())),
-                reapers: Arc::new(Mutex::new(HashMap::new())),
             })
         }
 
@@ -166,7 +174,7 @@ mod native {
             };
 
             let slot = self.children.lock().unwrap().remove(&engine_id);
-            let Some(slot) = slot else {
+            let Some(ChildSlot { pid, reaper }) = slot else {
                 ctx.reply(&TerminateResult::Err {
                     error: format!(
                         "engine {} is not hub-spawned by ProcessCapability; \
@@ -177,96 +185,63 @@ mod native {
                 return;
             };
 
-            // Reaper might already have taken the Child (race: external
-            // exit fired the same moment as the terminate request).
-            // Take what's there; if None, the reaper already broadcast
-            // ProcessExited and we report Ok with no exit info.
-            let Some(child) = slot.lock().unwrap().take() else {
-                ctx.reply(&TerminateResult::Ok {
-                    exit_code: None,
-                    sigkilled: false,
-                });
-                return;
-            };
-
             let grace = mail
                 .grace_ms
                 .map(|ms| Duration::from_millis(ms as u64))
                 .unwrap_or(DEFAULT_TERMINATE_GRACE);
 
-            let outcome = self.runtime.block_on(terminate_substrate(child, grace));
-            // Once we've reaped, the reaper task's `wait()` will
-            // resolve too — but its slot's Child is gone, so it
-            // exits without broadcasting. Drop the join handle.
-            self.reapers.lock().unwrap().remove(&engine_id);
-
-            match outcome {
-                Ok(o) => {
-                    self.broadcast_exited(engine_id, o.exit_code, "terminate".to_owned());
-                    ctx.reply(&TerminateResult::Ok {
-                        exit_code: o.exit_code,
-                        sigkilled: o.sigkilled,
-                    })
-                }
-                Err(e) => ctx.reply(&TerminateResult::Err {
-                    error: format!("terminate failed: {e}"),
-                }),
-            }
+            let (exit_code, sigkilled) = self
+                .runtime
+                .block_on(signal_and_await_reaper(pid, reaper, grace));
+            // Reaper itself broadcasts `aether.process.exited` once
+            // `Child::wait` resolves; the terminate handler doesn't
+            // double-broadcast.
+            ctx.reply(&TerminateResult::Ok {
+                exit_code,
+                sigkilled,
+            });
         }
     }
 
     impl ProcessCapability {
-        /// Park the freshly-spawned child in the cap-local map and
-        /// kick off a reaper task on the tokio runtime that takes
-        /// the `Child` back out, awaits its exit, and broadcasts
-        /// `ProcessExited`. The reaper exits silently if the slot's
-        /// child is already gone — the terminate handler races for
-        /// the same `Child` and the loser bows out.
-        fn adopt_and_reap(&self, engine_id: EngineId, child: Child) {
-            let slot = Arc::new(Mutex::new(Some(child)));
-            self.children
-                .lock()
-                .unwrap()
-                .insert(engine_id, Arc::clone(&slot));
-
+        /// Hand the freshly-spawned `Child` to a tokio reaper task
+        /// that owns it for life and resolves with the child's exit
+        /// code via the returned `JoinHandle`. The cap stores the PID
+        /// (so terminate can `libc::kill` it) and the join handle (so
+        /// terminate can await the reap) in the children map.
+        ///
+        /// On natural exit, the reaper broadcasts
+        /// `aether.process.exited` itself. On `Terminate` mail or
+        /// chassis shutdown, the terminate path signals the PID, the
+        /// reaper observes `Child::wait` resolution, and the broadcast
+        /// fires once — same path either way.
+        fn adopt_and_reap(&self, engine_id: EngineId, mut child: Child) {
+            let pid = child.id().unwrap_or(0);
             let outbound = self.outbound.clone();
             let children = Arc::clone(&self.children);
-            let reapers = Arc::clone(&self.reapers);
-            let task = self.runtime.spawn(async move {
-                let Some(mut child) = slot.lock().unwrap().take() else {
-                    // Terminate handler already took it.
-                    return;
-                };
+            let reaper = self.runtime.spawn(async move {
                 let exit_code = match child.wait().await {
                     Ok(status) => status.code(),
                     Err(_) => None,
                 };
                 children.lock().unwrap().remove(&engine_id);
-                reapers.lock().unwrap().remove(&engine_id);
                 if let Some(out) = outbound {
                     broadcast_exited_via(&out, engine_id, exit_code, "exited".to_owned());
                 }
+                exit_code
             });
-            self.reapers.lock().unwrap().insert(engine_id, task);
-        }
-
-        fn broadcast_exited(&self, engine_id: EngineId, exit_code: Option<i32>, reason: String) {
-            if let Some(out) = self.outbound.as_ref() {
-                broadcast_exited_via(out, engine_id, exit_code, reason);
-            }
+            self.children
+                .lock()
+                .unwrap()
+                .insert(engine_id, ChildSlot { pid, reaper });
         }
 
         /// Drain every spawned child and run the SIGTERM → grace →
         /// SIGKILL escalation against each in parallel. Called by the
-        /// hub chassis's shutdown coordinator (driver runtime path) so
-        /// SIGINT / SIGTERM on the hub doesn't orphan children into
-        /// init. Each child's reaper task naturally observes the
-        /// `Child::wait` completion and broadcasts
-        /// `aether.process.exited`; this method is the bulk variant
-        /// of [`Self::on_terminate`].
-        ///
-        /// Errors per child are logged but don't abort the loop — we
-        /// want every child reached.
+        /// hub chassis's shutdown coordinator so SIGINT / SIGTERM on
+        /// the hub doesn't orphan children into init. Each child's
+        /// reaper task observes `Child::wait` resolution and
+        /// broadcasts `aether.process.exited` itself.
         pub async fn shutdown_all(&self, grace: Duration) {
             let drained: Vec<(EngineId, ChildSlot)> = {
                 let mut guard = self.children.lock().unwrap();
@@ -280,17 +255,12 @@ mod native {
                 count = drained.len(),
                 "terminating spawned child(ren) at chassis shutdown",
             );
-            let mut handles = Vec::with_capacity(drained.len());
-            for (engine_id, slot) in drained {
-                let Some(child) = slot.lock().unwrap().take() else {
-                    // Reaper already took it; its broadcast will fire
-                    // on natural exit. Drop the join handle.
-                    self.reapers.lock().unwrap().remove(&engine_id);
-                    continue;
-                };
-                self.reapers.lock().unwrap().remove(&engine_id);
-                handles.push(self.runtime.spawn(terminate_substrate(child, grace)));
-            }
+            let handles: Vec<_> = drained
+                .into_iter()
+                .map(|(_, ChildSlot { pid, reaper })| {
+                    tokio::spawn(signal_and_await_reaper(pid, reaper, grace))
+                })
+                .collect();
             for h in handles {
                 if let Err(e) = h.await {
                     tracing::warn!(
@@ -301,6 +271,58 @@ mod native {
                 }
             }
         }
+    }
+
+    /// Signal a child PID with SIGTERM, give the reaper task up to
+    /// `grace` to resolve, escalate to SIGKILL if the reaper hasn't
+    /// resolved by then, and finally await the reaper to capture the
+    /// actual exit code. Returns `(exit_code, sigkilled)` matching
+    /// the wire shape's `Ok` variant.
+    ///
+    /// On non-unix the SIGTERM step is a no-op (tokio's `Child` has
+    /// no cross-platform soft-kill primitive). The grace timer still
+    /// fires; the SIGKILL escalation also no-ops, leaving the wait
+    /// to resolve only when the child exits on its own. This matches
+    /// the pre-cap `terminate_substrate` helper's behavior on
+    /// non-unix builds.
+    async fn signal_and_await_reaper(
+        pid: u32,
+        reaper: TokioJoinHandle<Option<i32>>,
+        grace: Duration,
+    ) -> (Option<i32>, bool) {
+        #[cfg(unix)]
+        if pid != 0 {
+            // SAFETY: `libc::kill` is always sound to call; a bad pid
+            // returns an error we don't need to inspect.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+
+        // Pin the reaper handle so we can poll it via `&mut` against
+        // a select!, drop in to a SIGKILL escalation if the grace
+        // window elapses, and then `await` it again to extract the
+        // exit code. A bare `tokio::time::timeout(grace, reaper)`
+        // drops the handle on elapse, which loses the post-SIGKILL
+        // exit-code reap.
+        tokio::pin!(reaper);
+        let mut sigkilled = false;
+        tokio::select! {
+            biased;
+            joined = &mut reaper => return (joined.unwrap_or(None), sigkilled),
+            _ = tokio::time::sleep(grace) => {
+                sigkilled = true;
+                #[cfg(unix)]
+                if pid != 0 {
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+
+        let exit_code = reaper.await.unwrap_or(None);
+        (exit_code, sigkilled)
     }
 
     fn broadcast_exited_via(
@@ -415,7 +437,6 @@ mod native {
                     runtime: rt.handle().clone(),
                     outbound: Some(outbound),
                     children: Arc::new(super::Mutex::new(super::HashMap::new())),
-                    reapers: Arc::new(super::Mutex::new(super::HashMap::new())),
                 };
                 Self {
                     cap,
@@ -553,6 +574,120 @@ mod native {
             assert_eq!(exited.engine_id, engine_id.0.to_string());
             assert_eq!(exited.exit_code, Some(7));
             assert_eq!(exited.reason, "exited");
+        }
+
+        /// Regression for the smoke-found bug where `on_terminate`
+        /// returned `Ok { None, false }` without actually killing the
+        /// child: the reaper had taken the `Child` immediately, the
+        /// terminate path's slot was empty, and the child kept
+        /// running. Post-fix, the terminate path signals the PID via
+        /// `libc::kill` and awaits the reaper's exit code — so a
+        /// `/bin/sh` child that responds to SIGTERM exits cleanly
+        /// inside the grace window.
+        #[test]
+        #[cfg(unix)]
+        fn signal_and_await_reaper_kills_responsive_child_within_grace() {
+            let fix = TestFixture::new();
+            let engine_id = super::EngineId(aether_data::Uuid::from_u128(0xBEEF_u128));
+            let child = fix
+                ._rt
+                .block_on(async {
+                    tokio::process::Command::new("/bin/sh")
+                        .arg("-c")
+                        .arg("sleep 60")
+                        .stdin(std::process::Stdio::null())
+                        .kill_on_drop(true)
+                        .spawn()
+                })
+                .expect("spawn /bin/sh");
+            let pid = child.id().expect("pid available");
+
+            fix.cap.adopt_and_reap(engine_id, child);
+
+            // Pull the slot out the same way the terminate handler
+            // does and await the signal+reap dance.
+            let super::ChildSlot {
+                pid: slot_pid,
+                reaper,
+            } = fix
+                .cap
+                .children
+                .lock()
+                .unwrap()
+                .remove(&engine_id)
+                .expect("slot");
+            assert_eq!(slot_pid, pid);
+
+            let (exit_code, sigkilled) = fix._rt.block_on(super::signal_and_await_reaper(
+                pid,
+                reaper,
+                Duration::from_secs(2),
+            ));
+            assert!(!sigkilled, "sh should exit on SIGTERM within grace");
+            // sh-on-SIGTERM yields no normal `exit_code` (signal-
+            // terminated process); accept either None or any value
+            // since the contract is "wait resolved".
+            let _ = exit_code;
+
+            // Verify the child is actually reaped — `libc::kill(pid, 0)`
+            // returns ESRCH when the process is gone.
+            let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+            let errno = std::io::Error::last_os_error().raw_os_error();
+            assert!(
+                rc != 0 && errno == Some(libc::ESRCH),
+                "pid {pid} still signalable after terminate (rc={rc}, errno={errno:?})",
+            );
+        }
+
+        /// Regression for the SIGKILL escalation path: a child that
+        /// ignores SIGTERM doesn't exit within the grace window, so
+        /// the cap escalates to SIGKILL and the reply carries
+        /// `sigkilled = true`.
+        #[test]
+        #[cfg(unix)]
+        fn signal_and_await_reaper_escalates_to_sigkill_when_grace_expires() {
+            let fix = TestFixture::new();
+            let engine_id = super::EngineId(aether_data::Uuid::from_u128(0xCAFE_u128));
+            let child = fix
+                ._rt
+                .block_on(async {
+                    tokio::process::Command::new("/bin/sh")
+                        .arg("-c")
+                        // Trap SIGTERM so only SIGKILL takes it down.
+                        .arg("trap '' TERM; while :; do :; done")
+                        .stdin(std::process::Stdio::null())
+                        .kill_on_drop(true)
+                        .spawn()
+                })
+                .expect("spawn /bin/sh");
+            let pid = child.id().expect("pid available");
+            // Give sh a beat to install the trap before we signal —
+            // signaling before the trap is installed yields a clean
+            // SIGTERM exit and the test premise collapses.
+            std::thread::sleep(Duration::from_millis(100));
+
+            fix.cap.adopt_and_reap(engine_id, child);
+            let super::ChildSlot { reaper, .. } = fix
+                .cap
+                .children
+                .lock()
+                .unwrap()
+                .remove(&engine_id)
+                .expect("slot");
+
+            let (_exit_code, sigkilled) = fix._rt.block_on(super::signal_and_await_reaper(
+                pid,
+                reaper,
+                Duration::from_millis(200),
+            ));
+            assert!(sigkilled, "expected SIGKILL escalation");
+
+            let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+            let errno = std::io::Error::last_os_error().raw_os_error();
+            assert!(
+                rc != 0 && errno == Some(libc::ESRCH),
+                "pid {pid} still signalable after SIGKILL (rc={rc}, errno={errno:?})",
+            );
         }
     }
 }
