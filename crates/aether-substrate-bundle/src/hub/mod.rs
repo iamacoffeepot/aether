@@ -185,6 +185,7 @@ impl HubProtocolBackend {
             target: entry.target,
             message: entry.message,
             sequence: entry.sequence,
+            origin: entry.origin,
         }
     }
 }

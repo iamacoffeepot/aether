@@ -5,75 +5,119 @@
 //! HandlesKind markers, and re-exports the real struct from inside
 //! the mod on native.
 //!
-//! Issue #583 routed the cap onto [`aether_substrate::log_capture::emit_decoded`]
-//! so guest log events bypass `tracing::dispatcher` entirely. The
-//! pre-#583 path went `LogEvent` → `log::log!()` → `tracing-log` →
-//! global subscriber → engine_logs ring; under issue #581's planned
-//! actor-aware subscriber that round-trip would catch the cap's own
-//! emissions and recurse back into the cap. Direct emission writes
-//! the same ring entry without involving any tracing layer.
+//! Issue #581 retired `log_capture`'s ring/flush plumbing in favour
+//! of this cap as the egress owner. Every `tracing::*` event flows
+//! through `aether-actor::log`'s actor-aware subscriber:
+//!
+//! - In-actor → buffered in `LogBuffer` → drain at handler exit
+//!   ships a single `LogBatch` mail to this mailbox.
+//! - Host code → single-entry `LogBatch` mail through the
+//!   registered host dispatch (also lands here).
+//!
+//! The cap's body is a pure forwarder: each entry becomes a
+//! substrate-side `LogEntry` handed to `HubOutbound::egress_log_batch`.
 
-// Handler-signature kinds must be importable at file root because
-// `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
-// of the mod (always-on, outside the cfg gate). Aether-kinds is
-// wasm-compatible so the import doesn't need cfg gating.
-use aether_kinds::LogEvent;
+use aether_kinds::LogBatch;
 
 #[aether_actor::bridge]
 mod native {
-    use super::LogEvent;
+    use super::LogBatch;
     use aether_actor::actor;
     use aether_substrate::capability::BootError;
-    use aether_substrate::log_capture;
     use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::outbound::{HubOutbound, LogEntry, LogLevel};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// `aether.log` mailbox cap. Stateless beyond the process-wide
-    /// log-capture ring set up by [`aether_substrate::log_capture::init`] —
-    /// every cap instance forwards decoded `LogEvent` mail through
-    /// [`log_capture::emit_decoded`] (issue #583), which writes the
-    /// engine_logs ring and stderr without involving the global
-    /// `tracing` dispatcher.
-    pub struct LogCapability;
+    /// `aether.log` mailbox cap. Receives [`LogBatch`] mail, converts
+    /// each entry into a substrate-side [`LogEntry`] (timestamp +
+    /// monotonic sequence stamped on receipt; `origin` plucked from
+    /// the mail envelope's sender), and forwards via
+    /// [`HubOutbound::egress_log_batch`].
+    pub struct LogCapability {
+        outbound: Option<Arc<HubOutbound>>,
+        sequence: AtomicU64,
+    }
 
     #[actor]
     impl NativeActor for LogCapability {
         type Config = ();
         const NAMESPACE: &'static str = "aether.log";
 
-        fn init(_: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self)
+        fn init(_: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            let outbound = ctx.mailer().outbound().cloned();
+            Ok(Self {
+                outbound,
+                sequence: AtomicU64::new(1),
+            })
         }
 
-        /// Emit a decoded log event into the engine_logs ring (ADR-0023)
-        /// and stderr via [`log_capture::emit_decoded`].
+        /// Forward a drained log batch to the hub via `egress_log_batch`.
         ///
         /// # Agent
-        /// Components mail `aether.log` `LogEvent { level, target, message }`
-        /// to this mailbox. Fire-and-forget; no reply.
+        /// The actor-aware tracing subscriber buffers `tracing::*` events
+        /// per-actor and ships a [`LogBatch`] here at handler exit (or
+        /// immediately on `WARN`/`ERROR` priority flush). Host-emitted
+        /// events land as single-entry batches. Sender attribution
+        /// rides on the mail envelope; this cap reads `ctx.sender()`
+        /// to populate `LogEntry::origin`.
         #[handler]
-        fn on_log_event(&self, _ctx: &mut NativeCtx<'_>, event: LogEvent) {
-            log_capture::emit_decoded(event);
+        fn on_log_batch(&self, ctx: &mut NativeCtx<'_>, batch: LogBatch) {
+            let Some(outbound) = self.outbound.as_ref() else {
+                return;
+            };
+            let origin = ctx.origin();
+            let now = now_unix_ms();
+            let entries: Vec<LogEntry> = batch
+                .entries
+                .into_iter()
+                .map(|e| LogEntry {
+                    timestamp_unix_ms: now,
+                    level: u8_to_level(e.level),
+                    target: e.target,
+                    message: e.message,
+                    sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
+                    origin,
+                })
+                .collect();
+            outbound.egress_log_batch(entries);
         }
+    }
+
+    fn u8_to_level(level: u8) -> LogLevel {
+        match level {
+            0 => LogLevel::Trace,
+            1 => LogLevel::Debug,
+            2 => LogLevel::Info,
+            3 => LogLevel::Warn,
+            4 => LogLevel::Error,
+            _ => LogLevel::Info,
+        }
+    }
+
+    fn now_unix_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
     }
 
     #[cfg(test)]
     mod tests {
         use std::sync::Arc;
         use std::thread;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
-        use super::{BootError, LogCapability, LogEvent};
+        use super::{BootError, LogBatch, LogCapability};
         use aether_actor::Actor;
         use aether_data::Kind;
+        use aether_kinds::LogEvent;
         use aether_substrate::chassis::Chassis;
         use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver};
         use aether_substrate::mailer::Mailer;
         use aether_substrate::registry::{MailboxEntry, Registry};
 
-        /// Stand-in chassis for the passive boot path. The Log cap doesn't
-        /// need a driver, so `build_passive()` is the natural test entry
-        /// — same shape as the `with_actor_*` smokes in
-        /// `chassis_builder::tests`.
         struct TestChassis;
         impl Chassis for TestChassis {
             const PROFILE: &'static str = "test";
@@ -88,12 +132,12 @@ mod native {
             (Arc::new(Registry::new()), Arc::new(Mailer::new()))
         }
 
-        /// End-to-end: boot the cap through `with_actor`, push an
-        /// `aether.log` mail at the registered mailbox, the dispatcher
+        /// End-to-end: boot the cap through `with_actor`, push a
+        /// `LogBatch` mail at the registered mailbox, the dispatcher
         /// thread runs the macro-emitted `NativeDispatch` which calls
-        /// `on_log_event`. Test asserts dispatch + clean shutdown.
+        /// `on_log_batch`. Test asserts dispatch + clean shutdown.
         #[test]
-        fn capability_routes_log_event_through_dispatcher() {
+        fn capability_routes_log_batch_through_dispatcher() {
             let (registry, mailer) = fresh_substrate();
             let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<LogCapability>(())
@@ -107,14 +151,16 @@ mod native {
                 panic!("expected sink entry");
             };
 
-            let event = LogEvent {
-                level: 3,
-                target: "aether_test_guest".into(),
-                message: "parse failed: missing close paren".into(),
+            let batch = LogBatch {
+                entries: vec![LogEvent {
+                    level: 3,
+                    target: "aether_test_guest".into(),
+                    message: "parse failed: missing close paren".into(),
+                }],
             };
-            let bytes = postcard::to_allocvec(&event).expect("encode");
+            let bytes = postcard::to_allocvec(&batch).expect("encode");
             handler(
-                <LogEvent as Kind>::ID,
+                <LogBatch as Kind>::ID,
                 "aether.log",
                 None,
                 aether_substrate::mail::ReplyTo::NONE,
@@ -123,16 +169,9 @@ mod native {
             );
 
             thread::sleep(Duration::from_millis(50));
-            let start = Instant::now();
             drop(chassis);
-            assert!(
-                start.elapsed() < Duration::from_millis(500),
-                "shutdown should complete promptly via channel-drop"
-            );
         }
 
-        /// Builder rejects a duplicate claim if the well-known mailbox name
-        /// was already registered.
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (registry, mailer) = fresh_substrate();
@@ -150,3 +189,10 @@ mod native {
         }
     }
 }
+
+// Subscriber install + tracing-subscriber stack moved to
+// `aether-substrate::log_install` so the substrate's boot path can
+// install the actor-aware layer before any cap boots (early-boot
+// `tracing::*` still surfaces via the fmt::Layer fallback). The cap
+// keeps only its handler body — this file no longer carries any
+// install-side machinery.

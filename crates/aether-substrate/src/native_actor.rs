@@ -178,6 +178,18 @@ impl<'a> NativeCtx<'a> {
         self.sender
     }
 
+    /// Local-component origin of the mail currently being dispatched,
+    /// or `None` for mail with no local sender (broadcast,
+    /// substrate-generated, hub-bubbled). Issue #581's `LogCapability`
+    /// reads this to populate `LogEntry::origin` from the envelope
+    /// rather than the payload.
+    pub fn origin(&self) -> Option<aether_data::MailboxId> {
+        match self.sender.target {
+            crate::mail::ReplyTarget::Component(id) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Singleton sender shortcut: returns a typed [`ActorMailbox`]
     /// addressing the unique instance of receiver actor `R`. Mirrors
     /// [`aether_actor::Ctx::actor`]; same `&self`-receiver `send` /

@@ -804,7 +804,18 @@ where
         let mailer_clone = ctx.mail_send_handle();
         let mut init_ctx =
             crate::native_actor::NativeInitCtx::new(&transport, &empty_actors, mailer_clone);
-        aether_actor::local::with_stamped(&slots, || A::init(config, &mut init_ctx))?
+        // Issue #581: drain the `LogBuffer` after init so cap-boot
+        // tracing events surface to LogCapability promptly.
+        aether_actor::local::with_stamped(&slots, || {
+            aether_actor::log::with_actor_dispatch(
+                &*transport as &dyn aether_actor::log::MailDispatch,
+                || {
+                    let r = A::init(config, &mut init_ctx);
+                    aether_actor::log::drain_buffer();
+                    r
+                },
+            )
+        })?
     };
     drop(empty_actors); // explicit shape — no shared state outlives init
 
@@ -818,19 +829,34 @@ where
         .spawn(move || {
             while let Some(env) = transport_for_thread.recv_blocking() {
                 aether_actor::local::with_stamped(&slots, || {
-                    let mut native_ctx =
-                        crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
-                    if actor_for_thread
-                        .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
-                        .is_none()
-                    {
-                        tracing::warn!(
-                            target: "aether_substrate::capability",
-                            actor = A::NAMESPACE,
-                            kind = env.kind_name.as_str(),
-                            "native actor dispatch missed: kind not handled or decode failed"
-                        );
-                    }
+                    aether_actor::log::with_actor_dispatch(
+                        &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                        || {
+                            let mut native_ctx = crate::native_actor::NativeCtx::new(
+                                &transport_for_thread,
+                                env.sender,
+                            );
+                            if actor_for_thread
+                                .__aether_dispatch_envelope(
+                                    &mut native_ctx,
+                                    env.kind,
+                                    &env.payload,
+                                )
+                                .is_none()
+                            {
+                                tracing::warn!(
+                                    target: "aether_substrate::capability",
+                                    actor = A::NAMESPACE,
+                                    kind = env.kind_name.as_str(),
+                                    "native actor dispatch missed: kind not handled or decode failed"
+                                );
+                            }
+                            // Issue #581: drain the actor's `LogBuffer`
+                            // after each handler so buffered events
+                            // surface to LogCapability.
+                            aether_actor::log::drain_buffer();
+                        },
+                    );
                 });
                 // Decrement matches the sink-handler's increment —
                 // the chassis frame-bound drain barrier reads this
@@ -1028,6 +1054,10 @@ impl ChassisBuilder {
                 }
             }
         }
+        // Issue #581: legacy chassis-builder path also finalises
+        // the host-branch log dispatch. Same shape as the typed
+        // `Builder::build` path.
+        crate::log_install::install_log_target_if_registered(Arc::clone(&mailer), &registry);
         Ok(BootedChassis {
             running: booted,
             _fallback: fallback,

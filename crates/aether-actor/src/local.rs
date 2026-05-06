@@ -257,6 +257,26 @@ mod native_impl {
             f(slots)
         })
     }
+
+    /// Like [`with_current`] but tolerates "no actor stamped" by
+    /// returning `None`. Used by callers that legitimately run on
+    /// both sides of an actor boundary — issue 581's actor-aware
+    /// tracing layer is the first consumer: in-actor → push to the
+    /// `LogBuffer`; no actor → fall through to the host branch.
+    pub(super) fn try_with_current<R>(f: impl FnOnce(&ActorSlots) -> R) -> Option<R> {
+        CURRENT_SLOTS.with(|slot| {
+            let ptr = slot.get();
+            if ptr.is_null() {
+                None
+            } else {
+                // SAFETY: same justification as `with_current` —
+                // the stamp is live for the duration of the
+                // surrounding `with_stamped`.
+                let slots = unsafe { &*ptr };
+                Some(f(slots))
+            }
+        })
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -307,6 +327,21 @@ pub trait Local: Default + Send + 'static {
     fn with_mut<R>(f: impl FnOnce(&mut Self) -> R) -> R {
         native_impl::with_current(|slots| slots.with_mut::<Self, R>(f))
     }
+
+    /// Issue #581: like [`Self::with`] but returns `None` when no
+    /// actor is currently stamped (host-code path: substrate boot,
+    /// scheduler, panic hook). Lets callers run on both sides of
+    /// an actor boundary without panicking.
+    fn try_with<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
+        native_impl::try_with_current(|slots| slots.with::<Self, R>(f))
+    }
+
+    /// Mutable variant of [`Self::try_with`]. Same semantics: returns
+    /// `None` when host-code; lazily initializes via `Default::default()`
+    /// on first in-actor access.
+    fn try_with_mut<R>(f: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        native_impl::try_with_current(|slots| slots.with_mut::<Self, R>(f))
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -320,6 +355,20 @@ pub trait Local: Default + 'static {
     /// initialized via `Default::default()` on first access.
     fn with_mut<R>(f: impl FnOnce(&mut Self) -> R) -> R {
         wasm::WASM_SLOTS.with_mut::<Self, R>(f)
+    }
+
+    /// Symmetric counterpart to the native `try_with`. Wasm linear
+    /// memory is always "in actor" (the linear memory IS the actor),
+    /// so this always succeeds — present for API symmetry with the
+    /// native trait.
+    fn try_with<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
+        Some(wasm::WASM_SLOTS.with::<Self, R>(f))
+    }
+
+    /// Symmetric counterpart to native `try_with_mut`; always
+    /// returns `Some` on wasm.
+    fn try_with_mut<R>(f: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        Some(wasm::WASM_SLOTS.with_mut::<Self, R>(f))
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //! ADR-0035 split peripheral code out of the runtime, but left every
 //! chassis's `main()` copying ~80 lines of identical initialisation:
-//! `HubOutbound` + `log_capture::init` + `Engine` + `Registry` + kind
+//! `HubOutbound` + `log_install::init_subscriber` + `Engine` + `Registry` + kind
 //! descriptor loop + broadcast sink + `Mailer` + `Linker` +
 //! `host_fns::register` + `Scheduler` + input subscribers +
 //! `ControlPlane`. `SubstrateBoot` folds that path into a single
@@ -44,7 +44,7 @@ use wasmtime::{Engine, Linker};
 use crate::{
     AETHER_CONTROL, AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ChassisControlHandler,
     ControlPlane, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
-    handle_store::HandleStore, host_fns, input::new_subscribers, log_capture,
+    handle_store::HandleStore, host_fns, input::new_subscribers,
 };
 
 /// Everything a chassis needs after shared boot setup. Fields are
@@ -227,7 +227,12 @@ impl<'a> SubstrateBootBuilder<'a> {
         crate::panic_hook::init_panic_hook();
 
         let outbound = HubOutbound::disconnected();
-        log_capture::init(Arc::clone(&outbound));
+        // Issue #581: install the actor-aware tracing subscriber
+        // stack. Replaces the retired `log_capture::init` ring +
+        // flush thread; the egress path now routes through
+        // `LogCapability` which `Builder::build` finalises with
+        // `log_install::install_log_target_if_registered`.
+        crate::log_install::init_subscriber();
 
         let engine = Arc::new(Engine::default());
         let registry = Arc::new(Registry::new());

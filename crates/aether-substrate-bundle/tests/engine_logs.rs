@@ -74,6 +74,7 @@ fn entry(seq: u64, level: LogLevel, target: &str, message: &str) -> LogEntry {
         target: target.into(),
         message: message.into(),
         sequence: seq,
+        origin: None,
     }
 }
 

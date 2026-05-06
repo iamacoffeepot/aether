@@ -178,6 +178,7 @@ mod tests {
             target: "t".into(),
             message: msg.into(),
             sequence: seq,
+            origin: None,
         }
     }
 

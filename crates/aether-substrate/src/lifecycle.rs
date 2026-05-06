@@ -63,11 +63,16 @@ pub fn fatal_abort(outbound: &HubOutbound, reason: String) -> ! {
         );
     }
 
-    // Drain whatever's in the capture ring onto the engine TCP
-    // before we go. The 250 ms background flusher in `log_capture`
-    // can't be relied on during abort — we exit the process below
-    // and the flusher's loop never sees the next tick.
-    crate::log_capture::flush_now();
+    // Issue #581: drain the dying actor's per-actor `LogBuffer`
+    // into LogCapability's mailbox so trap-time tracing events
+    // reach the cap before exit. (The pre-#581 `log_capture::flush_now`
+    // drained the substrate-global ring synchronously; with the
+    // ring retired, `aether-actor::log::drain_buffer` is the
+    // closest equivalent — it hands buffered events to the cap
+    // via the actor's transport. Hub-egress is still
+    // fire-and-forget against a process exit, same window as
+    // before.)
+    aether_actor::log::drain_buffer();
 
     std::process::exit(FATAL_EXIT_CODE);
 }

@@ -124,6 +124,9 @@ pub struct LogEntry {
     pub target: String,
     pub message: String,
     pub sequence: u64,
+    /// Issue #581: actor that emitted this entry, or `None` for
+    /// host-emitted (substrate boot, scheduler, panic hook) events.
+    pub origin: Option<MailboxId>,
 }
 
 /// Severity for `LogEntry`. Mirrors `tracing::Level`. Ordered
@@ -404,6 +407,7 @@ mod tests {
                 target: "aether_substrate::component".into(),
                 message: "trap in deliver: unreachable".into(),
                 sequence: 47,
+                origin: None,
             },
             LogEntry {
                 timestamp_unix_ms: 1_713_379_200_456,
@@ -411,6 +415,7 @@ mod tests {
                 target: "aether_substrate::scheduler".into(),
                 message: "boot complete".into(),
                 sequence: 48,
+                origin: None,
             },
         ]);
         let mut buf = Vec::new();
