@@ -1,7 +1,29 @@
 # ADR-0009: Hub-supervised substrate spawn
 
-- **Status:** Accepted
+- **Status:** Superseded in part by ADR-0078
 - **Date:** 2026-04-14
+
+> **Note (2026-05-06):** §3 (the substrate-spawn mechanism — bespoke
+> async `spawn_substrate` / `terminate_substrate` helpers in
+> `crate::hub::spawn`, `EngineRegistry`-owned `Child` side-map, the
+> hub coordinator's `terminate_all_children` shutdown sweep) is
+> superseded by ADR-0078. Phase 1 of ADR-0078 lifted child-process
+> supervision into `ProcessCapability` — a `#[bridge] mod native` cap
+> in `aether-substrate-bundle::hub::process_capability` that owns
+> every spawned `Child`, runs a per-child reaper task converting
+> `Child::wait` into `aether.process.exited` broadcast mail, and
+> exposes `aether.process.{spawn, terminate}` request/reply kinds the
+> MCP coordinator routes through.
+>
+> §1 (the MCP-tool surface — `spawn_substrate`, `terminate_substrate`,
+> `list_engines.spawned`), §2 (process lifecycle: `AETHER_HUB_URL`
+> injection, `Hello`-handshake correlation by PID, SIGTERM → grace →
+> SIGKILL escalation, externally-connected vs spawned distinction),
+> and §4 (failure modes) all stay normative. The user-visible MCP
+> wire shape is unchanged across the migration; only the substrate-
+> internal plumbing moved into the actor model. Read this ADR for the
+> behavior contract; read ADR-0078 for the post-actor-model
+> implementation that ships today.
 
 ## Context
 
