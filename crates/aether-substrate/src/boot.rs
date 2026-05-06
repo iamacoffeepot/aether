@@ -338,6 +338,7 @@ impl<'a> SubstrateBootBuilder<'a> {
             input_subscribers: Arc::clone(&input_subscribers),
             default_name_counter: Arc::new(AtomicU64::new(0)),
             chassis_handler,
+            log_drain: Arc::new(std::sync::OnceLock::new()),
         };
         registry.register_sink(AETHER_CONTROL, control_plane.into_sink_handler());
 

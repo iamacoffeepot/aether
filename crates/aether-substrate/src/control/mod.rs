@@ -29,8 +29,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use aether_data::KindDescriptor;
 use aether_data::{Kind, KindId};
 use aether_kinds::{
-    ComponentCapabilities, DropComponent, DropResult, LoadComponent, LoadResult, MailEnvelope,
-    ReplaceComponent, ReplaceResult, SubscribeInput, SubscribeInputResult, UnsubscribeInput,
+    ComponentCapabilities, ConfigureLogDrain, DropComponent, DropResult, LoadComponent, LoadResult,
+    MailEnvelope, ReplaceComponent, ReplaceResult, SubscribeInput, SubscribeInputResult,
+    UnsubscribeInput,
 };
 use wasmtime::{Engine, Linker, Module};
 
@@ -194,6 +195,14 @@ pub struct ControlPlane {
     /// drop-warn log — fine for tests and the hub chassis that
     /// inherits nothing peripheral.
     pub chassis_handler: Option<ChassisControlHandler>,
+    /// Issue #601: chassis-declared log drain target. Shared with
+    /// [`crate::SubstrateBoot::log_drain`]; the chassis Builder writes
+    /// it via `with_log_drain<T>()` when the cap chain finishes
+    /// booting. `handle_load` reads it to decide whether to push
+    /// `ConfigureLogDrain` to a freshly-loaded component. `None`
+    /// means the chassis declared no drain — runtime-loaded
+    /// components stay drainless, matching boot-time behaviour.
+    pub log_drain: Arc<std::sync::OnceLock<MailboxId>>,
 }
 
 /// Closure contract for a chassis-registered control-plane handler.
@@ -246,6 +255,18 @@ impl ControlPlane {
             UnsubscribeInput::ID => {
                 let result = self.handle_unsubscribe(bytes);
                 self.outbound.send_reply(sender, &result);
+            }
+            ConfigureLogDrain::ID => {
+                // Issue #601: chassis dispatches this at boot so the
+                // runtime `load_component` path picks up the chassis-
+                // declared drain through the same mail flow every
+                // actor receives. Cast-shape decode; `OnceLock::set`
+                // is a no-op on subsequent calls so a hypothetical
+                // re-dispatch (e.g. future per-chassis-restart) is
+                // tolerated as "first wins" rather than panicking.
+                if let Ok(cfg) = bytemuck::try_pod_read_unaligned::<ConfigureLogDrain>(bytes) {
+                    let _ = self.log_drain.set(cfg.mailbox);
+                }
             }
             _ => {
                 if let Some(handler) = &self.chassis_handler {
@@ -392,6 +413,23 @@ impl ControlPlane {
 
         self.insert_component(mailbox, component);
         self.announce_kinds();
+
+        // Issue #601: dispatch the chassis-declared log drain to the
+        // freshly-registered component so its `LogDrainSlot` resolves
+        // to the same target boot-time actors received. Reads from
+        // the chassis-owned slot (`SubstrateBoot::log_drain`) — `None`
+        // if the chassis didn't declare a drain via
+        // `Builder::with_log_drain<T>()`, in which case runtime-loaded
+        // components stay drainless like every other actor on a
+        // drainless chassis. No process-globals; the slot is owned
+        // by `SubstrateBoot` and shared via `Arc`.
+        if let Some(drain) = self.log_drain.get().copied() {
+            let cfg = aether_kinds::ConfigureLogDrain { mailbox: drain };
+            let payload = bytemuck::bytes_of(&cfg).to_vec();
+            let kind = <aether_kinds::ConfigureLogDrain as aether_data::Kind>::ID;
+            self.queue
+                .push(crate::mail::Mail::new(mailbox, kind, payload, 1));
+        }
 
         LoadResult::Ok {
             mailbox_id: mailbox,
