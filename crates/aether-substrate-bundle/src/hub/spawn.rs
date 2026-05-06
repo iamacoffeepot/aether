@@ -150,20 +150,24 @@ impl PendingSpawns {
     }
 }
 
-/// Spawn a substrate binary as a child process, wait for its `Hello`
-/// handshake, and adopt the `Child` into the engine registry so the
-/// child's lifetime is tied to the engine record. Returns the freshly
-/// minted `EngineId` on success; on any failure the child is killed
-/// before returning.
+/// Spawn a substrate binary as a child process and wait for its
+/// `Hello` handshake. Returns both the freshly minted `EngineId` and
+/// the live `Child` so the caller decides where the handle lives.
 ///
-/// `hub_engine_addr` is the address the child should dial to reach the
-/// hub — it's injected as `AETHER_HUB_URL` in the child's environment.
-pub async fn spawn_substrate(
+/// On any failure the child is killed before returning. `pending`
+/// must already be wired into the engine handshake path so the
+/// substrate's `Hello` frame can fulfil the registered slot keyed
+/// on the child's PID.
+///
+/// Callers pick between this and [`spawn_substrate`]: this returns
+/// the `Child` for the cap to own (ADR-0078); [`spawn_substrate`]
+/// adopts it into the registry side-map for the bespoke pre-cap
+/// MCP coordinator path. Both share this body up to the handshake.
+pub async fn spawn_substrate_no_adopt(
     opts: SpawnOpts,
     hub_engine_addr: SocketAddr,
     pending: &PendingSpawns,
-    engines: &EngineRegistry,
-) -> Result<EngineId, SpawnError> {
+) -> Result<(EngineId, Child), SpawnError> {
     let mut cmd = Command::new(&opts.binary_path);
     cmd.args(&opts.args);
     for (k, v) in &opts.env {
@@ -185,10 +189,7 @@ pub async fn spawn_substrate(
     let rx = pending.register(pid);
 
     match tokio::time::timeout(opts.handshake_timeout, rx).await {
-        Ok(Ok(engine_id)) => {
-            engines.adopt_child(engine_id, child);
-            Ok(engine_id)
-        }
+        Ok(Ok(engine_id)) => Ok((engine_id, child)),
         Ok(Err(_)) => {
             pending.cancel(pid);
             // Child drops here; kill_on_drop reaps it.
@@ -199,6 +200,25 @@ pub async fn spawn_substrate(
             Err(SpawnError::HandshakeTimeout(opts.handshake_timeout))
         }
     }
+}
+
+/// Spawn a substrate binary as a child process, wait for its `Hello`
+/// handshake, and adopt the `Child` into the engine registry so the
+/// child's lifetime is tied to the engine record. Returns the freshly
+/// minted `EngineId` on success; on any failure the child is killed
+/// before returning.
+///
+/// `hub_engine_addr` is the address the child should dial to reach the
+/// hub — it's injected as `AETHER_HUB_URL` in the child's environment.
+pub async fn spawn_substrate(
+    opts: SpawnOpts,
+    hub_engine_addr: SocketAddr,
+    pending: &PendingSpawns,
+    engines: &EngineRegistry,
+) -> Result<EngineId, SpawnError> {
+    let (engine_id, child) = spawn_substrate_no_adopt(opts, hub_engine_addr, pending).await?;
+    engines.adopt_child(engine_id, child);
+    Ok(engine_id)
 }
 
 /// Outcome of `terminate_substrate`. `sigkilled` is `true` if the

@@ -34,6 +34,8 @@ use aether_substrate::chassis_builder::{
 };
 use tokio::runtime::Runtime;
 
+use crate::hub::process_capability::{ProcessCapability, ProcessCapabilityConfig};
+
 use crate::hub::loopback::{
     LoopbackEngine, LoopbackHandle, run_inbound_drainer, spawn_outbound_drainer,
 };
@@ -122,6 +124,20 @@ impl HubChassis {
             engine_addr,
         );
 
+        // ADR-0078 Phase 1: ProcessCapability needs a tokio runtime
+        // handle at cap-init time to drive its async spawn / wait /
+        // terminate work from the dispatcher-thread sync handlers.
+        // Build the runtime here (instead of in
+        // `DriverCapability::boot`) so the Handle is available before
+        // `Builder::with_actor::<ProcessCapability>(...)` runs `init`.
+        // The driver later runs `block_on(coordinator)` against this
+        // same runtime — no second runtime is constructed.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| BootError::Other(Box::new(e)))?;
+        let rt_handle = rt.handle().clone();
+
         // The chassis_builder's `Builder::new` takes the substrate's
         // registry + mailer so passives have somewhere to claim
         // mailboxes against. The hub-chassis substrate lives inside
@@ -133,16 +149,23 @@ impl HubChassis {
         let driver = HubServerDriverCapability {
             engine_addr,
             mcp_addr,
-            registry,
+            registry: registry.clone(),
             sessions,
-            pending,
+            pending: pending.clone(),
             logs,
             state,
             loopback,
+            rt,
         };
 
         Builder::<HubChassis>::new(registry_arc, mailer_arc)
             .with_actor::<BroadcastCapability>(())
+            .with_actor::<ProcessCapability>(ProcessCapabilityConfig {
+                engines: registry,
+                pending,
+                hub_engine_addr: engine_addr,
+                runtime: rt_handle,
+            })
             .driver(driver)
             .build()
     }
@@ -164,6 +187,11 @@ pub struct HubServerDriverCapability {
     logs: LogStore,
     state: Arc<HubState>,
     loopback: LoopbackEngine,
+    /// Tokio runtime constructed in `HubChassis::build_inner` so
+    /// `ProcessCapability::init` could grab a `Handle` at cap boot.
+    /// `boot` moves this into [`HubServerDriverRunning`]; `run`
+    /// blocks on `block_on(coordinator)` against it.
+    rt: Runtime,
 }
 
 /// Post-boot handle for [`HubServerDriverCapability`]. Holds the constructed
@@ -185,10 +213,6 @@ impl DriverCapability for HubServerDriverCapability {
     type Running = HubServerDriverRunning;
 
     fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| BootError::Other(Box::new(e)))?;
         let HubServerDriverCapability {
             engine_addr,
             mcp_addr,
@@ -198,6 +222,7 @@ impl DriverCapability for HubServerDriverCapability {
             logs,
             state,
             loopback,
+            rt,
         } = self;
         Ok(HubServerDriverRunning {
             rt,
