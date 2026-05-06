@@ -17,6 +17,7 @@ use aether_capabilities::{
     BroadcastCapability, HandleCapability, IoCapability, LogCapability, NetCapability,
     io::NamespaceRoots, net::NetConfig as NetConf,
 };
+use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
 use aether_data::{Kind, KindId};
 use aether_kinds::{
     Advance, CaptureFrame, FrameStats, PlatformInfo, SetMasterGain, SetMasterGainResult,
@@ -25,7 +26,7 @@ use aether_kinds::{
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{
-    Chassis, ChassisControlHandler, HubOutbound, ReplyTo, SubstrateBoot,
+    Chassis, HubOutbound, ReplyTo, SubstrateBoot,
     capture::{
         reply_unsupported_advance, reply_unsupported_capture_frame,
         reply_unsupported_platform_info, reply_unsupported_window_mode,
@@ -136,10 +137,16 @@ impl HeadlessChassis {
             tick_period,
         } = env;
 
-        let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION"))
-            .workers(WORKERS)
-            .chassis_handler(|ctx| Some(chassis_control_handler(Arc::clone(ctx.outbound))))
-            .build()?;
+        let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
+        let _ = WORKERS;
+        let chassis_handler = chassis_control_handler(Arc::clone(&boot.outbound));
+        let control_plane_config = ControlPlaneConfig {
+            engine: Arc::clone(&boot.engine),
+            linker: Arc::clone(&boot.linker),
+            hub_outbound: Arc::clone(&boot.outbound),
+            input_subscribers: Arc::clone(&boot.input_subscribers),
+            chassis_handler: Some(chassis_handler),
+        };
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_frame_stats = boot
@@ -232,6 +239,7 @@ impl HeadlessChassis {
             .with_actor::<BroadcastCapability>(())
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
+            .with_actor::<ControlPlaneCapability>(control_plane_config)
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<NetCapability>(net)
             .with_log_drain::<LogCapability>()

@@ -36,7 +36,7 @@ use crate::lifecycle;
 use crate::mail::{Mail, MailboxId};
 use crate::mailer::Mailer;
 use crate::outbound::HubOutbound;
-use crate::scheduler::DrainSummary;
+use crate::supervisor::DrainSummary;
 
 /// Frame-stats emission cadence. Hardcoded for v1; an env knob is
 /// deferred until a forcing function arrives. 120 frames at 60 Hz is
@@ -193,7 +193,6 @@ pub fn emit_frame_stats(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
     use std::time::Duration;
 
@@ -201,38 +200,26 @@ mod tests {
     use aether_kinds::FrameStats;
 
     use super::*;
-    use crate::component::Component;
-    use crate::ctx::SubstrateCtx;
-    use crate::host_fns;
-    use crate::input;
     use crate::mail::MailboxId;
     use crate::registry::Registry;
-    use crate::scheduler::{ComponentEntry, ComponentTable, DrainDeath, DrainSummary};
+    use crate::supervisor::{ComponentRouter, ComponentSendOutcome, DrainDeath, DrainSummary};
 
-    /// Minimal no-op WAT: exports `memory` and a `receive_p32` that
-    /// returns 0. Suffices for spawning a `ComponentEntry`; we only
-    /// exercise the gate state, never `deliver`.
-    const WAT_NOOP: &str = r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
-                i32.const 0))
-    "#;
+    /// Mock router that returns a pre-configured `DrainSummary` from
+    /// `drain_all_with_budget`. Lets the wedge / death format-string
+    /// tests exercise the real `Mailer::drain_all_with_budget` ⇒
+    /// `abort_reason` path without spinning a real wasm dispatcher.
+    /// The supervisor's own dispatcher-stuck coverage lives cap-side.
+    struct StubRouter {
+        summary: DrainSummary,
+    }
 
-    fn minimal_component() -> Component {
-        let engine = wasmtime::Engine::default();
-        let mut linker: wasmtime::Linker<SubstrateCtx> = wasmtime::Linker::new(&engine);
-        host_fns::register(&mut linker).expect("register host fns");
-        let wasm = wat::parse_str(WAT_NOOP).expect("compile WAT");
-        let module = wasmtime::Module::new(&engine, &wasm).expect("compile module");
-        let ctx = SubstrateCtx::new(
-            MailboxId(0),
-            Arc::new(Registry::new()),
-            Arc::new(Mailer::new()),
-            HubOutbound::disconnected(),
-            input::new_subscribers(),
-        );
-        Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate")
+    impl ComponentRouter for StubRouter {
+        fn route(&self, _recipient: MailboxId, _mail: Mail) -> ComponentSendOutcome {
+            ComponentSendOutcome::Unknown
+        }
+        fn drain_all_with_budget(&self, _budget: Duration) -> DrainSummary {
+            self.summary.clone()
+        }
     }
 
     /// `abort_reason` returns `None` for a clean drain summary.
@@ -314,72 +301,70 @@ mod tests {
         );
     }
 
-    /// End-to-end: a stuck dispatcher (pending bumped without a
-    /// matching mail) makes `drain_all_with_budget` return a
-    /// Wedged summary, and `abort_reason` produces the expected
-    /// reason string. Calling `drain_or_abort` directly would
-    /// `std::process::exit` at the end, so the test runs the same
-    /// drain the helper runs and the same formatter, just with the
-    /// terminal `lifecycle::fatal_abort` step swapped for an
-    /// equality assertion.
+    /// `Mailer::drain_all_with_budget` propagates the supervisor's
+    /// summary verbatim, and the wedge `abort_reason` carries the
+    /// originating mailbox via the `Display` formatter (post-issue-435).
+    /// Calling `drain_or_abort` directly would `std::process::exit` at
+    /// the end, so the test runs the same drain the helper runs and
+    /// the same formatter, just with the terminal
+    /// `lifecycle::fatal_abort` step swapped for an equality
+    /// assertion.
     ///
-    /// Pre-issue-427 the wedge-abort path had zero unit coverage on
-    /// any chassis (the chassis frame loops kill the process on
-    /// the call). Co-locating it with the helper makes the
-    /// regression-detection cost a single `cargo test`.
+    /// Cap-side coverage of the dispatcher-stuck primitive
+    /// (`bump_pending_for_test` on a real `ComponentEntry`) lives in
+    /// `aether-capabilities`; here a stub router stands in for the
+    /// supervisor so the format-string contract gets unit coverage
+    /// even on chassis variants that don't host components.
     #[test]
-    fn stuck_dispatcher_drains_to_wedge_and_aborts_with_display_mailbox() {
+    fn drain_all_with_budget_propagates_supervisor_wedge() {
         let registry = Arc::new(Registry::new());
-        let mailbox = registry.register_component("stuck");
         let mailer = Arc::new(Mailer::new());
-        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
-        mailer.wire(Arc::clone(&registry), Arc::clone(&components));
+        mailer.wire(Arc::clone(&registry));
 
-        let entry = Arc::new(ComponentEntry::spawn(
-            minimal_component(),
-            Arc::clone(&registry),
-            Arc::clone(&mailer),
-            mailbox,
-        ));
-        components
-            .write()
-            .unwrap()
-            .insert(mailbox, Arc::clone(&entry));
+        let mailbox = MailboxId(0xDEAD_BEEF_CAFE_F00D_u64);
+        let waited = Duration::from_millis(50);
+        let summary = DrainSummary {
+            deaths: Vec::new(),
+            wedged: Some((mailbox, waited)),
+        };
+        mailer.install_component_router(Arc::new(StubRouter {
+            summary: summary.clone(),
+        }));
 
-        // Bump pending without sending mail: dispatcher never wakes,
-        // never decrements. `drain_all_with_budget` must return a
-        // Wedged summary at the budget.
-        entry.bump_pending_for_test();
-
-        let summary = mailer.drain_all_with_budget(Duration::from_millis(50));
-        let (wedge_mailbox, _waited) = summary
+        let observed = mailer.drain_all_with_budget(waited);
+        let (wedge_mailbox, _waited) = observed
             .wedged
             .as_ref()
-            .expect("stuck dispatcher must surface as wedged");
+            .expect("stub supervisor produced a wedged summary");
         assert_eq!(*wedge_mailbox, mailbox);
 
-        let reason = abort_reason(&summary).expect("wedged summary yields a reason");
+        let reason = abort_reason(&observed).expect("wedged summary yields a reason");
         assert!(
             reason.starts_with("dispatcher wedged: mailbox="),
             "reason must lead with `dispatcher wedged: mailbox=` (got: {reason})",
         );
         assert!(reason.contains("waited="));
-        // Pin the Display-vs-Debug contract on the mailbox id —
-        // the same guard the format-string-only test enforces, but
-        // for the live drain path. Display for `MailboxId` is
-        // `mbx-<hex>`; Debug wraps in `MailboxId(...)`.
+        // Display formatter for `MailboxId` is `mbx-<hex>`, not the
+        // `MailboxId(<n>)` Debug form.
         assert!(
             !reason.contains("MailboxId("),
             "wedge reason must format mailbox via Display, not Debug (got: {reason})",
         );
+    }
 
-        // Restore pending so the dispatcher's teardown drain
-        // assertions stay clean, then drop entry refs so the
-        // dispatcher's mpsc Sender is the last strong ref and the
-        // dispatcher thread joins on close.
-        entry.clear_pending_for_test();
-        drop(entry);
-        components.write().unwrap().clear();
+    /// `Mailer::drain_all_with_budget` returns an empty summary when
+    /// no supervisor has installed a router. Chassis without a
+    /// component supervisor (today: hub) take this path each frame
+    /// without reaching for a missing router.
+    #[test]
+    fn drain_all_with_budget_empty_without_supervisor() {
+        let registry = Arc::new(Registry::new());
+        let mailer = Arc::new(Mailer::new());
+        mailer.wire(Arc::clone(&registry));
+
+        let observed = mailer.drain_all_with_budget(Duration::from_millis(10));
+        assert!(observed.deaths.is_empty());
+        assert!(observed.wedged.is_none());
     }
 
     /// `emit_frame_stats` is a no-op on non-multiples of
@@ -400,8 +385,7 @@ mod tests {
             ),
         );
         let mailer = Arc::new(Mailer::new());
-        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
-        mailer.wire(Arc::clone(&registry), components);
+        mailer.wire(Arc::clone(&registry));
 
         let kind_id = FrameStats::ID;
         emit_frame_stats(&mailer, kind_id, 1, 0);
@@ -426,8 +410,7 @@ mod tests {
             ),
         );
         let mailer = Arc::new(Mailer::new());
-        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
-        mailer.wire(Arc::clone(&registry), components);
+        mailer.wire(Arc::clone(&registry));
 
         emit_frame_stats(&mailer, FrameStats::ID, LOG_EVERY_FRAMES, 42);
         let frames = captured.read().unwrap();

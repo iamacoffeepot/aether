@@ -15,7 +15,7 @@ use aether_substrate_bundle::hub::wire::{
     Welcome,
 };
 use aether_substrate_bundle::{
-    HubClient, HubOutbound, Mailer, Registry, ReplyTarget, ReplyTo, Scheduler, mail::MailboxId,
+    HubClient, HubOutbound, Mailer, Registry, ReplyTarget, ReplyTo, mail::MailboxId,
 };
 
 /// Start a mock hub on a random port. Returns the bound address and a
@@ -119,8 +119,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     );
     registry.register_kind("aether.tick");
     let queue = Arc::new(Mailer::new());
-
-    let _sched = Scheduler::new(Arc::clone(&registry), Arc::clone(&queue), 1);
+    queue.wire(Arc::clone(&registry));
 
     let client_handle = thread::spawn({
         let registry = Arc::clone(&registry);

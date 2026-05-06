@@ -25,6 +25,7 @@ use aether_capabilities::{
     BroadcastCapability, HandleCapability, LogCapability, RenderCapability, RenderConfig,
     RenderHandles,
 };
+use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
 use aether_data::{Kind, KindId};
 use aether_kinds::{
     Advance, AdvanceResult, CaptureFrame, FrameStats, PlatformInfo, SetWindowMode, SetWindowTitle,
@@ -32,13 +33,13 @@ use aether_kinds::{
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
+use aether_substrate::control_helpers::decode_payload;
 use aether_substrate::{
-    Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
+    Chassis, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capture::{
         CaptureQueue, begin_capture_request, reply_unsupported_platform_info,
         reply_unsupported_window_mode, reply_unsupported_window_title,
     },
-    control::decode_payload,
     render::VERTEX_BUFFER_BYTES,
 };
 
@@ -243,22 +244,22 @@ impl TestBenchChassis {
             capture_queue,
         } = env;
 
-        let boot = SubstrateBoot::builder(&name, &version)
-            .workers(workers)
-            .chassis_handler({
-                let cq = capture_queue.clone();
-                let tx = events_tx.clone();
-                move |ctx| {
-                    Some(chassis_control_handler(
-                        cq,
-                        tx,
-                        Arc::clone(ctx.registry),
-                        Arc::clone(ctx.queue),
-                        Arc::clone(ctx.outbound),
-                    ))
-                }
-            })
-            .build()?;
+        let boot = SubstrateBoot::builder(&name, &version).build()?;
+        let _ = workers;
+        let chassis_handler = chassis_control_handler(
+            capture_queue.clone(),
+            events_tx.clone(),
+            Arc::clone(&boot.registry),
+            Arc::clone(&boot.queue),
+            Arc::clone(&boot.outbound),
+        );
+        let control_plane_config = ControlPlaneConfig {
+            engine: Arc::clone(&boot.engine),
+            linker: Arc::clone(&boot.linker),
+            hub_outbound: Arc::clone(&boot.outbound),
+            input_subscribers: Arc::clone(&boot.input_subscribers),
+            chassis_handler: Some(chassis_handler),
+        };
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_frame_stats = boot
@@ -275,6 +276,7 @@ impl TestBenchChassis {
                 .with_actor::<BroadcastCapability>(())
                 .with_actor::<HandleCapability>(())
                 .with_actor::<LogCapability>(())
+                .with_actor::<ControlPlaneCapability>(control_plane_config)
                 .with_actor::<RenderCapability>(render_config)
                 .with_log_drain::<LogCapability>()
                 .build_passive()

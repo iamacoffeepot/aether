@@ -17,11 +17,34 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use aether_capabilities::{ControlPlaneCapability, ControlPlaneConfig};
 use aether_substrate_bundle::{
-    Component, HubOutbound, Mailer, Registry, Scheduler, SubstrateCtx, host_fns,
+    Component, HubOutbound, Mailer, Registry, SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
 };
 use wasmtime::{Engine, Linker, Module};
+
+/// Build a `ControlPlaneCapability` test fixture wired for a fresh
+/// substrate. Mirrors the legacy `Scheduler::new` shape — wires the
+/// mailer's component router and gives the test something to call
+/// `attach_component_for_test` on.
+fn make_supervisor(
+    engine: &Engine,
+    registry: &Arc<Registry>,
+    queue: &Arc<Mailer>,
+) -> ControlPlaneCapability {
+    queue.wire(Arc::clone(registry));
+    let mut linker: Linker<SubstrateCtx> = Linker::new(engine);
+    host_fns::register(&mut linker).expect("register host fns");
+    let config = ControlPlaneConfig {
+        engine: Arc::new(engine.clone()),
+        linker: Arc::new(linker),
+        hub_outbound: HubOutbound::disconnected(),
+        input_subscribers: aether_substrate_bundle::new_subscribers(),
+        chassis_handler: None,
+    };
+    ControlPlaneCapability::for_test(config, Arc::clone(registry), Arc::clone(queue))
+}
 
 fn forwards_to_sink_wat(sink_id: MailboxId) -> String {
     // ADR-0029 made mailbox ids 64-bit name hashes, so the sink's id
@@ -79,8 +102,8 @@ fn tick_roundtrip_component_to_sink() {
     );
     let component = Component::instantiate(&engine, &linker, &module, ctx).expect("instantiate");
 
-    let scheduler = Scheduler::new(registry, Arc::clone(&queue), 2);
-    scheduler.add_component(component_mbox, component);
+    let supervisor = make_supervisor(&engine, &registry, &queue);
+    supervisor.attach_component_for_test(component_mbox, component);
 
     // Drive three "frames" — each frame, enqueue one tick mail and wait.
     for frame in 1..=3u32 {
@@ -149,8 +172,8 @@ fn batched_mail_preserves_fifo_per_mailbox() {
     // kept as a regression guard on FIFO-per-mailbox under the new
     // shape: with N=200 mails routed through a single router thread
     // and forwarded via mpsc, order must still match the push order.
-    let scheduler = Scheduler::new(registry, Arc::clone(&queue), 2);
-    scheduler.add_component(component_mbox, component);
+    let supervisor = make_supervisor(&engine, &registry, &queue);
+    supervisor.attach_component_for_test(component_mbox, component);
 
     for i in 1..=N {
         queue.push(Mail::new(component_mbox, aether_data::KindId(1), vec![], i));

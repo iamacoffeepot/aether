@@ -229,9 +229,6 @@ impl SubstrateCtx {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::RwLock;
-
     use crate::outbound::EgressEvent;
 
     use super::*;
@@ -248,7 +245,7 @@ mod tests {
         let sender = registry.register_component("client");
 
         let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry), Arc::new(RwLock::new(HashMap::new())));
+        mailer.wire(Arc::clone(&registry));
         mailer.wire_outbound(Arc::clone(&outbound));
 
         let ctx = SubstrateCtx::new(
@@ -293,7 +290,7 @@ mod tests {
         let sender = registry.register_component("client");
 
         let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry), Arc::new(RwLock::new(HashMap::new())));
+        mailer.wire(Arc::clone(&registry));
         // Deliberately no `wire_outbound`.
 
         let ctx = SubstrateCtx::new(

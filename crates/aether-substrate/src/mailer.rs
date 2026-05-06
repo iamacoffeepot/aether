@@ -1,36 +1,45 @@
-// Inline router (ADR-0038 Phase 3).
+// Inline router (ADR-0038 Phase 3 + issue 603).
 //
-// Phase 2 retired the VecDeque + router thread; Phase 3 retires the
-// global `outstanding` / `done_cv` barrier too. The per-component
-// drain primitive on `ComponentEntry` replaces `wait_idle` — callers
-// that previously waited for "all mail in flight" now drain the
-// specific mailboxes they care about (or iterate the full components
-// table via `scheduler::drain_all`).
+// Phase 2 retired the VecDeque + router thread; Phase 3 retired the
+// global `outstanding` / `done_cv` barrier in favour of per-component
+// drains. Issue 603 retired the shared `ComponentTable` Arc — the
+// wasm-component supervisor owns the table now and installs itself as
+// a [`crate::supervisor::ComponentRouter`] during its `init`. The
+// Mailer keeps a registry handle for sink/dropped/unknown classification
+// and consults the supervisor for `Component` recipients; without an
+// installed supervisor (early-boot, hub chassis) component-bound mail
+// warn-drops via the same Unknown path component-less chassis already
+// took.
 //
-// What survives: `push(mail)` resolves the recipient inline on the
-// caller's thread (sinks run inline; components forward to inbox;
-// dropped / unknown warn-drop). The module's only state is the
-// `Registry` + `ComponentTable` handles, wired once by
-// `Scheduler::new`.
+// `push(mail)` still resolves the recipient inline on the caller's
+// thread.
 
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use crate::outbound::HubOutbound;
 use crate::registry::{MailboxEntry, Registry};
-use crate::scheduler::ComponentTable;
+use crate::supervisor::{ComponentRouter, ComponentSendOutcome, DrainSummary};
 use aether_data::{HandleId, KindId};
 
 pub struct Mailer {
     /// Registry handle for resolving recipients on `push`. Wired once
-    /// by `Scheduler::new`; expected to be set by the time any mail
-    /// can land.
+    /// by `SubstrateBoot::build`; expected to be set by the time any
+    /// mail can land.
     registry: OnceLock<Arc<Registry>>,
-    /// Components table for forwarding into per-component inboxes.
-    /// Wired alongside `registry`.
-    components: OnceLock<ComponentTable>,
+    /// Routing handle into the wasm-component supervisor. Installed
+    /// by `ControlPlaneCapability::init` via
+    /// [`Self::install_component_router`]. Absent on chassis that
+    /// don't host components (today: the hub chassis), in which case
+    /// `MailboxEntry::Component` mail warn-drops with an
+    /// "no supervisor installed" reason; absent during the
+    /// post-`SubstrateBoot::build` / pre-`with_actor` window too,
+    /// which is fine because no component can be loaded until the
+    /// supervisor itself boots.
+    component_router: OnceLock<Arc<dyn ComponentRouter>>,
     /// Hub outbound handle. When set and connected, mail to unknown
     /// mailbox ids bubbles up to the hub-substrate (ADR-0037
     /// Phase 1) instead of being warn-dropped locally. Wired by
@@ -55,22 +64,35 @@ impl Mailer {
     pub fn new() -> Self {
         Self {
             registry: OnceLock::new(),
-            components: OnceLock::new(),
+            component_router: OnceLock::new(),
             outbound: OnceLock::new(),
             handle_store: OnceLock::new(),
         }
     }
 
-    /// Wire the registry + components table. Called by `Scheduler::new`
-    /// once both exist; panics on re-wiring to surface construction-
-    /// order bugs loud rather than silent.
-    pub fn wire(&self, registry: Arc<Registry>, components: ComponentTable) {
+    /// Wire the registry. Called by `SubstrateBoot::build` once it
+    /// exists; panics on re-wiring to surface construction-order bugs
+    /// loud rather than silent. Issue 603 split this from the legacy
+    /// component-table wire — supervisor installation is a separate
+    /// concern handled at cap boot via [`Self::install_component_router`].
+    pub fn wire(&self, registry: Arc<Registry>) {
         self.registry
             .set(registry)
             .unwrap_or_else(|_| panic!("Mailer::wire called twice"));
-        self.components
-            .set(components)
-            .unwrap_or_else(|_| panic!("Mailer::wire called twice"));
+    }
+
+    /// Install the wasm-component supervisor's router. Called once
+    /// from `ControlPlaneCapability::init`; panics on re-install. The
+    /// supervisor's `init` runs after `Builder::with_actor::<...>(...)`,
+    /// so any chassis that hosts components has the router installed
+    /// before its driver starts pumping. Chassis that don't host
+    /// components (today: hub) leave the slot empty and component-
+    /// bound mail warn-drops as `Unknown`.
+    pub fn install_component_router(&self, router: Arc<dyn ComponentRouter>) {
+        self.component_router
+            .set(router)
+            .map_err(|_| ())
+            .unwrap_or_else(|_| panic!("Mailer::install_component_router called twice"));
     }
 
     /// Wire the `HubOutbound` so mail to unknown mailbox ids bubbles
@@ -113,16 +135,26 @@ impl Mailer {
         self.outbound.get()
     }
 
+    /// Borrow the wired [`Registry`]. Issue 603: surfaced so
+    /// `ControlPlaneCapability::init` can pull the registry for its
+    /// internal state without requiring it on `ControlPlaneConfig` —
+    /// per Resolved Decision §2 registry arrives via init ctx, not
+    /// via the cap's config struct.
+    pub fn registry(&self) -> Option<&Arc<Registry>> {
+        self.registry.get()
+    }
+
     /// Hand `mail` to the substrate for dispatch. Sinks run on the
-    /// caller thread; component mail forwards into the recipient's
-    /// inbox (which bumps the per-entry drain counter); dropped /
-    /// unknown recipients warn-and-discard (or bubble up to the hub-
-    /// substrate when a `HubOutbound` is connected, per ADR-0037).
+    /// caller thread; component mail forwards through the installed
+    /// supervisor's router (which bumps the per-entry drain counter);
+    /// dropped / unknown recipients warn-and-discard (or bubble up to
+    /// the hub-substrate when a `HubOutbound` is connected, per
+    /// ADR-0037).
     pub fn push(&self, mail: Mail) {
         route_mail(
             mail,
             self.registry.get().expect("Mailer not wired"),
-            self.components.get().expect("Mailer not wired"),
+            self.component_router.get().map(Arc::as_ref),
             self.outbound.get(),
             self.handle_store.get(),
         );
@@ -154,10 +186,10 @@ impl Mailer {
         store.put(handle, kind, bytes)?;
         let parked = store.take_parked(handle);
         let registry = self.registry.get().expect("Mailer not wired");
-        let components = self.components.get().expect("Mailer not wired");
+        let router = self.component_router.get().map(Arc::as_ref);
         let outbound = self.outbound.get();
         for mail in parked {
-            route_mail(mail, registry, components, outbound, Some(store));
+            route_mail(mail, registry, router, outbound, Some(store));
         }
         Ok(())
     }
@@ -210,26 +242,40 @@ impl Mailer {
     }
 
     /// Block until every live component's inbox is empty and no
-    /// `deliver` is in flight. Phase-3 replacement for Phase-2's
-    /// `wait_idle` barrier — equivalent end-to-end semantics
-    /// (iterates the components table and waits on each entry's
-    /// per-mailbox drain counter, re-checking in case one entry's
-    /// delivery pushed fresh mail to another).
+    /// `deliver` is in flight. Equivalent to a budget-of-infinity
+    /// drain; chassis frame-loops use [`Self::drain_all_with_budget`]
+    /// instead. Returns immediately if no supervisor has installed a
+    /// router (no components possible without one). Re-iterates after
+    /// a clean pass if any entry's pending counter rose again — a
+    /// delivered mail can dispatch fresh mail to another mailbox we
+    /// already drained.
     pub fn drain_all(&self) {
-        let components = self.components.get().expect("Mailer not wired");
-        crate::scheduler::drain_all(components);
+        let Some(router) = self.component_router.get() else {
+            return;
+        };
+        // Effectively infinite per-pass budget; chassis fail-fast policy
+        // lives on `drain_all_with_budget`.
+        loop {
+            let summary = router.drain_all_with_budget(Duration::from_secs(60 * 60 * 24));
+            if summary.deaths.is_empty() && summary.wedged.is_none() {
+                return;
+            }
+            if summary.wedged.is_some() {
+                return;
+            }
+        }
     }
 
-    /// Budget-aware variant of `drain_all` (ADR-0063). Returns a
-    /// `DrainSummary` the chassis matches on to detect dispatcher
-    /// deaths and wedges; on either, the chassis routes through
-    /// `lifecycle::fatal_abort`.
-    pub fn drain_all_with_budget(
-        &self,
-        budget: std::time::Duration,
-    ) -> crate::scheduler::DrainSummary {
-        let components = self.components.get().expect("Mailer not wired");
-        crate::scheduler::drain_all_with_budget(components, budget)
+    /// Budget-aware drain (ADR-0063). Returns a [`DrainSummary`] the
+    /// chassis matches on to detect dispatcher deaths and wedges; on
+    /// either, the chassis routes through `lifecycle::fatal_abort`.
+    /// Returns an empty summary if no supervisor has installed a
+    /// router.
+    pub fn drain_all_with_budget(&self, budget: Duration) -> DrainSummary {
+        match self.component_router.get() {
+            Some(router) => router.drain_all_with_budget(budget),
+            None => DrainSummary::default(),
+        }
     }
 }
 
@@ -254,7 +300,7 @@ impl Default for Mailer {
 fn route_mail(
     mut mail: Mail,
     registry: &Registry,
-    components: &ComponentTable,
+    router: Option<&dyn ComponentRouter>,
     outbound: Option<&Arc<HubOutbound>>,
     store: Option<&Arc<HandleStore>>,
 ) {
@@ -313,31 +359,35 @@ fn route_mail(
             );
         }
         Some(MailboxEntry::Component) => {
-            let entry = components.read().unwrap().get(&recipient).map(Arc::clone);
-            match entry {
-                Some(entry) => {
-                    // Issue 321 Phase 2: differentiate "actor died
-                    // (panic / trap)" from "shutdown closed". The
-                    // dead-state check happens before send so the
-                    // warn message is unambiguous; otherwise both
-                    // failure modes collapsed into the same line and
-                    // dead-actor diagnoses became "why is mail being
-                    // dropped?" detective work.
-                    if entry.is_dead() {
-                        tracing::warn!(
-                            target: "aether_substrate::queue",
-                            mailbox = %recipient,
-                            "mail to dead mailbox (actor panicked or trapped); discarded — see component_died broadcast",
-                        );
-                    } else if !entry.send(mail) {
-                        tracing::warn!(
-                            target: "aether_substrate::queue",
-                            mailbox = %recipient,
-                            "component inbox closed (shutdown); mail discarded",
-                        );
-                    }
+            // Issue 603: routing goes through the cap-installed
+            // supervisor. Issue 321 Phase 2's dead-vs-closed
+            // disambiguation rides on the structured outcome the
+            // supervisor returns.
+            let Some(router) = router else {
+                tracing::warn!(
+                    target: "aether_substrate::queue",
+                    mailbox = %recipient,
+                    "mail to component mailbox but no supervisor installed — dropped",
+                );
+                return;
+            };
+            match router.route(recipient, mail) {
+                ComponentSendOutcome::Sent => {}
+                ComponentSendOutcome::Dead => {
+                    tracing::warn!(
+                        target: "aether_substrate::queue",
+                        mailbox = %recipient,
+                        "mail to dead mailbox (actor panicked or trapped); discarded — see component_died broadcast",
+                    );
                 }
-                None => {
+                ComponentSendOutcome::Closed => {
+                    tracing::warn!(
+                        target: "aether_substrate::queue",
+                        mailbox = %recipient,
+                        "component inbox closed (shutdown); mail discarded",
+                    );
+                }
+                ComponentSendOutcome::Unknown => {
                     tracing::warn!(
                         target: "aether_substrate::queue",
                         mailbox = %recipient,
@@ -396,7 +446,6 @@ fn route_mail(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::RwLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -416,10 +465,9 @@ mod tests {
     fn unknown_mailbox_with_connected_outbound_bubbles_up() {
         let (outbound, outbound_rx) = crate::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
-        let components = Arc::new(RwLock::new(HashMap::new()));
 
         let mailer = Mailer::new();
-        mailer.wire(Arc::clone(&registry), Arc::clone(&components));
+        mailer.wire(Arc::clone(&registry));
         mailer.wire_outbound(Arc::clone(&outbound));
 
         let unknown = MailboxId(0xDEADBEEF_u64);
@@ -452,10 +500,9 @@ mod tests {
     #[test]
     fn unknown_mailbox_without_outbound_warn_drops() {
         let registry = Arc::new(Registry::new());
-        let components = Arc::new(RwLock::new(HashMap::new()));
 
         let mailer = Mailer::new();
-        mailer.wire(Arc::clone(&registry), Arc::clone(&components));
+        mailer.wire(Arc::clone(&registry));
         // Deliberately no wire_outbound.
 
         let unknown = MailboxId(0xDEADBEEF_u64);
@@ -553,10 +600,9 @@ mod tests {
 
     fn make_mailer() -> (Arc<Registry>, Arc<Mailer>, Arc<HandleStore>) {
         let registry = Arc::new(Registry::new());
-        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
         let store = Arc::new(HandleStore::new(64 * 1024));
         let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry), components);
+        mailer.wire(Arc::clone(&registry));
         mailer.wire_handle_store(Arc::clone(&store));
         (registry, mailer, store)
     }
@@ -664,9 +710,8 @@ mod tests {
     #[test]
     fn resolve_handle_without_wired_store_is_noop() {
         let registry = Arc::new(Registry::new());
-        let components: ComponentTable = Arc::new(RwLock::new(HashMap::new()));
         let mailer = Mailer::new();
-        mailer.wire(Arc::clone(&registry), components);
+        mailer.wire(Arc::clone(&registry));
         // No wire_handle_store call.
         mailer
             .resolve_handle(HandleId(1), KindId(2), vec![3])

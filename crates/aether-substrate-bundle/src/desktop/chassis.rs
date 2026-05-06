@@ -16,9 +16,10 @@
 use std::sync::Arc;
 
 use aether_capabilities::{
-    AudioCapability, BroadcastCapability, HandleCapability, IoCapability, LogCapability,
-    NetCapability, RenderCapability, RenderConfig, audio::AudioConfig as AudioConf,
-    io::NamespaceRoots, net::NetConfig as NetConf,
+    AudioCapability, BroadcastCapability, ChassisControlHandler, ControlPlaneCapability,
+    ControlPlaneConfig, HandleCapability, IoCapability, LogCapability, NetCapability,
+    RenderCapability, RenderConfig, audio::AudioConfig as AudioConf, io::NamespaceRoots,
+    net::NetConfig as NetConf,
 };
 use aether_data::Kind;
 use aether_kinds::{
@@ -27,10 +28,10 @@ use aether_kinds::{
 };
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
+use aether_substrate::control_helpers::decode_payload;
 use aether_substrate::{
-    Chassis, ChassisControlHandler, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
+    Chassis, HubOutbound, Mailer, Registry, ReplyTo, SubstrateBoot,
     capture::{CaptureQueue, begin_capture_request, reply_unsupported_advance},
-    control::decode_payload,
 };
 use winit::event_loop::{EventLoop, EventLoopProxy};
 
@@ -285,22 +286,24 @@ impl DesktopChassis {
             boot_title,
         } = env;
 
-        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION"))
-            .workers(WORKERS)
-            .chassis_handler({
-                let proxy = event_loop.create_proxy();
-                let cq = capture_queue.clone();
-                move |ctx| {
-                    Some(chassis_control_handler(
-                        proxy,
-                        cq,
-                        Arc::clone(ctx.registry),
-                        Arc::clone(ctx.queue),
-                        Arc::clone(ctx.outbound),
-                    ))
-                }
-            })
-            .build()?;
+        let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
+        let _ = WORKERS; // ADR-0038 retired the worker count knob; field
+        // retained for `EngineInfo.workers` wire compat.
+
+        let chassis_handler = chassis_control_handler(
+            event_loop.create_proxy(),
+            capture_queue.clone(),
+            Arc::clone(&boot.registry),
+            Arc::clone(&boot.queue),
+            Arc::clone(&boot.outbound),
+        );
+        let control_plane_config = ControlPlaneConfig {
+            engine: Arc::clone(&boot.engine),
+            linker: Arc::clone(&boot.linker),
+            hub_outbound: Arc::clone(&boot.outbound),
+            input_subscribers: Arc::clone(&boot.input_subscribers),
+            chassis_handler: Some(chassis_handler),
+        };
 
         tracing::info!(
             target: "aether_substrate::boot",
@@ -354,6 +357,7 @@ impl DesktopChassis {
             .with_actor::<BroadcastCapability>(())
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
+            .with_actor::<ControlPlaneCapability>(control_plane_config)
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<NetCapability>(net)
             .with_actor::<AudioCapability>(audio)

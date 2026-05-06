@@ -14,7 +14,7 @@ use std::fs;
 
 use aether_codec::encode_schema;
 use aether_data::{KindDescriptor, canonical::kind_id_from_parts};
-use aether_kinds::{LoadComponent, descriptors};
+use aether_kinds::{LoadComponent, LoadResult, descriptors};
 use aether_substrate_bundle::{KindId, test_bench::TestBench};
 use thiserror::Error;
 
@@ -127,8 +127,16 @@ fn run_step(
                 wasm,
                 name: name.clone(),
             };
-            match bench.send_mail("aether.control", &mail) {
-                Ok(()) => StepStatus::Pass,
+            // Issue 603: ControlPlaneCapability dispatches asynchronously
+            // on its own thread, so a `send_mail` here would race with
+            // the next step. Awaiting `LoadResult` makes the script's
+            // sequential semantics explicit (load completes before
+            // anything that depends on the loaded component runs).
+            match bench.send_and_await_reply::<LoadComponent, LoadResult>("aether.control", &mail) {
+                Ok(LoadResult::Ok { .. }) => StepStatus::Pass,
+                Ok(LoadResult::Err { error }) => {
+                    StepStatus::Fail(format!("load_component failed: {error}"))
+                }
                 Err(e) => StepStatus::Fail(format!("load_component dispatch: {e}")),
             }
         }

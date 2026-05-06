@@ -974,20 +974,16 @@ fn expand_bridge(mut item_mod: ItemMod, feature: Option<String>) -> syn::Result<
                  `const NAMESPACE: &'static str = ...` so the marker `impl Actor` can carry it",
             )
         })?;
-        // Issue 576: bridge-wrapped actors come in two flavours —
-        // strict typed receiver (only #[handler]s) or catch-all cap
-        // (only #[fallback]). Hybrid is rejected for the same reason
-        // the inner expander rejects it (the always-on blanket
-        // `HandlesKind<K>` would overlap with per-handler impls, and
-        // strict receivers shouldn't silently swallow unknown kinds).
-        if !handler_kinds.is_empty() && has_fallback {
-            return Err(syn::Error::new_spanned(
-                actor_impl,
-                "#[bridge]'s inner #[actor] block cannot mix #[handler] and #[fallback] — \
-                 pick one shape: strict typed receiver (only #[handler]s) or catch-all cap \
-                 (only #[fallback])",
-            ));
-        }
+        // Issue 576 + issue 603: bridge-wrapped actors come in three
+        // flavours — strict typed receiver (only `#[handler]`s),
+        // catch-all cap (only `#[fallback]`), or hybrid (typed
+        // handlers + a `#[fallback]` runtime safety net). The hybrid
+        // shape is what `ControlPlaneCapability` uses: declared kinds
+        // it accepts are typed; unknown kinds (Phase 1 chassis-
+        // peripheral migration window) ride the fallback. Hybrid emits
+        // per-handler `HandlesKind<K>` impls (no blanket — declared
+        // kinds compile, undeclared do not), so the type-system
+        // strictness is unchanged from a pure-handler cap.
         if handler_kinds.is_empty() && !has_fallback {
             return Err(syn::Error::new_spanned(
                 actor_impl,
@@ -1055,11 +1051,15 @@ fn expand_bridge(mut item_mod: ItemMod, feature: Option<String>) -> syn::Result<
             #frame_barrier_const
         }
     };
-    // Issue 576: catch-all caps (only #[fallback]) emit one blanket
-    // `impl<K: Kind> HandlesKind<K> for X {}` so typed sends compile
-    // for every K. Strict receivers (only #[handler]s) keep
-    // per-handler impls. Mixed shape was already rejected above.
-    let handles_kind_markers: Vec<TokenStream2> = if catch_all {
+    // Issue 576 + issue 603: only-fallback (true catch-all) caps emit
+    // one blanket `impl<K: Kind> HandlesKind<K> for X {}` so typed
+    // sends compile for every K. Strict receivers (only `#[handler]`s)
+    // and hybrid caps (handlers + fallback) emit per-handler impls so
+    // only declared kinds are reachable via `ctx.actor::<X>().send`.
+    // The fallback in the hybrid shape is a runtime safety net for
+    // mail that arrives by mailbox name, not a type-system catch-all.
+    let only_fallback = catch_all && handler_kinds.is_empty();
+    let handles_kind_markers: Vec<TokenStream2> = if only_fallback {
         let kind_param: syn::Ident = syn::parse_quote!(__AetherCatchAllK);
         let mut blanket_generics = generics.clone();
         blanket_generics.params.push(syn::parse_quote!(
@@ -1849,20 +1849,16 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         )
     })?;
 
-    // Issue 576: native actors come in two flavours — strict typed
-    // receiver (only #[handler]s) or catch-all cap (only #[fallback]).
-    // Hybrid (typed + fallback as runtime safety net) is forbidden:
-    // strict receivers shouldn't silently swallow unknown kinds, and
-    // the type-system catch-all blanket `HandlesKind<K>` would overlap
-    // with per-handler impls anyway.
-    if !handlers.is_empty() && fallback.is_some() {
-        return Err(syn::Error::new_spanned(
-            self_ty,
-            "#[actor] impl NativeActor cannot mix #[handler] and #[fallback] — \
-             pick one shape: strict typed receiver (only #[handler]s) or catch-all cap \
-             (only #[fallback])",
-        ));
-    }
+    // Issue 576 + issue 603: native actors come in three flavours —
+    // strict typed receiver (only `#[handler]`s), catch-all cap (only
+    // `#[fallback]`), or hybrid (typed handlers + a `#[fallback]`
+    // runtime safety net). `ControlPlaneCapability` uses the hybrid
+    // shape: declared `LoadComponent` / `DropComponent` / etc. land on
+    // typed handlers; chassis-peripheral kinds (Phase 1 migration)
+    // ride the fallback. The fallback runs only on dispatch table
+    // misses, so per-handler `HandlesKind<K>` markers are still
+    // authoritative at the type system — `ctx.actor::<X>().send(K)`
+    // compiles only for declared K.
     if handlers.is_empty() && fallback.is_none() {
         return Err(syn::Error::new_spanned(
             self_ty,
@@ -1894,14 +1890,16 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         }
     };
 
-    // Issue 576: catch-all caps (only #[fallback], no #[handler]s) get
+    // Issue 576 + issue 603: only-fallback (true catch-all) caps emit
     // a single blanket `impl<K: Kind> HandlesKind<K> for X {}` so any
     // typed `ctx.actor::<X>().send(&payload)` compiles for every K.
-    // The orphan rule allows this because the self type is local. For
-    // strict receivers (only #[handler]s) we keep per-handler impls.
+    // Strict receivers and hybrid caps (handlers + fallback safety
+    // net) keep per-handler impls — only declared kinds compile via
+    // typed sends; the fallback handles unknown kinds at runtime
+    // (e.g. mail arriving by mailbox name).
     let handles_kind_impls: Vec<TokenStream2> = if opts.skip_markers {
         Vec::new()
-    } else if fallback.is_some() {
+    } else if fallback.is_some() && handlers.is_empty() {
         let kind_param: syn::Ident = syn::parse_quote!(__AetherCatchAllK);
         let mut blanket_generics = generics.clone();
         blanket_generics.params.push(syn::parse_quote!(

@@ -2,26 +2,26 @@
 //!
 //! ADR-0035 split peripheral code out of the runtime, but left every
 //! chassis's `main()` copying ~80 lines of identical initialisation:
-//! `HubOutbound` + `log_install::init_subscriber` + `Engine` + `Registry` + kind
-//! descriptor loop + broadcast sink + `Mailer` + `Linker` +
-//! `host_fns::register` + `Scheduler` + input subscribers +
-//! `ControlPlane`. `SubstrateBoot` folds that path into a single
-//! builder so adding a new chassis (hub, web, etc.) is just its
-//! peripheral code, not another reimplementation of the shared
-//! bring-up.
+//! `HubOutbound` + `log_install::init_subscriber` + `Engine` +
+//! `Registry` + kind descriptor loop + broadcast sink + `Mailer` +
+//! `Linker` + `host_fns::register` + input subscribers. `SubstrateBoot`
+//! folds that path into a single builder so adding a new chassis (hub,
+//! web, etc.) is just its peripheral code, not another reimplementation
+//! of the shared bring-up.
 //!
-//! The chassis handler is supplied via a closure that runs *during*
-//! `build()`, after the runtime handles exist but before the
-//! `ControlPlane` sink is registered. This lets the closure
-//! `Arc::clone` the runtime pieces (registry, queue, outbound) it
-//! needs to close over while staying on the happy path where the
-//! `ControlPlane` is wired up once, not in two steps.
+//! Issue 603 retired the substrate-side construction of the
+//! `ControlPlane` sink. The wasm-component supervisor is now
+//! `aether-capabilities::ControlPlaneCapability`, booted by chassis
+//! mains via `Builder::with_actor::<ControlPlaneCapability>(...)`. The
+//! shared boot still wires every dependency the cap needs (engine,
+//! linker, hub outbound, input subscribers) and exposes them as fields
+//! the chassis main passes into `ControlPlaneConfig` at the call site.
 //!
 //! **Hub connect is explicit.** `build()` does NOT dial
 //! `AETHER_HUB_URL`. The chassis registers its own sinks and any
 //! other state that should exist before the hub knows the engine is
-//! alive, then calls `boot.connect_hub(url)` (or its `_from_env`
-//! wrapper) to dial. Without this separation, a hub-driven
+//! alive, then dials by composing `aether_hub::HubClientCapability`
+//! through `Builder::with()`. Without this separation, a hub-driven
 //! `load_component` could race ahead of the chassis's main thread
 //! and bind a chassis sink name to a freshly-loaded component before
 //! the chassis's later `register_sink` call, panicking the substrate
@@ -36,23 +36,26 @@
 //! mains reach for them when calling [`SubstrateBoot::add_actor`].
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::{
-    AETHER_CONTROL, AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ChassisControlHandler,
-    ControlPlane, HubOutbound, InputSubscribers, Mailer, Registry, Scheduler, SubstrateCtx,
-    handle_store::HandleStore, host_fns, input::new_subscribers,
+    AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, HubOutbound, InputSubscribers, Mailer,
+    Registry, SubstrateCtx, handle_store::HandleStore, host_fns, input::new_subscribers,
 };
 
 /// Everything a chassis needs after shared boot setup. Fields are
 /// `pub` so chassis code destructures and takes ownership of the
-/// pieces it actually uses; anything unused (e.g. a headless chassis
-/// never touches `linker` directly, only via `ControlPlane`'s load
-/// path) stays on the struct and gets dropped when the chassis
-/// shuts down.
+/// pieces it actually uses; anything unused stays on the struct and
+/// gets dropped when the chassis shuts down.
+///
+/// Issue 603: `engine`, `linker`, `outbound`, `input_subscribers` are
+/// the inputs `ControlPlaneCapability` consumes through
+/// `ControlPlaneConfig` when the chassis main installs the
+/// supervisor via `Builder::with_actor::<ControlPlaneCapability>(...)`.
+/// The substrate boot doesn't construct the cap itself — it just
+/// holds the dependencies the cap will need.
 pub struct SubstrateBoot {
     pub engine: Arc<Engine>,
     pub registry: Arc<Registry>,
@@ -60,7 +63,6 @@ pub struct SubstrateBoot {
     pub queue: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
     pub input_subscribers: InputSubscribers,
-    pub scheduler: Scheduler,
     /// ADR-0045 typed-handle store. Sized from
     /// `AETHER_HANDLE_STORE_MAX_BYTES` (default 256 MB). Wired into
     /// `Mailer` so dispatch resolves `Ref::Handle` payloads on the
@@ -75,9 +77,10 @@ pub struct SubstrateBoot {
     /// ADR-0070 native capabilities booted during shared bring-up.
     /// Stage 2e (issue 552) extracted every cap to `aether-capabilities`,
     /// so the substrate boot no longer pre-installs any cap — chassis
-    /// mains call [`Self::add_actor`] for each one (HandleCapability is
-    /// universal and goes first; chassis-conditional Audio / Render /
-    /// Log / Net / Io follow). Exposed publicly so chassis binaries
+    /// mains call [`Self::add_actor`] for each one
+    /// (`HandleCapability` is universal and goes first;
+    /// chassis-conditional `Audio` / `Render` / `Log` / `Net` / `Io` /
+    /// `ControlPlane` follow). Exposed publicly so chassis binaries
     /// that want explicit control can `take()` and call
     /// [`BootedChassis::shutdown`] themselves.
     pub chassis: Option<BootedChassis>,
@@ -88,25 +91,9 @@ pub struct SubstrateBoot {
     pub version: String,
 }
 
-/// Handles the chassis handler closure closes over when building its
-/// `ChassisControlHandler`. Built by `SubstrateBootBuilder::build`
-/// after the runtime pieces exist and passed to the closure by
-/// reference so it can `Arc::clone` what it needs without taking
-/// ownership away from the boot itself.
-pub struct ChassisHandlerContext<'a> {
-    pub registry: &'a Arc<Registry>,
-    pub queue: &'a Arc<Mailer>,
-    pub outbound: &'a Arc<HubOutbound>,
-}
-
-type ChassisHandlerFactory =
-    Box<dyn FnOnce(&ChassisHandlerContext<'_>) -> Option<ChassisControlHandler>>;
-
 pub struct SubstrateBootBuilder<'a> {
     name: &'a str,
     version: &'a str,
-    workers: usize,
-    build_handler: ChassisHandlerFactory,
 }
 
 impl SubstrateBoot {
@@ -115,12 +102,7 @@ impl SubstrateBoot {
     /// name (`"hello-triangle"`, `"headless"`) and
     /// `env!("CARGO_PKG_VERSION")`.
     pub fn builder<'a>(name: &'a str, version: &'a str) -> SubstrateBootBuilder<'a> {
-        SubstrateBootBuilder {
-            name,
-            version,
-            workers: 2,
-            build_handler: Box::new(|_| None),
-        }
+        SubstrateBootBuilder { name, version }
     }
 
     /// Dial `url` and start the hub reader + heartbeat threads.
@@ -192,33 +174,16 @@ impl SubstrateBoot {
 }
 
 impl<'a> SubstrateBootBuilder<'a> {
-    /// Scheduler worker count. Default 2.
-    pub fn workers(mut self, workers: usize) -> Self {
-        self.workers = workers;
-        self
-    }
-
-    /// Supply the closure that constructs the chassis's
-    /// `ChassisControlHandler`. The closure runs during `build()`
-    /// once `registry` / `queue` / `outbound` exist, and returns
-    /// `None` for chassis that don't own any control kinds (e.g.
-    /// early tests or a future chassis that maps every peripheral
-    /// kind through a different path).
-    pub fn chassis_handler<F>(mut self, build: F) -> Self
-    where
-        F: FnOnce(&ChassisHandlerContext<'_>) -> Option<ChassisControlHandler> + 'static,
-    {
-        self.build_handler = Box::new(build);
-        self
-    }
-
     /// Execute the boot: registers `aether_kinds::descriptors::all()`,
-    /// wires the broadcast + control-plane sinks, and starts the
-    /// scheduler's workers. Chassis-specific sinks (desktop's `render`,
-    /// headless's nop `render`, etc.) are registered by the chassis
-    /// after this returns. Does NOT dial the hub — the chassis calls
-    /// `boot.connect_hub_from_env()` once it's done registering its
-    /// sinks (issue #262).
+    /// wires the diagnostic sink, and prepares the runtime handles
+    /// (engine, registry, mailer, linker, outbound, input subscribers)
+    /// for chassis-level cap composition. Does NOT install the
+    /// wasm-component supervisor — that's
+    /// `aether-capabilities::ControlPlaneCapability`, booted through
+    /// `Builder::with_actor::<ControlPlaneCapability>(...)` by the
+    /// chassis main using the fields exposed on [`SubstrateBoot`].
+    /// Does NOT dial the hub — chassis mains compose
+    /// `aether_hub::HubClientCapability` themselves (issue #262).
     pub fn build(self) -> wasmtime::Result<SubstrateBoot> {
         // Issue #321: route panics through tracing so dispatcher-thread
         // crashes surface in `engine_logs` instead of vanishing to
@@ -227,11 +192,7 @@ impl<'a> SubstrateBootBuilder<'a> {
         crate::panic_hook::init_panic_hook();
 
         let outbound = HubOutbound::disconnected();
-        // Issue #581: install the actor-aware tracing subscriber
-        // stack. Replaces the retired `log_capture::init` ring +
-        // flush thread; the egress path now routes through
-        // `LogCapability` which `Builder::build` finalises with
-        // `log_install::install_log_target_if_registered`.
+        // Issue #581: install the actor-aware tracing subscriber stack.
         crate::log_install::init_subscriber();
 
         let engine = Arc::new(Engine::default());
@@ -243,16 +204,6 @@ impl<'a> SubstrateBootBuilder<'a> {
                 .register_kind_with_descriptor(d.clone())
                 .expect("duplicate kind in substrate init");
         }
-
-        // Issue 576: broadcast moved out of substrate into the
-        // `BroadcastCapability` cap in `aether-capabilities`. Chassis bins
-        // chain `with_actor::<BroadcastCapability>(())` like every other
-        // cap; the cap's `init` grabs the wired `HubOutbound` from
-        // the mailer and its `#[fallback]` handler lifts every
-        // received envelope into `egress_broadcast`. The mailbox id
-        // matching `HUB_BROADCAST_MAILBOX_NAME` stays available to
-        // substrate-internal pushers (frame_stats, component_died)
-        // through `aether_kinds::mailboxes::HUB_BROADCAST`.
 
         // Diagnostic sink for hub → originating-engine typo reports
         // (ADR-0037 follow-up, issue #185). Re-emits the unresolved-
@@ -294,19 +245,10 @@ impl<'a> SubstrateBootBuilder<'a> {
         );
 
         let queue = Arc::new(Mailer::new());
+        queue.wire(Arc::clone(&registry));
         queue.wire_outbound(Arc::clone(&outbound));
         let handle_store = Arc::new(HandleStore::from_env());
         queue.wire_handle_store(Arc::clone(&handle_store));
-        // Issue 552 stage 2e: every chassis-policy cap (including
-        // `HandleCapability`) lives in `aether-capabilities` and is
-        // installed by the chassis main post-`build()` via
-        // [`SubstrateBoot::add_actor`]. The substrate boot stays cap-
-        // agnostic — it only wires the runtime pieces every cap reads
-        // from (`Mailer::handle_store` etc.). The chassis returned
-        // here is empty; chassis mains chain `boot.add_actor::<X>(...)`
-        // to install Handle / Io / Net / Audio / Render in whatever
-        // combination their profile needs.
-        let _ = &handle_store;
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&queue))
             .build()
             .map_err(|e| wasmtime::Error::msg(format!("chassis capability boot: {e}")))?;
@@ -315,32 +257,7 @@ impl<'a> SubstrateBootBuilder<'a> {
         host_fns::register(&mut linker)?;
         let linker = Arc::new(linker);
 
-        let scheduler = Scheduler::new(Arc::clone(&registry), Arc::clone(&queue), self.workers);
-
         let input_subscribers = new_subscribers();
-
-        let chassis_handler = {
-            let ctx = ChassisHandlerContext {
-                registry: &registry,
-                queue: &queue,
-                outbound: &outbound,
-            };
-            (self.build_handler)(&ctx)
-        };
-
-        let control_plane = ControlPlane {
-            engine: Arc::clone(&engine),
-            linker: Arc::clone(&linker),
-            registry: Arc::clone(&registry),
-            queue: Arc::clone(&queue),
-            outbound: Arc::clone(&outbound),
-            components: scheduler.components().clone(),
-            input_subscribers: Arc::clone(&input_subscribers),
-            default_name_counter: Arc::new(AtomicU64::new(0)),
-            chassis_handler,
-            log_drain: Arc::new(std::sync::OnceLock::new()),
-        };
-        registry.register_sink(AETHER_CONTROL, control_plane.into_sink_handler());
 
         Ok(SubstrateBoot {
             engine,
@@ -349,7 +266,6 @@ impl<'a> SubstrateBootBuilder<'a> {
             queue,
             outbound,
             input_subscribers,
-            scheduler,
             handle_store,
             boot_descriptors,
             chassis: Some(chassis),

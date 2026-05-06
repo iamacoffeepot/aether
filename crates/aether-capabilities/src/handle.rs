@@ -149,8 +149,6 @@ mod native {
 
     #[cfg(test)]
     mod tests {
-        use std::collections::HashMap;
-        use std::sync::RwLock;
         use std::sync::mpsc;
         use std::thread;
         use std::time::{Duration, Instant};
@@ -181,7 +179,7 @@ mod native {
             }
             let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
             let mailer = Arc::new(Mailer::new());
-            mailer.wire(Arc::clone(&registry), Arc::new(RwLock::new(HashMap::new())));
+            mailer.wire(Arc::clone(&registry));
             mailer.wire_outbound(outbound);
             mailer.wire_handle_store(Arc::clone(&store));
             (store, mailer, registry, rx)

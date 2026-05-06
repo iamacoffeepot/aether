@@ -730,15 +730,9 @@ mod native {
         /// Build a fully-wired `Mailer` connected to a fresh test
         /// outbound channel.
         fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
-            use std::collections::HashMap;
-            use std::sync::RwLock;
-
             let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
             let mailer = Arc::new(Mailer::new());
-            mailer.wire(
-                Arc::new(Registry::new()),
-                Arc::new(RwLock::new(HashMap::new())),
-            );
+            mailer.wire(Arc::new(Registry::new()));
             mailer.wire_outbound(outbound);
             (mailer, rx)
         }
