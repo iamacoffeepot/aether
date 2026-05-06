@@ -46,6 +46,14 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        // Re-entry guard: events emitted from inside
+        // `drain_buffer` / `ship_host_event` (e.g. the
+        // `capability mailbox sender dropped` warn fired during
+        // shutdown) would otherwise loop the pipeline. Stderr fmt
+        // still receives the event via the registered fmt::Layer.
+        if aether_actor::log::is_in_pipeline() {
+            return;
+        }
         let entry = encode_event(event);
         let level = entry.level;
         let entry_for_host = entry.clone();

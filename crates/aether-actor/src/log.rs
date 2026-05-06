@@ -15,14 +15,16 @@
 //! [`with_actor_dispatch`]. Both branches funnel through the same
 //! trait surface.
 //!
-//! Recursion guard: if anything inside this module's drain path
-//! emitted a `tracing::*` event the actor-aware layer would re-enter
-//! the buffer mid-drain. The push path uses
-//! [`Local::try_with_mut`]'s inner `RefCell::borrow_mut`, which
-//! panics on re-entry — issue #582's primitive enforces the guard
-//! structurally so we don't carry a separate flag. Drain-path code
-//! that needs diagnostics does so through a non-`tracing` channel
-//! (e.g., `eprintln!`) to keep the contract intact.
+//! Recursion guard: code inside [`drain_buffer`] / [`ship_host_event`]
+//! routes through `Mailer::push`, which can emit its own
+//! `tracing::*` events (e.g. the `capability mailbox sender dropped`
+//! warn fired from a dead sink handler). Without a guard, those
+//! events re-enter the layer, push the actor's buffer, priority-
+//! flush at WARN, and recurse — observable as a stack overflow
+//! during chassis shutdown. The [`in_log_pipeline`] TLS flag
+//! short-circuits the actor-aware path while a drain or host-ship
+//! is in flight; events still flow to the registered `tsfmt::Layer`
+//! so operators see them on stderr.
 
 extern crate alloc;
 
@@ -197,6 +199,8 @@ pub fn drain_buffer() {
     };
     let batch = LogBatch { entries };
 
+    let _guard = PipelineGuard::enter();
+
     #[cfg(not(target_arch = "wasm32"))]
     {
         let Some(dispatch) = native_tls::ACTOR_DISPATCH.with(|slot| slot.get()) else {
@@ -208,6 +212,64 @@ pub fn drain_buffer() {
     #[cfg(target_arch = "wasm32")]
     {
         ship_batch_via_wasm_transport(mailbox, batch);
+    }
+}
+
+/// Re-entry guard for the log pipeline. While set, [`is_in_pipeline`]
+/// returns `true` and the actor-aware tracing layer skips the in-
+/// actor and host branches (events still reach the registered
+/// `tsfmt::Layer` for stderr). The guard wraps every code path that
+/// might trigger a `tracing::*` event from inside the egress
+/// machinery — chiefly [`drain_buffer`] / [`ship_host_event`], whose
+/// `Mailer::push` ↦ sink-handler chain emits its own warns when a
+/// recipient is dead.
+#[cfg(not(target_arch = "wasm32"))]
+mod pipeline_tls {
+    extern crate std;
+    use core::cell::Cell;
+
+    std::thread_local! {
+        pub(super) static IN_LOG_PIPELINE: Cell<bool> = const { Cell::new(false) };
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+mod pipeline_tls {
+    use core::cell::Cell;
+
+    pub(super) struct Slot(pub Cell<bool>);
+    // SAFETY: wasm linear memory is single-threaded; the static is
+    // reachable only from this actor's code.
+    unsafe impl Sync for Slot {}
+    pub(super) static IN_LOG_PIPELINE: Slot = Slot(Cell::new(false));
+
+    impl Slot {
+        pub fn with<R>(&'static self, f: impl FnOnce(&Cell<bool>) -> R) -> R {
+            f(&self.0)
+        }
+    }
+}
+
+/// `true` iff we're currently inside the drain / host-ship path.
+/// Read by [`crate::log::is_in_pipeline`] consumers (chiefly the
+/// actor-aware layer in `aether-substrate::log_install`); set + cleared
+/// by [`PipelineGuard`].
+pub fn is_in_pipeline() -> bool {
+    pipeline_tls::IN_LOG_PIPELINE.with(|cell| cell.get())
+}
+
+struct PipelineGuard;
+
+impl PipelineGuard {
+    fn enter() -> Self {
+        pipeline_tls::IN_LOG_PIPELINE.with(|cell| cell.set(true));
+        Self
+    }
+}
+
+impl Drop for PipelineGuard {
+    fn drop(&mut self) {
+        pipeline_tls::IN_LOG_PIPELINE.with(|cell| cell.set(false));
     }
 }
 
@@ -232,6 +294,7 @@ pub fn ship_host_event(entry: LogEvent) {
     let Some(mailbox) = registered_log_mailbox() else {
         return;
     };
+    let _guard = PipelineGuard::enter();
     ship_batch(
         host,
         mailbox,
@@ -411,6 +474,12 @@ impl Subscriber for WasmSubscriber {
     fn exit(&self, _: &span::Id) {}
 
     fn event(&self, event: &Event<'_>) {
+        // Re-entry guard: we're inside `drain_buffer` /
+        // `ship_host_event`. Drop the event to keep the pipeline
+        // from looping.
+        if is_in_pipeline() {
+            return;
+        }
         let entry = encode_event(event);
         let level = entry.level;
         // Push to the actor's buffer. `try_with_mut` is `Some` on
