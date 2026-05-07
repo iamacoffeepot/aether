@@ -154,10 +154,10 @@ pub enum LogLevel {
 /// local mailbox id so the hub-chassis's reply peripheral can
 /// route replies back to it. The source `engine_id` isn't on the
 /// wire — the hub knows which TCP connection the frame arrived on.
-/// `None` means "no reply target" (broadcast-origin, substrate-
-/// generated, no `from_component` attribution); the hub-side
-/// sender handle will be `NO_REPLY_HANDLE` for the receiving
-/// component.
+/// `None` means "no reply target" (broadcast-origin or substrate-
+/// generated mail, where `Mail::reply_to.target != Component(_)`);
+/// the hub-side sender handle will be `NO_REPLY_HANDLE` for the
+/// receiving component.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineMailToHubSubstrateFrame {
     pub recipient_mailbox_id: MailboxId,

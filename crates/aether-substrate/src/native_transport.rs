@@ -329,9 +329,8 @@ impl MailTransport for NativeTransport {
         let recipient_id = MailboxId(recipient);
         let reply_to =
             ReplyTo::with_correlation(ReplyTarget::Component(self.self_mailbox), correlation);
-        let mail = Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count)
-            .with_reply_to(reply_to)
-            .with_origin(self.self_mailbox);
+        let mail =
+            Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count).with_reply_to(reply_to);
         // Record `correlation -> recipient` for the cross-class
         // `wait_reply` guard. We record on every send (the FFI here
         // can't tell fire-and-forget from request/reply) and let
