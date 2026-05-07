@@ -2150,31 +2150,28 @@ struct NativeFallbackFn {
 }
 
 /// Validate a native `#[fallback]` method signature. Required shape:
-/// `(&self, ctx: &mut NativeCtx<'_>, env: &Envelope)`. The third
-/// argument's exact type isn't checked here — the synthesized
-/// override calls `self.<fallback>(ctx, env)` and the user's fn body
-/// will type-error against `&Envelope` if they wrote the wrong
-/// parameter type.
+/// `(&self | &mut self, ctx: &mut NativeCtx<'_>, env: &Envelope)`.
+/// The third argument's exact type isn't checked here — the
+/// synthesized override calls `self.<fallback>(ctx, env)` and the
+/// user's fn body will type-error against `&Envelope` if they wrote
+/// the wrong parameter type.
+///
+/// Issue 629 / Phase B: `&mut self` is now allowed alongside `&self`.
+/// The dispatcher owns the cap as `Box<A>` and calls the fallback
+/// through `&mut Box<A>`, so either receiver shape works.
 fn validate_native_fallback_sig(sig: &Signature) -> syn::Result<()> {
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
             "#[fallback] on `impl NativeActor for X` must have signature \
-             `(&self, ctx: &mut NativeCtx<'_>, env: &Envelope)`",
+             `(&self | &mut self, ctx: &mut NativeCtx<'_>, env: &Envelope)`",
         ));
     }
     let first = &sig.inputs[0];
-    let FnArg::Receiver(recv) = first else {
+    if !matches!(first, FnArg::Receiver(_)) {
         return Err(syn::Error::new_spanned(
             first,
-            "#[fallback] first parameter must be `&self`",
-        ));
-    };
-    if recv.mutability.is_some() {
-        return Err(syn::Error::new_spanned(
-            recv,
-            "#[fallback] receiver must be `&self`, not `&mut self` — \
-             native caps share state across threads via interior mutability behind `Arc<Self>`",
+            "#[fallback] first parameter must be `&self` or `&mut self`",
         ));
     }
     let third = &sig.inputs[2];
@@ -2188,42 +2185,38 @@ fn validate_native_fallback_sig(sig: &Signature) -> syn::Result<()> {
 }
 
 /// Extract `K` from a `#[actor] impl NativeActor` handler method's
-/// third parameter. Required signature: `(&self, ctx: &mut NativeCtx<'_>, mail: K)`.
-/// The `&self` (vs `&mut self`) is load-bearing — the actor lives
-/// behind `Arc<Self>` and shares the ref across dispatcher / lookup
-/// consumers.
-/// Extract `K` from a NativeActor handler's third parameter and a
-/// flag for slice-handler shape. Accepts:
-///   - `(&self, ctx: &mut NativeCtx<'_>, mail: K)` — single-payload
-///     handler, decodes via `Kind::decode_from_bytes`.
-///   - `(&self, ctx: &mut NativeCtx<'_>, mails: &[K])` — batched
-///     cast-shape handler, decodes the whole envelope as a contiguous
-///     `&[K]` slice via `decode_cast_slice` so a single envelope with
-///     `count > 1` (`Mailbox::send_many`, ADR-0019) reaches the
-///     handler intact. Only meaningful for cast-shape kinds; postcard
-///     kinds have no batch wire.
+/// third parameter and a flag for slice-handler shape. Accepts:
+///   - `(&self | &mut self, ctx: &mut NativeCtx<'_>, mail: K)` —
+///     single-payload handler, decodes via `Kind::decode_from_bytes`.
+///   - `(&self | &mut self, ctx: &mut NativeCtx<'_>, mails: &[K])` —
+///     batched cast-shape handler, decodes the whole envelope as a
+///     contiguous `&[K]` slice via `decode_cast_slice` so a single
+///     envelope with `count > 1` (`Mailbox::send_many`, ADR-0019)
+///     reaches the handler intact. Only meaningful for cast-shape
+///     kinds; postcard kinds have no batch wire.
+///
+/// Issue 629 / Phase B: `&mut self` is now allowed alongside `&self`.
+/// The dispatcher owns the cap as `Box<A>` and calls each handler
+/// through `&mut Box<A>`, so either receiver shape works. Caps with
+/// mutable state migrate from interior mutability (`Mutex` / `Atomic`)
+/// to plain fields by flipping handler signatures to `&mut self` per
+/// cap.
 fn extract_native_actor_handler_kind(sig: &Signature) -> syn::Result<(Type, bool)> {
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
             "#[actor] impl NativeActor #[handler] method must have signature \
-             `(&self, ctx: &mut NativeCtx<'_>, arg: K)` (or `mail: &[K]` for batched cast kinds)",
+             `(&self | &mut self, ctx: &mut NativeCtx<'_>, arg: K)` \
+             (or `mail: &[K]` for batched cast kinds)",
         ));
     }
     let first = &sig.inputs[0];
-    let FnArg::Receiver(recv) = first else {
+    if !matches!(first, FnArg::Receiver(_)) {
         return Err(syn::Error::new_spanned(
             first,
-            "#[handler] first parameter must be `&self` (NativeActor caps share state via Arc)",
+            "#[handler] first parameter must be `&self` or `&mut self`",
         ));
     };
-    if recv.mutability.is_some() {
-        return Err(syn::Error::new_spanned(
-            recv,
-            "#[actor] impl NativeActor #[handler] receiver must be `&self`, not `&mut self` — \
-             native caps share state across threads via interior mutability behind `Arc<Self>`",
-        ));
-    }
     let third = &sig.inputs[2];
     let FnArg::Typed(pt) = third else {
         return Err(syn::Error::new_spanned(

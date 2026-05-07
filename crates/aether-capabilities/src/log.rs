@@ -27,7 +27,6 @@ mod native {
     use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::outbound::{HubOutbound, LogEntry, LogLevel};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     /// `aether.log` mailbox cap. Receives [`LogBatch`] mail, converts
@@ -35,9 +34,14 @@ mod native {
     /// monotonic sequence stamped on receipt; `origin` plucked from
     /// the mail envelope's sender), and forwards via
     /// [`HubOutbound::egress_log_batch`].
+    ///
+    /// Issue 629 / Phase B: `sequence` is a plain `u64` field. The
+    /// dispatcher thread is the sole writer (one handler at a time),
+    /// so the pre-Phase-A `AtomicU64` was a worker-pool-era artifact
+    /// rather than a contention point.
     pub struct LogCapability {
         outbound: Option<Arc<HubOutbound>>,
-        sequence: AtomicU64,
+        sequence: u64,
     }
 
     #[actor]
@@ -49,7 +53,7 @@ mod native {
             let outbound = ctx.mailer().outbound().cloned();
             Ok(Self {
                 outbound,
-                sequence: AtomicU64::new(1),
+                sequence: 1,
             })
         }
 
@@ -63,7 +67,7 @@ mod native {
         /// rides on the mail envelope; this cap reads `ctx.sender()`
         /// to populate `LogEntry::origin`.
         #[handler]
-        fn on_log_batch(&self, ctx: &mut NativeCtx<'_>, batch: LogBatch) {
+        fn on_log_batch(&mut self, ctx: &mut NativeCtx<'_>, batch: LogBatch) {
             let Some(outbound) = self.outbound.as_ref() else {
                 return;
             };
@@ -72,13 +76,17 @@ mod native {
             let entries: Vec<LogEntry> = batch
                 .entries
                 .into_iter()
-                .map(|e| LogEntry {
-                    timestamp_unix_ms: now,
-                    level: u8_to_level(e.level),
-                    target: e.target,
-                    message: e.message,
-                    sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
-                    origin,
+                .map(|e| {
+                    let sequence = self.sequence;
+                    self.sequence += 1;
+                    LogEntry {
+                        timestamp_unix_ms: now,
+                        level: u8_to_level(e.level),
+                        target: e.target,
+                        message: e.message,
+                        sequence,
+                        origin,
+                    }
                 })
                 .collect();
             outbound.egress_log_batch(entries);
