@@ -755,6 +755,14 @@ struct BootedPassives {
     /// installing every actor's `LogDrainSlot` to the chassis-declared
     /// drain.
     claimed_actor_mailboxes: Vec<MailboxId>,
+    /// Issue 607 Phase 2 / Phase 3 (ADR-0079): per-chassis actor
+    /// lifecycle registry, plus the spawn machinery that writes into
+    /// it. Both built once at boot; `Spawner` carries `Arc` clones of
+    /// the chassis-level handles (registry, actor_registry, mailer,
+    /// frame_bound_set, aborter) so future per-handler `spawn_child`
+    /// reaches them without separate plumbing.
+    actor_registry: Arc<crate::ActorRegistry>,
+    spawner: Arc<crate::Spawner>,
 }
 
 /// Issue #601: dispatch a `ConfigureLogDrain { mailbox: drain }` mail
@@ -813,6 +821,14 @@ fn boot_passives(
     let mut frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)> = Vec::new();
     let frame_bound_set: Arc<RwLock<HashSet<MailboxId>>> = Arc::new(RwLock::new(HashSet::new()));
     let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
+    let actor_registry: Arc<crate::ActorRegistry> = Arc::new(crate::ActorRegistry::new());
+    let spawner: Arc<crate::Spawner> = Arc::new(crate::Spawner::new(
+        Arc::clone(registry),
+        Arc::clone(&actor_registry),
+        Arc::clone(mailer),
+        Arc::clone(&frame_bound_set),
+        Arc::clone(aborter),
+    ));
     for boot in passives {
         let mut ctx = ChassisCtx::new(
             registry,
@@ -841,6 +857,8 @@ fn boot_passives(
         frame_bound_set,
         aborter: Arc::clone(aborter),
         claimed_actor_mailboxes,
+        actor_registry,
+        spawner,
     })
 }
 
@@ -870,6 +888,30 @@ impl<C: Chassis> BuiltChassis<C> {
     /// hand off to `run()` and don't keep the chassis around).
     pub fn actor<A: NativeActor>(&self) -> Option<Arc<A>> {
         self.booted.actors.get::<A>()
+    }
+
+    /// Issue 607 Phase 3: chassis-level entry point for spawning an
+    /// instanced actor (ADR-0079). Returns a [`crate::SpawnBuilder`]
+    /// the caller chains `after_init` / `finish` against. The
+    /// per-handler equivalent (`NativeCtx::spawn_child`) lands in a
+    /// follow-up; callers in the chassis-builder scope (driver
+    /// pre-build, embedders) reach for this.
+    pub fn spawn_actor<'a, A>(
+        &'a self,
+        subname: crate::Subname<'a>,
+        config: A::Config,
+    ) -> crate::SpawnBuilder<'a, A>
+    where
+        A: aether_actor::Instanced + NativeActor + NativeDispatch,
+    {
+        crate::SpawnBuilder::new(&self.booted.spawner, subname, config, crate::ReplyTo::NONE)
+    }
+
+    /// Borrow the chassis's [`crate::ActorRegistry`]. Read-only;
+    /// embedders that want to introspect live instanced actors
+    /// (test assertions, diagnostics) reach for this.
+    pub fn actor_registry(&self) -> &Arc<crate::ActorRegistry> {
+        &self.booted.actor_registry
     }
 
     /// Block on the driver's run loop. On clean return, shut down
@@ -933,6 +975,29 @@ impl<C: Chassis> PassiveChassis<C> {
     /// through mail.
     pub fn actor<A: NativeActor>(&self) -> Option<Arc<A>> {
         self.booted.actors.get::<A>()
+    }
+
+    /// Issue 607 Phase 3: chassis-level entry point for spawning an
+    /// instanced actor (ADR-0079). Returns a [`crate::SpawnBuilder`]
+    /// the caller chains `after_init` / `finish` against. Mirrors
+    /// [`BuiltChassis::spawn_actor`]; both build the same
+    /// [`crate::SpawnBuilder`] over the chassis's [`crate::Spawner`].
+    pub fn spawn_actor<'a, A>(
+        &'a self,
+        subname: crate::Subname<'a>,
+        config: A::Config,
+    ) -> crate::SpawnBuilder<'a, A>
+    where
+        A: aether_actor::Instanced + NativeActor + NativeDispatch,
+    {
+        crate::SpawnBuilder::new(&self.booted.spawner, subname, config, crate::ReplyTo::NONE)
+    }
+
+    /// Borrow the chassis's [`crate::ActorRegistry`]. Read-only;
+    /// embedders that want to introspect live instanced actors
+    /// (test assertions, diagnostics) reach for this.
+    pub fn actor_registry(&self) -> &Arc<crate::ActorRegistry> {
+        &self.booted.actor_registry
     }
 }
 
