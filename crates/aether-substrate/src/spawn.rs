@@ -134,7 +134,7 @@ impl Spawner {
     /// 7. Pre-load `after_init_mail` into the inbox.
     /// 8. Spawn dispatcher thread, move actor in.
     fn spawn_actor<A>(
-        &self,
+        self: Arc<Self>,
         subname: Subname<'_>,
         config: A::Config,
         after_init_mail: Vec<Envelope>,
@@ -183,6 +183,10 @@ impl Spawner {
             false,
             Arc::clone(&self.frame_bound_set),
             Arc::clone(&self.aborter),
+            // Pass the chassis's `Spawner` through so the spawned
+            // actor can in turn `ctx.spawn_child` from its own
+            // handlers.
+            Some(Arc::clone(&self)),
         ));
         transport.install_inbox(rx);
 
@@ -337,12 +341,17 @@ fn alloc_instanced_thread_name(full_name: &str) -> String {
 /// running list of after-init envelopes. `finish` consumes the
 /// builder and runs the spawn lifecycle.
 pub struct SpawnBuilder<'ctx, A: Instanced + NativeActor + NativeDispatch> {
-    spawner: &'ctx Spawner,
+    spawner: Arc<Spawner>,
     subname: Subname<'ctx>,
     config: Option<A::Config>,
     sender: ReplyTo,
     after_init: Vec<Envelope>,
     _marker: PhantomData<fn() -> A>,
+    /// Carries the `'ctx` lifetime even though `spawner` is `Arc`
+    /// (no longer borrowed). The lifetime ties `Subname::Named(&str)`
+    /// to whatever borrow it was constructed from at the call site,
+    /// so a stack-local subname doesn't dangle past `finish()`.
+    _ctx: PhantomData<&'ctx ()>,
 }
 
 impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
@@ -350,7 +359,7 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
     /// `spawn_actor` entry points (on `BuiltChassis` / `PassiveChassis`)
     /// build these too.
     pub(crate) fn new(
-        spawner: &'ctx Spawner,
+        spawner: Arc<Spawner>,
         subname: Subname<'ctx>,
         config: A::Config,
         sender: ReplyTo,
@@ -362,6 +371,7 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
             sender,
             after_init: Vec::new(),
             _marker: PhantomData,
+            _ctx: PhantomData,
         }
     }
 
@@ -404,6 +414,6 @@ impl<'ctx, A: Instanced + NativeActor + NativeDispatch> SpawnBuilder<'ctx, A> {
             ..
         } = self;
         let config = config.expect("SpawnBuilder::finish consumed exactly once");
-        spawner.spawn_actor::<A>(subname, config, after_init, sender)
+        Spawner::spawn_actor::<A>(spawner, subname, config, after_init, sender)
     }
 }
