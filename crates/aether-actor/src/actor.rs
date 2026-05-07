@@ -41,18 +41,94 @@ pub trait Actor: Sized + Send + 'static {
     const FRAME_BARRIER: bool = false;
 }
 
-/// Marker: only one instance of this actor can be live per substrate.
-/// Required by `Ctx::actor::<R>()` so the type → mailbox lookup is
-/// unambiguous — the substrate enforces "at most one Singleton actor
-/// per `R::NAMESPACE`" at registration time, and senders address by
-/// type rather than by name.
+/// Cardinality marker: only one instance of this actor can be live per
+/// substrate. `R::NAMESPACE` is the full mailbox name, fixed at
+/// compile time. Required by `Ctx::actor::<R>()` so the type → mailbox
+/// lookup is unambiguous — the substrate enforces "at most one
+/// Singleton actor per `R::NAMESPACE`" at registration time, and
+/// senders address by type rather than by name.
 ///
 /// Chassis caps (including catch-all caps like `BroadcastCapability`) are always
 /// singletons. User components are singletons when their cdylib loads
 /// at the default name (`R::NAMESPACE` from the wasm custom section);
 /// multi-instance loads use `ctx.resolve_actor::<R>(name)` instead and
 /// don't go through the singleton path. ADR-0075 §Decision 1.
+///
+/// Mutually exclusive with [`Instanced`] at the type level: an actor
+/// is either one-of-a-kind (singleton, type-keyed) or N-instances
+/// (instanced, name-keyed under a shared namespace prefix). ADR-0079.
 pub trait Singleton: Actor {}
+
+/// Cardinality marker: many instances of this actor type can be live
+/// per substrate, each under its own subname. `R::NAMESPACE` is a
+/// **prefix** — full mailbox names take the form
+/// `"{NAMESPACE}:{subname}"` (e.g. `aether.net.session:42`). The `:`
+/// separator is structural; subnames may not contain it.
+///
+/// Forcing function is socket actors (ADR-0079): a singleton listener
+/// (e.g. `NetCapability`) accepts connections and spawns one
+/// `SessionActor` per accepted socket via `ctx.spawn_child`. Senders
+/// address an instance by name through `ctx.resolve_actor::<R>(subname)`.
+///
+/// Mutually exclusive with [`Singleton`] at the type level. ADR-0079.
+pub trait Instanced: Actor {}
+
+/// Validation outcome for namespace segments — both the `NAMESPACE`
+/// const on an [`Instanced`] type (the listener prefix) and the
+/// runtime subname passed to `spawn_child`. Same rules apply at both
+/// sites: stay printable-ASCII-ish, don't collide with the structural
+/// `:` separator, and stay under [`NAMESPACE_SEGMENT_MAX_LEN`] bytes.
+///
+/// `TooLong` carries the limit so error messages can render it
+/// without re-fetching the const, and so future relaxation can vary
+/// the limit per call site if needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamespaceError {
+    Empty,
+    ContainsSeparator,
+    ContainsControlOrWhitespace,
+    TooLong { limit: usize },
+}
+
+/// Byte-length cap for namespace segments. Generous — full names like
+/// `aether.net.session:<uuid>` (~50 bytes) clear it by a wide margin —
+/// but bounded so the registry's `HashMap<MailboxId, _>` keys stay in
+/// a predictable size class and a runaway caller can't grow the
+/// tombstone set with megabyte names.
+pub const NAMESPACE_SEGMENT_MAX_LEN: usize = 256;
+
+/// Validate a namespace segment. Used at registration time on the
+/// `NAMESPACE` const of [`Singleton`] / [`Instanced`] types, and at
+/// runtime on the `subname` passed to `spawn_child`. ADR-0079.
+///
+/// Rejects:
+/// - empty segments
+/// - segments containing the `:` separator
+/// - segments containing ASCII control bytes or any whitespace (incl. space)
+/// - segments longer than [`NAMESPACE_SEGMENT_MAX_LEN`] bytes
+///
+/// Multi-byte UTF-8 (CJK, emoji, ...) is allowed — the rule is "no
+/// ASCII control / whitespace / separator," not "ASCII-only." MailboxId
+/// hashing is byte-level so any valid UTF-8 hashes deterministically.
+pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
+    if s.is_empty() {
+        return Err(NamespaceError::Empty);
+    }
+    if s.len() > NAMESPACE_SEGMENT_MAX_LEN {
+        return Err(NamespaceError::TooLong {
+            limit: NAMESPACE_SEGMENT_MAX_LEN,
+        });
+    }
+    for c in s.chars() {
+        if c == ':' {
+            return Err(NamespaceError::ContainsSeparator);
+        }
+        if c.is_control() || c.is_whitespace() {
+            return Err(NamespaceError::ContainsControlOrWhitespace);
+        }
+    }
+    Ok(())
+}
 
 /// Per-handler-kind marker: `R: HandlesKind<K>` means actor `R` has a
 /// `#[handler]` method accepting kind `K`. Auto-emitted by the
