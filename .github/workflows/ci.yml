@@ -68,7 +68,18 @@ jobs:
     # becomes routine, lower it — routine failure is a signal.
     timeout-minutes: 15
     steps:
+      # Issue #612: fetch-depth 2 (PR) / 0 (push) so the changed-crate
+      # filter in `Run tests` can `git diff HEAD^1 HEAD` (or against
+      # `event.before`/`after`). PR #610 originally added a second
+      # `actions/checkout@v3` after pre-build to get this history; the
+      # default `clean: true` on that re-checkout wiped the wasm
+      # artifacts the pre-build step had just produced, so scenario
+      # tests (gated by AETHER_REQUIRE_RUNTIME) panicked. Configuring
+      # fetch-depth on the initial checkout keeps target/ alive into
+      # the test step.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -118,12 +129,9 @@ jobs:
             [ -z "$pkg" ] && continue
             cargo build --target wasm32-unknown-unknown -p "$pkg"
           done <<< "$pkgs"
-        # Get the diff between the current commit and the base of the PR, then filter to just the files that changed.
-        # If any of those files are in the `crates/` directory, or are `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, or a workflow file,
-        # then we consider this PR to have "code changes" that require running the tests. Otherwise, we can skip the tests to save time.
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+      # Filter to just the files changed in this PR / push and run
+      # tests only for crates whose files appear. Git history fetched
+      # by the initial checkout above (fetch-depth 2 / 0).
       - name: Run tests
         run: |
           if ${{ github.event_name == 'pull_request' }}; then
