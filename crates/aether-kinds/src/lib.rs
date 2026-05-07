@@ -433,6 +433,36 @@ pub struct UnresolvedMail {
     pub kind_id: aether_data::KindId,
 }
 
+/// Issue 607 Phase 4b (ADR-0079): framework-emitted close
+/// notification. Sent to every monitor a closing actor accumulated via
+/// `NativeCtx::monitor` — the substrate drains `monitors_of[target]`
+/// after the target's `on_close` runs, fires one `MonitorNotice` per
+/// watcher, and only then flips the target's slot from `Live` to
+/// `Dead`.
+///
+/// The watcher receives this kind as ordinary mail; its `#[handler]`
+/// reads `target` to identify which actor it was monitoring. v1 carries
+/// only the target id — no `CloseReason` field — so the wire shape is
+/// purely additive if a future revision wants to surface trap vs
+/// shutdown vs cooperative close.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.observation.monitor_notice")]
+pub struct MonitorNotice {
+    pub target: aether_data::MailboxId,
+}
+
 // Reserved control-plane vocabulary (ADR-0010). The substrate handles
 // these kinds inline rather than dispatching to a component — the
 // namespace itself is the routing discriminator. ADR-0019 PR 5 turned

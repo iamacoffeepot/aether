@@ -65,7 +65,7 @@ pub mod reply_table;
 pub mod spawn;
 pub mod supervisor;
 
-pub use actor_registry::{ActorEntry, ActorRegistry};
+pub use actor_registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
 pub use aether_actor::Actor;
 pub use boot::{SubstrateBoot, SubstrateBootBuilder};
 pub use capability::{
@@ -82,7 +82,9 @@ pub use ctx::SubstrateCtx;
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
 pub use mail::{KindId, Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 pub use mailer::Mailer;
-pub use native_actor::{Actors, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx};
+pub use native_actor::{
+    Actors, MonitorHandle, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
+};
 pub use native_transport::NativeTransport;
 pub use outbound::{
     DroppingBackend, EgressBackend, EgressEvent, HubOutbound, LogEntry, LogLevel, RecordingBackend,

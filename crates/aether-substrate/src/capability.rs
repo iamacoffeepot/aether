@@ -879,6 +879,9 @@ where
 
     let actor_for_thread = Arc::clone(&actor_arc);
     let transport_for_thread = Arc::clone(&transport);
+    let actor_registry_for_thread = Arc::clone(ctx.spawner_arc().actor_registry());
+    let mailer_for_thread = ctx.mail_send_handle();
+    let self_id_for_thread = mailbox_id;
     let thread_name = alloc_legacy_native_actor_thread_name::<A>();
     let thread = std::thread::Builder::new()
         .name(thread_name)
@@ -967,6 +970,32 @@ where
                     },
                 );
             });
+            // Issue 607 Phase 4b (ADR-0079): mirror the new builder
+            // path's close-time monitor cleanup — drain monitors_of,
+            // fan out MonitorNotice mails, prune the reverse index,
+            // tombstone the id. Singletons aren't `Live` in `actors`
+            // today, but a singleton that called `ctx.monitor` left
+            // entries in `monitoring`; the prune is what keeps those
+            // forward indices clean after the dispatcher exits.
+            let watchers = actor_registry_for_thread.close_actor(self_id_for_thread);
+            if !watchers.is_empty() {
+                let notice = aether_kinds::MonitorNotice {
+                    target: self_id_for_thread,
+                };
+                let payload = <aether_kinds::MonitorNotice as aether_data::Kind>::encode_into_bytes(
+                    &notice,
+                );
+                let kind =
+                    crate::mail::KindId(<aether_kinds::MonitorNotice as aether_data::Kind>::ID.0);
+                for watcher in watchers {
+                    mailer_for_thread.push(crate::mail::Mail::new(
+                        watcher,
+                        kind,
+                        payload.clone(),
+                        1,
+                    ));
+                }
+            }
         })
         .map_err(|e| BootError::Other(Box::new(e)))?;
 
