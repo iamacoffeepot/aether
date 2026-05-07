@@ -138,7 +138,7 @@ jobs:
           echo "Unique crate names: ${CRATE_NAMES}"
           for crate in $CRATE_NAMES; do
             echo "Found changes in crate: $crate"
-            cargo test -p file://$(pwd)/${crate}
+            cargo test -p ${crate}
           done
         env:
           AETHER_REQUIRE_RUNTIME: "1"
