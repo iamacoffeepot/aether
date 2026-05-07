@@ -62,6 +62,7 @@ pub mod registry;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod reply_table;
+pub mod spawn;
 pub mod supervisor;
 
 pub use actor_registry::{ActorEntry, ActorRegistry};
@@ -88,6 +89,7 @@ pub use outbound::{
 };
 pub use panic_hook::init_panic_hook;
 pub use registry::{MailboxEntry, Registry, SinkHandler};
+pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 pub use supervisor::{
     ComponentRouter, ComponentSendOutcome, DrainDeath, DrainOutcome, DrainSummary,
 };

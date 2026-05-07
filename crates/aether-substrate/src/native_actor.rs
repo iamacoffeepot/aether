@@ -297,6 +297,18 @@ impl<'a> NativeInitCtx<'a> {
         self.transport
     }
 
+    /// The actor's own [`MailboxId`] — the deterministic FNV-1a hash
+    /// of its full registered name (ADR-0029). For singletons that's
+    /// `Actor::NAMESPACE`; for instanced actors it's
+    /// `"{NAMESPACE}:{subname}"` (ADR-0079). Init may use this to
+    /// publish its own address — e.g. dispatch
+    /// `aether.control.subscribe_input { mailbox: ctx.self_id() }`
+    /// before registration completes; replies route correctly once the
+    /// spawn lifecycle finishes inserting the entry.
+    pub fn self_id(&self) -> crate::mail::MailboxId {
+        self.transport.self_mailbox()
+    }
+
     /// Clone the substrate's mailer. Caps that need to register a
     /// `Mailer::set_outbound`-style hook (Hub client, future
     /// fallback routers) reach for this; most caps don't need it.

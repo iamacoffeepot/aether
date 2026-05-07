@@ -111,10 +111,62 @@ impl ActorRegistry {
     }
 
     /// `TypeId` that owns the given namespace, if any. Populated at
-    /// chassis-build (singletons) and first spawn (instanced) starting
-    /// in Phase 3; today this always returns `None`.
+    /// chassis-build (singletons) and first spawn (instanced).
     pub fn namespace_owner(&self, namespace: &'static str) -> Option<TypeId> {
         self.name_owners.read().unwrap().get(namespace).copied()
+    }
+
+    /// Claim ownership of `namespace` for `type_id`. Returns `Ok(())` on
+    /// fresh claim or when the same `TypeId` re-claims the same
+    /// namespace (idempotent — multiple instanced spawns of the same
+    /// type share one namespace). Returns `Err(other_type_id)` when a
+    /// different type already owns the namespace — the ADR-0079 guard
+    /// against Singleton/Instanced or Instanced/Instanced collisions.
+    pub(crate) fn try_claim_namespace(
+        &self,
+        namespace: &'static str,
+        type_id: TypeId,
+    ) -> Result<(), TypeId> {
+        let mut owners = self.name_owners.write().unwrap();
+        match owners.get(namespace) {
+            Some(&existing) if existing == type_id => Ok(()),
+            Some(&existing) => Err(existing),
+            None => {
+                owners.insert(namespace, type_id);
+                Ok(())
+            }
+        }
+    }
+
+    /// Insert a `Live` actor entry under `id`. Returns `Err(())` if a
+    /// `Live` entry already exists at `id` (caller must check
+    /// `is_tombstoned` separately for the retired-name case). Used by
+    /// the spawn primitive after init succeeds.
+    pub(crate) fn insert_live(
+        &self,
+        id: MailboxId,
+        sender: Sender<Envelope>,
+        actor: Arc<dyn std::any::Any + Send + Sync>,
+        type_id: TypeId,
+    ) -> Result<(), ()> {
+        let mut actors = self.actors.write().unwrap();
+        match actors.get(&id) {
+            Some(ActorEntry::Live { .. }) => Err(()),
+            // `Dead` slot or empty: install the live entry. Phase 4
+            // populates `Dead` on close, but Phase 3 only ever sees
+            // empty slots.
+            _ => {
+                actors.insert(
+                    id,
+                    ActorEntry::Live {
+                        sender,
+                        actor,
+                        type_id,
+                    },
+                );
+                Ok(())
+            }
+        }
     }
 }
 
