@@ -83,7 +83,7 @@ pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_
 pub use mail::{KindId, Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 pub use mailer::Mailer;
 pub use native_actor::{
-    Actors, MonitorHandle, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
+    ExportedHandles, MonitorHandle, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
 };
 pub use native_transport::NativeTransport;
 pub use outbound::{

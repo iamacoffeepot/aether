@@ -2067,7 +2067,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         let method_ident = &f.method.sig.ident;
         quote! {
             fn __aether_dispatch_fallback(
-                &self,
+                &mut self,
                 __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
                 __aether_env: &::aether_substrate::capability::Envelope,
             ) -> bool {
@@ -2105,7 +2105,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         #[cfg(not(target_arch = "wasm32"))]
         impl #impl_generics ::aether_substrate::NativeDispatch for #self_ty #where_clause {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
                 __aether_kind: ::aether_substrate::mail::KindId,
                 __aether_payload: &[u8],

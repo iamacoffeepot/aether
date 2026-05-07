@@ -200,13 +200,14 @@ pub struct HubServerDriverRunning {
     logs: LogStore,
     state: Arc<HubState>,
     loopback: LoopbackEngine,
-    /// Handle to the booted [`ProcessCapability`]. The shutdown
-    /// coordinator calls [`ProcessCapability::shutdown_all`] on this
-    /// to terminate every spawned child before dropping the loopback
-    /// substrate. `None` is unreachable in production (the cap is
-    /// always booted on the hub chassis); kept Optional only because
-    /// `DriverCtx::actor` returns Option for type-system purity.
-    process_cap: Option<Arc<ProcessCapability>>,
+    /// Issue 629 / Phase A: handle bundle published by
+    /// [`ProcessCapability::init`] — the shutdown coordinator calls
+    /// [`ProcessHandles::shutdown_all`] to terminate every spawned
+    /// child before dropping the loopback substrate. `None` is
+    /// unreachable in production (the cap is always booted on the
+    /// hub chassis); kept Optional only because
+    /// `DriverCtx::handle::<H>()` returns Option for type-system purity.
+    process_handles: Option<crate::hub::process_capability::ProcessHandles>,
 }
 
 impl DriverCapability for HubServerDriverCapability {
@@ -224,7 +225,7 @@ impl DriverCapability for HubServerDriverCapability {
             loopback,
             rt,
         } = self;
-        let process_cap = ctx.actor::<ProcessCapability>();
+        let process_handles = ctx.handle::<crate::hub::process_capability::ProcessHandles>();
         Ok(HubServerDriverRunning {
             rt,
             engine_addr,
@@ -235,7 +236,7 @@ impl DriverCapability for HubServerDriverCapability {
             logs,
             state,
             loopback,
-            process_cap,
+            process_handles,
         })
     }
 }
@@ -252,7 +253,7 @@ impl DriverRunning for HubServerDriverRunning {
             logs,
             state,
             loopback,
-            process_cap,
+            process_handles,
         } = *self;
 
         rt.block_on(coordinator(
@@ -264,7 +265,7 @@ impl DriverRunning for HubServerDriverRunning {
             logs,
             state,
             loopback,
-            process_cap,
+            process_handles,
         ));
 
         Ok(())
@@ -287,7 +288,7 @@ async fn coordinator(
     logs: LogStore,
     state: Arc<HubState>,
     loopback: LoopbackEngine,
-    process_cap: Option<Arc<ProcessCapability>>,
+    process_handles: Option<crate::hub::process_capability::ProcessHandles>,
 ) {
     let LoopbackEngine {
         boot,
@@ -341,8 +342,8 @@ async fn coordinator(
     // escalation) regardless of which task drops its Arc last.
     // Skipping this is what orphaned children into init on hub
     // SIGTERM pre-fix.
-    if let Some(cap) = process_cap.as_ref() {
-        cap.shutdown_all(SHUTDOWN_CHILD_GRACE).await;
+    if let Some(handles) = process_handles.as_ref() {
+        handles.shutdown_all(SHUTDOWN_CHILD_GRACE).await;
     }
 
     // `boot` drops here — scheduler workers join, HubOutbound's

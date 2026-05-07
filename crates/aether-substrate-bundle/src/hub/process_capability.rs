@@ -97,6 +97,19 @@ mod native {
         children: Arc<Mutex<HashMap<EngineId, ChildSlot>>>,
     }
 
+    /// Issue 629 / Phase A: driver-facing handle bundle published by
+    /// [`ProcessCapability::init`] via `ctx.publish_handle`. The hub
+    /// chassis driver retrieves a clone via
+    /// `DriverCtx::handle::<ProcessHandles>()` and calls
+    /// [`Self::shutdown_all`] during chassis shutdown coordination so
+    /// every spawned child gets SIGTERM + grace + SIGKILL escalation
+    /// before the hub process exits.
+    #[derive(Clone)]
+    pub struct ProcessHandles {
+        children: Arc<Mutex<HashMap<EngineId, ChildSlot>>>,
+        runtime: Handle,
+    }
+
     #[actor]
     impl NativeActor for ProcessCapability {
         type Config = ProcessCapabilityConfig;
@@ -106,13 +119,21 @@ mod native {
             cfg: ProcessCapabilityConfig,
             ctx: &mut NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
+            let children = Arc::new(Mutex::new(HashMap::new()));
+            // Issue 629 / Phase A: publish the driver-facing handle so
+            // the hub chassis shutdown coordinator can drain spawned
+            // children at exit without holding `Arc<ProcessCapability>`.
+            ctx.publish_handle(ProcessHandles {
+                children: Arc::clone(&children),
+                runtime: cfg.runtime.clone(),
+            });
             Ok(Self {
                 engines: cfg.engines,
                 pending: cfg.pending,
                 hub_engine_addr: cfg.hub_engine_addr,
                 runtime: cfg.runtime,
                 outbound: ctx.mailer().outbound().cloned(),
-                children: Arc::new(Mutex::new(HashMap::new())),
+                children,
             })
         }
 
@@ -235,11 +256,15 @@ mod native {
                 .unwrap()
                 .insert(engine_id, ChildSlot { pid, reaper });
         }
+    }
 
+    impl ProcessHandles {
         /// Drain every spawned child and run the SIGTERM → grace →
         /// SIGKILL escalation against each in parallel. Called by the
-        /// hub chassis's shutdown coordinator so SIGINT / SIGTERM on
-        /// the hub doesn't orphan children into init. Each child's
+        /// hub chassis's shutdown coordinator (which now reaches the
+        /// children map via `DriverCtx::handle::<ProcessHandles>()`
+        /// rather than `Arc<ProcessCapability>`) so SIGINT / SIGTERM
+        /// on the hub doesn't orphan children into init. Each child's
         /// reaper task observes `Child::wait` resolution and
         /// broadcasts `aether.process.exited` itself.
         pub async fn shutdown_all(&self, grace: Duration) {
@@ -258,7 +283,8 @@ mod native {
             let handles: Vec<_> = drained
                 .into_iter()
                 .map(|(_, ChildSlot { pid, reaper })| {
-                    tokio::spawn(signal_and_await_reaper(pid, reaper, grace))
+                    self.runtime
+                        .spawn(signal_and_await_reaper(pid, reaper, grace))
                 })
                 .collect();
             for h in handles {
@@ -686,4 +712,4 @@ mod native {
     }
 }
 
-pub use native::ProcessCapabilityConfig;
+pub use native::{ProcessCapabilityConfig, ProcessHandles};

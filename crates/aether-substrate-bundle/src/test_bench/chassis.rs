@@ -202,20 +202,16 @@ impl TestBenchChassis {
                 .with_log_drain::<LogCapability>()
                 .build_passive()?;
 
-        // Issue 552 stage 2d: pull the booted `Arc<RenderCapability>`
-        // out of the `PassiveChassis` actors map and clone the
-        // Arc-shared handles. Pre-2d the chassis main extracted handles
-        // before moving the cap into the chassis builder; with the
-        // NativeActor shape, init runs inside `with_actor::<...>` so
-        // there's no pre-build cap to call `handles()` on.
-        let render_handles = passive
-            .actor::<RenderCapability>()
-            .ok_or_else(|| {
+        // Issue 629 / Phase A: render publishes its `RenderHandles`
+        // bundle on the chassis's `ExportedHandles` map during `init`.
+        // Embedders retrieve via `PassiveChassis::handle::<H>()` — no
+        // `Arc<RenderCapability>` ever escapes the dispatcher thread.
+        let render_handles: aether_capabilities::RenderHandles =
+            passive.handle::<aether_capabilities::RenderHandles>().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "TestBenchChassis::build: RenderCapability not booted via with_actor",
+                    "TestBenchChassis::build: RenderHandles not published — RenderCapability must boot via with_actor before TestBench builds",
                 )
-            })?
-            .handles();
+            })?;
 
         let hub = crate::hub::connect_hub_client(&boot, hub_url.as_deref())?;
 

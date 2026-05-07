@@ -842,13 +842,14 @@ where
     ));
     transport.install_inbox(receiver);
 
-    // The legacy path doesn't carry a chassis-side `Actors` map; init
-    // contexts that don't need peer lookups (today: every cap migrating
-    // through this path — Handle, Audio, Io, Net, Render) work fine
-    // against an empty map. The new `Builder::with_actor` path threads
-    // a real map for caps that DO need peer lookups; both end up using
-    // the same NativeInitCtx + dispatcher trampoline shape.
-    let empty_actors = crate::Actors::new();
+    // The legacy path doesn't share the chassis's `ExportedHandles`
+    // map; init contexts that don't need to publish a driver-facing
+    // handle bundle (today: every cap migrating through this path —
+    // Handle, Audio, Io, Net) work fine against a throwaway map. The
+    // new `Builder::with_actor` path threads the real chassis-owned
+    // map; both end up using the same NativeInitCtx + dispatcher
+    // trampoline shape.
+    let mut throwaway_handles = crate::ExportedHandles::new();
 
     // Per-actor scratch storage (issue 582). Stamped into TLS via
     // `local::with_stamped` for the duration of `init` and
@@ -858,8 +859,11 @@ where
 
     let actor = {
         let mailer_clone = ctx.mail_send_handle();
-        let mut init_ctx =
-            crate::native_actor::NativeInitCtx::new(&transport, &empty_actors, mailer_clone);
+        let mut init_ctx = crate::native_actor::NativeInitCtx::new(
+            &transport,
+            &mut throwaway_handles,
+            mailer_clone,
+        );
         // Issue #581: drain the `LogBuffer` after init so cap-boot
         // tracing events surface to LogCapability promptly.
         aether_actor::local::with_stamped(&slots, || {
@@ -873,11 +877,11 @@ where
             )
         })?
     };
-    drop(empty_actors); // explicit shape — no shared state outlives init
+    drop(throwaway_handles); // explicit shape — no shared state outlives init
 
-    let actor_arc: Arc<A> = Arc::new(actor);
+    // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
+    let mut actor: Box<A> = Box::new(actor);
 
-    let actor_for_thread = Arc::clone(&actor_arc);
     let transport_for_thread = Arc::clone(&transport);
     let actor_registry_for_thread = Arc::clone(ctx.spawner_arc().actor_registry());
     let mailer_for_thread = ctx.mail_send_handle();
@@ -906,7 +910,7 @@ where
                                 &transport_for_thread,
                                 env.sender,
                             );
-                            if actor_for_thread
+                            if actor
                                 .__aether_dispatch_envelope(
                                     &mut native_ctx,
                                     env.kind,
@@ -944,7 +948,7 @@ where
                                 &transport_for_thread,
                                 env.sender,
                             );
-                            let _ = actor_for_thread.__aether_dispatch_envelope(
+                            let _ = actor.__aether_dispatch_envelope(
                                 &mut native_ctx,
                                 env.kind,
                                 &env.payload,
@@ -965,7 +969,7 @@ where
                             &transport_for_thread,
                             crate::mail::ReplyTo::NONE,
                         );
-                        actor_for_thread.on_close(&mut close_ctx);
+                        actor.on_close(&mut close_ctx);
                         aether_actor::log::drain_buffer();
                     },
                 );
@@ -1002,10 +1006,6 @@ where
     Ok(Box::new(LegacyNativeActorErased {
         thread: Some(thread),
         sink_sender: Some(sink_sender),
-        // Hold the Arc<A> to keep the actor alive for the dispatcher
-        // thread's lifetime; on drop the dispatcher's recv exits and
-        // the Arc reaches refcount zero, dropping the actor itself.
-        _actor: actor_arc as Arc<dyn std::any::Any + Send + Sync>,
     }) as Box<dyn ActorErased>)
 }
 
@@ -1023,7 +1023,6 @@ fn alloc_legacy_native_actor_thread_name<A: aether_actor::Actor>() -> String {
 struct LegacyNativeActorErased {
     thread: Option<std::thread::JoinHandle<()>>,
     sink_sender: Option<SinkSender>,
-    _actor: Arc<dyn std::any::Any + Send + Sync>,
 }
 
 impl ActorErased for LegacyNativeActorErased {}
