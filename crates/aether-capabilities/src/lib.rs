@@ -30,9 +30,9 @@ pub mod audio;
 pub mod broadcast;
 pub mod control;
 pub mod handle;
+pub mod http;
 pub mod io;
 pub mod log;
-pub mod http;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod test_bench;
@@ -52,9 +52,9 @@ pub use control::ControlPlaneCapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use control::ControlPlaneConfig;
 pub use handle::HandleCapability;
+pub use http::{HttpCapability, HttpConfig};
 pub use io::IoCapability;
 pub use log::LogCapability;
-pub use http::{HttpCapability, HttpConfig};
 #[cfg(feature = "render")]
 pub use render::HeadlessRenderCapability;
 #[cfg(feature = "render")]

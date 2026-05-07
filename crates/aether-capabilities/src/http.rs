@@ -18,7 +18,7 @@ use std::time::Duration;
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_kinds::{Fetch, HttpHeader, HttpMethod, HttpError};
+use aether_kinds::{Fetch, HttpError, HttpHeader, HttpMethod};
 
 /// Default response-body cap when `AETHER_HTTP_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -168,8 +168,8 @@ mod native {
     use std::time::Duration;
 
     use super::{
-        DisabledHttpAdapter, Fetch, FetchRequest, FetchResponse, HttpHeader, HttpMethod, HttpAdapter,
-        HttpConfig, HttpError,
+        DisabledHttpAdapter, Fetch, FetchRequest, FetchResponse, HttpAdapter, HttpConfig,
+        HttpError, HttpHeader, HttpMethod,
     };
     use aether_actor::{MailCtx, actor};
     use aether_kinds::FetchResult;
@@ -441,8 +441,8 @@ mod native {
         use std::sync::Mutex;
 
         use super::super::{
-            DEFAULT_MAX_BODY_BYTES, DisabledHttpAdapter, FetchRequest, FetchResponse, HttpHeader,
-            HttpMethod, HttpAdapter, HttpConfig, HttpError,
+            DEFAULT_MAX_BODY_BYTES, DisabledHttpAdapter, FetchRequest, FetchResponse, HttpAdapter,
+            HttpConfig, HttpError, HttpHeader, HttpMethod,
         };
         use super::{
             Arc, Duration, Fetch, FetchResult, HashSet, HttpCapability, UreqHttpAdapter,
