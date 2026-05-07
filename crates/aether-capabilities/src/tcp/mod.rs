@@ -39,14 +39,18 @@
 //! sees the flag, breaks; the dispatcher thread joins.
 
 mod listener;
+mod session;
 
 pub use listener::TcpListenerActor;
-// TcpListenerConfig lives inside the native bridge mod (gated
-// non-wasm32) and is only consumed by the cap's spawn path on
-// native — re-exporting unconditionally would fail to resolve on
-// wasm32 builds where the bridge emits a stub.
+// TcpListenerConfig and TcpSessionActor / TcpSessionConfig live
+// inside the native bridge mod (gated non-wasm32) and are only
+// consumed by the cap's spawn path on native — re-exporting
+// unconditionally would fail to resolve on wasm32 builds where
+// the bridge emits a stub.
 #[cfg(not(target_arch = "wasm32"))]
 pub use listener::TcpListenerConfig;
+#[cfg(not(target_arch = "wasm32"))]
+pub use session::{TcpSessionActor, TcpSessionConfig};
 
 // Trait-marker kinds the wasm32 bridge stub references via HandlesKind.
 use aether_kinds::{BindListener, ListListeners, MonitorNotice, UnbindListener};
@@ -542,6 +546,99 @@ mod cap_native {
                 }
                 UnbindListenerResult::Ok { .. } => panic!("expected Err for unknown listener"),
             }
+        }
+
+        /// Issue 607 Phase 6b: connect a real TCP client to a bound
+        /// listener, write bytes, observe `SessionData` broadcast on
+        /// the egress, then drop the client and observe
+        /// `SessionClosed`. Exercises the full pipeline:
+        /// listener accept thread → mpsc → ConnectionReady wake →
+        /// listener spawns TcpSessionActor → session read thread →
+        /// mpsc → SessionDataReady wake → session broadcasts.
+        ///
+        /// Boots [`crate::BroadcastCapability`] alongside `TcpCapability`
+        /// so the broadcast mailbox is registered; sessions broadcast
+        /// `SessionData` / `SessionClosed` through it.
+        #[test]
+        fn session_round_trip_data_then_close() {
+            use std::io::Write;
+            use std::net::TcpStream;
+
+            let (registry, mailer, rx) = fresh_substrate();
+            let _chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+                .with_actor::<crate::BroadcastCapability>(())
+                .with_actor::<TcpCapability>(())
+                .build()
+                .expect("caps boot");
+
+            // Bind to OS-picked port.
+            let bind_reply: BindListenerResult = drive_and_decode(
+                &registry,
+                &rx,
+                TcpCapability::NAMESPACE,
+                &BindListener {
+                    addr: "127.0.0.1:0".into(),
+                    name: None,
+                },
+            );
+            let local_port = match bind_reply {
+                BindListenerResult::Ok { local_port, .. } => local_port,
+                BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
+            };
+
+            // Connect a real client to the listener and write a
+            // tagged payload. Drop the client to trigger EOF on the
+            // session's read path.
+            let payload_text = b"hello session";
+            {
+                let mut client = TcpStream::connect(format!("127.0.0.1:{local_port}"))
+                    .expect("client connects to listener");
+                client.write_all(payload_text).expect("client write");
+                // Explicit flush + drop. `Drop` on TcpStream calls
+                // shutdown which triggers EOF on the server read.
+            }
+
+            // Drain egress until we observe both SessionData and
+            // SessionClosed broadcasts. The chassis driver thread
+            // (the loopback HubOutbound) ships every broadcast over
+            // `rx`. We tolerate other egress events (e.g. Tick
+            // broadcasts) interleaved.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut saw_data = false;
+            let mut saw_closed = false;
+            while Instant::now() < deadline && (!saw_data || !saw_closed) {
+                let frame = match rx.try_recv() {
+                    Ok(f) => f,
+                    Err(_) => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                };
+                let (kind_name, payload) = match frame {
+                    EgressEvent::Broadcast {
+                        kind_name, payload, ..
+                    } => (kind_name, payload),
+                    EgressEvent::ToSession {
+                        kind_name, payload, ..
+                    } => (kind_name, payload),
+                    _ => continue,
+                };
+                if kind_name == <aether_kinds::SessionData as Kind>::NAME {
+                    let decoded: aether_kinds::SessionData =
+                        postcard::from_bytes(&payload).expect("decode SessionData");
+                    assert_eq!(decoded.bytes, payload_text);
+                    assert!(decoded.peer.starts_with("127.0.0.1:"));
+                    assert!(decoded.session_name.starts_with("conn-"));
+                    saw_data = true;
+                } else if kind_name == <aether_kinds::SessionClosed as Kind>::NAME {
+                    let decoded: aether_kinds::SessionClosed =
+                        postcard::from_bytes(&payload).expect("decode SessionClosed");
+                    assert_eq!(decoded.reason, "eof");
+                    saw_closed = true;
+                }
+            }
+            assert!(saw_data, "SessionData broadcast did not arrive");
+            assert!(saw_closed, "SessionClosed broadcast did not arrive");
         }
 
         /// Two concurrent binds on different ports both surface in
