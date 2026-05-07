@@ -190,6 +190,10 @@ mod native {
                     "registry must be wired on Mailer before RenderCapability::init",
                 )))
             })?;
+            // Issue 629 / Phase A: publish the driver-facing handle
+            // bundle on the chassis's `ExportedHandles` map so the
+            // desktop driver retrieves it via `DriverCtx::handle::<RenderHandles>()`.
+            ctx.publish_handle(handles.clone());
             Ok(Self {
                 handles,
                 config,

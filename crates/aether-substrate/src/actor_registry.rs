@@ -26,14 +26,19 @@ use crate::mail::MailboxId;
 
 /// One actor slot in the registry. `Live` carries the inbox sender
 /// (for direct mail routing into the dispatcher), the actor's
-/// type-erased `Arc` (for `resolve_actor`-style downcasts), the
-/// actor's `TypeId` (gates type-keyed lookups), and its subname
-/// (Phase 5 — surfaced through [`super::PassiveChassis::resolve_actors`]
-/// so callers can iterate `(subname, Arc<A>)` pairs). `Dead` is a
-/// sentinel for entries whose dispatcher has joined and whose actor
-/// has dropped — mail addressed to the slot warn-drops, and
-/// `spawn_child` rejects the name for reuse. ADR-0079 §Drop /
-/// lifecycle.
+/// `TypeId` (gates type-keyed `resolve_actors` enumeration), and its
+/// subname (Phase 5 — surfaced through
+/// [`super::PassiveChassis::resolve_actors`] so callers can iterate
+/// `(subname, MailboxId)` pairs). `Dead` is a sentinel for entries
+/// whose dispatcher has joined and whose actor has dropped — mail
+/// addressed to the slot warn-drops, and `spawn_child` rejects the
+/// name for reuse. ADR-0079 §Drop / lifecycle.
+///
+/// Issue 629 / Phase A: the pre-629 `actor: Arc<dyn Any + Send + Sync>`
+/// field retired. The actor itself is owned exclusively by its
+/// dispatcher thread as `Box<A>`; the registry no longer holds a
+/// cross-thread share. Type-keyed lookups (`resolve_actor` /
+/// `resolve_actors`) return [`MailboxId`] addresses, not `Arc<A>`.
 ///
 /// `sender` is `Arc<Sender<Envelope>>` so the registry's sink
 /// handler can hold a `Weak<Sender>` and upgrade only while the
@@ -48,7 +53,6 @@ use crate::mail::MailboxId;
 pub enum ActorEntry {
     Live {
         sender: Arc<Sender<Envelope>>,
-        actor: Arc<dyn std::any::Any + Send + Sync>,
         type_id: TypeId,
         subname: String,
     },
@@ -126,16 +130,18 @@ impl ActorRegistry {
         Self::default()
     }
 
-    /// `Some(actor)` only if the slot at `id` is `Live`. `Dead` and
-    /// missing both return `None` — callers can't distinguish via this
-    /// path, by design (ADR-0079: `Dead` is opaque to lookup; spawn-time
-    /// retirement check goes through [`Self::is_tombstoned`]).
-    pub fn live_actor(&self, id: MailboxId) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+    /// Issue 629 / Phase A: `true` only if the slot at `id` is `Live`.
+    /// Replaces the pre-629 `live_actor(id) -> Option<Arc<dyn Any +
+    /// Send + Sync>>` accessor; the actor itself no longer escapes its
+    /// dispatcher thread. Callers that needed the actor reference now
+    /// read a cap-exported handle (drivers) or send mail (peers).
+    /// `Dead` and missing both return `false` — callers can't
+    /// distinguish via this path, by design (ADR-0079: `Dead` is opaque
+    /// to lookup; spawn-time retirement check goes through
+    /// [`Self::is_tombstoned`]).
+    pub fn is_live(&self, id: MailboxId) -> bool {
         let actors = self.actors.read().unwrap();
-        match actors.get(&id) {
-            Some(ActorEntry::Live { actor, .. }) => Some(Arc::clone(actor)),
-            _ => None,
-        }
+        matches!(actors.get(&id), Some(ActorEntry::Live { .. }))
     }
 
     /// `Some(sender)` only if the slot at `id` is `Live`. The returned
@@ -152,7 +158,7 @@ impl ActorRegistry {
 
     /// `TypeId` of the actor occupying the slot at `id`, or `None` if
     /// the slot is `Dead` or missing. The downcast-safety counterpart
-    /// to [`Self::live_actor`].
+    /// to [`Self::is_live`].
     pub fn type_id_at(&self, id: MailboxId) -> Option<TypeId> {
         let actors = self.actors.read().unwrap();
         match actors.get(&id) {
@@ -209,7 +215,6 @@ impl ActorRegistry {
         &self,
         id: MailboxId,
         sender: Arc<Sender<Envelope>>,
-        actor: Arc<dyn std::any::Any + Send + Sync>,
         type_id: TypeId,
         subname: String,
     ) -> Result<(), ()> {
@@ -224,7 +229,6 @@ impl ActorRegistry {
                     id,
                     ActorEntry::Live {
                         sender,
-                        actor,
                         type_id,
                         subname,
                     },
@@ -235,34 +239,30 @@ impl ActorRegistry {
     }
 
     /// Issue 607 Phase 5 (ADR-0079): walk every `Live` slot whose
-    /// `TypeId` matches `T` and hand the caller `(subname, Arc<T>)`.
+    /// `TypeId` matches `T` and hand the caller `(subname, MailboxId)`.
     /// Used by [`super::PassiveChassis::resolve_actors`] /
     /// [`super::BuiltChassis::resolve_actors`] to enumerate all
     /// instances of a given type.
     ///
-    /// The returned `String` is owned (clone of the entry's subname)
-    /// because the iterator outlives the lock; the `Arc<T>` is a
-    /// downcast of the type-erased entry. Both Vec slot allocations
-    /// land while the read lock is held; the lock drops before the
-    /// caller iterates.
-    pub(crate) fn live_actors_of_type<T>(&self) -> Vec<(String, Arc<T>)>
+    /// Issue 629 / Phase A: returns `(subname, MailboxId)` instead of
+    /// `(subname, Arc<T>)`. The actor itself no longer escapes its
+    /// dispatcher thread — callers that need to reach into instance
+    /// state mail the address; the registry only owns addressing data.
+    ///
+    /// Both Vec slot allocations land while the read lock is held; the
+    /// lock drops before the caller iterates.
+    pub(crate) fn live_subnames_of_type<T>(&self) -> Vec<(String, MailboxId)>
     where
-        T: std::any::Any + Send + Sync + 'static,
+        T: std::any::Any + 'static,
     {
         let actors = self.actors.read().unwrap();
         let target = TypeId::of::<T>();
         actors
-            .values()
-            .filter_map(|entry| match entry {
+            .iter()
+            .filter_map(|(id, entry)| match entry {
                 ActorEntry::Live {
-                    actor,
-                    type_id,
-                    subname,
-                    ..
-                } if *type_id == target => Arc::clone(actor)
-                    .downcast::<T>()
-                    .ok()
-                    .map(|a| (subname.clone(), a)),
+                    type_id, subname, ..
+                } if *type_id == target => Some((subname.clone(), *id)),
                 _ => None,
             })
             .collect()
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn fresh_registry_is_empty() {
         let r = ActorRegistry::new();
-        assert!(r.live_actor(MailboxId(1)).is_none());
+        assert!(!r.is_live(MailboxId(1)));
         assert!(r.live_sender(MailboxId(1)).is_none());
         assert!(r.type_id_at(MailboxId(1)).is_none());
         assert!(!r.is_tombstoned(MailboxId(1)));
@@ -440,16 +440,14 @@ mod tests {
     }
 
     /// Helper: insert a `Live` slot at `id` so `register_monitor`'s
-    /// liveness check passes. Uses a throwaway sender + actor so the
-    /// test doesn't drag in `NativeActor`.
+    /// liveness check passes. Uses a throwaway sender so the test
+    /// doesn't drag in `NativeActor`.
     fn insert_live_stub(r: &ActorRegistry, id: MailboxId) {
         let (tx, _rx) = std::sync::mpsc::channel::<crate::capability::Envelope>();
         struct Stub;
-        let actor: Arc<dyn std::any::Any + Send + Sync> = Arc::new(Stub);
         r.insert_live(
             id,
             Arc::new(tx),
-            actor,
             std::any::TypeId::of::<Stub>(),
             String::new(),
         )

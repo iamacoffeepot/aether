@@ -818,7 +818,7 @@ mod tests {
         }
         impl NativeDispatch for Child {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 _ctx: &mut NativeCtx<'_>,
                 kind: aether_substrate::KindId,
                 payload: &[u8],
@@ -889,11 +889,11 @@ mod tests {
 
         // Live registry slots are populated by id.
         assert!(
-            tb.actor_registry().live_actor(id_a).is_some(),
+            tb.actor_registry().is_live(id_a),
             "first instance should be Live in the actor registry"
         );
         assert!(
-            tb.actor_registry().live_actor(id_b).is_some(),
+            tb.actor_registry().is_live(id_b),
             "second instance should be Live in the actor registry"
         );
     }

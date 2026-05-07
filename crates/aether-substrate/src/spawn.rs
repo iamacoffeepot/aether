@@ -191,9 +191,13 @@ impl Spawner {
         transport.install_inbox(rx);
 
         let actor = {
-            let empty_actors = crate::Actors::new();
+            // Instanced actors don't publish driver-facing sub-handles
+            // today — Phase 4+ may revisit. Pass a throwaway
+            // ExportedHandles to keep the init-ctx shape uniform with
+            // the singleton path.
+            let mut throwaway_handles = crate::ExportedHandles::new();
             let mut init_ctx =
-                NativeInitCtx::new(&transport, &empty_actors, Arc::clone(&self.mailer));
+                NativeInitCtx::new(&transport, &mut throwaway_handles, Arc::clone(&self.mailer));
             match A::init(config, &mut init_ctx) {
                 Ok(a) => a,
                 Err(e) => return Err(SpawnError::InitFailed(e)),
@@ -257,7 +261,11 @@ impl Spawner {
             Err(NameConflict { name }) => return Err(SpawnError::SubnameInUse { full_name: name }),
         }
 
-        let actor_arc: Arc<A> = Arc::new(actor);
+        // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
+        // The chassis-side actor_registry no longer holds a clone of
+        // the actor — only the sender + type_id + subname for routing
+        // and resolve_actor.
+        let mut actor: Box<A> = Box::new(actor);
 
         // Insert before pre-loading mail: the actor_registry holding
         // the sender is the canonical record that the slot is live.
@@ -269,7 +277,6 @@ impl Spawner {
             .insert_live(
                 id,
                 Arc::clone(&strong_sender),
-                Arc::clone(&actor_arc) as Arc<dyn std::any::Any + Send + Sync>,
                 TypeId::of::<A>(),
                 subname_str.clone(),
             )
@@ -298,7 +305,10 @@ impl Spawner {
         // existing `boot_native_actor` shape minus the frame-bound
         // pending-counter decrement (instanced actors are
         // free-running per the comment above).
-        let actor_for_thread = Arc::clone(&actor_arc);
+        //
+        // Issue 629 / Phase A: the dispatcher takes the Box<A> by
+        // move — the actor is owned exclusively by this thread for
+        // its lifetime; no Arc share with the chassis or registry.
         let transport_for_thread = Arc::clone(&transport);
         let actor_registry_for_thread = Arc::clone(&self.actor_registry);
         let mailer_for_thread = Arc::clone(&self.mailer);
@@ -328,7 +338,7 @@ impl Spawner {
                     };
                     let mut native_ctx =
                         crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
-                    if actor_for_thread
+                    if actor
                         .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
                         .is_none()
                     {
@@ -349,7 +359,7 @@ impl Spawner {
                 while let Some(env) = transport_for_thread.try_recv() {
                     let mut native_ctx =
                         crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
-                    if actor_for_thread
+                    if actor
                         .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
                         .is_none()
                     {
@@ -368,7 +378,7 @@ impl Spawner {
                     &transport_for_thread,
                     crate::mail::ReplyTo::NONE,
                 );
-                actor_for_thread.on_close(&mut close_ctx);
+                actor.on_close(&mut close_ctx);
 
                 // Issue 607 Phase 4b (ADR-0079): close path. Drain
                 // monitors_of[id] for fan-out, prune monitoring[id]
@@ -399,7 +409,7 @@ impl Spawner {
                     }
                 }
 
-                // actor_arc and transport_for_thread drop here on
+                // actor (Box) and transport_for_thread drop here on
                 // thread exit. The chassis-stored sender was already
                 // dropped when `close_actor`'s `mark_dead` flipped the
                 // entry from Live to Dead.
