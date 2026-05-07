@@ -144,7 +144,8 @@ jobs:
   desktop:
     name: Test desktop (${{ matrix.os }})
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # only run this job on tagged releases
+    if: needs.changes.outputs.code == 'true' && startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.os }}
     # Normal run is ≤ 2 min; cap at 15 so a runner stall (hub mac
     # CI flaked on 2026-04-21 against PR #164's commit, then
