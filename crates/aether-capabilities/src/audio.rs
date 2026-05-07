@@ -668,23 +668,16 @@ mod native {
     /// `audio_sender` is `None` when the cpal pipeline isn't running
     /// (`AETHER_AUDIO_DISABLE=1`, no audio device, init failure). In
     /// that mode `NoteOn` / `NoteOff` no-op and `SetMasterGain` replies
-    /// `Err`. The audio_thread / shutdown handles live behind a `Mutex`
-    /// so the `Drop` impl can take ownership during teardown without
-    /// requiring `&mut self` everywhere — handlers run with `&self`
-    /// (Arc-shared) per the `NativeActor` contract.
+    /// `Err`.
+    ///
+    /// Issue 629 / Phase B: `audio_thread` and `audio_shutdown` are
+    /// plain fields. Pre-Phase-A they sat behind a `Mutex<AudioTeardown>`
+    /// so `Drop::drop(&mut self)` could `.take()` them while handlers
+    /// ran with `&self` (Arc-shared). Post-Phase-A the dispatcher owns
+    /// the cap as `Box<A>` and `Drop` runs with exclusive `&mut self`,
+    /// so the wrapping mutex retires.
     pub struct AudioCapability {
         audio_sender: Option<AudioEventSender>,
-        /// Worker thread holding the [`cpal::Stream`] + drop-on-shutdown
-        /// sender. Mutex-wrapped so `Drop` can `.take()` the JoinHandle
-        /// and Sender on `&mut self` while normal handlers (`&self`)
-        /// don't need to touch them.
-        teardown: std::sync::Mutex<AudioTeardown>,
-    }
-
-    /// Teardown state pulled aside so `Drop` can take ownership of the
-    /// JoinHandle and shutdown sender without poisoning the rest of the
-    /// cap struct.
-    struct AudioTeardown {
         audio_thread: Option<JoinHandle<()>>,
         audio_shutdown: Option<mpsc::Sender<()>>,
     }
@@ -693,10 +686,8 @@ mod native {
         fn nop() -> Self {
             Self {
                 audio_sender: None,
-                teardown: std::sync::Mutex::new(AudioTeardown {
-                    audio_thread: None,
-                    audio_shutdown: None,
-                }),
+                audio_thread: None,
+                audio_shutdown: None,
             }
         }
     }
@@ -705,14 +696,9 @@ mod native {
         fn drop(&mut self) {
             // Drop the shutdown sender first; the worker's `recv()`
             // returns, it drops the cpal::Stream on its own thread, and
-            // exits. Then we join. Mutex contention is impossible here —
-            // Drop runs only when the last Arc is released.
-            let mut tear = self
-                .teardown
-                .lock()
-                .expect("AudioCapability teardown mutex poisoned");
-            tear.audio_shutdown.take();
-            if let Some(t) = tear.audio_thread.take() {
+            // exits. Then we join.
+            self.audio_shutdown.take();
+            if let Some(t) = self.audio_thread.take() {
                 let _ = t.join();
             }
         }
@@ -741,10 +727,8 @@ mod native {
             match spawn_audio_worker(config.requested_sample_rate) {
                 Ok((audio_sender, audio_thread, audio_shutdown)) => Ok(Self {
                     audio_sender: Some(audio_sender),
-                    teardown: std::sync::Mutex::new(AudioTeardown {
-                        audio_thread: Some(audio_thread),
-                        audio_shutdown: Some(audio_shutdown),
-                    }),
+                    audio_thread: Some(audio_thread),
+                    audio_shutdown: Some(audio_shutdown),
                 }),
                 Err(e) => {
                     tracing::warn!(
