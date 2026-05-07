@@ -2734,4 +2734,271 @@ mod tests {
 
         drop(chassis);
     }
+
+    /// Issue 607 Phase 5.5 verify: an instanced parent's handler calls
+    /// `ctx.spawn_child::<Grandchild>(...)` to launch an instanced
+    /// grandchild. Phase 3b shipped `Arc<Spawner>` threading through
+    /// every spawned actor's transport precisely so this works; this
+    /// test is the first end-to-end coverage of the instanced→instanced
+    /// path. Phase 6b (TcpListenerActor → TcpSessionActor) structurally
+    /// depends on this — listeners spawning sessions IS the recursive
+    /// case.
+    ///
+    /// Asserts:
+    ///   1. Grandchild's `MailboxId` is `Live` in the registry.
+    ///   2. `chassis.resolve_actor::<Grandchild>(name)` resolves it.
+    ///   3. Grandchild's `after_init` mail dispatches as its first
+    ///      envelope (received counter bumps to 1).
+    ///   4. Closing the parent does NOT cascade-close the grandchild —
+    ///      no parent-child shutdown coupling is wired by default;
+    ///      that's monitor-driven, opt-in.
+    #[test]
+    fn instanced_can_spawn_grandchild() {
+        use crate::registry::MailboxEntry;
+        use crate::spawn::Subname;
+        use aether_actor::{HandlesKind, Instanced};
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        // Trigger to make the parent spawn its grandchild.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Hatch {
+            tag: u32,
+        }
+        impl Kind for Hatch {
+            const NAME: &'static str = "test.recursive.hatch";
+            const ID: DataKindId = DataKindId(0xA00A_A00A_A00A_A00A);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        // Pre-loaded onto the grandchild via after_init.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Ping {
+            tag: u32,
+        }
+        impl Kind for Ping {
+            const NAME: &'static str = "test.recursive.ping";
+            const ID: DataKindId = DataKindId(0xB00B_B00B_B00B_B00B);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        // Self-shutdown trigger for the parent.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Quit {
+            tag: u32,
+        }
+        impl Kind for Quit {
+            const NAME: &'static str = "test.recursive.quit";
+            const ID: DataKindId = DataKindId(0xC00C_C00C_C00C_C00C);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        struct Grandchild {
+            received: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for Grandchild {
+            const NAMESPACE: &'static str = "test.recursive.grandchild";
+        }
+        impl Instanced for Grandchild {}
+        impl HandlesKind<Ping> for Grandchild {}
+        impl crate::native_actor::NativeActor for Grandchild {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self { received: config })
+            }
+        }
+        impl crate::native_actor::NativeDispatch for Grandchild {
+            fn __aether_dispatch_envelope(
+                &self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Ping::ID.0 {
+                    let _ = Ping::decode_from_bytes(payload)?;
+                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        struct Parent {
+            grandchild_received: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for Parent {
+            const NAMESPACE: &'static str = "test.recursive.parent";
+        }
+        impl Instanced for Parent {}
+        impl HandlesKind<Hatch> for Parent {}
+        impl HandlesKind<Quit> for Parent {}
+        impl crate::native_actor::NativeActor for Parent {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self {
+                    grandchild_received: config,
+                })
+            }
+        }
+        impl crate::native_actor::NativeDispatch for Parent {
+            fn __aether_dispatch_envelope(
+                &self,
+                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Hatch::ID.0 {
+                    let _ = Hatch::decode_from_bytes(payload)?;
+                    // Recursive spawn: instanced parent → instanced
+                    // grandchild. Pre-load a Ping so the grandchild's
+                    // first envelope dispatches without an external
+                    // mail step.
+                    let _id = ctx
+                        .spawn_child::<Grandchild>(
+                            Subname::Named("only"),
+                            Arc::clone(&self.grandchild_received),
+                        )
+                        .after_init(Ping { tag: 0xCAFE })
+                        .finish()
+                        .expect("recursive spawn must succeed");
+                    return Some(());
+                }
+                if kind.0 == Quit::ID.0 {
+                    let _ = Quit::decode_from_bytes(payload)?;
+                    ctx.shutdown();
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let grandchild_received = Arc::new(AtomicU32::new(0));
+        let parent_id = chassis
+            .spawn_actor::<Parent>(Subname::Named("p1"), Arc::clone(&grandchild_received))
+            .finish()
+            .expect("spawn parent");
+
+        // Trigger parent → grandchild spawn.
+        let MailboxEntry::Sink(parent_handler) =
+            registry.entry(parent_id).expect("parent sink registered")
+        else {
+            panic!("expected sink entry for parent");
+        };
+        parent_handler(
+            <Hatch as Kind>::ID,
+            Hatch::NAME,
+            None,
+            aether_data::ReplyTo::NONE,
+            &(Hatch { tag: 1 }).encode_into_bytes(),
+            1,
+        );
+
+        // Wait for the grandchild's after_init Ping to dispatch (proves
+        // the recursive spawn happened AND the after_init plumbing
+        // works through it).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while grandchild_received.load(AtomicOrdering::SeqCst) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            grandchild_received.load(AtomicOrdering::SeqCst),
+            1,
+            "grandchild's after_init Ping should dispatch as its first envelope",
+        );
+
+        // Grandchild is Live in the registry under the deterministic
+        // full-name id (NAMESPACE = "test.recursive.grandchild",
+        // subname = "only").
+        let grandchild_id = crate::mail::MailboxId(
+            aether_data::mailbox_id_from_name("test.recursive.grandchild:only").0,
+        );
+        assert!(
+            chassis.actor_registry().live_actor(grandchild_id).is_some(),
+            "grandchild should be Live in the registry under the deterministic full-name id",
+        );
+
+        // resolve_actor finds it via the typed cardinality-aware path.
+        let grandchild: Arc<Grandchild> = chassis
+            .resolve_actor::<Grandchild>("only")
+            .expect("resolve_actor must find the grandchild");
+        assert!(
+            Arc::ptr_eq(&grandchild.received, &grandchild_received),
+            "resolve_actor returns the actual grandchild Arc — not a fresh allocation",
+        );
+
+        // Closing the parent does NOT cascade-close the grandchild.
+        // Parent-child shutdown coupling is opt-in via monitor; without
+        // it, the grandchild keeps running.
+        parent_handler(
+            <Quit as Kind>::ID,
+            Quit::NAME,
+            None,
+            aether_data::ReplyTo::NONE,
+            &(Quit { tag: 1 }).encode_into_bytes(),
+            1,
+        );
+
+        // Wait for parent slot to flip Dead.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while chassis.actor_registry().live_actor(parent_id).is_some()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            chassis.actor_registry().is_tombstoned(parent_id),
+            "parent should have tombstoned",
+        );
+        // Grandchild survives — no cascade.
+        assert!(
+            chassis.actor_registry().live_actor(grandchild_id).is_some(),
+            "grandchild should outlive parent (no automatic cascade-close)",
+        );
+        assert!(
+            chassis.resolve_actor::<Grandchild>("only").is_some(),
+            "grandchild remains resolvable after parent's death",
+        );
+
+        drop(chassis);
+    }
 }
