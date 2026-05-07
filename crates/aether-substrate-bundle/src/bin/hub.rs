@@ -3,14 +3,12 @@
 
 use aether_substrate_bundle::hub::{Chassis, HubChassis, HubEnv};
 
-fn main() -> wasmtime::Result<()> {
-    let chassis = HubChassis::build(HubEnv::from_env())
-        .map_err(|e| wasmtime::Error::msg(format!("chassis build: {e}")))?;
+fn main() -> anyhow::Result<()> {
+    let chassis = HubChassis::build(HubEnv::from_env())?;
     eprintln!(
         "aether-substrate-bundle: hub chassis initialised (profile={})",
         HubChassis::PROFILE,
     );
-    chassis
-        .run()
-        .map_err(|e| wasmtime::Error::msg(format!("chassis run: {e}")))
+    chassis.run()?;
+    Ok(())
 }

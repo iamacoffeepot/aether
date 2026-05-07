@@ -41,7 +41,6 @@ fn make_supervisor(
         linker: Arc::new(linker),
         hub_outbound: HubOutbound::disconnected(),
         input_subscribers: aether_substrate_bundle::new_subscribers(),
-        chassis_handler: None,
     };
     ControlPlaneCapability::for_test(config, Arc::clone(registry), Arc::clone(queue))
 }

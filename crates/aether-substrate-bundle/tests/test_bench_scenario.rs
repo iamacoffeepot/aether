@@ -57,21 +57,28 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> MailEnvelope {
     }
 }
 
-/// Loads the probe into the bench. The load mail is queued and
-/// processed during the next `advance` (the bench's queue is FIFO
-/// and drains ahead of the chassis Advance event, so the freshly
-/// instantiated probe is fully subscribed before any tick fans out).
-fn load_probe(bench: &TestBench, wasm_path: &Path) {
+/// Loads the probe into the bench, blocking until the substrate
+/// replies with `LoadResult` so subsequent `advance` calls see a
+/// fully-instantiated and tick-subscribed component. Pre-Phase-4 of
+/// issue 603 the bench's `aether.control` mailbox served as a single
+/// FIFO point for both load and advance; Phase 4 split advance onto
+/// `aether.test_bench`, so load is no longer naturally ordered ahead
+/// of advance — the test must await `LoadResult` explicitly.
+fn load_probe(bench: &mut TestBench, wasm_path: &Path) {
     let wasm = std::fs::read(wasm_path).expect("read fixture wasm");
-    bench
-        .send_mail(
+    let result: aether_kinds::LoadResult = bench
+        .send_and_await_reply(
             "aether.control",
             &LoadComponent {
                 wasm,
                 name: Some(PROBE_NAME.to_owned()),
             },
         )
-        .expect("dispatch load_component");
+        .expect("await load_component reply");
+    match result {
+        aether_kinds::LoadResult::Ok { .. } => {}
+        aether_kinds::LoadResult::Err { error } => panic!("load_component: {error}"),
+    }
 }
 
 /// Subscribing the fixture to Tick yields exactly one
@@ -83,7 +90,7 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    load_probe(&bench, &wasm_path);
+    load_probe(&mut bench, &wasm_path);
 
     bench.advance(5).expect("advance 5");
     assert_eq!(
@@ -105,7 +112,7 @@ fn drop_component_silences_tick_echoes() {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    load_probe(&bench, &wasm_path);
+    load_probe(&mut bench, &wasm_path);
 
     bench.advance(3).expect("pre-drop advance");
     assert_eq!(
@@ -115,20 +122,23 @@ fn drop_component_silences_tick_echoes() {
         bench.observed_kinds(),
     );
 
-    // Queue the drop. The same FIFO ordering that lets the load mail
-    // beat the first tick fanout means the drop mail beats the next
-    // tick fanout — by the time `Advance{1}`'s `run_frame` queries
-    // subscribers, the probe's mailbox is already gone.
+    // Phase 4 split advance off `aether.control`, so the drop mail no
+    // longer naturally orders ahead of the next advance. Await
+    // `DropResult` explicitly so the probe's mailbox is fully gone
+    // before the next advance dispatches ticks.
     let probe_mbox = mailbox_id_from_name(PROBE_NAME);
-    bench
-        .send_mail(
+    let drop_result: aether_kinds::DropResult = bench
+        .send_and_await_reply(
             "aether.control",
             &DropComponent {
                 mailbox_id: probe_mbox,
             },
         )
-        .expect("dispatch drop_component");
-    bench.advance(1).expect("drop drain advance");
+        .expect("await drop_component reply");
+    match drop_result {
+        aether_kinds::DropResult::Ok => {}
+        aether_kinds::DropResult::Err { error } => panic!("drop_component: {error}"),
+    }
 
     let post_drop = bench.count_observed(TICK_OBSERVED);
 
@@ -154,7 +164,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    load_probe(&bench, &wasm_path);
+    load_probe(&mut bench, &wasm_path);
     // Advance once so the probe is loaded + subscribed; the capture
     // path doesn't dispatch Tick on its own (`run_frame` runs with
     // dispatch_tick=false during capture), so we need at least one
@@ -230,7 +240,7 @@ fn replace_component_preserves_mailbox_identity() {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    load_probe(&bench, &wasm_path);
+    load_probe(&mut bench, &wasm_path);
 
     bench.advance(3).expect("pre-replace advance");
     let pre_replace = bench.count_observed(TICK_OBSERVED);
@@ -241,10 +251,13 @@ fn replace_component_preserves_mailbox_identity() {
         bench.observed_kinds(),
     );
 
+    // Phase 4 of issue 603 split advance off `aether.control`, so
+    // replace mail no longer naturally orders ahead of the next
+    // advance. Await `ReplaceResult` explicitly.
     let probe_mbox = mailbox_id_from_name(PROBE_NAME);
     let wasm = std::fs::read(&wasm_path).expect("re-read fixture wasm");
-    bench
-        .send_mail(
+    let replace_result: aether_kinds::ReplaceResult = bench
+        .send_and_await_reply(
             "aether.control",
             &ReplaceComponent {
                 mailbox_id: probe_mbox,
@@ -252,8 +265,11 @@ fn replace_component_preserves_mailbox_identity() {
                 drain_timeout_ms: None,
             },
         )
-        .expect("dispatch replace_component");
-    bench.advance(1).expect("replace drain advance");
+        .expect("await replace_component reply");
+    match replace_result {
+        aether_kinds::ReplaceResult::Ok { .. } => {}
+        aether_kinds::ReplaceResult::Err { error } => panic!("replace_component: {error}"),
+    }
 
     let post_replace_baseline = bench.count_observed(TICK_OBSERVED);
     bench.advance(4).expect("post-replace advance");

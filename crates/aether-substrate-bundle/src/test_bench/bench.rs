@@ -425,7 +425,14 @@ impl TestBench {
     /// `AdvanceResult::Ok`.
     pub fn advance(&mut self, ticks: u32) -> Result<u32, TestBenchError> {
         let cid = self.fresh_correlation_id();
-        self.push_control(&Advance { ticks }, cid);
+        // Issue 603 Phase 4: advance migrated from `aether.control`
+        // (chassis_handler closure) onto `aether.test_bench`
+        // (`TestBenchCapability`).
+        self.push_to_mailbox(
+            aether_data::mailbox_id_from_name("aether.test_bench"),
+            &Advance { ticks },
+            cid,
+        );
         match self.pump_until_reply::<AdvanceResult>(cid, "AdvanceResult")? {
             AdvanceResult::Ok { ticks_completed } => Ok(ticks_completed),
             AdvanceResult::Err { error } => Err(TestBenchError::Advance(error)),
@@ -472,22 +479,12 @@ impl TestBench {
         }
     }
 
-    /// Push a control mail addressed to the substrate's `aether.control`
-    /// mailbox with our session as the reply target and `cid` as the
-    /// correlation id. The reply will surface on `loopback_rx` with
-    /// the same `cid` echoed.
-    fn push_control<K>(&self, mail: &K, cid: u64)
-    where
-        K: Kind + serde::Serialize,
-    {
-        self.push_to_mailbox(aether_kinds::mailboxes::CONTROL, mail, cid);
-    }
-
     /// Push a typed mail addressed to a specific chassis-owned mailbox
     /// with our session as the reply target and `cid` as the correlation
-    /// id. Generalises [`Self::push_control`] for kinds that landed on
-    /// `aether.control` pre-issue-603 and now route to their own caps
-    /// (`aether.render.capture_frame`, etc.).
+    /// id. Issue 603 retired `aether.control` as the catch-all for
+    /// chassis-peripheral kinds; each one now routes to its own cap
+    /// (`aether.render.capture_frame`, `aether.test_bench.advance`,
+    /// `aether.window.set_mode`, etc.).
     fn push_to_mailbox<K>(&self, mailbox: aether_data::MailboxId, mail: &K, cid: u64)
     where
         K: Kind + serde::Serialize,

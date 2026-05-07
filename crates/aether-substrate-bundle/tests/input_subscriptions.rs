@@ -94,7 +94,6 @@ fn make_harness() -> Harness {
             linker,
             hub_outbound: HubOutbound::disconnected(),
             input_subscribers: Arc::clone(&input_subscribers),
-            chassis_handler: None,
         },
         Arc::clone(&registry),
         Arc::clone(&queue),

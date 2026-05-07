@@ -478,7 +478,7 @@ fn unix_now() -> u64 {
 pub fn connect_hub_client(
     boot: &SubstrateBoot,
     url: Option<&str>,
-) -> wasmtime::Result<Option<HubClient>> {
+) -> anyhow::Result<Option<HubClient>> {
     let url = match url {
         Some(u) if !u.is_empty() => u,
         _ => return Ok(None),
@@ -492,6 +492,6 @@ pub fn connect_hub_client(
         Arc::clone(&boot.queue),
         Arc::clone(&boot.outbound),
     )
-    .map_err(|e| wasmtime::Error::msg(format!("hub connect to {url:?} failed: {e}")))?;
+    .map_err(|e| anyhow::anyhow!("hub connect to {url:?} failed: {e}"))?;
     Ok(Some(client))
 }

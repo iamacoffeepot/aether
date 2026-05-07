@@ -1,60 +1,32 @@
-//! Headless chassis-registered control-plane handler.
+//! Headless chassis: `HeadlessChassis` (ADR-0035 / ADR-0071), the
+//! `Err`-replying capability stubs that fail fast for kinds desktop
+//! supports natively (capture/window) plus `Advance`, and the
+//! [`HeadlessChassis::build`] entry point that assembles the substrate
+//! + tick driver into a [`BuiltChassis`].
 //!
-//! Headless has no GPU and no window, so `capture_frame`,
-//! `set_window_mode`, and `platform_info` have nothing to answer
-//! with. Rather than letting core's `ControlPlane` warn-drop the mail
-//! (which would leave the sender hanging on its await-reply slot
-//! until the hub's timeout fires), this closure replies inline with
-//! an explicit `Err { error: ... }` so MCP tool calls fail fast and
-//! with a diagnosable message. See ADR-0035 § Consequences (neutral):
-//! "A headless chassis receiving set_window_mode replies with an
-//! unsupported error".
+//! Issue 603 retired the `chassis_handler` closure: each fail-fast
+//! kind moved onto its own cap. `HeadlessRenderCapability` (Phase 2)
+//! handles `aether.render`; `HeadlessWindowCapability` (Phase 3)
+//! handles `aether.window`; `UnsupportedTestBenchCapability` (Phase 4)
+//! handles `aether.test_bench`. `aether.control.platform_info` was
+//! deleted as a kind in Phase 4 — no replacement, no MCP path until
+//! issue 603 §F2 revives the per-domain shape.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use aether_capabilities::{
-    BroadcastCapability, HandleCapability, HeadlessRenderCapability, HeadlessWindowCapability,
-    IoCapability, LogCapability, NetCapability, io::NamespaceRoots, net::NetConfig as NetConf,
+    BroadcastCapability, ControlPlaneCapability, ControlPlaneConfig, HandleCapability,
+    HeadlessRenderCapability, HeadlessWindowCapability, IoCapability, LogCapability, NetCapability,
+    UnsupportedTestBenchCapability, io::NamespaceRoots, net::NetConfig as NetConf,
 };
-use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
 use aether_data::{Kind, KindId};
-use aether_kinds::{Advance, FrameStats, PlatformInfo, SetMasterGain, SetMasterGainResult, Tick};
+use aether_kinds::{FrameStats, SetMasterGain, SetMasterGainResult, Tick};
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
-use aether_substrate::{
-    Chassis, HubOutbound, ReplyTo, SubstrateBoot,
-    capture::{reply_unsupported_advance, reply_unsupported_platform_info},
-};
+use aether_substrate::{Chassis, SubstrateBoot};
 
 use super::driver::{HeadlessTimerCapability, WORKERS, parse_tick_hz_env};
-
-const UNSUPPORTED: &str = "unsupported on headless chassis — no GPU or window peripherals";
-const UNSUPPORTED_ADVANCE: &str =
-    "unsupported on headless chassis — aether.test_bench.advance is test-bench-only (ADR-0067)";
-
-pub fn chassis_control_handler(outbound: Arc<HubOutbound>) -> ChassisControlHandler {
-    Arc::new(
-        move |kind: KindId, kind_name: &str, sender: ReplyTo, _bytes: &[u8]| match kind {
-            Advance::ID => {
-                reply_unsupported_advance(&outbound, sender, UNSUPPORTED_ADVANCE);
-            }
-            PlatformInfo::ID => {
-                // PlatformInfoResult::Err also exists — future work
-                // could return a partial Ok (OS + engine info, empty
-                // GPU/monitors) once headless needs that detail.
-                reply_unsupported_platform_info(&outbound, sender, UNSUPPORTED);
-            }
-            _ => {
-                tracing::warn!(
-                    target: "aether_substrate::chassis",
-                    kind = %kind_name,
-                    "headless chassis has no handler for control kind — dropping",
-                );
-            }
-        },
-    )
-}
 
 /// Marker type for the headless chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HeadlessChassis>`] returned
@@ -104,15 +76,12 @@ impl HeadlessEnv {
 
 impl HeadlessChassis {
     /// Build the headless chassis: stand up substrate-core internals,
-    /// register the nop chassis sinks (render / camera / audio — they
-    /// keep mailbox names resolvable so desktop-designed components
-    /// loaded on headless don't warn-storm), connect the hub, compose
-    /// the native passives (log, io, net) through the chassis_builder
-    /// `.with()` chain, then wrap the timer in a
-    /// [`HeadlessTimerCapability`] and hand it to the builder.
-    /// Returns a [`BuiltChassis`] whose [`BuiltChassis::run`] blocks
-    /// on the tick loop. The trait method [`Chassis::build`] forwards
-    /// here.
+    /// register the audio fail-fast sink, connect the hub, compose
+    /// the native passives (broadcast/handle/log/control/io/net plus
+    /// the headless render / window / test-bench fail-fast caps)
+    /// through the chassis_builder `.with()` chain, then wrap the
+    /// timer in a [`HeadlessTimerCapability`] and hand it to the
+    /// builder.
     fn build_inner(env: HeadlessEnv) -> Result<BuiltChassis<HeadlessChassis>, BootError> {
         let HeadlessEnv {
             hub_url,
@@ -123,13 +92,11 @@ impl HeadlessChassis {
 
         let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
         let _ = WORKERS;
-        let chassis_handler = chassis_control_handler(Arc::clone(&boot.outbound));
         let control_plane_config = ControlPlaneConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
             input_subscribers: Arc::clone(&boot.input_subscribers),
-            chassis_handler: Some(chassis_handler),
         };
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
@@ -138,11 +105,6 @@ impl HeadlessChassis {
             .kind_id(FrameStats::NAME)
             .expect("FrameStats registered");
 
-        // `aether.render` lands on `HeadlessRenderCapability` below
-        // (issue 603 Phase 2): no-op `DrawTriangle` / `Camera` so
-        // desktop-designed components don't warn-storm; `Err`-replying
-        // `CaptureFrame`. The pre-Phase-2 `register_sink("aether.render", nop)`
-        // shape retired with the cap extraction.
         // Audio nop sink — NoteOn/NoteOff fall through silently;
         // SetMasterGain replies Err so agents fail fast rather than
         // hang on a chassis with no audio device.
@@ -216,6 +178,7 @@ impl HeadlessChassis {
             .with_actor::<NetCapability>(net)
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
+            .with_actor::<UnsupportedTestBenchCapability>(())
             .with_log_drain::<LogCapability>()
             .driver(driver)
             .build()

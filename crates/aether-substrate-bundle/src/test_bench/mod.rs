@@ -13,11 +13,11 @@
 //!   link this directly via `aether_substrate_bundle::test_bench::TestBench`.
 
 mod bench;
+pub mod cap;
 pub mod chassis;
 pub mod events;
 pub mod render;
 
 pub use bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TestBench, TestBenchBuilder, TestBenchError};
-pub use chassis::{
-    TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS, chassis_control_handler,
-};
+pub use cap::{TestBenchCapConfig, TestBenchCapability};
+pub use chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};

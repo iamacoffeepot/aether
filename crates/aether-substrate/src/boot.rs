@@ -144,7 +144,7 @@ impl SubstrateBoot {
     /// Pre-PR-E3 there was a separate `add_facade` for actor caps
     /// alongside `add_capability` for legacy `Capability` caps; the
     /// legacy path retired alongside `Capability` itself.
-    pub fn add_capability<C>(&mut self, cap: C) -> wasmtime::Result<()>
+    pub fn add_capability<C>(&mut self, cap: C) -> Result<(), crate::capability::BootError>
     where
         C: aether_actor::Actor + aether_actor::Dispatch + Send + 'static,
     {
@@ -152,14 +152,12 @@ impl SubstrateBoot {
             .chassis
             .as_mut()
             .expect("SubstrateBoot::build always installs a BootedChassis");
-        chassis
-            .add(&self.registry, &self.queue, cap)
-            .map_err(|e| wasmtime::Error::msg(format!("capability boot failed: {e}")))
+        chassis.add(&self.registry, &self.queue, cap)
     }
 
     /// Issue 552 stage 2: post-build entry for a `NativeActor`.
     /// Mirror of [`Self::add_capability`] for the new cap shape.
-    pub fn add_actor<A>(&mut self, config: A::Config) -> wasmtime::Result<()>
+    pub fn add_actor<A>(&mut self, config: A::Config) -> Result<(), crate::capability::BootError>
     where
         A: crate::NativeActor + crate::NativeDispatch,
     {
@@ -167,9 +165,7 @@ impl SubstrateBoot {
             .chassis
             .as_mut()
             .expect("SubstrateBoot::build always installs a BootedChassis");
-        chassis
-            .add_actor::<A>(&self.registry, &self.queue, config)
-            .map_err(|e| wasmtime::Error::msg(format!("capability boot failed: {e}")))
+        chassis.add_actor::<A>(&self.registry, &self.queue, config)
     }
 }
 

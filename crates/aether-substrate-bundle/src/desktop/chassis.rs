@@ -1,94 +1,42 @@
 //! Desktop chassis: `DesktopChassis` (ADR-0035 / ADR-0071), the
-//! chassis-registered control-plane handler that owns the three
-//! desktop-only kinds (`capture_frame`, `set_window_mode`,
-//! `platform_info`), and the [`DesktopChassis::build`] entry point
-//! (ADR-0071 phase 3) that assembles the substrate + driver into a
-//! [`BuiltChassis`] for `main()` to drive.
+//! `UserEvent` enum the winit event loop consumes, and the
+//! [`DesktopChassis::build`] entry point that assembles the substrate
+//! + driver into a [`BuiltChassis`] for `main()` to drive.
 //!
-//! The control handler runs on a scheduler worker (same thread as
-//! every other sink handler), so the operations that need winit/wgpu
-//! access forward to the event-loop thread via
-//! `EventLoopProxy<UserEvent>`. `capture_frame` orchestrates its own
-//! mail envelopes (pre-capture bundle push + after-capture bundle
-//! resolution) and routes through `CaptureQueue` to hand off to the
-//! render thread.
+//! Issue 603 retired `chassis_handler` entirely: capture goes through
+//! `RenderCapability` (Phase 2), window kinds through driver-as-actor
+//! on `aether.window` (Phase 3), and `platform_info` was deleted as a
+//! kind (Phase 4) along with the closure-fallback that served it.
+//! `UserEvent::Capture` is the lone remaining proxy event — it wakes
+//! the loop so a queued `CaptureQueue` request gets pulled on the
+//! next redraw, even when the window is occluded.
 
 use std::sync::Arc;
 
 use aether_capabilities::{
-    AudioCapability, BroadcastCapability, CaptureBackend, ChassisControlHandler,
-    ControlPlaneCapability, ControlPlaneConfig, HandleCapability, IoCapability, LogCapability,
-    NetCapability, RenderCapability, RenderConfig, audio::AudioConfig as AudioConf,
-    io::NamespaceRoots, net::NetConfig as NetConf,
+    AudioCapability, BroadcastCapability, CaptureBackend, ControlPlaneCapability,
+    ControlPlaneConfig, HandleCapability, IoCapability, LogCapability, NetCapability,
+    RenderCapability, RenderConfig, UnsupportedTestBenchCapability,
+    audio::AudioConfig as AudioConf, io::NamespaceRoots, net::NetConfig as NetConf,
 };
-use aether_data::Kind;
-use aether_kinds::{Advance, PlatformInfo, WindowMode};
+use aether_kinds::WindowMode;
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
-use aether_substrate::{
-    Chassis, HubOutbound, ReplyTo, SubstrateBoot,
-    capture::{CaptureQueue, reply_unsupported_advance},
-};
-use winit::event_loop::{EventLoop, EventLoopProxy};
+use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
+use winit::error::EventLoopError;
+use winit::event_loop::EventLoop;
 
 use super::driver::{DesktopDriverCapability, WORKERS, parse_window_mode_env};
 
 /// Event the event-loop thread consumes from the desktop chassis.
-/// Either a chassis-originated request for work that needs winit/wgpu
-/// context (platform info, capture) or a wake-up so the loop picks up
-/// a queued capture on the next redraw.
-///
-/// `aether.window.set_mode` / `aether.window.set_title` (issue 603
-/// Phase 3) don't ride this enum any more — the desktop driver claims
-/// `aether.window` directly and drains the inbox in `about_to_wait`.
+/// Just one variant today: a wake-up so the loop picks up a queued
+/// capture on the next redraw, even under `ControlFlow::Wait` when
+/// the window is occluded.
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     /// A capture was just enqueued on `CaptureQueue`; wake the loop
-    /// so `RedrawRequested` pulls and fulfils it, even under
-    /// `ControlFlow::Wait` when the window is occluded.
+    /// so `RedrawRequested` pulls and fulfils it.
     Capture,
-    /// An MCP session asked for a `platform_info` snapshot. The
-    /// event-loop thread snapshots + replies via outbound.
-    PlatformInfo { reply_to: ReplyTo },
-}
-
-/// Build the `ChassisControlHandler` closure desktop installs on
-/// `ControlPlane::chassis_handler`. Today only `platform_info` and
-/// `advance` ride here — `set_window_mode` / `set_window_title` moved
-/// to the driver-as-actor `aether.window` mailbox in issue 603 Phase 3,
-/// `capture_frame` to `RenderCapability` in Phase 2, and Phase 4 will
-/// retire `platform_info` and the closure itself.
-pub fn chassis_control_handler(
-    proxy: EventLoopProxy<UserEvent>,
-    outbound: Arc<HubOutbound>,
-) -> ChassisControlHandler {
-    Arc::new(
-        move |kind: aether_data::KindId, kind_name: &str, sender: ReplyTo, _bytes: &[u8]| {
-            match kind {
-                PlatformInfo::ID => {
-                    // Empty payload; forward the sender straight to the
-                    // event loop and let it snapshot + reply on its own
-                    // thread (winit monitor / scale-factor APIs require it).
-                    let _ = proxy.send_event(UserEvent::PlatformInfo { reply_to: sender });
-                }
-                Advance::ID => {
-                    reply_unsupported_advance(
-                        &outbound,
-                        sender,
-                        "unsupported on desktop chassis — aether.test_bench.advance is \
-                         test-bench-only (ADR-0067)",
-                    );
-                }
-                _ => {
-                    tracing::warn!(
-                        target: "aether_substrate::chassis",
-                        kind = %kind_name,
-                        "desktop chassis has no handler for control kind — dropping",
-                    );
-                }
-            }
-        },
-    )
 }
 
 /// Marker type for the desktop chassis. Carries no fields — the
@@ -134,7 +82,11 @@ impl DesktopEnv {
     /// way. The single env-reading edge for the desktop chassis (per
     /// issue 464). Tests bypass this by constructing `DesktopEnv`
     /// directly.
-    pub fn from_env() -> wasmtime::Result<Self> {
+    ///
+    /// The only fallible step is `EventLoop::build`; everything else
+    /// is infallible env reads. The signature names that fault rather
+    /// than the historic catch-all `wasmtime::Result` (issue #571).
+    pub fn from_env() -> Result<Self, EventLoopError> {
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
         let capture_queue = CaptureQueue::new();
@@ -200,17 +152,13 @@ impl DesktopChassis {
         } = env;
 
         let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
-        let _ = WORKERS; // ADR-0038 retired the worker count knob; field
-        // retained for `EngineInfo.workers` wire compat.
+        let _ = WORKERS;
 
-        let chassis_handler =
-            chassis_control_handler(event_loop.create_proxy(), Arc::clone(&boot.outbound));
         let control_plane_config = ControlPlaneConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
             input_subscribers: Arc::clone(&boot.input_subscribers),
-            chassis_handler: Some(chassis_handler),
         };
         // Capture handoff lives on `RenderCapability` post-issue-603
         // Phase 2. The cap dispatcher runs `on_capture_frame`, parks
@@ -234,8 +182,6 @@ impl DesktopChassis {
             workers = WORKERS,
             "componentless boot — close window to exit; load a component via aether.control.load_component",
         );
-
-        let boot_kinds_count = boot.boot_descriptors.len() as u32;
 
         // Hub connect AFTER every chassis sink is registered (issue #262).
         // Post-ADR-0070 phase 4: the hub client lives in `aether-hub`;
@@ -265,7 +211,6 @@ impl DesktopChassis {
             event_loop,
             boot,
             capture_queue,
-            boot_kinds_count,
             boot_mode,
             boot_size,
             boot_title,
@@ -286,6 +231,7 @@ impl DesktopChassis {
             .with_actor::<NetCapability>(net)
             .with_actor::<AudioCapability>(audio)
             .with_actor::<RenderCapability>(render_config)
+            .with_actor::<UnsupportedTestBenchCapability>(())
             .with_log_drain::<LogCapability>()
             .driver(driver)
             .build()
