@@ -124,12 +124,11 @@ jobs:
       - name: Run tests for changed crates
         run: |
           set -euo pipefail
-          echo "Checking for code changes..."
-          git fetch origin ${{ github.base_ref }} --depth=1
-          CHANGED_FILES=$(git diff --name-only FETCH_HEAD)
+          CHANGED_FILES=$(git diff --name-only HEAD HEAD~1)
           echo "Changed files: ${CHANGED_FILES}"
           TESTABLE_CRATES=$(echo ${CHANGED_FILES} | grep -E '^(crates)')
           CRATE_NAMES=$(echo "${TESTABLE_CRATES}" | cut -d/ -f2 | sort -u)
+          echo "Testable crates: ${CRATE_NAMES}"
           for crate in $CRATE_NAMES; do
             echo "Found changes in crate: $crate"
             cargo test -p file://$(pwd)/${crate}
