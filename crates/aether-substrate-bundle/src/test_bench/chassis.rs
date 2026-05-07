@@ -1,22 +1,12 @@
-//! Test-bench chassis-registered control-plane handler (ADR-0067)
-//! plus the ADR-0071 phase 6 [`TestBenchChassis`] marker +
-//! [`TestBenchEnv`] config + [`TestBenchChassis::build_passive`]
+//! Test-bench chassis (ADR-0067) — `TestBenchChassis` marker,
+//! `TestBenchEnv` config, and the `TestBenchChassis::build_passive`
 //! entry point.
 //!
-//! Custom control-plane kinds:
-//!
-//! - `aether.render.capture_frame` — same two-phase resolve / push
-//!   / handoff desktop uses, but the handoff target is the chassis
-//!   event channel (not a winit `EventLoopProxy`). The `PendingCapture`
-//!   itself rides in `CaptureQueue`; the event channel just signals
-//!   the loop to wake up.
-//! - `aether.test_bench.advance` — pushes an `Advance` event onto the
-//!   chassis event channel. The loop runs N ticks (Tick fanout →
-//!   drain → render or render-with-capture) and replies once they
-//!   complete.
-//! - `set_window_mode` / `set_window_title` / `platform_info` —
-//!   reply `Err` with an "unsupported on test-bench chassis" message.
-//!   Same fail-fast shape headless uses on these.
+//! Issue 603 retired the `chassis_handler` closure: capture rides
+//! `RenderCapability` (Phase 2), window-kind mail through
+//! `HeadlessWindowCapability` (Phase 3, fail-fast), advance through
+//! `TestBenchCapability` claiming `aether.test_bench` (Phase 4), and
+//! `aether.control.platform_info` was deleted entirely (Phase 4).
 
 use std::sync::{Arc, Mutex};
 
@@ -25,79 +15,23 @@ use aether_capabilities::{
     BroadcastCapability, CaptureBackend, HandleCapability, HeadlessWindowCapability, LogCapability,
     RenderCapability, RenderConfig, RenderHandles,
 };
-use aether_capabilities::{ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig};
+use aether_capabilities::{ControlPlaneCapability, ControlPlaneConfig};
 use aether_data::Kind;
 use aether_data::KindId;
-use aether_kinds::{Advance, AdvanceResult, FrameStats, PlatformInfo, Tick};
+use aether_kinds::{FrameStats, Tick};
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
-use aether_substrate::control_helpers::decode_payload;
 use aether_substrate::{
-    Chassis, HubOutbound, ReplyTo, SubstrateBoot,
-    capture::{CaptureQueue, reply_unsupported_platform_info},
-    render::VERTEX_BUFFER_BYTES,
+    Chassis, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
 };
 
+use super::cap::{TestBenchCapConfig, TestBenchCapability};
 use super::events::{ChassisEvent, EventSender};
 
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
 /// component, the scheduler doesn't read this — it's retained on the
 /// hub-protocol wire for compatibility).
 pub const WORKERS: usize = 2;
-
-const UNSUPPORTED_WINDOW: &str = "unsupported on test-bench chassis — no window peripherals (set_window_mode, set_window_title, \
-     platform_info are desktop-only)";
-
-pub fn chassis_control_handler(
-    events: EventSender,
-    outbound: Arc<HubOutbound>,
-) -> ChassisControlHandler {
-    Arc::new(
-        move |kind: KindId, kind_name: &str, sender: ReplyTo, bytes: &[u8]| match kind {
-            Advance::ID => {
-                handle_advance(&events, &outbound, sender, bytes);
-            }
-            PlatformInfo::ID => {
-                reply_unsupported_platform_info(&outbound, sender, UNSUPPORTED_WINDOW);
-            }
-            _ => {
-                tracing::warn!(
-                    target: "aether_substrate::chassis",
-                    kind = %kind_name,
-                    "test-bench chassis has no handler for control kind — dropping",
-                );
-            }
-        },
-    )
-}
-
-/// Decode `Advance { ticks }`, push the request onto the event
-/// channel. The tick loop runs `ticks` cycles and replies. A
-/// shut-down loop replies `Err` inline.
-fn handle_advance(events: &EventSender, outbound: &HubOutbound, sender: ReplyTo, bytes: &[u8]) {
-    let payload: Advance = match decode_payload(bytes) {
-        Ok(p) => p,
-        Err(error) => {
-            outbound.send_reply(sender, &AdvanceResult::Err { error });
-            return;
-        }
-    };
-
-    if events
-        .send(ChassisEvent::Advance {
-            reply_to: sender,
-            ticks: payload.ticks,
-        })
-        .is_err()
-    {
-        outbound.send_reply(
-            sender,
-            &AdvanceResult::Err {
-                error: "test-bench chassis shutting down — advance aborted".to_owned(),
-            },
-        );
-    }
-}
 
 /// ADR-0071 marker type for the test-bench chassis. Carries no
 /// fields — the chassis instance is the [`PassiveChassis<TestBenchChassis>`]
@@ -133,7 +67,7 @@ impl Chassis for TestBenchChassis {
 /// Bag of resolved configs the test-bench chassis takes at build
 /// time. Constructed by the embedder — the binary's `main()` reads
 /// env vars; the in-process [`super::TestBench`] takes builder
-/// args. `events_tx` is captured into the chassis-control closure;
+/// args. `events_tx` is captured into the test-bench cap's config;
 /// the matching `events_rx` rides on [`TestBenchBuild`] for the
 /// embedder to drive.
 pub struct TestBenchEnv {
@@ -156,12 +90,12 @@ pub struct TestBenchEnv {
     /// binary passes `None` for zero overhead.
     pub observed_kinds: Option<Arc<Mutex<Vec<String>>>>,
     /// Sender side of the chassis event channel. Cloned into the
-    /// chassis-control handler closure; the matching receiver rides
-    /// on [`TestBenchBuild`].
+    /// `TestBenchCapability` config + render's capture-wake closure;
+    /// the matching receiver rides on [`TestBenchBuild`].
     pub events_tx: EventSender,
-    /// Capture-handoff slot the chassis-control handler writes
-    /// into; the embedder's frame loop drains it on each
-    /// `RedrawRequested`-equivalent step.
+    /// Capture-handoff slot the render cap writes into; the
+    /// embedder's frame loop drains it on each `RedrawRequested`-
+    /// equivalent step.
     pub capture_queue: CaptureQueue,
 }
 
@@ -196,13 +130,13 @@ pub struct TestBenchBuild {
 
 impl TestBenchChassis {
     /// Build the test-bench chassis: stand up substrate-core
-    /// internals via [`SubstrateBoot::builder`], boot Log + Render
-    /// as passives via the chassis_builder [`Builder`], connect the
-    /// hub if `env.hub_url` is set, and return a [`TestBenchBuild`]
-    /// the embedder takes ownership of. The embedder is responsible
-    /// for any further capability adds (io with whatever failure
-    /// semantics it wants), GPU creation, loopback attach, and
-    /// driving the event loop.
+    /// internals via [`SubstrateBoot::builder`], boot the standard
+    /// passives + `TestBenchCapability` via the chassis_builder
+    /// [`Builder`], connect the hub if `env.hub_url` is set, and
+    /// return a [`TestBenchBuild`] the embedder takes ownership of.
+    /// The embedder is responsible for any further capability adds
+    /// (io with whatever failure semantics it wants), GPU creation,
+    /// loopback attach, and driving the event loop.
     pub fn build_passive(env: TestBenchEnv) -> wasmtime::Result<TestBenchBuild> {
         let TestBenchEnv {
             name,
@@ -216,14 +150,11 @@ impl TestBenchChassis {
 
         let boot = SubstrateBoot::builder(&name, &version).build()?;
         let _ = workers;
-        let chassis_handler =
-            chassis_control_handler(events_tx.clone(), Arc::clone(&boot.outbound));
         let control_plane_config = ControlPlaneConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
             input_subscribers: Arc::clone(&boot.input_subscribers),
-            chassis_handler: Some(chassis_handler),
         };
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
@@ -250,6 +181,15 @@ impl TestBenchChassis {
                 outbound: Arc::clone(&boot.outbound),
             }),
         };
+
+        // Phase 4: advance lands on `TestBenchCapability` claiming
+        // `aether.test_bench`. The cap pushes `ChassisEvent::Advance`
+        // onto the embedder loop just like the retired
+        // `chassis_handler` closure did.
+        let test_bench_cap_config = TestBenchCapConfig {
+            events: events_tx.clone(),
+        };
+
         let passive =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
                 .with_actor::<BroadcastCapability>(())
@@ -258,6 +198,7 @@ impl TestBenchChassis {
                 .with_actor::<ControlPlaneCapability>(control_plane_config)
                 .with_actor::<RenderCapability>(render_config)
                 .with_actor::<HeadlessWindowCapability>(())
+                .with_actor::<TestBenchCapability>(test_bench_cap_config)
                 .with_log_drain::<LogCapability>()
                 .build_passive()
                 .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
@@ -279,12 +220,9 @@ impl TestBenchChassis {
 
         let hub = crate::hub::connect_hub_client(&boot, hub_url.as_deref())?;
 
-        // The chassis-control closure already cloned `events_tx`;
-        // dropping the local copy lets the receiver hang up cleanly
-        // once every chassis_control_handler clone is released. The
-        // embedder retains its own `EventSender` clone if it wants
-        // to send synthetic events; otherwise the chassis_control
-        // closure is the only sender.
+        // The cap config already cloned `events_tx`; dropping the
+        // local copy lets the receiver hang up cleanly once every
+        // sender is released.
         drop(events_tx);
 
         Ok(TestBenchBuild {

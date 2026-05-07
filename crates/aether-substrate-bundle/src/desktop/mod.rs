@@ -1,10 +1,12 @@
-//! Desktop chassis: winit event loop, wgpu renderer, capture queue,
-//! and the chassis-side control-plane handler that owns the desktop-
-//! only kinds (capture_frame, set_window_mode, platform_info).
+//! Desktop chassis: winit event loop, wgpu renderer, capture queue.
+//! Issue 603 retired the chassis-side control-plane handler that
+//! pre-Phases-2-4 owned `capture_frame` / window kinds /
+//! `platform_info` — each kind now has its own cap (or, for
+//! `platform_info`, was deleted entirely).
 
 pub mod chassis;
 pub mod driver;
 pub mod render;
 
-pub use chassis::{DesktopChassis, DesktopEnv, UserEvent, chassis_control_handler};
+pub use chassis::{DesktopChassis, DesktopEnv, UserEvent};
 pub use driver::{DesktopDriverCapability, DesktopDriverRunning};

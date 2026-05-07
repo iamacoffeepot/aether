@@ -30,9 +30,7 @@ pub mod hub;
 pub mod test_bench;
 
 pub use aether_capabilities as capabilities;
-pub use aether_capabilities::{
-    BroadcastCapability, ChassisControlHandler, ControlPlaneCapability, ControlPlaneConfig,
-};
+pub use aether_capabilities::{BroadcastCapability, ControlPlaneCapability, ControlPlaneConfig};
 pub use aether_substrate::{
     Chassis, Component, HubOutbound, InputSubscribers, KindId, Mail, MailKind, MailboxEntry,
     MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, SinkHandler, SubstrateBoot, SubstrateCtx,

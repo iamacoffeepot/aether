@@ -16,11 +16,12 @@
 //! `handle_load` to push the same drain into freshly-loaded
 //! components.
 //!
-//! Chassis-peripheral kinds (`capture_frame`, `set_window_mode`,
-//! `set_window_title`, `platform_info`) flow through the
-//! [`ChassisControlHandler`] closure on `ControlPlaneConfig` for the
-//! Phase 1 migration window. Phases 2–4 of issue 603 peel them off
-//! into their own caps and the closure retires.
+//! Issue 603 Phases 2–4 peeled chassis-peripheral kinds onto their own
+//! caps: `capture_frame` → `RenderCapability`, window kinds →
+//! desktop driver-as-actor / `HeadlessWindowCapability`, `advance` →
+//! `TestBenchCapability` / `UnsupportedTestBenchCapability`.
+//! `platform_info` was deleted as a kind. The `ChassisControlHandler`
+//! closure-fallback retired with them.
 //!
 //! Dispatcher infrastructure (`PendingGate`, `ComponentEntry`,
 //! `dispatcher_loop`, `kill_actor`, `splice_inbox`,
@@ -36,11 +37,11 @@ use aether_kinds::{
     DropComponent, LoadComponent, ReplaceComponent, SubscribeInput, UnsubscribeInput,
 };
 
-// `ControlPlaneConfig` and `ChassisControlHandler` are exported from
-// inside `mod native` for native callers (the cap struct itself is
-// auto-emitted at file root by `#[bridge]`).
+// `ControlPlaneConfig` is exported from inside `mod native` for
+// native callers (the cap struct itself is auto-emitted at file root
+// by `#[bridge]`).
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{ChassisControlHandler, ControlPlaneConfig};
+pub use native::ControlPlaneConfig;
 
 #[aether_actor::bridge]
 mod native {
@@ -62,13 +63,13 @@ mod native {
 
     use super::{DropComponent, LoadComponent, ReplaceComponent, SubscribeInput, UnsubscribeInput};
 
-    use aether_substrate::capability::{BootError, Envelope};
+    use aether_substrate::capability::BootError;
     use aether_substrate::component::{Component, DISPATCH_UNKNOWN_KIND};
     use aether_substrate::control_helpers::{decode_payload, register_or_match_all};
     use aether_substrate::ctx::SubstrateCtx;
     use aether_substrate::input::{self, InputSubscribers};
     use aether_substrate::kind_manifest;
-    use aether_substrate::mail::{Mail, MailboxId, ReplyTo};
+    use aether_substrate::mail::{Mail, MailboxId};
     use aether_substrate::mailer::Mailer;
     use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::outbound::HubOutbound;
@@ -83,32 +84,17 @@ mod native {
     /// the old dispatcher.
     const DEFAULT_DRAIN_TIMEOUT_MS: u32 = 5_000;
 
-    /// Closure contract for a chassis-registered control-plane fallback.
-    /// Called for every mail arriving at `aether.control` whose kind
-    /// isn't one the cap handles natively. The chassis is responsible
-    /// for decoding, replying (via the outbound it constructed with),
-    /// and any mail orchestration. Phase 1 migration shape — Phases
-    /// 2–4 of issue 603 retire it as the chassis-peripheral kinds
-    /// (`capture_frame`, `set_window_mode`, `set_window_title`,
-    /// `platform_info`) move to their own caps.
-    pub type ChassisControlHandler =
-        Arc<dyn Fn(aether_data::KindId, &str, ReplyTo, &[u8]) + Send + Sync>;
-
     /// Configuration for [`ControlPlaneCapability`]. `engine` and
     /// `linker` are the wasmtime instances every load / replace
     /// instantiates against; `hub_outbound` is the egress handle the
     /// cap uses for `*Result` replies and `aether.kinds.changed`
     /// announcements; `input_subscribers` is the ADR-0021 fan-out
     /// table (shared with the platform thread).
-    ///
-    /// `chassis_handler` is the Phase 1 migration shape for chassis-
-    /// peripheral kinds (§9 / Phases 2–4 retire it).
     pub struct ControlPlaneConfig {
         pub engine: Arc<Engine>,
         pub linker: Arc<Linker<SubstrateCtx>>,
         pub hub_outbound: Arc<HubOutbound>,
         pub input_subscribers: InputSubscribers,
-        pub chassis_handler: Option<ChassisControlHandler>,
     }
 
     /// `aether.control` cap. Outer struct is a thin
@@ -135,7 +121,6 @@ mod native {
         components: RwLock<HashMap<MailboxId, Arc<ComponentEntry>>>,
         input_subscribers: InputSubscribers,
         default_name_counter: AtomicU64,
-        chassis_handler: Option<ChassisControlHandler>,
     }
 
     impl ControlPlaneCapability {
@@ -165,7 +150,6 @@ mod native {
                 components: RwLock::new(HashMap::new()),
                 input_subscribers: config.input_subscribers,
                 default_name_counter: AtomicU64::new(0),
-                chassis_handler: config.chassis_handler,
             });
             queue.install_component_router(Arc::clone(&inner) as Arc<dyn ComponentRouter>);
             Self { inner }
@@ -261,7 +245,6 @@ mod native {
                 components: RwLock::new(HashMap::new()),
                 input_subscribers: config.input_subscribers,
                 default_name_counter: AtomicU64::new(0),
-                chassis_handler: config.chassis_handler,
             });
             // Install `inner` as the Mailer's component router. Mail
             // landing on `MailboxEntry::Component` from any thread now
@@ -340,26 +323,6 @@ mod native {
             let result = self.inner.handle_unsubscribe(payload);
             ctx.transport()
                 .send_reply_for_handler(ctx.reply_target(), &result);
-        }
-
-        /// Phase 1 migration safety net for chassis-peripheral kinds
-        /// that haven't been peeled into their own caps yet
-        /// (`capture_frame`, `set_window_mode`, `set_window_title`,
-        /// `platform_info`). The chassis main supplies a closure on
-        /// `ControlPlaneConfig.chassis_handler` that decodes + replies
-        /// for these. Phases 2–4 of issue 603 retire the closure
-        /// entirely as each kind moves to its own cap.
-        #[fallback]
-        fn on_chassis_kind(&self, _ctx: &mut NativeCtx<'_>, env: &Envelope) {
-            if let Some(handler) = &self.inner.chassis_handler {
-                handler(env.kind, env.kind_name.as_str(), env.sender, &env.payload);
-            } else {
-                tracing::warn!(
-                    target: "aether_capabilities::control",
-                    kind = %env.kind_name,
-                    "aether.control received unrecognised kind (no chassis handler registered) — dropping",
-                );
-            }
         }
     }
 
