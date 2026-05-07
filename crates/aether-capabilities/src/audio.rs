@@ -61,7 +61,7 @@ use aether_kinds::{NoteOff, NoteOn, SetMasterGain};
 #[cfg(all(not(target_arch = "wasm32"), feature = "audio-native"))]
 pub use native::AudioConfig;
 
-#[aether_actor::bridge(feature = "audio-native")]
+#[aether_actor::bridge(singleton, feature = "audio-native")]
 mod native {
     use std::f32::consts::TAU;
     use std::sync::Arc;

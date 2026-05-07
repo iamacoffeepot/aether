@@ -19,7 +19,7 @@
 
 use aether_kinds::LogBatch;
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native {
     use super::LogBatch;
     use aether_actor::actor;

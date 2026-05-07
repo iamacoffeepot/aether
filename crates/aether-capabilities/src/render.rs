@@ -37,7 +37,7 @@ pub use native::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 // auto-emitted re-export. It carries no auxiliary native-only types,
 // so nothing extra to surface here.
 
-#[aether_actor::bridge(feature = "render-native")]
+#[aether_actor::bridge(singleton, feature = "render-native")]
 mod native {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -685,7 +685,7 @@ mod native {
     }
 }
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native_headless {
     use std::sync::Arc;
 

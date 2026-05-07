@@ -815,46 +815,87 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
 /// feature pulling its native dep set in.
 #[proc_macro_attribute]
 pub fn bridge(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let feature = match parse_bridge_attr(attr) {
-        Ok(f) => f,
+    let opts = match parse_bridge_attr(attr) {
+        Ok(o) => o,
         Err(e) => return e.to_compile_error().into(),
     };
     let item = parse_macro_input!(item as ItemMod);
-    match expand_bridge(item, feature) {
+    match expand_bridge(item, opts) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
-/// Parse the optional `feature = "name"` argument on `#[bridge]`.
-/// Empty attr returns `None` (the default no-feature mode); anything
-/// else parses as a `syn::MetaNameValue` whose path must be `feature`
-/// and value must be a string literal.
-fn parse_bridge_attr(attr: TokenStream) -> syn::Result<Option<String>> {
-    if attr.is_empty() {
-        return Ok(None);
-    }
-    let meta: syn::MetaNameValue = syn::parse(attr)?;
-    if !meta.path.is_ident("feature") {
-        return Err(syn::Error::new_spanned(
-            &meta.path,
-            "#[bridge] only accepts `feature = \"name\"`",
-        ));
-    }
-    let syn::Expr::Lit(syn::ExprLit {
-        lit: syn::Lit::Str(s),
-        ..
-    }) = meta.value
-    else {
-        return Err(syn::Error::new_spanned(
-            &meta.path,
-            "#[bridge(feature = ...)] expects a string literal",
-        ));
-    };
-    Ok(Some(s.value()))
+/// Cardinality declaration on `#[bridge]`. The bridge attribute is the
+/// natural site for this because the bridge owns two struct definition
+/// sites (the wasm stub at file root + the native struct in `mod
+/// native`), and a cardinality marker impl needs to land at file root
+/// to cover both. Pre-issue-625 the bridge auto-emitted Singleton; the
+/// refactor makes the choice explicit (and adds Instanced as the
+/// counterpart).
+#[derive(Clone, Copy)]
+enum BridgeCardinality {
+    Singleton,
+    Instanced,
 }
 
-fn expand_bridge(mut item_mod: ItemMod, feature: Option<String>) -> syn::Result<TokenStream2> {
+#[derive(Default)]
+struct BridgeOpts {
+    cardinality: Option<BridgeCardinality>,
+    feature: Option<String>,
+}
+
+/// Parse `#[bridge]`'s optional arguments. Recognised:
+/// - `singleton` (positional flag) — emit `impl Singleton for X`
+/// - `instanced` (positional flag) — emit `impl Instanced for X`
+/// - `feature = "name"` — gate the inner mod on the named feature
+///
+/// Empty attr (`#[bridge]`) emits no cardinality marker; the author is
+/// expected to hand-roll one (test fixtures, future cases). Mixing
+/// `singleton` and `instanced` is rejected — a cap is one or the other.
+fn parse_bridge_attr(attr: TokenStream) -> syn::Result<BridgeOpts> {
+    let mut opts = BridgeOpts::default();
+    if attr.is_empty() {
+        return Ok(opts);
+    }
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("singleton") {
+            if matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
+                return Err(meta.error(
+                    "#[bridge] cannot declare both `singleton` and `instanced` — \
+                     cardinality is mutually exclusive (ADR-0079)",
+                ));
+            }
+            opts.cardinality = Some(BridgeCardinality::Singleton);
+            Ok(())
+        } else if meta.path.is_ident("instanced") {
+            if matches!(opts.cardinality, Some(BridgeCardinality::Singleton)) {
+                return Err(meta.error(
+                    "#[bridge] cannot declare both `singleton` and `instanced` — \
+                     cardinality is mutually exclusive (ADR-0079)",
+                ));
+            }
+            opts.cardinality = Some(BridgeCardinality::Instanced);
+            Ok(())
+        } else if meta.path.is_ident("feature") {
+            let value = meta.value()?;
+            let lit: syn::LitStr = value.parse()?;
+            opts.feature = Some(lit.value());
+            Ok(())
+        } else {
+            Err(meta
+                .error("#[bridge] only accepts `singleton`, `instanced`, or `feature = \"name\"`"))
+        }
+    });
+    syn::parse::Parser::parse(parser, attr)?;
+    Ok(opts)
+}
+
+fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenStream2> {
+    let BridgeOpts {
+        cardinality,
+        feature,
+    } = opts;
     let Some((brace, items)) = item_mod.content.take() else {
         return Err(syn::Error::new_spanned(
             &item_mod,
@@ -1042,14 +1083,27 @@ fn expand_bridge(mut item_mod: ItemMod, feature: Option<String>) -> syn::Result<
         #native_cfg
         pub use #mod_ident::#type_ident;
     };
-    let singleton_marker = quote! {
-        impl #impl_generics ::aether_actor::Singleton for #self_ty #where_clause {}
-    };
+    // Issue 625: cardinality is an explicit declaration on the bridge
+    // attribute per ADR-0079. The bridge sits over two struct
+    // definition sites — the wasm stub at file root and the native
+    // struct inside `mod native` — and the cardinality marker impl
+    // must land at file root to cover both. The author writes
+    // `#[bridge(singleton)]` or `#[bridge(instanced)]`; absence is
+    // hand-rolled (test fixtures, future cases that don't fit either).
     let actor_marker = quote! {
         impl #impl_generics ::aether_actor::Actor for #self_ty #where_clause {
             const NAMESPACE: &'static str = #namespace_expr;
             #frame_barrier_const
         }
+    };
+    let cardinality_marker = match cardinality {
+        Some(BridgeCardinality::Singleton) => Some(quote! {
+            impl #impl_generics ::aether_actor::Singleton for #self_ty #where_clause {}
+        }),
+        Some(BridgeCardinality::Instanced) => Some(quote! {
+            impl #impl_generics ::aether_actor::Instanced for #self_ty #where_clause {}
+        }),
+        None => None,
     };
     // Issue 576 + issue 603: only-fallback (true catch-all) caps emit
     // one blanket `impl<K: Kind> HandlesKind<K> for X {}` so typed
@@ -1107,8 +1161,8 @@ fn expand_bridge(mut item_mod: ItemMod, feature: Option<String>) -> syn::Result<
     let mod_attrs = std::mem::take(&mut item_mod.attrs);
     Ok(quote! {
         #stub_and_reexport
-        #singleton_marker
         #actor_marker
+        #cardinality_marker
         #(#handles_kind_markers)*
 
         #(#mod_attrs)*
@@ -1204,17 +1258,15 @@ pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// `#[derive(Singleton)]` — emits `impl ::aether_actor::Singleton for T {}`.
 ///
-/// Issue 552 stage 0: explicit opt-in marker that an actor type is
-/// the sole instance of its kind in a chassis. The trait itself is a
-/// simple marker — no methods. Future stages may grow `Singleton`
-/// into a richer trait (e.g. an associated `unique_name() -> &str`)
-/// at which point this derive emits the additional bodies; today
-/// it's just the marker.
-///
-/// Kept as `#[derive(Singleton)]` rather than auto-emitted by
-/// `#[actor]` so opting OUT (multi-instance actors, when stage 5+
-/// introduces them) is non-breaking — the absence of the derive
-/// becomes the opt-out signal instead of a new attribute syntax.
+/// Per ADR-0079 (issue 607) cardinality is first-class:
+/// [`Singleton`] and [`Instanced`] are mutually exclusive at the type
+/// level. Issue 625 made the choice explicit at the struct
+/// definition rather than auto-emitted by `#[bridge]` — `Singleton`
+/// is a property of the type, not of any one trait it implements.
+/// Authors place `#[derive(Singleton)]` on the cap struct alongside
+/// `pub struct X` inside the bridge mod; absence selects the other
+/// cardinality (and the type-system catches mistakes — `Builder::with_actor`
+/// requires `Singleton`, `ctx.spawn_child` requires `Instanced`).
 #[proc_macro_derive(Singleton)]
 pub fn derive_singleton(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -1222,6 +1274,27 @@ pub fn derive_singleton(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     quote! {
         impl #impl_generics ::aether_actor::Singleton for #name #ty_generics #where_clause {}
+    }
+    .into()
+}
+
+/// `#[derive(Instanced)]` — emits `impl ::aether_actor::Instanced for T {}`.
+///
+/// The instanced counterpart of [`derive_singleton`]. Per ADR-0079
+/// (issue 607), instanced actors carry a runtime subname under their
+/// `NAMESPACE` prefix — full names hash to `"{NAMESPACE}:{subname}"`
+/// (e.g. `aether.tcp.listener:8080`). Authors place
+/// `#[derive(Instanced)]` on the cap struct inside the bridge mod;
+/// `Builder::with_actor` rejects instanced types at compile time
+/// (the chassis-builder boots singletons only), and
+/// `ctx.spawn_child` requires the `Instanced` bound.
+#[proc_macro_derive(Instanced)]
+pub fn derive_instanced(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    quote! {
+        impl #impl_generics ::aether_actor::Instanced for #name #ty_generics #where_clause {}
     }
     .into()
 }

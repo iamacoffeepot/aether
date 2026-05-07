@@ -17,7 +17,7 @@ use aether_kinds::{ProcessExited, Spawn, SpawnResult, Terminate, TerminateResult
 use crate::hub::registry::EngineRegistry;
 use crate::hub::spawn::PendingSpawns;
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native {
     use super::{
         EngineRegistry, PendingSpawns, ProcessExited, Spawn, SpawnResult, Terminate,

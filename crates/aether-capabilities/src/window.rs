@@ -13,7 +13,7 @@
 // of the mod (always-on, outside the cfg gate).
 use aether_kinds::{SetWindowMode, SetWindowTitle};
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native {
     use std::sync::Arc;
 

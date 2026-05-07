@@ -161,7 +161,7 @@ fn parse_default_timeout_env() -> Duration {
     Duration::from_millis(ms as u64)
 }
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native {
     use std::collections::HashSet;
     use std::sync::Arc;
