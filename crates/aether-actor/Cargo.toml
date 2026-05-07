@@ -17,7 +17,7 @@ edition.workspace = true
 [dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
 # ADR-0030 Phase 2: `InitCtx::subscribe_input` self-addresses
-# `aether.control.subscribe_input` for every `K::IS_INPUT` handler kind.
+# `aether.input.subscribe` for every `K::IS_INPUT` handler kind.
 # The wasm-shim helpers in `wasm::{io, net, log}` (folded in by issue
 # 552 stage 0) also build `aether.io.*` / `aether.net.*` / `aether.log.*`
 # request kinds — that whole vocabulary lives in `aether-kinds`.

@@ -15,9 +15,10 @@ use std::sync::Arc;
 
 use aether_capabilities::{
     AudioCapability, BroadcastCapability, CaptureBackend, ControlPlaneCapability,
-    ControlPlaneConfig, HandleCapability, HttpCapability, IoCapability, LogCapability,
-    RenderCapability, RenderConfig, TcpCapability, UnsupportedTestBenchCapability,
-    audio::AudioConfig as AudioConf, http::HttpConfig as HttpConf, io::NamespaceRoots,
+    ControlPlaneConfig, HandleCapability, HttpCapability, InputCapability, InputConfig,
+    IoCapability, LogCapability, RenderCapability, RenderConfig, TcpCapability,
+    UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf, http::HttpConfig as HttpConf,
+    io::NamespaceRoots,
 };
 use aether_kinds::WindowMode;
 use aether_substrate::capability::BootError;
@@ -160,6 +161,9 @@ impl DesktopChassis {
             hub_outbound: Arc::clone(&boot.outbound),
             input_subscribers: Arc::clone(&boot.input_subscribers),
         };
+        let input_config = InputConfig {
+            input_subscribers: Arc::clone(&boot.input_subscribers),
+        };
         // Capture handoff lives on `RenderCapability` post-issue-603
         // Phase 2. The cap dispatcher runs `on_capture_frame`, parks
         // the request on `capture_queue`, and pokes `UserEvent::Capture`
@@ -226,6 +230,7 @@ impl DesktopChassis {
             .with_actor::<BroadcastCapability>(())
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
+            .with_actor::<InputCapability>(input_config)
             .with_actor::<ControlPlaneCapability>(control_plane_config)
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<HttpCapability>(http)

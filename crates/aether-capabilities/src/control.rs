@@ -33,9 +33,7 @@
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_kinds::{
-    DropComponent, LoadComponent, ReplaceComponent, SubscribeInput, UnsubscribeInput,
-};
+use aether_kinds::{DropComponent, LoadComponent, ReplaceComponent};
 
 // `ControlPlaneConfig` is exported from inside `mod native` for
 // native callers (the cap struct itself is auto-emitted at file root
@@ -57,11 +55,10 @@ mod native {
     use aether_data::{Kind, KindDescriptor};
     use aether_kinds::{
         ComponentCapabilities, ComponentDied, DropResult, LoadResult, ReplaceResult,
-        SubscribeInputResult,
     };
     use wasmtime::{Engine, Linker, Module};
 
-    use super::{DropComponent, LoadComponent, ReplaceComponent, SubscribeInput, UnsubscribeInput};
+    use super::{DropComponent, LoadComponent, ReplaceComponent};
 
     use aether_substrate::capability::BootError;
     use aether_substrate::component::{Component, DISPATCH_UNKNOWN_KIND};
@@ -202,20 +199,6 @@ mod native {
             let bytes = postcard::to_allocvec(&payload).expect("encode ReplaceComponent");
             self.inner.handle_replace_bytes(&bytes)
         }
-
-        /// Test-support counterpart of [`Self::load_for_test`].
-        #[doc(hidden)]
-        pub fn subscribe_for_test(&self, payload: SubscribeInput) -> SubscribeInputResult {
-            let bytes = postcard::to_allocvec(&payload).expect("encode SubscribeInput");
-            self.inner.handle_subscribe_bytes(&bytes)
-        }
-
-        /// Test-support counterpart of [`Self::load_for_test`].
-        #[doc(hidden)]
-        pub fn unsubscribe_for_test(&self, payload: UnsubscribeInput) -> SubscribeInputResult {
-            let bytes = postcard::to_allocvec(&payload).expect("encode UnsubscribeInput");
-            self.inner.handle_unsubscribe_bytes(&bytes)
-        }
     }
 
     #[actor]
@@ -297,30 +280,6 @@ mod native {
         #[handler]
         fn on_replace_component(&self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
             let result = self.inner.handle_replace(payload);
-            ctx.transport()
-                .send_reply_for_handler(ctx.reply_target(), &result);
-        }
-
-        /// Subscribe a mailbox to an input stream (ADR-0021).
-        ///
-        /// # Agent
-        /// `SubscribeInput { kind, mailbox }`. Component mailboxes only —
-        /// sinks and dropped mailboxes are rejected.
-        #[handler]
-        fn on_subscribe_input(&self, ctx: &mut NativeCtx<'_>, payload: SubscribeInput) {
-            let result = self.inner.handle_subscribe(payload);
-            ctx.transport()
-                .send_reply_for_handler(ctx.reply_target(), &result);
-        }
-
-        /// Unsubscribe a mailbox from an input stream (ADR-0021).
-        ///
-        /// # Agent
-        /// `UnsubscribeInput { kind, mailbox }`. Idempotent on
-        /// "not currently subscribed"; rejects unknown / sink mailboxes.
-        #[handler]
-        fn on_unsubscribe_input(&self, ctx: &mut NativeCtx<'_>, payload: UnsubscribeInput) {
-            let result = self.inner.handle_unsubscribe(payload);
             ctx.transport()
                 .send_reply_for_handler(ctx.reply_target(), &result);
         }
@@ -541,50 +500,6 @@ mod native {
             DropResult::Ok
         }
 
-        fn handle_subscribe_bytes(&self, bytes: &[u8]) -> SubscribeInputResult {
-            match decode_payload(bytes) {
-                Ok(p) => self.handle_subscribe(p),
-                Err(error) => SubscribeInputResult::Err { error },
-            }
-        }
-
-        fn handle_subscribe(&self, payload: SubscribeInput) -> SubscribeInputResult {
-            let id = payload.mailbox;
-            if let Err(e) = validate_subscriber_mailbox(&self.registry, id) {
-                return SubscribeInputResult::Err { error: e };
-            }
-            self.input_subscribers
-                .write()
-                .unwrap()
-                .entry(payload.kind)
-                .or_default()
-                .insert(id);
-            SubscribeInputResult::Ok
-        }
-
-        fn handle_unsubscribe_bytes(&self, bytes: &[u8]) -> SubscribeInputResult {
-            match decode_payload(bytes) {
-                Ok(p) => self.handle_unsubscribe(p),
-                Err(error) => SubscribeInputResult::Err { error },
-            }
-        }
-
-        fn handle_unsubscribe(&self, payload: UnsubscribeInput) -> SubscribeInputResult {
-            let id = payload.mailbox;
-            if let Err(e) = validate_subscriber_mailbox(&self.registry, id) {
-                return SubscribeInputResult::Err { error: e };
-            }
-            if let Some(set) = self
-                .input_subscribers
-                .write()
-                .unwrap()
-                .get_mut(&payload.kind)
-            {
-                set.remove(&id);
-            }
-            SubscribeInputResult::Ok
-        }
-
         fn handle_replace_bytes(&self, bytes: &[u8]) -> ReplaceResult {
             match decode_payload(bytes) {
                 Ok(p) => self.handle_replace(p),
@@ -755,19 +670,6 @@ mod native {
             {
                 subs.entry(handler.id).or_default().insert(mailbox);
             }
-        }
-    }
-
-    /// Shared validation for `subscribe_input` / `unsubscribe_input`:
-    /// the mailbox id must name a live component.
-    fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
-        match registry.entry(id) {
-            Some(MailboxEntry::Component) => Ok(()),
-            Some(MailboxEntry::Sink(_)) => {
-                Err(format!("mailbox {:?} is a sink, not a component", id))
-            }
-            Some(MailboxEntry::Dropped) => Err(format!("mailbox {:?} already dropped", id)),
-            None => Err(format!("unknown mailbox id {:?}", id)),
         }
     }
 
