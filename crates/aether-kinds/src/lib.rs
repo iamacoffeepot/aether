@@ -598,6 +598,82 @@ mod tcp {
     )]
     #[kind(name = "aether.tcp.close")]
     pub struct Close {}
+
+    /// `aether.tcp.connection_ready` — sidecar accept thread → listener
+    /// dispatcher wake. Issue 607 Phase 6b: the listener's accept
+    /// thread blocks on `accept()`, pushes the resulting `TcpStream`
+    /// over an mpsc into the dispatcher, then fires this mail at its
+    /// own listener mailbox to wake the handler. The handler drains
+    /// the mpsc and spawns a `TcpSessionActor` per pending stream.
+    /// Empty payload — the actual stream rides the mpsc, not the mail
+    /// envelope (a live `TcpStream` is not wire-shaped).
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.tcp.connection_ready")]
+    pub struct ConnectionReady {}
+
+    /// `aether.tcp.session_data_ready` — sidecar read thread → session
+    /// dispatcher wake. Mirror of [`ConnectionReady`] for the session
+    /// read path: the read thread blocks on `read()`, pushes bytes via
+    /// mpsc, fires this mail at its own session mailbox. The handler
+    /// drains the mpsc and broadcasts each chunk as [`SessionData`].
+    /// Empty payload.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.tcp.session_data_ready")]
+    pub struct SessionDataReady {}
+
+    /// `aether.tcp.session_data` — broadcast emitted by a
+    /// `TcpSessionActor` on each chunk read from its peer. Carries
+    /// the session subname (`conn-N`), the peer address as a string,
+    /// and the bytes received in one `read()` call. Postcard-shaped
+    /// (variable-length payload) — agents drain via `receive_mail`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.tcp.session_data")]
+    pub struct SessionData {
+        pub session_name: String,
+        pub peer: String,
+        pub bytes: Vec<u8>,
+    }
+
+    /// `aether.tcp.session_write` — peer mails this to a
+    /// `TcpSessionActor` to write `bytes` to the connected stream.
+    /// Fire-and-forget; the session's handler does a blocking write
+    /// on the dispatcher thread (writes are typically fast and
+    /// dispatcher-thread initiated, so a sidecar isn't needed for
+    /// the write path).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.tcp.session_write")]
+    pub struct SessionWrite {
+        pub bytes: Vec<u8>,
+    }
+
+    /// `aether.tcp.session_close` — peer asks the session to close
+    /// gracefully. Mailed via `ctx.actor::<TcpSessionActor>(...)` or
+    /// resolved by subname. The session's handler calls
+    /// `ctx.shutdown()`; the close fan-out fires `MonitorNotice` to
+    /// the parent listener (which spawned it).
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.tcp.session_close")]
+    pub struct SessionClose {}
+
+    /// `aether.tcp.session_closed` — broadcast emitted on session
+    /// close. Carries the session subname, the peer address, and a
+    /// human-readable reason ("eof", "read error: ...", "explicit
+    /// close", etc.). Agents observe via `receive_mail` to know when
+    /// a session terminated and clean up any per-session state they
+    /// were tracking.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.tcp.session_closed")]
+    pub struct SessionClosed {
+        pub session_name: String,
+        pub peer: String,
+        pub reason: String,
+    }
 }
 
 mod control_plane {

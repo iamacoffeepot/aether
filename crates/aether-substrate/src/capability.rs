@@ -917,7 +917,15 @@ where
                                     &env.payload,
                                 )
                                 .is_none()
+                                && !actor
+                                    .__aether_dispatch_fallback(&mut native_ctx, &env)
                             {
+                                // Issue 576: catch-all caps override
+                                // `__aether_dispatch_fallback` and
+                                // return `true` after their fallback
+                                // runs, suppressing this warn. Strict
+                                // receivers keep the default (returns
+                                // `false`) and surface the miss.
                                 tracing::warn!(
                                     target: "aether_substrate::capability",
                                     actor = A::NAMESPACE,
@@ -948,11 +956,17 @@ where
                                 &transport_for_thread,
                                 env.sender,
                             );
-                            let _ = actor.__aether_dispatch_envelope(
-                                &mut native_ctx,
-                                env.kind,
-                                &env.payload,
-                            );
+                            if actor
+                                .__aether_dispatch_envelope(
+                                    &mut native_ctx,
+                                    env.kind,
+                                    &env.payload,
+                                )
+                                .is_none()
+                            {
+                                let _ = actor
+                                    .__aether_dispatch_fallback(&mut native_ctx, &env);
+                            }
                             aether_actor::log::drain_buffer();
                         },
                     );
