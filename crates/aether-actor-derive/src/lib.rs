@@ -18,6 +18,7 @@
 //! for canonical bytes and `<Self as Schema>::LABEL_NODE` for
 //! the labels tree.
 //!
+//! testing for a diff
 //! `Schema` emits three consts per impl: `SCHEMA` (the `SchemaType`
 //! tree, const-constructible per ADR-0031), `LABEL` (the
 //! `Option<&'static str>` Rust type path from `module_path!()`), and

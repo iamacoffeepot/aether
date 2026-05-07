@@ -121,20 +121,26 @@ jobs:
         # Get the diff between the current commit and the base of the PR, then filter to just the files that changed.
         # If any of those files are in the `crates/` directory, or are `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, or a workflow file,
         # then we consider this PR to have "code changes" that require running the tests. Otherwise, we can skip the tests to save time.
-      - name: Run tests for changed crates
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+      - name: Get changed files
+        id: changed-files
         run: |
-          set -euo pipefail
-          git fetch origin $GITHUB_BASE_REF
-          CHANGED_FILES=$(git diff --name-only origin/${GITHUB_BASE_REF} ${GITHUB_SHA})
-          echo "Changed files: ${CHANGED_FILES}"
-          TESTABLE_CRATES=$(echo ${CHANGED_FILES} | grep -E '^(crates)')
+          if ${{ github.event_name == 'pull_request' }}; then
+              echo "changed_files=$(git diff --name-only -r HEAD^1 HEAD | xargs)" >> $GITHUB_OUTPUT
+          else
+              echo "changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }} | xargs)" >> $GITHUB_OUTPUT
+          fi
+      - name: Run tests
+        run: |
+          TESTABLE_CRATES=$(echo ${{ steps.changed-files.outputs.changed_files }} | grep -E '^(crates)')
           CRATE_NAMES=$(echo "${TESTABLE_CRATES}" | cut -d/ -f2 | sort -u)
           echo "Testable crates: ${CRATE_NAMES}"
           for crate in $CRATE_NAMES; do
             echo "Found changes in crate: $crate"
             cargo test -p file://$(pwd)/${crate}
           done
-
         env:
           AETHER_REQUIRE_RUNTIME: "1"
 
