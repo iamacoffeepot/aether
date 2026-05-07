@@ -234,7 +234,7 @@ pub fn build_registry(
     Ok((Arc::new(registry), roots))
 }
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;

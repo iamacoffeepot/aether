@@ -23,7 +23,7 @@ use aether_kinds::Advance;
 // don't have to reach into `native::`.
 pub use native::TestBenchCapConfig;
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native {
     use std::sync::Arc;
 

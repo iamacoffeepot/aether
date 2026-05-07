@@ -43,7 +43,7 @@ use aether_kinds::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::ControlPlaneConfig;
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native {
     use std::collections::HashMap;
     use std::panic::AssertUnwindSafe;

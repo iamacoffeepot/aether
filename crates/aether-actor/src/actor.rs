@@ -172,3 +172,36 @@ pub trait HandlesKind<K: Kind>: Actor {}
 pub trait Dispatch {
     fn __dispatch(&mut self, sender: ReplyTo, kind: u64, payload: &[u8]) -> Option<()>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue 625 (ADR-0079): `#[derive(Singleton)]` and
+    /// `#[derive(Instanced)]` are the explicit author-side surface
+    /// for cardinality. Trait mutual exclusion is documentation +
+    /// use-site bounds (no sealed-trait enforcement); this smoke
+    /// confirms both derives produce reachable marker impls
+    /// independently.
+    #[test]
+    fn singleton_derive_emits_marker_impl() {
+        #[derive(crate::Singleton)]
+        struct UniqueCap;
+        impl Actor for UniqueCap {
+            const NAMESPACE: &'static str = "test.cardinality.unique";
+        }
+        fn requires_singleton<T: Singleton>() {}
+        requires_singleton::<UniqueCap>();
+    }
+
+    #[test]
+    fn instanced_derive_emits_marker_impl() {
+        #[derive(crate::Instanced)]
+        struct PerThing;
+        impl Actor for PerThing {
+            const NAMESPACE: &'static str = "test.cardinality.per_thing";
+        }
+        fn requires_instanced<T: Instanced>() {}
+        requires_instanced::<PerThing>();
+    }
+}

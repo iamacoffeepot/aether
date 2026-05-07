@@ -161,21 +161,24 @@ pub mod __macro_internals {
 pub use aether_data::{
     Kind, KindId as DataKindId, Schema, actor, bridge, capability, fallback, handler, local,
 };
-// `Singleton` lives in two namespaces:
+// `Singleton` and `Instanced` each live in two namespaces:
 //   - the type namespace for the marker trait (`Actor` super-trait),
 //     re-exported above as part of `actor::*`.
-//   - the macro namespace for the `#[derive(Singleton)]` proc-macro,
-//     forwarded through `aether-data::Singleton` (which itself
-//     re-exports `aether-actor-derive::Singleton` behind the `derive`
-//     feature).
+//   - the macro namespace for the `#[derive(Singleton)]` /
+//     `#[derive(Instanced)]` proc-macros, forwarded through
+//     `aether-data` (which itself re-exports them from
+//     `aether-actor-derive` behind the `derive` feature).
 // Rust resolves derive names from the macro namespace and type names
-// from the type namespace, so the same `Singleton` identifier covers
-// both `impl Singleton for X` and `#[derive(Singleton)]` without
-// ambiguity at the user's call site. The `#[doc(inline)]` flattens
-// the rustdoc page so the derive shows up at `aether_actor::Singleton`
-// rather than under a synthetic re-export shim.
+// from the type namespace, so the same identifier covers both
+// `impl Singleton for X` / `impl Instanced for X` and the
+// `#[derive(...)]` form without ambiguity at the user's call site.
+// The `#[doc(inline)]` flattens the rustdoc page so the derives show
+// up at `aether_actor::{Singleton, Instanced}` rather than under
+// synthetic re-export shims. Issue 625 (ADR-0079) made the cardinality
+// derives the explicit author-side surface — `#[bridge]` no longer
+// auto-emits either.
 #[doc(inline)]
-pub use aether_data::Singleton;
+pub use aether_data::{Instanced, Singleton};
 
 /// Wrap one-or-more items in `#[cfg(not(target_arch = "wasm32"))]`.
 /// Issue 552 stage 4's wasm-header-only build of `aether-capabilities`
