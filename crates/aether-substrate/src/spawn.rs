@@ -271,6 +271,7 @@ impl Spawner {
                 Arc::clone(&strong_sender),
                 Arc::clone(&actor_arc) as Arc<dyn std::any::Any + Send + Sync>,
                 TypeId::of::<A>(),
+                subname_str.clone(),
             )
             .is_err()
         {

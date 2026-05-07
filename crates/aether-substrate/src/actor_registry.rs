@@ -26,23 +26,31 @@ use crate::mail::MailboxId;
 
 /// One actor slot in the registry. `Live` carries the inbox sender
 /// (for direct mail routing into the dispatcher), the actor's
-/// type-erased `Arc` (for `resolve_actor`-style downcasts), and the
-/// actor's `TypeId` (gates type-keyed lookups). `Dead` is a sentinel
-/// for entries whose dispatcher has joined and whose actor has
-/// dropped — mail addressed to the slot warn-drops, and `spawn_child`
-/// rejects the name for reuse. ADR-0079 §Drop / lifecycle.
+/// type-erased `Arc` (for `resolve_actor`-style downcasts), the
+/// actor's `TypeId` (gates type-keyed lookups), and its subname
+/// (Phase 5 — surfaced through [`super::PassiveChassis::resolve_actors`]
+/// so callers can iterate `(subname, Arc<A>)` pairs). `Dead` is a
+/// sentinel for entries whose dispatcher has joined and whose actor
+/// has dropped — mail addressed to the slot warn-drops, and
+/// `spawn_child` rejects the name for reuse. ADR-0079 §Drop /
+/// lifecycle.
 ///
 /// `sender` is `Arc<Sender<Envelope>>` so the registry's sink
 /// handler can hold a `Weak<Sender>` and upgrade only while the
 /// actor is `Live`; on `mark_dead` the Arc drops and the weak
 /// upgrade fails, making mail addressed to a dead instanced
 /// mailbox warn-drop.
+///
+/// `subname` is empty (`String::new()`) for slot inserts that don't
+/// originate from the spawn path (singletons today never `insert_live`;
+/// future Phase 7 alignment may revisit).
 #[derive(Clone)]
 pub enum ActorEntry {
     Live {
         sender: Arc<Sender<Envelope>>,
         actor: Arc<dyn std::any::Any + Send + Sync>,
         type_id: TypeId,
+        subname: String,
     },
     Dead,
 }
@@ -191,12 +199,19 @@ impl ActorRegistry {
     /// `Live` entry already exists at `id` (caller must check
     /// `is_tombstoned` separately for the retired-name case). Used by
     /// the spawn primitive after init succeeds.
+    ///
+    /// `subname` is the per-instance segment Phase 5
+    /// [`super::PassiveChassis::resolve_actors`] iterates over;
+    /// callers that don't originate from the spawn path (today: none;
+    /// tests use empty strings) pass `""` and accept they won't show
+    /// up in the resolve_actors iterator.
     pub(crate) fn insert_live(
         &self,
         id: MailboxId,
         sender: Arc<Sender<Envelope>>,
         actor: Arc<dyn std::any::Any + Send + Sync>,
         type_id: TypeId,
+        subname: String,
     ) -> Result<(), ()> {
         let mut actors = self.actors.write().unwrap();
         match actors.get(&id) {
@@ -211,11 +226,46 @@ impl ActorRegistry {
                         sender,
                         actor,
                         type_id,
+                        subname,
                     },
                 );
                 Ok(())
             }
         }
+    }
+
+    /// Issue 607 Phase 5 (ADR-0079): walk every `Live` slot whose
+    /// `TypeId` matches `T` and hand the caller `(subname, Arc<T>)`.
+    /// Used by [`super::PassiveChassis::resolve_actors`] /
+    /// [`super::BuiltChassis::resolve_actors`] to enumerate all
+    /// instances of a given type.
+    ///
+    /// The returned `String` is owned (clone of the entry's subname)
+    /// because the iterator outlives the lock; the `Arc<T>` is a
+    /// downcast of the type-erased entry. Both Vec slot allocations
+    /// land while the read lock is held; the lock drops before the
+    /// caller iterates.
+    pub(crate) fn live_actors_of_type<T>(&self) -> Vec<(String, Arc<T>)>
+    where
+        T: std::any::Any + Send + Sync + 'static,
+    {
+        let actors = self.actors.read().unwrap();
+        let target = TypeId::of::<T>();
+        actors
+            .values()
+            .filter_map(|entry| match entry {
+                ActorEntry::Live {
+                    actor,
+                    type_id,
+                    subname,
+                    ..
+                } if *type_id == target => Arc::clone(actor)
+                    .downcast::<T>()
+                    .ok()
+                    .map(|a| (subname.clone(), a)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Issue 607 Phase 4a (ADR-0079): flip the slot at `id` from
@@ -396,8 +446,14 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel::<crate::capability::Envelope>();
         struct Stub;
         let actor: Arc<dyn std::any::Any + Send + Sync> = Arc::new(Stub);
-        r.insert_live(id, Arc::new(tx), actor, std::any::TypeId::of::<Stub>())
-            .expect("fresh slot");
+        r.insert_live(
+            id,
+            Arc::new(tx),
+            actor,
+            std::any::TypeId::of::<Stub>(),
+            String::new(),
+        )
+        .expect("fresh slot");
     }
 
     #[test]
