@@ -208,8 +208,14 @@ impl Spawner {
         // only op that can fail with a name collision against a peer
         // singleton claim — the actor_registry slot is keyed on
         // MailboxId which already passed the tombstone check).
-        let tx_for_sink = Arc::new(tx.clone());
-        let weak_for_handler = Arc::downgrade(&tx_for_sink);
+        //
+        // The strong `Arc<Sender>` lives in the actor_registry's
+        // Live entry. The sink handler's `Weak<Sender>` upgrades only
+        // while the Arc is alive — i.e. while the actor's slot is
+        // Live. On `mark_dead` the Arc drops, the weak upgrade fails,
+        // and external mail addressed to the dead mailbox warn-drops.
+        let strong_sender: Arc<mpsc::Sender<Envelope>> = Arc::new(tx.clone());
+        let weak_for_handler = Arc::downgrade(&strong_sender);
         let registered = self.registry.try_register_sink(
             full_name.clone(),
             Arc::new(
@@ -255,11 +261,14 @@ impl Spawner {
 
         // Insert before pre-loading mail: the actor_registry holding
         // the sender is the canonical record that the slot is live.
+        // The Arc<Sender> here is the same one the sink handler's
+        // Weak references — when `mark_dead` drops this entry, the
+        // weak upgrade fails for any further external mail.
         if self
             .actor_registry
             .insert_live(
                 id,
-                tx.clone(),
+                Arc::clone(&strong_sender),
                 Arc::clone(&actor_arc) as Arc<dyn std::any::Any + Send + Sync>,
                 TypeId::of::<A>(),
             )
@@ -290,16 +299,31 @@ impl Spawner {
         // free-running per the comment above).
         let actor_for_thread = Arc::clone(&actor_arc);
         let transport_for_thread = Arc::clone(&transport);
+        let actor_registry_for_thread = Arc::clone(&self.actor_registry);
         let thread_name = alloc_instanced_thread_name(&full_name);
-        // The strong sink Arc was held only to populate the Weak
-        // handler reference; drop the local strong here so the
-        // handler's upgrade tracks dispatcher liveness through the
-        // tx clone the actor_registry holds.
-        drop(tx_for_sink);
+        // The local strong Arc was the populator for the Weak handler
+        // ref; the actor_registry now holds an `Arc::clone` of the
+        // same Arc, so dropping the local doesn't break the weak.
+        drop(strong_sender);
         let _ = std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                while let Some(env) = transport_for_thread.recv_blocking() {
+                // Issue 607 Phase 4a (ADR-0079): the dispatcher loop
+                // observes two shutdown signals: the self-shutdown
+                // flag (set by `NativeCtx::shutdown`) checked after
+                // each handler return, and channel-disconnect
+                // (substrate shutdown — registry dropped, sender
+                // gone) signalled by `recv_blocking` returning None.
+                // Both flow through the same drain → on_close → exit
+                // path below.
+                loop {
+                    if transport_for_thread.should_shutdown() {
+                        break;
+                    }
+                    let env = match transport_for_thread.recv_blocking() {
+                        Some(e) => e,
+                        None => break,
+                    };
                     let mut native_ctx =
                         crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
                     if actor_for_thread
@@ -314,9 +338,46 @@ impl Spawner {
                         );
                     }
                 }
-                // Dispatcher exit — actor_arc drops here when the loop
-                // ends. Phase 4 will wire `on_close` here and flip the
-                // registry slot to `Dead` + insert a tombstone.
+
+                // Drain remaining mail synchronously. The flag/disconnect
+                // raced against any in-flight mail the sink handler
+                // already pushed; the actor sees it before `on_close`
+                // runs so a "please close" handler that flushes state
+                // observes the full inbox.
+                while let Some(env) = transport_for_thread.try_recv() {
+                    let mut native_ctx =
+                        crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
+                    if actor_for_thread
+                        .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
+                        .is_none()
+                    {
+                        tracing::warn!(
+                            target: "aether_substrate::spawn",
+                            actor = A::NAMESPACE,
+                            kind = env.kind_name.as_str(),
+                            "instanced actor drain dispatch missed: kind not handled or decode failed"
+                        );
+                    }
+                }
+
+                // Last-chance close hook. ReplyTo is None because no
+                // inbound envelope produced this call.
+                let mut close_ctx = crate::native_actor::NativeCtx::new(
+                    &transport_for_thread,
+                    crate::mail::ReplyTo::NONE,
+                );
+                actor_for_thread.on_close(&mut close_ctx);
+
+                // Mark Dead + tombstone before actor_arc drops so
+                // peer lookups serialise: any send racing the close
+                // either finds Live (and gets dispatched in the drain
+                // loop above) or finds the slot already retired.
+                actor_registry_for_thread.mark_dead(id);
+
+                // actor_arc and transport_for_thread drop here on
+                // thread exit. The chassis-stored sender was already
+                // dropped when the actor_registry's `mark_dead` flipped
+                // the entry from Live to Dead.
             })
             .expect("dispatcher thread spawn must succeed");
 

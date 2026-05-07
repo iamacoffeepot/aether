@@ -392,7 +392,23 @@ where
         let thread = std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                while let Some(env) = transport_for_thread.recv_blocking() {
+                // Issue 607 Phase 4a (ADR-0079): the singleton
+                // dispatcher polls the self-shutdown flag the same
+                // way the instanced dispatcher does in `spawn.rs`.
+                // Channel-disconnect is the chassis-shutdown path;
+                // both flow through the same drain → on_close → exit
+                // sequence below. Singletons don't tombstone (their
+                // mailbox slot stays in `Registry`); the chassis's
+                // `BootedPassives::shutdown_in_place` reverse-drops
+                // the SinkSender to fully disconnect the sink.
+                loop {
+                    if transport_for_thread.should_shutdown() {
+                        break;
+                    }
+                    let env = match transport_for_thread.recv_blocking() {
+                        Some(e) => e,
+                        None => break,
+                    };
                     aether_actor::local::with_stamped(&slots, || {
                         // Issue #581: stamp the actor's transport as
                         // the in-actor `MailDispatch` so the actor-
@@ -435,6 +451,43 @@ where
                         p.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                     }
                 }
+                // Drain remaining inbox synchronously so any in-flight
+                // mail dispatched during the shutdown signal is
+                // observed before `on_close` runs.
+                while let Some(env) = transport_for_thread.try_recv() {
+                    aether_actor::local::with_stamped(&slots, || {
+                        aether_actor::log::with_actor_dispatch(
+                            &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                            || {
+                                let mut ctx =
+                                    NativeCtx::new(&transport_for_thread, env.sender);
+                                let _ = actor_for_thread
+                                    .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload);
+                                aether_actor::log::drain_buffer();
+                            },
+                        );
+                    });
+                    if let Some(p) = &pending {
+                        p.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                    }
+                }
+                // Last-chance close hook. Runs whether the trigger was
+                // self-shutdown (flag) or substrate shutdown (channel
+                // disconnect). Default empty for singletons that don't
+                // need it; opt-in for caps with cleanup state.
+                aether_actor::local::with_stamped(&slots, || {
+                    aether_actor::log::with_actor_dispatch(
+                        &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                        || {
+                            let mut close_ctx = NativeCtx::new(
+                                &transport_for_thread,
+                                crate::mail::ReplyTo::NONE,
+                            );
+                            actor_for_thread.on_close(&mut close_ctx);
+                            aether_actor::log::drain_buffer();
+                        },
+                    );
+                });
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
@@ -1644,6 +1697,151 @@ mod tests {
         assert!(
             chassis.actor_registry().live_actor(child_id).is_some(),
             "spawned child should be Live in the actor registry under the deterministic full-name id"
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 4a verify: `ctx.shutdown()` from inside an
+    /// instanced actor's handler triggers the drain → on_close → exit
+    /// path, flips the actor_registry slot to `Dead`, and inserts the
+    /// id into `tombstones`. A reused subname after retirement returns
+    /// `SpawnError::SubnameRetired`.
+    #[test]
+    fn ctx_shutdown_marks_dead_runs_on_close_tombstones_id() {
+        use crate::registry::MailboxEntry;
+        use crate::spawn::{SpawnError, Subname};
+        use aether_actor::{HandlesKind, Instanced};
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Quit {
+            tag: u32,
+        }
+        impl Kind for Quit {
+            const NAME: &'static str = "test.shutdown.quit";
+            const ID: DataKindId = DataKindId(0xE0E1_E2E3_E4E5_E6E7);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        struct Closer {
+            close_observed: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for Closer {
+            const NAMESPACE: &'static str = "test.shutdown.closer";
+        }
+        impl Instanced for Closer {}
+        impl HandlesKind<Quit> for Closer {}
+        impl crate::native_actor::NativeActor for Closer {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self {
+                    close_observed: config,
+                })
+            }
+            fn on_close(&self, _ctx: &mut crate::native_actor::NativeCtx<'_>) {
+                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        impl crate::native_actor::NativeDispatch for Closer {
+            fn __aether_dispatch_envelope(
+                &self,
+                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Quit::ID.0 {
+                    let _ = Quit::decode_from_bytes(payload)?;
+                    ctx.shutdown();
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let close_observed = Arc::new(AtomicU32::new(0));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let id = chassis
+            .spawn_actor::<Closer>(Subname::Counter, Arc::clone(&close_observed))
+            .finish()
+            .expect("spawn instanced actor");
+
+        // Push a Quit envelope at the spawned mailbox via the
+        // registered sink handler. The handler's `ctx.shutdown()`
+        // flips the dispatcher's flag; after the handler returns the
+        // trampoline drains, runs `on_close`, marks Dead, tombstones.
+        let MailboxEntry::Sink(handler) = registry.entry(id).expect("sink registered") else {
+            panic!("expected sink entry for instanced actor");
+        };
+        let bytes = (Quit { tag: 1 }).encode_into_bytes();
+        handler(
+            <Quit as Kind>::ID,
+            Quit::NAME,
+            None,
+            aether_data::ReplyTo::NONE,
+            &bytes,
+            1,
+        );
+
+        // Wait for on_close to run + the registry slot to flip Dead.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while close_observed.load(AtomicOrdering::SeqCst) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            close_observed.load(AtomicOrdering::SeqCst),
+            1,
+            "on_close fired exactly once after the dispatcher drained"
+        );
+        // Spin until the slot transitions Dead — the dispatcher
+        // thread runs `mark_dead` after `on_close`, so there's a
+        // small window between the close-observed bump above and the
+        // registry update.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while chassis.actor_registry().live_actor(id).is_some()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            chassis.actor_registry().live_actor(id).is_none(),
+            "registry slot should transition Live → Dead after on_close runs"
+        );
+        assert!(
+            chassis.actor_registry().is_tombstoned(id),
+            "tombstone insertion forbids reuse of the retired full name"
+        );
+
+        // Spawning again under the same `Subname::Counter` would
+        // increment the per-Spawner counter (so it'd target a fresh
+        // id, not collide); reuse the same `Named` subname to land
+        // back at the tombstoned id.
+        let err = chassis
+            .spawn_actor::<Closer>(Subname::Named("0"), Arc::clone(&close_observed))
+            .finish()
+            .expect_err("retired subname must reject");
+        assert!(
+            matches!(err, SpawnError::SubnameRetired { .. }),
+            "expected SubnameRetired, got {err:?}"
         );
 
         drop(chassis);

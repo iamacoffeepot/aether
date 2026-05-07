@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -107,6 +107,13 @@ pub struct NativeTransport {
     /// (those tests never spawn instances); production constructors
     /// (`new` / `from_ctx`) pass `Some` from the chassis.
     spawner: Option<Arc<crate::Spawner>>,
+    /// Issue 607 Phase 4a (ADR-0079): self-shutdown flag. The actor's
+    /// dispatcher polls this between handler dispatches; flipping it
+    /// (via [`Self::signal_shutdown`] / `NativeCtx::shutdown`) tells
+    /// the dispatcher to drain the inbox, run `on_close`, and exit.
+    /// Substrate-shutdown (channel disconnect) flows through the same
+    /// drain → close → exit path without setting the flag.
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 /// Soft cap on [`NativeTransport::pending_recipients`]. A
@@ -158,6 +165,7 @@ impl NativeTransport {
             aborter,
             pending_recipients: Mutex::new(HashMap::new()),
             spawner,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -231,6 +239,24 @@ impl NativeTransport {
     /// separate per-handler plumbing.
     pub fn spawner(&self) -> Option<&Arc<crate::Spawner>> {
         self.spawner.as_ref()
+    }
+
+    /// Issue 607 Phase 4a (ADR-0079): set the self-shutdown flag the
+    /// actor's dispatcher polls between handler dispatches. Subsequent
+    /// `recv_blocking` calls still process incoming mail, but
+    /// `should_shutdown` reports `true` so the trampoline can drain
+    /// the inbox synchronously, run `on_close`, and exit. Idempotent.
+    pub fn signal_shutdown(&self) {
+        self.shutdown_flag.store(true, Ordering::Release);
+    }
+
+    /// Read the self-shutdown flag. Polled by the dispatcher trampoline
+    /// after each handler dispatch — substrate-shutdown
+    /// (channel-disconnect) flows through the same drain path without
+    /// setting this flag, so the trampoline takes either signal as a
+    /// trigger to wind down.
+    pub fn should_shutdown(&self) -> bool {
+        self.shutdown_flag.load(Ordering::Acquire)
     }
 
     /// Block until the next envelope arrives on this actor's inbox.
