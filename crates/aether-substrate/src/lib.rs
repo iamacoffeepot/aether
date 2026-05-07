@@ -36,6 +36,7 @@
 // macro arm.
 extern crate self as aether_substrate;
 
+pub mod actor_registry;
 pub mod boot;
 pub mod capability;
 pub mod capture;
@@ -63,6 +64,7 @@ pub mod render;
 pub mod reply_table;
 pub mod supervisor;
 
+pub use actor_registry::{ActorEntry, ActorRegistry};
 pub use aether_actor::Actor;
 pub use boot::{SubstrateBoot, SubstrateBootBuilder};
 pub use capability::{
