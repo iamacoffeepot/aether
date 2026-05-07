@@ -58,7 +58,7 @@ fn parse_size_env() -> (u32, u32) {
     }
 }
 
-fn main() -> wasmtime::Result<()> {
+fn main() -> anyhow::Result<()> {
     let capture_queue = CaptureQueue::new();
     let (events_tx, events_rx) = events::channel();
 
@@ -132,7 +132,7 @@ fn drive_events_loop(
     kind_tick: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
     hub: Option<aether_substrate_bundle::hub::HubClient>,
-) -> wasmtime::Result<()> {
+) -> anyhow::Result<()> {
     let queue = Arc::clone(&boot.queue);
     let outbound = Arc::clone(&boot.outbound);
     let input_subscribers = Arc::clone(&boot.input_subscribers);

@@ -41,6 +41,10 @@ aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-codec = { path = "../aether-codec" }
 aether-kinds = { path = "../aether-kinds" }
+# Catch-all error type for chassis main()s + build_passive that
+# bridge BootError / wasmtime / io faults purely to bubble up.
+# Same crate as `wasmtime::Result` re-exports (issue #571).
+anyhow = "1"
 axum = "0.8"
 base64 = "0.22"
 bytemuck = { version = "1.19", features = ["derive"] }
