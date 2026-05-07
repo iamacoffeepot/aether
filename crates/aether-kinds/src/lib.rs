@@ -1642,10 +1642,7 @@ mod tests {
         assert_eq!(ReplaceResult::NAME, "aether.control.replace_result");
         assert_eq!(SubscribeInput::NAME, "aether.input.subscribe");
         assert_eq!(UnsubscribeInput::NAME, "aether.input.unsubscribe");
-        assert_eq!(
-            SubscribeInputResult::NAME,
-            "aether.input.subscribe_result"
-        );
+        assert_eq!(SubscribeInputResult::NAME, "aether.input.subscribe_result");
         assert_eq!(CaptureFrame::NAME, "aether.render.capture_frame");
         assert_eq!(
             CaptureFrameResult::NAME,

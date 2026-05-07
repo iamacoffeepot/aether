@@ -103,12 +103,7 @@ mod native {
         fn on_unsubscribe(&mut self, ctx: &mut NativeCtx<'_>, payload: UnsubscribeInput) {
             let result = match validate_subscriber_mailbox(&self.registry, payload.mailbox) {
                 Ok(()) => {
-                    if let Some(set) = self
-                        .subscribers
-                        .write()
-                        .unwrap()
-                        .get_mut(&payload.kind)
-                    {
+                    if let Some(set) = self.subscribers.write().unwrap().get_mut(&payload.kind) {
                         set.remove(&payload.mailbox);
                     }
                     SubscribeInputResult::Ok
@@ -163,12 +158,7 @@ mod native {
         pub fn unsubscribe_for_test(&self, payload: UnsubscribeInput) -> SubscribeInputResult {
             match validate_subscriber_mailbox(&self.registry, payload.mailbox) {
                 Ok(()) => {
-                    if let Some(set) = self
-                        .subscribers
-                        .write()
-                        .unwrap()
-                        .get_mut(&payload.kind)
-                    {
+                    if let Some(set) = self.subscribers.write().unwrap().get_mut(&payload.kind) {
                         set.remove(&payload.mailbox);
                     }
                     SubscribeInputResult::Ok

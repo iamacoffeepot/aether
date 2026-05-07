@@ -53,7 +53,9 @@ mod native {
 
     use aether_actor::actor;
     use aether_data::{Kind, KindDescriptor};
-    use aether_kinds::{ComponentCapabilities, ComponentDied, DropResult, LoadResult, ReplaceResult};
+    use aether_kinds::{
+        ComponentCapabilities, ComponentDied, DropResult, LoadResult, ReplaceResult,
+    };
     use wasmtime::{Engine, Linker, Module};
 
     use super::{DropComponent, LoadComponent, ReplaceComponent};
@@ -281,7 +283,6 @@ mod native {
             ctx.transport()
                 .send_reply_for_handler(ctx.reply_target(), &result);
         }
-
     }
 
     impl ComponentRouter for ControlPlaneInner {

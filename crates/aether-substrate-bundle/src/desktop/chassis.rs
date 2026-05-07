@@ -17,8 +17,8 @@ use aether_capabilities::{
     AudioCapability, BroadcastCapability, CaptureBackend, ControlPlaneCapability,
     ControlPlaneConfig, HandleCapability, HttpCapability, InputCapability, InputConfig,
     IoCapability, LogCapability, RenderCapability, RenderConfig, TcpCapability,
-    UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf,
-    http::HttpConfig as HttpConf, io::NamespaceRoots,
+    UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf, http::HttpConfig as HttpConf,
+    io::NamespaceRoots,
 };
 use aether_kinds::WindowMode;
 use aether_substrate::capability::BootError;

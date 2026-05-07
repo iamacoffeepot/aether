@@ -99,7 +99,8 @@ fn make_harness() -> Harness {
         Arc::clone(&registry),
         Arc::clone(&queue),
     );
-    let input_cap = InputCapability::for_test(Arc::clone(&registry), Arc::clone(&input_subscribers));
+    let input_cap =
+        InputCapability::for_test(Arc::clone(&registry), Arc::clone(&input_subscribers));
 
     Harness {
         cap,
