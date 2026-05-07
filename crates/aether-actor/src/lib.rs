@@ -95,7 +95,8 @@ pub use wasm::{
 //   - issue #581 — `log` shim replaced by the unified actor-aware
 //     path at `aether_actor::log` (both targets).
 //   - issue #589 — `net` helpers had zero callers; components now
-//     send `Fetch` directly via `ctx.actor::<NetCapability>().send(...)`.
+//     send `Fetch` directly via `ctx.actor::<HttpCapability>().send(...)`
+//     (the cap was renamed from `NetCapability` in issue #612).
 //   - issue #591 — `io` helpers replaced by the same typed-sender
 //     shape (`ctx.actor::<IoCapability>().send(&Read { .. })`); the
 //     sync wait_reply helpers (`*_sync` + `SyncIoError`) had a single

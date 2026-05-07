@@ -17,8 +17,9 @@ use std::time::Duration;
 
 use aether_capabilities::{
     BroadcastCapability, ControlPlaneCapability, ControlPlaneConfig, HandleCapability,
-    HeadlessRenderCapability, HeadlessWindowCapability, IoCapability, LogCapability, NetCapability,
-    UnsupportedTestBenchCapability, io::NamespaceRoots, net::NetConfig as NetConf,
+    HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability, IoCapability,
+    LogCapability, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
+    io::NamespaceRoots,
 };
 use aether_data::{Kind, KindId};
 use aether_kinds::{FrameStats, SetMasterGain, SetMasterGainResult, Tick};
@@ -50,7 +51,7 @@ impl Chassis for HeadlessChassis {
 pub struct HeadlessEnv {
     pub hub_url: Option<String>,
     pub namespace_roots: NamespaceRoots,
-    pub net: NetConf,
+    pub http: HttpConf,
     pub tick_period: Duration,
 }
 
@@ -61,14 +62,14 @@ impl HeadlessEnv {
     /// directly.
     pub fn from_env() -> Self {
         let hub_url = std::env::var("AETHER_HUB_URL").ok();
-        let net = NetConf::from_env();
+        let http = HttpConf::from_env();
         let namespace_roots = NamespaceRoots::from_env();
         let tick_hz = parse_tick_hz_env();
         let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));
         HeadlessEnv {
             hub_url,
             namespace_roots,
-            net,
+            http,
             tick_period,
         }
     }
@@ -77,7 +78,7 @@ impl HeadlessEnv {
 impl HeadlessChassis {
     /// Build the headless chassis: stand up substrate-core internals,
     /// register the audio fail-fast sink, connect the hub, compose
-    /// the native passives (broadcast/handle/log/control/io/net plus
+    /// the native passives (broadcast/handle/log/control/io/http plus
     /// the headless render / window / test-bench fail-fast caps)
     /// through the chassis_builder `.with()` chain, then wrap the
     /// timer in a [`HeadlessTimerCapability`] and hand it to the
@@ -86,7 +87,7 @@ impl HeadlessChassis {
         let HeadlessEnv {
             hub_url,
             namespace_roots,
-            net,
+            http,
             tick_period,
         } = env;
 
@@ -164,7 +165,7 @@ impl HeadlessChassis {
             hub,
         };
 
-        // ADR-0071 phase B: io / net / log compose through the
+        // ADR-0071 phase B: io / http / log compose through the
         // chassis_builder `.with()` chain. Boot order is declaration
         // order — log first so other capabilities' boot tracing routes
         // through the log capture.
@@ -175,7 +176,7 @@ impl HeadlessChassis {
             .with_actor::<LogCapability>(())
             .with_actor::<ControlPlaneCapability>(control_plane_config)
             .with_actor::<IoCapability>(namespace_roots)
-            .with_actor::<NetCapability>(net)
+            .with_actor::<HttpCapability>(http)
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedTestBenchCapability>(())

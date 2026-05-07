@@ -3,7 +3,7 @@
 //! their `&'static str` recipient name as `<X>Capability::NAMESPACE`
 //! (issue 525 Phase 1); the SDK side mirrors them as free
 //! `pub const X_MAILBOX_NAME` strings (`aether-component::io`,
-//! `aether-component::net`, `aether-actor::handle`) for use in
+//! `aether-component::http`, `aether-actor::handle`) for use in
 //! `Mailbox::resolve(...)` calls. This module is the typed companion:
 //! anywhere a `MailboxId` is being compared or constructed against a
 //! well-known mailbox, prefer one of these constants over
@@ -41,8 +41,10 @@ pub const AUDIO: MailboxId = mailbox_id_from_name("aether.audio");
 /// against logical namespaces flow through this mailbox.
 pub const IO: MailboxId = mailbox_id_from_name("aether.io");
 
-/// Network mailbox (ADR-0043). Fetch / Cancel route here.
-pub const NET: MailboxId = mailbox_id_from_name("aether.net");
+/// HTTP mailbox (ADR-0043). Fetch routes here. Renamed from `aether.net`
+/// → `aether.http` (issue 612) to free `aether.net` for the socket-based
+/// `NetCapability` introduced by ADR-0079.
+pub const HTTP: MailboxId = mailbox_id_from_name("aether.http");
 
 /// Log mailbox — components emit `LogEvent` here for structured logging
 /// that surfaces through `engine_logs`.

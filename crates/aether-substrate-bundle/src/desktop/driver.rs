@@ -6,7 +6,7 @@
 //! `AETHER_WINDOW_MODE` parser. Wraps everything in a
 //! [`DesktopDriverCapability`] so [`crate::chassis::DesktopChassis`]
 //! composes one driver alongside its passive capabilities
-//! (LogCapability, IoCapability, NetCapability, AudioCapability,
+//! (LogCapability, IoCapability, HttpCapability, AudioCapability,
 //! RenderCapability — composed via `chassis_builder::Builder::with`
 //! per ADR-0071 phase B).
 //!
@@ -632,7 +632,7 @@ pub struct DesktopDriverRunning {
     event_loop: EventLoop<UserEvent>,
     triangles_rendered: Arc<AtomicU64>,
     /// `SubstrateBoot` drops at the end of `run()`. The chassis_builder
-    /// `BootedPassives` (holding render/audio/io/net/log runnings)
+    /// `BootedPassives` (holding render/audio/io/http/log runnings)
     /// drops just after, tearing down each passive in reverse boot
     /// order via `RunningCapability::shutdown`.
     _boot: SubstrateBoot,

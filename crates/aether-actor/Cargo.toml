@@ -37,10 +37,12 @@ tracing = { version = "0.1", default-features = false }
 [dev-dependencies]
 # Examples migrate from kind-typed `Mailbox` resolutions to actor-
 # typed `ctx.actor::<R>()` calls (issue 575) — needs the cap markers
-# in scope. `default-features = false, features = ["render"]` pulls
-# the marker layer only (cycle-safe via dev-dep, no cargo build of
-# `aether-substrate` from this crate's build graph).
-aether-capabilities = { path = "../aether-capabilities", default-features = false, features = ["render"] }
+# in scope. Pulls `native` so caps' `mod native` blocks compile (they
+# import `aether_substrate` types and are gated on the bridge's
+# default `cfg(not(target_arch = "wasm32"))`, not on the `native`
+# feature). `aether-substrate` deps back on `aether-actor`, but cargo
+# permits dev-dep cycles for the test-target build graph.
+aether-capabilities = { path = "../aether-capabilities", features = ["render"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 bytemuck = { version = "1", features = ["derive"] }
 postcard = { version = "1.1", features = ["alloc"] }

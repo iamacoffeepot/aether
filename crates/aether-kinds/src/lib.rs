@@ -924,8 +924,8 @@ mod control_plane {
     }
 
     // ADR-0043 substrate HTTP egress. One request kind + one reply
-    // kind on the `"aether.net"` sink, plus supporting `HttpMethod`,
-    // `HttpHeader`, and `NetError` shapes. All postcard-shaped
+    // kind on the `"aether.http"` sink, plus supporting `HttpMethod`,
+    // `HttpHeader`, and `HttpError` shapes. All postcard-shaped
     // (Strings, Vecs, Option<u32>).
     //
     // Reply correlation follows the ADR-0041 pattern: the reply
@@ -964,7 +964,7 @@ mod control_plane {
         pub value: String,
     }
 
-    /// Structured failure reason for a net request (ADR-0043 §1).
+    /// Structured failure reason for an HTTP request (ADR-0043 §1).
     /// Typed variants cover the branches agents routinely need to
     /// match on — `Timeout` → retry, `AllowlistDenied` → config
     /// issue, `BodyTooLarge` → chunk the response, `Disabled` →
@@ -973,7 +973,7 @@ mod control_plane {
     /// specific detail (DNS failure, TLS handshake, connection
     /// refused, etc.) as free-form text.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-    pub enum NetError {
+    pub enum HttpError {
         InvalidUrl(String),
         Timeout,
         BodyTooLarge,
@@ -982,15 +982,15 @@ mod control_plane {
         AdapterError(String),
     }
 
-    /// `aether.net.fetch` — request the substrate perform an HTTP
+    /// `aether.http.fetch` — request the substrate perform an HTTP
     /// request and reply with the response. Mailed to the
-    /// `"aether.net"` sink; reply lands via `reply_mail` as
+    /// `"aether.http"` sink; reply lands via `reply_mail` as
     /// `FetchResult`.
     /// `timeout_ms` overrides the chassis default
-    /// (`AETHER_NET_TIMEOUT_MS`, default 30000) when set; `None`
+    /// (`AETHER_HTTP_TIMEOUT_MS`, default 30000) when set; `None`
     /// uses the default.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.net.fetch")]
+    #[kind(name = "aether.http.fetch")]
     pub struct Fetch {
         pub url: String,
         pub method: HttpMethod,
@@ -1002,15 +1002,15 @@ mod control_plane {
     /// Reply to `Fetch`. Both arms echo the originating `url` so the
     /// caller correlates reply-to-request without threading a
     /// pending-op queue — operation identity comes from the reply
-    /// kind itself (`aether.net.fetch_result`). Request `body` is
+    /// kind itself (`aether.http.fetch_result`). Request `body` is
     /// deliberately not echoed: correlation needs the identity of
     /// the request, not its contents, and a multi-MB upload should
     /// not round-trip. `Ok` carries the HTTP status, response
     /// headers, and response body (bounded by
-    /// `AETHER_NET_MAX_BODY_BYTES`, default 16MB); `Err` carries a
-    /// `NetError` variant.
+    /// `AETHER_HTTP_MAX_BODY_BYTES`, default 16MB); `Err` carries an
+    /// `HttpError` variant.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.net.fetch_result")]
+    #[kind(name = "aether.http.fetch_result")]
     pub enum FetchResult {
         Ok {
             url: String,
@@ -1020,7 +1020,7 @@ mod control_plane {
         },
         Err {
             url: String,
-            error: NetError,
+            error: HttpError,
         },
     }
 
@@ -1046,7 +1046,7 @@ mod control_plane {
     // id.
 
     /// Structured failure reason for a handle operation. Mirrors
-    /// `IoError` / `NetError`'s tagged-enum shape so guests can
+    /// `IoError` / `HttpError`'s tagged-enum shape so guests can
     /// pattern-match on the variant rather than parsing strings.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub enum HandleError {
@@ -1690,14 +1690,14 @@ mod tests {
         }
     }
 
-    // ADR-0043 net kind roundtrips. `Fetch` carries String + typed
+    // ADR-0043 HTTP kind roundtrips. `Fetch` carries String + typed
     // method + Vec<HttpHeader> + Vec<u8> body + Option<u32>;
     // `FetchResult` mirrors `ReadResult`'s Ok/Err split with a
-    // typed error arm wrapping `NetError`. Tests prove the derived
+    // typed error arm wrapping `HttpError`. Tests prove the derived
     // Serialize/Deserialize agree on the wire for each shape, with
     // special attention to the `body`-not-echoed invariant and the
-    // payload-carrying `NetError` variants.
-    mod net_roundtrips {
+    // payload-carrying `HttpError` variants.
+    mod http_roundtrips {
         use super::*;
         use alloc::string::ToString;
         use alloc::vec;
@@ -1776,54 +1776,54 @@ mod tests {
         }
 
         #[test]
-        fn fetch_result_err_roundtrip_echoes_url_and_net_error() {
+        fn fetch_result_err_roundtrip_echoes_url_and_http_error() {
             let r = FetchResult::Err {
                 url: "https://api.example.com/gone".to_string(),
-                error: NetError::Timeout,
+                error: HttpError::Timeout,
             };
             let bytes = postcard::to_allocvec(&r).unwrap();
             let back: FetchResult = postcard::from_bytes(&bytes).unwrap();
             match back {
                 FetchResult::Err { url, error } => {
                     assert_eq!(url, "https://api.example.com/gone");
-                    assert_eq!(error, NetError::Timeout);
+                    assert_eq!(error, HttpError::Timeout);
                 }
                 FetchResult::Ok { .. } => panic!("expected Err"),
             }
         }
 
         #[test]
-        fn net_error_invalid_url_carries_payload() {
-            let e = NetError::InvalidUrl("not a url".to_string());
+        fn http_error_invalid_url_carries_payload() {
+            let e = HttpError::InvalidUrl("not a url".to_string());
             let bytes = postcard::to_allocvec(&e).unwrap();
-            let back: NetError = postcard::from_bytes(&bytes).unwrap();
+            let back: HttpError = postcard::from_bytes(&bytes).unwrap();
             match back {
-                NetError::InvalidUrl(s) => assert_eq!(s, "not a url"),
+                HttpError::InvalidUrl(s) => assert_eq!(s, "not a url"),
                 other => panic!("expected InvalidUrl, got {other:?}"),
             }
         }
 
         #[test]
-        fn net_error_adapter_carries_detail() {
-            let e = NetError::AdapterError("dns lookup failed".to_string());
+        fn http_error_adapter_carries_detail() {
+            let e = HttpError::AdapterError("dns lookup failed".to_string());
             let bytes = postcard::to_allocvec(&e).unwrap();
-            let back: NetError = postcard::from_bytes(&bytes).unwrap();
+            let back: HttpError = postcard::from_bytes(&bytes).unwrap();
             match back {
-                NetError::AdapterError(s) => assert_eq!(s, "dns lookup failed"),
+                HttpError::AdapterError(s) => assert_eq!(s, "dns lookup failed"),
                 other => panic!("expected AdapterError, got {other:?}"),
             }
         }
 
         #[test]
-        fn net_error_unit_variants_roundtrip() {
+        fn http_error_unit_variants_roundtrip() {
             for e in [
-                NetError::Timeout,
-                NetError::BodyTooLarge,
-                NetError::AllowlistDenied,
-                NetError::Disabled,
+                HttpError::Timeout,
+                HttpError::BodyTooLarge,
+                HttpError::AllowlistDenied,
+                HttpError::Disabled,
             ] {
                 let bytes = postcard::to_allocvec(&e).unwrap();
-                let back: NetError = postcard::from_bytes(&bytes).unwrap();
+                let back: HttpError = postcard::from_bytes(&bytes).unwrap();
                 assert_eq!(back, e);
             }
         }
