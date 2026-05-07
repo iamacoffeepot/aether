@@ -130,11 +130,12 @@ jobs:
           if ${{ github.event_name == 'pull_request' }}; then
               echo "changed_files=$(git diff --name-only -r HEAD^1 HEAD | xargs)" >> $GITHUB_OUTPUT
           else
-              echo "changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }} | xargs)" >> $GITHUB_OUTPUT
+              echo "changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }})" >> $GITHUB_OUTPUT
           fi
       - name: Run tests
         run: |
-          TESTABLE_CRATES=$(echo ${{ steps.changed-files.outputs.changed_files }} | grep -E '^(crates)')
+
+          TESTABLE_CRATES=$(echo "${{ steps.changed-files.outputs.changed_files }}" | grep -E '^(crates)')
           CRATE_NAMES=$(echo "${TESTABLE_CRATES}" | cut -d/ -f2 | sort -u)
           echo "Testable crates: ${CRATE_NAMES}"
           for crate in $CRATE_NAMES; do
