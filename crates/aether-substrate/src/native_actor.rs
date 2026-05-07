@@ -416,9 +416,9 @@ impl<'a> NativeInitCtx<'a> {
     /// `Actor::NAMESPACE`; for instanced actors it's
     /// `"{NAMESPACE}:{subname}"` (ADR-0079). Init may use this to
     /// publish its own address — e.g. dispatch
-    /// `aether.control.subscribe_input { mailbox: ctx.self_id() }`
-    /// before registration completes; replies route correctly once the
-    /// spawn lifecycle finishes inserting the entry.
+    /// `aether.input.subscribe { mailbox: ctx.self_id() }` before
+    /// registration completes; replies route correctly once the spawn
+    /// lifecycle finishes inserting the entry.
     pub fn self_id(&self) -> crate::mail::MailboxId {
         self.transport.self_mailbox()
     }

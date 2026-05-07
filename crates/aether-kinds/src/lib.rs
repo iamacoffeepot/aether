@@ -797,29 +797,28 @@ mod control_plane {
     // ADR-0021 publish/subscribe routing for substrate input streams,
     // ADR-0068 keying. The substrate maintains one subscriber set per
     // input `KindId`; a `SubscribeInput` names the kind id and the
-    // mailbox to add. Reserved kind names `aether.control.subscribe_input`
-    // / `aether.control.unsubscribe_input` /
-    // `aether.control.subscribe_input_result` match the namespace used
-    // for load/drop/replace; the substrate handles them inline and
-    // replies via reply-to-sender.
+    // mailbox to add. Issue 638 Phase 2 rehomed these kinds from
+    // `aether.control.*` to `aether.input.*`; the chassis-owned
+    // `InputCapability` handles them inline and replies via
+    // reply-to-sender.
 
-    /// `aether.control.subscribe_input` — add `mailbox` to the
-    /// subscriber set for `kind`. Idempotent: subscribing a mailbox
-    /// already in the set is still `Ok` (subscriptions are a set, not
-    /// a counter). Reply: `SubscribeInputResult`.
+    /// `aether.input.subscribe` — add `mailbox` to the subscriber set
+    /// for `kind`. Idempotent: subscribing a mailbox already in the
+    /// set is still `Ok` (subscriptions are a set, not a counter).
+    /// Reply: `SubscribeInputResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.subscribe_input")]
+    #[kind(name = "aether.input.subscribe")]
     pub struct SubscribeInput {
         pub kind: aether_data::KindId,
         pub mailbox: aether_data::MailboxId,
     }
 
-    /// `aether.control.unsubscribe_input` — remove `mailbox` from the
+    /// `aether.input.unsubscribe` — remove `mailbox` from the
     /// subscriber set for `kind`. Idempotent: unsubscribing a mailbox
     /// that isn't subscribed is still `Ok`. Reply:
     /// `SubscribeInputResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.unsubscribe_input")]
+    #[kind(name = "aether.input.unsubscribe")]
     pub struct UnsubscribeInput {
         pub kind: aether_data::KindId,
         pub mailbox: aether_data::MailboxId,
@@ -829,7 +828,7 @@ mod control_plane {
     /// failure mode: the target mailbox id doesn't name a live
     /// component (unknown, a sink, or already dropped).
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.subscribe_input_result")]
+    #[kind(name = "aether.input.subscribe_result")]
     pub enum SubscribeInputResult {
         Ok,
         Err { error: String },
@@ -1641,11 +1640,11 @@ mod tests {
         assert_eq!(LoadResult::NAME, "aether.control.load_result");
         assert_eq!(DropResult::NAME, "aether.control.drop_result");
         assert_eq!(ReplaceResult::NAME, "aether.control.replace_result");
-        assert_eq!(SubscribeInput::NAME, "aether.control.subscribe_input");
-        assert_eq!(UnsubscribeInput::NAME, "aether.control.unsubscribe_input");
+        assert_eq!(SubscribeInput::NAME, "aether.input.subscribe");
+        assert_eq!(UnsubscribeInput::NAME, "aether.input.unsubscribe");
         assert_eq!(
             SubscribeInputResult::NAME,
-            "aether.control.subscribe_input_result"
+            "aether.input.subscribe_result"
         );
         assert_eq!(CaptureFrame::NAME, "aether.render.capture_frame");
         assert_eq!(

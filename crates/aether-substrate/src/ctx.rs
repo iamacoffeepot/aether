@@ -46,9 +46,9 @@ pub struct SubstrateCtx {
     /// ADR-0021 subscriber sets, shared with the platform-event
     /// publisher in `main.rs`. `#[actor]`-decorated components
     /// auto-subscribe every `K::IS_INPUT` handler kind by mailing
-    /// `aether.control.subscribe_input` from the init prologue the
-    /// macro prepends (ADR-0033 phase 3), which the control plane
-    /// processes and mutates this set.
+    /// `aether.input.subscribe` from the init prologue the macro
+    /// prepends (ADR-0033 phase 3); `InputCapability` processes the
+    /// mail and mutates this set.
     pub input_subscribers: InputSubscribers,
     /// ADR-0013 + ADR-0017: handle→entry map populated by
     /// `Component::deliver` whenever an inbound mail has a meaningful

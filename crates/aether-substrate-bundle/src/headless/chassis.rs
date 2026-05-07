@@ -17,9 +17,9 @@ use std::time::Duration;
 
 use aether_capabilities::{
     BroadcastCapability, ControlPlaneCapability, ControlPlaneConfig, HandleCapability,
-    HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability, IoCapability,
-    LogCapability, TcpCapability, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
-    io::NamespaceRoots,
+    HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability, InputCapability,
+    InputConfig, IoCapability, LogCapability, TcpCapability, UnsupportedTestBenchCapability,
+    http::HttpConfig as HttpConf, io::NamespaceRoots,
 };
 use aether_data::{Kind, KindId};
 use aether_kinds::{FrameStats, SetMasterGain, SetMasterGainResult, Tick};
@@ -99,6 +99,9 @@ impl HeadlessChassis {
             hub_outbound: Arc::clone(&boot.outbound),
             input_subscribers: Arc::clone(&boot.input_subscribers),
         };
+        let input_config = InputConfig {
+            input_subscribers: Arc::clone(&boot.input_subscribers),
+        };
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_frame_stats = boot
@@ -174,6 +177,7 @@ impl HeadlessChassis {
             .with_actor::<BroadcastCapability>(())
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
+            .with_actor::<InputCapability>(input_config)
             .with_actor::<ControlPlaneCapability>(control_plane_config)
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<HttpCapability>(http)

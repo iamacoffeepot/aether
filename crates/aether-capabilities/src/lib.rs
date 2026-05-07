@@ -31,6 +31,7 @@ pub mod broadcast;
 pub mod control;
 pub mod handle;
 pub mod http;
+pub mod input;
 pub mod io;
 pub mod log;
 #[cfg(feature = "render")]
@@ -54,6 +55,10 @@ pub use control::ControlPlaneCapability;
 pub use control::ControlPlaneConfig;
 pub use handle::HandleCapability;
 pub use http::{HttpCapability, HttpConfig};
+pub use input::InputCapability;
+#[cfg(not(target_arch = "wasm32"))]
+pub use input::InputConfig;
+
 pub use io::IoCapability;
 pub use log::LogCapability;
 #[cfg(feature = "render")]

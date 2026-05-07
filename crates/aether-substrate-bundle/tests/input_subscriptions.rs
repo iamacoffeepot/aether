@@ -19,7 +19,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use aether_capabilities::{ControlPlaneCapability, ControlPlaneConfig};
+use aether_capabilities::{ControlPlaneCapability, ControlPlaneConfig, InputCapability};
 use aether_data::{Kind, KindId};
 use aether_kinds::{DropComponent, LoadComponent, SubscribeInput, Tick, UnsubscribeInput};
 use aether_substrate_bundle::{
@@ -53,6 +53,7 @@ fn tally_forwarding_wat(tally_id: u64) -> String {
 
 struct Harness {
     cap: ControlPlaneCapability,
+    input_cap: InputCapability,
     queue: Arc<Mailer>,
     input_subscribers: InputSubscribers,
     counter: Arc<AtomicU32>,
@@ -98,9 +99,11 @@ fn make_harness() -> Harness {
         Arc::clone(&registry),
         Arc::clone(&queue),
     );
+    let input_cap = InputCapability::for_test(Arc::clone(&registry), Arc::clone(&input_subscribers));
 
     Harness {
         cap,
+        input_cap,
         queue,
         input_subscribers,
         counter,
@@ -121,14 +124,14 @@ fn load_wat(cap: &ControlPlaneCapability, wat: &str, name: &str) -> aether_data:
     }
 }
 
-fn subscribe(cap: &ControlPlaneCapability, kind: KindId, mailbox: aether_data::MailboxId) {
+fn subscribe(cap: &InputCapability, kind: KindId, mailbox: aether_data::MailboxId) {
     let r = cap.subscribe_for_test(SubscribeInput { kind, mailbox });
     matches!(r, aether_kinds::SubscribeInputResult::Ok)
         .then_some(())
         .expect("subscribe succeeded");
 }
 
-fn unsubscribe(cap: &ControlPlaneCapability, kind: KindId, mailbox: aether_data::MailboxId) {
+fn unsubscribe(cap: &InputCapability, kind: KindId, mailbox: aether_data::MailboxId) {
     let r = cap.unsubscribe_for_test(UnsubscribeInput { kind, mailbox });
     matches!(r, aether_kinds::SubscribeInputResult::Ok)
         .then_some(())
@@ -165,7 +168,7 @@ fn empty_subscribers_means_no_delivery() {
 fn subscribed_component_receives_published_ticks() {
     let h = make_harness();
     let id = load_wat(&h.cap, &h.wat, "listener");
-    subscribe(&h.cap, Tick::ID, id);
+    subscribe(&h.input_cap, Tick::ID, id);
     assert_eq!(subscribers_for(&h.input_subscribers, Tick::ID), vec![id]);
     for _ in 0..3 {
         publish_tick(&h);
@@ -178,8 +181,8 @@ fn two_subscribers_each_receive_every_tick() {
     let h = make_harness();
     let a = load_wat(&h.cap, &h.wat, "a");
     let b = load_wat(&h.cap, &h.wat, "b");
-    subscribe(&h.cap, Tick::ID, a);
-    subscribe(&h.cap, Tick::ID, b);
+    subscribe(&h.input_cap, Tick::ID, a);
+    subscribe(&h.input_cap, Tick::ID, b);
     publish_tick(&h);
     publish_tick(&h);
     // 2 subscribers × 2 ticks = 4 deliveries.
@@ -190,11 +193,11 @@ fn two_subscribers_each_receive_every_tick() {
 fn unsubscribe_stops_delivery() {
     let h = make_harness();
     let id = load_wat(&h.cap, &h.wat, "listener");
-    subscribe(&h.cap, Tick::ID, id);
+    subscribe(&h.input_cap, Tick::ID, id);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);
 
-    unsubscribe(&h.cap, Tick::ID, id);
+    unsubscribe(&h.input_cap, Tick::ID, id);
     publish_tick(&h);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);
@@ -204,7 +207,7 @@ fn unsubscribe_stops_delivery() {
 fn drop_clears_subscriptions() {
     let h = make_harness();
     let id = load_wat(&h.cap, &h.wat, "victim");
-    subscribe(&h.cap, Tick::ID, id);
+    subscribe(&h.input_cap, Tick::ID, id);
     publish_tick(&h);
     assert_eq!(h.counter.load(Ordering::SeqCst), 1);
 
