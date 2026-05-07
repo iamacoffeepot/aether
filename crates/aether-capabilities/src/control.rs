@@ -1097,7 +1097,7 @@ mod native {
         };
 
         let mail = Mail::new(
-            aether_kinds::mailboxes::HUB_BROADCAST,
+            aether_data::mailbox_id_from_name(aether_kinds::HUB_BROADCAST_MAILBOX_NAME),
             ComponentDied::ID,
             payload,
             1,

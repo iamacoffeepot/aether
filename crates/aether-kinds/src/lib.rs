@@ -15,9 +15,17 @@ extern crate alloc;
 
 pub mod descriptors;
 pub mod keycode;
-pub mod mailboxes;
 
 use bytemuck::{Pod, Zeroable};
+
+/// Hub broadcast mailbox name (ADR-0008 observation path). The
+/// `BroadcastCapability` (in `aether-capabilities`) reuses this string
+/// as its `Actor::NAMESPACE`; substrate-internal pushes (frame_loop's
+/// frame-stats emission, the scheduler-death announce) read the same
+/// const so name and id stay in lockstep without depending on
+/// `aether-capabilities`. Issue #613 retired the `mailboxes` module
+/// the const used to live in; this single string is the residue.
+pub const HUB_BROADCAST_MAILBOX_NAME: &str = "hub.claude.broadcast";
 
 // Every kind below derives both `Kind` and `Schema`. Pre-ADR-0032
 // `Schema` was gated behind a `descriptors` feature so wasm guests
@@ -423,6 +431,36 @@ pub struct SubstrateDying {
 pub struct UnresolvedMail {
     pub recipient_mailbox_id: aether_data::MailboxId,
     pub kind_id: aether_data::KindId,
+}
+
+/// Issue 607 Phase 4b (ADR-0079): framework-emitted close
+/// notification. Sent to every monitor a closing actor accumulated via
+/// `NativeCtx::monitor` — the substrate drains `monitors_of[target]`
+/// after the target's `on_close` runs, fires one `MonitorNotice` per
+/// watcher, and only then flips the target's slot from `Live` to
+/// `Dead`.
+///
+/// The watcher receives this kind as ordinary mail; its `#[handler]`
+/// reads `target` to identify which actor it was monitoring. v1 carries
+/// only the target id — no `CloseReason` field — so the wire shape is
+/// purely additive if a future revision wants to surface trap vs
+/// shutdown vs cooperative close.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Pod,
+    Zeroable,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.observation.monitor_notice")]
+pub struct MonitorNotice {
+    pub target: aether_data::MailboxId,
 }
 
 // Reserved control-plane vocabulary (ADR-0010). The substrate handles

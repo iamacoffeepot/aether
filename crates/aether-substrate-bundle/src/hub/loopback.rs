@@ -194,7 +194,9 @@ fn send_unresolved_diagnostic(
     })
     .to_vec();
     let frame = HubToEngine::MailById(MailByIdFrame {
-        recipient_mailbox_id: aether_kinds::mailboxes::DIAGNOSTICS,
+        recipient_mailbox_id: aether_data::mailbox_id_from_name(
+            aether_substrate::AETHER_DIAGNOSTICS,
+        ),
         kind_id: UnresolvedMail::ID,
         payload,
         count: 1,
@@ -530,7 +532,7 @@ mod tests {
         assert_eq!(frame.kind_id, UnresolvedMail::ID);
         assert_eq!(
             frame.recipient_mailbox_id,
-            aether_kinds::mailboxes::DIAGNOSTICS,
+            aether_data::mailbox_id_from_name(aether_substrate::AETHER_DIAGNOSTICS),
         );
         let record: &UnresolvedMail = bytemuck::from_bytes(&frame.payload);
         assert_eq!(

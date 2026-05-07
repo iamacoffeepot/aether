@@ -165,15 +165,15 @@ fn abort_reason(summary: &DrainSummary) -> Option<String> {
 /// specific context (FPS, elapsed) the helper shouldn't decide
 /// the schema for.
 ///
-/// Stage 3 of issue 552 retired the `broadcast_mbox` parameter:
-/// the recipient is `aether_kinds::mailboxes::HUB_BROADCAST`, a const-
-/// evaluated id matching the broadcast cap's claim under
-/// `HUB_BROADCAST_MAILBOX_NAME` (issue 576 promoted broadcast into a
-/// real chassis cap; the const stayed in `aether-kinds` so substrate-
-/// internal pushes don't depend on `aether-capabilities`). `sender`
-/// likewise retired — the broadcast path is target-by-mailbox +
-/// fan-out, no reply, so a sender identity wasn't read by any
-/// consumer.
+/// Stage 3 of issue 552 retired the `broadcast_mbox` parameter: the
+/// recipient is derived from `aether_kinds::HUB_BROADCAST_MAILBOX_NAME`
+/// inline (`mailbox_id_from_name` is `const fn`), matching the
+/// broadcast cap's claim under the same constant (issue 576 promoted
+/// broadcast into a real chassis cap; the name stayed in
+/// `aether-kinds` so substrate-internal pushes don't depend on
+/// `aether-capabilities`). `sender` likewise retired — the broadcast
+/// path is target-by-mailbox + fan-out, no reply, so a sender
+/// identity wasn't read by any consumer.
 pub fn emit_frame_stats(
     queue: &Mailer,
     kind_frame_stats: aether_data::KindId,
@@ -184,7 +184,7 @@ pub fn emit_frame_stats(
         return;
     }
     queue.push(Mail::new(
-        aether_kinds::mailboxes::HUB_BROADCAST,
+        aether_data::mailbox_id_from_name(aether_kinds::HUB_BROADCAST_MAILBOX_NAME),
         kind_frame_stats,
         encode(&FrameStats { frame, triangles }),
         1,
@@ -377,7 +377,7 @@ mod tests {
         let captured: Arc<RwLock<Vec<Vec<u8>>>> = Arc::new(RwLock::new(Vec::new()));
         let captured_for_sink = Arc::clone(&captured);
         registry.register_sink(
-            aether_kinds::mailboxes::HUB_BROADCAST_MAILBOX_NAME,
+            aether_kinds::HUB_BROADCAST_MAILBOX_NAME,
             Arc::new(
                 move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {
                     captured_for_sink.write().unwrap().push(bytes.to_vec());
@@ -402,7 +402,7 @@ mod tests {
         let captured: Arc<RwLock<Vec<Vec<u8>>>> = Arc::new(RwLock::new(Vec::new()));
         let captured_for_sink = Arc::clone(&captured);
         registry.register_sink(
-            aether_kinds::mailboxes::HUB_BROADCAST_MAILBOX_NAME,
+            aether_kinds::HUB_BROADCAST_MAILBOX_NAME,
             Arc::new(
                 move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {
                     captured_for_sink.write().unwrap().push(bytes.to_vec());

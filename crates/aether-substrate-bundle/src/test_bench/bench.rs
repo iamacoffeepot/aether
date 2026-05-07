@@ -30,7 +30,8 @@ use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tic
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use crate::hub::HubProtocolBackend;
-use aether_capabilities::{IoCapability, io::NamespaceRoots};
+use aether_actor::Actor;
+use aether_capabilities::{IoCapability, RenderCapability, io::NamespaceRoots};
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
     capture::CaptureQueue,
@@ -389,6 +390,32 @@ impl TestBench {
         Ok(())
     }
 
+    /// Issue 607 Phase 3: spawn an instanced actor onto the bench's
+    /// chassis (ADR-0079). Returns a [`aether_substrate::SpawnBuilder`]
+    /// the caller chains `after_init` / `finish` against — the same
+    /// shape callers reach for from the chassis-builder scope. Used by
+    /// integration tests that exercise the spawn lifecycle without
+    /// going through a parent-actor handler.
+    pub fn spawn_actor<'a, A>(
+        &'a self,
+        subname: aether_substrate::Subname<'a>,
+        config: A::Config,
+    ) -> aether_substrate::SpawnBuilder<'a, A>
+    where
+        A: aether_actor::Instanced
+            + aether_substrate::NativeActor
+            + aether_substrate::NativeDispatch,
+    {
+        self._passive.spawn_actor::<A>(subname, config)
+    }
+
+    /// Borrow the bench's [`aether_substrate::ActorRegistry`]. Used
+    /// alongside `spawn_actor` so tests can inspect the live entry's
+    /// `MailboxId` directly.
+    pub fn actor_registry(&self) -> &Arc<aether_substrate::ActorRegistry> {
+        self._passive.actor_registry()
+    }
+
     /// Send `mail` to `recipient_name` with this bench's session as
     /// the reply target, then pump until a matching reply arrives and
     /// decode it as `R`. The reply must be postcard-encoded — true
@@ -466,7 +493,7 @@ impl TestBench {
         // landed on `aether.control` and routed through the
         // chassis_handler closure.
         self.push_to_mailbox(
-            aether_kinds::mailboxes::RENDER,
+            aether_data::mailbox_id_from_name(RenderCapability::NAMESPACE),
             &CaptureFrame {
                 mails: pre,
                 after_mails: after,
@@ -738,6 +765,136 @@ mod tests {
             png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
             "captured bytes are not a PNG: first 8 bytes={:?}",
             &png.iter().take(8).cloned().collect::<Vec<u8>>(),
+        );
+    }
+
+    /// Issue 607 Phase 3 verify: spawn an instanced actor through
+    /// `TestBench::spawn_actor`, exercise `Subname::Counter` +
+    /// `Subname::Named`, assert returned `MailboxId` matches the
+    /// deterministic full-name hash, confirm reused subnames fail,
+    /// and confirm `after_init` mail lands as the actor's first
+    /// dispatch.
+    #[test]
+    fn spawn_instanced_actor_smoke() {
+        use aether_actor::{Actor as ActorTrait, HandlesKind, Instanced};
+        use aether_data::{Kind as DataKind, KindId as DataKindId, mailbox_id_from_name};
+        use aether_substrate::{
+            BootError, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx, SpawnError, Subname,
+        };
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Bump {
+            tag: u32,
+        }
+        impl DataKind for Bump {
+            const NAME: &'static str = "test.spawn.bump";
+            const ID: DataKindId = DataKindId(0xB0B1_B2B3_B4B5_B6B7);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        struct Child {
+            received: Arc<AtomicU32>,
+        }
+        impl ActorTrait for Child {
+            const NAMESPACE: &'static str = "test.spawn.child";
+        }
+        impl Instanced for Child {}
+        impl HandlesKind<Bump> for Child {}
+        impl NativeActor for Child {
+            type Config = Arc<AtomicU32>;
+            fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { received: config })
+            }
+        }
+        impl NativeDispatch for Child {
+            fn __aether_dispatch_envelope(
+                &self,
+                _ctx: &mut NativeCtx<'_>,
+                kind: aether_substrate::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Bump::ID.0 {
+                    let _ = Bump::decode_from_bytes(payload)?;
+                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let tb = match TestBench::start_with_size(64, 48) {
+            Ok(tb) => tb,
+            Err(e) => {
+                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
+
+        let received = Arc::new(AtomicU32::new(0));
+
+        // Subname::Counter — first instance, full name "test.spawn.child:0".
+        let id_a = tb
+            .spawn_actor::<Child>(Subname::Counter, Arc::clone(&received))
+            .after_init(Bump { tag: 1 })
+            .after_init(Bump { tag: 2 })
+            .finish()
+            .expect("first counter spawn");
+        assert_eq!(
+            id_a,
+            MailboxId(mailbox_id_from_name("test.spawn.child:0").0),
+            "Counter subname allocates from a per-Spawner counter starting at 0"
+        );
+
+        // Subname::Named — second instance, full name "test.spawn.child:alpha".
+        let id_b = tb
+            .spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received))
+            .finish()
+            .expect("named spawn");
+        assert_eq!(
+            id_b,
+            MailboxId(mailbox_id_from_name("test.spawn.child:alpha").0),
+        );
+
+        // Reused subname → SubnameInUse.
+        let err = tb
+            .spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received))
+            .finish()
+            .expect_err("reused subname must fail");
+        assert!(
+            matches!(err, SpawnError::SubnameInUse { .. }),
+            "expected SubnameInUse, got {err:?}"
+        );
+
+        // Wait briefly for the two pre-loaded `Bump` mails to land in
+        // the first instance's dispatcher.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while received.load(AtomicOrdering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            received.load(AtomicOrdering::SeqCst),
+            2,
+            "both pre-loaded after_init mails should dispatch to the first instance"
+        );
+
+        // Live registry slots are populated by id.
+        assert!(
+            tb.actor_registry().live_actor(id_a).is_some(),
+            "first instance should be Live in the actor registry"
+        );
+        assert!(
+            tb.actor_registry().live_actor(id_b).is_some(),
+            "second instance should be Live in the actor registry"
         );
     }
 }

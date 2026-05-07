@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -100,6 +100,20 @@ pub struct NativeTransport {
     /// `MAX_PENDING_RECIPIENTS`); a runaway sender that never paired
     /// a wait would otherwise leak entries here.
     pending_recipients: Mutex<HashMap<u64, MailboxId>>,
+    /// Issue 607 Phase 3b (ADR-0079): the chassis's [`crate::Spawner`]
+    /// cloned into every booted actor's transport so per-handler
+    /// `NativeCtx::spawn_child` can reach the spawn machinery without
+    /// separate plumbing. `None` for [`Self::new_for_test`] transports
+    /// (those tests never spawn instances); production constructors
+    /// (`new` / `from_ctx`) pass `Some` from the chassis.
+    spawner: Option<Arc<crate::Spawner>>,
+    /// Issue 607 Phase 4a (ADR-0079): self-shutdown flag. The actor's
+    /// dispatcher polls this between handler dispatches; flipping it
+    /// (via [`Self::signal_shutdown`] / `NativeCtx::shutdown`) tells
+    /// the dispatcher to drain the inbox, run `on_close`, and exit.
+    /// Substrate-shutdown (channel disconnect) flows through the same
+    /// drain → close → exit path without setting the flag.
+    shutdown_flag: Arc<AtomicBool>,
 }
 
 /// Soft cap on [`NativeTransport::pending_recipients`]. A
@@ -138,6 +152,7 @@ impl NativeTransport {
         caller_frame_bound: bool,
         frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
         aborter: Arc<dyn FatalAborter>,
+        spawner: Option<Arc<crate::Spawner>>,
     ) -> Self {
         Self {
             mailer,
@@ -149,6 +164,8 @@ impl NativeTransport {
             frame_bound_set,
             aborter,
             pending_recipients: Mutex::new(HashMap::new()),
+            spawner,
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -174,6 +191,7 @@ impl NativeTransport {
             frame_bound,
             ctx.frame_bound_set(),
             ctx.fatal_aborter(),
+            Some(Arc::clone(ctx.spawner_arc())),
         )
     }
 
@@ -190,6 +208,7 @@ impl NativeTransport {
             false,
             Arc::new(RwLock::new(HashSet::new())),
             Arc::new(PanicAborter),
+            None,
         )
     }
 
@@ -209,6 +228,35 @@ impl NativeTransport {
     /// transport's send path.
     pub fn self_mailbox(&self) -> MailboxId {
         self.self_mailbox
+    }
+
+    /// The chassis's [`crate::Spawner`], if one was wired in at
+    /// construction. `Some` for production transports built through
+    /// [`Self::from_ctx`] (the chassis builds + threads its `Spawner`
+    /// into every cap); `None` for [`Self::new_for_test`] transports
+    /// (those tests don't exercise spawn). Used by
+    /// `NativeCtx::spawn_child` to reach the spawn machinery without
+    /// separate per-handler plumbing.
+    pub fn spawner(&self) -> Option<&Arc<crate::Spawner>> {
+        self.spawner.as_ref()
+    }
+
+    /// Issue 607 Phase 4a (ADR-0079): set the self-shutdown flag the
+    /// actor's dispatcher polls between handler dispatches. Subsequent
+    /// `recv_blocking` calls still process incoming mail, but
+    /// `should_shutdown` reports `true` so the trampoline can drain
+    /// the inbox synchronously, run `on_close`, and exit. Idempotent.
+    pub fn signal_shutdown(&self) {
+        self.shutdown_flag.store(true, Ordering::Release);
+    }
+
+    /// Read the self-shutdown flag. Polled by the dispatcher trampoline
+    /// after each handler dispatch — substrate-shutdown
+    /// (channel-disconnect) flows through the same drain path without
+    /// setting this flag, so the trampoline takes either signal as a
+    /// trigger to wind down.
+    pub fn should_shutdown(&self) -> bool {
+        self.shutdown_flag.load(Ordering::Acquire)
     }
 
     /// Block until the next envelope arrives on this actor's inbox.
@@ -566,6 +614,7 @@ mod tests {
             caller_frame_bound,
             frame_bound_set,
             Arc::new(PanicAborter),
+            None,
         )
     }
 

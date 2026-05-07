@@ -96,6 +96,25 @@ pub trait NativeActor: Actor + Sync {
     fn init(config: Self::Config, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError>
     where
         Self: Sized;
+
+    /// Issue 607 Phase 4a (ADR-0079): last-chance close hook. Runs
+    /// after the dispatcher's inbox drain, before the actor value
+    /// drops. Triggers:
+    ///
+    /// - Self-shutdown — actor's handler called `ctx.shutdown()`;
+    ///   dispatcher saw the flag set after the handler returned.
+    /// - Substrate shutdown — chassis dropped its registry, the sink
+    ///   handler's `Weak<Sender>` upgrade fails, the inbox channel
+    ///   disconnects, and `recv_blocking` returns `None`.
+    /// - Cooperative external — a peer mailed the actor a "please
+    ///   close" kind; the actor's handler did its cleanup and called
+    ///   `ctx.shutdown()`. From the dispatcher's perspective this is
+    ///   identical to self-shutdown.
+    ///
+    /// `&self` matches the handler convention: caps put any mutable
+    /// state behind interior mutability. Default empty — opt-in for
+    /// caps that need to publish a final broadcast or flush state.
+    fn on_close(&self, _ctx: &mut NativeCtx<'_>) {}
 }
 
 /// Sum dispatch entry-point — emitted once per `#[actor] impl
@@ -203,6 +222,93 @@ impl<'a> NativeCtx<'a> {
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<'_, R, NativeTransport> {
         ActorMailbox::__new(mailbox_id_from_name(name).0, self.transport)
     }
+
+    /// Issue 607 Phase 4a (ADR-0079): self-shutdown signal. Sets a
+    /// flag the actor's dispatcher polls after each handler returns;
+    /// when set, the trampoline drains any remaining inbox mail
+    /// synchronously, runs `NativeActor::on_close`, and exits the
+    /// dispatch loop. After exit the actor's [`crate::MailboxId`]
+    /// transitions from `Live` to `Dead` in the chassis's
+    /// [`crate::ActorRegistry`] and is added to `tombstones` —
+    /// `spawn_child` rejects reuse of the retired full name with
+    /// `SpawnError::SubnameRetired`.
+    ///
+    /// Idempotent — flipping the flag twice is the same as flipping
+    /// it once. Singletons booted through `with_actor` rely on the
+    /// chassis-shutdown channel-drop path instead of this flag, but
+    /// can call `shutdown()` to opt in to flag-based exit.
+    pub fn shutdown(&self) {
+        self.transport.signal_shutdown();
+    }
+
+    /// Issue 607 Phase 4b (ADR-0079): register the calling actor as a
+    /// monitor of `target`. Returns a [`MonitorHandle`] whose `Drop`
+    /// deregisters the entry, so a handler that wants to unwatch
+    /// before the watcher itself dies just drops the handle.
+    ///
+    /// On the target's close, the substrate drains its monitor list
+    /// and fires one [`aether_kinds::MonitorNotice`] per watcher
+    /// before the slot transitions `Live` → `Dead`. The watcher
+    /// receives that notice as ordinary mail and reads the `target`
+    /// field to identify the closing actor.
+    ///
+    /// Validation: `target` must currently be `Live` in the
+    /// [`crate::ActorRegistry`]; tombstoned (closed) and unknown ids
+    /// surface as [`crate::MonitorError`]. Singletons today don't sit
+    /// in the actor registry as `Live` entries (their entries live in
+    /// the routing [`crate::Registry`] only); a future lift inserts
+    /// them so monitoring a singleton works the same way. Until then,
+    /// monitor only addresses instanced actors.
+    ///
+    /// Panics if the transport was constructed via
+    /// [`NativeTransport::new_for_test`] (no spawner / actor registry
+    /// wired). Production transports always carry both.
+    pub fn monitor(
+        &self,
+        target: aether_data::MailboxId,
+    ) -> Result<MonitorHandle, crate::actor_registry::MonitorError> {
+        let spawner = self
+            .transport
+            .spawner()
+            .expect("NativeCtx::monitor requires a chassis-built transport (no spawner installed — likely a `new_for_test` transport)");
+        let registry = Arc::clone(spawner.actor_registry());
+        let watcher = self.transport.self_mailbox();
+        registry.register_monitor(watcher, target)?;
+        Ok(MonitorHandle::new(registry, watcher, target))
+    }
+
+    /// Issue 607 Phase 3b (ADR-0079): spawn an instanced actor as a
+    /// child of the calling actor. The new actor's [`crate::ReplyTo`]
+    /// stamps the calling actor's mailbox so any reply addressed to
+    /// `ReplyTarget::Component` routes back here.
+    ///
+    /// Returns a [`crate::SpawnBuilder`] the caller chains
+    /// `after_init` / `finish` against. Mirrors the chassis-level
+    /// `PassiveChassis::spawn_actor` / `BuiltChassis::spawn_actor`
+    /// shape; both flow through the same [`crate::Spawner`].
+    ///
+    /// Panics if the transport was constructed via
+    /// [`NativeTransport::new_for_test`] (which doesn't wire a
+    /// spawner). Production transports always carry one, so handler
+    /// code never reaches the panic.
+    pub fn spawn_child<'b, A>(
+        &'b self,
+        subname: crate::spawn::Subname<'b>,
+        config: A::Config,
+    ) -> crate::SpawnBuilder<'b, A>
+    where
+        A: aether_actor::Instanced + NativeActor + crate::NativeDispatch,
+    {
+        let spawner = self
+            .transport
+            .spawner()
+            .expect("NativeCtx::spawn_child requires a chassis-built transport (no spawner installed — likely a `new_for_test` transport)");
+        let sender = ReplyTo {
+            target: crate::mail::ReplyTarget::Component(self.transport.self_mailbox()),
+            correlation_id: ReplyTo::NO_CORRELATION,
+        };
+        crate::SpawnBuilder::new(Arc::clone(spawner), subname, config, sender)
+    }
 }
 
 impl<'a> Sender for NativeCtx<'a> {
@@ -295,6 +401,18 @@ impl<'a> NativeInitCtx<'a> {
     /// outbound mail.
     pub fn transport(&self) -> &NativeTransport {
         self.transport
+    }
+
+    /// The actor's own [`MailboxId`] — the deterministic FNV-1a hash
+    /// of its full registered name (ADR-0029). For singletons that's
+    /// `Actor::NAMESPACE`; for instanced actors it's
+    /// `"{NAMESPACE}:{subname}"` (ADR-0079). Init may use this to
+    /// publish its own address — e.g. dispatch
+    /// `aether.control.subscribe_input { mailbox: ctx.self_id() }`
+    /// before registration completes; replies route correctly once the
+    /// spawn lifecycle finishes inserting the entry.
+    pub fn self_id(&self) -> crate::mail::MailboxId {
+        self.transport.self_mailbox()
     }
 
     /// Clone the substrate's mailer. Caps that need to register a
@@ -408,6 +526,57 @@ impl Actors {
     /// Number of booted actors. Useful for tests.
     pub fn len(&self) -> usize {
         self.by_type.len()
+    }
+}
+
+/// Issue 607 Phase 4b (ADR-0079): RAII handle returned by
+/// [`NativeCtx::monitor`]. Holds the registered `(watcher, target)`
+/// pair plus an `Arc` to the chassis's [`crate::ActorRegistry`] so
+/// `Drop` can deregister without rethreading the registry through the
+/// caller.
+///
+/// The framework also prunes the monitor entry on either party's
+/// close (the target's close drains `monitors_of[target]` after firing
+/// `MonitorNotice`; the watcher's close walks `monitoring[watcher]` to
+/// remove `watcher` from each target's forward list). `Drop` calls
+/// [`crate::ActorRegistry::deregister_monitor`] which is idempotent —
+/// dropping a handle whose entry the close path already removed is a
+/// no-op.
+///
+/// Not `Clone` — a monitor is a unique (watcher, target) registration;
+/// duplicating the handle would duplicate the deregistration on Drop
+/// (still benign because deregister is idempotent, but cloneable
+/// handles encourage holding multiple references whose semantics
+/// surface as silent multi-prune).
+pub struct MonitorHandle {
+    registry: Arc<crate::actor_registry::ActorRegistry>,
+    watcher: aether_data::MailboxId,
+    target: aether_data::MailboxId,
+}
+
+impl MonitorHandle {
+    pub(crate) fn new(
+        registry: Arc<crate::actor_registry::ActorRegistry>,
+        watcher: aether_data::MailboxId,
+        target: aether_data::MailboxId,
+    ) -> Self {
+        Self {
+            registry,
+            watcher,
+            target,
+        }
+    }
+
+    /// The target this handle is monitoring. Useful for handlers that
+    /// hold many handles and need to identify which one fired a notice.
+    pub fn target(&self) -> aether_data::MailboxId {
+        self.target
+    }
+}
+
+impl Drop for MonitorHandle {
+    fn drop(&mut self) {
+        self.registry.deregister_monitor(self.watcher, self.target);
     }
 }
 

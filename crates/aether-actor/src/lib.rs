@@ -67,7 +67,10 @@ mod sync;
 mod transport;
 pub mod wasm;
 
-pub use actor::{Actor, Dispatch, HandlesKind, Singleton};
+pub use actor::{
+    Actor, Dispatch, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, Singleton,
+    validate_namespace_segment,
+};
 pub use ctx::{Ctx, DropCtx, InitCtx};
 pub use local::Local;
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
