@@ -300,6 +300,7 @@ impl Spawner {
         let actor_for_thread = Arc::clone(&actor_arc);
         let transport_for_thread = Arc::clone(&transport);
         let actor_registry_for_thread = Arc::clone(&self.actor_registry);
+        let mailer_for_thread = Arc::clone(&self.mailer);
         let thread_name = alloc_instanced_thread_name(&full_name);
         // The local strong Arc was the populator for the Weak handler
         // ref; the actor_registry now holds an `Arc::clone` of the
@@ -368,16 +369,39 @@ impl Spawner {
                 );
                 actor_for_thread.on_close(&mut close_ctx);
 
-                // Mark Dead + tombstone before actor_arc drops so
-                // peer lookups serialise: any send racing the close
-                // either finds Live (and gets dispatched in the drain
-                // loop above) or finds the slot already retired.
-                actor_registry_for_thread.mark_dead(id);
+                // Issue 607 Phase 4b (ADR-0079): close path. Drain
+                // monitors_of[id] for fan-out, prune monitoring[id]
+                // from each target's forward list, then mark Dead +
+                // tombstone. `close_actor` runs all three steps under
+                // its own locks; we fan out the returned watcher list
+                // here so the MonitorNotice mails ride the substrate's
+                // ordinary `Mailer::push` path (sinks dispatch on the
+                // calling thread; component recipients route through
+                // the supervisor).
+                let watchers = actor_registry_for_thread.close_actor(id);
+                if !watchers.is_empty() {
+                    let notice = aether_kinds::MonitorNotice { target: id };
+                    let payload =
+                        <aether_kinds::MonitorNotice as aether_data::Kind>::encode_into_bytes(
+                            &notice,
+                        );
+                    let kind = crate::mail::KindId(
+                        <aether_kinds::MonitorNotice as aether_data::Kind>::ID.0,
+                    );
+                    for watcher in watchers {
+                        mailer_for_thread.push(crate::mail::Mail::new(
+                            watcher,
+                            kind,
+                            payload.clone(),
+                            1,
+                        ));
+                    }
+                }
 
                 // actor_arc and transport_for_thread drop here on
                 // thread exit. The chassis-stored sender was already
-                // dropped when the actor_registry's `mark_dead` flipped
-                // the entry from Live to Dead.
+                // dropped when `close_actor`'s `mark_dead` flipped the
+                // entry from Live to Dead.
             })
             .expect("dispatcher thread spawn must succeed");
 
