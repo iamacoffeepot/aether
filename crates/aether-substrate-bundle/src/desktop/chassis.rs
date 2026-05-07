@@ -23,6 +23,7 @@ use aether_kinds::WindowMode;
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{Builder, BuiltChassis};
 use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
+use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
 
 use super::driver::{DesktopDriverCapability, WORKERS, parse_window_mode_env};
@@ -81,7 +82,11 @@ impl DesktopEnv {
     /// way. The single env-reading edge for the desktop chassis (per
     /// issue 464). Tests bypass this by constructing `DesktopEnv`
     /// directly.
-    pub fn from_env() -> wasmtime::Result<Self> {
+    ///
+    /// The only fallible step is `EventLoop::build`; everything else
+    /// is infallible env reads. The signature names that fault rather
+    /// than the historic catch-all `wasmtime::Result` (issue #571).
+    pub fn from_env() -> Result<Self, EventLoopError> {
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
         let capture_queue = CaptureQueue::new();

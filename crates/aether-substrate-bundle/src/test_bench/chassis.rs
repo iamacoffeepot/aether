@@ -137,7 +137,7 @@ impl TestBenchChassis {
     /// The embedder is responsible for any further capability adds
     /// (io with whatever failure semantics it wants), GPU creation,
     /// loopback attach, and driving the event loop.
-    pub fn build_passive(env: TestBenchEnv) -> wasmtime::Result<TestBenchBuild> {
+    pub fn build_passive(env: TestBenchEnv) -> anyhow::Result<TestBenchBuild> {
         let TestBenchEnv {
             name,
             version,
@@ -200,8 +200,7 @@ impl TestBenchChassis {
                 .with_actor::<HeadlessWindowCapability>(())
                 .with_actor::<TestBenchCapability>(test_bench_cap_config)
                 .with_log_drain::<LogCapability>()
-                .build_passive()
-                .map_err(|e: BootError| wasmtime::Error::msg(format!("chassis build: {e}")))?;
+                .build_passive()?;
 
         // Issue 552 stage 2d: pull the booted `Arc<RenderCapability>`
         // out of the `PassiveChassis` actors map and clone the
@@ -212,7 +211,7 @@ impl TestBenchChassis {
         let render_handles = passive
             .actor::<RenderCapability>()
             .ok_or_else(|| {
-                wasmtime::Error::msg(
+                anyhow::anyhow!(
                     "TestBenchChassis::build: RenderCapability not booted via with_actor",
                 )
             })?

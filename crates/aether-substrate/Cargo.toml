@@ -31,6 +31,12 @@ audio = ["dep:cpal", "dep:crossbeam-queue"]
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
+# Catch-all error type for boot paths that bridge multiple fault
+# sources (BootError + occasional wasmtime / io). Same crate as
+# `wasmtime::Result` re-exports, so swapping `wasmtime::Result`
+# call sites to `anyhow::Result` is a zero-cost rename — it just
+# stops advertising a wasmtime dep that isn't there (issue #571).
+anyhow = "1"
 bytemuck = "1.19"
 postcard = { version = "1.1", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
