@@ -297,6 +297,28 @@ where
     A: NativeActor + NativeDispatch,
 {
     Box::new(move |ctx, actors| {
+        // Issue 607 Phase 3b (ADR-0079): claim namespace ownership for
+        // this singleton's `Actor::NAMESPACE`. The actor registry
+        // tracks one TypeId per namespace across both cardinalities
+        // (Singleton/Instanced), so a later `spawn_child::<X>` whose
+        // `X::NAMESPACE` collides with this singleton's namespace
+        // surfaces as `SpawnError::NamespaceOwnedByOtherType`. Same
+        // TypeId re-claiming the same namespace is idempotent.
+        if let Err(_existing) = ctx
+            .spawner_arc()
+            .actor_registry()
+            .try_claim_namespace(A::NAMESPACE, std::any::TypeId::of::<A>())
+        {
+            // The other claim is on the same namespace by a different
+            // TypeId — a chassis-build collision. Surface as a typed
+            // BootError; the chassis builder unwinds the partially
+            // booted caps before propagating.
+            return Err(BootError::Other(Box::new(std::io::Error::other(format!(
+                "namespace {:?} already owned by a different TypeId — fix the conflicting actor's NAMESPACE const",
+                A::NAMESPACE
+            )))));
+        }
+
         // Frame-bound caps (today: render) claim through the
         // frame-bound path so the `pending` counter feeds the chassis
         // frame loop. Free-running caps take the regular drop-on-
@@ -708,6 +730,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
                 &booted.frame_bound_set,
                 &booted.aborter,
                 &mut booted.claimed_actor_mailboxes,
+                &booted.spawner,
             );
             let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.actors);
             driver_boot(&mut driver_ctx)?
@@ -838,6 +861,7 @@ fn boot_passives(
             &frame_bound_set,
             aborter,
             &mut claimed_actor_mailboxes,
+            &spawner,
         );
         match boot(&mut ctx, &mut actors) {
             Ok(shutdown) => shutdowns.push(shutdown),
@@ -904,7 +928,12 @@ impl<C: Chassis> BuiltChassis<C> {
     where
         A: aether_actor::Instanced + NativeActor + NativeDispatch,
     {
-        crate::SpawnBuilder::new(&self.booted.spawner, subname, config, crate::ReplyTo::NONE)
+        crate::SpawnBuilder::new(
+            Arc::clone(&self.booted.spawner),
+            subname,
+            config,
+            crate::ReplyTo::NONE,
+        )
     }
 
     /// Borrow the chassis's [`crate::ActorRegistry`]. Read-only;
@@ -990,7 +1019,12 @@ impl<C: Chassis> PassiveChassis<C> {
     where
         A: aether_actor::Instanced + NativeActor + NativeDispatch,
     {
-        crate::SpawnBuilder::new(&self.booted.spawner, subname, config, crate::ReplyTo::NONE)
+        crate::SpawnBuilder::new(
+            Arc::clone(&self.booted.spawner),
+            subname,
+            config,
+            crate::ReplyTo::NONE,
+        )
     }
 
     /// Borrow the chassis's [`crate::ActorRegistry`]. Read-only;
@@ -1428,6 +1462,188 @@ mod tests {
             103,
             "init seeded 100 + 3 handler bumps ⇒ Local at 103 (proves the same \
              ActorSlots is stamped across init and dispatch)"
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 3b verify: a singleton parent's handler calls
+    /// `ctx.spawn_child::<Child>(...)` to launch an instanced actor.
+    /// Asserts the child's `MailboxId` lands in the chassis's
+    /// `ActorRegistry` as a Live entry, and that the parent-pre-loaded
+    /// `after_init` mail dispatches as the child's first envelope.
+    #[test]
+    fn ctx_spawn_child_routes_through_handler() {
+        use crate::registry::MailboxEntry;
+        use crate::spawn::Subname;
+        use aether_actor::{HandlesKind, Instanced};
+        use aether_data::{Kind, KindId as DataKindId, ReplyTo as DataReplyTo};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Hatch {
+            tag: u32,
+        }
+        impl Kind for Hatch {
+            const NAME: &'static str = "test.spawn_child.hatch";
+            const ID: DataKindId = DataKindId(0xC0C1_C2C3_C4C5_C6C7);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Ping {
+            tag: u32,
+        }
+        impl Kind for Ping {
+            const NAME: &'static str = "test.spawn_child.ping";
+            const ID: DataKindId = DataKindId(0xD0D1_D2D3_D4D5_D6D7);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        struct ChildCap {
+            received: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for ChildCap {
+            const NAMESPACE: &'static str = "test.spawn_child.child";
+        }
+        impl Instanced for ChildCap {}
+        impl HandlesKind<Ping> for ChildCap {}
+        impl crate::native_actor::NativeActor for ChildCap {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self { received: config })
+            }
+        }
+        impl crate::native_actor::NativeDispatch for ChildCap {
+            fn __aether_dispatch_envelope(
+                &self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Ping::ID.0 {
+                    let _ = Ping::decode_from_bytes(payload)?;
+                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        struct ParentCap {
+            spawn_count: Arc<AtomicU32>,
+            child_received: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for ParentCap {
+            const NAMESPACE: &'static str = "test.spawn_child.parent";
+        }
+        impl aether_actor::Singleton for ParentCap {}
+        impl HandlesKind<Hatch> for ParentCap {}
+        impl crate::native_actor::NativeActor for ParentCap {
+            type Config = (Arc<AtomicU32>, Arc<AtomicU32>);
+            fn init(
+                (spawn_count, child_received): Self::Config,
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self {
+                    spawn_count,
+                    child_received,
+                })
+            }
+        }
+        impl crate::native_actor::NativeDispatch for ParentCap {
+            fn __aether_dispatch_envelope(
+                &self,
+                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Hatch::ID.0 {
+                    let _ = Hatch::decode_from_bytes(payload)?;
+                    let _id = ctx
+                        .spawn_child::<ChildCap>(Subname::Counter, Arc::clone(&self.child_received))
+                        .after_init(Ping { tag: 42 })
+                        .finish()
+                        .expect("spawn_child must succeed");
+                    self.spawn_count.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let spawn_count = Arc::new(AtomicU32::new(0));
+        let child_received = Arc::new(AtomicU32::new(0));
+
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<ParentCap>((Arc::clone(&spawn_count), Arc::clone(&child_received)))
+            .build_passive()
+            .expect("ParentCap boots");
+
+        // Push Hatch at the parent's mailbox; the parent's handler
+        // calls `ctx.spawn_child::<ChildCap>` which in turn pushes a
+        // Ping at the new child via the after_init bootstrap.
+        let parent_id = registry
+            .lookup(<ParentCap as aether_actor::Actor>::NAMESPACE)
+            .expect("ParentCap claimed");
+        let MailboxEntry::Sink(handler) = registry.entry(parent_id).expect("sink") else {
+            panic!("expected sink entry");
+        };
+        let bytes = (Hatch { tag: 1 }).encode_into_bytes();
+        handler(
+            <Hatch as Kind>::ID,
+            Hatch::NAME,
+            None,
+            DataReplyTo::NONE,
+            &bytes,
+            1,
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while child_received.load(AtomicOrdering::SeqCst) < 1
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            spawn_count.load(AtomicOrdering::SeqCst),
+            1,
+            "parent's handler ran spawn_child exactly once"
+        );
+        assert_eq!(
+            child_received.load(AtomicOrdering::SeqCst),
+            1,
+            "spawn_child's after_init mail dispatched as the child's first envelope"
+        );
+
+        // Child is Live in the chassis's actor registry.
+        let child_id =
+            crate::mail::MailboxId(aether_data::mailbox_id_from_name("test.spawn_child.child:0").0);
+        assert!(
+            chassis.actor_registry().live_actor(child_id).is_some(),
+            "spawned child should be Live in the actor registry under the deterministic full-name id"
         );
 
         drop(chassis);

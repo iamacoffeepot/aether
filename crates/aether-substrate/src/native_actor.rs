@@ -203,6 +203,39 @@ impl<'a> NativeCtx<'a> {
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<'_, R, NativeTransport> {
         ActorMailbox::__new(mailbox_id_from_name(name).0, self.transport)
     }
+
+    /// Issue 607 Phase 3b (ADR-0079): spawn an instanced actor as a
+    /// child of the calling actor. The new actor's [`crate::ReplyTo`]
+    /// stamps the calling actor's mailbox so any reply addressed to
+    /// `ReplyTarget::Component` routes back here.
+    ///
+    /// Returns a [`crate::SpawnBuilder`] the caller chains
+    /// `after_init` / `finish` against. Mirrors the chassis-level
+    /// `PassiveChassis::spawn_actor` / `BuiltChassis::spawn_actor`
+    /// shape; both flow through the same [`crate::Spawner`].
+    ///
+    /// Panics if the transport was constructed via
+    /// [`NativeTransport::new_for_test`] (which doesn't wire a
+    /// spawner). Production transports always carry one, so handler
+    /// code never reaches the panic.
+    pub fn spawn_child<'b, A>(
+        &'b self,
+        subname: crate::spawn::Subname<'b>,
+        config: A::Config,
+    ) -> crate::SpawnBuilder<'b, A>
+    where
+        A: aether_actor::Instanced + NativeActor + crate::NativeDispatch,
+    {
+        let spawner = self
+            .transport
+            .spawner()
+            .expect("NativeCtx::spawn_child requires a chassis-built transport (no spawner installed — likely a `new_for_test` transport)");
+        let sender = ReplyTo {
+            target: crate::mail::ReplyTarget::Component(self.transport.self_mailbox()),
+            correlation_id: ReplyTo::NO_CORRELATION,
+        };
+        crate::SpawnBuilder::new(Arc::clone(spawner), subname, config, sender)
+    }
 }
 
 impl<'a> Sender for NativeCtx<'a> {

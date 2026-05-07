@@ -294,11 +294,24 @@ pub struct ChassisCtx<'a> {
     /// `Registry::register_sink` directly and do *not* land here —
     /// they're not actors and have no `LogDrainSlot` to install.
     claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
+    /// Issue 607 Phase 3b (ADR-0079): the chassis's
+    /// [`crate::Spawner`], cloned into every booted actor's
+    /// [`crate::NativeTransport`] (via [`crate::NativeTransport::from_ctx`])
+    /// so per-handler `NativeCtx::spawn_child` can reach the spawn
+    /// machinery without separate plumbing. Built once at boot in
+    /// `boot_passives` (chassis_builder) / `ChassisBuilder::build`
+    /// (legacy).
+    spawner: &'a Arc<crate::Spawner>,
 }
 
 impl<'a> ChassisCtx<'a> {
     /// Internal constructor used by [`ChassisBuilder::build`] and the
-    /// ADR-0071 [`crate::chassis_builder::Builder`].
+    /// ADR-0071 [`crate::chassis_builder::Builder`]. Eight refs is one
+    /// over clippy's default; the alternative — a builder-of-the-builder
+    /// — pays the same plumbing cost without adding clarity, since
+    /// every chassis path that constructs a `ChassisCtx` already has
+    /// every ref in scope.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         registry: &'a Arc<Registry>,
         mailer: &'a Arc<Mailer>,
@@ -307,6 +320,7 @@ impl<'a> ChassisCtx<'a> {
         frame_bound_set: &'a Arc<RwLock<HashSet<MailboxId>>>,
         aborter: &'a Arc<dyn FatalAborter>,
         claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
+        spawner: &'a Arc<crate::Spawner>,
     ) -> Self {
         Self {
             registry,
@@ -316,6 +330,7 @@ impl<'a> ChassisCtx<'a> {
             frame_bound_set,
             aborter,
             claimed_actor_mailboxes,
+            spawner,
         }
     }
 
@@ -597,6 +612,14 @@ impl<'a> ChassisCtx<'a> {
         Arc::clone(self.aborter)
     }
 
+    /// Borrow the chassis's [`crate::Spawner`]. Used by
+    /// [`crate::NativeTransport::from_ctx`] to clone an `Arc<Spawner>`
+    /// into every booted actor's transport so per-handler
+    /// `NativeCtx::spawn_child` can reach the spawn machinery.
+    pub fn spawner_arc(&self) -> &Arc<crate::Spawner> {
+        self.spawner
+    }
+
     /// Install the fallback-router handler. At most one capability
     /// may claim the slot; a second call returns
     /// [`BootError::FallbackRouterAlreadyClaimed`].
@@ -779,6 +802,21 @@ fn boot_native_actor<A>(
 where
     A: crate::NativeActor + crate::NativeDispatch,
 {
+    // Issue 607 Phase 3b (ADR-0079): claim namespace ownership for
+    // this singleton. Mirrors the new builder path; cross-cardinality
+    // collisions surface as a typed BootError that the legacy
+    // ChassisBuilder unwinds.
+    if let Err(_existing) = ctx
+        .spawner_arc()
+        .actor_registry()
+        .try_claim_namespace(A::NAMESPACE, std::any::TypeId::of::<A>())
+    {
+        return Err(BootError::Other(Box::new(std::io::Error::other(format!(
+            "namespace {:?} already owned by a different TypeId — fix the conflicting actor's NAMESPACE const",
+            A::NAMESPACE
+        )))));
+    }
+
     // Stage 2d: frame-bound caps go through `claim_frame_bound_mailbox`
     // so the chassis's `frame_bound_pending` Vec sees the pending
     // counter; the dispatcher decrements after each handler dispatch
@@ -1052,6 +1090,19 @@ impl ChassisBuilder {
         // owns that surface). Track claims here for shape parity with
         // the new path; the vec stays unused.
         let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
+        // Issue 607 Phase 3 / Phase 3b (ADR-0079): per-chassis actor
+        // registry + spawner. Mirrors `chassis_builder::Builder`'s
+        // `boot_passives` so caps booted through either path expose
+        // the same `NativeCtx::spawn_child` surface to runtime
+        // handlers.
+        let actor_registry: Arc<crate::ActorRegistry> = Arc::new(crate::ActorRegistry::new());
+        let spawner: Arc<crate::Spawner> = Arc::new(crate::Spawner::new(
+            Arc::clone(&registry),
+            Arc::clone(&actor_registry),
+            Arc::clone(&mailer),
+            Arc::clone(&frame_bound_set),
+            Arc::clone(&aborter),
+        ));
         let mut booted: Vec<Box<dyn ActorErased>> = Vec::with_capacity(pending.len());
         for boot in pending {
             let mut ctx = ChassisCtx::new(
@@ -1062,6 +1113,7 @@ impl ChassisBuilder {
                 &frame_bound_set,
                 &aborter,
                 &mut claimed_actor_mailboxes,
+                &spawner,
             );
             match boot(&mut ctx) {
                 Ok(actor) => booted.push(actor),
@@ -1093,6 +1145,8 @@ impl ChassisBuilder {
             frame_bound_pending,
             frame_bound_set,
             aborter,
+            actor_registry,
+            spawner,
         })
     }
 }
@@ -1125,6 +1179,18 @@ pub struct BootedChassis {
     /// [`crate::lifecycle::OutboundFatalAborter`] via
     /// [`ChassisBuilder::with_aborter`].
     aborter: Arc<dyn FatalAborter>,
+    /// Issue 607 Phase 2 / Phase 3 (ADR-0079): per-chassis actor
+    /// lifecycle registry. Mirror of `chassis_builder::BootedPassives`'
+    /// field; held here so caps booted through the legacy
+    /// `ChassisBuilder` path also see the registry through
+    /// `NativeCtx::spawn_child` (Phase 3b).
+    #[allow(dead_code)]
+    actor_registry: Arc<crate::ActorRegistry>,
+    /// Issue 607 Phase 3b (ADR-0079): chassis-level spawn machinery
+    /// cloned into every booted actor's transport. Held here for the
+    /// chassis lifetime; `add` / `add_actor` thread it through
+    /// post-build cap claims so they see the same machinery.
+    spawner: Arc<crate::Spawner>,
 }
 
 impl fmt::Debug for BootedChassis {
@@ -1196,6 +1262,7 @@ impl BootedChassis {
             &self.frame_bound_set,
             &self.aborter,
             &mut claimed_actor_mailboxes,
+            &self.spawner,
         );
         let handle = ctx.spawn_actor_dispatcher(cap)?;
         self.running.push(Box::new(handle));
@@ -1232,6 +1299,7 @@ impl BootedChassis {
             &self.frame_bound_set,
             &self.aborter,
             &mut claimed_actor_mailboxes,
+            &self.spawner,
         );
         let erased = boot_native_actor::<A>(&mut ctx, config)?;
         self.running.push(erased);
