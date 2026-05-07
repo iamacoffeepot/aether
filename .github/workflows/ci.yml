@@ -131,9 +131,11 @@ jobs:
           else
               changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }})
           fi
+          echo "Changed files: ${changed_files}"
           TESTABLE_CRATES=$(echo "${changed_files}" | grep -E '^(crates)')
+          echo "Testable crates paths: ${TESTABLE_CRATES}"
           CRATE_NAMES=$(echo "${TESTABLE_CRATES}" | cut -d/ -f2 | sort -u)
-          echo "Testable crates: ${CRATE_NAMES}"
+          echo "Unique crate names: ${CRATE_NAMES}"
           for crate in $CRATE_NAMES; do
             echo "Found changes in crate: $crate"
             cargo test -p file://$(pwd)/${crate}
