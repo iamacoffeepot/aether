@@ -1041,9 +1041,13 @@ impl<C: Chassis> BuiltChassis<C> {
     /// `(subname, MailboxId)` pairs (not `Arc<A>`); the actor itself
     /// never escapes its dispatcher thread.
     ///
-    /// Useful for chassis-level diagnostics (which sessions are
-    /// alive?) and for tests that need to assert against the full
-    /// fleet without holding a list of subnames externally.
+    /// **Diagnostic / embedder-test affordance.** Caps that supervise
+    /// a fleet of instances (e.g. `TcpCapability` over
+    /// `TcpListenerActor`) hold their own cap-local map of children
+    /// and update it on `MonitorNotice` — they don't enumerate via
+    /// the chassis registry from a handler. Reach for this from a
+    /// driver / TestBench / scenario inspection step, not from
+    /// production cap state. ADR-0079 supervisor-as-cap pattern.
     pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
         &self,
     ) -> Vec<(String, MailboxId)> {
@@ -1173,7 +1177,9 @@ impl<C: Chassis> PassiveChassis<C> {
     /// Issue 607 Phase 5 (ADR-0079): mirror of
     /// [`BuiltChassis::resolve_actors`] for embedders that drive
     /// passive chassis directly. Issue 629 / Phase A: returns
-    /// `(subname, MailboxId)` pairs.
+    /// `(subname, MailboxId)` pairs. Diagnostic-only contract: caps
+    /// that supervise a fleet hold their own cap-local map; this is
+    /// for tests and chassis-level introspection only.
     pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
         &self,
     ) -> Vec<(String, MailboxId)> {

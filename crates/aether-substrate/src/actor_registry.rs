@@ -241,8 +241,16 @@ impl ActorRegistry {
     /// Issue 607 Phase 5 (ADR-0079): walk every `Live` slot whose
     /// `TypeId` matches `T` and hand the caller `(subname, MailboxId)`.
     /// Used by [`super::PassiveChassis::resolve_actors`] /
-    /// [`super::BuiltChassis::resolve_actors`] to enumerate all
-    /// instances of a given type.
+    /// [`super::BuiltChassis::resolve_actors`] for chassis-level
+    /// enumeration of instanced actors.
+    ///
+    /// **Crate-private on purpose.** Cap handlers should not introspect
+    /// the registry at runtime — caps that supervise a fleet of
+    /// instances (e.g. `TcpCapability` over `TcpListenerActor`) hold
+    /// their own cap-local map of children and update it on
+    /// `MonitorNotice`. The chassis-level surface is for
+    /// embedder/test diagnostics, not in-handler state. ADR-0079
+    /// supervisor-as-cap pattern.
     ///
     /// Issue 629 / Phase A: returns `(subname, MailboxId)` instead of
     /// `(subname, Arc<T>)`. The actor itself no longer escapes its

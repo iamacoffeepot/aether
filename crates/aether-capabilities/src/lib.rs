@@ -35,6 +35,7 @@ pub mod io;
 pub mod log;
 #[cfg(feature = "render")]
 pub mod render;
+pub mod tcp;
 pub mod test_bench;
 pub mod window;
 
@@ -61,5 +62,6 @@ pub use render::HeadlessRenderCapability;
 pub use render::RenderCapability;
 #[cfg(feature = "render-native")]
 pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
+pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
 pub use window::HeadlessWindowCapability;

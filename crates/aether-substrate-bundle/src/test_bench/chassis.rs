@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use crate::hub::HubClient;
 use aether_capabilities::{
     BroadcastCapability, CaptureBackend, HandleCapability, HeadlessWindowCapability, LogCapability,
-    RenderCapability, RenderConfig, RenderHandles,
+    RenderCapability, RenderConfig, RenderHandles, TcpCapability,
 };
 use aether_capabilities::{ControlPlaneCapability, ControlPlaneConfig};
 use aether_data::Kind;
@@ -196,6 +196,7 @@ impl TestBenchChassis {
                 .with_actor::<HandleCapability>(())
                 .with_actor::<LogCapability>(())
                 .with_actor::<ControlPlaneCapability>(control_plane_config)
+                .with_actor::<TcpCapability>(())
                 .with_actor::<RenderCapability>(render_config)
                 .with_actor::<HeadlessWindowCapability>(())
                 .with_actor::<TestBenchCapability>(test_bench_cap_config)
