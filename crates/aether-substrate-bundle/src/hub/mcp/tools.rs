@@ -51,10 +51,10 @@ use crate::hub::registry::ComponentRecord;
 /// capture / load / replace paths.
 const KIND_CAPTURE_FRAME: &str = "aether.render.capture_frame";
 const KIND_CAPTURE_FRAME_RESULT: &str = "aether.render.capture_frame_result";
-const KIND_LOAD_COMPONENT: &str = "aether.control.load_component";
-const KIND_LOAD_RESULT: &str = "aether.control.load_result";
-const KIND_REPLACE_COMPONENT: &str = "aether.control.replace_component";
-const KIND_REPLACE_RESULT: &str = "aether.control.replace_result";
+const KIND_LOAD_COMPONENT: &str = "aether.component.load";
+const KIND_LOAD_RESULT: &str = "aether.component.load_result";
+const KIND_REPLACE_COMPONENT: &str = "aether.component.replace";
+const KIND_REPLACE_RESULT: &str = "aether.component.replace_result";
 
 /// Shared default/cap for await-reply tools. `DEFAULT_CAPTURE_TIMEOUT`
 /// is reused directly by name from the capture path; these aliases
@@ -569,7 +569,7 @@ impl Hub {
     }
 
     #[tool(
-        description = "Load a WASM component into the substrate by filesystem path. The hub reads the binary from `binary_path`, forwards the bytes to the substrate as `aether.control.load_component`, and waits for the substrate's `LoadResult` reply — returning `{mailbox_id, name}` inline or an error. Path must exist as given (no `~` expansion, no relative resolution — same rule as `spawn_substrate`). The component's kind vocabulary rides in the wasm's `aether.kinds` custom section (ADR-0028) — the loader doesn't declare kinds separately. Rejects with \"already in flight\" if a prior `load_component` on this session hasn't completed. Default timeout 5000ms; clamped to 30000. Agents never inline the wasm bytes through the tool call — that's what the path is for."
+        description = "Load a WASM component into the substrate by filesystem path. The hub reads the binary from `binary_path`, forwards the bytes to the substrate as `aether.component.load`, and waits for the substrate's `LoadResult` reply — returning `{mailbox_id, name}` inline or an error. Path must exist as given (no `~` expansion, no relative resolution — same rule as `spawn_substrate`). The component's kind vocabulary rides in the wasm's `aether.kinds` custom section (ADR-0028) — the loader doesn't declare kinds separately. Rejects with \"already in flight\" if a prior `load_component` on this session hasn't completed. Default timeout 5000ms; clamped to 30000. Agents never inline the wasm bytes through the tool call — that's what the path is for."
     )]
     pub(super) async fn load_component(
         &self,
@@ -601,7 +601,7 @@ impl Hub {
     /// Shared load-component core. `load_component` wraps this after
     /// parsing the engine id from the MCP arg; `spawn_substrate` calls
     /// it directly once per entry in its `components` preload list.
-    /// Reads the wasm file, dispatches `aether.control.load_component`
+    /// Reads the wasm file, dispatches `aether.component.load`
     /// against the usual reply-guard, decodes the response, and
     /// updates the engine registry on success — returning the same
     /// `LoadComponentResponse` shape the public tool returns.
@@ -636,7 +636,7 @@ impl Hub {
 
         let spec = MailSpec {
             engine_id: engine_id_str.to_owned(),
-            recipient_name: "aether.control".to_owned(),
+            recipient_name: "aether.component".to_owned(),
             kind_name: KIND_LOAD_COMPONENT.to_owned(),
             params: Some(params),
             count: 1,
@@ -706,7 +706,7 @@ impl Hub {
     }
 
     #[tool(
-        description = "Atomically replace a live component's WASM with a new binary loaded from a filesystem path (ADR-0022 + ADR-0038 structural splice). The hub reads the binary from `binary_path` and forwards `aether.control.replace_component` to the substrate, which splices the mailbox's inbox over to a new dispatcher, drops the old sender, and joins the old dispatcher once it drains naturally. Kind vocabulary rides in the wasm's `aether.kinds` custom section (ADR-0028). `drain_timeout_ms` is accepted for wire compatibility but currently ignored — post-ADR-0038 there is no freeze-drain timeout to enforce. Path must exist as given. Waits for the substrate's `ReplaceResult`; returns `\"Ok\"` on success. Rejects with \"already in flight\" if a prior replace is pending on this session. Tool timeout default 5000ms, clamped to 30000."
+        description = "Atomically replace a live component's WASM with a new binary loaded from a filesystem path (ADR-0022 + ADR-0038 structural splice). The hub reads the binary from `binary_path` and forwards `aether.component.replace` to the substrate, which splices the mailbox's inbox over to a new dispatcher, drops the old sender, and joins the old dispatcher once it drains naturally. Kind vocabulary rides in the wasm's `aether.kinds` custom section (ADR-0028). `drain_timeout_ms` is accepted for wire compatibility but currently ignored — post-ADR-0038 there is no freeze-drain timeout to enforce. Path must exist as given. Waits for the substrate's `ReplaceResult`; returns `\"Ok\"` on success. Rejects with \"already in flight\" if a prior replace is pending on this session. Tool timeout default 5000ms, clamped to 30000."
     )]
     pub(super) async fn replace_component(
         &self,
@@ -755,7 +755,7 @@ impl Hub {
 
         let spec = MailSpec {
             engine_id: args.engine_id.clone(),
-            recipient_name: "aether.control".to_owned(),
+            recipient_name: "aether.component".to_owned(),
             kind_name: KIND_REPLACE_COMPONENT.to_owned(),
             params: Some(params),
             count: 1,

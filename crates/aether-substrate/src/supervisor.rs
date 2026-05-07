@@ -3,7 +3,7 @@
 //! Defines the trait the [`crate::Mailer`] consults for component-bound
 //! mail and the structured outcomes the chassis frame loop matches on
 //! when draining (ADR-0063). The implementation lives in
-//! `aether-capabilities::ControlPlaneCapability`; `aether-substrate`
+//! `aether-capabilities::ComponentHostCapability`; `aether-substrate`
 //! holds only the interface so chassis-side consumers (frame_loop,
 //! Mailer routing) stay capability-agnostic.
 
@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::mail::{Mail, MailboxId};
 
 /// Routing handle for a chassis-installed wasm-component supervisor.
-/// The supervisor (today: `ControlPlaneCapability`) owns the live
+/// The supervisor (today: `ComponentHostCapability`) owns the live
 /// component table and per-component dispatcher threads; substrate
 /// runtime code that needs to forward mail to a component goes through
 /// this trait. Installed via [`crate::Mailer::install_component_router`]

@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use aether_capabilities::{
-    AudioCapability, BroadcastCapability, CaptureBackend, ControlPlaneCapability,
-    ControlPlaneConfig, HandleCapability, HttpCapability, InputCapability, InputConfig,
+    AudioCapability, BroadcastCapability, CaptureBackend, ComponentHostCapability,
+    ComponentHostConfig, HandleCapability, HttpCapability, InputCapability, InputConfig,
     IoCapability, LogCapability, RenderCapability, RenderConfig, TcpCapability,
     UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf, http::HttpConfig as HttpConf,
     io::NamespaceRoots,
@@ -155,7 +155,7 @@ impl DesktopChassis {
         let boot = SubstrateBoot::builder("hello-triangle", env!("CARGO_PKG_VERSION")).build()?;
         let _ = WORKERS;
 
-        let control_plane_config = ControlPlaneConfig {
+        let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
@@ -184,7 +184,7 @@ impl DesktopChassis {
         tracing::info!(
             target: "aether_substrate::boot",
             workers = WORKERS,
-            "componentless boot — close window to exit; load a component via aether.control.load_component",
+            "componentless boot — close window to exit; load a component via aether.component.load",
         );
 
         // Hub connect AFTER every chassis sink is registered (issue #262).
@@ -231,7 +231,7 @@ impl DesktopChassis {
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
             .with_actor::<InputCapability>(input_config)
-            .with_actor::<ControlPlaneCapability>(control_plane_config)
+            .with_actor::<ComponentHostCapability>(component_host_config)
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<HttpCapability>(http)
             .with_actor::<TcpCapability>(())

@@ -1019,7 +1019,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
         // flavours — strict typed receiver (only `#[handler]`s),
         // catch-all cap (only `#[fallback]`), or hybrid (typed
         // handlers + a `#[fallback]` runtime safety net). The hybrid
-        // shape is what `ControlPlaneCapability` uses: declared kinds
+        // shape is what `ComponentHostCapability` uses: declared kinds
         // it accepts are typed; unknown kinds (Phase 1 chassis-
         // peripheral migration window) ride the fallback. Hybrid emits
         // per-handler `HandlesKind<K>` impls (no blanket — declared
@@ -1936,7 +1936,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // Issue 576 + issue 603: native actors come in three flavours —
     // strict typed receiver (only `#[handler]`s), catch-all cap (only
     // `#[fallback]`), or hybrid (typed handlers + a `#[fallback]`
-    // runtime safety net). `ControlPlaneCapability` uses the hybrid
+    // runtime safety net). `ComponentHostCapability` uses the hybrid
     // shape: declared `LoadComponent` / `DropComponent` / etc. land on
     // typed handlers; chassis-peripheral kinds (Phase 1 migration)
     // ride the fallback. The fallback runs only on dispatch table

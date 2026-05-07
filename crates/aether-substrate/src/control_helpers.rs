@@ -1,5 +1,5 @@
 //! Decode + envelope-resolution helpers used by
-//! `aether-capabilities::ControlPlaneCapability` and the
+//! `aether-capabilities::ComponentHostCapability` and the
 //! `RenderCapability` capture handler (issue 603 Phase 2). Standalone
 //! module so non-capability substrate consumers can pull `decode_payload`
 //! / `resolve_bundle` without dragging in the capability crate.

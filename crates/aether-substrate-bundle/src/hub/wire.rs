@@ -219,8 +219,8 @@ pub struct MailByIdFrame {
 /// (ADR-0008): engine-originated mail addressed to a Claude session
 /// or broadcast to all sessions. `KindsChanged` (ADR-0010 §4) tells
 /// the hub to replace its cached descriptor list for this engine —
-/// needed after `aether.control.load_component` /
-/// `aether.control.replace_component` registers a new kind, which the
+/// needed after `aether.component.load` /
+/// `aether.component.replace` registers a new kind, which the
 /// hub would otherwise miss since its cache is pinned at `Hello`.
 /// `LogBatch` (ADR-0023) carries captured log entries from the
 /// substrate's tracing layer; the hub appends them to a per-engine

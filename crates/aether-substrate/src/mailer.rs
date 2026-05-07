@@ -31,7 +31,7 @@ pub struct Mailer {
     /// mail can land.
     registry: OnceLock<Arc<Registry>>,
     /// Routing handle into the wasm-component supervisor. Installed
-    /// by `ControlPlaneCapability::init` via
+    /// by `ComponentHostCapability::init` via
     /// [`Self::install_component_router`]. Absent on chassis that
     /// don't host components (today: the hub chassis), in which case
     /// `MailboxEntry::Component` mail warn-drops with an
@@ -82,7 +82,7 @@ impl Mailer {
     }
 
     /// Install the wasm-component supervisor's router. Called once
-    /// from `ControlPlaneCapability::init`; panics on re-install. The
+    /// from `ComponentHostCapability::init`; panics on re-install. The
     /// supervisor's `init` runs after `Builder::with_actor::<...>(...)`,
     /// so any chassis that hosts components has the router installed
     /// before its driver starts pumping. Chassis that don't host
@@ -136,8 +136,8 @@ impl Mailer {
     }
 
     /// Borrow the wired [`Registry`]. Issue 603: surfaced so
-    /// `ControlPlaneCapability::init` can pull the registry for its
-    /// internal state without requiring it on `ControlPlaneConfig` —
+    /// `ComponentHostCapability::init` can pull the registry for its
+    /// internal state without requiring it on `ComponentHostConfig` —
     /// per Resolved Decision §2 registry arrives via init ctx, not
     /// via the cap's config struct.
     pub fn registry(&self) -> Option<&Arc<Registry>> {

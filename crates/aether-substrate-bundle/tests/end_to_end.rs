@@ -17,14 +17,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use aether_capabilities::{ControlPlaneCapability, ControlPlaneConfig};
+use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_substrate_bundle::{
     Component, HubOutbound, Mailer, Registry, SubstrateCtx, host_fns,
     mail::{Mail, MailboxId},
 };
 use wasmtime::{Engine, Linker, Module};
 
-/// Build a `ControlPlaneCapability` test fixture wired for a fresh
+/// Build a `ComponentHostCapability` test fixture wired for a fresh
 /// substrate. Mirrors the legacy `Scheduler::new` shape — wires the
 /// mailer's component router and gives the test something to call
 /// `attach_component_for_test` on.
@@ -32,17 +32,17 @@ fn make_supervisor(
     engine: &Engine,
     registry: &Arc<Registry>,
     queue: &Arc<Mailer>,
-) -> ControlPlaneCapability {
+) -> ComponentHostCapability {
     queue.wire(Arc::clone(registry));
     let mut linker: Linker<SubstrateCtx> = Linker::new(engine);
     host_fns::register(&mut linker).expect("register host fns");
-    let config = ControlPlaneConfig {
+    let config = ComponentHostConfig {
         engine: Arc::new(engine.clone()),
         linker: Arc::new(linker),
         hub_outbound: HubOutbound::disconnected(),
         input_subscribers: aether_substrate_bundle::new_subscribers(),
     };
-    ControlPlaneCapability::for_test(config, Arc::clone(registry), Arc::clone(queue))
+    ComponentHostCapability::for_test(config, Arc::clone(registry), Arc::clone(queue))
 }
 
 fn forwards_to_sink_wat(sink_id: MailboxId) -> String {

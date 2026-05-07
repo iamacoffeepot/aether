@@ -8,7 +8,7 @@
 //! The wasm-component supervisor — the actor that owns the per-mailbox
 //! component table, dispatcher threads, and the wasmtime Engine /
 //! Linker — lives in `aether-capabilities` as
-//! [`ControlPlaneCapability`][cp] (issue 603). Substrate exposes the
+//! [`ComponentHostCapability`][cp] (issue 603). Substrate exposes the
 //! interface the supervisor implements via [`supervisor::ComponentRouter`]
 //! plus the structured drain outcomes ([`supervisor::DrainSummary`])
 //! the chassis frame loop matches on; it knows nothing about the
@@ -24,7 +24,7 @@
 //! The chassis instance you `run()` is the [`BuiltChassis<Self>`] the
 //! trait method returns, not a value of `Self` itself.
 //!
-//! [cp]: https://docs.rs/aether-capabilities/latest/aether_capabilities/struct.ControlPlaneCapability.html
+//! [cp]: https://docs.rs/aether-capabilities/latest/aether_capabilities/struct.ComponentHostCapability.html
 
 // Issue 552 stage 2: the `#[actor] impl NativeActor for X` macro
 // emits `impl ::aether_substrate::NativeDispatch for X` so external

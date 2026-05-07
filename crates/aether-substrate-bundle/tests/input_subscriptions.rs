@@ -1,6 +1,6 @@
 // End-to-end smoke for ADR-0021 publish/subscribe routing. Stands up
 // the same triple a chassis main builds — Registry, Mailer, and
-// `ControlPlaneCapability` sharing one `InputSubscribers` table — loads
+// `ComponentHostCapability` sharing one `InputSubscribers` table — loads
 // a WAT component via the cap's test-support entry, subscribes it,
 // then drives "platform events" by calling the same `subscribers_for`
 // helper that `App::window_event` uses and pushing one mail per
@@ -9,7 +9,7 @@
 // into guest memory.
 //
 // Issue 603 retired the standalone `aether-substrate::control::ControlPlane`
-// in favour of `aether-capabilities::ControlPlaneCapability`. The
+// in favour of `aether-capabilities::ComponentHostCapability`. The
 // harness here uses the cap's `for_test` constructor to build the cap
 // without spinning up a chassis dispatcher thread; the typed
 // `*_for_test` methods drive the cap's internal handlers
@@ -19,7 +19,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use aether_capabilities::{ControlPlaneCapability, ControlPlaneConfig, InputCapability};
+use aether_capabilities::{ComponentHostCapability, ComponentHostConfig, InputCapability};
 use aether_data::{Kind, KindId};
 use aether_kinds::{DropComponent, LoadComponent, SubscribeInput, Tick, UnsubscribeInput};
 use aether_substrate_bundle::{
@@ -52,7 +52,7 @@ fn tally_forwarding_wat(tally_id: u64) -> String {
 }
 
 struct Harness {
-    cap: ControlPlaneCapability,
+    cap: ComponentHostCapability,
     input_cap: InputCapability,
     queue: Arc<Mailer>,
     input_subscribers: InputSubscribers,
@@ -89,8 +89,8 @@ fn make_harness() -> Harness {
     queue.wire(Arc::clone(&registry));
 
     let input_subscribers = new_subscribers();
-    let cap = ControlPlaneCapability::for_test(
-        ControlPlaneConfig {
+    let cap = ComponentHostCapability::for_test(
+        ComponentHostConfig {
             engine,
             linker,
             hub_outbound: HubOutbound::disconnected(),
@@ -113,7 +113,7 @@ fn make_harness() -> Harness {
     }
 }
 
-fn load_wat(cap: &ControlPlaneCapability, wat: &str, name: &str) -> aether_data::MailboxId {
+fn load_wat(cap: &ComponentHostCapability, wat: &str, name: &str) -> aether_data::MailboxId {
     let payload = LoadComponent {
         wasm: wat::parse_str(wat).expect("compile WAT"),
         name: Some(name.into()),
@@ -139,7 +139,7 @@ fn unsubscribe(cap: &InputCapability, kind: KindId, mailbox: aether_data::Mailbo
         .expect("unsubscribe succeeded");
 }
 
-fn drop_component(cap: &ControlPlaneCapability, mailbox_id: aether_data::MailboxId) {
+fn drop_component(cap: &ComponentHostCapability, mailbox_id: aether_data::MailboxId) {
     let r = cap.drop_for_test(DropComponent { mailbox_id });
     matches!(r, aether_kinds::DropResult::Ok)
         .then_some(())

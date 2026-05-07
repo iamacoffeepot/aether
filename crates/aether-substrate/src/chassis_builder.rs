@@ -628,11 +628,11 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     /// chassis calls [`Self::with_log_drain`]; on `build()` the
     /// mailbox id is dispatched as `aether.log.configure_drain` mail
     /// to every booted actor so each actor's `LogDrainSlot` is
-    /// installed. `ControlPlaneCapability` snapshots the same drain
+    /// installed. `ComponentHostCapability` snapshots the same drain
     /// for the runtime `load_component` path — runtime-loaded
     /// components receive `ConfigureLogDrain` themselves on
     /// registration. The chassis Builder declares the drain; the
-    /// runtime state lives entirely in `ControlPlane` and per-actor
+    /// runtime state lives entirely in `ComponentHostCapability` and per-actor
     /// `LogDrainSlot`s, set the same way every actor's slot is set:
     /// via mail.
     log_drain: Option<MailboxId>,
@@ -764,10 +764,11 @@ impl<C: Chassis> Builder<C, NoDriver> {
     pub fn build_passive(self) -> Result<PassiveChassis<C>, BootError> {
         let booted = boot_passives(&self.registry, &self.mailer, &self.aborter, self.passives)?;
         // Issue #601: push `ConfigureLogDrain` to every booted actor
-        // and to `aether.control` so every per-actor `LogDrainSlot`
-        // (auto-emitted handler) plus the `ControlPlane`'s drain slot
-        // (for the runtime load path) resolve to the chassis-declared
-        // target. No-op if the chassis didn't call `with_log_drain`.
+        // and to `aether.component` so every per-actor `LogDrainSlot`
+        // (auto-emitted handler) plus the `ComponentHostCapability`'s
+        // drain slot (for the runtime load path) resolve to the
+        // chassis-declared target. No-op if the chassis didn't call
+        // `with_log_drain`.
         dispatch_configure_log_drain(
             &self.registry,
             &self.mailer,
@@ -838,7 +839,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
 
         let mut booted = boot_passives(&registry, &mailer, &aborter, passives)?;
         // Issue #601: push `ConfigureLogDrain` to every booted actor
-        // and to `aether.control` so the runtime load path picks up
+        // and to `aether.component` so the runtime load path picks up
         // the chassis-declared drain through the same mail every
         // actor receives.
         dispatch_configure_log_drain(
@@ -922,7 +923,7 @@ struct BootedPassives {
 /// Sends through the same `Mailer` every other mail uses — each actor
 /// mailbox routes the envelope to the auto-emitted `ConfigureLogDrain`
 /// arm in `#[handlers]`, which installs the per-actor `LogDrainSlot`.
-/// Issue 603: `ControlPlaneCapability` is now a normal actor booted
+/// Issue 603: `ComponentHostCapability` is now a normal actor booted
 /// through this Builder, so its mailbox lands in
 /// `claimed_actor_mailboxes` like every other cap and the pre-603
 /// special-case lookup of `aether.control` retired.

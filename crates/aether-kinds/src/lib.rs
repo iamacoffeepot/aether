@@ -682,15 +682,15 @@ mod control_plane {
 
     use serde::{Deserialize, Serialize};
 
-    /// `aether.control.load_component` — request the substrate load a
-    /// WASM component into a freshly allocated mailbox. Carries the
-    /// raw WASM bytes and an optional human-readable name. The
+    /// `aether.component.load` — request the substrate load a WASM
+    /// component into a freshly allocated mailbox. Carries the raw
+    /// WASM bytes and an optional human-readable name. The
     /// component's kind vocabulary ships embedded in the wasm's
     /// `aether.kinds` custom section (ADR-0028) — the substrate
     /// reads it directly and the loader doesn't need to declare
     /// anything. Substrate replies with `LoadResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.load_component")]
+    #[kind(name = "aether.component.load")]
     pub struct LoadComponent {
         pub wasm: Vec<u8>,
         pub name: Option<String>,
@@ -703,7 +703,7 @@ mod control_plane {
     /// (ADR-0033). `Err` carries the failure reason — kind-descriptor
     /// conflict, invalid WASM, name conflict, etc.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.load_result")]
+    #[kind(name = "aether.component.load_result")]
     pub enum LoadResult {
         Ok {
             mailbox_id: aether_data::MailboxId,
@@ -751,10 +751,10 @@ mod control_plane {
         pub doc: Option<String>,
     }
 
-    /// `aether.control.drop_component` — remove a component from the
+    /// `aether.component.drop` — remove a component from the
     /// substrate and invalidate its mailbox id. Reply: `DropResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.drop_component")]
+    #[kind(name = "aether.component.drop")]
     pub struct DropComponent {
         pub mailbox_id: aether_data::MailboxId,
     }
@@ -762,13 +762,13 @@ mod control_plane {
     /// Reply to `DropComponent`. `Ok` on success; `Err` if the
     /// mailbox was unknown, wasn't a component, or already dropped.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.drop_result")]
+    #[kind(name = "aether.component.drop_result")]
     pub enum DropResult {
         Ok,
         Err { error: String },
     }
 
-    /// `aether.control.replace_component` — atomically rebind a target
+    /// `aether.component.replace` — atomically rebind a target
     /// mailbox id to a freshly instantiated component. ADR-0022: the
     /// substrate freezes the target, drains in-flight mail through
     /// the old instance, then swaps. If the drain exceeds
@@ -777,7 +777,7 @@ mod control_plane {
     /// vocabulary rides in the wasm's `aether.kinds` custom section
     /// (ADR-0028). Reply: `ReplaceResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.replace_component")]
+    #[kind(name = "aether.component.replace")]
     pub struct ReplaceComponent {
         pub mailbox_id: aether_data::MailboxId,
         pub wasm: Vec<u8>,
@@ -788,7 +788,7 @@ mod control_plane {
     /// advertised capabilities on `Ok` so the hub's cached state
     /// reflects the swapped binary; `Err` carries a free-form reason.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.replace_result")]
+    #[kind(name = "aether.component.replace_result")]
     pub enum ReplaceResult {
         Ok { capabilities: ComponentCapabilities },
         Err { error: String },
@@ -1634,12 +1634,12 @@ mod tests {
         assert_eq!(FrameStats::NAME, "aether.observation.frame_stats");
         assert_eq!(Ping::NAME, "aether.ping");
         assert_eq!(Pong::NAME, "aether.pong");
-        assert_eq!(LoadComponent::NAME, "aether.control.load_component");
-        assert_eq!(ReplaceComponent::NAME, "aether.control.replace_component");
-        assert_eq!(DropComponent::NAME, "aether.control.drop_component");
-        assert_eq!(LoadResult::NAME, "aether.control.load_result");
-        assert_eq!(DropResult::NAME, "aether.control.drop_result");
-        assert_eq!(ReplaceResult::NAME, "aether.control.replace_result");
+        assert_eq!(LoadComponent::NAME, "aether.component.load");
+        assert_eq!(ReplaceComponent::NAME, "aether.component.replace");
+        assert_eq!(DropComponent::NAME, "aether.component.drop");
+        assert_eq!(LoadResult::NAME, "aether.component.load_result");
+        assert_eq!(DropResult::NAME, "aether.component.drop_result");
+        assert_eq!(ReplaceResult::NAME, "aether.component.replace_result");
         assert_eq!(SubscribeInput::NAME, "aether.input.subscribe");
         assert_eq!(UnsubscribeInput::NAME, "aether.input.unsubscribe");
         assert_eq!(SubscribeInputResult::NAME, "aether.input.subscribe_result");

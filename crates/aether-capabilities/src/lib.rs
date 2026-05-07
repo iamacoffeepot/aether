@@ -28,7 +28,7 @@
 #[cfg(feature = "audio")]
 pub mod audio;
 pub mod broadcast;
-pub mod control;
+pub mod component;
 pub mod handle;
 pub mod http;
 pub mod input;
@@ -45,14 +45,14 @@ pub use audio::AudioCapability;
 #[cfg(feature = "audio-native")]
 pub use audio::AudioConfig;
 pub use broadcast::BroadcastCapability;
-pub use control::ControlPlaneCapability;
-// `ControlPlaneConfig` is wasmtime-bound (it holds `Arc<Engine>` /
+pub use component::ComponentHostCapability;
+// `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<SubstrateCtx>>`). It re-exports only on the native
 // target — wasm-component consumers see the cap stub via
-// `ControlPlaneCapability` for typed `ctx.actor::<...>()` addressing
+// `ComponentHostCapability` for typed `ctx.actor::<...>()` addressing
 // without dragging the wasmtime stack into the wasm graph.
 #[cfg(not(target_arch = "wasm32"))]
-pub use control::ControlPlaneConfig;
+pub use component::ComponentHostConfig;
 pub use handle::HandleCapability;
 pub use http::{HttpCapability, HttpConfig};
 pub use input::InputCapability;
