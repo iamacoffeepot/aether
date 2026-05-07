@@ -132,7 +132,7 @@ jobs:
               changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }})
           fi
           echo "Changed files: ${changed_files}"
-          TESTABLE_CRATES=$(echo "${changed_files}" | grep -E '^(crates)')
+          TESTABLE_CRATES=$(echo "${changed_files}" | grep -E '^(crates)' || true)
           echo "Testable crates paths: ${TESTABLE_CRATES}"
           CRATE_NAMES=$(echo "${TESTABLE_CRATES}" | cut -d/ -f2 | sort -u)
           echo "Unique crate names: ${CRATE_NAMES}"
