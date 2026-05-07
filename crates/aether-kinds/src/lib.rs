@@ -15,9 +15,17 @@ extern crate alloc;
 
 pub mod descriptors;
 pub mod keycode;
-pub mod mailboxes;
 
 use bytemuck::{Pod, Zeroable};
+
+/// Hub broadcast mailbox name (ADR-0008 observation path). The
+/// `BroadcastCapability` (in `aether-capabilities`) reuses this string
+/// as its `Actor::NAMESPACE`; substrate-internal pushes (frame_loop's
+/// frame-stats emission, the scheduler-death announce) read the same
+/// const so name and id stay in lockstep without depending on
+/// `aether-capabilities`. Issue #613 retired the `mailboxes` module
+/// the const used to live in; this single string is the residue.
+pub const HUB_BROADCAST_MAILBOX_NAME: &str = "hub.claude.broadcast";
 
 // Every kind below derives both `Kind` and `Schema`. Pre-ADR-0032
 // `Schema` was gated behind a `descriptors` feature so wasm guests
