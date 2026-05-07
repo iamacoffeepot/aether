@@ -883,7 +883,18 @@ where
     let thread = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            while let Some(env) = transport_for_thread.recv_blocking() {
+            // Issue 607 Phase 4a (ADR-0079): legacy singleton dispatcher
+            // mirrors the new chassis_builder shape — flag-poll for
+            // self-shutdown, channel-disconnect for substrate shutdown,
+            // both flow through drain → on_close → exit.
+            loop {
+                if transport_for_thread.should_shutdown() {
+                    break;
+                }
+                let env = match transport_for_thread.recv_blocking() {
+                    Some(e) => e,
+                    None => break,
+                };
                 aether_actor::local::with_stamped(&slots, || {
                     aether_actor::log::with_actor_dispatch(
                         &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
@@ -921,6 +932,41 @@ where
                     p.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
                 }
             }
+            while let Some(env) = transport_for_thread.try_recv() {
+                aether_actor::local::with_stamped(&slots, || {
+                    aether_actor::log::with_actor_dispatch(
+                        &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                        || {
+                            let mut native_ctx = crate::native_actor::NativeCtx::new(
+                                &transport_for_thread,
+                                env.sender,
+                            );
+                            let _ = actor_for_thread.__aether_dispatch_envelope(
+                                &mut native_ctx,
+                                env.kind,
+                                &env.payload,
+                            );
+                            aether_actor::log::drain_buffer();
+                        },
+                    );
+                });
+                if let Some(p) = &pending {
+                    p.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                }
+            }
+            aether_actor::local::with_stamped(&slots, || {
+                aether_actor::log::with_actor_dispatch(
+                    &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                    || {
+                        let mut close_ctx = crate::native_actor::NativeCtx::new(
+                            &transport_for_thread,
+                            crate::mail::ReplyTo::NONE,
+                        );
+                        actor_for_thread.on_close(&mut close_ctx);
+                        aether_actor::log::drain_buffer();
+                    },
+                );
+            });
         })
         .map_err(|e| BootError::Other(Box::new(e)))?;
 

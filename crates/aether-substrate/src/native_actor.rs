@@ -96,6 +96,25 @@ pub trait NativeActor: Actor + Sync {
     fn init(config: Self::Config, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError>
     where
         Self: Sized;
+
+    /// Issue 607 Phase 4a (ADR-0079): last-chance close hook. Runs
+    /// after the dispatcher's inbox drain, before the actor value
+    /// drops. Triggers:
+    ///
+    /// - Self-shutdown — actor's handler called `ctx.shutdown()`;
+    ///   dispatcher saw the flag set after the handler returned.
+    /// - Substrate shutdown — chassis dropped its registry, the sink
+    ///   handler's `Weak<Sender>` upgrade fails, the inbox channel
+    ///   disconnects, and `recv_blocking` returns `None`.
+    /// - Cooperative external — a peer mailed the actor a "please
+    ///   close" kind; the actor's handler did its cleanup and called
+    ///   `ctx.shutdown()`. From the dispatcher's perspective this is
+    ///   identical to self-shutdown.
+    ///
+    /// `&self` matches the handler convention: caps put any mutable
+    /// state behind interior mutability. Default empty — opt-in for
+    /// caps that need to publish a final broadcast or flush state.
+    fn on_close(&self, _ctx: &mut NativeCtx<'_>) {}
 }
 
 /// Sum dispatch entry-point — emitted once per `#[actor] impl
@@ -202,6 +221,24 @@ impl<'a> NativeCtx<'a> {
     /// runtime instance name. Mirrors [`aether_actor::Ctx::resolve_actor`].
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<'_, R, NativeTransport> {
         ActorMailbox::__new(mailbox_id_from_name(name).0, self.transport)
+    }
+
+    /// Issue 607 Phase 4a (ADR-0079): self-shutdown signal. Sets a
+    /// flag the actor's dispatcher polls after each handler returns;
+    /// when set, the trampoline drains any remaining inbox mail
+    /// synchronously, runs `NativeActor::on_close`, and exits the
+    /// dispatch loop. After exit the actor's [`crate::MailboxId`]
+    /// transitions from `Live` to `Dead` in the chassis's
+    /// [`crate::ActorRegistry`] and is added to `tombstones` —
+    /// `spawn_child` rejects reuse of the retired full name with
+    /// `SpawnError::SubnameRetired`.
+    ///
+    /// Idempotent — flipping the flag twice is the same as flipping
+    /// it once. Singletons booted through `with_actor` rely on the
+    /// chassis-shutdown channel-drop path instead of this flag, but
+    /// can call `shutdown()` to opt in to flag-based exit.
+    pub fn shutdown(&self) {
+        self.transport.signal_shutdown();
     }
 
     /// Issue 607 Phase 3b (ADR-0079): spawn an instanced actor as a

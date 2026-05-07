@@ -29,10 +29,16 @@ use crate::mail::MailboxId;
 /// for entries whose dispatcher has joined and whose actor has
 /// dropped — mail addressed to the slot warn-drops, and `spawn_child`
 /// rejects the name for reuse. ADR-0079 §Drop / lifecycle.
+///
+/// `sender` is `Arc<Sender<Envelope>>` so the registry's sink
+/// handler can hold a `Weak<Sender>` and upgrade only while the
+/// actor is `Live`; on `mark_dead` the Arc drops and the weak
+/// upgrade fails, making mail addressed to a dead instanced
+/// mailbox warn-drop.
 #[derive(Clone)]
 pub enum ActorEntry {
     Live {
-        sender: Sender<Envelope>,
+        sender: Arc<Sender<Envelope>>,
         actor: Arc<dyn std::any::Any + Send + Sync>,
         type_id: TypeId,
     },
@@ -81,14 +87,14 @@ impl ActorRegistry {
         }
     }
 
-    /// `Some(sender)` only if the slot at `id` is `Live`. `Sender` is
-    /// `Clone`, so the returned handle can be used to push mail
-    /// directly into the actor's inbox without holding the registry
-    /// lock across the send.
+    /// `Some(sender)` only if the slot at `id` is `Live`. The returned
+    /// `Sender` is cloned out of the registry's `Arc<Sender>` so the
+    /// caller can push mail directly into the actor's inbox without
+    /// holding the registry lock or affecting the Arc's strong count.
     pub fn live_sender(&self, id: MailboxId) -> Option<Sender<Envelope>> {
         let actors = self.actors.read().unwrap();
         match actors.get(&id) {
-            Some(ActorEntry::Live { sender, .. }) => Some(sender.clone()),
+            Some(ActorEntry::Live { sender, .. }) => Some((**sender).clone()),
             _ => None,
         }
     }
@@ -145,7 +151,7 @@ impl ActorRegistry {
     pub(crate) fn insert_live(
         &self,
         id: MailboxId,
-        sender: Sender<Envelope>,
+        sender: Arc<Sender<Envelope>>,
         actor: Arc<dyn std::any::Any + Send + Sync>,
         type_id: TypeId,
     ) -> Result<(), ()> {
@@ -167,6 +173,21 @@ impl ActorRegistry {
                 Ok(())
             }
         }
+    }
+
+    /// Issue 607 Phase 4a (ADR-0079): flip the slot at `id` from
+    /// `Live` to `Dead` and insert the id into `tombstones`. Called
+    /// by the instanced-actor dispatcher after `on_close` runs so
+    /// future `spawn_child` calls reject reuse of the retired name
+    /// with `SpawnError::SubnameRetired`. Idempotent — re-running on
+    /// an already-`Dead` slot leaves it `Dead` and doesn't double-
+    /// insert into `tombstones`.
+    pub(crate) fn mark_dead(&self, id: MailboxId) {
+        let mut actors = self.actors.write().unwrap();
+        actors.insert(id, ActorEntry::Dead);
+        drop(actors);
+        let mut tombstones = self.tombstones.write().unwrap();
+        tombstones.insert(id);
     }
 }
 
