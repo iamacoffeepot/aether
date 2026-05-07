@@ -19,20 +19,15 @@
 // means this type has zero chassis-awareness and lives anywhere a
 // chassis cares about captures.
 //
-// The `reply_unsupported_*` helpers shave repeated
-// `XxxResult::Err { error: reason.to_owned() }` branches across
-// chassis variants that don't own the matching peripheral.
-// `aether.render.capture_frame` doesn't appear in this list anymore:
-// post-issue-603 Phase 2 it lands on a real cap (`HeadlessRenderCapability`
-// on headless, `RenderCapability` on desktop / test-bench). See
-// issue 429 for the original consolidation.
+// Pre-issue-603 a sibling `reply_unsupported_*` family lived next to
+// `CaptureQueue` for chassis-handler closures that replied `Err` to
+// peripheral kinds (capture/window/platform_info/advance). Phases 2-4
+// retired those closures by giving each kind its own cap; the helpers
+// retired with them. See issue 429 for the original consolidation.
 
 use std::sync::{Arc, Mutex};
 
-use aether_kinds::{AdvanceResult, PlatformInfoResult, SetWindowModeResult, SetWindowTitleResult};
-
 use crate::mail::{Mail, ReplyTo};
-use crate::outbound::HubOutbound;
 
 /// One pending capture request. Carries the reply handle so the
 /// render thread can reply once it has bytes, plus a resolved list
@@ -75,52 +70,6 @@ impl CaptureQueue {
     pub fn take(&self) -> Option<PendingCapture> {
         self.slot.lock().unwrap().take()
     }
-}
-
-/// Reply `SetWindowModeResult::Err` with the given reason. Used by
-/// chassis variants that don't own a window (headless, test-bench).
-pub fn reply_unsupported_window_mode(outbound: &HubOutbound, sender: ReplyTo, reason: &str) {
-    outbound.send_reply(
-        sender,
-        &SetWindowModeResult::Err {
-            error: reason.to_owned(),
-        },
-    );
-}
-
-/// Reply `SetWindowTitleResult::Err` with the given reason. Used by
-/// chassis variants that don't own a window (headless, test-bench).
-pub fn reply_unsupported_window_title(outbound: &HubOutbound, sender: ReplyTo, reason: &str) {
-    outbound.send_reply(
-        sender,
-        &SetWindowTitleResult::Err {
-            error: reason.to_owned(),
-        },
-    );
-}
-
-/// Reply `PlatformInfoResult::Err` with the given reason. Used by
-/// chassis variants that don't expose platform peripherals (headless,
-/// test-bench).
-pub fn reply_unsupported_platform_info(outbound: &HubOutbound, sender: ReplyTo, reason: &str) {
-    outbound.send_reply(
-        sender,
-        &PlatformInfoResult::Err {
-            error: reason.to_owned(),
-        },
-    );
-}
-
-/// Reply `AdvanceResult::Err` with the given reason. Used by chassis
-/// variants that don't drive ticks via `aether.test_bench.advance`
-/// (desktop, headless — only test-bench supports advance).
-pub fn reply_unsupported_advance(outbound: &HubOutbound, sender: ReplyTo, reason: &str) {
-    outbound.send_reply(
-        sender,
-        &AdvanceResult::Err {
-            error: reason.to_owned(),
-        },
-    );
 }
 
 #[cfg(test)]

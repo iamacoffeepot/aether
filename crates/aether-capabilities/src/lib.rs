@@ -35,6 +35,7 @@ pub mod log;
 pub mod net;
 #[cfg(feature = "render")]
 pub mod render;
+pub mod test_bench;
 pub mod window;
 
 #[cfg(feature = "audio")]
@@ -43,14 +44,13 @@ pub use audio::AudioCapability;
 pub use audio::AudioConfig;
 pub use broadcast::BroadcastCapability;
 pub use control::ControlPlaneCapability;
-// `ChassisControlHandler` + `ControlPlaneConfig` are wasmtime-bound
-// (the config holds `Arc<Engine>` / `Arc<Linker<SubstrateCtx>>`, the
-// closure type alias references substrate `ReplyTo`). They re-export
-// only on the native target — wasm-component consumers see the cap
-// stub via `ControlPlaneCapability` for typed `ctx.actor::<...>()`
-// addressing without dragging the wasmtime stack into the wasm graph.
+// `ControlPlaneConfig` is wasmtime-bound (it holds `Arc<Engine>` /
+// `Arc<Linker<SubstrateCtx>>`). It re-exports only on the native
+// target — wasm-component consumers see the cap stub via
+// `ControlPlaneCapability` for typed `ctx.actor::<...>()` addressing
+// without dragging the wasmtime stack into the wasm graph.
 #[cfg(not(target_arch = "wasm32"))]
-pub use control::{ChassisControlHandler, ControlPlaneConfig};
+pub use control::ControlPlaneConfig;
 pub use handle::HandleCapability;
 pub use io::IoCapability;
 pub use log::LogCapability;
@@ -61,4 +61,5 @@ pub use render::HeadlessRenderCapability;
 pub use render::RenderCapability;
 #[cfg(feature = "render-native")]
 pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
+pub use test_bench::UnsupportedTestBenchCapability;
 pub use window::HeadlessWindowCapability;

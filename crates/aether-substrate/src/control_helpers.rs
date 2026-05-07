@@ -1,12 +1,8 @@
-//! Decode + envelope-resolution helpers shared by the wasm-component
-//! supervisor (`aether-capabilities::ControlPlaneCapability`) and
-//! chassis-side `chassis_handler` closures (`capture_frame`,
-//! `set_window_mode`, etc., until the Phase 2–4 cap migrations land).
-//!
-//! Standalone module so substrate consumers (the desktop / test-bench
-//! `chassis_handler` closures, [`crate::capture::begin_capture_request`])
-//! don't depend on `aether-capabilities` — the capability crate sits
-//! above the substrate in the dependency graph.
+//! Decode + envelope-resolution helpers used by
+//! `aether-capabilities::ControlPlaneCapability` and the
+//! `RenderCapability` capture handler (issue 603 Phase 2). Standalone
+//! module so non-capability substrate consumers can pull `decode_payload`
+//! / `resolve_bundle` without dragging in the capability crate.
 
 use aether_data::KindDescriptor;
 use aether_kinds::MailEnvelope;

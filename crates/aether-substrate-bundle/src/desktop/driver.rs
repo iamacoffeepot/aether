@@ -25,10 +25,9 @@ use aether_capabilities::RenderHandles;
 use aether_data::Kind;
 use aether_data::{encode, encode_empty};
 use aether_kinds::{
-    CaptureFrameResult, EngineInfo, FrameStats, GpuBackend, GpuDeviceType, GpuInfo, Key,
-    KeyRelease, MonitorInfo, MouseButton, MouseMove, OsInfo, PlatformInfoResult, SetWindowMode,
-    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, Tick, VideoMode, WindowInfo,
-    WindowMode, WindowSize, keycode,
+    CaptureFrameResult, FrameStats, Key, KeyRelease, MouseButton, MouseMove, SetWindowMode,
+    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, Tick, WindowMode, WindowSize,
+    keycode,
 };
 use aether_substrate::capability::{BootError, Envelope};
 use aether_substrate::chassis_builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
@@ -88,11 +87,6 @@ pub struct App {
     /// hands it to `frame_loop::drain_frame_bound_or_abort` after the
     /// component drain so render's inbox quiesces before submit.
     frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
-    /// How many kinds the substrate registered at boot. Captured once
-    /// and cached so `platform_info` can report it without having to
-    /// consult the live registry (which also contains runtime-loaded
-    /// kinds — those aren't part of the build fingerprint).
-    boot_kinds_count: u32,
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
     pub(crate) started: Option<Instant>,
@@ -193,45 +187,6 @@ fn map_winit_keycode(k: KeyCode) -> Option<u32> {
     })
 }
 
-/// Copy winit's `VideoModeHandle` fields into the wire-stable mirror
-/// in `aether-kinds`. Separate type so the kind's schema doesn't ride
-/// winit's layout.
-fn mirror_video_mode(m: winit::monitor::VideoModeHandle) -> VideoMode {
-    VideoMode {
-        width: m.size().width,
-        height: m.size().height,
-        refresh_mhz: m.refresh_rate_millihertz(),
-        bit_depth: m.bit_depth(),
-    }
-}
-
-/// Convert wgpu's `DeviceType` into the wire-stable mirror enum in
-/// `aether-kinds`. Separate enum so the schema doesn't drift with
-/// wgpu versions.
-fn map_device_type(t: wgpu::DeviceType) -> GpuDeviceType {
-    match t {
-        wgpu::DeviceType::Other => GpuDeviceType::Other,
-        wgpu::DeviceType::IntegratedGpu => GpuDeviceType::IntegratedGpu,
-        wgpu::DeviceType::DiscreteGpu => GpuDeviceType::DiscreteGpu,
-        wgpu::DeviceType::VirtualGpu => GpuDeviceType::VirtualGpu,
-        wgpu::DeviceType::Cpu => GpuDeviceType::Cpu,
-    }
-}
-
-/// Convert wgpu's `Backend` into the wire-stable mirror. `Empty` is
-/// coalesced into `Noop` — the substrate never uses the empty
-/// backend, but the match needs to be exhaustive.
-fn map_backend(b: wgpu::Backend) -> GpuBackend {
-    match b {
-        wgpu::Backend::Noop => GpuBackend::Noop,
-        wgpu::Backend::Vulkan => GpuBackend::Vulkan,
-        wgpu::Backend::Metal => GpuBackend::Metal,
-        wgpu::Backend::Dx12 => GpuBackend::Dx12,
-        wgpu::Backend::Gl => GpuBackend::Gl,
-        wgpu::Backend::BrowserWebGpu => GpuBackend::BrowserWebGpu,
-    }
-}
-
 /// Parse `AETHER_WINDOW_MODE`. Grammar:
 ///   `windowed`              — default size
 ///   `windowed:WxH`          — windowed, WxH physical pixels
@@ -330,94 +285,6 @@ fn resolve_fullscreen(
 }
 
 impl App {
-    /// Build a `PlatformInfoResult::Ok` from whatever the event loop
-    /// knows right now: OS via `std::env::consts` + `os_info`, engine
-    /// via compile-time + boot-time facts, GPU via the cached
-    /// `AdapterInfo` on `Gpu`, monitors via winit. `window` is `None`
-    /// until `resumed` fires and `self.window` / `self.gpu` are set.
-    fn snapshot_platform_info(&self, event_loop: &ActiveEventLoop) -> PlatformInfoResult {
-        let os_info = os_info::get();
-        let os = OsInfo {
-            name: std::env::consts::OS.to_owned(),
-            version: os_info.version().to_string(),
-            arch: std::env::consts::ARCH.to_owned(),
-        };
-        let engine = EngineInfo {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            workers: WORKERS as u32,
-            kinds_count: self.boot_kinds_count,
-        };
-
-        let Some(gpu) = self.gpu.as_ref() else {
-            return PlatformInfoResult::Err {
-                error: "platform_info requested before GPU and window initialized".to_owned(),
-            };
-        };
-
-        let gpu_info = GpuInfo {
-            name: gpu.adapter_info.name.clone(),
-            vendor_id: gpu.adapter_info.vendor,
-            device_id: gpu.adapter_info.device,
-            device_type: map_device_type(gpu.adapter_info.device_type),
-            backend: map_backend(gpu.adapter_info.backend),
-            driver: gpu.adapter_info.driver.clone(),
-            driver_info: gpu.adapter_info.driver_info.clone(),
-            max_texture_dim_2d: gpu.limits.max_texture_dimension_2d,
-            max_buffer_size: gpu.limits.max_buffer_size,
-            max_bind_groups: gpu.limits.max_bind_groups,
-        };
-
-        let primary = event_loop.primary_monitor();
-        let monitors: Vec<MonitorInfo> = event_loop
-            .available_monitors()
-            .map(|m| {
-                let pos = m.position();
-                let size = m.size();
-                let current_refresh = m.refresh_rate_millihertz();
-                let modes: Vec<VideoMode> = m.video_modes().map(mirror_video_mode).collect();
-                let current_mode = current_refresh.and_then(|mhz| {
-                    modes.iter().copied().find(|v| {
-                        v.width == size.width && v.height == size.height && v.refresh_mhz == mhz
-                    })
-                });
-                MonitorInfo {
-                    name: m.name(),
-                    is_primary: primary.as_ref() == Some(&m),
-                    position_x: pos.x,
-                    position_y: pos.y,
-                    width: size.width,
-                    height: size.height,
-                    scale_factor: m.scale_factor(),
-                    current_mode,
-                    modes,
-                }
-            })
-            .collect();
-
-        let window = self.window.as_ref().map(|w| {
-            let size = w.inner_size();
-            let monitor_index = w
-                .current_monitor()
-                .and_then(|m| event_loop.available_monitors().position(|other| other == m))
-                .map(|idx| idx as u32);
-            WindowInfo {
-                mode: self.current_mode.clone(),
-                width: size.width,
-                height: size.height,
-                scale_factor: w.scale_factor(),
-                monitor_index,
-            }
-        });
-
-        PlatformInfoResult::Ok {
-            os,
-            engine,
-            gpu: gpu_info,
-            monitors,
-            window,
-        }
-    }
-
     fn apply_window_mode(
         &mut self,
         mode: WindowMode,
@@ -543,16 +410,12 @@ impl App {
 }
 
 impl ApplicationHandler<UserEvent> for App {
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Capture => {
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
-            }
-            UserEvent::PlatformInfo { reply_to } => {
-                let result = self.snapshot_platform_info(event_loop);
-                self.outbound.send_reply(reply_to, &result);
             }
         }
     }
@@ -756,7 +619,6 @@ pub struct DesktopDriverCapability {
     pub event_loop: EventLoop<UserEvent>,
     pub boot: SubstrateBoot,
     pub capture_queue: aether_substrate::capture::CaptureQueue,
-    pub boot_kinds_count: u32,
     pub boot_mode: WindowMode,
     pub boot_size: Option<(u32, u32)>,
     pub boot_title: String,
@@ -785,7 +647,6 @@ impl DriverCapability for DesktopDriverCapability {
             event_loop,
             boot,
             capture_queue,
-            boot_kinds_count,
             boot_mode,
             boot_size,
             boot_title,
@@ -862,7 +723,6 @@ impl DriverCapability for DesktopDriverCapability {
             capture_queue,
             outbound: Arc::clone(&boot.outbound),
             frame_bound_pending,
-            boot_kinds_count,
             window: None,
             gpu: None,
             started: None,
