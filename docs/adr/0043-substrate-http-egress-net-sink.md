@@ -3,6 +3,8 @@
 - **Status:** Proposed
 - **Date:** 2026-04-24
 
+> **Update (2026-05-06, issue #612):** the mailbox originally named `aether.net` was renamed to `aether.http` (and `NetCapability` → `HttpCapability`, `NetError` → `HttpError`, `AETHER_NET_*` → `AETHER_HTTP_*`) to free `aether.net` for the socket-based capability introduced by ADR-0079. Body below preserves the original names as a historical record.
+
 ## Context
 
 Components today have no way to talk to the network. The substrate owns I/O (ADR-0041), GPU (render sink), audio (ADR-0039), and the wasm boundary — but there is no sink for outbound HTTP, and wasm components have no path to sockets of their own. That's fine for the pure-compute + local-filesystem surface the substrate has been to date, but three concrete forcing functions now push against it:
