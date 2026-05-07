@@ -30,7 +30,8 @@ use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tic
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use crate::hub::HubProtocolBackend;
-use aether_capabilities::{IoCapability, io::NamespaceRoots};
+use aether_actor::Actor;
+use aether_capabilities::{IoCapability, RenderCapability, io::NamespaceRoots};
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
     capture::CaptureQueue,
@@ -466,7 +467,7 @@ impl TestBench {
         // landed on `aether.control` and routed through the
         // chassis_handler closure.
         self.push_to_mailbox(
-            aether_kinds::mailboxes::RENDER,
+            aether_data::mailbox_id_from_name(RenderCapability::NAMESPACE),
             &CaptureFrame {
                 mails: pre,
                 after_mails: after,

@@ -25,7 +25,7 @@
 // `impl Actor for X` block emitted as a sibling of the mod (outside
 // any cfg gate). Aether-kinds is wasm-compatible so the import doesn't
 // need cfg gating.
-use aether_kinds::mailboxes::HUB_BROADCAST_MAILBOX_NAME;
+use aether_kinds::HUB_BROADCAST_MAILBOX_NAME;
 
 #[aether_actor::bridge]
 mod native {
