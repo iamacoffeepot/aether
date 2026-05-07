@@ -8,7 +8,8 @@
 //! kind moved onto its own cap. `HeadlessRenderCapability` (Phase 2)
 //! handles `aether.render`; `HeadlessWindowCapability` (Phase 3)
 //! handles `aether.window`; `UnsupportedTestBenchCapability` (Phase 4)
-//! handles `aether.test_bench`. `aether.control.platform_info` was
+//! handles `aether.test_bench`. `aether.control.platform_info` (now
+//! a deleted kind name from a retired namespace) was
 //! deleted as a kind in Phase 4 — no replacement, no MCP path until
 //! issue 603 §F2 revives the per-domain shape.
 
@@ -16,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_capabilities::{
-    BroadcastCapability, ControlPlaneCapability, ControlPlaneConfig, HandleCapability,
+    BroadcastCapability, ComponentHostCapability, ComponentHostConfig, HandleCapability,
     HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability, InputCapability,
     InputConfig, IoCapability, LogCapability, TcpCapability, UnsupportedTestBenchCapability,
     http::HttpConfig as HttpConf, io::NamespaceRoots,
@@ -93,7 +94,7 @@ impl HeadlessChassis {
 
         let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
         let _ = WORKERS;
-        let control_plane_config = ControlPlaneConfig {
+        let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
@@ -144,7 +145,7 @@ impl HeadlessChassis {
             target: "aether_substrate::boot",
             workers = WORKERS,
             tick_hz = tick_hz,
-            "componentless boot — load a component via aether.control.load_component",
+            "componentless boot — load a component via aether.component.load",
         );
 
         // Hub connect AFTER every chassis sink is registered (issue #262).
@@ -178,7 +179,7 @@ impl HeadlessChassis {
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
             .with_actor::<InputCapability>(input_config)
-            .with_actor::<ControlPlaneCapability>(control_plane_config)
+            .with_actor::<ComponentHostCapability>(component_host_config)
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<HttpCapability>(http)
             .with_actor::<TcpCapability>(())

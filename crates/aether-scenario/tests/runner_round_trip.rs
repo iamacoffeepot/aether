@@ -68,7 +68,7 @@ name: typo-mailbox
 steps:
   - op: send_mail
     recipient: not.a.real.mailbox
-    kind: aether.control.drop_component
+    kind: aether.component.drop
     params:
       mailbox_id: "mbx-deadbeef"
 "#,

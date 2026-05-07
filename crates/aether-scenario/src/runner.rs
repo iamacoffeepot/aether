@@ -127,12 +127,13 @@ fn run_step(
                 wasm,
                 name: name.clone(),
             };
-            // Issue 603: ControlPlaneCapability dispatches asynchronously
+            // Issue 603: ComponentHostCapability dispatches asynchronously
             // on its own thread, so a `send_mail` here would race with
             // the next step. Awaiting `LoadResult` makes the script's
             // sequential semantics explicit (load completes before
             // anything that depends on the loaded component runs).
-            match bench.send_and_await_reply::<LoadComponent, LoadResult>("aether.control", &mail) {
+            match bench.send_and_await_reply::<LoadComponent, LoadResult>("aether.component", &mail)
+            {
                 Ok(LoadResult::Ok { .. }) => StepStatus::Pass,
                 Ok(LoadResult::Err { error }) => {
                     StepStatus::Fail(format!("load_component failed: {error}"))
@@ -278,8 +279,8 @@ mod tests {
             ),
             (
                 Step::SendMail {
-                    recipient: "aether.control".to_owned(),
-                    kind: "aether.control.drop_component".to_owned(),
+                    recipient: "aether.component".to_owned(),
+                    kind: "aether.component.drop".to_owned(),
                     params: serde_yml::Value::Null,
                 },
                 "send_mail",
@@ -299,7 +300,7 @@ mod tests {
     fn descriptors_cover_load_component_and_io_write() {
         let descs = aether_kinds::descriptors::all();
         let names: Vec<&str> = descs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"aether.control.load_component"));
+        assert!(names.contains(&"aether.component.load"));
         assert!(names.contains(&"aether.io.write"));
     }
 }

@@ -11,11 +11,11 @@
 //!
 //! Issue 603 retired the substrate-side construction of the
 //! `ControlPlane` sink. The wasm-component supervisor is now
-//! `aether-capabilities::ControlPlaneCapability`, booted by chassis
-//! mains via `Builder::with_actor::<ControlPlaneCapability>(...)`. The
+//! `aether-capabilities::ComponentHostCapability`, booted by chassis
+//! mains via `Builder::with_actor::<ComponentHostCapability>(...)`. The
 //! shared boot still wires every dependency the cap needs (engine,
 //! linker, hub outbound, input subscribers) and exposes them as fields
-//! the chassis main passes into `ControlPlaneConfig` at the call site.
+//! the chassis main passes into `ComponentHostConfig` at the call site.
 //!
 //! **Hub connect is explicit.** `build()` does NOT dial
 //! `AETHER_HUB_URL`. The chassis registers its own sinks and any
@@ -51,9 +51,9 @@ use crate::{
 /// gets dropped when the chassis shuts down.
 ///
 /// Issue 603: `engine`, `linker`, `outbound`, `input_subscribers` are
-/// the inputs `ControlPlaneCapability` consumes through
-/// `ControlPlaneConfig` when the chassis main installs the
-/// supervisor via `Builder::with_actor::<ControlPlaneCapability>(...)`.
+/// the inputs `ComponentHostCapability` consumes through
+/// `ComponentHostConfig` when the chassis main installs the
+/// supervisor via `Builder::with_actor::<ComponentHostCapability>(...)`.
 /// The substrate boot doesn't construct the cap itself — it just
 /// holds the dependencies the cap will need.
 pub struct SubstrateBoot {
@@ -175,8 +175,8 @@ impl<'a> SubstrateBootBuilder<'a> {
     /// (engine, registry, mailer, linker, outbound, input subscribers)
     /// for chassis-level cap composition. Does NOT install the
     /// wasm-component supervisor — that's
-    /// `aether-capabilities::ControlPlaneCapability`, booted through
-    /// `Builder::with_actor::<ControlPlaneCapability>(...)` by the
+    /// `aether-capabilities::ComponentHostCapability`, booted through
+    /// `Builder::with_actor::<ComponentHostCapability>(...)` by the
     /// chassis main using the fields exposed on [`SubstrateBoot`].
     /// Does NOT dial the hub — chassis mains compose
     /// `aether_hub::HubClientCapability` themselves (issue #262).

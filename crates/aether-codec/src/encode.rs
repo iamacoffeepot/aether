@@ -1441,7 +1441,7 @@ mod tests {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let mailbox = aether_data::MailboxId::from_name("aether.control");
+        let mailbox = aether_data::MailboxId::from_name("aether.component");
         let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
         let bytes = encode_schema(&json!({ "mailbox": s }), &schema).unwrap();
         let mut expected = Vec::new();
@@ -1457,7 +1457,7 @@ mod tests {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let mailbox = aether_data::MailboxId::from_name("aether.control");
+        let mailbox = aether_data::MailboxId::from_name("aether.component");
         let bytes = encode_schema(&json!({ "mailbox": mailbox.0 }), &schema).unwrap();
         let mut expected = Vec::new();
         write_varint_u64(&mut expected, mailbox.0);
@@ -1495,7 +1495,7 @@ mod tests {
                 ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
             },
         ]);
-        let mailbox = aether_data::MailboxId::from_name("aether.control");
+        let mailbox = aether_data::MailboxId::from_name("aether.component");
         let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
         let bytes = encode_schema(&json!({ "stream": 1, "mailbox": s }), &schema).unwrap();
         assert_eq!(bytes.len(), 16);

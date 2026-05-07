@@ -16,7 +16,7 @@ use aether_capabilities::{
     InputCapability, InputConfig, LogCapability, RenderCapability, RenderConfig, RenderHandles,
     TcpCapability,
 };
-use aether_capabilities::{ControlPlaneCapability, ControlPlaneConfig};
+use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_kinds::{FrameStats, Tick};
@@ -151,7 +151,7 @@ impl TestBenchChassis {
 
         let boot = SubstrateBoot::builder(&name, &version).build()?;
         let _ = workers;
-        let control_plane_config = ControlPlaneConfig {
+        let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
@@ -201,7 +201,7 @@ impl TestBenchChassis {
                 .with_actor::<HandleCapability>(())
                 .with_actor::<LogCapability>(())
                 .with_actor::<InputCapability>(input_config)
-                .with_actor::<ControlPlaneCapability>(control_plane_config)
+                .with_actor::<ComponentHostCapability>(component_host_config)
                 .with_actor::<TcpCapability>(())
                 .with_actor::<RenderCapability>(render_config)
                 .with_actor::<HeadlessWindowCapability>(())

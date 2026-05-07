@@ -2,16 +2,17 @@
 //! table for substrate input streams (`Tick`, `Key`, `MouseMove`,
 //! `MouseButton`, `WindowSize`). Pre-issue-638 the `subscribe_input` /
 //! `unsubscribe_input` kinds rode `aether.control`; Phase 2 of the
-//! split rehomes them to their real domain so the chassis-internal
-//! component-host cap (`aether.control` today, `aether.component`
-//! after Phase 3) only carries component-lifecycle concerns.
+//! split rehomed them to their real domain so the chassis-internal
+//! component-host cap (`aether.component` post-issue-638-Phase-3,
+//! formerly `aether.control`) only carries component-lifecycle
+//! concerns.
 //!
 //! The subscriber table itself is genuinely cross-thread shared — the
 //! platform thread reads it on every published input event while this
 //! cap mutates it on subscribe/unsubscribe. The substrate creates one
 //! `InputSubscribers: Arc<RwLock<HashMap<KindId, BTreeSet<MailboxId>>>>`
 //! at boot and clones it into both the cap config and every chassis
-//! driver. `ControlPlaneCapability` also holds a clone for its
+//! driver. `ComponentHostCapability` also holds a clone for its
 //! synchronous load-time auto-subscribe and drop-time cleanup paths
 //! (issue 634 will retire those into mail).
 
@@ -34,7 +35,7 @@ mod native {
     /// Configuration for [`InputCapability`]. The `input_subscribers`
     /// table is the same `Arc<RwLock<HashMap<...>>>` `SubstrateBoot`
     /// minted at boot, cloned into every reader (platform thread) and
-    /// every other writer (`ControlPlaneCapability` for load/drop
+    /// every other writer (`ComponentHostCapability` for load/drop
     /// synchronous mutations).
     pub struct InputConfig {
         pub input_subscribers: InputSubscribers,
@@ -122,7 +123,7 @@ mod native {
         /// (the `aether-substrate-bundle` `input_subscriptions.rs`
         /// suite) reach for this when they want to drive
         /// subscribe/unsubscribe synchronously alongside a separately
-        /// booted `ControlPlaneCapability::for_test` — both caps hold
+        /// booted `ComponentHostCapability::for_test` — both caps hold
         /// clones of the same `InputSubscribers` Arc.
         #[doc(hidden)]
         pub fn for_test(registry: Arc<Registry>, subscribers: InputSubscribers) -> Self {

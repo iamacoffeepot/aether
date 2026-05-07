@@ -1053,7 +1053,7 @@ mod tests {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let mailbox = aether_data::MailboxId::from_name("aether.control");
+        let mailbox = aether_data::MailboxId::from_name("aether.component");
         let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
         roundtrip(json!({ "mailbox": s }), &schema);
     }
@@ -1072,7 +1072,7 @@ mod tests {
                 ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
             },
         ]);
-        let mailbox = aether_data::MailboxId::from_name("aether.control");
+        let mailbox = aether_data::MailboxId::from_name("aether.component");
         let s = aether_data::tagged_id::encode(mailbox.0).unwrap();
         roundtrip(json!({ "stream": 1, "mailbox": s }), &schema);
     }
@@ -1088,7 +1088,7 @@ mod tests {
         // into `subscribe_input.{kind, mailbox}`, and the wire bytes
         // match what the substrate expects.
         use aether_data::Kind;
-        let mailbox = aether_data::MailboxId::from_name("aether.control");
+        let mailbox = aether_data::MailboxId::from_name("aether.component");
         let mailbox_str = aether_data::tagged_id::encode(mailbox.0).unwrap();
         let kind_id = aether_kinds::Tick::ID;
         let kind_str = aether_data::tagged_id::encode(kind_id.0).unwrap();

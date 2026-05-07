@@ -1,4 +1,5 @@
-//! `aether.control` cap (issue 603). The wasm-component supervisor:
+//! `aether.component` cap (issue 603, renamed in issue 638 phase 3
+//! from `aether.control`). The wasm-component supervisor:
 //! the single owner of every wasm component's lifetime, table, and
 //! dispatcher thread. Pre-extraction the supervisor was split between
 //! `aether-substrate::control::ControlPlane` (decided load / drop /
@@ -9,7 +10,7 @@
 //! `Mailer`'s [`ComponentRouter`] for component-bound routing.
 //!
 //! The cap is a `#[bridge] mod native { ... }` per the ADR-0076 /
-//! issue 565 pattern. `Actor::NAMESPACE = "aether.control"`. Per-kind
+//! issue 565 pattern. `Actor::NAMESPACE = "aether.component"`. Per-kind
 //! `#[handler]` methods replace the legacy `dispatch` match; the
 //! macro-emitted `ConfigureLogDrain` handler covers the per-actor
 //! `LogDrainSlot` for free, and the cap reads `current_drain()` in
@@ -35,11 +36,11 @@
 // of the mod (always-on, outside the cfg gate).
 use aether_kinds::{DropComponent, LoadComponent, ReplaceComponent};
 
-// `ControlPlaneConfig` is exported from inside `mod native` for
+// `ComponentHostConfig` is exported from inside `mod native` for
 // native callers (the cap struct itself is auto-emitted at file root
 // by `#[bridge]`).
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::ControlPlaneConfig;
+pub use native::ComponentHostConfig;
 
 #[aether_actor::bridge(singleton)]
 mod native {
@@ -81,27 +82,27 @@ mod native {
     /// the old dispatcher.
     const DEFAULT_DRAIN_TIMEOUT_MS: u32 = 5_000;
 
-    /// Configuration for [`ControlPlaneCapability`]. `engine` and
+    /// Configuration for [`ComponentHostCapability`]. `engine` and
     /// `linker` are the wasmtime instances every load / replace
     /// instantiates against; `hub_outbound` is the egress handle the
     /// cap uses for `*Result` replies and `aether.kinds.changed`
     /// announcements; `input_subscribers` is the ADR-0021 fan-out
     /// table (shared with the platform thread).
-    pub struct ControlPlaneConfig {
+    pub struct ComponentHostConfig {
         pub engine: Arc<Engine>,
         pub linker: Arc<Linker<SubstrateCtx>>,
         pub hub_outbound: Arc<HubOutbound>,
         pub input_subscribers: InputSubscribers,
     }
 
-    /// `aether.control` cap. Outer struct is a thin
-    /// [`Arc<ControlPlaneInner>`] wrapper so [`Self::init`] can install
+    /// `aether.component` cap. Outer struct is a thin
+    /// [`Arc<ComponentHostInner>`] wrapper so [`Self::init`] can install
     /// the inner as the `Mailer`'s [`ComponentRouter`] before the
     /// chassis builder constructs the cap's own `Arc<Self>` (the
     /// `make_native_actor_boot` path Arcs the actor *after* `init`
     /// returns, so the cap can't install itself).
-    pub struct ControlPlaneCapability {
-        inner: Arc<ControlPlaneInner>,
+    pub struct ComponentHostCapability {
+        inner: Arc<ComponentHostInner>,
     }
 
     /// State the cap captures and the [`ComponentRouter`] impl reads.
@@ -109,7 +110,7 @@ mod native {
     /// an `Arc<Self>` so route lookups don't go through the cap struct
     /// (which is Arc-shared with the chassis Actors map and the
     /// dispatcher thread).
-    struct ControlPlaneInner {
+    struct ComponentHostInner {
         engine: Arc<Engine>,
         linker: Arc<Linker<SubstrateCtx>>,
         registry: Arc<Registry>,
@@ -120,13 +121,13 @@ mod native {
         default_name_counter: AtomicU64,
     }
 
-    impl ControlPlaneCapability {
+    impl ComponentHostCapability {
         /// Test-support constructor. Builds the cap with the supplied
-        /// `registry` / `queue` and installs `ControlPlaneInner` as
+        /// `registry` / `queue` and installs `ComponentHostInner` as
         /// `mailer`'s `ComponentRouter`. Per Resolved Decision §3,
         /// narrow pure-handler unit tests use this; lifecycle tests
         /// (load → drop → replace, shutdown ordering) boot a real
-        /// chassis via `Builder::with_actor::<ControlPlaneCapability>(...)`.
+        /// chassis via `Builder::with_actor::<ComponentHostCapability>(...)`.
         ///
         /// `#[doc(hidden)] pub` so cross-crate test helpers (the
         /// `aether-substrate-bundle` integration tests) can reach for it
@@ -134,11 +135,11 @@ mod native {
         /// `Builder::with_actor` and never hits this method.
         #[doc(hidden)]
         pub fn for_test(
-            config: ControlPlaneConfig,
+            config: ComponentHostConfig,
             registry: Arc<Registry>,
             queue: Arc<Mailer>,
         ) -> Self {
-            let inner = Arc::new(ControlPlaneInner {
+            let inner = Arc::new(ComponentHostInner {
                 engine: config.engine,
                 linker: config.linker,
                 registry,
@@ -178,7 +179,7 @@ mod native {
         /// through the cap's load handler synchronously. Returns the
         /// `LoadResult` the cap would reply with; tests assert on it
         /// directly rather than threading a reply outbound. Mirrors
-        /// `aether.control.load_component` mail end-to-end minus the
+        /// `aether.component.load` mail end-to-end minus the
         /// dispatcher thread hop.
         #[doc(hidden)]
         pub fn load_for_test(&self, payload: LoadComponent) -> LoadResult {
@@ -202,24 +203,24 @@ mod native {
     }
 
     #[actor]
-    impl NativeActor for ControlPlaneCapability {
-        type Config = ControlPlaneConfig;
-        const NAMESPACE: &'static str = "aether.control";
+    impl NativeActor for ComponentHostCapability {
+        type Config = ComponentHostConfig;
+        const NAMESPACE: &'static str = "aether.component";
 
         fn init(
-            config: ControlPlaneConfig,
+            config: ComponentHostConfig,
             ctx: &mut NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
             let mailer = ctx.mailer();
             let registry = mailer.registry().cloned().ok_or_else(|| {
                 BootError::Other(
                     std::io::Error::other(
-                        "registry must be wired on Mailer before ControlPlaneCapability::init",
+                        "registry must be wired on Mailer before ComponentHostCapability::init",
                     )
                     .into(),
                 )
             })?;
-            let inner = Arc::new(ControlPlaneInner {
+            let inner = Arc::new(ComponentHostInner {
                 engine: config.engine,
                 linker: config.linker,
                 registry,
@@ -285,7 +286,7 @@ mod native {
         }
     }
 
-    impl ComponentRouter for ControlPlaneInner {
+    impl ComponentRouter for ComponentHostInner {
         fn route(&self, recipient: MailboxId, mail: Mail) -> ComponentSendOutcome {
             let entry = self
                 .components
@@ -334,10 +335,10 @@ mod native {
         }
     }
 
-    impl Drop for ControlPlaneInner {
+    impl Drop for ComponentHostInner {
         fn drop(&mut self) {
             // Chassis shutdown reverse-order: by the time the last Arc
-            // to `ControlPlaneInner` drops, the cap's own dispatcher
+            // to `ComponentHostInner` drops, the cap's own dispatcher
             // (and every other cap) has already exited, so no fresh
             // mail is landing. Walk the table once, close each inbox,
             // and join the per-component dispatcher threads — the
@@ -361,7 +362,7 @@ mod native {
         }
     }
 
-    impl ControlPlaneInner {
+    impl ComponentHostInner {
         fn handle_load_bytes(&self, bytes: &[u8]) -> LoadResult {
             match decode_payload(bytes) {
                 Ok(p) => self.handle_load(p),

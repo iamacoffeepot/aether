@@ -424,7 +424,7 @@ impl TestBench {
     /// pattern is "send → await → decode" — e.g. the `aether.io`
     /// `Read`/`Write`/`Delete`/`List` round trips. `advance` and
     /// `capture` are specialisations of this same shape against the
-    /// `aether.control` mailbox.
+    /// `aether.component` mailbox.
     pub fn send_and_await_reply<K, R>(
         &mut self,
         recipient_name: &str,
@@ -550,7 +550,7 @@ impl TestBench {
         // wait around 60 s. Long enough to absorb wasm compile under
         // parallel test contention on a 2-core CI runner (issue 603
         // made `aether.control` mail dispatch through
-        // `ControlPlaneCapability`'s thread instead of inline on the
+        // `ComponentHostCapability`'s thread instead of inline on the
         // caller, so a `LoadComponent` step needs the wait to ride
         // out the dispatcher hop + wasmtime compile under high CPU
         // pressure when N test binaries run in parallel).
