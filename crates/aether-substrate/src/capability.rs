@@ -560,6 +560,25 @@ impl<'a> ChassisCtx<'a> {
         })
     }
 
+    /// Issue 607 Phase 7: undo a previous `claim_*_mailbox` call.
+    /// Removes the sink from the chassis registry, the (id, counter)
+    /// entry from `frame_bound_pending`, the id from
+    /// `frame_bound_set`, and the id from `claimed_actor_mailboxes`.
+    /// Idempotent: calling on an id that wasn't claimed is a no-op.
+    ///
+    /// Used in the singleton-boot unwind path (chassis_builder /
+    /// capability) when `init` fails after the cap mailbox was
+    /// claimed. Without this, the failed cap leaves a sink registered
+    /// against its namespace and a stuck counter in
+    /// `frame_bound_pending` that the chassis frame loop would wait
+    /// for forever.
+    pub fn unclaim_mailbox(&mut self, id: MailboxId) {
+        self.registry.remove_sink(id);
+        self.frame_bound_pending.retain(|(i, _)| *i != id);
+        self.frame_bound_set.write().unwrap().remove(&id);
+        self.claimed_actor_mailboxes.retain(|i| *i != id);
+    }
+
     /// Clone-able mail-send handle. Capabilities stash this into
     /// their dispatcher state to send mail to other mailboxes
     /// (including other capabilities). Same `Arc<Mailer>` every
@@ -822,17 +841,30 @@ where
     // counter; the dispatcher decrements after each handler dispatch
     // so the per-frame drain barrier (ADR-0074 §Decision 5) sees the
     // counter drop in lock-step with handler progress.
-    let (mailbox_id, receiver, sink_sender, pending) = if A::FRAME_BARRIER {
-        let claim = ctx.claim_frame_bound_mailbox::<A>()?;
-        (
-            claim.id,
-            claim.receiver,
-            claim.sink_sender,
-            Some(claim.pending),
-        )
+    //
+    // Issue 607 Phase 7: if the mailbox claim fails, release the
+    // namespace claim we made above before propagating.
+    let claim_result = if A::FRAME_BARRIER {
+        ctx.claim_frame_bound_mailbox::<A>().map(|claim| {
+            (
+                claim.id,
+                claim.receiver,
+                claim.sink_sender,
+                Some(claim.pending),
+            )
+        })
     } else {
-        let claim = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
-        (claim.id, claim.receiver, claim.sink_sender, None)
+        ctx.claim_mailbox_drop_on_shutdown::<A>()
+            .map(|claim| (claim.id, claim.receiver, claim.sink_sender, None))
+    };
+    let (mailbox_id, receiver, sink_sender, pending) = match claim_result {
+        Ok(c) => c,
+        Err(e) => {
+            ctx.spawner_arc()
+                .actor_registry()
+                .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+            return Err(e);
+        }
     };
 
     let transport = Arc::new(crate::NativeTransport::from_ctx(
@@ -857,7 +889,10 @@ where
     // `chassis_builder::make_native_actor_boot`.
     let slots = Box::new(aether_actor::local::ActorSlots::new());
 
-    let actor = {
+    // Issue 607 Phase 7: failed init releases the slot before any
+    // dispatcher thread is spawned — drop the transport (and its
+    // installed inbox), unclaim the mailbox, release the namespace.
+    let init_result = {
         let mailer_clone = ctx.mail_send_handle();
         let mut init_ctx = crate::native_actor::NativeInitCtx::new(
             &transport,
@@ -875,9 +910,21 @@ where
                     r
                 },
             )
-        })?
+        })
     };
     drop(throwaway_handles); // explicit shape — no shared state outlives init
+    let actor = match init_result {
+        Ok(a) => a,
+        Err(e) => {
+            drop(transport);
+            drop(sink_sender);
+            ctx.unclaim_mailbox(mailbox_id);
+            ctx.spawner_arc()
+                .actor_registry()
+                .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+            return Err(e);
+        }
+    };
 
     // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
     let mut actor: Box<A> = Box::new(actor);

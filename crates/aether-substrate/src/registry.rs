@@ -260,6 +260,28 @@ impl Registry {
         self.insert(name.into(), MailboxEntry::Sink(handler))
     }
 
+    /// Issue 607 Phase 7: fully remove a sink entry. Used in the
+    /// chassis-boot unwind path when a singleton's `init` fails after
+    /// `try_register_sink` claimed the slot — the partial-boot state
+    /// must not leak into a later cap's namespace lookup. Returns
+    /// `true` if the entry existed and was a sink (and was removed),
+    /// `false` if the id is unknown or refers to a non-sink entry.
+    /// Component entries go through [`Self::drop_mailbox`] (which
+    /// transitions to `Dropped` rather than removing) — the lifecycle
+    /// difference is intentional: components can re-register the same
+    /// id after a drop, sinks are torn down on cap teardown and the
+    /// id can be freshly recreated.
+    pub(crate) fn remove_sink(&self, id: MailboxId) -> bool {
+        let mut inner = self.inner.write().unwrap();
+        match inner.mailboxes.get(&id) {
+            Some(slot) if matches!(slot.entry, MailboxEntry::Sink(_)) => {
+                inner.mailboxes.remove(&id);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Does a live (non-`Dropped`) mailbox exist under `name`? Returns
     /// its id if so. The id itself is deterministic (ADR-0029) —
     /// callers that just want the id without a liveness check can use
