@@ -997,8 +997,77 @@ impl<C: Chassis> BuiltChassis<C> {
     /// chassis. Useful for embedders that hold a [`BuiltChassis`]
     /// directly (today: hand-written test harnesses; bin chassis
     /// hand off to `run()` and don't keep the chassis around).
-    pub fn actor<A: NativeActor>(&self) -> Option<Arc<A>> {
+    ///
+    /// Issue 607 Phase 5 (ADR-0079): tightened to `A: Singleton +
+    /// NativeActor`. Wrong-cardinality calls fail to compile —
+    /// instanced actors live in the [`crate::ActorRegistry`] and are
+    /// reached via [`Self::resolve_actor`] instead.
+    ///
+    /// ```compile_fail
+    /// # use aether_substrate::{BuiltChassis, NativeActor};
+    /// # use aether_actor::Instanced;
+    /// // Calling actor::<X>() on an Instanced actor fails to compile —
+    /// // the Singleton bound is missing.
+    /// fn _wrong<C: aether_substrate::Chassis, A: Instanced + NativeActor>(
+    ///     chassis: &BuiltChassis<C>,
+    /// ) {
+    ///     let _ = chassis.actor::<A>();
+    /// }
+    /// ```
+    pub fn actor<A: aether_actor::Singleton + NativeActor>(&self) -> Option<Arc<A>> {
         self.booted.actors.get::<A>()
+    }
+
+    /// Issue 607 Phase 5 (ADR-0079): look up a single instanced actor
+    /// by its per-instance subname. Returns `Some(Arc<A>)` only if
+    /// `(A::NAMESPACE, subname)` resolves to a `Live` slot in the
+    /// chassis's [`crate::ActorRegistry`] whose `TypeId` matches `A`.
+    /// `None` for missing names, tombstoned names, or type
+    /// mismatches.
+    ///
+    /// Diagnostic / test affordance — production handler code should
+    /// reach for `ctx.resolve_actor::<A>(name)` (typed mail send),
+    /// not the chassis-level lookup. Wrong-cardinality calls fail
+    /// to compile via the `Instanced` bound.
+    ///
+    /// ```compile_fail
+    /// # use aether_substrate::{BuiltChassis, NativeActor};
+    /// # use aether_actor::Singleton;
+    /// // Calling resolve_actor::<X>(...) on a Singleton fails to
+    /// // compile — the Instanced bound is missing.
+    /// fn _wrong<C: aether_substrate::Chassis, A: Singleton + NativeActor>(
+    ///     chassis: &BuiltChassis<C>,
+    /// ) {
+    ///     let _ = chassis.resolve_actor::<A>("anything");
+    /// }
+    /// ```
+    pub fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
+        &self,
+        subname: &str,
+    ) -> Option<Arc<A>> {
+        let full_name = format!("{}:{}", A::NAMESPACE, subname);
+        let id = MailboxId(aether_data::mailbox_id_from_name(&full_name).0);
+        let actor_any = self.booted.actor_registry.live_actor(id)?;
+        let type_id = self.booted.actor_registry.type_id_at(id)?;
+        if type_id != std::any::TypeId::of::<A>() {
+            return None;
+        }
+        actor_any.downcast::<A>().ok()
+    }
+
+    /// Issue 607 Phase 5 (ADR-0079): enumerate every `Live` instance
+    /// of `A` along with its subname. Returns owned `(String, Arc<A>)`
+    /// pairs because the registry's `RwLock` releases before the
+    /// iterator runs; cloning the subname per entry is cheap (one
+    /// allocation per live instance).
+    ///
+    /// Useful for chassis-level diagnostics (which sessions are
+    /// alive?) and for tests that need to assert against the full
+    /// fleet without holding a list of subnames externally.
+    pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
+        &self,
+    ) -> Vec<(String, Arc<A>)> {
+        self.booted.actor_registry.live_actors_of_type::<A>()
     }
 
     /// Issue 607 Phase 3: chassis-level entry point for spawning an
@@ -1089,8 +1158,59 @@ impl<C: Chassis> PassiveChassis<C> {
     /// chassis. Embedders (TestBench, integration tests) reach for
     /// this when they need to peer at cap state without going
     /// through mail.
-    pub fn actor<A: NativeActor>(&self) -> Option<Arc<A>> {
+    ///
+    /// Issue 607 Phase 5 (ADR-0079): tightened to `A: Singleton +
+    /// NativeActor`. Wrong-cardinality calls fail to compile —
+    /// instanced actors live in the [`crate::ActorRegistry`] and are
+    /// reached via [`Self::resolve_actor`] instead.
+    ///
+    /// ```compile_fail
+    /// # use aether_substrate::{PassiveChassis, NativeActor};
+    /// # use aether_actor::Instanced;
+    /// fn _wrong<C: aether_substrate::Chassis, A: Instanced + NativeActor>(
+    ///     chassis: &PassiveChassis<C>,
+    /// ) {
+    ///     let _ = chassis.actor::<A>();
+    /// }
+    /// ```
+    pub fn actor<A: aether_actor::Singleton + NativeActor>(&self) -> Option<Arc<A>> {
         self.booted.actors.get::<A>()
+    }
+
+    /// Issue 607 Phase 5 (ADR-0079): mirror of
+    /// [`BuiltChassis::resolve_actor`] for embedders that drive
+    /// passive chassis directly (TestBench, integration tests).
+    ///
+    /// ```compile_fail
+    /// # use aether_substrate::{PassiveChassis, NativeActor};
+    /// # use aether_actor::Singleton;
+    /// fn _wrong<C: aether_substrate::Chassis, A: Singleton + NativeActor>(
+    ///     chassis: &PassiveChassis<C>,
+    /// ) {
+    ///     let _ = chassis.resolve_actor::<A>("anything");
+    /// }
+    /// ```
+    pub fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
+        &self,
+        subname: &str,
+    ) -> Option<Arc<A>> {
+        let full_name = format!("{}:{}", A::NAMESPACE, subname);
+        let id = MailboxId(aether_data::mailbox_id_from_name(&full_name).0);
+        let actor_any = self.booted.actor_registry.live_actor(id)?;
+        let type_id = self.booted.actor_registry.type_id_at(id)?;
+        if type_id != std::any::TypeId::of::<A>() {
+            return None;
+        }
+        actor_any.downcast::<A>().ok()
+    }
+
+    /// Issue 607 Phase 5 (ADR-0079): mirror of
+    /// [`BuiltChassis::resolve_actors`] for embedders that drive
+    /// passive chassis directly.
+    pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
+        &self,
+    ) -> Vec<(String, Arc<A>)> {
+        self.booted.actor_registry.live_actors_of_type::<A>()
     }
 
     /// Issue 607 Phase 3: chassis-level entry point for spawning an
@@ -2366,6 +2486,251 @@ mod tests {
             0,
             "target's monitors_of should drop the dead watcher",
         );
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 5 verify: `resolve_actor` and `resolve_actors`
+    /// against a multi-instance fixture. Spawns three instanced actors
+    /// under one type, asserts:
+    ///   - `resolve_actor::<A>("a")` finds the named instance.
+    ///   - `resolve_actor::<A>("missing")` returns `None`.
+    ///   - `resolve_actors::<A>()` enumerates all three (subname-keyed).
+    ///   - After one closes, the iterator drops to two and the closed
+    ///     name returns `None` from `resolve_actor`.
+    #[test]
+    fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
+        use crate::registry::MailboxEntry;
+        use crate::spawn::Subname;
+        use aether_actor::{HandlesKind, Instanced};
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Quit {
+            tag: u32,
+        }
+        impl Kind for Quit {
+            const NAME: &'static str = "test.resolve.quit";
+            const ID: DataKindId = DataKindId(0xF00D_F00D_F00D_F00D);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        struct Member {
+            tag: u32,
+        }
+        impl aether_actor::Actor for Member {
+            const NAMESPACE: &'static str = "test.resolve.member";
+        }
+        impl Instanced for Member {}
+        impl HandlesKind<Quit> for Member {}
+        impl crate::native_actor::NativeActor for Member {
+            type Config = u32;
+            fn init(
+                tag: u32,
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self { tag })
+            }
+        }
+        impl crate::native_actor::NativeDispatch for Member {
+            fn __aether_dispatch_envelope(
+                &self,
+                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Quit::ID.0 {
+                    let _ = Quit::decode_from_bytes(payload)?;
+                    ctx.shutdown();
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let _id_a = chassis
+            .spawn_actor::<Member>(Subname::Named("a"), 1)
+            .finish()
+            .expect("spawn a");
+        let _id_b = chassis
+            .spawn_actor::<Member>(Subname::Named("b"), 2)
+            .finish()
+            .expect("spawn b");
+        let id_c = chassis
+            .spawn_actor::<Member>(Subname::Named("c"), 3)
+            .finish()
+            .expect("spawn c");
+
+        // resolve_actor finds the named instance.
+        let a: Arc<Member> = chassis.resolve_actor::<Member>("a").expect("a is live");
+        assert_eq!(a.tag, 1, "resolve_actor returns the matching Arc");
+
+        // Missing subname → None.
+        assert!(
+            chassis.resolve_actor::<Member>("missing").is_none(),
+            "unknown subname should return None",
+        );
+
+        // resolve_actors enumerates all three. Order is registry-defined
+        // (HashMap iteration), so collect into a sorted (subname, tag)
+        // vec for assertions.
+        let mut all: Vec<(String, u32)> = chassis
+            .resolve_actors::<Member>()
+            .into_iter()
+            .map(|(name, arc)| (name, arc.tag))
+            .collect();
+        all.sort();
+        assert_eq!(
+            all,
+            vec![
+                ("a".to_owned(), 1),
+                ("b".to_owned(), 2),
+                ("c".to_owned(), 3),
+            ],
+            "resolve_actors should enumerate every Live instance with its subname",
+        );
+
+        // Close c — Quit it through the sink handler. After close,
+        // resolve_actors drops to two and resolve_actor::<Member>("c")
+        // returns None.
+        let MailboxEntry::Sink(handler) = registry.entry(id_c).expect("c sink registered") else {
+            panic!("expected sink entry for c");
+        };
+        handler(
+            <Quit as Kind>::ID,
+            Quit::NAME,
+            None,
+            aether_data::ReplyTo::NONE,
+            &(Quit { tag: 1 }).encode_into_bytes(),
+            1,
+        );
+
+        // Wait for c's slot to flip Dead.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while chassis.actor_registry().live_actor(id_c).is_some()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert!(
+            chassis.resolve_actor::<Member>("c").is_none(),
+            "closed instance should disappear from resolve_actor",
+        );
+        let mut after: Vec<(String, u32)> = chassis
+            .resolve_actors::<Member>()
+            .into_iter()
+            .map(|(name, arc)| (name, arc.tag))
+            .collect();
+        after.sort();
+        assert_eq!(
+            after,
+            vec![("a".to_owned(), 1), ("b".to_owned(), 2)],
+            "resolve_actors should drop the closed instance",
+        );
+
+        // Counter for unused warning. (`_id_a` / `_id_b` retain their
+        // names elsewhere; this guard keeps the compiler happy.)
+        let _ = AtomicU32::new(0).load(AtomicOrdering::SeqCst);
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 5: type mismatch through `resolve_actor` returns
+    /// `None` rather than a downcast that succeeds against the wrong
+    /// type. Two instanced types live under different namespaces; a
+    /// lookup with one type at the other's id mismatches and returns
+    /// None.
+    #[test]
+    fn resolve_actor_returns_none_on_type_mismatch() {
+        use crate::spawn::Subname;
+        use aether_actor::Instanced;
+
+        struct Foo;
+        impl aether_actor::Actor for Foo {
+            const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
+        }
+        impl Instanced for Foo {}
+        impl crate::native_actor::NativeActor for Foo {
+            type Config = ();
+            fn init(
+                _: (),
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self)
+            }
+        }
+        impl crate::native_actor::NativeDispatch for Foo {
+            fn __aether_dispatch_envelope(
+                &self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        struct Bar;
+        impl aether_actor::Actor for Bar {
+            const NAMESPACE: &'static str = "test.resolve_mismatch.bar";
+        }
+        impl Instanced for Bar {}
+        impl crate::native_actor::NativeActor for Bar {
+            type Config = ();
+            fn init(
+                _: (),
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self)
+            }
+        }
+        impl crate::native_actor::NativeDispatch for Bar {
+            fn __aether_dispatch_envelope(
+                &self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let _ = chassis
+            .spawn_actor::<Foo>(Subname::Named("only"), ())
+            .finish()
+            .expect("spawn foo");
+
+        // Resolving with the same subname but the wrong type returns
+        // None — the namespaces differ so the hashed full names differ
+        // and Bar's "only" is just not present. (The TypeId guard
+        // would catch a hash collision.)
+        assert!(chassis.resolve_actor::<Bar>("only").is_none());
+
+        // resolve_actors::<Bar>() is empty because no Bar instances
+        // were spawned, even though a Foo with the same subname exists.
+        assert_eq!(chassis.resolve_actors::<Bar>().len(), 0);
+        assert_eq!(chassis.resolve_actors::<Foo>().len(), 1);
 
         drop(chassis);
     }
