@@ -18,7 +18,7 @@ use std::time::Duration;
 use aether_capabilities::{
     BroadcastCapability, ControlPlaneCapability, ControlPlaneConfig, HandleCapability,
     HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability, IoCapability,
-    LogCapability, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
+    LogCapability, TcpCapability, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
     io::NamespaceRoots,
 };
 use aether_data::{Kind, KindId};
@@ -177,6 +177,7 @@ impl HeadlessChassis {
             .with_actor::<ControlPlaneCapability>(control_plane_config)
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<HttpCapability>(http)
+            .with_actor::<TcpCapability>(())
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedTestBenchCapability>(())

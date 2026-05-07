@@ -1847,6 +1847,15 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     let mut fallback: Option<NativeFallbackFn> = None;
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
     let mut consts: Vec<syn::ImplItemConst> = Vec::new();
+    // Issue 607 Phase 4a (ADR-0079): `on_close` is a `NativeActor` trait
+    // method with a default empty body. When a cap overrides it, the
+    // override must land inside the trait impl block (so the
+    // dispatcher trampoline's `actor.on_close(...)` resolves to the
+    // override via trait dispatch). Pre-issue-625 the macro routed
+    // every non-handler / non-init fn into the inherent impl, so
+    // `on_close` overrides triggered a dead_code warning and (worse)
+    // didn't override the trait method at all.
+    let mut lifecycle_methods: Vec<syn::ImplItemFn> = Vec::new();
 
     for impl_item in item.items {
         match impl_item {
@@ -1892,6 +1901,8 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                     fallback = Some(NativeFallbackFn { method: f });
                 } else if f.sig.ident == "init" {
                     init_method = Some(f);
+                } else if f.sig.ident == "on_close" {
+                    lifecycle_methods.push(f);
                 } else {
                     helpers.push(f);
                 }
@@ -2100,6 +2111,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         impl #impl_generics #trait_path for #self_ty #where_clause {
             #config_type
             #init_method
+            #(#lifecycle_methods)*
         }
 
         #[cfg(not(target_arch = "wasm32"))]

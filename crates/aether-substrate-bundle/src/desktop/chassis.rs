@@ -16,7 +16,7 @@ use std::sync::Arc;
 use aether_capabilities::{
     AudioCapability, BroadcastCapability, CaptureBackend, ControlPlaneCapability,
     ControlPlaneConfig, HandleCapability, HttpCapability, IoCapability, LogCapability,
-    RenderCapability, RenderConfig, UnsupportedTestBenchCapability,
+    RenderCapability, RenderConfig, TcpCapability, UnsupportedTestBenchCapability,
     audio::AudioConfig as AudioConf, http::HttpConfig as HttpConf, io::NamespaceRoots,
 };
 use aether_kinds::WindowMode;
@@ -229,6 +229,7 @@ impl DesktopChassis {
             .with_actor::<ControlPlaneCapability>(control_plane_config)
             .with_actor::<IoCapability>(namespace_roots)
             .with_actor::<HttpCapability>(http)
+            .with_actor::<TcpCapability>(())
             .with_actor::<AudioCapability>(audio)
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<UnsupportedTestBenchCapability>(())
