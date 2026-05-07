@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use aether_capabilities::{
     AudioCapability, BroadcastCapability, CaptureBackend, ControlPlaneCapability,
-    ControlPlaneConfig, HandleCapability, IoCapability, LogCapability, NetCapability,
+    ControlPlaneConfig, HandleCapability, HttpCapability, IoCapability, LogCapability,
     RenderCapability, RenderConfig, UnsupportedTestBenchCapability,
-    audio::AudioConfig as AudioConf, io::NamespaceRoots, net::NetConfig as NetConf,
+    audio::AudioConfig as AudioConf, http::HttpConfig as HttpConf, io::NamespaceRoots,
 };
 use aether_kinds::WindowMode;
 use aether_substrate::capability::BootError;
@@ -69,7 +69,7 @@ pub struct DesktopEnv {
     pub capture_queue: CaptureQueue,
     pub hub_url: Option<String>,
     pub namespace_roots: NamespaceRoots,
-    pub net: NetConf,
+    pub http: HttpConf,
     pub audio: AudioConf,
     pub boot_mode: WindowMode,
     pub boot_size: Option<(u32, u32)>,
@@ -92,7 +92,7 @@ impl DesktopEnv {
         let capture_queue = CaptureQueue::new();
 
         let hub_url = std::env::var("AETHER_HUB_URL").ok();
-        let net = NetConf::from_env();
+        let http = HttpConf::from_env();
         let namespace_roots = NamespaceRoots::from_env();
         let audio = AudioConf::from_env();
 
@@ -119,7 +119,7 @@ impl DesktopEnv {
             capture_queue,
             hub_url,
             namespace_roots,
-            net,
+            http,
             audio,
             boot_mode,
             boot_size,
@@ -131,7 +131,7 @@ impl DesktopEnv {
 impl DesktopChassis {
     /// Build the desktop chassis: stand up substrate-core internals,
     /// connect to the hub if requested, compose the native passives
-    /// (log, io, net, audio, render+camera) through the
+    /// (log, io, http, audio, render+camera) through the
     /// chassis_builder `.with()` chain, then wrap everything in a
     /// [`DesktopDriverCapability`] and hand it to the builder.
     /// Returns a [`BuiltChassis`] whose [`BuiltChassis::run`] blocks
@@ -144,7 +144,7 @@ impl DesktopChassis {
             capture_queue,
             hub_url,
             namespace_roots,
-            net,
+            http,
             audio,
             boot_mode,
             boot_size,
@@ -228,7 +228,7 @@ impl DesktopChassis {
             .with_actor::<LogCapability>(())
             .with_actor::<ControlPlaneCapability>(control_plane_config)
             .with_actor::<IoCapability>(namespace_roots)
-            .with_actor::<NetCapability>(net)
+            .with_actor::<HttpCapability>(http)
             .with_actor::<AudioCapability>(audio)
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<UnsupportedTestBenchCapability>(())
