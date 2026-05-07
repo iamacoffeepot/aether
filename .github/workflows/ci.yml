@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [ main ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -73,7 +73,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - name: Install Linux deps (ALSA for cpal, Mesa lavapipe for wgpu)
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev mesa-vulkan-drivers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+          mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@v2
       # Pre-build component wasm artifacts the scenario runner loads
       # at test time. Without this, ADR-0067 per-component scenarios
@@ -117,7 +118,6 @@ jobs:
             [ -z "$pkg" ] && continue
             cargo build --target wasm32-unknown-unknown -p "$pkg"
           done <<< "$pkgs"
-
         # Get the diff between the current commit and the base of the PR, then filter to just the files that changed.
         # If any of those files are in the `crates/` directory, or are `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, or a workflow file,
         # then we consider this PR to have "code changes" that require running the tests. Otherwise, we can skip the tests to save time.
@@ -128,13 +128,13 @@ jobs:
         id: changed-files
         run: |
           if ${{ github.event_name == 'pull_request' }}; then
-              echo "changed_files=$(git diff --name-only -r HEAD^1 HEAD | xargs)" >> $GITHUB_OUTPUT
+              echo "changed_files=$(git diff --name-only -r HEAD^1 HEAD)" >> $GITHUB_OUTPUT
           else
               echo "changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }})" >> $GITHUB_OUTPUT
           fi
       - name: Run tests
         run: |
-
+          
           TESTABLE_CRATES=$(echo "${{ steps.changed-files.outputs.changed_files }}" | grep -E '^(crates)')
           CRATE_NAMES=$(echo "${TESTABLE_CRATES}" | cut -d/ -f2 | sort -u)
           echo "Testable crates: ${CRATE_NAMES}"
@@ -164,7 +164,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [ macos-latest, windows-latest ]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -176,7 +176,7 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [changes, fmt, clippy, test, desktop]
+    needs: [ changes, fmt, clippy, test, desktop ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
