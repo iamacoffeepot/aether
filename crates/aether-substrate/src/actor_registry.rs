@@ -201,6 +201,29 @@ impl ActorRegistry {
         }
     }
 
+    /// Issue 607 Phase 7: release ownership of `namespace` iff
+    /// `type_id` currently owns it. Used in the chassis-boot unwind
+    /// path when a singleton's `init` fails — without this release,
+    /// the failed cap's namespace stays claimed and a later cap with
+    /// a different `TypeId` legitimately claiming the same namespace
+    /// (after the failed cap is gone) collides. Returns `true` if the
+    /// entry was released, `false` if absent or owned by a different
+    /// type (typically a caller bug, but we don't panic — the boot
+    /// failure path runs even on weird states).
+    ///
+    /// Crate-private — only the boot-failure paths in
+    /// [`crate::capability`] / [`crate::chassis_builder`] call this.
+    pub(crate) fn release_namespace(&self, namespace: &'static str, type_id: TypeId) -> bool {
+        let mut owners = self.name_owners.write().unwrap();
+        match owners.get(namespace) {
+            Some(&existing) if existing == type_id => {
+                owners.remove(namespace);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Insert a `Live` actor entry under `id`. Returns `Err(())` if a
     /// `Live` entry already exists at `id` (caller must check
     /// `is_tombstoned` separately for the retired-name case). Used by

@@ -295,6 +295,13 @@ impl Spawner {
             // 64-bit id even with distinct names. Treat as
             // SubnameInUse for the caller; the singleton's claim wins
             // (it landed first).
+            //
+            // Issue 607 Phase 7: the sink WAS registered above; remove
+            // it before returning so the failed spawn doesn't leave
+            // a dangling sink that warn-drops mail. The actor itself
+            // (init succeeded) drops naturally as `actor` falls out
+            // of scope.
+            self.registry.remove_sink(id);
             return Err(SpawnError::SubnameInUse { full_name });
         }
 

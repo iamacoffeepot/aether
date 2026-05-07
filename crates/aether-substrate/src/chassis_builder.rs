@@ -331,17 +331,33 @@ where
         // frame loop. Free-running caps take the regular drop-on-
         // shutdown claim. Both share the same dispatcher trampoline
         // shape apart from the post-dispatch decrement.
-        let (mailbox_id, receiver, sink_sender, pending) = if A::FRAME_BARRIER {
-            let claim = ctx.claim_frame_bound_mailbox::<A>()?;
-            (
-                claim.id,
-                claim.receiver,
-                claim.sink_sender,
-                Some(claim.pending),
-            )
+        //
+        // Issue 607 Phase 7: if the mailbox claim fails (name
+        // collision against a peer cap claiming the same mailbox
+        // through `register_sink`), release the namespace claim we
+        // just made — otherwise a later cap with a different TypeId
+        // legitimately claiming the same namespace can't.
+        let claim_result = if A::FRAME_BARRIER {
+            ctx.claim_frame_bound_mailbox::<A>().map(|claim| {
+                (
+                    claim.id,
+                    claim.receiver,
+                    claim.sink_sender,
+                    Some(claim.pending),
+                )
+            })
         } else {
-            let claim = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
-            (claim.id, claim.receiver, claim.sink_sender, None)
+            ctx.claim_mailbox_drop_on_shutdown::<A>()
+                .map(|claim| (claim.id, claim.receiver, claim.sink_sender, None))
+        };
+        let (mailbox_id, receiver, sink_sender, pending) = match claim_result {
+            Ok(c) => c,
+            Err(e) => {
+                ctx.spawner_arc()
+                    .actor_registry()
+                    .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+                return Err(e);
+            }
         };
 
         // Per-cap transport. `NativeTransport::from_ctx` pulls the
@@ -364,7 +380,12 @@ where
         // stamp the actor's transport as the in-actor `MailDispatch`
         // around `init` so any `tracing::*` event the cap fires
         // during boot drains to LogCapability when init returns.
-        let actor = {
+        //
+        // Issue 607 Phase 7: failed init releases the slot before any
+        // dispatcher thread is spawned — drop the transport
+        // (including its installed inbox), unclaim the mailbox, and
+        // release the namespace.
+        let init_result = {
             let mailer_clone = ctx.mail_send_handle();
             let mut init_ctx = NativeInitCtx::new(&transport, handles, mailer_clone);
             aether_actor::local::with_stamped(&slots, || {
@@ -376,7 +397,19 @@ where
                         r
                     },
                 )
-            })?
+            })
+        };
+        let actor = match init_result {
+            Ok(a) => a,
+            Err(e) => {
+                drop(transport);
+                drop(sink_sender);
+                ctx.unclaim_mailbox(mailbox_id);
+                ctx.spawner_arc()
+                    .actor_registry()
+                    .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+                return Err(e);
+            }
         };
 
         // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
@@ -1345,6 +1378,63 @@ mod tests {
             .expect_err("second passive must fail with duplicate claim");
 
         assert!(matches!(err, BootError::MailboxAlreadyClaimed { .. }));
+    }
+
+    /// Issue 607 Phase 7: a singleton whose `init` returns `Err`
+    /// releases its slot before `with_actor` propagates the error.
+    /// After the failed build, the chassis's `Registry` has no sink
+    /// at the cap's namespace and the `ActorRegistry`'s `name_owners`
+    /// no longer claims the namespace — so a fresh chassis can boot
+    /// a different cap with the same namespace string (or the same
+    /// cap with a different config) without colliding.
+    #[test]
+    fn failed_singleton_init_releases_namespace_and_sink() {
+        struct FailingCap;
+        impl aether_actor::Actor for FailingCap {
+            const NAMESPACE: &'static str = "test.phase7.failing_cap";
+        }
+        impl aether_actor::Singleton for FailingCap {}
+
+        impl crate::native_actor::NativeActor for FailingCap {
+            type Config = ();
+            fn init(
+                _: (),
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Err(BootError::Other(Box::new(std::io::Error::other(
+                    "intentional init failure for Phase 7 cleanup test",
+                ))))
+            }
+        }
+        impl crate::native_actor::NativeDispatch for FailingCap {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<FailingCap>(())
+            .build_passive()
+            .expect_err("init failure must propagate");
+        // The error wraps init's std::io::Error message.
+        assert!(
+            format!("{err:?}").contains("intentional init failure"),
+            "expected init error to propagate, got {err:?}",
+        );
+
+        // Sink at the cap's namespace must be gone — Registry::lookup
+        // returns None for absent entries.
+        assert!(
+            registry.lookup(FailingCap::NAMESPACE).is_none(),
+            "sink at {} should be removed after failed init",
+            FailingCap::NAMESPACE,
+        );
     }
 
     /// Issue 552 stage 1: end-to-end smoke for the new
