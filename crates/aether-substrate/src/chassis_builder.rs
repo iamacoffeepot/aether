@@ -626,11 +626,10 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     aborter: Arc<dyn FatalAborter>,
     /// Issue #601: chassis-declared log-drain target. `None` until the
     /// chassis calls [`Self::with_log_drain`]; on `build()` the
-    /// mailbox id is dispatched as `aether.control.configure_log_drain`
-    /// mail to every booted actor so each actor's `LogDrainSlot` is
-    /// installed. The same mail also goes to `aether.control` so the
-    /// [`crate::control::ControlPlane`]'s dispatch arm stores the
-    /// drain for the runtime `load_component` path — runtime-loaded
+    /// mailbox id is dispatched as `aether.log.configure_drain` mail
+    /// to every booted actor so each actor's `LogDrainSlot` is
+    /// installed. `ControlPlaneCapability` snapshots the same drain
+    /// for the runtime `load_component` path — runtime-loaded
     /// components receive `ConfigureLogDrain` themselves on
     /// registration. The chassis Builder declares the drain; the
     /// runtime state lives entirely in `ControlPlane` and per-actor
@@ -724,8 +723,8 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// be a [`NativeActor`] that handles [`LogBatch`] (the cap's
     /// mailbox id is derived from `T::NAMESPACE` at compile time).
     /// On `build()` / `build_passive()` the chassis dispatches a
-    /// `aether.control.configure_log_drain` mail to every booted actor
-    /// so each actor's `LogDrainSlot` resolves to this mailbox; the
+    /// `aether.log.configure_drain` mail to every booted actor so each
+    /// actor's `LogDrainSlot` resolves to this mailbox; the
     /// auto-emitted handler in `#[actor]` does the install.
     ///
     /// No call → `log_drain` stays `None`, no `ConfigureLogDrain`

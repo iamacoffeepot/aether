@@ -835,9 +835,9 @@ mod control_plane {
         Err { error: String },
     }
 
-    /// `aether.control.configure_log_drain` — chassis-pushed mail every
-    /// actor handles to pick up the configured log drain mailbox
-    /// (issue #601). The chassis dispatches one of these to every
+    /// `aether.log.configure_drain` — chassis-pushed mail every actor
+    /// handles to pick up the configured log drain mailbox (issue
+    /// #601). The chassis dispatches one of these to every
     /// freshly-instantiated actor before any other inbound mail; the
     /// SDK's `#[actor]` / `#[handlers]` derive auto-emits a handler
     /// that installs `mailbox` into the per-actor `LogDrainSlot` so
@@ -854,7 +854,7 @@ mod control_plane {
     #[derive(
         Copy, Clone, Debug, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
     )]
-    #[kind(name = "aether.control.configure_log_drain")]
+    #[kind(name = "aether.log.configure_drain")]
     pub struct ConfigureLogDrain {
         pub mailbox: aether_data::MailboxId,
     }

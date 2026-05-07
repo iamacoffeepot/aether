@@ -286,7 +286,7 @@ pub struct ChassisCtx<'a> {
     /// `claim_frame_bound_mailbox_*`, `claim_mailbox_drop_on_shutdown_*`)
     /// appends its `MailboxId` here. The chassis builder reads the
     /// list after `boot_passives` to dispatch
-    /// `aether.control.configure_log_drain` mail to each booted actor
+    /// `aether.log.configure_drain` mail to each booted actor
     /// so its `LogDrainSlot` resolves to the chassis's declared drain
     /// (`Builder::with_log_drain<T>()`).
     ///
