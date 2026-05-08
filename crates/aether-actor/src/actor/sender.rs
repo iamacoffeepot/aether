@@ -1,11 +1,17 @@
 //! Issue 552 stage 1: cross-transport actor-typed sender surface.
+//! Predates the per-stage capability trait split (issue 663 / 665):
+//! `Sender` and `MailCtx` are the legacy traits the `#[handler]`
+//! macro emits dispatch arms against, kept alongside
+//! [`crate::actor::ctx::MailSender`] / [`crate::actor::ctx::OutboundReply`]
+//! so existing macro emissions continue to compile. New cross-target
+//! code should program against the per-stage capability traits.
 //!
-//! Both the wasm-guest [`Ctx<'a, FfiTransport>`] and the native
-//! [`aether_substrate::NativeCtx<'a>`] implement [`Sender`] and
-//! [`MailCtx`]. The traits are the language stage-3 senders walk
-//! against once `resolve_mailbox::<K>(name)` retires — `ctx.send::<R>(&kind)`
-//! is the same call shape everywhere, with the trait body picking
-//! the per-transport routing.
+//! Both the wasm-guest [`crate::ffi::FfiCtx<'a>`] and the native
+//! `NativeCtx<'a>` (in `aether-substrate`) implement [`Sender`] and
+//! [`MailCtx`]. The traits provide the cross-target call shape
+//! `ctx.send::<R>(&kind)`; per-target routing happens in each impl
+//! (FFI bodies hit [`crate::ffi::bridge::MAIL_BRIDGE`]; native bodies hit
+//! `NativeBinding`'s inherent `send_mail`).
 //!
 //! [`Sender`] is the addressing minimum every per-handler ctx and
 //! every init-time ctx exposes — single-payload `send`, batched
@@ -33,10 +39,11 @@ use aether_data::Kind;
 use crate::actor::{Actor, HandlesKind};
 
 /// Outbound-mail surface every actor ctx exposes. Implementations
-/// route through their owning transport — the wasm impl on
-/// [`crate::Ctx<'a, FfiTransport>`] dispatches through host fns;
-/// the native impl on `NativeCtx<'_>` (in `aether-substrate`)
-/// pushes onto the cross-actor `Arc<Mailer>` queue.
+/// route through their per-target dispatch surface — the wasm impl
+/// on [`crate::ffi::FfiCtx<'_>`] dispatches through
+/// [`crate::ffi::bridge::MAIL_BRIDGE`]; the native impl on `NativeCtx<'_>`
+/// (in `aether-substrate`) pushes onto the cross-actor `Arc<Mailer>`
+/// queue via `NativeBinding`'s inherent `send_mail`.
 ///
 /// `R` is the receiving actor type. `R::NAMESPACE` resolves to the
 /// receiver's mailbox id at compile time (ADR-0029 stable hash).

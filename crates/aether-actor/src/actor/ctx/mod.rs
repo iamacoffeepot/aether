@@ -24,9 +24,11 @@ pub mod mail_sender;
 pub mod outbound_reply;
 pub mod persistence;
 pub mod resolver;
+pub mod sync_waiter;
 
 pub use lifecycle::LifecycleControl;
 pub use mail_sender::MailSender;
 pub use outbound_reply::OutboundReply;
 pub use persistence::Persistence;
 pub use resolver::Resolver;
+pub use sync_waiter::SyncWaiter;

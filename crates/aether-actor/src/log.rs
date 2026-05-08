@@ -15,7 +15,7 @@
 //! the SDK contract — `LogBuffer`, `LogDrainSlot`, `drain_buffer`
 //! itself — stays in this crate so the `#[handlers]` derive can emit
 //! a single path that resolves on both wasm and native targets.
-//! Wasm doesn't need a hook: it ships through [`crate::FFI_TRANSPORT`]
+//! Wasm doesn't need a hook: it ships through [`crate::ffi::bridge::MAIL_BRIDGE`]
 //! directly since the linear memory IS the actor.
 //!
 //! There is no host branch. `tracing::*` events fired outside any
@@ -44,7 +44,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use aether_data::{Kind, KindId, MailboxId};
+#[cfg(not(target_arch = "wasm32"))]
+use aether_data::KindId;
+use aether_data::{Kind, MailboxId};
 use aether_kinds::{LogBatch, LogEvent};
 use tracing::{
     Event, Level,
@@ -259,12 +261,11 @@ impl Drop for PipelineGuard {
 
 #[cfg(target_arch = "wasm32")]
 fn ship_batch_via_wasm_transport(mailbox: MailboxId, batch: LogBatch) {
-    use crate::mail::transport::MailTransport;
     let bytes = match postcard::to_allocvec(&batch) {
         Ok(b) => b,
         Err(_) => return,
     };
-    crate::FFI_TRANSPORT.send_mail(mailbox.0, <LogBatch as Kind>::ID.0, &bytes, 1);
+    crate::ffi::bridge::MAIL_BRIDGE.send_mail(mailbox.0, <LogBatch as Kind>::ID.0, &bytes, 1);
 }
 
 /// Hard cap on the per-event message bytes. Trims oversize

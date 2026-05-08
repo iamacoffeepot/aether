@@ -25,8 +25,8 @@ use std::sync::{Arc, RwLock};
 use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
 use aether_data::{Kind, mailbox_id_from_name};
 
+use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
-use crate::actor::native::transport::NativeTransport;
 use crate::actor::native::{NativeActor, NativeDispatch, NativeInitCtx};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::error::BootError;
@@ -82,7 +82,7 @@ pub enum SpawnError {
 }
 
 /// Chassis-level spawn machinery (Phase 3). One per chassis; cloned as
-/// `Arc<Spawner>` into every [`NativeTransport`] so per-handler
+/// `Arc<Spawner>` into every [`NativeBinding`] so per-handler
 /// `NativeCtx::spawn_child` can reach it without explicit plumbing.
 pub struct Spawner {
     registry: Arc<Registry>,
@@ -218,7 +218,7 @@ impl Spawner {
         // `NativeInitCtx::self_id`); spawn-thread doesn't exist yet.
         let (tx, rx) = mpsc::channel::<Envelope>();
 
-        let transport = Arc::new(NativeTransport::new(
+        let transport = Arc::new(NativeBinding::new(
             Arc::clone(&self.mailer),
             id,
             // Phase 3 instanced actors are free-running. Frame-barrier

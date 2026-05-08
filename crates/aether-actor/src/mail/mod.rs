@@ -1,14 +1,21 @@
 //! Mail layer of the actor SDK: the inbound `Mail` envelope,
 //! `PriorState` bundle, and `ReplyTo` opaque handle live here in
-//! `mod.rs` (pure decoders, no transport coupling). The `Mailbox<K, T>`
-//! send-side type lives in [`mailbox`](crate::mail::mailbox); the
-//! `MailTransport` trait every transport impl provides lives in
-//! [`transport`](crate::mail::transport); the ADR-0042 sync round-trip
-//! helper lives in [`sync`](crate::mail::sync).
+//! `mod.rs` (pure decoders, no transport coupling). The
+//! [`Mailbox<K>`](crate::mail::mailbox) addressing token lives in
+//! the [`mailbox`](crate::mail::mailbox) submodule; the
+//! [`WaitError`](crate::mail::sync::WaitError) trait + the rc-decode
+//! helper for `wait_reply` returns live in
+//! [`sync`](crate::mail::sync).
+//!
+//! Issue 665 retired the `MailTransport` trait that previously sat at
+//! `transport.rs` here. Per-stage capability traits in
+//! [`crate::actor::ctx`] are the only cross-target trait surface;
+//! per-target dispatch goes through [`crate::ffi::bridge`] (FFI) and
+//! the inherent methods on `aether_substrate::actor::native::binding::NativeBinding`
+//! (native).
 
 pub mod mailbox;
 pub mod sync;
-pub mod transport;
 
 use core::marker::PhantomData;
 

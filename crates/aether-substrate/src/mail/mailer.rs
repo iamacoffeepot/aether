@@ -290,7 +290,7 @@ fn route_mail(
                 // with no local component origin (broadcast-
                 // originated, substrate-generated). Recovered from
                 // `reply_to.target = Component(_)` set by
-                // `ComponentCtx::send` / `NativeTransport::send_mail`
+                // `ComponentCtx::send` / `NativeBinding::send_mail`
                 // (issue #644).
                 let source_mailbox_id = match mail.reply_to.target {
                     ReplyTarget::Component(id) => Some(id),

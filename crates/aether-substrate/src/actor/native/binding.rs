@@ -1,19 +1,25 @@
-//! ADR-0074 §Decision: native-side `MailTransport` implementation.
+//! ADR-0074 §Decision (revisited by issue 665): native per-actor
+//! binding state.
 //!
-//! [`NativeTransport`] is a regular struct each capability owns. It
+//! [`NativeBinding`] is a regular struct each capability owns. It
 //! holds the per-actor state — mailer + self mailbox + inbox +
 //! correlation counter + wait-overflow queue — directly as fields,
-//! reached via `&self` on every trait method. No thread-locals, no
-//! install/uninstall ceremony, no RefCell runtime borrow checks.
-//! The actor binding is type-system-tracked through the `&T`
-//! references the SDK threads into `Sink::send`, `Ctx<'a, T>`, the
-//! `wait_reply` helper, and the typed-handle module.
+//! reached via `&self` on every inherent method. No thread-locals,
+//! no install/uninstall ceremony, no RefCell runtime borrow checks.
+//! The actor binding is type-system-tracked through the
+//! `&NativeBinding` references the SDK threads into
+//! [`super::ctx::NativeCtx`], [`super::mailbox::NativeActorMailbox`],
+//! and the substrate-internal helpers below.
 //!
-//! Capabilities build their `NativeTransport` at boot and pass
-//! `&self.transport` (or thread it through to a worker) wherever an
-//! `&T` is needed. The wasm-guest path uses
-//! `aether_actor::ffi::FfiTransport` (a ZST) the same way; both
-//! impls share the SDK in `aether-actor`.
+//! Capabilities build their `NativeBinding` at boot and pass
+//! `&self.transport` (or thread it through to a worker) wherever a
+//! `&NativeBinding` is needed. The FFI guest path rides
+//! [`aether_actor::ffi::bridge`] static ZSTs (`MAIL`, `PERSIST`,
+//! `SYNC_WAIT`) instead — issue 665 retired the cross-target
+//! `MailTransport` trait that previously unified them, so each side
+//! exposes its own dispatch surface and the per-stage capability
+//! traits in `aether_actor::actor::ctx` are the only cross-target
+//! abstraction.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
@@ -22,38 +28,37 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-use aether_actor::MailTransport;
-
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::ctx::ChassisCtx;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId, ReplyTarget, ReplyTo};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 
-/// Owned `MailTransport` impl for a native actor. Each capability
-/// constructs one at boot via [`NativeTransport::new`] and holds it
-/// for the lifetime of its dispatcher thread; SDK helpers receive
-/// `&self.transport` references.
+/// Per-actor binding state every native capability owns. Each
+/// capability constructs one at boot via [`NativeBinding::new`] and
+/// holds it for the lifetime of its dispatcher thread; SDK helpers
+/// receive `&self.transport` references.
 ///
-/// The five trait methods read/mutate the struct's fields directly:
+/// The three inherent dispatch methods read/mutate the struct's
+/// fields directly:
 ///
-/// - `send_mail` — mints a fresh correlation id (atomic
+/// - [`Self::send_mail`] — mints a fresh correlation id (atomic
 ///   monotonic counter), wraps the bytes in a [`Mail`] with
 ///   `ReplyTarget::Component(self.self_mailbox)` so any reply
 ///   routes back here, and pushes through the shared
 ///   `Arc<Mailer>`.
-/// - `reply_mail` — Phase 2b stub. Native capabilities that need
-///   to reply to a sender (handle, audio, io, net) gain this when
-///   they migrate; log doesn't reply.
-/// - `save_state` — permanent stub. Native actors don't have a
-///   `replace_component`-style hot reload path; `save_state` is a
-///   wasm-component concept (ADR-0016).
-/// - `wait_reply` — pulls from `self.inbox` with timeout, filters
-///   by `(kind, correlation)`, parks non-matching envelopes into
-///   `self.overflow` for a future `wait_reply` to find, mirrors the
-///   wasm side's `ComponentCtx::wait_reply` semantics.
-/// - `prev_correlation` — reads the atomic counter.
-pub struct NativeTransport {
+/// - [`Self::wait_reply`] — pulls from `self.inbox` with timeout,
+///   filters by `(kind, correlation)`, parks non-matching envelopes
+///   into `self.overflow` for a future `wait_reply` to find,
+///   mirrors the wasm side's [`super::ctx::NativeCtx`] sync-wait
+///   semantics.
+/// - [`Self::prev_correlation`] — reads the atomic counter.
+///
+/// Reply (the typed `K` shape) goes through
+/// [`Self::send_reply_for_handler`] below; persistence
+/// (`save_state`) is wasm-component-only (ADR-0016) and never lands
+/// here.
+pub struct NativeBinding {
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
     /// Owned by `wait_reply`; held in a `Mutex` so the `&self`
@@ -61,7 +66,7 @@ pub struct NativeTransport {
     /// so the inbox can be installed lazily after construction
     /// (capabilities sometimes have to thread the receiver through
     /// a builder before the transport sees it). `OnceLock::get()`
-    /// returns `None` until [`NativeTransport::install_inbox`] runs;
+    /// returns `None` until [`NativeBinding::install_inbox`] runs;
     /// `wait_reply` returns the `ERR_NO_INBOX` sentinel in that
     /// case.
     inbox: OnceLock<Mutex<Receiver<Envelope>>>,
@@ -117,7 +122,7 @@ pub struct NativeTransport {
     shutdown_flag: Arc<AtomicBool>,
 }
 
-/// Soft cap on [`NativeTransport::pending_recipients`]. A
+/// Soft cap on [`NativeBinding::pending_recipients`]. A
 /// fire-and-forget `send_mail` (one with no paired `wait_reply`)
 /// leaves an entry in the map indefinitely; the cap stops a runaway
 /// sender from growing the map without bound. Picked large enough
@@ -130,7 +135,7 @@ pub struct NativeTransport {
 /// worse than the pre-guard baseline).
 const MAX_PENDING_RECIPIENTS: usize = 1024;
 
-impl NativeTransport {
+impl NativeBinding {
     /// Build a fresh transport. Pair `self_mailbox` with the id the
     /// `MailboxClaim` returned (the substrate routes replies back
     /// to it via the `ReplyTarget::Component(self_mailbox)` tag the
@@ -176,7 +181,7 @@ impl NativeTransport {
     ///
     /// ```ignore
     /// let claim = ctx.claim_mailbox_drop_on_shutdown(NAME)?;
-    /// let transport = NativeTransport::from_ctx(ctx, claim.id, Self::FRAME_BARRIER);
+    /// let transport = NativeBinding::from_ctx(ctx, claim.id, Self::FRAME_BARRIER);
     /// ```
     ///
     /// Capabilities that don't migrate to this constructor in the
@@ -220,7 +225,7 @@ impl NativeTransport {
     pub fn install_inbox(&self, inbox: Receiver<Envelope>) {
         self.inbox
             .set(Mutex::new(inbox))
-            .unwrap_or_else(|_| panic!("NativeTransport::install_inbox called twice"));
+            .unwrap_or_else(|_| panic!("NativeBinding::install_inbox called twice"));
     }
 
     /// The mailbox id the substrate routes inbound mail through to
@@ -287,7 +292,7 @@ impl NativeTransport {
     /// }
     /// ```
     ///
-    /// Distinct from [`MailTransport::wait_reply`], which filters by
+    /// Distinct from [`Self::wait_reply`], which filters by
     /// `(kind, correlation)` and returns when a *specific* reply
     /// arrives — `recv_blocking` is for the dispatcher's "next
     /// thing, whatever it is" main loop.
@@ -308,14 +313,14 @@ impl NativeTransport {
         inbox.lock().unwrap().try_recv().ok()
     }
 
-    /// Stage 2 reply path for native actors. Routes through the
-    /// substrate's `Mailer::send_reply` so a handler's `ctx.reply(&result)`
-    /// reaches the originator the same way a pre-stage-2 cap's
-    /// `self.mailer.send_reply(sender, &result)` did. The wasm-flavoured
-    /// `MailTransport::reply_mail` still returns `ERR_NOT_IMPLEMENTED`
-    /// because its `sender: u32` is a wasm-handle shape that doesn't
-    /// fit the native `ReplyTo` — the typed entry below is the actual
-    /// reply API native actors use.
+    /// Reply path for native actors. Routes through the substrate's
+    /// [`Mailer::send_reply`] so a handler's `ctx.reply(&result)`
+    /// reaches the originator the same way a pre-actor-model cap's
+    /// `self.mailer.send_reply(sender, &result)` did. Issue 665
+    /// retired the FFI-shaped `reply_mail` stub the prior
+    /// `MailTransport` impl carried — it took `sender: u32`, a wasm
+    /// handle shape that doesn't fit native's [`ReplyTo`]. This typed
+    /// entry is the only reply API native actors reach for.
     pub fn send_reply_for_handler<K>(&self, sender: ReplyTo, payload: &K)
     where
         K: aether_data::Kind + serde::Serialize,
@@ -324,20 +329,28 @@ impl NativeTransport {
     }
 }
 
-/// Return code surfaced from `send_mail` / `reply_mail` /
-/// `save_state` for a no-op or unsupported call. Distinct from
-/// substrate-rejected `1` so callers can tell "not implemented" from
-/// "rejected by recipient lookup".
-const ERR_NOT_IMPLEMENTED: u32 = 0xFFFF_FF00;
-
 /// Negative sentinel for `wait_reply` when no inbox is installed.
 /// Picked outside the documented `-1`/`-2`/`-3` range so the SDK's
 /// `decode_wait_reply` falls into the unknown-rc branch and surfaces
 /// "no inbox installed" by name in the error.
 const ERR_NO_INBOX_I32: i32 = 100;
 
-impl MailTransport for NativeTransport {
-    fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
+/// Inherent send / wait_reply / prev_correlation entry points the
+/// per-handler [`super::ctx::NativeCtx`] / [`super::ctx::NativeInitCtx`]
+/// route through. Issue 665 retired the prior `MailTransport` trait
+/// impl; the FFI-shaped wrapper served no purpose for native (Mailer
+/// dispatch is direct), and `save_state` / `reply_mail` were stubs the
+/// trait forced on us. The capability traits in
+/// [`aether_actor::actor::ctx`] are the only cross-target trait surface
+/// post-665.
+impl NativeBinding {
+    /// Push a typed payload at `recipient`. Mints a fresh correlation
+    /// id (atomic monotonic counter), wraps the bytes in a [`Mail`]
+    /// with `ReplyTarget::Component(self.self_mailbox)` so any reply
+    /// routes back here, and pushes through the shared
+    /// `Arc<Mailer>`. Returns `0` (channel-send failures collapse to
+    /// the same scalar — there is no FFI surface here to differentiate).
+    pub fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let recipient_id = MailboxId(recipient);
         let reply_to =
@@ -362,32 +375,17 @@ impl MailTransport for NativeTransport {
         0
     }
 
-    fn reply_mail(&self, _sender: u32, _kind: u64, _bytes: &[u8], _count: u32) -> u32 {
-        // ADR-0074 Phase 2b: the first capability that needs reply
-        // is handle (round-trips `Handle{Publish,Release,Pin,Unpin}Result`
-        // back to the sender). Until then, the bare-bytes →
-        // `Mailer::send_reply` bridge isn't worth designing. Log
-        // doesn't reply.
-        tracing::error!(
-            target: "aether_substrate::native_transport",
-            "NativeTransport::reply_mail not yet implemented — Phase 2b lands this when handle migrates"
-        );
-        ERR_NOT_IMPLEMENTED
-    }
-
-    fn save_state(&self, _version: u32, _bytes: &[u8]) -> u32 {
-        // Native actors don't have a `replace_component`-style hot
-        // reload path (only wasm components do, ADR-0016). The trait
-        // method is part of the unified SDK signature; the native
-        // impl returns an error sentinel so a misuse is loud.
-        tracing::error!(
-            target: "aether_substrate::native_transport",
-            "NativeTransport::save_state called — native actors don't migrate"
-        );
-        ERR_NOT_IMPLEMENTED
-    }
-
-    fn wait_reply(
+    /// Block this actor's thread until a mail of `expected_kind`
+    /// (and, when `expected_correlation != 0`, also matching that
+    /// correlation id) arrives, then copy up to `out.len()` bytes of
+    /// its payload into `out` (ADR-0042). `timeout_ms` is clamped
+    /// substrate-side to 30s.
+    ///
+    /// Returns `>= 0` = bytes written, `-1` = timeout, `-2` = payload
+    /// larger than `out` (mail re-parked for retry), `-3` = the host
+    /// tore the actor down mid-wait. Any other negative is a
+    /// transport-specific sentinel (e.g. `-100` no-inbox).
+    pub fn wait_reply(
         &self,
         expected_kind: u64,
         out: &mut [u8],
@@ -497,7 +495,12 @@ impl MailTransport for NativeTransport {
         rc
     }
 
-    fn prev_correlation(&self) -> u64 {
+    /// Correlation id the substrate minted for this actor's most
+    /// recent `send_mail` (ADR-0042). `0` before any send. Universal
+    /// — every send mints a correlation; sync wrappers filter
+    /// `wait_reply` against it, async handlers stash it and match on
+    /// the inbound's reply correlation.
+    pub fn prev_correlation(&self) -> u64 {
         self.correlation.load(Ordering::Acquire)
     }
 }
@@ -559,7 +562,7 @@ mod tests {
         );
         let recipient = registry.lookup("test.sink").unwrap();
 
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(99));
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(99));
 
         assert_eq!(transport.prev_correlation(), 0);
         assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);
@@ -573,21 +576,10 @@ mod tests {
     #[test]
     fn wait_reply_without_inbox_returns_no_inbox_sentinel() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
         let mut buf = [0u8; 16];
         let rc = transport.wait_reply(0, &mut buf, 1, 0);
         assert_eq!(rc, -ERR_NO_INBOX_I32);
-    }
-
-    /// `reply_mail` and `save_state` are tracked stubs — Phase 2a
-    /// pins their behaviour so a future implementation is a
-    /// straight diff against the test.
-    #[test]
-    fn reply_mail_and_save_state_are_tracked_stubs() {
-        let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
-        assert_eq!(transport.reply_mail(0, 0, &[], 0), ERR_NOT_IMPLEMENTED);
-        assert_eq!(transport.save_state(0, &[]), ERR_NOT_IMPLEMENTED);
     }
 
     /// `install_inbox` is single-claim — a second install panics.
@@ -595,7 +587,7 @@ mod tests {
     #[should_panic(expected = "install_inbox called twice")]
     fn install_inbox_twice_panics() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
         let (_tx1, rx1) = mpsc::channel::<Envelope>();
         let (_tx2, rx2) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx1);
@@ -607,7 +599,7 @@ mod tests {
     #[test]
     fn wait_reply_times_out_when_inbox_quiet() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
         let (_tx, rx) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx);
         let mut buf = [0u8; 16];
@@ -627,8 +619,8 @@ mod tests {
         self_mailbox: MailboxId,
         caller_frame_bound: bool,
         frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
-    ) -> NativeTransport {
-        NativeTransport::new(
+    ) -> NativeBinding {
+        NativeBinding::new(
             mailer,
             self_mailbox,
             caller_frame_bound,
@@ -783,7 +775,7 @@ mod tests {
         );
         let recipient = registry.lookup("test.prune").unwrap();
 
-        let transport = NativeTransport::new_for_test(Arc::clone(&mailer), MailboxId(99));
+        let transport = NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(99));
         let (_tx_inbox, rx_inbox) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx_inbox);
 
@@ -813,7 +805,7 @@ mod tests {
     #[test]
     fn wait_reply_returns_payload_when_match_arrives() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
         let (tx, rx) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx);
 
@@ -831,7 +823,7 @@ mod tests {
     #[test]
     fn wait_reply_parks_non_matching_into_overflow() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
         let (tx, rx) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx);
 
@@ -850,7 +842,7 @@ mod tests {
     #[test]
     fn wait_reply_filters_by_correlation_not_just_kind() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
         let (tx, rx) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx);
 
@@ -869,7 +861,7 @@ mod tests {
     #[test]
     fn wait_reply_pulls_match_from_overflow_before_recv() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
         let (tx, rx) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx);
 
@@ -892,7 +884,7 @@ mod tests {
     #[test]
     fn wait_reply_parks_on_buffer_too_small_for_retry() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
         let (tx, rx) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx);
 
@@ -916,7 +908,7 @@ mod tests {
     #[test]
     fn wait_reply_returns_cancelled_when_sender_drops() {
         let (_registry, mailer) = fresh_substrate();
-        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let transport = NativeBinding::new_for_test(mailer, MailboxId(1));
         let (tx, rx) = mpsc::channel::<Envelope>();
         transport.install_inbox(rx);
         drop(tx);

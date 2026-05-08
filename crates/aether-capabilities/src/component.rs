@@ -123,7 +123,7 @@ mod native {
         #[handler]
         fn on_load_component(&mut self, ctx: &mut NativeCtx<'_>, payload: LoadComponent) {
             let result = self.handle_load(ctx, payload);
-            ctx.transport()
+            ctx.binding()
                 .send_reply_for_handler(ctx.reply_target(), &result);
         }
 

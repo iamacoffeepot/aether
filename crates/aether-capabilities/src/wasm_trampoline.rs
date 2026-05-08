@@ -125,7 +125,7 @@ pub struct WasmTrampoline {
     /// The trampoline's own mailbox id (== `MailboxId::from_name(full_name)`).
     /// Cached because `NativeCtx` only exposes `self_id()` via the
     /// `NativeInitCtx` flavour today; storing it here avoids reaching
-    /// into `ctx.transport().self_mailbox()` on every handler call.
+    /// into `ctx.binding().self_mailbox()` on every handler call.
     mailbox: MailboxId,
 }
 
@@ -147,8 +147,8 @@ impl NativeActor for WasmTrampoline {
         // Wire the trampoline's transport so `wait_reply_p32` host fn
         // can drain *this* trampoline's inbox + overflow (issue 634
         // Phase 4 PR 3 — single source of inbox truth lives on
-        // `NativeTransport`, not on `ComponentCtx`).
-        substrate_ctx.install_transport(Arc::clone(ctx.transport_arc()));
+        // `NativeBinding`, not on `ComponentCtx`).
+        substrate_ctx.install_binding(Arc::clone(ctx.binding_arc()));
         let component = Component::instantiate(
             &config.engine,
             &config.linker,
@@ -188,7 +188,7 @@ impl NativeActor for WasmTrampoline {
         if let Some(mut component) = self.component.take() {
             component.on_drop();
         }
-        ctx.transport()
+        ctx.binding()
             .send_reply_for_handler(ctx.reply_target(), &DropResult::Ok);
     }
 
@@ -202,7 +202,7 @@ impl NativeActor for WasmTrampoline {
     #[handler]
     fn on_replace_component(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
         let result = self.handle_replace(payload);
-        ctx.transport()
+        ctx.binding()
             .send_reply_for_handler(ctx.reply_target(), &result);
     }
 
@@ -233,7 +233,7 @@ impl NativeActor for WasmTrampoline {
             // substrate. Wedge detection (CPU-loop guests) waits on a
             // future epoch-deadline ADR — symmetric with native
             // actors, which have no wedge guard either today.
-            ctx.transport().fatal_abort(format!(
+            ctx.binding().fatal_abort(format!(
                 "component {} (kind {}) trapped: {e}",
                 self.mailbox, env.kind_name,
             ));

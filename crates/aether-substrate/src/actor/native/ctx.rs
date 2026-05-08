@@ -21,12 +21,15 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use aether_actor::actor::ctx::{LifecycleControl, MailSender, OutboundReply};
-use aether_actor::{Actor, ActorMailbox, HandlesKind, MailCtx, Sender, Singleton};
+use aether_actor::actor::ctx::{LifecycleControl, MailSender, OutboundReply, SyncWaiter};
+use aether_actor::mail::sync::WaitError;
+use aether_actor::{Actor, HandlesKind, MailCtx, Sender, Singleton};
+
+use crate::actor::native::mailbox::NativeActorMailbox;
 use aether_data::{Kind, mailbox_id_from_name};
 
 use crate::actor::monitor::MonitorHandle;
-use crate::actor::native::transport::NativeTransport;
+use crate::actor::native::binding::NativeBinding;
 use crate::actor::registry::MonitorError;
 use crate::mail::ReplyTo;
 use crate::mail::mailer::Mailer;
@@ -34,17 +37,17 @@ use crate::mail::mailer::Mailer;
 use super::{NativeActor, NativeDispatch};
 
 /// Per-mail context for a [`NativeActor`] handler. Borrows the
-/// actor's [`NativeTransport`] for outbound mail and carries the
+/// actor's [`NativeBinding`] for outbound mail and carries the
 /// inbound's reply target so [`MailCtx::reply::<K>(&payload)`] can
 /// route back to the originator without rethreading the handle.
 ///
 /// Stage 1 ships the wiring; the actual reply routing through
-/// [`NativeTransport::reply_mail`] / `Mailer::send_reply` is the
+/// [`NativeBinding::reply_mail`] / `Mailer::send_reply` is the
 /// stage-2 migration's responsibility (today's caps reply via
 /// `mailer.send_reply(...)` directly; stage 2 routes those onto
 /// `ctx.reply(...)`).
 pub struct NativeCtx<'a> {
-    transport: &'a NativeTransport,
+    binding: &'a NativeBinding,
     sender: ReplyTo,
 }
 
@@ -54,15 +57,15 @@ impl<'a> NativeCtx<'a> {
     /// `aether-capabilities` also reach for it directly so they can
     /// drive a handler without spinning up a full chassis; that's why
     /// it's `pub` rather than `pub(crate)`.
-    pub fn new(transport: &'a NativeTransport, sender: ReplyTo) -> Self {
-        Self { transport, sender }
+    pub fn new(binding: &'a NativeBinding, sender: ReplyTo) -> Self {
+        Self { binding, sender }
     }
 
-    /// Borrow the actor's transport. Exposed for stage-2 caps that
-    /// need to call low-level transport helpers the SDK doesn't yet
+    /// Borrow the actor's [`NativeBinding`]. Exposed for stage-2 caps
+    /// that need to call low-level binding helpers the SDK doesn't yet
     /// wrap.
-    pub fn transport(&self) -> &NativeTransport {
-        self.transport
+    pub fn binding(&self) -> &NativeBinding {
+        self.binding
     }
 
     /// The reply target for the mail currently being dispatched.
@@ -87,18 +90,16 @@ impl<'a> NativeCtx<'a> {
         }
     }
 
-    /// Singleton sender shortcut: returns a typed [`ActorMailbox`]
-    /// addressing the unique instance of receiver actor `R`. Mirrors
-    /// [`aether_actor::Ctx::actor`]; same `&self`-receiver `send` /
-    /// `send_many` ergonomics.
-    pub fn actor<R: Singleton>(&self) -> ActorMailbox<'_, R, NativeTransport> {
-        ActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.transport)
+    /// Singleton sender shortcut: returns a typed [`NativeActorMailbox`]
+    /// addressing the unique instance of receiver actor `R`.
+    pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
+        NativeActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.binding)
     }
 
-    /// Multi-instance sender: resolve a typed [`ActorMailbox`] from a
-    /// runtime instance name. Mirrors [`aether_actor::Ctx::resolve_actor`].
-    pub fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<'_, R, NativeTransport> {
-        ActorMailbox::__new(mailbox_id_from_name(name).0, self.transport)
+    /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
+    /// from a runtime instance name.
+    pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
+        NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
     }
 
     /// Issue 607 Phase 4a (ADR-0079): self-shutdown signal. Sets a
@@ -116,7 +117,7 @@ impl<'a> NativeCtx<'a> {
     /// chassis-shutdown channel-drop path instead of this flag, but
     /// can call `shutdown()` to opt in to flag-based exit.
     pub fn shutdown(&self) {
-        self.transport.signal_shutdown();
+        self.binding.signal_shutdown();
     }
 
     /// Issue 607 Phase 4b (ADR-0079): register the calling actor as a
@@ -139,15 +140,15 @@ impl<'a> NativeCtx<'a> {
     /// monitor only addresses instanced actors.
     ///
     /// Panics if the transport was constructed via
-    /// [`NativeTransport::new_for_test`] (no spawner / actor registry
+    /// [`NativeBinding::new_for_test`] (no spawner / actor registry
     /// wired). Production transports always carry both.
     pub fn monitor(&self, target: aether_data::MailboxId) -> Result<MonitorHandle, MonitorError> {
         let spawner = self
-            .transport
+            .binding
             .spawner()
-            .expect("NativeCtx::monitor requires a chassis-built transport (no spawner installed — likely a `new_for_test` transport)");
+            .expect("NativeCtx::monitor requires a chassis-built binding (no spawner installed — likely a `new_for_test` binding)");
         let registry = Arc::clone(spawner.actor_registry());
-        let watcher = self.transport.self_mailbox();
+        let watcher = self.binding.self_mailbox();
         registry.register_monitor(watcher, target)?;
         Ok(MonitorHandle::new(registry, watcher, target))
     }
@@ -163,7 +164,7 @@ impl<'a> NativeCtx<'a> {
     /// shape; both flow through the same [`crate::Spawner`].
     ///
     /// Panics if the transport was constructed via
-    /// [`NativeTransport::new_for_test`] (which doesn't wire a
+    /// [`NativeBinding::new_for_test`] (which doesn't wire a
     /// spawner). Production transports always carry one, so handler
     /// code never reaches the panic.
     pub fn spawn_child<'b, A>(
@@ -175,11 +176,11 @@ impl<'a> NativeCtx<'a> {
         A: aether_actor::Instanced + NativeActor + NativeDispatch,
     {
         let spawner = self
-            .transport
+            .binding
             .spawner()
-            .expect("NativeCtx::spawn_child requires a chassis-built transport (no spawner installed — likely a `new_for_test` transport)");
+            .expect("NativeCtx::spawn_child requires a chassis-built binding (no spawner installed — likely a `new_for_test` binding)");
         let sender = ReplyTo {
-            target: crate::mail::ReplyTarget::Component(self.transport.self_mailbox()),
+            target: crate::mail::ReplyTarget::Component(self.binding.self_mailbox()),
             correlation_id: ReplyTo::NO_CORRELATION,
         };
         super::spawn::SpawnBuilder::new(Arc::clone(spawner), subname, config, sender)
@@ -192,11 +193,9 @@ impl<'a> Sender for NativeCtx<'a> {
         R: Actor + HandlesKind<K>,
         K: Kind,
     {
-        ActorMailbox::<R, NativeTransport>::__new(
-            mailbox_id_from_name(R::NAMESPACE).0,
-            self.transport,
-        )
-        .send(payload);
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
     }
 
     fn send_many<R, K>(&mut self, payloads: &[K])
@@ -204,20 +203,19 @@ impl<'a> Sender for NativeCtx<'a> {
         R: Actor + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
-        ActorMailbox::<R, NativeTransport>::__new(
+        let bytes: &[u8] = bytemuck::cast_slice(payloads);
+        self.binding.send_mail(
             mailbox_id_from_name(R::NAMESPACE).0,
-            self.transport,
-        )
-        .send_many(payloads);
+            K::ID.0,
+            bytes,
+            payloads.len() as u32,
+        );
     }
 
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        // resolve_mailbox is generic over T: MailTransport — the
-        // const-construction path lands at the same MailboxId as
-        // ADR-0029's name hash, so the substrate routes the mail
-        // identically on either transport.
-        let mailbox = aether_actor::resolve_mailbox::<K, NativeTransport>(name);
-        mailbox.send(self.transport, payload);
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
     }
 }
 
@@ -231,7 +229,7 @@ impl<'a> MailCtx for NativeCtx<'a> {
     /// ctx already holds both the mailer reference (via the transport)
     /// and the inbound's reply target.
     fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
-        self.transport.send_reply_for_handler(self.sender, payload);
+        self.binding.send_reply_for_handler(self.sender, payload);
     }
 }
 
@@ -250,7 +248,7 @@ impl<'a> MailCtx for NativeCtx<'a> {
 /// [`Self::publish_handle`] and the consumer retrieves it through
 /// [`crate::DriverCtx::handle`].
 pub struct NativeInitCtx<'a> {
-    transport: &'a Arc<NativeTransport>,
+    binding: &'a Arc<NativeBinding>,
     handles: &'a mut ExportedHandles,
     mailer: Arc<Mailer>,
 }
@@ -259,31 +257,31 @@ impl<'a> NativeInitCtx<'a> {
     /// Internal constructor — only [`crate::chassis::builder::Builder::with_actor`]
     /// builds these.
     pub(crate) fn new(
-        transport: &'a Arc<NativeTransport>,
+        binding: &'a Arc<NativeBinding>,
         handles: &'a mut ExportedHandles,
         mailer: Arc<Mailer>,
     ) -> Self {
         Self {
-            transport,
+            binding,
             handles,
             mailer,
         }
     }
 
-    /// Borrow the Arc'd cap-bound transport. Used by the wasm
+    /// Borrow the Arc'd cap-bound [`NativeBinding`]. Used by the wasm
     /// trampoline at init to install itself on the
     /// [`crate::actor::wasm::component::ComponentCtx`] so the
-    /// `wait_reply_p32` host fn can route through this transport.
-    pub fn transport_arc(&self) -> &Arc<NativeTransport> {
-        self.transport
+    /// `wait_reply_p32` host fn can route through this binding.
+    pub fn binding_arc(&self) -> &Arc<NativeBinding> {
+        self.binding
     }
 
-    /// Borrow the cap-bound transport. Caps rarely reach for this —
-    /// `Sender::send::<R>(...)` covers the typed-send path — but
-    /// stage-2 migrations may want it during init for one-shot
+    /// Borrow the cap-bound [`NativeBinding`]. Caps rarely reach for
+    /// this — `Sender::send::<R>(...)` covers the typed-send path —
+    /// but stage-2 migrations may want it during init for one-shot
     /// outbound mail.
-    pub fn transport(&self) -> &NativeTransport {
-        self.transport
+    pub fn binding(&self) -> &NativeBinding {
+        self.binding
     }
 
     /// The actor's own [`MailboxId`] — the deterministic FNV-1a hash
@@ -295,7 +293,7 @@ impl<'a> NativeInitCtx<'a> {
     /// registration completes; replies route correctly once the spawn
     /// lifecycle finishes inserting the entry.
     pub fn self_id(&self) -> crate::mail::MailboxId {
-        self.transport.self_mailbox()
+        self.binding.self_mailbox()
     }
 
     /// Clone the substrate's mailer. Caps that need to register a
@@ -321,17 +319,16 @@ impl<'a> NativeInitCtx<'a> {
             .insert(TypeId::of::<H>(), Box::new(handle));
     }
 
-    /// Singleton sender shortcut: returns a typed [`ActorMailbox`]
-    /// addressing the unique instance of receiver actor `R`. Mirrors
-    /// [`aether_actor::Ctx::actor`].
-    pub fn actor<R: Singleton>(&self) -> ActorMailbox<'_, R, NativeTransport> {
-        ActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.transport)
+    /// Singleton sender shortcut: returns a typed [`NativeActorMailbox`]
+    /// addressing the unique instance of receiver actor `R`.
+    pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
+        NativeActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.binding)
     }
 
-    /// Multi-instance sender: resolve a typed [`ActorMailbox`] from a
-    /// runtime instance name. Mirrors [`aether_actor::Ctx::resolve_actor`].
-    pub fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<'_, R, NativeTransport> {
-        ActorMailbox::__new(mailbox_id_from_name(name).0, self.transport)
+    /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
+    /// from a runtime instance name.
+    pub fn resolve_actor<R: Actor>(&self, name: &str) -> NativeActorMailbox<'_, R> {
+        NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
     }
 }
 
@@ -341,11 +338,9 @@ impl<'a> Sender for NativeInitCtx<'a> {
         R: Actor + HandlesKind<K>,
         K: Kind,
     {
-        ActorMailbox::<R, NativeTransport>::__new(
-            mailbox_id_from_name(R::NAMESPACE).0,
-            self.transport,
-        )
-        .send(payload);
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
     }
 
     fn send_many<R, K>(&mut self, payloads: &[K])
@@ -353,16 +348,19 @@ impl<'a> Sender for NativeInitCtx<'a> {
         R: Actor + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
-        ActorMailbox::<R, NativeTransport>::__new(
+        let bytes: &[u8] = bytemuck::cast_slice(payloads);
+        self.binding.send_mail(
             mailbox_id_from_name(R::NAMESPACE).0,
-            self.transport,
-        )
-        .send_many(payloads);
+            K::ID.0,
+            bytes,
+            payloads.len() as u32,
+        );
     }
 
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        let mailbox = aether_actor::resolve_mailbox::<K, NativeTransport>(name);
-        mailbox.send(self.transport, payload);
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
     }
 }
 
@@ -377,9 +375,38 @@ impl<'a> Sender for NativeInitCtx<'a> {
 // the trait the same way native callers do.
 
 impl<'a> MailSender for NativeCtx<'a> {
-    type Transport = NativeTransport;
-    fn transport(&self) -> &NativeTransport {
-        self.transport
+    fn send<R, K>(&mut self, payload: &K)
+    where
+        R: Actor + HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
+    }
+
+    fn send_many<R, K>(&mut self, payloads: &[K])
+    where
+        R: Actor + HandlesKind<K>,
+        K: Kind + bytemuck::NoUninit,
+    {
+        let bytes: &[u8] = bytemuck::cast_slice(payloads);
+        self.binding.send_mail(
+            mailbox_id_from_name(R::NAMESPACE).0,
+            K::ID.0,
+            bytes,
+            payloads.len() as u32,
+        );
+    }
+
+    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
+    }
+
+    fn prev_correlation(&self) -> u64 {
+        self.binding.prev_correlation()
     }
 }
 
@@ -405,7 +432,27 @@ impl<'a> OutboundReply for NativeCtx<'a> {
     }
 
     fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
-        self.transport.send_reply_for_handler(self.sender, payload);
+        self.binding.send_reply_for_handler(self.sender, payload);
+    }
+}
+
+impl<'a> SyncWaiter for NativeCtx<'a> {
+    fn wait_reply<K, E>(
+        &self,
+        timeout_ms: u32,
+        capacity: usize,
+        expected_correlation: u64,
+    ) -> Result<K, E>
+    where
+        K: aether_data::Kind + serde::de::DeserializeOwned,
+        E: WaitError,
+    {
+        aether_actor::actor::ctx::sync_waiter::wait_reply_via::<K, E>(
+            |kind, out, timeout, corr| self.binding.wait_reply(kind, out, timeout, corr),
+            timeout_ms,
+            capacity,
+            expected_correlation,
+        )
     }
 }
 
@@ -414,24 +461,53 @@ impl<'a> LifecycleControl for NativeCtx<'a> {
     type MonitorError = MonitorError;
 
     fn shutdown(&self) {
-        self.transport.signal_shutdown();
+        self.binding.signal_shutdown();
     }
 
     fn monitor(&self, target: aether_data::MailboxId) -> Result<MonitorHandle, MonitorError> {
-        let spawner = self.transport.spawner().expect(
+        let spawner = self.binding.spawner().expect(
             "NativeCtx::monitor requires a chassis-built transport (no spawner installed — likely a `new_for_test` transport)",
         );
         let registry = Arc::clone(spawner.actor_registry());
-        let watcher = self.transport.self_mailbox();
+        let watcher = self.binding.self_mailbox();
         registry.register_monitor(watcher, target)?;
         Ok(MonitorHandle::new(registry, watcher, target))
     }
 }
 
 impl<'a> MailSender for NativeInitCtx<'a> {
-    type Transport = NativeTransport;
-    fn transport(&self) -> &NativeTransport {
-        self.transport
+    fn send<R, K>(&mut self, payload: &K)
+    where
+        R: Actor + HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
+    }
+
+    fn send_many<R, K>(&mut self, payloads: &[K])
+    where
+        R: Actor + HandlesKind<K>,
+        K: Kind + bytemuck::NoUninit,
+    {
+        let bytes: &[u8] = bytemuck::cast_slice(payloads);
+        self.binding.send_mail(
+            mailbox_id_from_name(R::NAMESPACE).0,
+            K::ID.0,
+            bytes,
+            payloads.len() as u32,
+        );
+    }
+
+    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.binding
+            .send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
+    }
+
+    fn prev_correlation(&self) -> u64 {
+        self.binding.prev_correlation()
     }
 }
 

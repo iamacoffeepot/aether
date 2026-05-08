@@ -686,7 +686,7 @@ impl TestBench {
         // submit so any DrawTriangle / aether.camera mail this frame
         // is integrated into the recorded pass. (The pre-Phase-4
         // component drain barrier is retired; trampoline traps
-        // fail-fast directly via `NativeTransport::fatal_abort`.)
+        // fail-fast directly via `NativeBinding::fatal_abort`.)
         frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
 
         match self.capture_queue.take() {

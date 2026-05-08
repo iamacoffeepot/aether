@@ -7,13 +7,19 @@
 //!
 //!   - [`raw`] — `extern "C"` host-fn imports + host-target panic
 //!     stubs (the only place the `_p32` symbols are named).
-//!   - [`FfiTransport`] — ZST that implements [`crate::MailTransport`]
-//!     by delegating each method to the matching [`raw`]`::*` host fn.
+//!   - [`bridge`] — per-concern ZST dispatch surfaces ([`MAIL_BRIDGE`],
+//!     [`PERSIST_BRIDGE`], [`SYNC_WAIT_BRIDGE`]). Each ZST owns one FFI op family
+//!     and forwards inherent methods to the matching [`raw`]`::*`
+//!     host fn. Issue 665 split the prior monolithic
+//!     `MailTransport`-impl ZST into these per-concern bridges so
+//!     persistence isn't mixed with mail and sync-wait isn't mixed
+//!     with either.
 //!   - [`FfiInitCtx`] / [`FfiCtx`] / [`FfiDropCtx`] — concrete per-stage
 //!     ctx structs, each impling the relevant subset of the per-stage
 //!     capability traits in [`crate::actor::ctx`].
-//!   - [`Mailbox<K>`] — 1-arg specialisation of
-//!     [`crate::mail::mailbox::Mailbox`] pinned to [`FfiTransport`].
+//!   - [`FfiActorMailbox<R>`] — actor-typed sender returned by
+//!     `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(name)`. Lifetime-
+//!     free — the global [`MAIL_BRIDGE`] static covers dispatch.
 //!   - [`FfiActor`] trait — entry point with `init` and `on_drop`
 //!     hooks. `init` returns `Result<Self, BootError>` so a guest can
 //!     surface its own error message instead of the panic-hook path's
@@ -53,27 +59,22 @@ use alloc::string::String;
 
 use crate::actor::ctx::{MailSender, OutboundReply, Persistence, Resolver};
 
+pub mod bridge;
 pub mod ctx;
+pub mod mailbox;
 pub mod raw;
-pub mod transport;
 
+pub use bridge::{
+    MAIL_BRIDGE, MailBridge, PERSIST_BRIDGE, PersistBridge, SYNC_WAIT_BRIDGE, SyncWaitBridge,
+};
 pub use ctx::{FfiCtx, FfiDropCtx, FfiInitCtx};
-pub use transport::{FFI_TRANSPORT, FfiTransport};
+pub use mailbox::FfiActorMailbox;
 
-/// 1-arg specialisation of [`crate::mail::mailbox::Mailbox`]. Component
-/// code writes `Mailbox<MyKind>`; the alias pins
-/// `T = FfiTransport`. Pinned via the original module path (not the
-/// crate-root re-export) so this alias doesn't recurse onto itself
-/// when the same `Mailbox` name is re-exported at the crate root.
-pub type Mailbox<K> = crate::mail::mailbox::Mailbox<K, FfiTransport>;
-
-/// FFI-flavoured `resolve_mailbox` — pins `T = FfiTransport` so the
-/// 1-turbofish-arg call shape `resolve_mailbox::<MyKind>(name)` works
-/// without spelling out the transport. The transport-generic version
-/// is at [`crate::resolve_mailbox`] for hand-rolled callers.
-pub const fn resolve_mailbox<K: aether_data::Kind>(mailbox_name: &str) -> Mailbox<K> {
-    crate::mail::mailbox::resolve_mailbox::<K, FfiTransport>(mailbox_name)
-}
+// Issue 665 retired the `ffi::Mailbox<K>` 1-arg alias and the
+// FFI-flavoured `resolve_mailbox` shim that pinned `T = FfiTransport`.
+// The transport-free [`crate::mail::mailbox::Mailbox<K>`] is now the
+// only `Mailbox` type; the crate-root [`crate::resolve_mailbox`]
+// builds it directly.
 
 /// Error returned by [`FfiActor::init`] when the actor cannot start
 /// (config parse failure, required handle missing, malformed env var).
@@ -308,8 +309,7 @@ macro_rules! __export_internal {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
             $crate::log::install_wasm_subscriber();
-            let mut ctx: $crate::FfiInitCtx<'_> =
-                $crate::FfiInitCtx::__new(&$crate::FFI_TRANSPORT, mailbox_id);
+            let mut ctx: $crate::FfiInitCtx<'_> = $crate::FfiInitCtx::__new(mailbox_id);
             let status = match <$component as $crate::FfiActor>::init(&mut ctx) {
                 Ok(instance) => {
                     unsafe {
@@ -351,7 +351,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(&$crate::FFI_TRANSPORT);
+            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new();
             let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
             let status = instance.__aether_dispatch(&mut ctx, mail);
             // Issue #598: ship buffered tracing events at handler exit.
@@ -368,8 +368,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiDropCtx<'_> =
-                $crate::FfiDropCtx::__new(&$crate::FFI_TRANSPORT);
+            let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new();
             $crate::__export_internal!(@on_replace $replaceable, $component, instance, ctx);
             $crate::log::drain_buffer();
             0
@@ -384,8 +383,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiDropCtx<'_> =
-                $crate::FfiDropCtx::__new(&$crate::FFI_TRANSPORT);
+            let mut ctx: $crate::FfiDropCtx<'_> = $crate::FfiDropCtx::__new();
             <$component as $crate::FfiActor>::on_drop(instance, &mut ctx);
             $crate::log::drain_buffer();
             0
@@ -402,7 +400,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(&$crate::FFI_TRANSPORT);
+            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new();
             let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
             $crate::__export_internal!(@on_rehydrate $replaceable, $component, instance, ctx, prior);
             $crate::log::drain_buffer();

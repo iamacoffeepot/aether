@@ -479,8 +479,8 @@ mod native {
         use aether_actor::Actor;
         use aether_data::MailboxId;
         use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
+        use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
-        use aether_substrate::actor::native::transport::NativeTransport;
         use aether_substrate::chassis::ctx::ChassisBuilder;
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::ReplyTo;
@@ -488,17 +488,17 @@ mod native {
         use aether_substrate::mail::registry::Registry;
 
         /// Test fixture that bundles the cap, a fully-wired test mailer,
-        /// and a `NativeTransport` long enough for handlers to borrow.
+        /// and a `NativeBinding` long enough for handlers to borrow.
         struct TestFixture {
             cap: IoCapability,
             rx: std::sync::mpsc::Receiver<EgressEvent>,
-            transport: NativeTransport,
+            transport: NativeBinding,
         }
 
         impl TestFixture {
             fn new(reg: Arc<AdapterRegistry>) -> Self {
                 let (mailer, rx) = test_mailer_and_rx();
-                let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+                let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
                 Self {
                     cap: IoCapability::from_registry(reg),
                     rx,

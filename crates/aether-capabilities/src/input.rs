@@ -84,7 +84,7 @@ mod native {
                 }
                 Err(error) => SubscribeInputResult::Err { error },
             };
-            ctx.transport()
+            ctx.binding()
                 .send_reply_for_handler(ctx.reply_target(), &result);
         }
 
@@ -104,7 +104,7 @@ mod native {
                 }
                 Err(error) => SubscribeInputResult::Err { error },
             };
-            ctx.transport()
+            ctx.binding()
                 .send_reply_for_handler(ctx.reply_target(), &result);
         }
     }
