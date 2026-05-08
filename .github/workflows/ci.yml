@@ -129,16 +129,15 @@ jobs:
             [ -z "$pkg" ] && continue
             cargo build --target wasm32-unknown-unknown -p "$pkg"
           done <<< "$pkgs"
-        # Get the diff between the current commit and the base of the PR, then filter to just the files that changed.
-        # If any of those files are in the `crates/` directory, or are `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, or a workflow file,
-        # then we consider this PR to have "code changes" that require running the tests. Otherwise, we can skip the tests to save time.
+      # Run the full workspace test suite under nextest. The
+      # changed-crate filter the prior step had is gone — nextest's
+      # process-per-test isolation surfaces cross-test contamination
+      # that the per-crate filter could mask, and the CI profile's
+      # `slow-timeout` bounds runaway tests cleanly.
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
-      - name: Test with latest nextest release
-        uses: actions-rs/cargo@v1
-        with:
-          command: nextest
-          args: run --all-features --profile ci
+      - name: Run tests
+        run: cargo nextest run --all-features --profile ci
         env:
           AETHER_REQUIRE_RUNTIME: "1"
 
