@@ -26,9 +26,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
 use crate::actor::native::binding::NativeBinding;
-use crate::actor::native::{
-    ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
-};
+use crate::actor::native::{ExportedHandles, NativeActor, NativeDispatch, NativeInitCtx};
 use crate::chassis::Chassis;
 use crate::chassis::ctx::{ChassisCtx, FacadeHandle, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
@@ -421,12 +419,10 @@ where
 
         // Spawn the dispatcher thread. The thread owns the Box<A>,
         // an Arc<NativeBinding>, and the per-actor `ActorSlots`
-        // (moved in by value); it loops `recv_blocking()` on the
-        // transport (which pulls from the installed inbox and
-        // disconnects when the chassis drops its `mailbox_sender`) and
-        // routes each envelope through `__aether_dispatch_envelope`,
-        // wrapped in `local::with_stamped` so handler bodies
-        // see the per-actor storage.
+        // (moved in by value); it delegates to the shared
+        // `dispatch_loop_run` helper (issue 672) which runs the
+        // outer loop, drain, on_close, and registry close-actor
+        // sequence — same shape the instanced path uses.
         let transport_for_thread = Arc::clone(&transport);
         let actor_registry_for_thread = Arc::clone(ctx.spawner_arc().actor_registry());
         let mailer_for_thread = ctx.mail_send_handle();
@@ -435,133 +431,15 @@ where
         let thread = std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                // Issue 607 Phase 4a (ADR-0079): the singleton
-                // dispatcher polls the self-shutdown flag the same
-                // way the instanced dispatcher does in `spawn.rs`.
-                // Channel-disconnect is the chassis-shutdown path;
-                // both flow through the same drain → on_close → exit
-                // sequence below. Singletons don't tombstone (their
-                // mailbox slot stays in `Registry`); the chassis's
-                // `BootedPassives::shutdown_in_place` reverse-drops
-                // the MailboxSender to fully disconnect the sink.
-                loop {
-                    if transport_for_thread.should_shutdown() {
-                        break;
-                    }
-                    let env = match transport_for_thread.recv_blocking() {
-                        Some(e) => e,
-                        None => break,
-                    };
-                    aether_actor::local::with_stamped(&slots, || {
-                        // Issue #581: stamp the actor's transport as
-                        // the in-actor `MailDispatch` so the actor-
-                        // aware tracing layer's priority flush + the
-                        // post-handler drain hook ship `LogBatch`
-                        // mail with sender attribution.
-                        crate::runtime::log_install::with_actor_dispatch(
-                            &*transport_for_thread as &dyn crate::runtime::log_install::MailDispatch,
-                            || {
-                                let mut ctx =
-                                    NativeCtx::new(&transport_for_thread, env.sender);
-                                if actor
-                                    .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
-                                    .is_none()
-                                    && !actor
-                                        .__aether_dispatch_fallback(&mut ctx, &env)
-                                {
-                                    // Issue 576: catch-all caps override
-                                    // `__aether_dispatch_fallback` and return
-                                    // `true` after their fallback runs,
-                                    // suppressing this warn. Strict receivers
-                                    // keep the default (returns `false`) and
-                                    // surface the miss.
-                                    tracing::warn!(
-                                        target: "aether_substrate::chassis_builder",
-                                        actor = A::NAMESPACE,
-                                        kind = env.kind_name.as_str(),
-                                        "native actor dispatch missed: kind not handled or decode failed"
-                                    );
-                                }
-                                aether_actor::log::drain_buffer();
-                            },
-                        );
-                    });
-                    // Decrement matches the sink-handler's increment —
-                    // the chassis frame-bound drain barrier
-                    // (`drain_frame_bound_or_abort`) reads this counter
-                    // to know when the dispatcher is caught up.
-                    if let Some(p) = &pending {
-                        p.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                    }
-                }
-                // Drain remaining inbox synchronously so any in-flight
-                // mail dispatched during the shutdown signal is
-                // observed before `on_close` runs.
-                while let Some(env) = transport_for_thread.try_recv() {
-                    aether_actor::local::with_stamped(&slots, || {
-                        crate::runtime::log_install::with_actor_dispatch(
-                            &*transport_for_thread as &dyn crate::runtime::log_install::MailDispatch,
-                            || {
-                                let mut ctx =
-                                    NativeCtx::new(&transport_for_thread, env.sender);
-                                let _ = actor
-                                    .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload);
-                                aether_actor::log::drain_buffer();
-                            },
-                        );
-                    });
-                    if let Some(p) = &pending {
-                        p.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-                    }
-                }
-                // Last-chance close hook. Runs whether the trigger was
-                // self-shutdown (flag) or substrate shutdown (channel
-                // disconnect). Default empty for singletons that don't
-                // need it; opt-in for caps with cleanup state.
-                aether_actor::local::with_stamped(&slots, || {
-                    crate::runtime::log_install::with_actor_dispatch(
-                        &*transport_for_thread as &dyn crate::runtime::log_install::MailDispatch,
-                        || {
-                            let mut close_ctx = NativeCtx::new(
-                                &transport_for_thread,
-                                crate::mail::ReplyTo::NONE,
-                            );
-                            actor.on_close(&mut close_ctx);
-                            aether_actor::log::drain_buffer();
-                        },
-                    );
-                });
-                // Issue 607 Phase 4b (ADR-0079): close the actor in
-                // the registry — drains monitors_of[id] for fan-out,
-                // walks monitoring[id] to prune the singleton from
-                // each watched target's forward index, then marks
-                // Dead + tombstones the id. Singletons today don't
-                // sit in `actors` as `Live`, so the slot transition
-                // is purely sentinel; the reverse-prune is the
-                // load-bearing step (a singleton that monitored
-                // instanced actors must not leave dangling forward
-                // refs after its dispatcher exits).
-                let watchers = actor_registry_for_thread.close_actor(self_id_for_thread);
-                if !watchers.is_empty() {
-                    let notice = aether_kinds::MonitorNotice {
-                        target: self_id_for_thread,
-                    };
-                    let payload =
-                        <aether_kinds::MonitorNotice as aether_data::Kind>::encode_into_bytes(
-                            &notice,
-                        );
-                    let kind = crate::mail::KindId(
-                        <aether_kinds::MonitorNotice as aether_data::Kind>::ID.0,
-                    );
-                    for watcher in watchers {
-                        mailer_for_thread.push(crate::mail::Mail::new(
-                            watcher,
-                            kind,
-                            payload.clone(),
-                            1,
-                        ));
-                    }
-                }
+                crate::actor::native::dispatch::dispatch_loop_run::<A>(
+                    &transport_for_thread,
+                    &mut actor,
+                    &slots,
+                    pending.as_ref(),
+                    &actor_registry_for_thread,
+                    &mailer_for_thread,
+                    self_id_for_thread,
+                );
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 

@@ -234,6 +234,15 @@ impl Spawner {
         ));
         transport.install_inbox(rx);
 
+        // Per-actor scratch storage (issue 582 / ADR-0074). Stamped
+        // into TLS via `local::with_stamped` for the duration of
+        // `init` and each handler dispatch so library code inside
+        // the actor (e.g., the issue-581 log buffer, `Local<T>`
+        // slots) can reach `Local::with_mut` without threading a
+        // ctx through. Mirrors the singleton path in
+        // `chassis::builder::make_native_actor_boot` (issue 672).
+        let slots = Box::new(aether_actor::local::ActorSlots::new());
+
         let actor = {
             // Instanced actors don't publish driver-facing sub-handles
             // today — Phase 4+ may revisit. Pass a throwaway
@@ -242,7 +251,23 @@ impl Spawner {
             let mut throwaway_handles = crate::ExportedHandles::new();
             let mut init_ctx =
                 NativeInitCtx::new(&transport, &mut throwaway_handles, Arc::clone(&self.mailer));
-            match A::init(config, &mut init_ctx) {
+            // Issue 581: wrap `init` in `with_stamped` +
+            // `with_actor_dispatch` so any `tracing::*` event the
+            // actor fires during boot drains to LogCapability with
+            // sender attribution when init returns. Singletons get
+            // this through `make_native_actor_boot`; instanced
+            // actors join the pattern in issue 672.
+            let init_result = aether_actor::local::with_stamped(&slots, || {
+                crate::runtime::log_install::with_actor_dispatch(
+                    &*transport as &dyn crate::runtime::log_install::MailDispatch,
+                    || {
+                        let r = A::init(config, &mut init_ctx);
+                        aether_actor::log::drain_buffer();
+                        r
+                    },
+                )
+            });
+            match init_result {
                 Ok(a) => a,
                 Err(e) => return Err(SpawnError::InitFailed(e)),
             }
@@ -375,14 +400,14 @@ impl Spawner {
             .unwrap()
             .push((id, Arc::clone(&pending)));
 
-        // 8. Spawn dispatcher thread, move actor in. Mirrors the
-        // existing `boot_native_actor` shape minus the frame-bound
-        // pending-counter decrement (instanced actors are
-        // free-running per the comment above).
-        //
-        // Issue 629 / Phase A: the dispatcher takes the Box<A> by
-        // move — the actor is owned exclusively by this thread for
-        // its lifetime; no Arc share with the chassis or registry.
+        // 8. Spawn dispatcher thread, move actor + slots in.
+        // Issue 672: delegates to the shared `dispatch_loop_run`
+        // helper — same loop body the singleton path uses, with
+        // `local::with_stamped` + `log_install::with_actor_dispatch`
+        // wrapping every dispatch, drain, and `on_close`. Issue 629 /
+        // Phase A: the dispatcher takes the Box<A> by move — the
+        // actor is owned exclusively by this thread for its lifetime;
+        // no Arc share with the chassis or registry.
         let transport_for_thread = Arc::clone(&transport);
         let actor_registry_for_thread = Arc::clone(&self.actor_registry);
         let mailer_for_thread = Arc::clone(&self.mailer);
@@ -395,109 +420,15 @@ impl Spawner {
         let _ = std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
-                // Issue 607 Phase 4a (ADR-0079): the dispatcher loop
-                // observes two shutdown signals: the self-shutdown
-                // flag (set by `NativeCtx::shutdown`) checked after
-                // each handler return, and channel-disconnect
-                // (substrate shutdown — registry dropped, sender
-                // gone) signalled by `recv_blocking` returning None.
-                // Both flow through the same drain → on_close → exit
-                // path below.
-                loop {
-                    if transport_for_thread.should_shutdown() {
-                        break;
-                    }
-                    let env = match transport_for_thread.recv_blocking() {
-                        Some(e) => e,
-                        None => break,
-                    };
-                    let mut native_ctx =
-                        crate::actor::native::ctx::NativeCtx::new(&transport_for_thread, env.sender);
-                    // Issue 634 Phase 4: trampolines are instanced
-                    // actors that route every un-typed kind through
-                    // `#[fallback]` to the wasm guest. Mirror the
-                    // chassis_builder singleton dispatcher's two-step
-                    // (typed → fallback) so the fallback override
-                    // takes effect.
-                    if actor
-                        .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
-                        .is_none()
-                        && !actor.__aether_dispatch_fallback(&mut native_ctx, &env)
-                    {
-                        tracing::warn!(
-                            target: "aether_substrate::spawn",
-                            actor = A::NAMESPACE,
-                            kind = env.kind_name.as_str(),
-                            "instanced actor dispatch missed: kind not handled or decode failed"
-                        );
-                    }
-                    pending_for_thread.fetch_sub(1, Ordering::AcqRel);
-                }
-
-                // Drain remaining mail synchronously. The flag/disconnect
-                // raced against any in-flight mail the sink handler
-                // already pushed; the actor sees it before `on_close`
-                // runs so a "please close" handler that flushes state
-                // observes the full inbox.
-                while let Some(env) = transport_for_thread.try_recv() {
-                    let mut native_ctx =
-                        crate::actor::native::ctx::NativeCtx::new(&transport_for_thread, env.sender);
-                    if actor
-                        .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
-                        .is_none()
-                        && !actor.__aether_dispatch_fallback(&mut native_ctx, &env)
-                    {
-                        tracing::warn!(
-                            target: "aether_substrate::spawn",
-                            actor = A::NAMESPACE,
-                            kind = env.kind_name.as_str(),
-                            "instanced actor drain dispatch missed: kind not handled or decode failed"
-                        );
-                    }
-                    pending_for_thread.fetch_sub(1, Ordering::AcqRel);
-                }
-
-                // Last-chance close hook. ReplyTo is None because no
-                // inbound envelope produced this call.
-                let mut close_ctx = crate::actor::native::ctx::NativeCtx::new(
+                crate::actor::native::dispatch::dispatch_loop_run::<A>(
                     &transport_for_thread,
-                    crate::mail::ReplyTo::NONE,
+                    &mut actor,
+                    &slots,
+                    Some(&pending_for_thread),
+                    &actor_registry_for_thread,
+                    &mailer_for_thread,
+                    id,
                 );
-                actor.on_close(&mut close_ctx);
-
-                // Issue 607 Phase 4b (ADR-0079): close path. Drain
-                // monitors_of[id] for fan-out, prune monitoring[id]
-                // from each target's forward list, then mark Dead +
-                // tombstone. `close_actor` runs all three steps under
-                // its own locks; we fan out the returned watcher list
-                // here so the MonitorNotice mails ride the substrate's
-                // ordinary `Mailer::push` path (sinks dispatch on the
-                // calling thread; component recipients route through
-                // the supervisor).
-                let watchers = actor_registry_for_thread.close_actor(id);
-                if !watchers.is_empty() {
-                    let notice = aether_kinds::MonitorNotice { target: id };
-                    let payload =
-                        <aether_kinds::MonitorNotice as aether_data::Kind>::encode_into_bytes(
-                            &notice,
-                        );
-                    let kind = crate::mail::KindId(
-                        <aether_kinds::MonitorNotice as aether_data::Kind>::ID.0,
-                    );
-                    for watcher in watchers {
-                        mailer_for_thread.push(crate::mail::Mail::new(
-                            watcher,
-                            kind,
-                            payload.clone(),
-                            1,
-                        ));
-                    }
-                }
-
-                // actor (Box) and transport_for_thread drop here on
-                // thread exit. The chassis-stored sender was already
-                // dropped when `close_actor`'s `mark_dead` flipped the
-                // entry from Live to Dead.
             })
             .expect("dispatcher thread spawn must succeed");
 
