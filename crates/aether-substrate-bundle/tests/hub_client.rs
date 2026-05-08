@@ -99,7 +99,7 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     let seen_for_sink = Arc::clone(&seen);
 
     let registry = Arc::new(Registry::new());
-    let recipient = registry.register_sink(
+    let recipient = registry.register_closure(
         "hello",
         Arc::new(
             move |_kind_id: aether_data::KindId,

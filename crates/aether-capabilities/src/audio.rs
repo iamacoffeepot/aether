@@ -1041,7 +1041,7 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (registry, mailer) = fresh_substrate();
-            registry.register_sink(AudioCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            registry.register_closure(AudioCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
             let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<AudioCapability>(AudioConfig {

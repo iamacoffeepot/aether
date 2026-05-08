@@ -78,7 +78,7 @@ fn tick_roundtrip_component_to_sink() {
 
     let counter = Arc::new(AtomicU32::new(0));
     let c2 = Arc::clone(&counter);
-    let sink_mbox = registry.register_sink(
+    let sink_mbox = registry.register_closure(
         "heartbeat",
         Arc::new(move |_kind_id, _kind, _origin, _sender, _bytes, count| {
             c2.fetch_add(count, Ordering::SeqCst);
@@ -142,7 +142,7 @@ fn batched_mail_preserves_fifo_per_mailbox() {
 
     let recorded: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::with_capacity(N as usize)));
     let recorded_clone = Arc::clone(&recorded);
-    let sink_mbox = registry.register_sink(
+    let sink_mbox = registry.register_closure(
         "observer",
         Arc::new(move |_kind_id, _kind, _origin, _sender, _bytes, count| {
             recorded_clone.lock().unwrap().push(count);

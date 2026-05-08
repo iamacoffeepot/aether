@@ -514,9 +514,12 @@ mod native {
 
             match self.registry.entry(id) {
                 Some(MailboxEntry::Component) => {}
-                Some(MailboxEntry::Sink(_)) => {
+                Some(MailboxEntry::Closure(_)) => {
                     return ReplaceResult::Err {
-                        error: format!("mailbox {} is a sink, not a component", id.0),
+                        error: format!(
+                            "mailbox {} is a chassis-bound mailbox, not a component",
+                            id.0
+                        ),
                     };
                 }
                 Some(MailboxEntry::Dropped) => {

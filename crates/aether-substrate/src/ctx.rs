@@ -190,7 +190,7 @@ impl SubstrateCtx {
         let correlation = self.mint_correlation();
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Component(self.sender), correlation);
 
-        if let Some(MailboxEntry::Sink(handler)) = self.registry.entry(recipient) {
+        if let Some(MailboxEntry::Closure(handler)) = self.registry.entry(recipient) {
             let kind_name = self.registry.kind_name(kind).unwrap_or_default();
             // Component-originated mail: the sender is this ctx's
             // mailbox, so its registry name is the `origin` any

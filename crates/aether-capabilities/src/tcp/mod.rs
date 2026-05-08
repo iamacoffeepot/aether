@@ -374,8 +374,8 @@ mod cap_native {
             let id = registry
                 .lookup(cap_namespace)
                 .expect("cap mailbox registered");
-            let MailboxEntry::Sink(handler) = registry.entry(id).expect("cap entry") else {
-                panic!("expected sink entry");
+            let MailboxEntry::Closure(handler) = registry.entry(id).expect("cap entry") else {
+                panic!("expected mailbox entry");
             };
             let bytes = postcard::to_allocvec(mail).expect("encode");
             handler(K::ID, K::NAME, None, session_reply(), &bytes, 1);

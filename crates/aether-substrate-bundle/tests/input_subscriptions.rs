@@ -77,7 +77,7 @@ fn make_harness() -> Harness {
 
     let counter = Arc::new(AtomicU32::new(0));
     let c2 = Arc::clone(&counter);
-    let sink_mbox = registry.register_sink(
+    let sink_mbox = registry.register_closure(
         "tally",
         Arc::new(move |_kind_id, _kind, _origin, _sender, _bytes, count| {
             c2.fetch_add(count, Ordering::SeqCst);

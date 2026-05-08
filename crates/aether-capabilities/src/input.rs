@@ -170,15 +170,16 @@ mod native {
     }
 
     /// Shared validation: the mailbox id must name a live component.
-    /// Sinks and already-dropped mailboxes are rejected with a
-    /// human-readable error string the cap echoes back via
-    /// `SubscribeInputResult::Err`.
+    /// Chassis-bound mailboxes and already-dropped mailboxes are
+    /// rejected with a human-readable error string the cap echoes
+    /// back via `SubscribeInputResult::Err`.
     fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
         match registry.entry(id) {
             Some(MailboxEntry::Component) => Ok(()),
-            Some(MailboxEntry::Sink(_)) => {
-                Err(format!("mailbox {:?} is a sink, not a component", id))
-            }
+            Some(MailboxEntry::Closure(_)) => Err(format!(
+                "mailbox {:?} is a chassis-bound mailbox, not a component",
+                id
+            )),
             Some(MailboxEntry::Dropped) => Err(format!("mailbox {:?} already dropped", id)),
             None => Err(format!("unknown mailbox id {:?}", id)),
         }

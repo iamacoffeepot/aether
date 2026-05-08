@@ -570,8 +570,8 @@ mod native {
 
         fn deliver(registry: &Registry, name: &str, kind: KindId, payload: &[u8]) {
             let id = registry.lookup(name).expect("mailbox registered");
-            let MailboxEntry::Sink(handler) = registry.entry(id).expect("entry exists") else {
-                panic!("expected sink entry for {name}");
+            let MailboxEntry::Closure(handler) = registry.entry(id).expect("entry exists") else {
+                panic!("expected mailbox entry for {name}");
             };
             handler(kind, "test.kind", None, ReplyTo::NONE, payload, 1);
         }

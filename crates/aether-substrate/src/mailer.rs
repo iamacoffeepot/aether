@@ -5,11 +5,11 @@
 // drains. Issue 603 retired the shared `ComponentTable` Arc — the
 // wasm-component supervisor owns the table now and installs itself as
 // a [`crate::supervisor::ComponentRouter`] during its `init`. The
-// Mailer keeps a registry handle for sink/dropped/unknown classification
-// and consults the supervisor for `Component` recipients; without an
-// installed supervisor (early-boot, hub chassis) component-bound mail
-// warn-drops via the same Unknown path component-less chassis already
-// took.
+// Mailer keeps a registry handle for closure/dropped/unknown
+// classification and consults the supervisor for `Component`
+// recipients; without an installed supervisor (early-boot, hub chassis)
+// component-bound mail warn-drops via the same Unknown path
+// component-less chassis already took.
 //
 // `push(mail)` still resolves the recipient inline on the caller's
 // thread.
@@ -130,7 +130,7 @@ impl Mailer {
     /// Issue 576: surfaced so the broadcast cap's `init` can grab the
     /// outbound at boot and lift catch-all envelopes through
     /// [`HubOutbound::egress_broadcast`] without the substrate
-    /// holding a closure-sink for it.
+    /// holding a registry closure for it.
     pub fn outbound(&self) -> Option<&Arc<HubOutbound>> {
         self.outbound.get()
     }
@@ -194,17 +194,18 @@ impl Mailer {
         Ok(())
     }
 
-    /// Route a sink's `*Result` reply to `sender` with a single
-    /// encode. `Session` / `EngineMailbox` hand off to the hub
-    /// outbound (unchanged hub-wire format); `Component` pushes a
-    /// fresh `Mail` into the target component's inbox so the guest's
-    /// normal dispatch path delivers the reply. `None` is a silent
-    /// drop — nobody asked for a reply.
+    /// Route a chassis-bound mailbox's `*Result` reply to `sender`
+    /// with a single encode. `Session` / `EngineMailbox` hand off to
+    /// the hub outbound (unchanged hub-wire format); `Component`
+    /// pushes a fresh `Mail` into the target component's inbox so the
+    /// guest's normal dispatch path delivers the reply. `None` is a
+    /// silent drop — nobody asked for a reply.
     ///
-    /// The reply mail carries `reply_to = None` and no origin: the
-    /// receiver isn't expected to reply to a reply, and decorating
-    /// with the sink's mailbox would produce a `ReplyEntry::Component`
-    /// pointing at a sink that can't itself receive mail.
+    /// The reply mail carries `reply_to = None`: the receiver isn't
+    /// expected to reply to a reply, and decorating with the
+    /// closure-bound mailbox's id would produce a
+    /// `ReplyEntry::Component` pointing at an entry that can't itself
+    /// receive mail.
     pub fn send_reply<K>(&self, sender: ReplyTo, result: &K) -> bool
     where
         K: aether_data::Kind + serde::Serialize,
@@ -342,13 +343,14 @@ fn route_mail(
 
     let recipient = mail.recipient;
     match registry.entry(recipient) {
-        Some(MailboxEntry::Sink(handler)) => {
+        Some(MailboxEntry::Closure(handler)) => {
             let kind_name = registry.kind_name(mail.kind).unwrap_or_default();
-            // Mail reaching a sink through `push` came from substrate
-            // core or a chassis (e.g. the frame loop's FrameStats
-            // push, platform input fan-out). Per ADR-0011 origin is
-            // `None`. Components reach sinks via `SubstrateCtx::send`
-            // inline and never enter `push`.
+            // Mail reaching a closure-bound mailbox through `push`
+            // came from substrate core or a chassis (e.g. the frame
+            // loop's FrameStats push, platform input fan-out). Per
+            // ADR-0011 origin is `None`. Components reach
+            // closure-bound mailboxes via `SubstrateCtx::send` inline
+            // and never enter `push`.
             handler(
                 mail.kind,
                 &kind_name,
@@ -459,7 +461,7 @@ mod tests {
     use crate::handle_store::HandleStore;
     use crate::mail::MailboxId;
     use crate::outbound::EgressEvent;
-    use crate::registry::SinkHandler;
+    use crate::registry::MailboxHandler;
     use aether_data::{Kind, Ref};
     use aether_data::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
 
@@ -587,7 +589,7 @@ mod tests {
                 delivery_count: Arc::new(AtomicUsize::new(0)),
             }
         }
-        fn handler(&self) -> SinkHandler {
+        fn handler(&self) -> MailboxHandler {
             let captured = Arc::clone(&self.captured);
             let count = Arc::clone(&self.delivery_count);
             Arc::new(
@@ -626,7 +628,7 @@ mod tests {
             })
             .unwrap();
         let sink = CapturingSink::new();
-        let sink_id = registry.register_sink("test.sink", sink.handler());
+        let sink_id = registry.register_closure("test.sink", sink.handler());
 
         let note = Note {
             body: "verbatim".into(),
@@ -662,7 +664,7 @@ mod tests {
             .unwrap();
 
         let sink = CapturingSink::new();
-        let sink_id = registry.register_sink("test.sink", sink.handler());
+        let sink_id = registry.register_closure("test.sink", sink.handler());
 
         // Push HeldNote mail with `held = Handle(7)`. Handle 7 is
         // not in the store yet — the mail must park. We construct
@@ -741,7 +743,7 @@ mod tests {
             .unwrap();
 
         let sink = CapturingSink::new();
-        let sink_id = registry.register_sink("test.sink", sink.handler());
+        let sink_id = registry.register_closure("test.sink", sink.handler());
 
         // Truncated payload — the walker bails Truncated mid-walk.
         mailer.push(Mail::new(sink_id, kind_id, vec![0u8; 1], 1));

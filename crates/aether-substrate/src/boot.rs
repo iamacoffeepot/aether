@@ -24,7 +24,7 @@
 //! through `Builder::with()`. Without this separation, a hub-driven
 //! `load_component` could race ahead of the chassis's main thread
 //! and bind a chassis sink name to a freshly-loaded component before
-//! the chassis's later `register_sink` call, panicking the substrate
+//! the chassis's later `register_closure` call, panicking the substrate
 //! (issue #262).
 //!
 //! **Env-var reading is the chassis's job.** Per issue 464,
@@ -209,7 +209,7 @@ impl<'a> SubstrateBootBuilder<'a> {
         // today; the sink is structured as a general diagnostic
         // channel so future diagnostic kinds can land here without
         // needing another sink.
-        registry.register_sink(
+        registry.register_closure(
             AETHER_DIAGNOSTICS,
             Arc::new(
                 |_kind: aether_data::KindId,
@@ -294,7 +294,7 @@ mod tests {
         // The boot is alive; chassis sinks can be registered without
         // racing a hub-driven load.
         boot.registry
-            .register_sink("test_chassis_sink", Arc::new(|_, _, _, _, _, _| {}));
+            .register_closure("test_chassis_sink", Arc::new(|_, _, _, _, _, _| {}));
         // No backend attached → `is_connected()` is false. Chassis
         // crates that want a hub bridge wire `HubClientCapability`
         // themselves through their `Builder`.

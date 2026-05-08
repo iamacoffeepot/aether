@@ -72,7 +72,7 @@ pub struct MailboxClaim {
 
 /// Result returned from [`ChassisCtx::claim_mailbox_drop_on_shutdown`].
 ///
-/// Same as [`MailboxClaim`] plus a strong [`SinkSender`] the
+/// Same as [`MailboxClaim`] plus a strong [`MailboxSender`] the
 /// capability is expected to drop during shutdown to break the
 /// channel — the channel-drop + join lifecycle ADR-0074 §Decision 5
 /// settles on. The registry's sink-handler closure holds only a
@@ -87,7 +87,7 @@ pub struct MailboxClaim {
 pub struct DropOnShutdownClaim {
     pub id: MailboxId,
     pub receiver: mpsc::Receiver<Envelope>,
-    pub sink_sender: SinkSender,
+    pub mailbox_sender: MailboxSender,
 }
 
 /// Strong handle to the inbound `Sender<Envelope>` for a mailbox
@@ -96,14 +96,14 @@ pub struct DropOnShutdownClaim {
 /// dropping it disconnects the channel and lets the dispatcher's
 /// `recv()` return `Err(Disconnected)` immediately.
 #[derive(Debug)]
-pub struct SinkSender {
+pub struct MailboxSender {
     // Held purely for its `Drop` side effect. When this `Arc` drops
     // and refcount hits zero, the inner `Sender` drops, the channel
     // disconnects, and the dispatcher exits its `recv()` loop.
     _inner: Arc<mpsc::Sender<Envelope>>,
 }
 
-impl SinkSender {
+impl MailboxSender {
     /// Internal constructor — only
     /// [`ChassisCtx::claim_mailbox_drop_on_shutdown`] /
     /// [`ChassisCtx::claim_frame_bound_mailbox`] build these.
@@ -131,7 +131,7 @@ impl SinkSender {
 pub struct FrameBoundClaim {
     pub id: MailboxId,
     pub receiver: mpsc::Receiver<Envelope>,
-    pub sink_sender: SinkSender,
+    pub mailbox_sender: MailboxSender,
     /// Shared with the registry's sink handler. The handler increments
     /// before pushing into the mpsc; the capability's dispatcher must
     /// decrement after each `dispatch()` returns.
@@ -178,7 +178,7 @@ pub type FallbackRouter = Arc<dyn Fn(&Envelope) -> bool + Send + Sync + 'static>
 pub enum BootError {
     /// The mailbox name is already bound, either to another
     /// capability that claimed it earlier or to a legacy
-    /// `Registry::register_sink` call from `SubstrateBoot::build`.
+    /// `Registry::register_closure` call from `SubstrateBoot::build`.
     /// Phase 2-5 expect this during the side-by-side period and
     /// remove the legacy registration in the same diff.
     MailboxAlreadyClaimed { name: String },
@@ -291,7 +291,7 @@ pub struct ChassisCtx<'a> {
     /// (`Builder::with_log_drain<T>()`).
     ///
     /// Sink-only registrations (e.g. `AETHER_DIAGNOSTICS`) go through
-    /// `Registry::register_sink` directly and do *not* land here —
+    /// `Registry::register_closure` directly and do *not* land here —
     /// they're not actors and have no `LogDrainSlot` to install.
     claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
     /// Issue 607 Phase 3b (ADR-0079): the chassis's
@@ -361,7 +361,7 @@ impl<'a> ChassisCtx<'a> {
     pub fn claim_mailbox_with_override(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
         let (tx, rx) = mpsc::channel::<Envelope>();
         let tx = Arc::new(tx);
-        let id = self.registry.try_register_sink(
+        let id = self.registry.try_register_closure(
             name.to_owned(),
             Arc::new(
                 move |kind: KindId,
@@ -393,7 +393,7 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Variant of [`Self::claim_mailbox`] that returns a strong
-    /// [`SinkSender`] alongside the receiver. Claims under
+    /// [`MailboxSender`] alongside the receiver. Claims under
     /// `C::NAMESPACE`. See
     /// [`Self::claim_mailbox_drop_on_shutdown_with_override`] for the
     /// arbitrary-name escape hatch.
@@ -404,9 +404,9 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Variant of [`Self::claim_mailbox_with_override`] that returns
-    /// a strong [`SinkSender`] alongside the receiver. The registry
+    /// a strong [`MailboxSender`] alongside the receiver. The registry
     /// holds only a [`std::sync::Weak`] reference to the sender, so
-    /// when the capability drops the `SinkSender` (during shutdown),
+    /// when the capability drops the `MailboxSender` (during shutdown),
     /// the channel disconnects and the dispatcher's `recv()` returns
     /// `Err(Disconnected)`.
     ///
@@ -420,14 +420,14 @@ impl<'a> ChassisCtx<'a> {
         name: &str,
     ) -> Result<DropOnShutdownClaim, BootError> {
         let (tx, rx) = mpsc::channel::<Envelope>();
-        // Strong Arc rides on `DropOnShutdownClaim.sink_sender` and
+        // Strong Arc rides on `DropOnShutdownClaim.mailbox_sender` and
         // lives for the capability's lifetime. The registry handler
         // only upgrades a `Weak` per call, so when the capability
         // drops its strong handle, the inner `Sender` also drops
         // and the dispatcher's `recv()` returns `Err(Disconnected)`.
         let tx = Arc::new(tx);
         let weak = Arc::downgrade(&tx);
-        let id = self.registry.try_register_sink(
+        let id = self.registry.try_register_closure(
             name.to_owned(),
             Arc::new(
                 move |kind: KindId,
@@ -466,7 +466,7 @@ impl<'a> ChassisCtx<'a> {
         Ok(DropOnShutdownClaim {
             id,
             receiver: rx,
-            sink_sender: SinkSender::new(tx),
+            mailbox_sender: MailboxSender::new(tx),
         })
     }
 
@@ -501,7 +501,7 @@ impl<'a> ChassisCtx<'a> {
         let weak = Arc::downgrade(&tx);
         let pending = Arc::new(AtomicU64::new(0));
         let pending_for_handler = Arc::clone(&pending);
-        let id = self.registry.try_register_sink(
+        let id = self.registry.try_register_closure(
             name.to_owned(),
             Arc::new(
                 move |kind: KindId,
@@ -555,7 +555,7 @@ impl<'a> ChassisCtx<'a> {
         Ok(FrameBoundClaim {
             id,
             receiver: rx,
-            sink_sender: SinkSender::new(tx),
+            mailbox_sender: MailboxSender::new(tx),
             pending,
         })
     }
@@ -573,7 +573,7 @@ impl<'a> ChassisCtx<'a> {
     /// `frame_bound_pending` that the chassis frame loop would wait
     /// for forever.
     pub fn unclaim_mailbox(&mut self, id: MailboxId) {
-        self.registry.remove_sink(id);
+        self.registry.remove_closure(id);
         self.frame_bound_pending.retain(|(i, _)| *i != id);
         self.frame_bound_set.write().unwrap().remove(&id);
         self.claimed_actor_mailboxes.retain(|i| *i != id);
@@ -662,7 +662,7 @@ impl<'a> ChassisCtx<'a> {
 ///
 /// The chassis owns this; the cap (with its [`Dispatch`] impl) lives
 /// inside the dispatcher thread. Dropping the handle drops the
-/// [`SinkSender`] (channel disconnects), the dispatcher's `recv()`
+/// [`MailboxSender`] (channel disconnects), the dispatcher's `recv()`
 /// returns `Err(Disconnected)`, the thread exits, and the captured
 /// cap drops with it — running its `Drop` impl on the dispatcher
 /// thread (where any backend resource cleanup happens).
@@ -676,7 +676,7 @@ pub struct FacadeHandle<C: 'static> {
     /// `take()` it before joining the thread; once gone, the
     /// registry's `Weak` upgrade fails on subsequent sends and the
     /// dispatcher's `recv()` returns `Err(Disconnected)`.
-    sink_sender: Option<SinkSender>,
+    mailbox_sender: Option<MailboxSender>,
     _cap: PhantomData<fn() -> C>,
 }
 
@@ -685,7 +685,7 @@ impl<C: 'static> Drop for FacadeHandle<C> {
         // Sender first — that's what disconnects the channel and lets
         // the dispatcher thread exit. Joining a still-alive sender
         // would hang.
-        self.sink_sender.take();
+        self.mailbox_sender.take();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -695,7 +695,7 @@ impl<C: 'static> Drop for FacadeHandle<C> {
 // `FacadeHandle<C>` is itself the chassis-stored entry — the cap C
 // lives inside the dispatcher thread. `Send` is the only ActorErased
 // requirement; the handle's fields (`Option<JoinHandle>`,
-// `Option<SinkSender>`, PhantomData) are all `Send`.
+// `Option<MailboxSender>`, PhantomData) are all `Send`.
 impl<C: 'static> ActorErased for FacadeHandle<C> {}
 
 impl<'a> ChassisCtx<'a> {
@@ -704,7 +704,7 @@ impl<'a> ChassisCtx<'a> {
     /// through its [`Dispatch`] impl. ADR-0075 §Decision 3.
     ///
     /// The cap is moved into the thread; the returned [`FacadeHandle`]
-    /// owns the [`SinkSender`] + [`JoinHandle`]. On chassis shutdown
+    /// owns the [`MailboxSender`] + [`JoinHandle`]. On chassis shutdown
     /// the handle drops, the channel disconnects, the thread exits,
     /// and the cap's `Drop` runs on the dispatcher thread (so any
     /// backend cleanup that touches non-Send resources stays on the
@@ -722,23 +722,23 @@ impl<'a> ChassisCtx<'a> {
         // chassis's `frame_bound_pending` Vec. Free-running caps go
         // through the regular drop-on-shutdown claim. The dispatch
         // loop is identical apart from the post-dispatch decrement.
-        let (receiver, sink_sender, pending) = if C::FRAME_BARRIER {
+        let (receiver, mailbox_sender, pending) = if C::FRAME_BARRIER {
             let claim = self.claim_frame_bound_mailbox_with_override(C::NAMESPACE)?;
             let FrameBoundClaim {
                 id: _,
                 receiver,
-                sink_sender,
+                mailbox_sender,
                 pending,
             } = claim;
-            (receiver, sink_sender, Some(pending))
+            (receiver, mailbox_sender, Some(pending))
         } else {
             let claim = self.claim_mailbox_drop_on_shutdown_with_override(C::NAMESPACE)?;
             let DropOnShutdownClaim {
                 id: _,
                 receiver,
-                sink_sender,
+                mailbox_sender,
             } = claim;
-            (receiver, sink_sender, None)
+            (receiver, mailbox_sender, None)
         };
 
         let mut owned = cap;
@@ -779,7 +779,7 @@ impl<'a> ChassisCtx<'a> {
 
         Ok(FacadeHandle {
             thread: Some(thread),
-            sink_sender: Some(sink_sender),
+            mailbox_sender: Some(mailbox_sender),
             _cap: PhantomData,
         })
     }
@@ -849,15 +849,15 @@ where
             (
                 claim.id,
                 claim.receiver,
-                claim.sink_sender,
+                claim.mailbox_sender,
                 Some(claim.pending),
             )
         })
     } else {
         ctx.claim_mailbox_drop_on_shutdown::<A>()
-            .map(|claim| (claim.id, claim.receiver, claim.sink_sender, None))
+            .map(|claim| (claim.id, claim.receiver, claim.mailbox_sender, None))
     };
-    let (mailbox_id, receiver, sink_sender, pending) = match claim_result {
+    let (mailbox_id, receiver, mailbox_sender, pending) = match claim_result {
         Ok(c) => c,
         Err(e) => {
             ctx.spawner_arc()
@@ -917,7 +917,7 @@ where
         Ok(a) => a,
         Err(e) => {
             drop(transport);
-            drop(sink_sender);
+            drop(mailbox_sender);
             ctx.unclaim_mailbox(mailbox_id);
             ctx.spawner_arc()
                 .actor_registry()
@@ -1066,7 +1066,7 @@ where
 
     Ok(Box::new(LegacyNativeActorErased {
         thread: Some(thread),
-        sink_sender: Some(sink_sender),
+        mailbox_sender: Some(mailbox_sender),
     }) as Box<dyn ActorErased>)
 }
 
@@ -1078,12 +1078,12 @@ fn alloc_legacy_native_actor_thread_name<A: aether_actor::Actor>() -> String {
 }
 
 /// Erased shutdown for a `NativeActor` booted through the legacy
-/// `ChassisBuilder.with_actor` path. Drops the [`SinkSender`] to
+/// `ChassisBuilder.with_actor` path. Drops the [`MailboxSender`] to
 /// disconnect the inbox channel (the dispatcher's `recv` returns
 /// `None` and the thread exits), then joins.
 struct LegacyNativeActorErased {
     thread: Option<std::thread::JoinHandle<()>>,
-    sink_sender: Option<SinkSender>,
+    mailbox_sender: Option<MailboxSender>,
 }
 
 impl ActorErased for LegacyNativeActorErased {}
@@ -1092,7 +1092,7 @@ impl Drop for LegacyNativeActorErased {
     fn drop(&mut self) {
         // Sender first — disconnects the channel and lets the
         // dispatcher's recv return None so the thread exits.
-        self.sink_sender.take();
+        self.mailbox_sender.take();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -1593,10 +1593,10 @@ mod tests {
         let id = registry
             .lookup(StubCap::NAMESPACE)
             .expect("stub mailbox registered");
-        let crate::registry::MailboxEntry::Sink(handler) =
+        let crate::registry::MailboxEntry::Closure(handler) =
             registry.entry(id).expect("entry exists")
         else {
-            panic!("expected sink entry");
+            panic!("expected mailbox entry");
         };
         // Push an empty payload at an arbitrary kind id; StubCap's
         // dispatch returns None unconditionally, but the test only

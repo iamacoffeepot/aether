@@ -140,7 +140,7 @@ struct FacadeShutdown<C: 'static> {
 
 impl<C: 'static> DynShutdown for FacadeShutdown<C> {
     fn shutdown_dyn(mut self: Box<Self>) {
-        // Drop the handle eagerly: drops SinkSender, channel
+        // Drop the handle eagerly: drops MailboxSender, channel
         // disconnects, dispatcher thread exits, cap drops. Equivalent
         // to letting `Box<Self>` drop, but explicit so the order is
         // documented.
@@ -334,7 +334,7 @@ where
         //
         // Issue 607 Phase 7: if the mailbox claim fails (name
         // collision against a peer cap claiming the same mailbox
-        // through `register_sink`), release the namespace claim we
+        // through `register_closure`), release the namespace claim we
         // just made — otherwise a later cap with a different TypeId
         // legitimately claiming the same namespace can't.
         let claim_result = if A::FRAME_BARRIER {
@@ -342,15 +342,15 @@ where
                 (
                     claim.id,
                     claim.receiver,
-                    claim.sink_sender,
+                    claim.mailbox_sender,
                     Some(claim.pending),
                 )
             })
         } else {
             ctx.claim_mailbox_drop_on_shutdown::<A>()
-                .map(|claim| (claim.id, claim.receiver, claim.sink_sender, None))
+                .map(|claim| (claim.id, claim.receiver, claim.mailbox_sender, None))
         };
-        let (mailbox_id, receiver, sink_sender, pending) = match claim_result {
+        let (mailbox_id, receiver, mailbox_sender, pending) = match claim_result {
             Ok(c) => c,
             Err(e) => {
                 ctx.spawner_arc()
@@ -403,7 +403,7 @@ where
             Ok(a) => a,
             Err(e) => {
                 drop(transport);
-                drop(sink_sender);
+                drop(mailbox_sender);
                 ctx.unclaim_mailbox(mailbox_id);
                 ctx.spawner_arc()
                     .actor_registry()
@@ -423,7 +423,7 @@ where
         // an Arc<NativeTransport>, and the per-actor `ActorSlots`
         // (moved in by value); it loops `recv_blocking()` on the
         // transport (which pulls from the installed inbox and
-        // disconnects when the chassis drops its `sink_sender`) and
+        // disconnects when the chassis drops its `mailbox_sender`) and
         // routes each envelope through `__aether_dispatch_envelope`,
         // wrapped in `local::with_stamped` so handler bodies
         // see the per-actor storage.
@@ -443,7 +443,7 @@ where
                 // sequence below. Singletons don't tombstone (their
                 // mailbox slot stays in `Registry`); the chassis's
                 // `BootedPassives::shutdown_in_place` reverse-drops
-                // the SinkSender to fully disconnect the sink.
+                // the MailboxSender to fully disconnect the sink.
                 loop {
                     if transport_for_thread.should_shutdown() {
                         break;
@@ -567,7 +567,7 @@ where
 
         Ok(Box::new(NativeActorShutdown {
             thread: Some(thread),
-            sink_sender: Some(sink_sender),
+            mailbox_sender: Some(mailbox_sender),
         }) as Box<dyn DynShutdown>)
     })
 }
@@ -584,13 +584,13 @@ fn alloc_native_actor_thread_name<A: Actor>() -> String {
 }
 
 /// Shutdown adapter for a [`NativeActor`] booted through
-/// [`Builder::with_actor`]. Drops the [`crate::capability::SinkSender`]
+/// [`Builder::with_actor`]. Drops the [`crate::capability::MailboxSender`]
 /// to disconnect the channel (the dispatcher's `recv_blocking` returns
 /// `None` and the thread exits), then joins the thread. Mirrors
 /// [`FacadeShutdown`] for the legacy facade path.
 struct NativeActorShutdown {
     thread: Option<std::thread::JoinHandle<()>>,
-    sink_sender: Option<crate::capability::SinkSender>,
+    mailbox_sender: Option<crate::capability::MailboxSender>,
 }
 
 impl DynShutdown for NativeActorShutdown {
@@ -598,7 +598,7 @@ impl DynShutdown for NativeActorShutdown {
         // Sender first — disconnects the channel and lets the
         // dispatcher's `recv_blocking` return None so the thread
         // exits. Joining a still-attached sender would hang.
-        self.sink_sender.take();
+        self.mailbox_sender.take();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -1530,7 +1530,7 @@ mod tests {
         let mailbox_id = registry
             .lookup(<ProbeCap as aether_actor::Actor>::NAMESPACE)
             .expect("with_actor claimed the mailbox");
-        let MailboxEntry::Sink(handler) = registry.entry(mailbox_id).expect("sink registered")
+        let MailboxEntry::Closure(handler) = registry.entry(mailbox_id).expect("sink registered")
         else {
             panic!("ProbeCap claim must be a sink entry");
         };
@@ -1707,7 +1707,7 @@ mod tests {
         let mailbox_id = registry
             .lookup(<LocalProbe as aether_actor::Actor>::NAMESPACE)
             .expect("with_actor claimed the mailbox");
-        let MailboxEntry::Sink(handler) = registry.entry(mailbox_id).expect("sink registered")
+        let MailboxEntry::Closure(handler) = registry.entry(mailbox_id).expect("sink registered")
         else {
             panic!("LocalProbe claim must be a sink entry");
         };
@@ -1884,8 +1884,8 @@ mod tests {
         let parent_id = registry
             .lookup(<ParentCap as aether_actor::Actor>::NAMESPACE)
             .expect("ParentCap claimed");
-        let MailboxEntry::Sink(handler) = registry.entry(parent_id).expect("sink") else {
-            panic!("expected sink entry");
+        let MailboxEntry::Closure(handler) = registry.entry(parent_id).expect("sink") else {
+            panic!("expected mailbox entry");
         };
         let bytes = (Hatch { tag: 1 }).encode_into_bytes();
         handler(
@@ -2010,8 +2010,8 @@ mod tests {
         // registered sink handler. The handler's `ctx.shutdown()`
         // flips the dispatcher's flag; after the handler returns the
         // trampoline drains, runs `on_close`, marks Dead, tombstones.
-        let MailboxEntry::Sink(handler) = registry.entry(id).expect("sink registered") else {
-            panic!("expected sink entry for instanced actor");
+        let MailboxEntry::Closure(handler) = registry.entry(id).expect("sink registered") else {
+            panic!("expected mailbox entry for instanced actor");
         };
         let bytes = (Quit { tag: 1 }).encode_into_bytes();
         handler(
@@ -2240,10 +2240,10 @@ mod tests {
         // Drive the watcher to register the monitor by pushing a
         // WatchOrder through its sink handler. After this returns
         // the watcher's handle is stored in `self.handle`.
-        let MailboxEntry::Sink(watcher_handler) =
+        let MailboxEntry::Closure(watcher_handler) =
             registry.entry(watcher_id).expect("watcher sink registered")
         else {
-            panic!("expected sink entry for watcher");
+            panic!("expected mailbox entry for watcher");
         };
         let order = WatchOrder {
             target_id: target_id.0,
@@ -2278,10 +2278,10 @@ mod tests {
         // Fire Quit at the target — its handler self-shuts; the
         // dispatcher's close path runs `close_actor`, which fans out
         // a MonitorNotice mail to watcher_id.
-        let MailboxEntry::Sink(target_handler) =
+        let MailboxEntry::Closure(target_handler) =
             registry.entry(target_id).expect("target sink registered")
         else {
-            panic!("expected sink entry for target");
+            panic!("expected mailbox entry for target");
         };
         target_handler(
             <Quit as Kind>::ID,
@@ -2473,10 +2473,10 @@ mod tests {
             .expect("spawn watcher");
 
         // Watcher registers monitor against target.
-        let MailboxEntry::Sink(watcher_handler) =
+        let MailboxEntry::Closure(watcher_handler) =
             registry.entry(watcher_id).expect("watcher sink registered")
         else {
-            panic!("expected sink entry for watcher");
+            panic!("expected mailbox entry for watcher");
         };
         let order = WatchOrder {
             target_id: target_id.0,
@@ -2669,8 +2669,9 @@ mod tests {
         // Close c — Quit it through the sink handler. After close,
         // resolve_actors drops to two and resolve_actor::<Member>("c")
         // returns None.
-        let MailboxEntry::Sink(handler) = registry.entry(id_c).expect("c sink registered") else {
-            panic!("expected sink entry for c");
+        let MailboxEntry::Closure(handler) = registry.entry(id_c).expect("c sink registered")
+        else {
+            panic!("expected mailbox entry for c");
         };
         handler(
             <Quit as Kind>::ID,
@@ -2976,10 +2977,10 @@ mod tests {
             .expect("spawn parent");
 
         // Trigger parent → grandchild spawn.
-        let MailboxEntry::Sink(parent_handler) =
+        let MailboxEntry::Closure(parent_handler) =
             registry.entry(parent_id).expect("parent sink registered")
         else {
-            panic!("expected sink entry for parent");
+            panic!("expected mailbox entry for parent");
         };
         parent_handler(
             <Hatch as Kind>::ID,

@@ -20,8 +20,8 @@ use aether_data::{Kind, Schema, mailbox_id_from_name};
 
 use crate::actor::{Actor, HandlesKind, Singleton};
 use crate::mail::ReplyTo;
+use crate::mailbox::{ActorMailbox, KindId, Mailbox, resolve, resolve_mailbox};
 use crate::sender::{MailCtx, Sender};
-use crate::sink::{ActorMailbox, KindId, Mailbox, resolve, resolve_mailbox};
 use crate::transport::MailTransport;
 
 /// Init-only capability handle. The type split between `InitCtx` and
