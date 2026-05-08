@@ -41,11 +41,11 @@ mod native {
 
     use super::{DropComponent, LoadComponent, ReplaceComponent};
 
-    use crate::wasm_trampoline::{self, WasmTrampoline, WasmTrampolineConfig};
     use aether_substrate::actor::native::spawn::Subname;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::actor::wasm::component::ComponentCtx;
     use aether_substrate::actor::wasm::kind_manifest;
+    use aether_substrate::actor::wasm::trampoline::{self, WasmTrampoline, WasmTrampolineConfig};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::input::{self, InputSubscribers};
     use aether_substrate::mail::helpers::register_or_match_all;
@@ -260,7 +260,7 @@ mod native {
 
             LoadResult::Ok {
                 mailbox_id,
-                name: wasm_trampoline::full_name(&name),
+                name: trampoline::full_name(&name),
                 capabilities,
             }
         }

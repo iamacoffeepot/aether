@@ -276,15 +276,7 @@ impl<'a> NativeInitCtx<'a> {
     /// [`NativeBinding`]. Used by the wasm trampoline at init to
     /// install itself on the [`crate::actor::wasm::component::ComponentCtx`]
     /// so the `wait_reply_p32` host fn can route through this binding.
-    ///
-    /// Double-underscore "not part of the public API" marker
-    /// (matching `__new` / `__set_reply_to` elsewhere). Issue #668
-    /// relocates the wasm trampoline into a substrate-internal
-    /// location so this can become `pub(crate)` cleanly; in the
-    /// meantime the trampoline lives in `aether-capabilities` and
-    /// needs `pub` reachability.
-    #[doc(hidden)]
-    pub fn __binding_arc(&self) -> &Arc<NativeBinding> {
+    pub(crate) fn binding(&self) -> &Arc<NativeBinding> {
         self.binding
     }
 

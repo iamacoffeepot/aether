@@ -9,38 +9,41 @@
 //! doesn't handle natively (today: [`DropComponent`], [`ReplaceComponent`])
 //! falls through `#[fallback]` to the wasm guest via
 //! [`Component::deliver`]. The framework dispatcher reads from the
-//! trampoline's [`NativeTransport`]; un-handled kinds reach
+//! trampoline's [`NativeBinding`]; un-handled kinds reach
 //! [`forward_to_wasm`]; the guest's `wait_reply_p32` /
 //! `send_mail_p32` / `reply_mail_p32` host fns route through the
-//! same transport.
+//! same binding.
 //!
 //! ## Why not custom-dispatched
 //!
-//! Earlier framing for this PR (now retired) said the trampoline
-//! had to run its own dispatcher loop because `wait_reply_p32`
-//! needs synchronous inbox pulls and the framework's per-envelope
-//! loop can't accommodate that. That was wrong:
-//! [`NativeTransport::wait_reply`] already supports synchronous
-//! pulls from inside a handler — same `Mutex<Receiver>` + overflow
-//! buffer shape `ComponentCtx::wait_reply` had. Unifying on the
-//! framework drops the parallel implementation.
+//! Earlier framing for the original PR (now retired) said the
+//! trampoline had to run its own dispatcher loop because
+//! `wait_reply_p32` needs synchronous inbox pulls and the framework's
+//! per-envelope loop can't accommodate that. That was wrong:
+//! [`NativeBinding::wait_reply`] already supports synchronous pulls
+//! from inside a handler — same `Mutex<Receiver>` + overflow buffer
+//! shape `ComponentCtx::wait_reply` had. Unifying on the framework
+//! drops the parallel implementation.
 //!
 //! ## Lifecycle
 //!
-//! - **Load**: [`ComponentHostCapability::on_load_component`]
-//!   spawns a trampoline via the runtime spawn machinery (subname =
-//!   the agent-supplied component name); the spawn path runs
-//!   [`WasmTrampoline::init`] which instantiates the wasm
-//!   [`Component`] against the trampoline's transport.
+//! - **Load**: `ComponentHostCapability::on_load_component` (in
+//!   `aether-capabilities`) spawns a trampoline via the runtime
+//!   spawn machinery (subname = the agent-supplied component name);
+//!   the spawn path runs [`WasmTrampoline::init`] which instantiates
+//!   the wasm [`Component`] against the trampoline's binding.
 //! - **Drop**: [`DropComponent`] mail addressed to the trampoline's
 //!   mailbox lands on [`Self::on_drop_component`], which calls
 //!   `ctx.shutdown()`. The framework drains the inbox, runs
 //!   `on_close`, and the dispatcher exits.
 //! - **Replace**: [`ReplaceComponent`] mail lands on
 //!   [`Self::on_replace_component`], which instantiates a new
-//!   [`Component`] against the same transport and swaps `self.component`.
+//!   [`Component`] against the same binding and swaps `self.component`.
 //!   ADR-0022 + ADR-0038 invariants hold because the inbox channel
-//!   is the trampoline's [`NativeTransport`] and outlives the swap.
+//!   is the trampoline's [`NativeBinding`] and outlives the swap.
+//!
+//! [`NativeBinding`]: crate::actor::native::NativeBinding
+//! [`NativeBinding::wait_reply`]: crate::actor::native::NativeBinding::wait_reply
 
 use std::sync::Arc;
 
@@ -49,16 +52,18 @@ use aether_actor::actor::ctx::OutboundReply;
 use aether_kinds::{
     ComponentCapabilities, DropComponent, DropResult, ReplaceComponent, ReplaceResult,
 };
-use aether_substrate::actor::native::envelope::Envelope;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
-use aether_substrate::chassis::error::BootError;
-use aether_substrate::input::InputSubscribers;
-use aether_substrate::mail::mailer::Mailer;
-use aether_substrate::mail::outbound::HubOutbound;
-use aether_substrate::mail::registry::Registry;
-use aether_substrate::mail::{Mail, MailboxId};
 use wasmtime::{Engine, Linker, Module};
+
+use crate::actor::native::envelope::Envelope;
+use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use crate::actor::wasm::component::{Component, ComponentCtx};
+use crate::actor::wasm::kind_manifest;
+use crate::chassis::error::BootError;
+use crate::input::InputSubscribers;
+use crate::mail::mailer::Mailer;
+use crate::mail::outbound::HubOutbound;
+use crate::mail::registry::Registry;
+use crate::mail::{Mail, MailboxId};
 
 /// Mailbox-name prefix every trampoline lives under. The full address
 /// is `format!("{NAMESPACE}:{name}")` where `name` is the
@@ -85,7 +90,7 @@ impl aether_actor::Instanced for WasmTrampoline {}
 /// Configuration handed to [`WasmTrampoline::init`] by the spawn
 /// path. Carries the wasmtime engine / linker plus the parsed
 /// module bytes; `init` instantiates the [`Component`] against the
-/// trampoline's transport.
+/// trampoline's binding.
 pub struct WasmTrampolineConfig {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
@@ -145,11 +150,11 @@ impl NativeActor for WasmTrampoline {
             Arc::clone(&config.outbound),
             Arc::clone(&config.input_subscribers),
         );
-        // Wire the trampoline's transport so `wait_reply_p32` host fn
+        // Wire the trampoline's binding so `wait_reply_p32` host fn
         // can drain *this* trampoline's inbox + overflow (issue 634
         // Phase 4 PR 3 — single source of inbox truth lives on
         // `NativeBinding`, not on `ComponentCtx`).
-        substrate_ctx.install_binding(Arc::clone(ctx.__binding_arc()));
+        substrate_ctx.install_binding(Arc::clone(ctx.binding()));
         let component = Component::instantiate(
             &config.engine,
             &config.linker,
@@ -194,10 +199,10 @@ impl NativeActor for WasmTrampoline {
 
     /// Replace the wasm component with a fresh module. ADR-0022 +
     /// ADR-0038 splice invariants hold because the trampoline's
-    /// inbox is the framework transport, which outlives the
+    /// inbox is the framework binding, which outlives the
     /// `Component` swap. `on_replace` runs on the old instance,
     /// `take_saved_state` lifts any rehydration bundle, the new
-    /// module instantiates against the same transport, and
+    /// module instantiates against the same binding, and
     /// `on_rehydrate` runs on the fresh side.
     #[handler]
     fn on_replace_component(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
@@ -208,7 +213,7 @@ impl NativeActor for WasmTrampoline {
     /// Forward un-handled mail to the wasm guest.
     ///
     /// The framework dispatcher pulled this envelope from the
-    /// trampoline's transport, dispatched against typed handlers
+    /// trampoline's binding, dispatched against typed handlers
     /// (none matched), and called this fallback. We synthesise a
     /// `Mail` with the trampoline's own id as recipient, hand it to
     /// `Component::deliver`, and let the guest's `receive_p32`
@@ -217,7 +222,7 @@ impl NativeActor for WasmTrampoline {
     fn forward_to_wasm(&mut self, ctx: &mut NativeCtx<'_>, env: &Envelope) -> bool {
         let Some(component) = self.component.as_mut() else {
             tracing::warn!(
-                target: "aether_capabilities::wasm_trampoline",
+                target: "aether_substrate::actor::wasm::trampoline",
                 mailbox = %self.mailbox,
                 kind = %env.kind_name,
                 "mail to trampoline with no wasm loaded (post-drop); discarded — re-load via aether.component.replace",
@@ -259,13 +264,10 @@ impl WasmTrampoline {
 
         // ADR-0033: parse capabilities from the new wasm so the
         // reply carries the post-replace handler vocabulary.
-        let capabilities =
-            match aether_substrate::actor::wasm::kind_manifest::read_inputs_from_bytes(
-                &payload.wasm,
-            ) {
-                Ok(c) => c,
-                Err(error) => return ReplaceResult::Err { error },
-            };
+        let capabilities = match kind_manifest::read_inputs_from_bytes(&payload.wasm) {
+            Ok(c) => c,
+            Err(error) => return ReplaceResult::Err { error },
+        };
 
         // Run on_replace on the old instance and lift any saved-
         // state bundle. If the trampoline is currently empty

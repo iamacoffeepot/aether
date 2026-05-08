@@ -25,5 +25,6 @@ pub mod component;
 pub mod host_fns;
 pub mod kind_manifest;
 pub mod reply_table;
+pub mod trampoline;
 
 pub use component::{Component, ComponentCtx};
