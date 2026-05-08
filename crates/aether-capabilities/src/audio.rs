@@ -886,7 +886,11 @@ mod native {
             for d in aether_kinds::descriptors::all() {
                 let _ = registry.register_kind_with_descriptor(d);
             }
-            (registry, Arc::new(Mailer::new()))
+            let store = ::std::sync::Arc::new(::aether_substrate::handle_store::HandleStore::new(
+                1024 * 1024,
+            ));
+            let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+            (registry, mailer)
         }
 
         #[test]

@@ -38,22 +38,14 @@ mod native {
         /// `aether.<name>` namespace.
         const NAMESPACE: &'static str = "aether.handle";
 
-        /// Pull the shared [`HandleStore`] off the substrate's wired
-        /// [`aether_substrate::Mailer`]. The store is wired by `SubstrateBoot::build`
-        /// before the chassis builder runs, so a `None` here is a
-        /// substrate-level boot ordering bug rather than user input —
-        /// surface it as a `BootError`.
+        /// Pull the shared [`HandleStore`] off the substrate's
+        /// [`aether_substrate::Mailer`]. The store is supplied at
+        /// `Mailer` construction by `SubstrateBoot::build` (issue 657
+        /// retired the post-construction `wire_handle_store` setter),
+        /// so the cap can clone it directly without a `None`-arm
+        /// bootstrap-ordering check.
         fn init(_: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            let store = ctx
-                .mailer()
-                .handle_store()
-                .ok_or_else(|| {
-                    BootError::Other(Box::new(std::io::Error::other(
-                        "HandleCapability::init: substrate Mailer has no HandleStore wired \
-                         (call wire_handle_store before chassis build)",
-                    )))
-                })?
-                .clone();
+            let store = Arc::clone(ctx.mailer().handle_store());
             Ok(Self { store })
         }
 
@@ -178,10 +170,9 @@ mod native {
                 let _ = registry.register_kind_with_descriptor(d);
             }
             let (outbound, rx) = aether_substrate::mail::outbound::HubOutbound::attached_loopback();
-            let mailer = Arc::new(Mailer::new());
-            mailer.wire(Arc::clone(&registry));
-            mailer.wire_outbound(outbound);
-            mailer.wire_handle_store(Arc::clone(&store));
+            let mailer = Arc::new(
+                Mailer::new(Arc::clone(&registry), Arc::clone(&store)).with_outbound(outbound),
+            );
             (store, mailer, registry, rx)
         }
 

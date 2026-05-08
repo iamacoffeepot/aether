@@ -463,7 +463,11 @@ mod native {
             for d in aether_kinds::descriptors::all() {
                 let _ = registry.register_kind_with_descriptor(d);
             }
-            (registry, Arc::new(Mailer::new()))
+            let store = ::std::sync::Arc::new(::aether_substrate::handle_store::HandleStore::new(
+                1024 * 1024,
+            ));
+            let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+            (registry, mailer)
         }
 
         struct StubAdapter {
@@ -507,9 +511,11 @@ mod native {
 
         fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
             let (outbound, rx) = aether_substrate::mail::outbound::HubOutbound::attached_loopback();
-            let mailer = Arc::new(Mailer::new());
-            mailer.wire(Arc::new(aether_substrate::mail::registry::Registry::new()));
-            mailer.wire_outbound(outbound);
+            let registry = Arc::new(aether_substrate::mail::registry::Registry::new());
+            let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
+                1024 * 1024,
+            ));
+            let mailer = Arc::new(Mailer::new(registry, store).with_outbound(outbound));
             (mailer, rx)
         }
 

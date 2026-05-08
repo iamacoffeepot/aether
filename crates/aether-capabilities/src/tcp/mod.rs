@@ -349,9 +349,11 @@ mod cap_native {
                 let _ = registry.register_kind_with_descriptor(d);
             }
             let (outbound, rx) = HubOutbound::attached_loopback();
-            let mailer = Arc::new(Mailer::new());
-            mailer.wire(Arc::clone(&registry));
-            mailer.wire_outbound(outbound);
+            let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
+                1024 * 1024,
+            ));
+            let mailer =
+                Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
             (registry, mailer, rx)
         }
 

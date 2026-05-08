@@ -1347,13 +1347,8 @@ mod tests {
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         let registry = Arc::new(Registry::new());
-        let mailer = Arc::new(Mailer::new());
-        // Wire the mailer's registry so any test that pushes mail
-        // (Phase 4b's close-time MonitorNotice fan-out, future
-        // close-side mail) doesn't trip the "Mailer not wired" assert
-        // in `Mailer::push`. Pre-Phase-4b tests that never reach
-        // `mailer.push` are unaffected — wiring is one-shot and idle.
-        mailer.wire(Arc::clone(&registry));
+        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
         (registry, mailer)
     }
 

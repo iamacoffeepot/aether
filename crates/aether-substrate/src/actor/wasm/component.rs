@@ -503,10 +503,12 @@ mod tests {
     use crate::mail::registry::Registry;
 
     fn ctx() -> ComponentCtx {
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
         ComponentCtx::new(
             MailboxId(0),
-            Arc::new(Registry::new()),
-            Arc::new(Mailer::new()),
+            Arc::clone(&registry),
+            Arc::new(Mailer::new(registry, store)),
             HubOutbound::disconnected(),
             crate::input::new_subscribers(),
         )
@@ -809,10 +811,12 @@ mod tests {
                 is_stream: false,
             })
             .expect("register kind");
+        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
         let ctx = ComponentCtx::new(
             M(0),
             registry,
-            Arc::new(Mailer::new()),
+            mailer,
             outbound,
             crate::input::new_subscribers(),
         );
@@ -882,9 +886,10 @@ mod tests {
             .try_register_closure("client", Arc::new(|_, _, _, _, _, _| {}))
             .expect("register client mailbox");
 
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry));
-        mailer.wire_outbound(Arc::clone(&outbound));
+        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(
+            Mailer::new(Arc::clone(&registry), store).with_outbound(Arc::clone(&outbound)),
+        );
 
         let ctx = ComponentCtx::new(
             sender,
@@ -929,9 +934,9 @@ mod tests {
             .try_register_closure("client", Arc::new(|_, _, _, _, _, _| {}))
             .expect("register client mailbox");
 
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry));
-        // Deliberately no `wire_outbound`.
+        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        // Deliberately no `with_outbound` — exercises the local warn-drop path.
 
         let ctx = ComponentCtx::new(
             sender,

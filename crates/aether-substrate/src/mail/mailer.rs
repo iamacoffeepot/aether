@@ -17,7 +17,7 @@
 // thread.
 
 use std::borrow::Cow;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::mail::outbound::HubOutbound;
@@ -26,86 +26,74 @@ use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use aether_data::{HandleId, KindId};
 
 pub struct Mailer {
-    /// Registry handle for resolving recipients on `push`. Wired once
-    /// by `SubstrateBoot::build`; expected to be set by the time any
-    /// mail can land.
-    registry: OnceLock<Arc<Registry>>,
+    /// Registry handle for resolving recipients on `push`. Owned for
+    /// the `Mailer`'s lifetime; supplied at construction time alongside
+    /// the `HandleStore` (issue 657 collapsed the prior `wire`-after-
+    /// `new` setter pair into a required-pair constructor).
+    registry: Arc<Registry>,
+    /// ADR-0045 typed-handle resolver. `route_mail` runs each mail
+    /// through the ref-walker before dispatching; missing handles
+    /// park the mail in the store. Required at construction time —
+    /// `SubstrateBoot::build` builds one with `HandleStore::from_env()`,
+    /// tests pass `Arc::new(HandleStore::new(1024 * 1024))`. Schemas
+    /// with no `Ref` nodes hit the no-op fast path inside `route_mail`,
+    /// so passing a store on tests that don't exercise handles costs
+    /// nothing.
+    handle_store: Arc<HandleStore>,
     /// Hub outbound handle. When set and connected, mail to unknown
     /// mailbox ids bubbles up to the hub-substrate (ADR-0037
-    /// Phase 1) instead of being warn-dropped locally. Wired by
-    /// `SubstrateBoot::build` right after the `Mailer` exists; the
-    /// boot holds the only `Arc<HubOutbound>` on the fresh side of
-    /// construction. Absent on chassis that skip hub connection
-    /// (today: the hub chassis itself), which keeps local warn-drop
-    /// semantics intact — the hub is the end of the bubbles-up
-    /// line.
-    outbound: OnceLock<Arc<HubOutbound>>,
-    /// ADR-0045 typed-handle resolver. When wired, `route_mail`
-    /// runs each mail through the ref-walker before dispatching;
-    /// missing handles park the mail in the store. Optional so
-    /// pre-PR-2 test paths (and any chassis that opts out by not
-    /// calling `wire_handle_store`) keep the original verbatim-
-    /// dispatch behaviour. `SubstrateBoot::build` wires this with
-    /// `HandleStore::from_env()` for every chassis.
-    handle_store: OnceLock<Arc<HandleStore>>,
+    /// Phase 1) instead of being warn-dropped locally. Optional —
+    /// chassis that skip hub connection (today: the hub chassis
+    /// itself) construct a `Mailer` without an outbound and keep
+    /// local warn-drop semantics intact (the hub is the end of the
+    /// bubbles-up line). Pre-issue-657 this rode an `OnceLock` set
+    /// post-construction via `wire_outbound`; the constructor +
+    /// `with_outbound` pair below replaces that.
+    outbound: Option<Arc<HubOutbound>>,
 }
 
 impl Mailer {
-    pub fn new() -> Self {
+    /// Construct a `Mailer` against the substrate's registry and
+    /// handle store. `SubstrateBoot::build` is the production caller;
+    /// tests build the same trio with `Registry::new()` and
+    /// `HandleStore::new(1024 * 1024)` (or any byte budget). Call
+    /// [`Self::with_outbound`] to attach a hub outbound if the
+    /// chassis needs ADR-0037 bubble-up.
+    pub fn new(registry: Arc<Registry>, handle_store: Arc<HandleStore>) -> Self {
         Self {
-            registry: OnceLock::new(),
-            outbound: OnceLock::new(),
-            handle_store: OnceLock::new(),
+            registry,
+            handle_store,
+            outbound: None,
         }
     }
 
-    /// Wire the registry. Called by `SubstrateBoot::build` once it
-    /// exists; panics on re-wiring to surface construction-order bugs
-    /// loud rather than silent.
-    pub fn wire(&self, registry: Arc<Registry>) {
-        self.registry
-            .set(registry)
-            .unwrap_or_else(|_| panic!("Mailer::wire called twice"));
-    }
-
-    /// Wire the `HubOutbound` so mail to unknown mailbox ids bubbles
+    /// Attach a `HubOutbound` so mail to unknown mailbox ids bubbles
     /// up to the hub-substrate (ADR-0037 Phase 1) instead of being
-    /// warn-dropped. Called by `SubstrateBoot::build` after the
-    /// `HubOutbound` exists; harmless to skip for chassis that are
-    /// their own hub (the hub chassis doesn't bubble up to itself).
-    pub fn wire_outbound(&self, outbound: Arc<HubOutbound>) {
-        self.outbound
-            .set(outbound)
-            .unwrap_or_else(|_| panic!("Mailer::wire_outbound called twice"));
+    /// warn-dropped. Fluent — returns `self` so the call site can
+    /// chain after `Mailer::new`. Skip the call entirely for chassis
+    /// that are their own hub or for tests that want local warn-drop
+    /// semantics (the hub chassis, the warn-drop test in
+    /// `actor::wasm::component`).
+    pub fn with_outbound(mut self, outbound: Arc<HubOutbound>) -> Self {
+        self.outbound = Some(outbound);
+        self
     }
 
-    /// Wire the ADR-0045 handle store. With a store wired, every
-    /// mail's payload walks through the ref-resolver before dispatch
-    /// (kinds whose schema contains no `Ref` nodes hit the no-op
-    /// fast path). Without a store, dispatch behaves exactly like
-    /// the pre-PR-2 path. Called by `SubstrateBoot::build`.
-    pub fn wire_handle_store(&self, store: Arc<HandleStore>) {
-        self.handle_store
-            .set(store)
-            .unwrap_or_else(|_| panic!("Mailer::wire_handle_store called twice"));
-    }
-
-    /// Borrow the wired `HandleStore`, or `None` if no store was
-    /// wired (pre-boot / test path). Read-only handle exposed so
+    /// Borrow the wired `HandleStore`. Read-only handle exposed so
     /// chassis-side handlers (PR 3 host-fn shims) can publish into
     /// the same store the dispatch path resolves against.
-    pub fn handle_store(&self) -> Option<&Arc<HandleStore>> {
-        self.handle_store.get()
+    pub fn handle_store(&self) -> &Arc<HandleStore> {
+        &self.handle_store
     }
 
     /// Borrow the wired [`HubOutbound`], or `None` if no outbound was
-    /// wired (test paths, or chassis that skip hub connection).
-    /// Issue 576: surfaced so the broadcast cap's `init` can grab the
-    /// outbound at boot and lift catch-all envelopes through
+    /// attached (the hub chassis, or tests). Issue 576: surfaced so
+    /// the broadcast cap's `init` can grab the outbound at boot and
+    /// lift catch-all envelopes through
     /// [`HubOutbound::egress_broadcast`] without the substrate
     /// holding a registry closure for it.
     pub fn outbound(&self) -> Option<&Arc<HubOutbound>> {
-        self.outbound.get()
+        self.outbound.as_ref()
     }
 
     /// Borrow the wired [`Registry`]. Issue 603: surfaced so
@@ -113,8 +101,8 @@ impl Mailer {
     /// internal state without requiring it on `ComponentHostConfig` —
     /// per Resolved Decision §2 registry arrives via init ctx, not
     /// via the cap's config struct.
-    pub fn registry(&self) -> Option<&Arc<Registry>> {
-        self.registry.get()
+    pub fn registry(&self) -> &Arc<Registry> {
+        &self.registry
     }
 
     /// Hand `mail` to the substrate for dispatch. Closure-bound
@@ -124,9 +112,9 @@ impl Mailer {
     pub fn push(&self, mail: Mail) {
         route_mail(
             mail,
-            self.registry.get().expect("Mailer not wired"),
-            self.outbound.get(),
-            self.handle_store.get(),
+            &self.registry,
+            self.outbound.as_ref(),
+            &self.handle_store,
         );
     }
 
@@ -142,23 +130,17 @@ impl Mailer {
     /// in those cases parked mail stays parked and the caller decides
     /// how to recover.
     ///
-    /// Without a wired store this is a no-op success: chassis that
-    /// don't expose handles never park mail in the first place.
     pub fn resolve_handle(
         &self,
         handle: HandleId,
         kind: KindId,
         bytes: Vec<u8>,
     ) -> Result<(), PutError> {
-        let Some(store) = self.handle_store.get() else {
-            return Ok(());
-        };
-        store.put(handle, kind, bytes)?;
-        let parked = store.take_parked(handle);
-        let registry = self.registry.get().expect("Mailer not wired");
-        let outbound = self.outbound.get();
+        self.handle_store.put(handle, kind, bytes)?;
+        let parked = self.handle_store.take_parked(handle);
+        let outbound = self.outbound.as_ref();
         for mail in parked {
-            route_mail(mail, registry, outbound, Some(store));
+            route_mail(mail, &self.registry, outbound, &self.handle_store);
         }
         Ok(())
     }
@@ -182,7 +164,7 @@ impl Mailer {
         match sender.target {
             ReplyTarget::None => false,
             ReplyTarget::Session(_) | ReplyTarget::EngineMailbox { .. } => {
-                match self.outbound.get() {
+                match self.outbound.as_ref() {
                     Some(outbound) => outbound.send_reply(sender, result),
                     None => false,
                 }
@@ -212,12 +194,6 @@ impl Mailer {
     }
 }
 
-impl Default for Mailer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Resolve `mail.recipient` against the registry and dispatch
 /// inline. Closure-bound mailboxes run their handler on the caller
 /// thread (or fan out via the cap's mpsc, depending on the closure).
@@ -233,10 +209,9 @@ fn route_mail(
     mut mail: Mail,
     registry: &Registry,
     outbound: Option<&Arc<HubOutbound>>,
-    store: Option<&Arc<HandleStore>>,
+    store: &Arc<HandleStore>,
 ) {
-    if let Some(store) = store
-        && let Some(descriptor) = registry.kind_descriptor(mail.kind)
+    if let Some(descriptor) = registry.kind_descriptor(mail.kind)
         && handle_store::schema_contains_ref(&descriptor.schema)
     {
         match handle_store::walk_and_resolve(&descriptor.schema, &mail.payload, store) {
@@ -365,10 +340,9 @@ mod tests {
     fn unknown_mailbox_with_connected_outbound_bubbles_up() {
         let (outbound, outbound_rx) = crate::mail::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(64 * 1024));
 
-        let mailer = Mailer::new();
-        mailer.wire(Arc::clone(&registry));
-        mailer.wire_outbound(Arc::clone(&outbound));
+        let mailer = Mailer::new(Arc::clone(&registry), store).with_outbound(Arc::clone(&outbound));
 
         let unknown = MailboxId(0xDEADBEEF_u64);
         let kind = KindId(0xABCD_u64);
@@ -400,10 +374,11 @@ mod tests {
     #[test]
     fn unknown_mailbox_without_outbound_warn_drops() {
         let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(64 * 1024));
 
-        let mailer = Mailer::new();
-        mailer.wire(Arc::clone(&registry));
-        // Deliberately no wire_outbound.
+        let mailer = Mailer::new(Arc::clone(&registry), store);
+        // Deliberately no `with_outbound` — exercises the local
+        // warn-drop path (the hub chassis path).
 
         let unknown = MailboxId(0xDEADBEEF_u64);
         mailer.push(Mail::new(unknown, KindId(0xABCD), vec![], 0));
@@ -501,9 +476,7 @@ mod tests {
     fn make_mailer() -> (Arc<Registry>, Arc<Mailer>, Arc<HandleStore>) {
         let registry = Arc::new(Registry::new());
         let store = Arc::new(HandleStore::new(64 * 1024));
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry));
-        mailer.wire_handle_store(Arc::clone(&store));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), Arc::clone(&store)));
         (registry, mailer, store)
     }
 
@@ -602,20 +575,6 @@ mod tests {
             }
             Ref::Handle { .. } => panic!("walker must replace Handle with Inline"),
         }
-    }
-
-    /// `resolve_handle` with no `Mailer::wire_handle_store` is a
-    /// no-op success — the original pre-PR-2 mailer paths (no store
-    /// wired) keep working without panicking.
-    #[test]
-    fn resolve_handle_without_wired_store_is_noop() {
-        let registry = Arc::new(Registry::new());
-        let mailer = Mailer::new();
-        mailer.wire(Arc::clone(&registry));
-        // No wire_handle_store call.
-        mailer
-            .resolve_handle(HandleId(1), KindId(2), vec![3])
-            .unwrap();
     }
 
     /// Mail whose payload is malformed against the registered

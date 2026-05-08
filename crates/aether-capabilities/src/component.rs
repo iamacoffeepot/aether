@@ -94,14 +94,7 @@ mod native {
             ctx: &mut NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
             let mailer = ctx.mailer();
-            let registry = mailer.registry().cloned().ok_or_else(|| {
-                BootError::Other(
-                    std::io::Error::other(
-                        "registry must be wired on Mailer before ComponentHostCapability::init",
-                    )
-                    .into(),
-                )
-            })?;
+            let registry = Arc::clone(mailer.registry());
             Ok(Self {
                 engine: config.engine,
                 linker: config.linker,
