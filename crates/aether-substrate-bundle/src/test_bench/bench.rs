@@ -31,7 +31,7 @@ use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tic
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use crate::hub::HubProtocolBackend;
 use aether_actor::Actor;
-use aether_capabilities::{FsCapability, RenderCapability, fs::NamespaceRoots};
+use aether_capabilities::{RenderCapability, fs::NamespaceRoots};
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
     capture::CaptureQueue,
@@ -252,11 +252,13 @@ impl TestBench {
         let (events_tx, events_rx) = event_channel();
         let observed_kinds = Arc::new(Mutex::new(Vec::<String>::new()));
 
-        // ADR-0071 phase 6: substrate boot + Log + Render passives go
-        // through `TestBenchChassis::build_passive` — the same path
-        // the binary uses. The build hands back the SubstrateBoot for
-        // io / further capability adds plus the render handles the
-        // bench's frame loop reads each tick.
+        // ADR-0071 phase 6: substrate boot + every cap goes through
+        // `TestBenchChassis::build_passive` — the same path the
+        // binary uses. Io is part of the chain when
+        // `namespace_roots` is supplied and pre-validation passes;
+        // the chassis warns and skips Io otherwise. Tests that care
+        // about io supply tempdir roots through
+        // `start_with_namespace_roots`; otherwise the bench skips Io.
         let env = TestBenchEnv {
             name: "test-bench".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -267,10 +269,11 @@ impl TestBench {
             observed_kinds: Some(Arc::clone(&observed_kinds)),
             events_tx,
             capture_queue: capture_queue.clone(),
+            namespace_roots,
         };
         let TestBenchBuild {
             passive,
-            mut boot,
+            boot,
             render_handles,
             kind_tick,
             kind_frame_stats,
@@ -283,21 +286,6 @@ impl TestBench {
         let (loopback_tx, loopback_rx) = mpsc::channel::<EngineToHub>();
         boot.outbound
             .attach_backend(Arc::new(HubProtocolBackend::new(loopback_tx)));
-
-        // Io cap booted post-build via `SubstrateBoot::add_actor` so
-        // adapter init failures (no writable default roots, missing
-        // env, etc.) warn-and-skip rather than failing the harness.
-        // Tests that care about io supply tempdir roots through
-        // `start_with_namespace_roots`; otherwise the bench skips Io.
-        if let Some(roots) = namespace_roots
-            && let Err(e) = boot.add_actor::<FsCapability>(roots)
-        {
-            tracing::warn!(
-                target: "aether_substrate::fs",
-                error = %e,
-                "io cap boot failed in TestBench (expected on systems without writable default roots)",
-            );
-        }
 
         let gpu = Gpu::new(width, height, render_handles.clone());
 

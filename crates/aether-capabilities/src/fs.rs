@@ -234,6 +234,25 @@ pub fn build_registry(
     Ok((Arc::new(registry), roots))
 }
 
+impl NamespaceRoots {
+    /// Pre-validate the configured roots: create each directory if
+    /// missing, then canonicalize. Mirrors what `LocalFileAdapter::new`
+    /// does inside [`FsCapability::init`], but exposed so embedders
+    /// can validate before building the chassis. Used by chassis
+    /// builders that want to surface root-validity as a "skip the
+    /// `aether.fs` cap and continue" decision rather than letting
+    /// init failure abort the whole boot.
+    pub fn ensure_dirs(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.save)?;
+        std::fs::create_dir_all(&self.assets)?;
+        std::fs::create_dir_all(&self.config)?;
+        self.save.canonicalize()?;
+        self.assets.canonicalize()?;
+        self.config.canonicalize()?;
+        Ok(())
+    }
+}
+
 #[aether_actor::bridge(singleton)]
 mod native {
     use std::path::{Path, PathBuf};
