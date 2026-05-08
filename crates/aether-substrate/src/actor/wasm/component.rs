@@ -151,7 +151,7 @@ impl ComponentCtx {
     /// fn closure captures the ctx via the wasmtime `Store` data
     /// pointer at instantiation time, not at host-fn call time, so
     /// installing later than that is fine).
-    pub fn install_binding(&mut self, binding: Arc<NativeBinding>) {
+    pub(crate) fn install_binding(&mut self, binding: Arc<NativeBinding>) {
         self.binding = Some(binding);
     }
 
