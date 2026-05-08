@@ -161,8 +161,8 @@ mod tests {
                 },
             ),
         );
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry));
+        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
         let kind_id = FrameStats::ID;
         emit_frame_stats(&mailer, kind_id, 1, 0);
@@ -186,8 +186,8 @@ mod tests {
                 },
             ),
         );
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry));
+        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
         emit_frame_stats(&mailer, FrameStats::ID, LOG_EVERY_FRAMES, 42);
         let frames = captured.read().unwrap();

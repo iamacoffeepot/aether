@@ -243,11 +243,11 @@ impl<'a> SubstrateBootBuilder<'a> {
             ),
         );
 
-        let queue = Arc::new(Mailer::new());
-        queue.wire(Arc::clone(&registry));
-        queue.wire_outbound(Arc::clone(&outbound));
         let handle_store = Arc::new(HandleStore::from_env());
-        queue.wire_handle_store(Arc::clone(&handle_store));
+        let queue = Arc::new(
+            Mailer::new(Arc::clone(&registry), Arc::clone(&handle_store))
+                .with_outbound(Arc::clone(&outbound)),
+        );
         let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&queue))
             .build()
             .map_err(|e| wasmtime::Error::msg(format!("chassis capability boot: {e}")))?;

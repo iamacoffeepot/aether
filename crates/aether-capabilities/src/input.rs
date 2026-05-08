@@ -58,14 +58,7 @@ mod native {
         const NAMESPACE: &'static str = "aether.input";
 
         fn init(config: InputConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            let registry = ctx.mailer().registry().cloned().ok_or_else(|| {
-                BootError::Other(
-                    std::io::Error::other(
-                        "registry must be wired on Mailer before InputCapability::init",
-                    )
-                    .into(),
-                )
-            })?;
+            let registry = Arc::clone(ctx.mailer().registry());
             Ok(Self {
                 registry,
                 subscribers: config.input_subscribers,

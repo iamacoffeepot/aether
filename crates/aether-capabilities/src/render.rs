@@ -185,11 +185,7 @@ mod native {
                 gpu: Arc::new(OnceLock::new()),
             };
             let mailer = ctx.mailer();
-            let registry = mailer.registry().cloned().ok_or_else(|| {
-                BootError::Other(Box::new(std::io::Error::other(
-                    "registry must be wired on Mailer before RenderCapability::init",
-                )))
-            })?;
+            let registry = Arc::clone(mailer.registry());
             // Issue 629 / Phase A: publish the driver-facing handle
             // bundle on the chassis's `ExportedHandles` map so the
             // desktop driver retrieves it via `DriverCtx::handle::<RenderHandles>()`.
@@ -560,11 +556,13 @@ mod native {
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
             let registry = Arc::new(Registry::new());
-            let mailer = Arc::new(Mailer::new());
             // Issue 603 Phase 2: `RenderCapability::init` reads
             // `mailer.registry()` to keep the substrate registry handle
             // for `capture_frame`'s resolve-bundle path.
-            mailer.wire(Arc::clone(&registry));
+            let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
+                1024 * 1024,
+            ));
+            let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
             (registry, mailer)
         }
 

@@ -531,8 +531,8 @@ mod tests {
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
         let registry = Arc::new(Registry::new());
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry));
+        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
         (registry, mailer)
     }
 

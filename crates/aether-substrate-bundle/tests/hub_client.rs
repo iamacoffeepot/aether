@@ -40,7 +40,10 @@ fn handshake_exchanges_hello_and_welcome() {
     let (addr, conn_rx) = accept_one();
 
     let registry = Arc::new(Registry::new());
-    let queue = Arc::new(Mailer::new());
+    let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
+        1024 * 1024,
+    ));
+    let queue = Arc::new(Mailer::new(Arc::clone(&registry), store));
     let client_handle = thread::spawn({
         let registry = Arc::clone(&registry);
         let queue = Arc::clone(&queue);
@@ -118,8 +121,10 @@ fn inbound_mail_lands_in_queue_after_resolution() {
         ),
     );
     registry.register_kind("aether.tick");
-    let queue = Arc::new(Mailer::new());
-    queue.wire(Arc::clone(&registry));
+    let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
+        1024 * 1024,
+    ));
+    let queue = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
     let client_handle = thread::spawn({
         let registry = Arc::clone(&registry);
@@ -214,7 +219,10 @@ fn client_sends_periodic_heartbeats() {
     let (addr, conn_rx) = accept_one();
 
     let registry = Arc::new(Registry::new());
-    let queue = Arc::new(Mailer::new());
+    let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
+        1024 * 1024,
+    ));
+    let queue = Arc::new(Mailer::new(Arc::clone(&registry), store));
     let client_handle = thread::spawn({
         let registry = Arc::clone(&registry);
         let queue = Arc::clone(&queue);
@@ -264,7 +272,10 @@ fn goodbye_stops_reader_thread() {
     // long as nothing hangs past the deadline.
     let (addr, conn_rx) = accept_one();
     let registry = Arc::new(Registry::new());
-    let queue = Arc::new(Mailer::new());
+    let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
+        1024 * 1024,
+    ));
+    let queue = Arc::new(Mailer::new(Arc::clone(&registry), store));
     let client_handle = thread::spawn({
         let registry = Arc::clone(&registry);
         let queue = Arc::clone(&queue);
@@ -315,7 +326,10 @@ fn outbound_sends_reach_the_hub_wire() {
     assert!(!outbound.is_connected());
 
     let registry = Arc::new(Registry::new());
-    let queue = Arc::new(Mailer::new());
+    let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
+        1024 * 1024,
+    ));
+    let queue = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
     let connect_outbound = Arc::clone(&outbound);
     let client_handle = thread::spawn({

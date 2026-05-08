@@ -113,7 +113,14 @@ impl Chassis for TestChassis {
 }
 
 fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-    (Arc::new(Registry::new()), Arc::new(Mailer::new()))
+    {
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(aether_substrate::handle_store::HandleStore::new(
+            1024 * 1024,
+        ));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        (registry, mailer)
+    }
 }
 
 fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {

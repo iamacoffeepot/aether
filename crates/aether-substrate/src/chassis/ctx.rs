@@ -1407,7 +1407,12 @@ mod tests {
     use aether_data::ReplyTo;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-        (Arc::new(Registry::new()), Arc::new(Mailer::new()))
+        {
+            let registry = Arc::new(Registry::new());
+            let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+            let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+            (registry, mailer)
+        }
     }
 
     /// Hand-rolled `Actor + Dispatch` fixture for the legacy
