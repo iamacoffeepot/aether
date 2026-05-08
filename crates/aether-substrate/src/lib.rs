@@ -15,7 +15,7 @@
 //! `ReplaceComponent`). Phase 4 PR 2 retired the per-frame drain
 //! barrier and the `DrainSummary` / `DrainDeath` / `DrainOutcome`
 //! aggregate types: trampoline traps now fail-fast directly via
-//! `NativeTransport::fatal_abort` at the trap site (ADR-0063).
+//! `NativeBinding::fatal_abort` at the trap site (ADR-0063).
 //!
 //! The `Chassis` trait (ADR-0035, redefined by ADR-0071) is universal
 //! but intentionally narrow: `const PROFILE` (the chassis's stable
@@ -48,10 +48,10 @@ pub mod render;
 pub mod runtime;
 
 pub use actor::monitor::MonitorHandle;
+pub use actor::native::binding::NativeBinding;
 pub use actor::native::ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
 pub use actor::native::envelope::Envelope;
 pub use actor::native::spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
-pub use actor::native::transport::NativeTransport;
 pub use actor::native::{NativeActor, NativeDispatch};
 pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
 pub use actor::wasm::component::{Component, ComponentCtx};

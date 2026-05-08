@@ -62,15 +62,17 @@
 //! rejected by the macro: strict receivers shouldn't silently swallow
 //! unknown kinds.
 
+pub mod binding;
 pub mod ctx;
 pub mod envelope;
+pub mod mailbox;
 pub mod spawn;
-pub mod transport;
 
+pub use binding::NativeBinding;
 pub use ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
 pub use envelope::Envelope;
+pub use mailbox::NativeActorMailbox;
 pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
-pub use transport::NativeTransport;
 
 use aether_actor::Actor;
 
@@ -96,7 +98,7 @@ pub trait NativeActor: Actor {
 
     /// Boot the cap. The chassis has already claimed the cap's
     /// mailbox under `Actor::NAMESPACE` and built a fresh
-    /// `NativeTransport` whose self-mailbox is that claim — the
+    /// `NativeBinding` whose self-mailbox is that claim — the
     /// `ctx` exposes those (and the actors-so-far map for boot-time
     /// peer lookups) plus the universal handle-store for caps that
     /// hold typed handles.

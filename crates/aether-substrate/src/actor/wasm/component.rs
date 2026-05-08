@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
-use crate::actor::native::transport::NativeTransport;
+use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry, ReplyTable};
 use crate::input::InputSubscribers;
 use crate::mail::mailer::Mailer;
@@ -93,16 +93,16 @@ pub struct ComponentCtx {
     /// `dispatch_load_component` reports it like any other
     /// instantiation error. None on the success path.
     pub init_failure: Option<String>,
-    /// Trampoline transport whose `wait_reply` the
+    /// Trampoline binding whose `wait_reply` the
     /// [`crate::actor::wasm::host_fns::wait_reply_p32`] host fn delegates to.
     /// `Some` for ctx instances built by [`WasmTrampoline::init`]
-    /// (issue 634 Phase 4 PR 3 — `transport.wait_reply` is now the
+    /// (issue 634 Phase 4 PR 3 — `binding.wait_reply` is now the
     /// single source of inbox / overflow / correlation-filter
     /// truth); `None` for the test paths that build `ComponentCtx`
     /// without a real trampoline (the host fn returns
     /// [`crate::actor::wasm::host_fns::WAIT_CANCELLED`] in that case, matching
     /// the pre-Phase-4 "no inbox installed" disposition).
-    pub transport: Option<Arc<NativeTransport>>,
+    pub binding: Option<Arc<NativeBinding>>,
     /// ADR-0042 correlation counter. Per-component (one
     /// `ComponentCtx` per component instance). Holds the *next* id
     /// to mint; `prev_correlation()` reads `counter - 1` to return
@@ -139,20 +139,20 @@ impl ComponentCtx {
             saved_state: None,
             save_state_error: None,
             init_failure: None,
-            transport: None,
+            binding: None,
             correlation_counter: Cell::new(1),
         }
     }
 
-    /// Wire the trampoline's `NativeTransport` into the ctx so the
+    /// Wire the trampoline's `NativeBinding` into the ctx so the
     /// [`crate::actor::wasm::host_fns::wait_reply_p32`] host fn can route through
     /// it. Called by [`WasmTrampoline::init`] right after constructing
     /// the ctx (and before `Component::instantiate`, since the host
     /// fn closure captures the ctx via the wasmtime `Store` data
     /// pointer at instantiation time, not at host-fn call time, so
     /// installing later than that is fine).
-    pub fn install_transport(&mut self, transport: Arc<NativeTransport>) {
-        self.transport = Some(transport);
+    pub fn install_binding(&mut self, binding: Arc<NativeBinding>) {
+        self.binding = Some(binding);
     }
 
     /// Mint the next correlation id and bump the counter. Private —
@@ -359,7 +359,7 @@ impl Component {
     /// meaningful reply target — a Claude session (non-NIL
     /// `SessionToken`), a remote engine mailbox, or a peer component
     /// (`reply_to.target = ReplyTarget::Component(_)` populated by
-    /// `ComponentCtx::send` / `NativeTransport::send_mail`).
+    /// `ComponentCtx::send` / `NativeBinding::send_mail`).
     /// Broadcast-origin and system-generated mail pass
     /// `NO_REPLY_HANDLE` so the guest's `mail.reply_to()` accessor
     /// returns `None`.

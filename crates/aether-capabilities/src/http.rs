@@ -450,8 +450,8 @@ mod native {
         };
         use aether_actor::Actor;
         use aether_data::{Kind, MailboxId};
+        use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
-        use aether_substrate::actor::native::transport::NativeTransport;
         use aether_substrate::chassis::ctx::ChassisBuilder;
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::ReplyTo;
@@ -581,7 +581,7 @@ mod native {
                 Arc::new(DisabledHttpAdapter),
                 HttpConfig::default().default_timeout,
             );
-            let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+            let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
             let mut ctx = NativeCtx::new(&transport, session_sender());
             cap.on_fetch(
                 &mut ctx,
@@ -690,7 +690,7 @@ mod native {
                 stub as Arc<dyn HttpAdapter>,
                 HttpConfig::default().default_timeout,
             );
-            let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+            let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
             let mut ctx = NativeCtx::new(&transport, session_sender());
             cap.on_fetch(
                 &mut ctx,
@@ -725,7 +725,7 @@ mod native {
                 StubAdapter::with(Err(HttpError::Timeout)) as Arc<dyn HttpAdapter>,
                 HttpConfig::default().default_timeout,
             );
-            let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+            let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
             let mut ctx = NativeCtx::new(&transport, session_sender());
             cap.on_fetch(
                 &mut ctx,
@@ -759,7 +759,7 @@ mod native {
                 stub as Arc<dyn HttpAdapter>,
                 HttpConfig::default().default_timeout,
             );
-            let transport = NativeTransport::new_for_test(mailer, MailboxId(0));
+            let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
             let mut ctx = NativeCtx::new(&transport, session_sender());
             cap.on_fetch(
                 &mut ctx,

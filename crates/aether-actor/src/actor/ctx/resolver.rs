@@ -16,9 +16,10 @@ use aether_data::Kind;
 use crate::actor::ctx::mail_sender::MailSender;
 use crate::mail::mailbox::{KindId, Mailbox};
 
-/// Init-time resolution surface. The associated [`MailSender::Transport`]
-/// pins the produced [`Mailbox`] to the same transport the ctx routes
-/// through.
+/// Init-time resolution surface. Issue 665 dropped the
+/// `Self::Transport`-keyed mailbox return type — the trait now hands
+/// back a transport-free [`Mailbox<K>`] addressing token; per-side
+/// dispatch happens through each ctx's inherent send methods.
 pub trait Resolver: MailSender {
     /// The component's own mailbox id — the value the substrate uses
     /// to address `receive` calls to this instance. Useful for
@@ -31,9 +32,11 @@ pub trait Resolver: MailSender {
     fn resolve<K: Kind>(&self) -> KindId<K>;
 
     /// Resolve a mailbox by name and bind it to kind `K`, producing a
-    /// typed [`Mailbox<K, Self::Transport>`]. Pure compile-time
-    /// construction.
-    fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K, Self::Transport>;
+    /// typed [`Mailbox<K>`]. Pure compile-time construction; the
+    /// returned token is pure addressing — sends route through each
+    /// ctx's inherent / trait-provided `send` methods, not through
+    /// the mailbox itself.
+    fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K>;
 
     /// Send `aether.input.subscribe` with this component's mailbox as
     /// the subscriber for `K`. ADR-0068 keys subscriber sets by

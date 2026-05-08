@@ -311,7 +311,7 @@ mod cap_native {
             // Fire the parked unbind reply if one was waiting.
             let parked = self.pending_unbinds.remove(&notice.target);
             if let Some(parked) = parked {
-                ctx.transport().send_reply_for_handler(
+                ctx.binding().send_reply_for_handler(
                     parked.sender,
                     &UnbindListenerResult::Ok {
                         listener_name: parked.listener_name,

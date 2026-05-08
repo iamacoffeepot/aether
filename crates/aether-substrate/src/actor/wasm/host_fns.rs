@@ -4,7 +4,6 @@
 // surface. Growth of this surface should be reviewed as deliberately
 // as any other architectural change.
 
-use aether_actor::MailTransport;
 use wasmtime::{Caller, Linker};
 
 use crate::actor::wasm::component::{ComponentCtx, StateBundle};
@@ -236,7 +235,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // guest side. The corresponding host fn is gone.
 
     // ADR-0042: synchronous mail wait, delegating to the trampoline's
-    // `NativeTransport::wait_reply` (issue 634 Phase 4 PR 3). The
+    // `NativeBinding::wait_reply` (issue 634 Phase 4 PR 3). The
     // transport already owns inbox + overflow + correlation-filter;
     // the host fn just bridges between wasm linear memory and the
     // transport's `&mut [u8]` buffer.
@@ -263,7 +262,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          expected_correlation: u64|
          -> i32 {
             let clamped = timeout_ms.min(MAX_WAIT_TIMEOUT_MS);
-            let Some(transport) = caller.data().transport.clone() else {
+            let Some(transport) = caller.data().binding.clone() else {
                 // No trampoline transport wired — the ctx was built by
                 // a test path that doesn't exercise wait_reply.
                 // Surface as cancelled so the guest doesn't spin.

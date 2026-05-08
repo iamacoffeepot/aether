@@ -24,8 +24,9 @@ use std::cell::Cell;
 
 use aether_actor::Local;
 use aether_actor::log::{LogBuffer, NativeLogShipper, drain_buffer, encode_event};
-use aether_actor::mail::transport::MailTransport;
 use aether_data::{KindId, MailboxId};
+
+use crate::actor::native::binding::NativeBinding;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::{Context, SubscriberExt};
@@ -48,16 +49,16 @@ pub trait MailDispatch: Send + Sync {
     fn send(&self, mailbox: MailboxId, kind: KindId, payload: &[u8]);
 }
 
-/// Every [`aether_actor::mail::transport::MailTransport`] is a valid
-/// [`MailDispatch`] — `send_mail`'s signature already matches what the
-/// drain path needs. Lets the chassis pass an actor's transport into
-/// [`with_actor_dispatch`] without a hand-rolled shim per call site.
-impl<T> MailDispatch for T
-where
-    T: MailTransport + Send + Sync + ?Sized,
-{
+/// Direct [`MailDispatch`] impl for [`NativeBinding`]. Issue 665
+/// retired the cross-target `MailTransport` trait that previously
+/// gated this as a blanket impl; today the only `MailDispatch`
+/// consumer is the chassis-stamped per-actor logging path, and
+/// `NativeBinding` is the only type that reaches it (FFI guests
+/// drain log batches through `FFI_TRANSPORT`'s bridge, not through
+/// `MailDispatch`).
+impl MailDispatch for NativeBinding {
     fn send(&self, mailbox: MailboxId, kind: KindId, payload: &[u8]) {
-        let _ = MailTransport::send_mail(self, mailbox.0, kind.0, payload, 1);
+        let _ = NativeBinding::send_mail(self, mailbox.0, kind.0, payload, 1);
     }
 }
 

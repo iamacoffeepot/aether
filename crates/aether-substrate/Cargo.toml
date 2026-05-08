@@ -23,7 +23,7 @@ audio = ["dep:cpal", "dep:crossbeam-queue"]
 
 [dependencies]
 # ADR-0074 Phase 2: target-agnostic actor SDK. Capabilities own a
-# `NativeTransport` instance (in `crate::native_transport`) and pass
+# `NativeBinding` instance (in `crate::native_transport`) and pass
 # `&self.transport` into the SDK's `Sink<K, T>` / `wait_reply` /
 # `Ctx<'_, T>` machinery — same shape the wasm guest path uses
 # through `WasmTransport`. The trait takes `&self` so per-actor

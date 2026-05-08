@@ -6,7 +6,7 @@ edition.workspace = true
 # Actor SDK shared by WASM components (via `wasm::WasmTransport` —
 # folded in from the prior `aether-component` crate by issue 552 stage
 # 0) and, eventually, native capabilities (via
-# `aether-substrate::NativeTransport`). Holds the `MailTransport`
+# `aether-substrate::NativeBinding`). Holds the `MailTransport`
 # trait, the typed mail/ctx/sink machinery generic over `T:
 # MailTransport`, the `wait_reply` helper, and the wasm-guest impl
 # (`WasmTransport`, `WasmActor`, `Replaceable`, `export!` macro plus

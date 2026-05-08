@@ -28,7 +28,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
-use crate::actor::native::transport::NativeTransport;
+use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::{
     ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
 };
@@ -287,7 +287,7 @@ fn make_fallback_router_boot(handler: FallbackRouter) -> PassiveBoot {
 
 /// Issue 552 stage 1: factory for the new [`NativeActor`] boot path.
 /// Claims the cap's mailbox under `A::NAMESPACE`, builds a fresh
-/// per-cap [`NativeTransport`], constructs a [`NativeInitCtx`], calls
+/// per-cap [`NativeBinding`], constructs a [`NativeInitCtx`], calls
 /// `A::init(config, &mut init_ctx)`, wraps the returned cap in an
 /// `Arc<A>`, inserts into the chassis-side [`Actors`] map, and spawns
 /// a dispatcher thread that pulls from the transport's inbox and
@@ -363,10 +363,10 @@ where
             }
         };
 
-        // Per-cap transport. `NativeTransport::from_ctx` pulls the
+        // Per-cap transport. `NativeBinding::from_ctx` pulls the
         // chassis's frame-bound set + aborter so the cross-class
         // wait_reply guard wires automatically.
-        let transport = Arc::new(NativeTransport::from_ctx(ctx, mailbox_id, A::FRAME_BARRIER));
+        let transport = Arc::new(NativeBinding::from_ctx(ctx, mailbox_id, A::FRAME_BARRIER));
         transport.install_inbox(receiver);
 
         // Per-actor scratch storage (issue 582 / ADR-0074). Stamped
@@ -423,7 +423,7 @@ where
         let mut actor: Box<A> = Box::new(actor);
 
         // Spawn the dispatcher thread. The thread owns the Box<A>,
-        // an Arc<NativeTransport>, and the per-actor `ActorSlots`
+        // an Arc<NativeBinding>, and the per-actor `ActorSlots`
         // (moved in by value); it loops `recv_blocking()` on the
         // transport (which pulls from the installed inbox and
         // disconnects when the chassis drops its `mailbox_sender`) and
@@ -892,13 +892,13 @@ struct BootedPassives {
     /// for its frame loop).
     frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
     /// Membership view of the same set; shared with every
-    /// [`crate::NativeTransport`] booted under this chassis so the
+    /// [`crate::NativeBinding`] booted under this chassis so the
     /// cross-class `wait_reply` guard can classify recipients.
     /// Populated alongside `frame_bound_pending` by
     /// [`ChassisCtx::claim_frame_bound_mailbox`].
     frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
     /// Cloned into every `ChassisCtx` and onto every booted
-    /// [`crate::NativeTransport`] so the cross-class `wait_reply`
+    /// [`crate::NativeBinding`] so the cross-class `wait_reply`
     /// guard has somewhere to abort to. Inherited from the
     /// [`Builder`]'s configured aborter.
     aborter: Arc<dyn FatalAborter>,

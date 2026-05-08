@@ -389,8 +389,8 @@ mod native {
         use aether_actor::Actor;
         use aether_data::Kind;
         use aether_kinds::{EnvVar, ProcessExited, Spawn, SpawnResult};
+        use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
-        use aether_substrate::actor::native::transport::NativeTransport;
         use aether_substrate::chassis::ctx::ChassisBuilder;
         use aether_substrate::mail::ReplyTo;
         use aether_substrate::mail::mailer::Mailer;
@@ -455,7 +455,7 @@ mod native {
         struct TestFixture {
             cap: ProcessCapability,
             rx: mpsc::Receiver<EgressEvent>,
-            transport: NativeTransport,
+            transport: NativeBinding,
             _rt: Runtime,
         }
 
@@ -463,7 +463,7 @@ mod native {
             fn new() -> Self {
                 let rt = Runtime::new().expect("tokio runtime");
                 let (mailer, outbound, rx) = test_mailer_and_rx();
-                let transport = NativeTransport::new_for_test(mailer, aether_data::MailboxId(0));
+                let transport = NativeBinding::new_for_test(mailer, aether_data::MailboxId(0));
                 let cap = ProcessCapability {
                     engines: EngineRegistry::new(),
                     pending: PendingSpawns::new(),

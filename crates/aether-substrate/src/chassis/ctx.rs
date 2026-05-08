@@ -149,7 +149,7 @@ pub struct ChassisCtx<'a> {
     /// [`BootedChassis::drain_frame_bound`].
     frame_bound_pending: &'a mut Vec<(MailboxId, Arc<AtomicU64>)>,
     /// Membership view of the same set the `frame_bound_pending` Vec
-    /// covers, shared with every [`crate::NativeTransport`] built
+    /// covers, shared with every [`crate::NativeBinding`] built
     /// against this chassis. Capabilities clone the [`Arc`] into their
     /// transport at boot; the transport's cross-class `wait_reply`
     /// guard reads it (with a brief read-lock) to classify the
@@ -159,7 +159,7 @@ pub struct ChassisCtx<'a> {
     /// pending-counter list.
     frame_bound_set: &'a Arc<RwLock<HashSet<MailboxId>>>,
     /// Indirection over [`crate::runtime::lifecycle::fatal_abort`] cloned into
-    /// every [`crate::NativeTransport`] this ctx builds, so the
+    /// every [`crate::NativeBinding`] this ctx builds, so the
     /// cross-class `wait_reply` guard (ADR-0074 §Decision 5) can
     /// abort without each capability needing to plumb
     /// [`crate::HubOutbound`] itself. Defaults to
@@ -183,7 +183,7 @@ pub struct ChassisCtx<'a> {
     claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
     /// Issue 607 Phase 3b (ADR-0079): the chassis's
     /// [`crate::Spawner`], cloned into every booted actor's
-    /// [`crate::NativeTransport`] (via [`crate::NativeTransport::from_ctx`])
+    /// [`crate::NativeBinding`] (via [`crate::NativeBinding::from_ctx`])
     /// so per-handler `NativeCtx::spawn_child` can reach the spawn
     /// machinery without separate plumbing. Built once at boot in
     /// `boot_passives` (chassis_builder) / `ChassisBuilder::build`
@@ -433,7 +433,7 @@ impl<'a> ChassisCtx<'a> {
         )?;
         self.frame_bound_pending.push((id, Arc::clone(&pending)));
         // Mirror the membership into the shared set so each
-        // capability's [`crate::NativeTransport`] can resolve "is the
+        // capability's [`crate::NativeBinding`] can resolve "is the
         // recipient of this `wait_reply` frame-bound?" with a single
         // read-lock — without each transport having to scan the
         // pending-counter Vec on every check.
@@ -503,7 +503,7 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Clone the chassis's shared frame-bound membership set. Read by
-    /// [`crate::NativeTransport::from_ctx`] so the cross-class
+    /// [`crate::NativeBinding::from_ctx`] so the cross-class
     /// `wait_reply` guard can classify each outbound recipient.
     /// Capabilities that just want to send mail don't need this.
     pub fn frame_bound_set(&self) -> Arc<RwLock<HashSet<MailboxId>>> {
@@ -511,7 +511,7 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Clone the chassis's [`FatalAborter`]. Read by
-    /// [`crate::NativeTransport::from_ctx`] so the cross-class
+    /// [`crate::NativeBinding::from_ctx`] so the cross-class
     /// `wait_reply` guard has somewhere to abort to without each
     /// transport plumbing [`crate::HubOutbound`] itself.
     pub fn fatal_aborter(&self) -> Arc<dyn FatalAborter> {
@@ -519,7 +519,7 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Borrow the chassis's [`crate::Spawner`]. Used by
-    /// [`crate::NativeTransport::from_ctx`] to clone an `Arc<Spawner>`
+    /// [`crate::NativeBinding::from_ctx`] to clone an `Arc<Spawner>`
     /// into every booted actor's transport so per-handler
     /// `NativeCtx::spawn_child` can reach the spawn machinery.
     pub fn spawner_arc(&self) -> &Arc<crate::Spawner> {
@@ -754,7 +754,7 @@ where
         }
     };
 
-    let transport = Arc::new(crate::NativeTransport::from_ctx(
+    let transport = Arc::new(crate::NativeBinding::from_ctx(
         ctx,
         mailbox_id,
         A::FRAME_BARRIER,
@@ -1191,11 +1191,11 @@ pub struct BootedChassis {
     /// drains so render submit sees fully-integrated state.
     frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
     /// Membership view of the frame-bound mailbox set. Shared with
-    /// every [`crate::NativeTransport`] booted under this chassis;
+    /// every [`crate::NativeBinding`] booted under this chassis;
     /// also threaded into [`Self::add`] so post-build capabilities
     /// see (and contribute to) the same set.
     frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
-    /// Aborter cloned into every [`crate::NativeTransport`] this
+    /// Aborter cloned into every [`crate::NativeBinding`] this
     /// chassis builds. Defaulted to [`PanicAborter`] by
     /// [`ChassisBuilder::new`]; production drivers swap in
     /// [`crate::runtime::lifecycle::OutboundFatalAborter`] via

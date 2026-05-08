@@ -1,91 +1,64 @@
 //! [`MailSender`] — outbound-mail surface every actor ctx exposes.
 //!
-//! Per-stage capability trait under the issue 663 refactor (target shape
-//! of `aether-actor::actor::ctx`). Both init-time and runtime ctxs across
-//! every transport implement [`MailSender`]; the per-host concrete ctx
-//! struct (today: parametric `Ctx<'a, T>` / `InitCtx<'a, T>` /
-//! `DropCtx<'a, T>` in `actor::ctx::parametric`; substrate's
-//! `NativeCtx<'a>` / `NativeInitCtx<'a>`) impls it with
-//! `type Transport = <its transport>` and the default-impl bodies
-//! cover the routing.
+//! Per-stage capability trait (issue 663 + 665). Both init-time and
+//! runtime ctxs across every transport implement [`MailSender`]; each
+//! per-host concrete ctx struct (FFI: `FfiCtx` / `FfiInitCtx` /
+//! `FfiDropCtx`; substrate: `NativeCtx` / `NativeInitCtx`) provides
+//! its own bodies — there are no default-impl bodies because the
+//! cross-target dispatch trait that backed them (`MailTransport`)
+//! retired in 665. Each side calls its dispatch surface inline:
+//! FFI bodies hit [`crate::ffi::bridge::MAIL_BRIDGE`], native bodies hit
+//! `NativeBinding`'s inherent `send_mail`.
 //!
-//! Phase A of issue 663 adds the trait alongside the existing
-//! [`crate::actor::sender::Sender`] / [`crate::actor::sender::MailCtx`]
-//! pair. `Sender` continues to back current call sites; the new trait
-//! is dead code at this phase. Phase B impls it on the existing ctx
-//! types, Phase C concretises the FFI ctx structs and retires the
-//! parametric `Ctx<'a, T>`, Phase D switches user-facing actor methods
-//! to the generic-bounds API.
+//! `actor::<R>()` / `resolve_actor::<R>(name)` retired from this trait
+//! because the returned typed-mailbox handle is per-side
+//! ([`crate::ffi::FfiActorMailbox<R>`] vs `NativeActorMailbox<'a, R>`).
+//! Each ctx provides them as inherent methods returning its own
+//! per-side type; the everyday user-facing `ctx.actor::<R>().send(&payload)`
+//! chain is unchanged. Generic-bounded code that needs cross-impl
+//! sends uses the trait's [`MailSender::send`] / [`MailSender::send_many`]
+//! / [`MailSender::send_to_named`] methods.
 
-use aether_data::{Kind, mailbox_id_from_name};
+use aether_data::Kind;
 
-use crate::actor::{Actor, HandlesKind, Singleton};
-use crate::mail::mailbox::{ActorMailbox, resolve_mailbox};
-use crate::mail::transport::MailTransport;
+use crate::actor::{Actor, HandlesKind};
 
-/// Outbound-mail surface every actor ctx exposes. The associated
-/// `Transport` plumbs the per-host send path so default-impl bodies
-/// cover both the FFI and native paths in one place.
+/// Outbound-mail surface every actor ctx exposes.
 ///
 /// `R: Actor + HandlesKind<K>` is the compile-time gate: trying to
 /// send a kind the receiver doesn't handle is rejected at the call
 /// site, not silently warn-dropped at runtime. Wire shape (cast or
 /// postcard) follows `Kind::encode_into_bytes` (issue #240).
 pub trait MailSender {
-    /// The transport this ctx routes outbound mail through. FFI ctxs
-    /// pin this to the FFI ZST transport; native ctxs pin to
-    /// `NativeTransport`.
-    type Transport: MailTransport;
-
-    /// Borrow the actor's transport. Default-impl bodies for `send` /
-    /// `send_many` / `send_to_named` route through this.
-    fn transport(&self) -> &Self::Transport;
-
-    /// Singleton sender shortcut: returns a typed [`ActorMailbox`]
-    /// addressing the unique instance of receiver actor `R`.
-    fn actor<R: Singleton>(&self) -> ActorMailbox<'_, R, Self::Transport> {
-        ActorMailbox::__new(mailbox_id_from_name(R::NAMESPACE).0, self.transport())
-    }
-
-    /// Multi-instance sender: resolve a typed [`ActorMailbox`] from a
-    /// runtime instance name.
-    fn resolve_actor<R: Actor>(&self, name: &str) -> ActorMailbox<'_, R, Self::Transport> {
-        ActorMailbox::__new(mailbox_id_from_name(name).0, self.transport())
-    }
-
     /// Send a single payload of kind `K` to the singleton instance of
     /// receiver actor `R`.
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        ActorMailbox::<R, Self::Transport>::__new(
-            mailbox_id_from_name(R::NAMESPACE).0,
-            self.transport(),
-        )
-        .send(payload);
-    }
+        K: Kind;
 
     /// Send a slice of cast-shape payloads as a contiguous batch.
     /// Cast-only — postcard has no efficient batched wire shape.
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        ActorMailbox::<R, Self::Transport>::__new(
-            mailbox_id_from_name(R::NAMESPACE).0,
-            self.transport(),
-        )
-        .send_many(payloads);
-    }
+        K: Kind + bytemuck::NoUninit;
 
     /// String-keyed escape hatch for callers that genuinely don't
     /// know the receiver type at compile site (debug tools, dynamic
     /// dispatch, components addressing user-named mailboxes the
     /// substrate registered without a corresponding Rust type).
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        resolve_mailbox::<K, Self::Transport>(name).send(self.transport(), payload);
-    }
+    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K);
+
+    /// Correlation id the host minted for this actor's most recent
+    /// outbound `send_mail` (ADR-0042). `0` before any send.
+    /// Universal mail-level metadata — every send mints a
+    /// correlation regardless of whether the caller sync-waits or
+    /// async-handles the reply, so the accessor lives on the
+    /// outbound-mail trait rather than behind the sync-wait surface.
+    /// Async correlation tracking (send → stash id → match against
+    /// inbound's reply correlation in the normal handler) reads from
+    /// here; sync wrappers thread the value into
+    /// [`crate::actor::ctx::SyncWaiter::wait_reply`].
+    fn prev_correlation(&self) -> u64;
 }

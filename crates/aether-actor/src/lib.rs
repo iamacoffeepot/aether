@@ -9,35 +9,36 @@
 //!
 //! ADR-0074 §Decision settled the actor model: components and
 //! capabilities collapse into one actor primitive — one mpsc inbox,
-//! one OS thread, one `MailboxId` — and share this SDK over two
-//! transport implementations. The FFI side rides
-//! [`ffi::FfiTransport`]; the native side rides
-//! `aether_substrate::actor::native::transport::NativeTransport`.
+//! one OS thread, one `MailboxId`. Issue 665 retired the unifying
+//! `MailTransport` trait that originally tied the FFI and native
+//! halves together — the cross-target abstraction is now the
+//! per-stage capability traits in [`actor::ctx`]; the per-target
+//! dispatch surfaces are [`ffi::bridge`] (FFI: [`ffi::MAIL`],
+//! [`ffi::PERSIST`], [`ffi::SYNC_WAIT`]) and the inherent methods on
+//! `aether_substrate::actor::native::binding::NativeBinding`.
 //!
 //! Public surface:
-//!   - [`MailTransport`] — the five-method trait every transport
-//!     impl must provide; signatures mirror the wasm `_p32` FFI
-//!     byte-for-byte.
 //!   - [`Mail`], [`PriorState`], [`ReplyTo`], [`KindId`] —
 //!     transport-free types: pure decode / phantom typing.
-//!   - [`Mailbox`] — generic over `T: MailTransport`; method bodies
-//!     dispatch through `T::*`. The 1-arg FFI alias
-//!     ([`ffi::Mailbox<K>`]) lives in [`ffi`] alongside
-//!     [`ffi::FfiTransport`].
+//!   - [`Mailbox`] — pure addressing token (`mailbox_id`, `kind_id`)
+//!     after issue 665 dropped the `T: MailTransport` parameter; sends
+//!     route through each ctx's send methods, not through the mailbox
+//!     itself.
 //!   - [`actor::ctx`] — per-stage capability traits ([`MailSender`],
 //!     [`OutboundReply`], [`Resolver`], [`Persistence`],
-//!     [`LifecycleControl`]). FFI ctxs in [`ffi::ctx`] and substrate's
-//!     `NativeCtx` family impl the relevant subset.
+//!     [`LifecycleControl`], `SyncWaiter`). FFI ctxs in [`ffi::ctx`]
+//!     and substrate's `NativeCtx` family impl the relevant subset.
 //!   - [`Slot`] — single-instance backing store the consumer's
 //!     [`export!`] macro emits as a `static`.
-//!   - [`WaitError`] + [`wait_reply`] + [`decode_wait_reply`] —
-//!     ADR-0042 sync round-trip helper, generic over the reply kind,
-//!     the error enum, and the transport.
-//!   - [`ffi`] — FFI binding layer: [`ffi::FfiTransport`] +
-//!     [`ffi::FfiActor`] trait + [`ffi::Replaceable`] hook trait + the
-//!     [`export!`] macro that pins `init` / `receive` / lifecycle FFI
-//!     exports plus the `aether.kinds.inputs` / `aether.namespace`
-//!     custom-section statics.
+//!   - [`WaitError`] + [`decode_wait_reply`] — ADR-0042 sync
+//!     round-trip helpers; the per-target wait primitive plugs into
+//!     `actor::ctx::sync_waiter::wait_reply_via`.
+//!   - [`ffi`] — FFI binding layer: [`ffi::bridge`] dispatch ZSTs +
+//!     [`ffi::FfiActor`] trait + [`ffi::Replaceable`] hook trait +
+//!     [`ffi::FfiActorMailbox`] for the actor-typed sender chain +
+//!     the [`export!`] macro that pins `init` / `receive` /
+//!     lifecycle FFI exports plus the `aether.kinds.inputs` /
+//!     `aether.namespace` custom-section statics.
 //!
 //! No FFI imports are pulled in unconditionally — the host-fn externs
 //! in [`ffi::raw`] live behind a `#[cfg(target_arch = "wasm32")]`
@@ -70,31 +71,26 @@ pub use actor::{
     validate_namespace_segment,
 };
 pub use local::Local;
-// Generic 2-arg `Mailbox<K, T>` stays accessible as
-// `aether_actor::mail::mailbox::Mailbox`. At the crate root we
-// re-export the 1-arg FFI alias (defined in `ffi`) under the same
-// `Mailbox` name so existing `aether_component::Mailbox<K>` consumers
-// keep their call shape when migrating to `aether_actor::*`.
-pub use mail::mailbox::{ActorMailbox, KindId, resolve, resolve_mailbox};
-pub use mail::sync::{WaitError, decode_wait_reply, wait_reply};
-pub use mail::transport::MailTransport;
+// Issue 665: `Mailbox<K, T>` and `ActorMailbox<'_, R, T>` retired; the
+// surviving [`mail::mailbox::Mailbox<K>`] is a transport-free
+// addressing token. Per-side actor-typed mailboxes live next to their
+// transport: [`ffi::FfiActorMailbox<R>`] for FFI guests and
+// `aether_substrate::actor::native::NativeActorMailbox<'a, R>` for
+// native actors.
+pub use mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
+pub use mail::sync::{WaitError, decode_wait_reply};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
 
 // FFI surface promoted to the crate root so consumers see
 // `aether_actor::FfiCtx<'_>` / `aether_actor::FfiActor` / etc. without
-// an extra `ffi::` segment. `Mailbox<K>` here is the FFI 1-arg alias —
-// the generic form is reachable through `mail::mailbox::Mailbox<K, T>`.
-pub use ffi::{
-    BootError, FFI_TRANSPORT, FfiActor, FfiCtx, FfiDropCtx, FfiInitCtx, FfiTransport, Mailbox,
-    Replaceable,
-};
+// an extra `ffi::` segment.
+pub use ffi::{BootError, FfiActor, FfiActorMailbox, FfiCtx, FfiDropCtx, FfiInitCtx, Replaceable};
 
-// Issue 442 / ADR-0033: `MailTransport` doubles as a re-export name
-// for the trait when consumers want to spell out the bound. Kept
-// separate from the [`MailTransport`] re-export above for code that
-// wrote `aether_component::MailTransportTrait` against the prior
-// alias.
-pub use mail::transport::MailTransport as MailTransportTrait;
+// Issue 665 retired `MailTransport` and its `MailTransportTrait`
+// alias. Per-stage capability traits in `actor::ctx` are the
+// cross-target abstraction; per-target dispatch lives in
+// `ffi::bridge::*` (FFI) and `NativeBinding`'s inherent methods
+// (native).
 
 /// Return code the `#[actor]`-synthesized dispatcher sends back up
 /// through `receive_p32` when a `#[handler]` arm matched (or the

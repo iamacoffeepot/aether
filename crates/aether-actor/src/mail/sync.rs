@@ -1,32 +1,31 @@
-//! Shared `wait_reply` helper used by synchronous SDK wrappers (today
-//! only handle round-trips). Each family carries its own error enum
-//! (e.g. `SyncHandleError`), so the helper is generic over both the
-//! reply kind `K` and an error type that implements [`WaitError`].
-//! The transport `T` is the third generic — picks `FfiTransport` for
-//! guests and `NativeTransport` for native capabilities (Phase 2).
+//! Shared rc → `Result<K, E>` decoder used by synchronous SDK
+//! wrappers (today only the handle round-trip and the per-side
+//! [`crate::actor::ctx::SyncWaiter`] impls). Each family carries its
+//! own error enum (e.g. `SyncHandleError`), so the helper is generic
+//! over both the reply kind `K` and an error type that implements
+//! [`WaitError`].
 //!
-//! The wasm-side `io::*_sync` / `net::fetch_blocking` wrappers that
-//! historically rode this helper retired across issues #589 (net) and
-//! #591 (io); the helper stays for the handle path and as the shared
-//! shape any future ctx-level `send_sync` lands on.
+//! Issue 665 retired the standalone `wait_reply::<K, E, T>(transport, ...)`
+//! helper — the `T: MailTransport` bound went away with the trait.
+//! The same alloc + raw-rc + decode shape now lives behind
+//! [`crate::actor::ctx::sync_waiter::wait_reply_via`], which takes
+//! the per-target blocking primitive as a closure so each `SyncWaiter`
+//! impl plugs in its own (FFI calls `SYNC_WAIT.wait_reply`; native
+//! calls `NativeBinding::wait_reply`).
 //!
 //! ADR-0042: the substrate echoes the request's correlation id on the
-//! reply; the host fn `wait_reply` parks the actor thread until a
-//! mail of kind `K` with the matching correlation arrives (or the
-//! timeout elapses). The three sentinel return codes (`-1` / `-2` /
-//! `-3`) map onto the [`WaitError`] constructors.
+//! reply; the per-target blocking primitive parks the actor thread
+//! until a mail of kind `K` with the matching correlation arrives
+//! (or the timeout elapses). The three sentinel return codes (`-1` /
+//! `-2` / `-3`) map onto the [`WaitError`] constructors below.
 
 use alloc::string::String;
-use alloc::vec;
-use alloc::vec::Vec;
-
-use aether_data::Kind;
-
-use crate::mail::transport::MailTransport;
 
 /// Error contract every sync wrapper's error enum needs to implement
-/// so [`wait_reply`] can construct the four post-FFI failure modes
-/// without knowing which family it's serving.
+/// so [`decode_wait_reply`] (and the per-target
+/// [`crate::actor::ctx::sync_waiter::wait_reply_via`] caller) can
+/// construct the four post-FFI failure modes without knowing which
+/// family it's serving.
 pub trait WaitError {
     fn timeout() -> Self;
     fn buffer_too_small() -> Self;
@@ -34,35 +33,11 @@ pub trait WaitError {
     fn decode(message: String) -> Self;
 }
 
-/// Allocate a `capacity`-sized scratch buffer in actor memory, park
-/// on `transport.wait_reply` for a mail of kind `K` with the given
-/// `expected_correlation`, and postcard-decode the written bytes.
-///
-/// `transport` is the actor-bound `MailTransport` instance — see
-/// `transport.rs` for the `&self` receiver design and how it
-/// type-system-tracks the actor binding.
-pub fn wait_reply<K, E, T>(
-    transport: &T,
-    timeout_ms: u32,
-    capacity: usize,
-    expected_correlation: u64,
-) -> Result<K, E>
-where
-    K: Kind + serde::de::DeserializeOwned,
-    E: WaitError,
-    T: MailTransport,
-{
-    let mut buf: Vec<u8> = vec![0u8; capacity];
-    let rc = transport.wait_reply(K::ID.0, &mut buf, timeout_ms, expected_correlation);
-    decode_wait_reply::<K, E>(rc, &buf)
-}
-
-/// Pure rc → `Result<K, E>` mapping extracted from [`wait_reply`] so
-/// the four sentinel branches and the unexpected-rc fallback are
-/// testable without a transport (`MailTransport` impls panic / no-op
-/// off their target). The happy path postcard-decodes
-/// `&buf[..rc as usize]`, matching what the in-FFI version does after
-/// the host fn writes `rc` bytes into the scratch buffer.
+/// Pure rc → `Result<K, E>` mapping. The four sentinel branches and
+/// the unexpected-rc fallback are testable without a real transport.
+/// The happy path postcard-decodes `&buf[..rc as usize]`, matching
+/// what the in-FFI flow does after the host fn writes `rc` bytes
+/// into the scratch buffer.
 pub fn decode_wait_reply<K, E>(rc: i32, buf: &[u8]) -> Result<K, E>
 where
     K: serde::de::DeserializeOwned,
