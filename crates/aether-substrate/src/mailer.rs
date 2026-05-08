@@ -279,7 +279,7 @@ fn route_mail(
             // came from substrate core or a chassis (e.g. the frame
             // loop's FrameStats push, platform input fan-out). Per
             // ADR-0011 origin is `None`. Components reach
-            // closure-bound mailboxes via `SubstrateCtx::send` inline
+            // closure-bound mailboxes via `ComponentCtx::send` inline
             // and never enter `push`.
             handler(
                 mail.kind,
@@ -315,7 +315,7 @@ fn route_mail(
                 // with no local component origin (broadcast-
                 // originated, substrate-generated). Recovered from
                 // `reply_to.target = Component(_)` set by
-                // `SubstrateCtx::send` / `NativeTransport::send_mail`
+                // `ComponentCtx::send` / `NativeTransport::send_mail`
                 // (issue #644).
                 let source_mailbox_id = match mail.reply_to.target {
                     ReplyTarget::Component(id) => Some(id),

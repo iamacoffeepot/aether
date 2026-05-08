@@ -21,7 +21,7 @@ use crate::{EngineId, MailboxId, SessionToken};
 /// (ADR-0008). `EngineMailbox` tags mail bubbled up from a component
 /// on another engine, so replies route to the originating engine's
 /// mailbox (ADR-0037 Phase 2). `Component` tags sink-bound mail that
-/// a local component pushed through `SubstrateCtx::send`, so sink
+/// a local component pushed through `ComponentCtx::send`, so sink
 /// reply paths (ADR-0041's io sink is the motivating case) can route
 /// the `*Result` back to the component via the mailer rather than
 /// the hub.

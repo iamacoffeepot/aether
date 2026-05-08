@@ -35,7 +35,7 @@ pub type MailKind = KindId;
 /// - `Session` — reply routes back to a Claude MCP session.
 /// - `EngineMailbox` — reply routes to a component on another engine.
 /// - `Component` — reply routes back to a local peer component
-///   (set by `SubstrateCtx::send` / `NativeTransport::send_mail`).
+///   (set by `ComponentCtx::send` / `NativeTransport::send_mail`).
 /// - `None` — no reply target (broadcast-origin or substrate-
 ///   generated mail).
 ///
@@ -65,7 +65,7 @@ impl Mail {
     /// Attach a reply-to destination. Used by the hub client when
     /// forwarding inbound frames (ADR-0008), the hub-chassis loopback
     /// when delivering bubbled-up mail (ADR-0037 Phase 2), and
-    /// `SubstrateCtx::send` / `NativeTransport::send_mail` for
+    /// `ComponentCtx::send` / `NativeTransport::send_mail` for
     /// peer-to-peer component sends (target = `Component(sender)`).
     /// Other mail paths leave the default `ReplyTo::None`.
     pub fn with_reply_to(mut self, reply_to: ReplyTo) -> Self {

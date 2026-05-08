@@ -43,7 +43,7 @@ mod native {
     use crate::wasm_trampoline::{self, WasmTrampoline, WasmTrampolineConfig};
     use aether_substrate::capability::BootError;
     use aether_substrate::control_helpers::register_or_match_all;
-    use aether_substrate::ctx::SubstrateCtx;
+    use aether_substrate::ctx::ComponentCtx;
     use aether_substrate::input::{self, InputSubscribers};
     use aether_substrate::kind_manifest;
     use aether_substrate::mail::{KindId, Mail, MailboxId};
@@ -62,7 +62,7 @@ mod native {
     /// table (shared with the platform thread + trampolines).
     pub struct ComponentHostConfig {
         pub engine: Arc<Engine>,
-        pub linker: Arc<Linker<SubstrateCtx>>,
+        pub linker: Arc<Linker<ComponentCtx>>,
         pub hub_outbound: Arc<HubOutbound>,
         pub input_subscribers: InputSubscribers,
     }
@@ -71,7 +71,7 @@ mod native {
     /// owner running on its dispatcher thread; no shared state.
     pub struct ComponentHostCapability {
         engine: Arc<Engine>,
-        linker: Arc<Linker<SubstrateCtx>>,
+        linker: Arc<Linker<ComponentCtx>>,
         registry: Arc<Registry>,
         mailer: Arc<Mailer>,
         outbound: Arc<HubOutbound>,

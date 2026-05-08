@@ -13,10 +13,10 @@
 // 2³² dispatches is out of scope for V0; when it becomes real, the
 // handle becomes a generational index.
 //
-// The table lives on `SubstrateCtx` rather than `Component` because
+// The table lives on `ComponentCtx` rather than `Component` because
 // the host fn touches it via `Caller::data_mut()`. Putting it there
 // also means replace/drop on the component naturally clears it — the
-// old `Store<SubstrateCtx>` is dropped and the table with it.
+// old `Store<ComponentCtx>` is dropped and the table with it.
 
 use std::collections::HashMap;
 

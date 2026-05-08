@@ -41,8 +41,8 @@ use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::{
-    AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, HubOutbound, InputSubscribers, Mailer,
-    Registry, SubstrateCtx, handle_store::HandleStore, host_fns, input::new_subscribers,
+    AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ComponentCtx, HubOutbound, InputSubscribers,
+    Mailer, Registry, handle_store::HandleStore, host_fns, input::new_subscribers,
 };
 
 /// Everything a chassis needs after shared boot setup. Fields are
@@ -59,7 +59,7 @@ use crate::{
 pub struct SubstrateBoot {
     pub engine: Arc<Engine>,
     pub registry: Arc<Registry>,
-    pub linker: Arc<Linker<SubstrateCtx>>,
+    pub linker: Arc<Linker<ComponentCtx>>,
     pub queue: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
     pub input_subscribers: InputSubscribers,
@@ -249,7 +249,7 @@ impl<'a> SubstrateBootBuilder<'a> {
             .build()
             .map_err(|e| wasmtime::Error::msg(format!("chassis capability boot: {e}")))?;
 
-        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
         host_fns::register(&mut linker)?;
         let linker = Arc::new(linker);
 

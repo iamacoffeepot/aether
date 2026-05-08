@@ -50,7 +50,7 @@ use crate::mailer::Mailer;
 /// - `wait_reply` — pulls from `self.inbox` with timeout, filters
 ///   by `(kind, correlation)`, parks non-matching envelopes into
 ///   `self.overflow` for a future `wait_reply` to find, mirrors the
-///   wasm side's `SubstrateCtx::wait_reply` semantics.
+///   wasm side's `ComponentCtx::wait_reply` semantics.
 /// - `prev_correlation` — reads the atomic counter.
 pub struct NativeTransport {
     mailer: Arc<Mailer>,
@@ -436,8 +436,7 @@ impl MailTransport for NativeTransport {
         let rc = loop {
             // Drain overflow first — a previous `wait_reply` may
             // have parked envelopes that match this kind /
-            // correlation. Mirrors `SubstrateCtx::wait_reply` on
-            // the wasm side (component.rs).
+            // correlation.
             let from_overflow = {
                 let mut overflow = self.overflow.lock().unwrap();
                 let pos = overflow
@@ -446,7 +445,14 @@ impl MailTransport for NativeTransport {
                 pos.and_then(|i| overflow.remove(i))
             };
             if let Some(env) = from_overflow {
-                break write_payload(&env, out);
+                let rc = write_payload(&env, out);
+                if rc == -2 {
+                    // Buffer too small: park back at the front so a
+                    // retry with a larger buffer picks it up before
+                    // anything newer.
+                    self.overflow.lock().unwrap().push_front(env);
+                }
+                break rc;
             }
 
             // No overflow match — pull from the inbox with whatever
@@ -460,7 +466,13 @@ impl MailTransport for NativeTransport {
             match recv_outcome {
                 Ok(env) => {
                     if matches_filter(&env, expected_kind, expected_correlation) {
-                        break write_payload(&env, out);
+                        let rc = write_payload(&env, out);
+                        if rc == -2 {
+                            // Same retry-friendly disposition as
+                            // overflow-matched: park at the front.
+                            self.overflow.lock().unwrap().push_front(env);
+                        }
+                        break rc;
                     }
                     self.overflow.lock().unwrap().push_back(env);
                     // Loop continues — try again with whatever time
@@ -497,17 +509,13 @@ fn matches_filter(env: &Envelope, expected_kind: u64, expected_correlation: u64)
 
 /// Copy `env.payload` into `out` and return the number of bytes
 /// written, matching the wasm `wait_reply_p32` ABI:
-/// `>= 0` = bytes written, `-2` = payload too large for the buffer
-/// (envelope is dropped — wasm re-parks but native callers should
-/// retry with a bigger buffer).
+/// `>= 0` = bytes written, `-2` = payload too large for the buffer.
+/// Caller is responsible for parking the envelope back on overflow
+/// when -2 is returned so a retry with a bigger buffer can pick it up
+/// (the helper is byte-only so it can also be used for peek-style
+/// callers that don't have an overflow to park on).
 fn write_payload(env: &Envelope, out: &mut [u8]) -> i32 {
     if env.payload.len() > out.len() {
-        tracing::warn!(
-            target: "aether_substrate::native_transport",
-            payload_len = env.payload.len(),
-            buffer_len = out.len(),
-            "wait_reply buffer too small — envelope dropped"
-        );
         return -2;
     }
     out[..env.payload.len()].copy_from_slice(&env.payload);
@@ -786,5 +794,134 @@ mod tests {
         let rc = transport.wait_reply(1, &mut buf, 1, correlation);
         assert_eq!(rc, -1);
         assert_eq!(transport.pending_recipients.lock().unwrap().len(), 0);
+    }
+
+    fn make_envelope(kind: u64, payload: Vec<u8>, correlation: u64) -> Envelope {
+        Envelope {
+            kind: KindId(kind),
+            kind_name: String::new(),
+            origin: None,
+            sender: ReplyTo::with_correlation(ReplyTarget::None, correlation),
+            payload,
+            count: 1,
+        }
+    }
+
+    /// `wait_reply` returns the matched envelope when it arrives via
+    /// the inbox while the wait is parked.
+    #[test]
+    fn wait_reply_returns_payload_when_match_arrives() {
+        let (_registry, mailer) = fresh_substrate();
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        transport.install_inbox(rx);
+
+        tx.send(make_envelope(0xABCD, vec![1, 2, 3, 4, 5], 0))
+            .unwrap();
+
+        let mut buf = [0u8; 16];
+        let rc = transport.wait_reply(0xABCD, &mut buf, 100, 0);
+        assert_eq!(rc, 5);
+        assert_eq!(&buf[..5], &[1, 2, 3, 4, 5]);
+    }
+
+    /// `wait_reply` parks non-matching envelopes onto overflow so the
+    /// dispatcher's next `recv` (or a follow-up wait) sees them.
+    #[test]
+    fn wait_reply_parks_non_matching_into_overflow() {
+        let (_registry, mailer) = fresh_substrate();
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        transport.install_inbox(rx);
+
+        tx.send(make_envelope(0x1111, vec![9], 0)).unwrap();
+        tx.send(make_envelope(0xABCD, vec![1], 0)).unwrap();
+
+        let mut buf = [0u8; 16];
+        let rc = transport.wait_reply(0xABCD, &mut buf, 100, 0);
+        assert_eq!(rc, 1);
+        assert_eq!(transport.overflow.lock().unwrap().len(), 1);
+    }
+
+    /// `wait_reply` filters by correlation when one is supplied — a
+    /// matching kind with a different correlation parks; only the
+    /// correlation-matched envelope returns.
+    #[test]
+    fn wait_reply_filters_by_correlation_not_just_kind() {
+        let (_registry, mailer) = fresh_substrate();
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        transport.install_inbox(rx);
+
+        tx.send(make_envelope(0xABCD, vec![0xFF], 11)).unwrap();
+        tx.send(make_envelope(0xABCD, vec![0x42], 22)).unwrap();
+
+        let mut buf = [0u8; 16];
+        let rc = transport.wait_reply(0xABCD, &mut buf, 100, 22);
+        assert_eq!(rc, 1);
+        assert_eq!(buf[0], 0x42);
+        assert_eq!(transport.overflow.lock().unwrap().len(), 1);
+    }
+
+    /// `wait_reply` checks overflow before recv — a matching envelope
+    /// already on overflow returns without touching the inbox.
+    #[test]
+    fn wait_reply_pulls_match_from_overflow_before_recv() {
+        let (_registry, mailer) = fresh_substrate();
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        transport.install_inbox(rx);
+
+        transport
+            .overflow
+            .lock()
+            .unwrap()
+            .push_back(make_envelope(0xABCD, vec![7], 0));
+        drop(tx);
+
+        let mut buf = [0u8; 16];
+        let rc = transport.wait_reply(0xABCD, &mut buf, 100, 0);
+        assert_eq!(rc, 1);
+        assert_eq!(buf[0], 7);
+    }
+
+    /// `wait_reply` returns -2 when payload exceeds the buffer and
+    /// parks the envelope back on overflow with `push_front` so a
+    /// retry with a larger buffer rediscovers it.
+    #[test]
+    fn wait_reply_parks_on_buffer_too_small_for_retry() {
+        let (_registry, mailer) = fresh_substrate();
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        transport.install_inbox(rx);
+
+        let big_payload = vec![0xAA; 10];
+        tx.send(make_envelope(0xABCD, big_payload.clone(), 0))
+            .unwrap();
+
+        let mut small = [0u8; 4];
+        let rc = transport.wait_reply(0xABCD, &mut small, 100, 0);
+        assert_eq!(rc, -2);
+        assert_eq!(transport.overflow.lock().unwrap().len(), 1);
+
+        let mut big = [0u8; 16];
+        let rc = transport.wait_reply(0xABCD, &mut big, 100, 0);
+        assert_eq!(rc, big_payload.len() as i32);
+        assert_eq!(&big[..big_payload.len()], &big_payload[..]);
+    }
+
+    /// `wait_reply` returns -3 cancelled when the inbox sender drops
+    /// (the receiver disconnects) before any matching mail arrives.
+    #[test]
+    fn wait_reply_returns_cancelled_when_sender_drops() {
+        let (_registry, mailer) = fresh_substrate();
+        let transport = NativeTransport::new_for_test(mailer, MailboxId(1));
+        let (tx, rx) = mpsc::channel::<Envelope>();
+        transport.install_inbox(rx);
+        drop(tx);
+
+        let mut buf = [0u8; 16];
+        let rc = transport.wait_reply(0xABCD, &mut buf, 100, 0);
+        assert_eq!(rc, -3);
     }
 }
