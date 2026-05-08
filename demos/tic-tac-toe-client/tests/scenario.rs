@@ -31,6 +31,20 @@ use aether_substrate_bundle::test_bench::TestBench;
 use aether_demo_tic_tac_toe as _;
 use aether_demo_tic_tac_toe_client as _;
 
+/// User-facing component names passed to `LoadComponent`.
+const SERVER_NAME: &str = "tic_tac_toe";
+const CLIENT_NAME: &str = "tic_tac_toe.client";
+
+/// Full mailbox address the substrate registers for the loaded
+/// client component (issue 634 Phase 4 PR 1). Mail to the bare
+/// `CLIENT_NAME` warn-drops as unknown — agents address the
+/// trampoline by its full `aether.component.trampoline:NAME` form,
+/// which is what `LoadResult.name` returns. The server's address
+/// isn't needed here because the click-flow scenario only mails
+/// the client; the client emits `PlayMove` to the server's bare
+/// short name (the SDK resolves it inside the wasm).
+const CLIENT_ADDRESS: &str = "aether.component.trampoline:tic_tac_toe.client";
+
 /// Probe for any usable wgpu adapter.
 fn has_wgpu_adapter() -> bool {
     let instance =
@@ -156,12 +170,12 @@ fn default_render_paints_grid() {
         steps: vec![
             Step::LoadComponent {
                 path: wasm_path.to_string_lossy().into_owned(),
-                name: Some("tic_tac_toe.client".to_owned()),
+                name: Some(CLIENT_NAME.to_owned()),
             },
             // First tick: SDK auto-subscribes inputs, on_tick renders.
             // Two more ticks settle the renderer.
             Step::Advance { ticks: 3 },
-            tick_to("tic_tac_toe.client"),
+            tick_to(CLIENT_ADDRESS),
             Step::Capture,
             Step::Assert {
                 check: Check::MailObserved {
@@ -210,30 +224,30 @@ fn click_center_cell_drives_server_broadcast() {
             // load order matching the agent-workflow docstring.
             Step::LoadComponent {
                 path: server_path.to_string_lossy().into_owned(),
-                name: Some("tic_tac_toe".to_owned()),
+                name: Some(SERVER_NAME.to_owned()),
             },
             Step::LoadComponent {
                 path: client_path.to_string_lossy().into_owned(),
-                name: Some("tic_tac_toe.client".to_owned()),
+                name: Some(CLIENT_NAME.to_owned()),
             },
             Step::Advance { ticks: 1 },
             // Cache window size + cursor in the client. The
             // `on_mouse_button` handler bails early if either is None.
             Step::SendMail {
-                recipient: "tic_tac_toe.client".to_owned(),
+                recipient: CLIENT_ADDRESS.to_owned(),
                 kind: "aether.window_size".to_owned(),
                 params: serde_yml::from_str("width: 64\nheight: 48")
                     .expect("window_size params parse"),
             },
             Step::SendMail {
-                recipient: "tic_tac_toe.client".to_owned(),
+                recipient: CLIENT_ADDRESS.to_owned(),
                 kind: "aether.mouse_move".to_owned(),
                 params: serde_yml::from_str("x: 32.0\ny: 24.0").expect("mouse_move params parse"),
             },
             // The click. Hit-test → cell (1,1) → PlayMove(1,1) sent
             // to the server. Server accepts, broadcasts game_state.
             Step::SendMail {
-                recipient: "tic_tac_toe.client".to_owned(),
+                recipient: CLIENT_ADDRESS.to_owned(),
                 kind: "aether.mouse_button".to_owned(),
                 params: serde_yml::Value::Null,
             },

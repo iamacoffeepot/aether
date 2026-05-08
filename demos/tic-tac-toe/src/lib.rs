@@ -117,21 +117,27 @@ pub struct MoveResult {
     pub state: GameState,
 }
 
-/// Well-known local mailbox name the server fans `GameState` to in
-/// addition to `hub.claude.broadcast`. Any component loaded under
-/// this name on the same substrate as the server will receive every
-/// state update — the intended consumer is the `aether-demo-tic-tac-
-/// toe-client` renderer, but any observer-style component works.
-/// If no component is registered under this name the send is a
-/// harmless "mailbox unknown" warn-drop.
-pub const CLIENT_OBSERVER: &str = "tic_tac_toe.client";
+/// Full mailbox address the server fans `GameState` to in addition to
+/// `hub.claude.broadcast`. Any component loaded under the subname
+/// `tic_tac_toe.client` on the same substrate as the server will
+/// receive every state update — the intended consumer is the
+/// `aether-demo-tic-tac-toe-client` renderer, but any observer-style
+/// component works. If no component is registered under that subname
+/// the send is a harmless "mailbox unknown" warn-drop.
+///
+/// Issue 634 Phase 4 PR 1 (2026-05-08) moved loaded wasm components
+/// from bare names to the `aether.component.trampoline:NAME` form;
+/// `send_to_named` against the bare name warn-drops. The constants
+/// here carry the full trampoline form so the existing shipping
+/// components keep working without a per-call address rewrite.
+pub const CLIENT_OBSERVER: &str = "aether.component.trampoline:tic_tac_toe.client";
 
-/// Well-known mailbox name the authoritative server is conventionally
+/// Full mailbox address the authoritative server is conventionally
 /// loaded under. Callers that want to mail `PlayMove` / `Reset` to
-/// the server can resolve this name at init; matches the default
-/// `load_component` name the server advertises via its top-level
-/// rustdoc.
-pub const SERVER: &str = "tic_tac_toe";
+/// the server can resolve this name at init; matches the trampoline
+/// the server's `load_component` produces when invoked with the
+/// canonical subname `tic_tac_toe`.
+pub const SERVER: &str = "aether.component.trampoline:tic_tac_toe";
 
 #[cfg(test)]
 mod tests {

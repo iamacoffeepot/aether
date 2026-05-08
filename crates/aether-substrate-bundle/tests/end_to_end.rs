@@ -1,5 +1,5 @@
 //! Pre-Phase-4 end-to-end test: WAT-built component →
-//! `SubstrateCtx::send` → sink handler. Used `ComponentHostCapability`'s
+//! `ComponentCtx::send` → sink handler. Used `ComponentHostCapability`'s
 //! `for_test` / `attach_component_for_test` test helpers and the
 //! mailer's `drain_all` to drive a hand-built `Component` past the
 //! cap's dispatcher infrastructure.

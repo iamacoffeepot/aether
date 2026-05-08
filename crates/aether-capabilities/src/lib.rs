@@ -49,7 +49,7 @@ pub use audio::AudioConfig;
 pub use broadcast::BroadcastCapability;
 pub use component::ComponentHostCapability;
 // `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
-// `Arc<Linker<SubstrateCtx>>`). It re-exports only on the native
+// `Arc<Linker<ComponentCtx>>`). It re-exports only on the native
 // target — wasm-component consumers see the cap stub via
 // `ComponentHostCapability` for typed `ctx.actor::<...>()` addressing
 // without dragging the wasmtime stack into the wasm graph.

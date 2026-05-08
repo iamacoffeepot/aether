@@ -383,7 +383,7 @@ impl<'a> MailCtx for NativeCtx<'a> {
 /// [`Self::publish_handle`] and the consumer retrieves it through
 /// [`crate::DriverCtx::handle`].
 pub struct NativeInitCtx<'a> {
-    transport: &'a NativeTransport,
+    transport: &'a Arc<NativeTransport>,
     handles: &'a mut ExportedHandles,
     mailer: Arc<Mailer>,
 }
@@ -392,7 +392,7 @@ impl<'a> NativeInitCtx<'a> {
     /// Internal constructor — only [`crate::chassis_builder::Builder::with_actor`]
     /// builds these.
     pub(crate) fn new(
-        transport: &'a NativeTransport,
+        transport: &'a Arc<NativeTransport>,
         handles: &'a mut ExportedHandles,
         mailer: Arc<Mailer>,
     ) -> Self {
@@ -401,6 +401,14 @@ impl<'a> NativeInitCtx<'a> {
             handles,
             mailer,
         }
+    }
+
+    /// Borrow the Arc'd cap-bound transport. Used by the wasm
+    /// trampoline at init to install itself on the
+    /// [`crate::ctx::ComponentCtx`] so the `wait_reply_p32` host fn
+    /// can route through this transport.
+    pub fn transport_arc(&self) -> &Arc<NativeTransport> {
+        self.transport
     }
 
     /// Borrow the cap-bound transport. Caps rarely reach for this —
