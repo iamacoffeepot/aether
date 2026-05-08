@@ -5,12 +5,11 @@
 //! peripherals (window, GPU, TCP listener, event loop) live in the
 //! chassis crate that binds this as a dependency. See ADR-0035.
 //!
-//! Each loaded wasm component runs as a `WasmTrampoline` —
+//! Each loaded wasm component runs as a [`actor::wasm::trampoline::WasmTrampoline`] —
 //! a `NativeActor` instanced under `aether.component.trampoline:NAME`
 //! that delegates incoming mail to the wasm guest via `#[fallback]`
-//! (issue 634 Phase 4). The trampoline lives in
-//! `aether-capabilities`; the substrate-side
-//! `ComponentHostCapability` shrinks to a `LoadComponent` handler
+//! (issue 634 Phase 4). The chassis-side `ComponentHostCapability`
+//! (in `aether-capabilities`) shrinks to a `LoadComponent` handler
 //! that spawns the trampoline (and forwarders for `DropComponent` /
 //! `ReplaceComponent`). Phase 4 PR 2 retired the per-frame drain
 //! barrier and the `DrainSummary` / `DrainDeath` / `DrainOutcome`
@@ -26,11 +25,11 @@
 //! The chassis instance you `run()` is the [`BuiltChassis<Self>`] the
 //! trait method returns, not a value of `Self` itself.
 
-// Issue 552 stage 2: the `#[actor] impl NativeActor for X` macro
-// emits `impl ::aether_substrate::NativeDispatch for X` so external
-// callers (caps in user crates, `aether-capabilities` once the move
-// in stage 2c lands) resolve unambiguously. For caps written *inside*
-// aether-substrate (today: every cap under `capabilities/`) the
+// The `#[actor] impl NativeActor for X` macro emits
+// `impl ::aether_substrate::NativeDispatch for X` so external callers
+// (caps in `aether-capabilities`, user-crate caps) resolve
+// unambiguously. For impls written *inside* aether-substrate (today:
+// the wasm trampoline at `actor::wasm::trampoline`) the
 // `::aether_substrate` prefix is in-crate; the self-alias makes
 // absolute paths resolve without a separate "internal vs external"
 // macro arm.
