@@ -392,8 +392,8 @@ where
             let mailer_clone = ctx.mail_send_handle();
             let mut init_ctx = NativeInitCtx::new(&transport, handles, mailer_clone);
             aether_actor::local::with_stamped(&slots, || {
-                aether_actor::log::with_actor_dispatch(
-                    &*transport as &dyn aether_actor::log::MailDispatch,
+                crate::runtime::log_install::with_actor_dispatch(
+                    &*transport as &dyn crate::runtime::log_install::MailDispatch,
                     || {
                         let r = A::init(config, &mut init_ctx);
                         aether_actor::log::drain_buffer();
@@ -461,8 +461,8 @@ where
                         // aware tracing layer's priority flush + the
                         // post-handler drain hook ship `LogBatch`
                         // mail with sender attribution.
-                        aether_actor::log::with_actor_dispatch(
-                            &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                        crate::runtime::log_install::with_actor_dispatch(
+                            &*transport_for_thread as &dyn crate::runtime::log_install::MailDispatch,
                             || {
                                 let mut ctx =
                                     NativeCtx::new(&transport_for_thread, env.sender);
@@ -502,8 +502,8 @@ where
                 // observed before `on_close` runs.
                 while let Some(env) = transport_for_thread.try_recv() {
                     aether_actor::local::with_stamped(&slots, || {
-                        aether_actor::log::with_actor_dispatch(
-                            &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                        crate::runtime::log_install::with_actor_dispatch(
+                            &*transport_for_thread as &dyn crate::runtime::log_install::MailDispatch,
                             || {
                                 let mut ctx =
                                     NativeCtx::new(&transport_for_thread, env.sender);
@@ -522,8 +522,8 @@ where
                 // disconnect). Default empty for singletons that don't
                 // need it; opt-in for caps with cleanup state.
                 aether_actor::local::with_stamped(&slots, || {
-                    aether_actor::log::with_actor_dispatch(
-                        &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                    crate::runtime::log_install::with_actor_dispatch(
+                        &*transport_for_thread as &dyn crate::runtime::log_install::MailDispatch,
                         || {
                             let mut close_ctx = NativeCtx::new(
                                 &transport_for_thread,
