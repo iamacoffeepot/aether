@@ -92,6 +92,15 @@ pub struct Spawner {
     /// Monotonic counter for [`Subname::Counter`]. Per-Spawner so each
     /// chassis runs its own sequence; not shared across substrates.
     counter: AtomicU64,
+    /// Per-instanced-actor inbox-pending counters. Each spawn registers
+    /// one here; the sink handler increments on push, the dispatcher
+    /// loop decrements after dispatching. Used by the test bench's
+    /// `advance` loop to wait for trampolines to drain before
+    /// declaring a frame done — production drivers (desktop, headless)
+    /// don't read this. Wedge detection (CPU-loop wasm) waits on a
+    /// future epoch-deadline ADR; this counter is for synchronization,
+    /// not fail-fast.
+    instanced_pending: RwLock<Vec<(MailboxId, Arc<AtomicU64>)>>,
 }
 
 impl Spawner {
@@ -109,6 +118,33 @@ impl Spawner {
             frame_bound_set,
             aborter,
             counter: AtomicU64::new(0),
+            instanced_pending: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Wait for every spawned instanced actor's inbox to quiesce
+    /// (`pending == 0`), polling until either every counter is zero or
+    /// `deadline` passes. Returns `true` on quiesce, `false` on
+    /// timeout. Test-bench-only — production drivers don't poll this;
+    /// trampolines are free-running by design and a slow tick handler
+    /// stalls only the next frame's render, not the chassis.
+    ///
+    /// Wedge detection (a CPU-loop wasm guest) waits on a future
+    /// epoch-deadline ADR; this is a passive wait, not an abort
+    /// barrier.
+    pub fn wait_instanced_quiesce(&self, deadline: std::time::Instant) -> bool {
+        loop {
+            let still_pending = {
+                let counters = self.instanced_pending.read().unwrap();
+                counters.iter().any(|(_, c)| c.load(Ordering::Acquire) > 0)
+            };
+            if !still_pending {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(50));
         }
     }
 
@@ -227,6 +263,12 @@ impl Spawner {
         // and external mail addressed to the dead mailbox warn-drops.
         let strong_sender: Arc<mpsc::Sender<Envelope>> = Arc::new(tx.clone());
         let weak_for_handler = Arc::downgrade(&strong_sender);
+        // Per-actor inbox-pending counter. Sink handler ++ on push;
+        // dispatcher loop -- after handling. Used by the test bench's
+        // `wait_instanced_quiesce` to wait for the actor to drain
+        // between ticks. Production drivers don't read this.
+        let pending = Arc::new(AtomicU64::new(0));
+        let pending_for_handler = Arc::clone(&pending);
         let registered = self.registry.try_register_closure(
             full_name.clone(),
             Arc::new(
@@ -252,7 +294,13 @@ impl Spawner {
                         payload: payload.to_vec(),
                         count,
                     };
+                    pending_for_handler.fetch_add(1, Ordering::AcqRel);
                     if tx.send(env).is_err() {
+                        // Receiver disconnected before we could deliver;
+                        // un-account for the increment so the counter
+                        // stays accurate (otherwise `wait_instanced_quiesce`
+                        // would never see zero).
+                        pending_for_handler.fetch_sub(1, Ordering::AcqRel);
                         tracing::warn!(
                             target: "aether_substrate::spawn",
                             kind = kind_name,
@@ -307,13 +355,24 @@ impl Spawner {
 
         // Pre-load bootstrap mail. tx is alive (rx is held by the
         // transport; nobody's polling yet), so these sends always
-        // succeed.
+        // succeed. Each pre-load increments the pending counter so
+        // `wait_instanced_quiesce` can see it before the actor's
+        // dispatcher consumes it.
         for env in after_init_mail {
+            pending.fetch_add(1, Ordering::AcqRel);
             // mpsc::Sender::send only fails when the receiver
             // disconnects; rx is alive here. Discard on the
             // theoretical impossibility.
             let _ = tx.send(env);
         }
+
+        // Register the pending counter for `wait_instanced_quiesce`
+        // *after* pre-load so the test bench observing this list sees
+        // a populated inbox at boot, not a phantom-empty one.
+        self.instanced_pending
+            .write()
+            .unwrap()
+            .push((id, Arc::clone(&pending)));
 
         // 8. Spawn dispatcher thread, move actor in. Mirrors the
         // existing `boot_native_actor` shape minus the frame-bound
@@ -326,6 +385,7 @@ impl Spawner {
         let transport_for_thread = Arc::clone(&transport);
         let actor_registry_for_thread = Arc::clone(&self.actor_registry);
         let mailer_for_thread = Arc::clone(&self.mailer);
+        let pending_for_thread = Arc::clone(&pending);
         let thread_name = alloc_instanced_thread_name(&full_name);
         // The local strong Arc was the populator for the Weak handler
         // ref; the actor_registry now holds an `Arc::clone` of the
@@ -370,6 +430,7 @@ impl Spawner {
                             "instanced actor dispatch missed: kind not handled or decode failed"
                         );
                     }
+                    pending_for_thread.fetch_sub(1, Ordering::AcqRel);
                 }
 
                 // Drain remaining mail synchronously. The flag/disconnect
@@ -392,6 +453,7 @@ impl Spawner {
                             "instanced actor drain dispatch missed: kind not handled or decode failed"
                         );
                     }
+                    pending_for_thread.fetch_sub(1, Ordering::AcqRel);
                 }
 
                 // Last-chance close hook. ReplyTo is None because no

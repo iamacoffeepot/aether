@@ -223,14 +223,15 @@ impl NativeActor for WasmTrampoline {
         let mail = Mail::new(self.mailbox, env.kind, env.payload.clone(), env.count)
             .with_reply_to(env.sender);
         if let Err(e) = component.deliver(&mail) {
-            tracing::error!(
-                target: "aether_capabilities::wasm_trampoline",
-                mailbox = %self.mailbox,
-                kind = %env.kind_name,
-                error = %e,
-                "wasm deliver returned Err (trap); marking trampoline dead via shutdown",
-            );
-            ctx.shutdown();
+            // ADR-0063 fail-fast: a wasm trap (or host-fn error
+            // returned through `Component::deliver`) kills the
+            // substrate. Wedge detection (CPU-loop guests) waits on a
+            // future epoch-deadline ADR — symmetric with native
+            // actors, which have no wedge guard either today.
+            ctx.transport().fatal_abort(format!(
+                "component {} (kind {}) trapped: {e}",
+                self.mailbox, env.kind_name,
+            ));
         }
         true
     }

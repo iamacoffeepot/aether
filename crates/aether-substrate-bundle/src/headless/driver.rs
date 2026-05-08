@@ -24,7 +24,7 @@ use aether_kinds::Tick;
 use aether_substrate::capability::BootError;
 use aether_substrate::chassis_builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::{
-    HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop, mail::Mail, subscribers_for,
+    InputSubscribers, Mailer, SubstrateBoot, frame_loop, mail::Mail, subscribers_for,
 };
 
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
@@ -76,7 +76,6 @@ pub struct HeadlessTimerRunning {
     kind_tick: KindId,
     kind_frame_stats: KindId,
     tick_period: Duration,
-    outbound: Arc<HubOutbound>,
     /// `SubstrateBoot` drops at the end of `run()` so its scheduler
     /// joins workers and its `BootedChassis` (legacy ADR-0070
     /// capabilities — io, net, log) tear down in reverse boot order
@@ -103,7 +102,6 @@ impl DriverCapability for HeadlessTimerCapability {
             kind_tick,
             kind_frame_stats,
             tick_period,
-            outbound: Arc::clone(&boot.outbound),
             _boot: boot,
             _hub: hub,
         })
@@ -118,7 +116,6 @@ impl DriverRunning for HeadlessTimerRunning {
             kind_tick,
             kind_frame_stats,
             tick_period,
-            outbound,
             _boot,
             _hub,
         } = *self;
@@ -143,11 +140,6 @@ impl DriverRunning for HeadlessTimerRunning {
             for mbox in subs {
                 queue.push(Mail::new(mbox, kind_tick, encode_empty::<Tick>(), 1));
             }
-            // ADR-0063 (issue 427: shared `frame_loop::DRAIN_BUDGET`).
-            // Budget-aware drain. Dispatcher deaths or wedges abort
-            // the substrate cleanly via `fatal_abort`.
-            frame_loop::drain_or_abort(&queue, &outbound);
-
             if frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
                 frame_loop::emit_frame_stats(&queue, kind_frame_stats, frame, 0);
                 let elapsed = started.elapsed().as_secs_f64().max(0.001);

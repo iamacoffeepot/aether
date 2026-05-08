@@ -488,11 +488,12 @@ impl ApplicationHandler<UserEvent> for App {
                         self.publish_window_size(size.width, size.height);
                     }
                 }
-                frame_loop::drain_or_abort(&self.queue, &self.outbound);
                 // ADR-0074 §Decision 5: render's inbox must quiesce
                 // before submit so any DrawTriangle / aether.camera
                 // mail this frame is integrated into the recorded
-                // pass.
+                // pass. (The pre-Phase-4 component drain barrier is
+                // retired; trampoline traps fail-fast directly via
+                // `NativeTransport::fatal_abort`.)
                 frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
                 if let Some(gpu) = self.gpu.as_mut() {
                     match pending_capture {
