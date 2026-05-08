@@ -667,6 +667,21 @@ impl TestBench {
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
             }
         }
+        // Wait for instanced actors (today: wasm trampolines) to
+        // process the just-pushed Tick before draining frame-bound
+        // caps. Without this, broadcasts the trampoline emits in
+        // response to the Tick land in the broadcast cap's inbox
+        // *after* `drain_frame_bound_or_abort` returns, and
+        // `pump_until_reply` sees `AdvanceResult` before the
+        // tick_observed broadcasts make the loopback round-trip.
+        // Production drivers don't share this wait — they let
+        // trampolines run free at their own cadence. Generous
+        // 5 s deadline matches the pre-Phase-4 implicit drain budget
+        // for slow CI; a never-quiescing actor surfaces as a test
+        // timeout, not a substrate abort (wedge detection waits on
+        // a future epoch-deadline ADR, symmetric with native).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let _ = self._passive.wait_instanced_quiesce(deadline);
         // ADR-0074 §Decision 5: render's inbox must quiesce before
         // submit so any DrawTriangle / aether.camera mail this frame
         // is integrated into the recorded pass. (The pre-Phase-4
