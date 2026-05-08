@@ -391,11 +391,23 @@ mod native {
         use aether_kinds::{EnvVar, ProcessExited, Spawn, SpawnResult};
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
-        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::chassis::Chassis;
+        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
+        use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::ReplyTo;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::Registry;
+
+        struct TestChassis;
+        impl Chassis for TestChassis {
+            const PROFILE: &'static str = "test";
+            type Driver = NeverDriver;
+            type Env = ();
+            fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+                unreachable!("TestChassis is driven by Builder::new directly in unit tests")
+            }
+        }
         use std::net::SocketAddr;
         use std::sync::mpsc;
         use std::time::Duration;
@@ -437,15 +449,15 @@ mod native {
         fn capability_boots_and_registers_mailbox() {
             let rt = Runtime::new().expect("tokio runtime");
             let (registry, mailer) = fresh_substrate();
-            let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<ProcessCapability>(cfg(&rt, unreachable_addr()))
-                .build()
+                .build_passive()
                 .expect("process capability boots");
             assert!(
                 registry.lookup(ProcessCapability::NAMESPACE).is_some(),
                 "aether.process mailbox registered",
             );
-            chassis.shutdown();
+            drop(chassis);
         }
 
         /// Manually constructed cap + a fully-wired test mailer so we

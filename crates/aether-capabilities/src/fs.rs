@@ -481,11 +481,22 @@ mod native {
         use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::actor::native::ctx::NativeCtx;
-        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::chassis::Chassis;
+        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::ReplyTo;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::Registry;
+
+        struct TestChassis;
+        impl Chassis for TestChassis {
+            const PROFILE: &'static str = "test";
+            type Driver = NeverDriver;
+            type Env = ();
+            fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+                unreachable!("TestChassis is driven by Builder::new directly in unit tests")
+            }
+        }
 
         /// Test fixture that bundles the cap, a fully-wired test mailer,
         /// and a `NativeBinding` long enough for handlers to borrow.
@@ -764,15 +775,15 @@ mod native {
         fn capability_boots_and_registers_mailbox() {
             let root = scratch_root("boots");
             let (registry, mailer) = fresh_substrate();
-            let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<IoCapability>(roots_under(&root))
-                .build()
+                .build_passive()
                 .expect("io capability boots");
             assert!(
                 registry.lookup(IoCapability::NAMESPACE).is_some(),
                 "io mailbox registered"
             );
-            chassis.shutdown();
+            drop(chassis);
             cleanup(&root);
         }
 
@@ -794,9 +805,9 @@ mod native {
             std::fs::create_dir_all(&roots.config).unwrap();
 
             let (registry, mailer) = fresh_substrate();
-            let result = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let result = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<IoCapability>(roots)
-                .build();
+                .build_passive();
             assert!(result.is_err(), "save root being a file must fail cap init");
             cleanup(&root);
         }
@@ -809,9 +820,9 @@ mod native {
             let (registry, mailer) = fresh_substrate();
             registry.register_closure(IoCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
-            let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<IoCapability>(roots_under(&root))
-                .build()
+                .build_passive()
                 .expect_err("collision must surface as BootError");
             assert!(matches!(
                 err,

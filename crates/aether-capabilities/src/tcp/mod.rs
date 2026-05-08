@@ -338,11 +338,23 @@ mod cap_native {
         };
         use aether_actor::Actor;
         use aether_data::{Kind, SessionToken, Uuid};
-        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::chassis::Chassis;
+        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
+        use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{ReplyTarget, ReplyTo};
+
+        struct TestChassis;
+        impl Chassis for TestChassis {
+            const PROFILE: &'static str = "test";
+            type Driver = NeverDriver;
+            type Env = ();
+            fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+                unreachable!("TestChassis is driven by Builder::new directly in unit tests")
+            }
+        }
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
             let registry = Arc::new(Registry::new());
@@ -409,9 +421,9 @@ mod cap_native {
         #[test]
         fn bind_then_list_then_unbind_roundtrip() {
             let (registry, mailer, rx) = fresh_substrate();
-            let _chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<TcpCapability>(())
-                .build()
+                .build_passive()
                 .expect("TcpCapability boots");
 
             // Bind to port 0 — let the OS pick a free port.
@@ -485,9 +497,9 @@ mod cap_native {
         #[test]
         fn bind_port_in_use_returns_err() {
             let (registry, mailer, rx) = fresh_substrate();
-            let _chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<TcpCapability>(())
-                .build()
+                .build_passive()
                 .expect("TcpCapability boots");
 
             let first: BindListenerResult = drive_and_decode(
@@ -531,9 +543,9 @@ mod cap_native {
         #[test]
         fn unbind_unknown_listener_errors() {
             let (registry, mailer, rx) = fresh_substrate();
-            let _chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<TcpCapability>(())
-                .build()
+                .build_passive()
                 .expect("TcpCapability boots");
 
             let reply: UnbindListenerResult = drive_and_decode(
@@ -569,10 +581,10 @@ mod cap_native {
             use std::net::TcpStream;
 
             let (registry, mailer, rx) = fresh_substrate();
-            let _chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<crate::BroadcastCapability>(())
                 .with_actor::<TcpCapability>(())
-                .build()
+                .build_passive()
                 .expect("caps boot");
 
             // Bind to OS-picked port.
@@ -650,9 +662,9 @@ mod cap_native {
         #[test]
         fn list_enumerates_two_concurrent_listeners() {
             let (registry, mailer, rx) = fresh_substrate();
-            let _chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<TcpCapability>(())
-                .build()
+                .build_passive()
                 .expect("TcpCapability boots");
 
             let _: BindListenerResult = drive_and_decode(

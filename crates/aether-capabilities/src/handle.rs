@@ -152,11 +152,22 @@ mod native {
         use super::{
             Arc, BootError, HandleCapability, HandlePublish, HandlePublishResult, HandleStore,
         };
-        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::chassis::Chassis;
+        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::outbound::EgressEvent;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{ReplyTarget, ReplyTo};
+
+        struct TestChassis;
+        impl Chassis for TestChassis {
+            const PROFILE: &'static str = "test";
+            type Driver = NeverDriver;
+            type Env = ();
+            fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+                unreachable!("TestChassis is driven by Builder::new directly in unit tests")
+            }
+        }
 
         fn fresh_substrate() -> (
             Arc<HandleStore>,
@@ -190,9 +201,9 @@ mod native {
         fn capability_routes_publish_through_dispatcher_thread() {
             let (store, mailer, registry, rx) = fresh_substrate();
 
-            let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<HandleCapability>(())
-                .build()
+                .build_passive()
                 .expect("capability boots");
 
             let id = registry
@@ -246,7 +257,7 @@ mod native {
             assert_eq!(stored_kind, KindId(0xCAFE));
             assert_eq!(stored_bytes, vec![1, 2, 3, 4, 5]);
 
-            chassis.shutdown();
+            drop(chassis);
         }
 
         /// Channel-drop shutdown: drop the chassis, the cap's dispatcher
@@ -255,13 +266,13 @@ mod native {
         fn shutdown_joins_dispatcher_thread() {
             let (_store, mailer, registry, _rx) = fresh_substrate();
 
-            let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<HandleCapability>(())
-                .build()
+                .build_passive()
                 .expect("capability boots");
 
             let start = Instant::now();
-            chassis.shutdown();
+            drop(chassis);
             let elapsed = start.elapsed();
             assert!(
                 elapsed < Duration::from_millis(500),
@@ -276,9 +287,9 @@ mod native {
             let (_store, mailer, registry, _rx) = fresh_substrate();
             registry.register_closure(HandleCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
-            let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<HandleCapability>(())
-                .build()
+                .build_passive()
                 .expect_err("collision must surface as BootError");
             assert!(matches!(
                 err,

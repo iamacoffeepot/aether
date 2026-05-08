@@ -876,10 +876,21 @@ mod native {
     mod tests {
         use super::*;
         use aether_actor::Actor;
-        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::chassis::Chassis;
+        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
         use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::Registry;
+
+        struct TestChassis;
+        impl Chassis for TestChassis {
+            const PROFILE: &'static str = "test";
+            type Driver = NeverDriver;
+            type Env = ();
+            fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+                unreachable!("TestChassis is driven by Builder::new directly in unit tests")
+            }
+        }
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
             let registry = Arc::new(Registry::new());
@@ -1028,18 +1039,18 @@ mod native {
         #[test]
         fn capability_boots_and_registers_mailbox() {
             let (registry, mailer) = fresh_substrate();
-            let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<AudioCapability>(AudioConfig {
                     disabled: true,
                     ..AudioConfig::default()
                 })
-                .build()
+                .build_passive()
                 .expect("audio capability boots");
             assert!(
                 registry.lookup(AudioCapability::NAMESPACE).is_some(),
                 "audio mailbox registered"
             );
-            chassis.shutdown();
+            drop(chassis);
         }
 
         /// Builder rejects a duplicate claim.
@@ -1048,12 +1059,12 @@ mod native {
             let (registry, mailer) = fresh_substrate();
             registry.register_closure(AudioCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
-            let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<AudioCapability>(AudioConfig {
                     disabled: true,
                     ..AudioConfig::default()
                 })
-                .build()
+                .build_passive()
                 .expect_err("collision must surface as BootError");
             assert!(matches!(
                 err,
