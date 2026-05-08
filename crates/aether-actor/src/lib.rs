@@ -60,8 +60,8 @@ mod ctx;
 pub mod local;
 pub mod log;
 mod mail;
+mod mailbox;
 mod sender;
-mod sink;
 mod slot;
 mod sync;
 mod transport;
@@ -80,7 +80,7 @@ pub use sender::{MailCtx, Sender};
 // 1-arg wasm alias (defined in `wasm`) under the same `Mailbox` name
 // so existing `aether_component::Mailbox<K>` consumers keep their
 // call shape when migrating to `aether_actor::*`.
-pub use sink::{ActorMailbox, KindId, resolve, resolve_mailbox};
+pub use mailbox::{ActorMailbox, KindId, resolve, resolve_mailbox};
 pub use slot::Slot;
 pub use sync::{WaitError, decode_wait_reply, wait_reply};
 pub use transport::MailTransport;

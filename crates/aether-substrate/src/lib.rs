@@ -70,7 +70,7 @@ pub use aether_actor::Actor;
 pub use boot::{SubstrateBoot, SubstrateBootBuilder};
 pub use capability::{
     ActorErased, BootError, BootedChassis, ChassisBuilder, ChassisCtx, DropOnShutdownClaim,
-    Envelope, FallbackRouter, FrameBoundClaim, MailboxClaim, SinkSender, WedgedFrameBound,
+    Envelope, FallbackRouter, FrameBoundClaim, MailboxClaim, MailboxSender, WedgedFrameBound,
 };
 pub use chassis::Chassis;
 pub use chassis_builder::{
@@ -90,7 +90,7 @@ pub use outbound::{
     DroppingBackend, EgressBackend, EgressEvent, HubOutbound, LogEntry, LogLevel, RecordingBackend,
 };
 pub use panic_hook::init_panic_hook;
-pub use registry::{MailboxEntry, Registry, SinkHandler};
+pub use registry::{MailboxEntry, MailboxHandler, Registry};
 pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
 pub use supervisor::{
     ComponentRouter, ComponentSendOutcome, DrainDeath, DrainOutcome, DrainSummary,

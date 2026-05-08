@@ -376,7 +376,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let captured: Arc<RwLock<Vec<Vec<u8>>>> = Arc::new(RwLock::new(Vec::new()));
         let captured_for_sink = Arc::clone(&captured);
-        registry.register_sink(
+        registry.register_closure(
             aether_kinds::HUB_BROADCAST_MAILBOX_NAME,
             Arc::new(
                 move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {
@@ -401,7 +401,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let captured: Arc<RwLock<Vec<Vec<u8>>>> = Arc::new(RwLock::new(Vec::new()));
         let captured_for_sink = Arc::clone(&captured);
-        registry.register_sink(
+        registry.register_closure(
             aether_kinds::HUB_BROADCAST_MAILBOX_NAME,
             Arc::new(
                 move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {

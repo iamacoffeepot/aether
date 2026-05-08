@@ -7,7 +7,7 @@ use core::marker::PhantomData;
 
 use aether_data::{Kind, Schema};
 
-use crate::sink::KindId;
+use crate::mailbox::KindId;
 
 /// Sentinel the substrate passes as the reply-handle parameter on
 /// the `receive` shim when there is no reply target — for
@@ -340,7 +340,7 @@ impl<'a> PriorState<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sink::KindId;
+    use crate::mailbox::KindId;
     use alloc::vec::Vec;
     use serde::{Deserialize, Serialize};
 

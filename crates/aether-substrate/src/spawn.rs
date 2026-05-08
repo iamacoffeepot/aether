@@ -213,9 +213,9 @@ impl Spawner {
 
         // 5-7. Register sink + Live entry + pre-load mail. The actor
         // registry's `insert_live` and the mailbox registry's
-        // `try_register_sink` each take their own write lock; a
+        // `try_register_closure` each take their own write lock; a
         // collision on either step rolls back. Sequence chosen so the
-        // sink is the gating step (its `try_register_sink` is the
+        // sink is the gating step (its `try_register_closure` is the
         // only op that can fail with a name collision against a peer
         // singleton claim — the actor_registry slot is keyed on
         // MailboxId which already passed the tombstone check).
@@ -227,7 +227,7 @@ impl Spawner {
         // and external mail addressed to the dead mailbox warn-drops.
         let strong_sender: Arc<mpsc::Sender<Envelope>> = Arc::new(tx.clone());
         let weak_for_handler = Arc::downgrade(&strong_sender);
-        let registered = self.registry.try_register_sink(
+        let registered = self.registry.try_register_closure(
             full_name.clone(),
             Arc::new(
                 move |kind: KindId,
@@ -301,7 +301,7 @@ impl Spawner {
             // a dangling sink that warn-drops mail. The actor itself
             // (init succeeded) drops naturally as `actor` falls out
             // of scope.
-            self.registry.remove_sink(id);
+            self.registry.remove_closure(id);
             return Err(SpawnError::SubnameInUse { full_name });
         }
 

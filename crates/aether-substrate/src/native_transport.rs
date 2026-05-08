@@ -262,7 +262,7 @@ impl NativeTransport {
     /// Block until the next envelope arrives on this actor's inbox.
     /// Returns `None` when the channel disconnects (the channel-drop
     /// shutdown signal — capability's `RunningCapability::shutdown`
-    /// dropped its [`crate::capability::SinkSender`], the registry
+    /// dropped its [`crate::capability::MailboxSender`], the registry
     /// handler can no longer upgrade its [`std::sync::Weak`], the
     /// inbox's last sender is gone) or when no inbox is installed.
     ///
@@ -523,7 +523,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Envelope>();
         // Register a sink so push routes somewhere instead of
         // hitting the unknown-recipient warn.
-        registry.register_sink(
+        registry.register_closure(
             "test.sink",
             Arc::new(move |kind, kind_name, origin, sender, payload, count| {
                 let _ = tx.send(Envelope {
@@ -626,7 +626,7 @@ mod tests {
     fn cross_class_wait_reply_aborts_when_caller_frame_bound_and_recipient_free_running() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_sink(
+        registry.register_closure(
             "test.free.running",
             Arc::new(move |kind, kind_name, origin, sender, payload, count| {
                 let _ = tx.send(Envelope {
@@ -664,7 +664,7 @@ mod tests {
     fn cross_class_wait_reply_does_not_abort_when_recipient_also_frame_bound() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_sink(
+        registry.register_closure(
             "test.frame.bound",
             Arc::new(move |kind, kind_name, origin, sender, payload, count| {
                 let _ = tx.send(Envelope {
@@ -709,7 +709,7 @@ mod tests {
     fn cross_class_wait_reply_does_not_abort_when_caller_free_running() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_sink(
+        registry.register_closure(
             "test.any",
             Arc::new(move |kind, kind_name, origin, sender, payload, count| {
                 let _ = tx.send(Envelope {
@@ -747,7 +747,7 @@ mod tests {
     fn wait_reply_prunes_pending_recipient_on_timeout() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_sink(
+        registry.register_closure(
             "test.prune",
             Arc::new(move |kind, kind_name, origin, sender, payload, count| {
                 let _ = tx.send(Envelope {

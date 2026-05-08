@@ -155,8 +155,8 @@ mod native {
             let id = registry
                 .lookup(LogCapability::NAMESPACE)
                 .expect("mailbox registered");
-            let MailboxEntry::Sink(handler) = registry.entry(id).expect("entry") else {
-                panic!("expected sink entry");
+            let MailboxEntry::Closure(handler) = registry.entry(id).expect("entry") else {
+                panic!("expected mailbox entry");
             };
 
             let batch = LogBatch {
@@ -183,7 +183,7 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (registry, mailer) = fresh_substrate();
-            registry.register_sink(LogCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            registry.register_closure(LogCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
             let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<LogCapability>(())

@@ -18,18 +18,19 @@ use crate::mail::{KindId, MailboxId, ReplyTo};
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
 use aether_data::{KindDescriptor, SchemaType};
 
-/// Handler invoked when mail is delivered to a substrate-owned sink.
-/// Called on a scheduler worker thread; must be `Send + Sync`.
-/// Arguments: the kind's id (`K::ID`, ADR-0030 schema hash), the
-/// kind's registered name (resolved by the dispatcher for diagnostic
-/// logging — sinks that only match on id can ignore it), the sending
-/// mailbox's registered name if the mail came from a component
-/// (`None` for substrate-core pushes with no sending mailbox, per
-/// ADR-0011), the remote origin of the mail per ADR-0008 / ADR-0037
+/// Closure invoked when mail is delivered to a chassis-bound mailbox.
+/// Called on the caller's thread (or the platform thread for input
+/// fan-out); must be `Send + Sync`. Arguments: the kind's id
+/// (`K::ID`, ADR-0030 schema hash), the kind's registered name
+/// (resolved by the dispatcher for diagnostic logging — handlers
+/// that only match on id can ignore it), the sending mailbox's
+/// registered name if the mail came from a component (`None` for
+/// substrate-core pushes with no sending mailbox, per ADR-0011),
+/// the remote reply target of the mail per ADR-0008 / ADR-0037
 /// (`Sender::Session` for hub-inbound, `ReplyTo::EngineMailbox` for
 /// bubbled-up, `ReplyTo::NONE` for substrate-local), payload bytes,
 /// and the kind-implied count.
-pub type SinkHandler =
+pub type MailboxHandler =
     Arc<dyn Fn(KindId, &str, Option<&str>, ReplyTo, &[u8], u32) + Send + Sync + 'static>;
 
 /// What a given mailbox actually is. The registry records this so the
@@ -40,8 +41,10 @@ pub type SinkHandler =
 pub enum MailboxEntry {
     /// Mail goes to a WASM component's `receive` function on a worker.
     Component,
-    /// Mail is handled inline by a substrate-native closure.
-    Sink(SinkHandler),
+    /// Mail is handled inline by a substrate-native closure (the
+    /// actor-as-mailbox wrap installed by `claim_mailbox` /
+    /// `register_closure`).
+    Closure(MailboxHandler),
     /// Mailbox has been explicitly dropped (ADR-0010). Mail addressed
     /// to a `Dropped` slot is discarded by the scheduler / ctx dispatch
     /// until the same name is re-registered, at which point the slot
@@ -223,8 +226,11 @@ impl Registry {
         };
         match slot.entry {
             MailboxEntry::Component => {}
-            MailboxEntry::Sink(_) => {
-                return Err(DropError::NotComponent { id, kind: "sink" });
+            MailboxEntry::Closure(_) => {
+                return Err(DropError::NotComponent {
+                    id,
+                    kind: "mailbox",
+                });
             }
             MailboxEntry::Dropped => return Err(DropError::AlreadyDropped(id)),
         }
@@ -232,49 +238,50 @@ impl Registry {
         Ok(slot.name.clone())
     }
 
-    /// Register a substrate-owned sink. Mail to this mailbox is handled
-    /// inline on the thread that delivered it (or on the host-function
-    /// caller thread if a component sent it). Panics on a name
-    /// collision — sinks are substrate-internal names, collisions are
-    /// bugs.
-    pub fn register_sink(&self, name: impl Into<String>, handler: SinkHandler) -> MailboxId {
+    /// Register a chassis-bound mailbox handled by `handler`. Mail to
+    /// this mailbox runs the closure inline on the delivering thread
+    /// (or on the host-function caller thread if a component sent it).
+    /// Panics on a name collision — these are substrate-internal
+    /// names, collisions are bugs.
+    pub fn register_closure(&self, name: impl Into<String>, handler: MailboxHandler) -> MailboxId {
         let name = name.into();
-        match self.insert(name.clone(), MailboxEntry::Sink(handler)) {
+        match self.insert(name.clone(), MailboxEntry::Closure(handler)) {
             Ok(id) => id,
             Err(_) => panic!("mailbox name already registered: {name}"),
         }
     }
 
-    /// Non-panicking variant of `register_sink`. Returns
+    /// Non-panicking variant of `register_closure`. Returns
     /// `NameConflict` on a collision so callers that legitimately
     /// race (ADR-0070 capability boots, where the side-by-side
-    /// extraction period puts legacy `register_sink` and a new
+    /// extraction period puts legacy `register_closure` and a new
     /// capability claim against the same mailbox during the
     /// transition diff) can surface the collision as a typed error
     /// rather than aborting the chassis.
-    pub fn try_register_sink(
+    pub fn try_register_closure(
         &self,
         name: impl Into<String>,
-        handler: SinkHandler,
+        handler: MailboxHandler,
     ) -> Result<MailboxId, NameConflict> {
-        self.insert(name.into(), MailboxEntry::Sink(handler))
+        self.insert(name.into(), MailboxEntry::Closure(handler))
     }
 
-    /// Issue 607 Phase 7: fully remove a sink entry. Used in the
-    /// chassis-boot unwind path when a singleton's `init` fails after
-    /// `try_register_sink` claimed the slot — the partial-boot state
-    /// must not leak into a later cap's namespace lookup. Returns
-    /// `true` if the entry existed and was a sink (and was removed),
-    /// `false` if the id is unknown or refers to a non-sink entry.
-    /// Component entries go through [`Self::drop_mailbox`] (which
-    /// transitions to `Dropped` rather than removing) — the lifecycle
-    /// difference is intentional: components can re-register the same
-    /// id after a drop, sinks are torn down on cap teardown and the
-    /// id can be freshly recreated.
-    pub(crate) fn remove_sink(&self, id: MailboxId) -> bool {
+    /// Issue 607 Phase 7: fully remove a closure-bound mailbox. Used
+    /// in the chassis-boot unwind path when a singleton's `init` fails
+    /// after `try_register_closure` claimed the slot — the partial-boot
+    /// state must not leak into a later cap's namespace lookup.
+    /// Returns `true` if the entry existed and was a `Closure` variant
+    /// (and was removed), `false` if the id is unknown or refers to a
+    /// non-closure entry. Component entries go through
+    /// [`Self::drop_mailbox`] (which transitions to `Dropped` rather
+    /// than removing) — the lifecycle difference is intentional:
+    /// components can re-register the same id after a drop, closure-
+    /// bound mailboxes are torn down on cap teardown and the id can be
+    /// freshly recreated.
+    pub(crate) fn remove_closure(&self, id: MailboxId) -> bool {
         let mut inner = self.inner.write().unwrap();
         match inner.mailboxes.get(&id) {
-            Some(slot) if matches!(slot.entry, MailboxEntry::Sink(_)) => {
+            Some(slot) if matches!(slot.entry, MailboxEntry::Closure(_)) => {
                 inner.mailboxes.remove(&id);
                 true
             }
@@ -298,8 +305,9 @@ impl Registry {
     }
 
     /// Fetch the entry for a mailbox id. Returns an owned clone so the
-    /// caller can drop the internal lock before invoking a sink handler
-    /// (avoids holding the registry lock across arbitrary user code).
+    /// caller can drop the internal lock before invoking a `Closure`
+    /// handler (avoids holding the registry lock across arbitrary user
+    /// code).
     pub fn entry(&self, id: MailboxId) -> Option<MailboxEntry> {
         self.inner
             .read()
@@ -310,7 +318,7 @@ impl Registry {
     }
 
     /// Reverse of `lookup`: name for a given mailbox id, or `None` if
-    /// the id is unknown. Used by the sink dispatch path to stamp
+    /// the id is unknown. Used by the closure dispatch path to stamp
     /// `origin` on observation mail (ADR-0011).
     pub fn mailbox_name(&self, id: MailboxId) -> Option<String> {
         self.inner
@@ -414,8 +422,9 @@ impl Registry {
     }
 
     /// Reverse of `kind_id`: name for a given id, or `None` if the id
-    /// isn't registered. Used by the scheduler to hand sink handlers
-    /// a kind name without them keeping their own map.
+    /// isn't registered. Used by the dispatch path to hand mailbox
+    /// closure handlers a kind name without them keeping their own
+    /// map.
     pub fn kind_name(&self, kind: KindId) -> Option<String> {
         self.inner
             .read()
@@ -487,18 +496,18 @@ mod tests {
     }
 
     #[test]
-    fn sink_handler_runs_on_call() {
+    fn closure_handler_runs_on_call() {
         let r = Registry::new();
         let counter = Arc::new(AtomicU32::new(0));
         let c2 = Arc::clone(&counter);
-        let id = r.register_sink(
+        let id = r.register_closure(
             "heartbeat",
             Arc::new(move |_kind_id, _kind, _origin, _sender, _bytes, count| {
                 c2.fetch_add(count, Ordering::SeqCst);
             }),
         );
-        let Some(MailboxEntry::Sink(h)) = r.entry(id) else {
-            panic!("expected sink")
+        let Some(MailboxEntry::Closure(h)) = r.entry(id) else {
+            panic!("expected closure entry")
         };
         // Test-side id is irrelevant — the handler ignores it.
         h(KindId(0), "aether.tick", None, ReplyTo::NONE, &[], 7);
@@ -517,7 +526,7 @@ mod tests {
     fn mailbox_ids_are_name_derived() {
         let r = Registry::new();
         let a = r.register_component("a");
-        let b = r.register_sink("b", Arc::new(|_, _, _, _, _, _| {}));
+        let b = r.register_closure("b", Arc::new(|_, _, _, _, _, _| {}));
         let c = r.register_component("c");
         assert_eq!(a, MailboxId::from_name("a"));
         assert_eq!(b, MailboxId::from_name("b"));
@@ -548,7 +557,7 @@ mod tests {
     fn mailbox_name_reverse_lookup() {
         let r = Registry::new();
         let a = r.register_component("physics");
-        let b = r.register_sink("hub.claude.broadcast", Arc::new(|_, _, _, _, _, _| {}));
+        let b = r.register_closure("hub.claude.broadcast", Arc::new(|_, _, _, _, _, _| {}));
         assert_eq!(r.mailbox_name(a).as_deref(), Some("physics"));
         assert_eq!(r.mailbox_name(b).as_deref(), Some("hub.claude.broadcast"));
         assert!(r.mailbox_name(MailboxId(999)).is_none());
@@ -782,11 +791,11 @@ mod tests {
     }
 
     #[test]
-    fn drop_mailbox_rejects_sink_and_unknown_and_repeat() {
+    fn drop_mailbox_rejects_closure_and_unknown_and_repeat() {
         let r = Registry::new();
-        let sink = r.register_sink("heartbeat", Arc::new(|_, _, _, _, _, _| {}));
+        let closure_id = r.register_closure("heartbeat", Arc::new(|_, _, _, _, _, _| {}));
         assert!(matches!(
-            r.drop_mailbox(sink),
+            r.drop_mailbox(closure_id),
             Err(DropError::NotComponent { .. })
         ));
         assert!(matches!(
