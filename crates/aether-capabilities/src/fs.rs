@@ -1,8 +1,8 @@
 //! `aether.fs` cap. Owns the full ADR-0041 stack — `FileAdapter` trait,
 //! `LocalFileAdapter`, `AdapterRegistry`, env-driven `NamespaceRoots`,
-//! and the [`IoCapability`] itself. Chassis mains resolve a
+//! and the [`FsCapability`] itself. Chassis mains resolve a
 //! [`NamespaceRoots`] (typically via [`NamespaceRoots::from_env`]) and
-//! pass it through `with_actor::<IoCapability>(roots)` — `init` builds
+//! pass it through `with_actor::<FsCapability>(roots)` — `init` builds
 //! the adapter registry and returns `BootError` on failure (per
 //! ADR-0063 fail-fast).
 //!
@@ -308,15 +308,15 @@ mod native {
     /// routes envelopes through the macro-emitted `NativeDispatch` impl;
     /// replies route via `ctx.reply(&result)` through the substrate's
     /// `Mailer::send_reply`.
-    pub struct IoCapability {
+    pub struct FsCapability {
         registry: Arc<AdapterRegistry>,
     }
 
     #[actor]
-    impl NativeActor for IoCapability {
+    impl NativeActor for FsCapability {
         /// Resolved namespace roots threaded through to `init`. Chassis
         /// mains build this via [`NamespaceRoots::from_env`] (or hand-roll
-        /// for tests) and pass to `with_actor::<IoCapability>(roots)`.
+        /// for tests) and pass to `with_actor::<FsCapability>(roots)`.
         type Config = NamespaceRoots;
 
         /// ADR-0041 + ADR-0074 Phase 5 chassis-owned mailbox.
@@ -457,9 +457,9 @@ mod native {
     }
 
     #[cfg(test)]
-    impl IoCapability {
+    impl FsCapability {
         /// Test-only direct constructor. Production boots through
-        /// `Builder::with_actor::<IoCapability>(roots)` which calls `init`;
+        /// `Builder::with_actor::<FsCapability>(roots)` which calls `init`;
         /// tests that want to drive handlers without spinning up a full
         /// chassis hand a pre-built registry directly.
         pub(crate) fn from_registry(registry: Arc<AdapterRegistry>) -> Self {
@@ -475,7 +475,7 @@ mod native {
             AdapterRegistry, Delete, FileAdapter, IoError, List, LocalFileAdapter, NamespaceRoots,
             Read, Write,
         };
-        use super::{Arc, IoCapability, Path, PathBuf};
+        use super::{Arc, FsCapability, Path, PathBuf};
         use aether_actor::Actor;
         use aether_data::MailboxId;
         use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
@@ -501,7 +501,7 @@ mod native {
         /// Test fixture that bundles the cap, a fully-wired test mailer,
         /// and a `NativeBinding` long enough for handlers to borrow.
         struct TestFixture {
-            cap: IoCapability,
+            cap: FsCapability,
             rx: std::sync::mpsc::Receiver<EgressEvent>,
             transport: NativeBinding,
         }
@@ -511,7 +511,7 @@ mod native {
                 let (mailer, rx) = test_mailer_and_rx();
                 let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
                 Self {
-                    cap: IoCapability::from_registry(reg),
+                    cap: FsCapability::from_registry(reg),
                     rx,
                     transport,
                 }
@@ -776,11 +776,11 @@ mod native {
             let root = scratch_root("boots");
             let (registry, mailer) = fresh_substrate();
             let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<IoCapability>(roots_under(&root))
+                .with_actor::<FsCapability>(roots_under(&root))
                 .build_passive()
                 .expect("io capability boots");
             assert!(
-                registry.lookup(IoCapability::NAMESPACE).is_some(),
+                registry.lookup(FsCapability::NAMESPACE).is_some(),
                 "io mailbox registered"
             );
             drop(chassis);
@@ -806,7 +806,7 @@ mod native {
 
             let (registry, mailer) = fresh_substrate();
             let result = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<IoCapability>(roots)
+                .with_actor::<FsCapability>(roots)
                 .build_passive();
             assert!(result.is_err(), "save root being a file must fail cap init");
             cleanup(&root);
@@ -818,16 +818,16 @@ mod native {
         fn duplicate_claim_rejects_with_typed_error() {
             let root = scratch_root("collide");
             let (registry, mailer) = fresh_substrate();
-            registry.register_closure(IoCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            registry.register_closure(FsCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
             let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<IoCapability>(roots_under(&root))
+                .with_actor::<FsCapability>(roots_under(&root))
                 .build_passive()
                 .expect_err("collision must surface as BootError");
             assert!(matches!(
                 err,
                 BootError::MailboxAlreadyClaimed { ref name }
-                    if name == IoCapability::NAMESPACE
+                    if name == FsCapability::NAMESPACE
             ));
             cleanup(&root);
         }

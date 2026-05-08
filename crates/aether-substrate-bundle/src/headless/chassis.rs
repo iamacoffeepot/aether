@@ -17,9 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_capabilities::{
-    BroadcastCapability, ComponentHostCapability, ComponentHostConfig, HandleCapability,
-    HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability, InputCapability,
-    InputConfig, IoCapability, LogCapability, TcpCapability, UnsupportedTestBenchCapability,
+    BroadcastCapability, ComponentHostCapability, ComponentHostConfig, FsCapability,
+    HandleCapability, HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability,
+    InputCapability, InputConfig, LogCapability, TcpCapability, UnsupportedTestBenchCapability,
     fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_data::{Kind, KindId};
@@ -182,7 +182,7 @@ impl HeadlessChassis {
             .with_actor::<LogCapability>(())
             .with_actor::<InputCapability>(input_config)
             .with_actor::<ComponentHostCapability>(component_host_config)
-            .with_actor::<IoCapability>(namespace_roots)
+            .with_actor::<FsCapability>(namespace_roots)
             .with_actor::<HttpCapability>(http)
             .with_actor::<TcpCapability>(())
             .with_actor::<HeadlessRenderCapability>(())

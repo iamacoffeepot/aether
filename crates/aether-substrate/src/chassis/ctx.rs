@@ -1258,7 +1258,7 @@ impl BootedChassis {
     /// Used by chassis mains to compose chassis-conditional
     /// capabilities on top of the universal capabilities
     /// `SubstrateBoot::build` already installed (today: the bundle
-    /// hooks `IoCapability` here in TestBench because adapter init
+    /// hooks `FsCapability` here in TestBench because adapter init
     /// can fail silently on systems without writable default roots).
     /// Boots run in call order; shutdown tears down in reverse,
     /// exactly like the build-time path.

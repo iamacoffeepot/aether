@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use aether_capabilities::IoCapability;
+use aether_capabilities::FsCapability;
 use aether_data::{Kind, encode_empty};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
 use aether_substrate::{
@@ -90,7 +90,7 @@ fn main() -> anyhow::Result<()> {
     // Io cap on the `boot.add_actor` path — the binary fails fast on
     // adapter init failure (the in-process API silent-skips for
     // systems without writable default roots).
-    boot.add_actor::<IoCapability>(namespace_roots)?;
+    boot.add_actor::<FsCapability>(namespace_roots)?;
 
     let (width, height) = parse_size_env();
     let gpu = Gpu::new(width, height, render_handles.clone());
