@@ -6,9 +6,17 @@
 //! [`LogDrainSlot`] with the chassis-declared drain mailbox.
 //! [`drain_buffer`] reads both slots and ships a [`LogBatch`] to that
 //! mailbox at handler exit (and on `WARN`/`ERROR` priority flush
-//! within the layer). The chassis dispatcher stamps the actor's own
-//! transport-backed dispatch per handler via [`with_actor_dispatch`],
-//! so the egress runs through the actor's own send path.
+//! within the layer).
+//!
+//! Native send path is plumbed via a fn-pointer hook the substrate
+//! registers at boot ([`set_native_log_shipper`]). This keeps the
+//! TLS-stamped dispatch + `MailDispatch` trait + dispatcher trampoline
+//! plumbing in `aether-substrate` (where chassis machinery lives) while
+//! the SDK contract — `LogBuffer`, `LogDrainSlot`, `drain_buffer`
+//! itself — stays in this crate so the `#[handlers]` derive can emit
+//! a single path that resolves on both wasm and native targets.
+//! Wasm doesn't need a hook: it ships through [`crate::WASM_TRANSPORT`]
+//! directly since the linear memory IS the actor.
 //!
 //! There is no host branch. `tracing::*` events fired outside any
 //! actor stamp (substrate boot, scheduler thread, panic hook) do NOT
@@ -97,89 +105,52 @@ pub fn current_drain() -> Option<MailboxId> {
     if raw.0 == 0 { None } else { Some(raw) }
 }
 
-/// Mail egress hook the actor-aware drain path call into. The
-/// chassis stamps an actor's transport per-handler via
-/// [`with_actor_dispatch`]; [`drain_buffer`] reads the stamp to
-/// route the actor's [`LogBatch`] through the same transport every
-/// other outbound `send` uses. `aether-actor` doesn't name
-/// `LogCapability` — the destination mailbox is per-actor-stamped via
-/// [`LogDrainSlot`] (issue #601).
-pub trait MailDispatch: Send + Sync {
-    /// Push `payload` (already postcard-encoded `LogBatch` bytes) to
-    /// `mailbox`. The implementer's `send_mail` attaches the actor's
-    /// sender id automatically.
-    fn send(&self, mailbox: MailboxId, kind: KindId, payload: &[u8]);
-}
-
-/// Every [`crate::mail::transport::MailTransport`] is a valid
-/// [`MailDispatch`] — `send_mail`'s signature already matches
-/// what the drain path needs. Lets the chassis pass an actor's
-/// transport into [`with_actor_dispatch`] without a hand-rolled
-/// shim per call site.
-impl<T> MailDispatch for T
-where
-    T: crate::mail::transport::MailTransport + Send + Sync + ?Sized,
-{
-    fn send(&self, mailbox: MailboxId, kind: KindId, payload: &[u8]) {
-        let _ =
-            crate::mail::transport::MailTransport::send_mail(self, mailbox.0, kind.0, payload, 1);
-    }
-}
-
-/// Native-only per-handler dispatch stamp. Wasm runs single-
-/// threaded inside one linear memory and uses
-/// [`crate::WASM_TRANSPORT`] directly — the chassis-stamp /
-/// TLS dance only matters on native where each actor owns its own
-/// transport instance.
+/// Native log-shipper hook signature. Substrate registers an
+/// implementation at boot via [`set_native_log_shipper`]; the native
+/// arm of [`drain_buffer`] calls through the registered pointer.
+/// The shipper resolves the per-thread stamped dispatch internally
+/// (the TLS storage + dispatcher trampoline live in
+/// `aether-substrate::runtime::log_install`).
+///
+/// Bytes are postcard-encoded `LogBatch` payloads — the actor side
+/// owns the encoding because `LogBatch` is the same kind on both
+/// targets and the wasm arm encodes the same way.
 #[cfg(not(target_arch = "wasm32"))]
-mod native_tls {
+pub type NativeLogShipper = fn(mailbox: MailboxId, kind: KindId, payload: &[u8]);
+
+#[cfg(not(target_arch = "wasm32"))]
+mod shipper {
     extern crate std;
-    use super::MailDispatch;
-    use core::cell::Cell;
+    use super::NativeLogShipper;
+    use core::sync::atomic::{AtomicPtr, Ordering};
 
-    std::thread_local! {
-        pub(super) static ACTOR_DISPATCH: Cell<Option<&'static dyn MailDispatch>> =
-            const { Cell::new(None) };
+    pub(super) static HOOK: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+    pub(super) fn store(hook: NativeLogShipper) {
+        HOOK.store(hook as *mut (), Ordering::Release);
+    }
+
+    pub(super) fn load() -> Option<NativeLogShipper> {
+        let raw = HOOK.load(Ordering::Acquire);
+        if raw.is_null() {
+            None
+        } else {
+            // SAFETY: the only way a non-null pointer lands in `HOOK` is
+            // through `store(hook: NativeLogShipper)`, which casts a
+            // valid `fn` pointer of that exact signature. Round-trips
+            // through `*mut ()` for `AtomicPtr` storage.
+            Some(unsafe { core::mem::transmute::<*mut (), NativeLogShipper>(raw) })
+        }
     }
 }
 
-/// RAII guard restoring the prior actor-dispatch stamp on drop.
+/// Install the native log-shipper hook. Called from
+/// `aether-substrate`'s boot path before any actor dispatcher runs.
+/// Idempotent — overwriting is fine; the substrate registers the same
+/// shipper across reinitialisation in tests.
 #[cfg(not(target_arch = "wasm32"))]
-struct DispatchGuard {
-    prev: Option<&'static dyn MailDispatch>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for DispatchGuard {
-    fn drop(&mut self) {
-        native_tls::ACTOR_DISPATCH.with(|slot| slot.set(self.prev));
-    }
-}
-
-/// Stamp `dispatch` as the current actor's mail-egress shim for the
-/// duration of `f`. The chassis dispatcher trampoline calls this
-/// around each handler dispatch (and around `init` if the actor's
-/// init body emits log events). Restored on return / panic via the
-/// drop guard.
-///
-/// Native-only: wasm doesn't carry a per-actor dispatch stamp —
-/// `WASM_TRANSPORT` is a process global covering the single actor
-/// in each linear memory.
-///
-/// SAFETY: the caller guarantees `dispatch` outlives `f`. Inside
-/// the closure the stamped reference is treated as `'static`; the
-/// guard restores the prior pointer before the surrounding stack
-/// frame returns, so no `'static` reference escapes.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn with_actor_dispatch<R>(dispatch: &dyn MailDispatch, f: impl FnOnce() -> R) -> R {
-    let static_ref: &'static dyn MailDispatch =
-        unsafe { core::mem::transmute::<&dyn MailDispatch, &'static dyn MailDispatch>(dispatch) };
-    let _guard = native_tls::ACTOR_DISPATCH.with(|slot| {
-        let prev = slot.get();
-        slot.set(Some(static_ref));
-        DispatchGuard { prev }
-    });
-    f()
+pub fn set_native_log_shipper(hook: NativeLogShipper) {
+    shipper::store(hook);
 }
 
 /// Pop the current actor's [`LogBuffer`] and ship the contents as
@@ -210,10 +181,14 @@ pub fn drain_buffer() {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let Some(dispatch) = native_tls::ACTOR_DISPATCH.with(|slot| slot.get()) else {
+        let Some(shipper) = shipper::load() else {
             return;
         };
-        ship_batch(dispatch, mailbox, batch);
+        let bytes = match postcard::to_allocvec(&batch) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        shipper(mailbox, <LogBatch as Kind>::ID, &bytes);
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -290,14 +265,6 @@ fn ship_batch_via_wasm_transport(mailbox: MailboxId, batch: LogBatch) {
         Err(_) => return,
     };
     crate::WASM_TRANSPORT.send_mail(mailbox.0, <LogBatch as Kind>::ID.0, &bytes, 1);
-}
-
-fn ship_batch(dispatch: &dyn MailDispatch, mailbox: MailboxId, batch: LogBatch) {
-    let bytes = match postcard::to_allocvec(&batch) {
-        Ok(b) => b,
-        Err(_) => return,
-    };
-    dispatch.send(mailbox, <LogBatch as Kind>::ID, &bytes);
 }
 
 /// Hard cap on the per-event message bytes. Trims oversize

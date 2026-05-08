@@ -9,20 +9,109 @@
 //! and per-actor [`aether_actor::log::LogDrainSlot`] handle every
 //! actor-bound case.
 //!
-//! Single entry point:
+//! Two entry points:
 //!   - [`init_subscriber`] — called from `SubstrateBoot::build`.
 //!     Installs `EnvFilter` + `tsfmt::Layer` + [`ActorAwareLayer`]
-//!     as `tracing`'s global default. Idempotent (later calls
-//!     no-op via `try_init`).
+//!     as `tracing`'s global default, and registers
+//!     [`ship_via_stamped_dispatch`] as `aether-actor::log`'s native
+//!     log shipper. Idempotent.
+//!   - [`with_actor_dispatch`] — called from each chassis dispatcher
+//!     trampoline. Stamps an actor's transport into TLS for the
+//!     duration of a handler so the actor's `tracing::*` events drain
+//!     through that transport's `send_mail`.
+
+use std::cell::Cell;
 
 use aether_actor::Local;
-use aether_actor::log::{LogBuffer, drain_buffer, encode_event};
+use aether_actor::log::{LogBuffer, NativeLogShipper, drain_buffer, encode_event};
+use aether_actor::mail::transport::MailTransport;
+use aether_data::{KindId, MailboxId};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, fmt as tsfmt};
+
+/// Mail egress hook the actor-aware drain path calls into. Lives in
+/// the substrate side because chassis machinery is the only consumer
+/// — the wasm side ships through `WASM_TRANSPORT` directly. The
+/// chassis stamps an actor's transport per-handler via
+/// [`with_actor_dispatch`]; the substrate-registered
+/// `aether-actor` shipper hook ([`ship_via_stamped_dispatch`])
+/// reads the stamp to route the actor's `LogBatch` through the same
+/// transport every other outbound `send` uses.
+pub trait MailDispatch: Send + Sync {
+    /// Push `payload` (already postcard-encoded `LogBatch` bytes) to
+    /// `mailbox`. The implementer's `send_mail` attaches the actor's
+    /// sender id automatically.
+    fn send(&self, mailbox: MailboxId, kind: KindId, payload: &[u8]);
+}
+
+/// Every [`aether_actor::mail::transport::MailTransport`] is a valid
+/// [`MailDispatch`] — `send_mail`'s signature already matches what the
+/// drain path needs. Lets the chassis pass an actor's transport into
+/// [`with_actor_dispatch`] without a hand-rolled shim per call site.
+impl<T> MailDispatch for T
+where
+    T: MailTransport + Send + Sync + ?Sized,
+{
+    fn send(&self, mailbox: MailboxId, kind: KindId, payload: &[u8]) {
+        let _ = MailTransport::send_mail(self, mailbox.0, kind.0, payload, 1);
+    }
+}
+
+std::thread_local! {
+    static ACTOR_DISPATCH: Cell<Option<&'static dyn MailDispatch>> =
+        const { Cell::new(None) };
+}
+
+/// RAII guard restoring the prior actor-dispatch stamp on drop.
+struct DispatchGuard {
+    prev: Option<&'static dyn MailDispatch>,
+}
+
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        ACTOR_DISPATCH.with(|slot| slot.set(self.prev));
+    }
+}
+
+/// Stamp `dispatch` as the current actor's mail-egress shim for the
+/// duration of `f`. The chassis dispatcher trampoline calls this
+/// around each handler dispatch (and around `init` if the actor's
+/// init body emits log events). Restored on return / panic via the
+/// drop guard.
+///
+/// Native-only: wasm doesn't carry a per-actor dispatch stamp —
+/// `WASM_TRANSPORT` is a process global covering the single actor in
+/// each linear memory.
+///
+/// SAFETY: the caller guarantees `dispatch` outlives `f`. Inside the
+/// closure the stamped reference is treated as `'static`; the guard
+/// restores the prior pointer before the surrounding stack frame
+/// returns, so no `'static` reference escapes.
+pub fn with_actor_dispatch<R>(dispatch: &dyn MailDispatch, f: impl FnOnce() -> R) -> R {
+    let static_ref: &'static dyn MailDispatch =
+        unsafe { core::mem::transmute::<&dyn MailDispatch, &'static dyn MailDispatch>(dispatch) };
+    let _guard = ACTOR_DISPATCH.with(|slot| {
+        let prev = slot.get();
+        slot.set(Some(static_ref));
+        DispatchGuard { prev }
+    });
+    f()
+}
+
+/// Native log shipper registered with `aether-actor::log` at boot.
+/// Reads the TLS-stamped [`MailDispatch`] and ships `payload` through
+/// it. No-op when no dispatch is stamped (out-of-actor `drain_buffer`
+/// calls — shouldn't happen in normal flow).
+fn ship_via_stamped_dispatch(mailbox: MailboxId, kind: KindId, payload: &[u8]) {
+    let Some(dispatch) = ACTOR_DISPATCH.with(|slot| slot.get()) else {
+        return;
+    };
+    dispatch.send(mailbox, kind, payload);
+}
 
 /// Tracing layer that routes in-actor events into the per-actor
 /// [`LogBuffer`] for the chassis-installed drain to ship as
@@ -63,8 +152,12 @@ const FILTER_ENV: &str = "AETHER_LOG_FILTER";
 
 /// Install the tracing subscriber stack: `EnvFilter` (reads
 /// `AETHER_LOG_FILTER`, default `info`) + `tsfmt::Layer` to stderr +
-/// [`ActorAwareLayer`]. Called from `SubstrateBoot::build`;
-/// idempotent (later calls no-op via `try_init`).
+/// [`ActorAwareLayer`]. Also registers [`ship_via_stamped_dispatch`]
+/// as `aether-actor::log`'s native shipper so `drain_buffer` calls
+/// from native actors route through the chassis-stamped transport.
+/// Called from `SubstrateBoot::build`; idempotent (later calls no-op
+/// via `try_init`; the shipper hook overwrite is a no-op since it's
+/// the same pointer).
 pub fn init_subscriber() {
     let filter = EnvFilter::try_from_env(FILTER_ENV).unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::registry()
@@ -72,4 +165,5 @@ pub fn init_subscriber() {
         .with(tsfmt::layer().with_writer(std::io::stderr))
         .with(ActorAwareLayer)
         .try_init();
+    aether_actor::log::set_native_log_shipper(ship_via_stamped_dispatch as NativeLogShipper);
 }

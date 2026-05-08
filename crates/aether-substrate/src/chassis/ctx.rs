@@ -789,8 +789,8 @@ where
         // Issue #581: drain the `LogBuffer` after init so cap-boot
         // tracing events surface to LogCapability promptly.
         aether_actor::local::with_stamped(&slots, || {
-            aether_actor::log::with_actor_dispatch(
-                &*transport as &dyn aether_actor::log::MailDispatch,
+            crate::runtime::log_install::with_actor_dispatch(
+                &*transport as &dyn crate::runtime::log_install::MailDispatch,
                 || {
                     let r = A::init(config, &mut init_ctx);
                     aether_actor::log::drain_buffer();
@@ -837,8 +837,8 @@ where
                     None => break,
                 };
                 aether_actor::local::with_stamped(&slots, || {
-                    aether_actor::log::with_actor_dispatch(
-                        &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                    crate::runtime::log_install::with_actor_dispatch(
+                        &*transport_for_thread as &dyn crate::runtime::log_install::MailDispatch,
                         || {
                             let mut native_ctx = crate::actor::native::ctx::NativeCtx::new(
                                 &transport_for_thread,
@@ -883,8 +883,8 @@ where
             }
             while let Some(env) = transport_for_thread.try_recv() {
                 aether_actor::local::with_stamped(&slots, || {
-                    aether_actor::log::with_actor_dispatch(
-                        &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                    crate::runtime::log_install::with_actor_dispatch(
+                        &*transport_for_thread as &dyn crate::runtime::log_install::MailDispatch,
                         || {
                             let mut native_ctx = crate::actor::native::ctx::NativeCtx::new(
                                 &transport_for_thread,
@@ -910,8 +910,8 @@ where
                 }
             }
             aether_actor::local::with_stamped(&slots, || {
-                aether_actor::log::with_actor_dispatch(
-                    &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
+                crate::runtime::log_install::with_actor_dispatch(
+                    &*transport_for_thread as &dyn crate::runtime::log_install::MailDispatch,
                     || {
                         let mut close_ctx = crate::actor::native::ctx::NativeCtx::new(
                             &transport_for_thread,
