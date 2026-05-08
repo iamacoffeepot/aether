@@ -297,10 +297,10 @@ mod tests {
     /// run-time. (Equivalent of the old catalog's
     /// `default_catalog_covers_load_component` test.)
     #[test]
-    fn descriptors_cover_load_component_and_io_write() {
+    fn descriptors_cover_load_component_and_fs_write() {
         let descs = aether_kinds::descriptors::all();
         let names: Vec<&str> = descs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"aether.component.load"));
-        assert!(names.contains(&"aether.io.write"));
+        assert!(names.contains(&"aether.fs.write"));
     }
 }

@@ -307,10 +307,10 @@ fn require_wgpu_only() -> bool {
     false
 }
 
-const IO_SINK: &str = "aether.io";
+const FS_MAILBOX: &str = "aether.fs";
 const IO_NAMESPACE_SAVE: &str = "save";
 
-/// `aether.io.write` followed by `aether.io.read` round-trips the
+/// `aether.fs.write` followed by `aether.fs.read` round-trips the
 /// bytes through the local-file adapter (ADR-0041). Both replies
 /// echo the originating namespace + path for correlation; the read
 /// reply also carries the bytes verbatim.
@@ -331,7 +331,7 @@ fn io_write_then_read_round_trips_in_save_namespace() {
 
     let write_reply: WriteResult = bench
         .send_and_await_reply(
-            IO_SINK,
+            FS_MAILBOX,
             &Write {
                 namespace: IO_NAMESPACE_SAVE.to_owned(),
                 path: path.clone(),
@@ -352,7 +352,7 @@ fn io_write_then_read_round_trips_in_save_namespace() {
 
     let read_reply: ReadResult = bench
         .send_and_await_reply(
-            IO_SINK,
+            FS_MAILBOX,
             &Read {
                 namespace: IO_NAMESPACE_SAVE.to_owned(),
                 path: path.clone(),
@@ -373,8 +373,8 @@ fn io_write_then_read_round_trips_in_save_namespace() {
     }
 }
 
-/// `aether.io.delete` removes a previously-written file; a
-/// follow-up `aether.io.read` of the same path returns
+/// `aether.fs.delete` removes a previously-written file; a
+/// follow-up `aether.fs.read` of the same path returns
 /// `Err { NotFound }`.
 #[test]
 fn io_delete_removes_written_file() {
@@ -391,7 +391,7 @@ fn io_delete_removes_written_file() {
     let path = "io-delete.bin".to_owned();
     let _: WriteResult = bench
         .send_and_await_reply(
-            IO_SINK,
+            FS_MAILBOX,
             &Write {
                 namespace: IO_NAMESPACE_SAVE.to_owned(),
                 path: path.clone(),
@@ -402,7 +402,7 @@ fn io_delete_removes_written_file() {
 
     let delete_reply: DeleteResult = bench
         .send_and_await_reply(
-            IO_SINK,
+            FS_MAILBOX,
             &Delete {
                 namespace: IO_NAMESPACE_SAVE.to_owned(),
                 path: path.clone(),
@@ -416,7 +416,7 @@ fn io_delete_removes_written_file() {
 
     let read_after_delete: ReadResult = bench
         .send_and_await_reply(
-            IO_SINK,
+            FS_MAILBOX,
             &Read {
                 namespace: IO_NAMESPACE_SAVE.to_owned(),
                 path: path.clone(),
@@ -433,7 +433,7 @@ fn io_delete_removes_written_file() {
     }
 }
 
-/// `aether.io.list` enumerates entries under a prefix. After a
+/// `aether.fs.list` enumerates entries under a prefix. After a
 /// write to `<sandbox>/probe-list.bin`, listing the empty prefix
 /// in `save` returns an entry list containing the bare filename.
 #[test]
@@ -451,7 +451,7 @@ fn io_list_returns_written_path() {
     let path = "probe-list.bin".to_owned();
     let _: WriteResult = bench
         .send_and_await_reply(
-            IO_SINK,
+            FS_MAILBOX,
             &Write {
                 namespace: IO_NAMESPACE_SAVE.to_owned(),
                 path: path.clone(),
@@ -462,7 +462,7 @@ fn io_list_returns_written_path() {
 
     let list_reply: ListResult = bench
         .send_and_await_reply(
-            IO_SINK,
+            FS_MAILBOX,
             &List {
                 namespace: IO_NAMESPACE_SAVE.to_owned(),
                 prefix: String::new(),
@@ -496,7 +496,7 @@ fn io_read_unknown_path_returns_not_found() {
 
     let read_reply: ReadResult = bench
         .send_and_await_reply(
-            IO_SINK,
+            FS_MAILBOX,
             &Read {
                 namespace: IO_NAMESPACE_SAVE.to_owned(),
                 path: "nonexistent-do-not-create.bin".to_owned(),

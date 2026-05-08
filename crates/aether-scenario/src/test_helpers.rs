@@ -52,7 +52,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use aether_substrate_bundle::capabilities::io::NamespaceRoots;
+use aether_substrate_bundle::capabilities::fs::NamespaceRoots;
 use aether_substrate_bundle::test_bench::TestBench;
 
 use crate::{Runner, Script, Step};
@@ -187,7 +187,7 @@ pub fn test_namespace_roots(save_dir: &Path) -> NamespaceRoots {
 /// Write `bytes` into the sandbox at filename `name`, returning the
 /// bare filename — the substrate resolves it relative to the
 /// namespace root, so callers pass this as the `path` field of
-/// `aether.io.read` / `aether.mesh.load` / etc.
+/// `aether.fs.read` / `aether.mesh.load` / etc.
 ///
 /// Panics if `init_save_sandbox` was never called in this process —
 /// the helper resolves the dir from the same `OnceLock` that

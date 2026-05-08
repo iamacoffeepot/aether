@@ -31,7 +31,7 @@ use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tic
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use crate::hub::HubProtocolBackend;
 use aether_actor::Actor;
-use aether_capabilities::{IoCapability, RenderCapability, io::NamespaceRoots};
+use aether_capabilities::{IoCapability, RenderCapability, fs::NamespaceRoots};
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
     capture::CaptureQueue,
@@ -539,7 +539,7 @@ impl TestBench {
     /// sleep briefly to give ADR-0070 capability dispatcher threads
     /// time to wake up — `IoCapability` and friends poll their mpsc
     /// receivers on a 100ms `recv_timeout`, so without this sleep a
-    /// capability-mediated reply (e.g. `aether.io.write` →
+    /// capability-mediated reply (e.g. `aether.fs.write` →
     /// `WriteResult`) can't beat the bail-out check.
     fn pump_until_reply<R>(&mut self, cid: u64, expected: &'static str) -> Result<R, TestBenchError>
     where

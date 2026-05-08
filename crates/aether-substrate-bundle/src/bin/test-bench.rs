@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
 
     // Per issue 464, this `main()` is the env-reading edge.
     let hub_url = std::env::var("AETHER_HUB_URL").ok();
-    let namespace_roots = aether_capabilities::io::NamespaceRoots::from_env();
+    let namespace_roots = aether_capabilities::fs::NamespaceRoots::from_env();
 
     let env = TestBenchEnv {
         name: "test-bench".to_owned(),

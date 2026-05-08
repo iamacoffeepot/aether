@@ -1,4 +1,4 @@
-//! `aether.io` cap. Owns the full ADR-0041 stack — `FileAdapter` trait,
+//! `aether.fs` cap. Owns the full ADR-0041 stack — `FileAdapter` trait,
 //! `LocalFileAdapter`, `AdapterRegistry`, env-driven `NamespaceRoots`,
 //! and the [`IoCapability`] itself. Chassis mains resolve a
 //! [`NamespaceRoots`] (typically via [`NamespaceRoots::from_env`]) and
@@ -7,7 +7,7 @@
 //! ADR-0063 fail-fast).
 //!
 //! Threading: the actor dispatcher thread pulls envelopes from the
-//! `aether.io` mailbox and routes them through the macro-emitted
+//! `aether.fs` mailbox and routes them through the macro-emitted
 //! `NativeDispatch::__aether_dispatch_envelope`. Adapter calls run
 //! synchronously on that thread; ADR-0041 flagged a future host-fn
 //! fast path for asset-sized streaming.
@@ -303,7 +303,7 @@ mod native {
         }
     }
 
-    /// `aether.io` mailbox cap. Owns the resolved adapter registry +
+    /// `aether.fs` mailbox cap. Owns the resolved adapter registry +
     /// namespace roots. The dispatcher thread holds an `Arc<Self>` and
     /// routes envelopes through the macro-emitted `NativeDispatch` impl;
     /// replies route via `ctx.reply(&result)` through the substrate's
@@ -320,7 +320,7 @@ mod native {
         type Config = NamespaceRoots;
 
         /// ADR-0041 + ADR-0074 Phase 5 chassis-owned mailbox.
-        const NAMESPACE: &'static str = "aether.io";
+        const NAMESPACE: &'static str = "aether.fs";
 
         /// Build the adapter registry from the resolved roots. Adapter
         /// init failure surfaces as `BootError::Other(io::Error)` so
