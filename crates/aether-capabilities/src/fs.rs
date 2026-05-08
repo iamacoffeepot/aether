@@ -1,8 +1,8 @@
 //! `aether.fs` cap. Owns the full ADR-0041 stack — `FileAdapter` trait,
 //! `LocalFileAdapter`, `AdapterRegistry`, env-driven `NamespaceRoots`,
-//! and the [`IoCapability`] itself. Chassis mains resolve a
+//! and the [`FsCapability`] itself. Chassis mains resolve a
 //! [`NamespaceRoots`] (typically via [`NamespaceRoots::from_env`]) and
-//! pass it through `with_actor::<IoCapability>(roots)` — `init` builds
+//! pass it through `with_actor::<FsCapability>(roots)` — `init` builds
 //! the adapter registry and returns `BootError` on failure (per
 //! ADR-0063 fail-fast).
 //!
@@ -20,13 +20,13 @@ use std::sync::Arc;
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
-use aether_kinds::{Delete, IoError, List, Read, Write};
+use aether_kinds::{Delete, FsError, List, Read, Write};
 
 /// Result shape used throughout the adapter layer. The variants of
-/// `IoError` map directly onto ADR-0041 §1's reply enums, so the
+/// `FsError` map directly onto ADR-0041 §1's reply enums, so the
 /// chassis dispatcher can forward an adapter failure without
 /// translation.
-pub type IoResult<T> = Result<T, IoError>;
+pub type FsResult<T> = Result<T, FsError>;
 
 /// Storage backend for one namespace. Implementations decide what
 /// `path` means against their own root — local files resolve it
@@ -36,20 +36,20 @@ pub type IoResult<T> = Result<T, IoError>;
 /// adapter's responsibility; callers hand the string through
 /// unchanged from the incoming mail.
 ///
-/// All four methods return `IoResult<_>`. Any backend-specific
+/// All four methods return `FsResult<_>`. Any backend-specific
 /// detail the caller might want (OS errno text, HTTP status) rides
-/// inside `IoError::AdapterError(String)`.
+/// inside `FsError::AdapterError(String)`.
 pub trait FileAdapter: Send + Sync {
-    fn read(&self, path: &str) -> IoResult<Vec<u8>>;
-    fn write(&self, path: &str, bytes: &[u8]) -> IoResult<()>;
-    fn delete(&self, path: &str) -> IoResult<()>;
-    fn list(&self, prefix: &str) -> IoResult<Vec<String>>;
+    fn read(&self, path: &str) -> FsResult<Vec<u8>>;
+    fn write(&self, path: &str, bytes: &[u8]) -> FsResult<()>;
+    fn delete(&self, path: &str) -> FsResult<()>;
+    fn list(&self, prefix: &str) -> FsResult<Vec<String>>;
 }
 
 /// Namespace → adapter table built at chassis boot. The cap reads
 /// `namespace` off an incoming `Read`/`Write`/etc. mail, looks up
 /// the adapter here, and either drives the call or replies
-/// `IoError::UnknownNamespace`. Registration is one-shot at boot;
+/// `FsError::UnknownNamespace`. Registration is one-shot at boot;
 /// hot-swap is out of scope.
 pub struct AdapterRegistry {
     adapters: HashMap<String, Arc<dyn FileAdapter>>,
@@ -123,13 +123,13 @@ impl LocalFileAdapter {
         &self.root
     }
 
-    fn resolve(&self, path: &str) -> IoResult<PathBuf> {
+    fn resolve(&self, path: &str) -> FsResult<PathBuf> {
         if path.starts_with('/') {
-            return Err(IoError::Forbidden);
+            return Err(FsError::Forbidden);
         }
         for component in path.split('/') {
             if component == ".." {
-                return Err(IoError::Forbidden);
+                return Err(FsError::Forbidden);
             }
         }
         Ok(self.root.join(path))
@@ -137,56 +137,56 @@ impl LocalFileAdapter {
 }
 
 impl FileAdapter for LocalFileAdapter {
-    fn read(&self, path: &str) -> IoResult<Vec<u8>> {
+    fn read(&self, path: &str) -> FsResult<Vec<u8>> {
         let resolved = self.resolve(path)?;
         match std::fs::read(&resolved) {
             Ok(bytes) => Ok(bytes),
-            Err(e) => Err(io_error_from_std(e)),
+            Err(e) => Err(fs_error_from_std(e)),
         }
     }
 
-    fn write(&self, path: &str, bytes: &[u8]) -> IoResult<()> {
+    fn write(&self, path: &str, bytes: &[u8]) -> FsResult<()> {
         if !self.writable {
-            return Err(IoError::Forbidden);
+            return Err(FsError::Forbidden);
         }
         let resolved = self.resolve(path)?;
         if let Some(parent) = resolved.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| IoError::AdapterError(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| FsError::AdapterError(e.to_string()))?;
         }
         let mut tmp = resolved.clone();
         let existing = tmp
             .file_name()
             .and_then(|s| s.to_str())
-            .ok_or_else(|| IoError::AdapterError("non-utf8 filename".into()))?
+            .ok_or_else(|| FsError::AdapterError("non-utf8 filename".into()))?
             .to_string();
         tmp.set_file_name(format!("{existing}.tmp-{}", std::process::id()));
-        std::fs::write(&tmp, bytes).map_err(|e| IoError::AdapterError(e.to_string()))?;
+        std::fs::write(&tmp, bytes).map_err(|e| FsError::AdapterError(e.to_string()))?;
         match std::fs::rename(&tmp, &resolved) {
             Ok(()) => Ok(()),
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
-                Err(IoError::AdapterError(e.to_string()))
+                Err(FsError::AdapterError(e.to_string()))
             }
         }
     }
 
-    fn delete(&self, path: &str) -> IoResult<()> {
+    fn delete(&self, path: &str) -> FsResult<()> {
         if !self.writable {
-            return Err(IoError::Forbidden);
+            return Err(FsError::Forbidden);
         }
         let resolved = self.resolve(path)?;
         match std::fs::remove_file(&resolved) {
             Ok(()) => Ok(()),
-            Err(e) => Err(io_error_from_std(e)),
+            Err(e) => Err(fs_error_from_std(e)),
         }
     }
 
-    fn list(&self, prefix: &str) -> IoResult<Vec<String>> {
+    fn list(&self, prefix: &str) -> FsResult<Vec<String>> {
         let resolved = self.resolve(prefix)?;
-        let entries = std::fs::read_dir(&resolved).map_err(io_error_from_std)?;
+        let entries = std::fs::read_dir(&resolved).map_err(fs_error_from_std)?;
         let mut names = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|e| IoError::AdapterError(e.to_string()))?;
+            let entry = entry.map_err(|e| FsError::AdapterError(e.to_string()))?;
             if let Some(s) = entry.file_name().to_str() {
                 names.push(s.to_string());
             }
@@ -196,11 +196,11 @@ impl FileAdapter for LocalFileAdapter {
     }
 }
 
-fn io_error_from_std(err: std::io::Error) -> IoError {
+fn fs_error_from_std(err: std::io::Error) -> FsError {
     match err.kind() {
-        ErrorKind::NotFound => IoError::NotFound,
-        ErrorKind::PermissionDenied => IoError::Forbidden,
-        _ => IoError::AdapterError(err.to_string()),
+        ErrorKind::NotFound => FsError::NotFound,
+        ErrorKind::PermissionDenied => FsError::Forbidden,
+        _ => FsError::AdapterError(err.to_string()),
     }
 }
 
@@ -240,7 +240,7 @@ mod native {
     use std::sync::Arc;
 
     use super::{
-        AdapterRegistry, Delete, IoError, List, NamespaceRoots, Read, Write, build_registry,
+        AdapterRegistry, Delete, FsError, List, NamespaceRoots, Read, Write, build_registry,
     };
     use aether_actor::{MailCtx, actor};
     use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
@@ -308,15 +308,15 @@ mod native {
     /// routes envelopes through the macro-emitted `NativeDispatch` impl;
     /// replies route via `ctx.reply(&result)` through the substrate's
     /// `Mailer::send_reply`.
-    pub struct IoCapability {
+    pub struct FsCapability {
         registry: Arc<AdapterRegistry>,
     }
 
     #[actor]
-    impl NativeActor for IoCapability {
+    impl NativeActor for FsCapability {
         /// Resolved namespace roots threaded through to `init`. Chassis
         /// mains build this via [`NamespaceRoots::from_env`] (or hand-roll
-        /// for tests) and pass to `with_actor::<IoCapability>(roots)`.
+        /// for tests) and pass to `with_actor::<FsCapability>(roots)`.
         type Config = NamespaceRoots;
 
         /// ADR-0041 + ADR-0074 Phase 5 chassis-owned mailbox.
@@ -330,7 +330,7 @@ mod native {
             let (registry, roots) =
                 build_registry(roots).map_err(|e| BootError::Other(Box::new(e)))?;
             tracing::info!(
-                target: "aether_substrate::io",
+                target: "aether_substrate::fs",
                 save = %roots.save.display(),
                 assets = %roots.assets.display(),
                 config = %roots.config.display(),
@@ -349,7 +349,7 @@ mod native {
                 ctx.reply(&ReadResult::Err {
                     namespace: mail.namespace,
                     path: mail.path,
-                    error: IoError::UnknownNamespace,
+                    error: FsError::UnknownNamespace,
                 });
                 return;
             };
@@ -380,7 +380,7 @@ mod native {
                 ctx.reply(&WriteResult::Err {
                     namespace: mail.namespace,
                     path: mail.path,
-                    error: IoError::UnknownNamespace,
+                    error: FsError::UnknownNamespace,
                 });
                 return;
             };
@@ -408,7 +408,7 @@ mod native {
                 ctx.reply(&DeleteResult::Err {
                     namespace: mail.namespace,
                     path: mail.path,
-                    error: IoError::UnknownNamespace,
+                    error: FsError::UnknownNamespace,
                 });
                 return;
             };
@@ -436,7 +436,7 @@ mod native {
                 ctx.reply(&ListResult::Err {
                     namespace: mail.namespace,
                     prefix: mail.prefix,
-                    error: IoError::UnknownNamespace,
+                    error: FsError::UnknownNamespace,
                 });
                 return;
             };
@@ -457,9 +457,9 @@ mod native {
     }
 
     #[cfg(test)]
-    impl IoCapability {
+    impl FsCapability {
         /// Test-only direct constructor. Production boots through
-        /// `Builder::with_actor::<IoCapability>(roots)` which calls `init`;
+        /// `Builder::with_actor::<FsCapability>(roots)` which calls `init`;
         /// tests that want to drive handlers without spinning up a full
         /// chassis hand a pre-built registry directly.
         pub(crate) fn from_registry(registry: Arc<AdapterRegistry>) -> Self {
@@ -472,10 +472,10 @@ mod native {
         use std::env::temp_dir;
 
         use super::super::{
-            AdapterRegistry, Delete, FileAdapter, IoError, List, LocalFileAdapter, NamespaceRoots,
+            AdapterRegistry, Delete, FileAdapter, FsError, List, LocalFileAdapter, NamespaceRoots,
             Read, Write,
         };
-        use super::{Arc, IoCapability, Path, PathBuf};
+        use super::{Arc, FsCapability, Path, PathBuf};
         use aether_actor::Actor;
         use aether_data::MailboxId;
         use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
@@ -501,7 +501,7 @@ mod native {
         /// Test fixture that bundles the cap, a fully-wired test mailer,
         /// and a `NativeBinding` long enough for handlers to borrow.
         struct TestFixture {
-            cap: IoCapability,
+            cap: FsCapability,
             rx: std::sync::mpsc::Receiver<EgressEvent>,
             transport: NativeBinding,
         }
@@ -511,7 +511,7 @@ mod native {
                 let (mailer, rx) = test_mailer_and_rx();
                 let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
                 Self {
-                    cap: IoCapability::from_registry(reg),
+                    cap: FsCapability::from_registry(reg),
                     rx,
                     transport,
                 }
@@ -567,10 +567,10 @@ mod native {
         fn resolve_rejects_parent_traversal() {
             let root = scratch_root("resolve-parent");
             let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            assert!(matches!(a.read("../etc/passwd"), Err(IoError::Forbidden)));
+            assert!(matches!(a.read("../etc/passwd"), Err(FsError::Forbidden)));
             assert!(matches!(
                 a.read("sub/../../escape"),
-                Err(IoError::Forbidden)
+                Err(FsError::Forbidden)
             ));
             cleanup(&root);
         }
@@ -579,7 +579,7 @@ mod native {
         fn resolve_rejects_absolute() {
             let root = scratch_root("resolve-abs");
             let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            assert!(matches!(a.read("/etc/passwd"), Err(IoError::Forbidden)));
+            assert!(matches!(a.read("/etc/passwd"), Err(FsError::Forbidden)));
             cleanup(&root);
         }
 
@@ -587,7 +587,7 @@ mod native {
         fn resolve_permits_dot_segments() {
             let root = scratch_root("resolve-dot");
             let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            assert!(matches!(a.read("./nonexistent"), Err(IoError::NotFound)));
+            assert!(matches!(a.read("./nonexistent"), Err(FsError::NotFound)));
             cleanup(&root);
         }
 
@@ -595,7 +595,7 @@ mod native {
         fn read_missing_file_returns_not_found() {
             let root = scratch_root("read-missing");
             let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            assert!(matches!(a.read("slot.bin"), Err(IoError::NotFound)));
+            assert!(matches!(a.read("slot.bin"), Err(FsError::NotFound)));
             cleanup(&root);
         }
 
@@ -638,7 +638,7 @@ mod native {
         fn write_on_read_only_returns_forbidden() {
             let root = scratch_root("write-readonly");
             let a = LocalFileAdapter::new(root.clone(), false).unwrap();
-            assert!(matches!(a.write("x.bin", &[]), Err(IoError::Forbidden)));
+            assert!(matches!(a.write("x.bin", &[]), Err(FsError::Forbidden)));
             cleanup(&root);
         }
 
@@ -646,7 +646,7 @@ mod native {
         fn delete_missing_returns_not_found() {
             let root = scratch_root("delete-missing");
             let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            assert!(matches!(a.delete("ghost.bin"), Err(IoError::NotFound)));
+            assert!(matches!(a.delete("ghost.bin"), Err(FsError::NotFound)));
             cleanup(&root);
         }
 
@@ -656,7 +656,7 @@ mod native {
             let a = LocalFileAdapter::new(root.clone(), true).unwrap();
             a.write("slot.bin", b"x").unwrap();
             a.delete("slot.bin").unwrap();
-            assert!(matches!(a.read("slot.bin"), Err(IoError::NotFound)));
+            assert!(matches!(a.read("slot.bin"), Err(FsError::NotFound)));
             cleanup(&root);
         }
 
@@ -664,7 +664,7 @@ mod native {
         fn delete_on_read_only_returns_forbidden() {
             let root = scratch_root("delete-readonly");
             let a = LocalFileAdapter::new(root.clone(), false).unwrap();
-            assert!(matches!(a.delete("x.bin"), Err(IoError::Forbidden)));
+            assert!(matches!(a.delete("x.bin"), Err(FsError::Forbidden)));
             cleanup(&root);
         }
 
@@ -703,7 +703,7 @@ mod native {
         fn list_missing_directory_returns_not_found() {
             let root = scratch_root("list-missing");
             let a = LocalFileAdapter::new(root.clone(), true).unwrap();
-            assert!(matches!(a.list("nope"), Err(IoError::NotFound)));
+            assert!(matches!(a.list("nope"), Err(FsError::NotFound)));
             cleanup(&root);
         }
 
@@ -776,11 +776,11 @@ mod native {
             let root = scratch_root("boots");
             let (registry, mailer) = fresh_substrate();
             let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<IoCapability>(roots_under(&root))
+                .with_actor::<FsCapability>(roots_under(&root))
                 .build_passive()
                 .expect("io capability boots");
             assert!(
-                registry.lookup(IoCapability::NAMESPACE).is_some(),
+                registry.lookup(FsCapability::NAMESPACE).is_some(),
                 "io mailbox registered"
             );
             drop(chassis);
@@ -806,7 +806,7 @@ mod native {
 
             let (registry, mailer) = fresh_substrate();
             let result = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<IoCapability>(roots)
+                .with_actor::<FsCapability>(roots)
                 .build_passive();
             assert!(result.is_err(), "save root being a file must fail cap init");
             cleanup(&root);
@@ -818,16 +818,16 @@ mod native {
         fn duplicate_claim_rejects_with_typed_error() {
             let root = scratch_root("collide");
             let (registry, mailer) = fresh_substrate();
-            registry.register_closure(IoCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            registry.register_closure(FsCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
             let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<IoCapability>(roots_under(&root))
+                .with_actor::<FsCapability>(roots_under(&root))
                 .build_passive()
                 .expect_err("collision must surface as BootError");
             assert!(matches!(
                 err,
                 BootError::MailboxAlreadyClaimed { ref name }
-                    if name == IoCapability::NAMESPACE
+                    if name == FsCapability::NAMESPACE
             ));
             cleanup(&root);
         }
@@ -881,7 +881,7 @@ mod native {
                 ReadResult::Err {
                     namespace,
                     path,
-                    error: IoError::UnknownNamespace,
+                    error: FsError::UnknownNamespace,
                 } => {
                     assert_eq!(namespace, "nope");
                     assert_eq!(path, "x.bin");
@@ -907,7 +907,7 @@ mod native {
             assert!(matches!(
                 decode_reply::<ReadResult>(&fix.rx),
                 ReadResult::Err {
-                    error: IoError::NotFound,
+                    error: FsError::NotFound,
                     ..
                 }
             ));
@@ -960,7 +960,7 @@ mod native {
             assert!(matches!(
                 decode_reply::<WriteResult>(&fix.rx),
                 WriteResult::Err {
-                    error: IoError::Forbidden,
+                    error: FsError::Forbidden,
                     ..
                 }
             ));
@@ -991,7 +991,7 @@ mod native {
             }
             assert!(matches!(
                 reg_clone.get("save").unwrap().read("x.bin"),
-                Err(IoError::NotFound)
+                Err(FsError::NotFound)
             ));
             cleanup(&root);
         }

@@ -32,7 +32,7 @@
 //!    `"aether.render"`.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
-use aether_capabilities::{IoCapability, RenderCapability};
+use aether_capabilities::{FsCapability, RenderCapability};
 use aether_kinds::{DrawTriangle, Read, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
@@ -112,7 +112,7 @@ impl FfiActor for MeshViewer {
             path = %msg.path,
             "load requested; issuing read",
         );
-        ctx.actor::<IoCapability>().send(&Read {
+        ctx.actor::<FsCapability>().send(&Read {
             namespace: msg.namespace,
             path: msg.path,
         });

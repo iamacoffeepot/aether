@@ -31,7 +31,7 @@ use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tic
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
 use crate::hub::HubProtocolBackend;
 use aether_actor::Actor;
-use aether_capabilities::{IoCapability, RenderCapability, fs::NamespaceRoots};
+use aether_capabilities::{FsCapability, RenderCapability, fs::NamespaceRoots};
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
     capture::CaptureQueue,
@@ -147,7 +147,7 @@ pub struct TestBench {
     /// broadcast / session-zero frames that arrived on the loopback.
     /// Used by scenario assertions like `Check::MailObserved`.
     /// Limitation (v1): mail addressed to other sinks
-    /// (`aether.io`, `aether.log`) and direct
+    /// (`aether.fs`, `aether.log`) and direct
     /// component-to-component mail does not show up here — those
     /// flows don't pass through outbound and are not observed by the
     /// chassis-owned sinks the bench wraps.
@@ -207,7 +207,7 @@ impl TestBenchBuilder {
 
     /// Override the ADR-0041 namespace roots. Forwarded to
     /// `SubstrateBootBuilder::namespace_roots` at boot, so the
-    /// `aether.io` adapter wired by the bench resolves
+    /// `aether.fs` adapter wired by the bench resolves
     /// `save://` / `assets://` / `config://` against these paths
     /// instead of [`NamespaceRoots::from_env`].
     pub fn namespace_roots(mut self, roots: NamespaceRoots) -> Self {
@@ -290,10 +290,10 @@ impl TestBench {
         // Tests that care about io supply tempdir roots through
         // `start_with_namespace_roots`; otherwise the bench skips Io.
         if let Some(roots) = namespace_roots
-            && let Err(e) = boot.add_actor::<IoCapability>(roots)
+            && let Err(e) = boot.add_actor::<FsCapability>(roots)
         {
             tracing::warn!(
-                target: "aether_substrate::io",
+                target: "aether_substrate::fs",
                 error = %e,
                 "io cap boot failed in TestBench (expected on systems without writable default roots)",
             );
@@ -421,7 +421,7 @@ impl TestBench {
     /// decode it as `R`. The reply must be postcard-encoded — true
     /// for every standard reply kind (`*Result` variants in
     /// `aether-kinds`). Use this for any sink/component whose reply
-    /// pattern is "send → await → decode" — e.g. the `aether.io`
+    /// pattern is "send → await → decode" — e.g. the `aether.fs`
     /// `Read`/`Write`/`Delete`/`List` round trips. `advance` and
     /// `capture` are specialisations of this same shape against the
     /// `aether.component` mailbox.
@@ -537,7 +537,7 @@ impl TestBench {
     /// fully drains the queue and processes any pending events.
     /// Quiet iterations (no events surfaced, no reply on loopback)
     /// sleep briefly to give ADR-0070 capability dispatcher threads
-    /// time to wake up — `IoCapability` and friends poll their mpsc
+    /// time to wake up — `FsCapability` and friends poll their mpsc
     /// receivers on a 100ms `recv_timeout`, so without this sleep a
     /// capability-mediated reply (e.g. `aether.fs.write` →
     /// `WriteResult`) can't beat the bail-out check.

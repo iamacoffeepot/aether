@@ -1004,14 +1004,14 @@ mod control_plane {
     // ADR-0041 substrate file I/O. Four request kinds on the
     // `"aether.fs"` mailbox (read / write / delete / list), paired
     // 1:1 with reply kinds
-    // that carry a structured `IoError` on failure. All postcard-
+    // that carry a structured `FsError` on failure. All postcard-
     // shaped because every request carries String namespace/path
     // fields and writes carry `Vec<u8>` bytes.
     //
     // `namespace` is the logical prefix without the `://`: mail
     // carries `"save"`, not `"save://"`. Paths are relative to the
     // namespace root; `..` and absolute prefixes are rejected at the
-    // adapter boundary as `IoError::Forbidden`.
+    // adapter boundary as `FsError::Forbidden`.
 
     /// Structured failure reason for an I/O request (ADR-0041 §1).
     /// Components can pattern-match on the variant to decide whether
@@ -1022,7 +1022,7 @@ mod control_plane {
     /// future cloud adapter — without locking the enum shape to any
     /// one backend.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-    pub enum IoError {
+    pub enum FsError {
         NotFound,
         Forbidden,
         UnknownNamespace,
@@ -1045,7 +1045,7 @@ mod control_plane {
     /// allocating correlation ids — operation identity comes from the
     /// reply kind itself (`aether.fs.read_result`), target identity
     /// from the echoed fields. `Ok` carries the full file contents;
-    /// `Err` carries an `IoError` variant.
+    /// `Err` carries an `FsError` variant.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.fs.read_result")]
     pub enum ReadResult {
@@ -1057,7 +1057,7 @@ mod control_plane {
         Err {
             namespace: String,
             path: String,
-            error: IoError,
+            error: FsError,
         },
     }
 
@@ -1078,7 +1078,7 @@ mod control_plane {
     /// correlation; the request's `bytes` field is *not* echoed so the
     /// reply payload stays small even when the write was megabytes
     /// (correlation needs the identity of the write, not its contents).
-    /// `Err` carries an `IoError` — `Forbidden` for read-only
+    /// `Err` carries an `FsError` — `Forbidden` for read-only
     /// namespaces (e.g. `assets://`), `AdapterError` for disk-full /
     /// permission / rename failures.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
@@ -1091,7 +1091,7 @@ mod control_plane {
         Err {
             namespace: String,
             path: String,
-            error: IoError,
+            error: FsError,
         },
     }
 
@@ -1120,7 +1120,7 @@ mod control_plane {
         Err {
             namespace: String,
             path: String,
-            error: IoError,
+            error: FsError,
         },
     }
 
@@ -1153,7 +1153,7 @@ mod control_plane {
         Err {
             namespace: String,
             prefix: String,
-            error: IoError,
+            error: FsError,
         },
     }
 
@@ -1280,7 +1280,7 @@ mod control_plane {
     // id.
 
     /// Structured failure reason for a handle operation. Mirrors
-    /// `IoError` / `HttpError`'s tagged-enum shape so guests can
+    /// `FsError` / `HttpError`'s tagged-enum shape so guests can
     /// pattern-match on the variant rather than parsing strings.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub enum HandleError {
@@ -1298,7 +1298,7 @@ mod control_plane {
         NoStore,
         /// Free-form adapter detail — kind-id mismatch on
         /// re-publish, internal state, etc. Free-form text for
-        /// the same reasons `IoError::AdapterError` is.
+        /// the same reasons `FsError::AdapterError` is.
         AdapterError(String),
     }
 
@@ -1766,7 +1766,7 @@ mod tests {
 
     // ADR-0041 I/O kind roundtrips. Request types carry String /
     // Vec<u8>, reply types are Ok/Err enums with the error arm
-    // wrapping `IoError`. postcard roundtrip proves the derived
+    // wrapping `FsError`. postcard roundtrip proves the derived
     // Serialize/Deserialize agree on the wire for each shape.
     mod fs_roundtrips {
         use super::*;
@@ -1813,7 +1813,7 @@ mod tests {
             let r = ReadResult::Err {
                 namespace: "save".to_string(),
                 path: "ghost.bin".to_string(),
-                error: IoError::NotFound,
+                error: FsError::NotFound,
             };
             let bytes = postcard::to_allocvec(&r).unwrap();
             let back: ReadResult = postcard::from_bytes(&bytes).unwrap();
@@ -1825,7 +1825,7 @@ mod tests {
                 } => {
                     assert_eq!(namespace, "save");
                     assert_eq!(path, "ghost.bin");
-                    assert_eq!(error, IoError::NotFound);
+                    assert_eq!(error, FsError::NotFound);
                 }
                 ReadResult::Ok { .. } => panic!("expected Err"),
             }
@@ -1833,11 +1833,11 @@ mod tests {
 
         #[test]
         fn io_error_adapter_carries_payload() {
-            let e = IoError::AdapterError("disk full".to_string());
+            let e = FsError::AdapterError("disk full".to_string());
             let bytes = postcard::to_allocvec(&e).unwrap();
-            let back: IoError = postcard::from_bytes(&bytes).unwrap();
+            let back: FsError = postcard::from_bytes(&bytes).unwrap();
             match back {
-                IoError::AdapterError(msg) => assert_eq!(msg, "disk full"),
+                FsError::AdapterError(msg) => assert_eq!(msg, "disk full"),
                 other => panic!("expected AdapterError, got {other:?}"),
             }
         }
@@ -1902,7 +1902,7 @@ mod tests {
             let r = DeleteResult::Err {
                 namespace: "save".to_string(),
                 path: "ghost.bin".to_string(),
-                error: IoError::NotFound,
+                error: FsError::NotFound,
             };
             let bytes = postcard::to_allocvec(&r).unwrap();
             let back: DeleteResult = postcard::from_bytes(&bytes).unwrap();
@@ -1914,7 +1914,7 @@ mod tests {
                 } => {
                     assert_eq!(namespace, "save");
                     assert_eq!(path, "ghost.bin");
-                    assert_eq!(error, IoError::NotFound);
+                    assert_eq!(error, FsError::NotFound);
                 }
                 DeleteResult::Ok { .. } => panic!("expected Err"),
             }

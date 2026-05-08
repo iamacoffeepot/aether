@@ -59,7 +59,7 @@ pub use input::InputCapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use input::InputConfig;
 
-pub use fs::IoCapability;
+pub use fs::FsCapability;
 pub use log::LogCapability;
 #[cfg(feature = "render")]
 pub use render::HeadlessRenderCapability;

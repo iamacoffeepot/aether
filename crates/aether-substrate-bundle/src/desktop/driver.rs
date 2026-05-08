@@ -6,7 +6,7 @@
 //! `AETHER_WINDOW_MODE` parser. Wraps everything in a
 //! [`DesktopDriverCapability`] so [`crate::chassis::DesktopChassis`]
 //! composes one driver alongside its passive capabilities
-//! (LogCapability, IoCapability, HttpCapability, AudioCapability,
+//! (LogCapability, FsCapability, HttpCapability, AudioCapability,
 //! RenderCapability — composed via `chassis_builder::Builder::with`
 //! per ADR-0071 phase B).
 //!
