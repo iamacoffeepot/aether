@@ -64,6 +64,7 @@
 
 pub mod binding;
 pub mod ctx;
+pub(crate) mod dispatch;
 pub mod envelope;
 pub mod mailbox;
 pub mod spawn;
