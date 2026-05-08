@@ -87,6 +87,7 @@ mod session_native {
     impl NativeActor for TcpSessionActor {
         type Config = TcpSessionConfig;
         const NAMESPACE: &'static str = "aether.tcp.session";
+        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         fn init(
             mut config: TcpSessionConfig,

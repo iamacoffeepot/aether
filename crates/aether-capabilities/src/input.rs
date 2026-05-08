@@ -57,6 +57,7 @@ mod native {
     impl NativeActor for InputCapability {
         type Config = InputConfig;
         const NAMESPACE: &'static str = "aether.input";
+        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         fn init(config: InputConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let registry = Arc::clone(ctx.mailer().registry());

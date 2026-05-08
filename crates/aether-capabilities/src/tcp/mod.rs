@@ -131,6 +131,7 @@ mod cap_native {
     impl NativeActor for TcpCapability {
         type Config = ();
         const NAMESPACE: &'static str = "aether.tcp";
+        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         fn init(_: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self {

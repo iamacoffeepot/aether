@@ -932,6 +932,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
         generics,
         namespace_expr,
         frame_barrier_expr,
+        scheduling_expr,
         handler_kinds,
         catch_all,
     ) = {
@@ -988,6 +989,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
         let mut has_fallback = false;
         let mut namespace_expr: Option<Expr> = None;
         let mut frame_barrier_expr: Option<Expr> = None;
+        let mut scheduling_expr: Option<Expr> = None;
         for impl_item in &actor_impl.items {
             match impl_item {
                 ImplItem::Fn(f) if f.attrs.iter().any(attr_is_handler) => {
@@ -1002,6 +1004,8 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
                         namespace_expr = Some(c.expr.clone());
                     } else if c.ident == "FRAME_BARRIER" {
                         frame_barrier_expr = Some(c.expr.clone());
+                    } else if c.ident == "SCHEDULING" {
+                        scheduling_expr = Some(c.expr.clone());
                     }
                 }
                 _ => {}
@@ -1038,6 +1042,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
             actor_impl.generics.clone(),
             namespace_expr,
             frame_barrier_expr,
+            scheduling_expr,
             handler_kinds,
             has_fallback,
         )
@@ -1060,6 +1065,21 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
     //   consumers compile typed sends without the substrate runtime.
     let frame_barrier_const = frame_barrier_expr.map(|expr| {
         quote! { const FRAME_BARRIER: bool = #expr; }
+    });
+    // Self-contained emission: the bridge lifts the user's expression
+    // from inside `mod native` (where `Scheduling` is in scope via an
+    // inner-mod import) to a sibling `impl Actor` at file root (where
+    // it isn't). Wrap the expression in a block with a local `use` so
+    // the lifted expression resolves regardless of the file-root
+    // import surface — the user keeps typing `Scheduling::Dedicated`
+    // ergonomically without having to remember a second file-root use.
+    let scheduling_const = scheduling_expr.map(|expr| {
+        quote! {
+            const SCHEDULING: ::aether_actor::Scheduling = {
+                use ::aether_actor::Scheduling;
+                #expr
+            };
+        }
     });
     // When the bridge declares `feature = "X"`, the wasm stub also
     // covers "native target without the feature" so consumers that
@@ -1094,6 +1114,7 @@ fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenSt
         impl #impl_generics ::aether_actor::Actor for #self_ty #where_clause {
             const NAMESPACE: &'static str = #namespace_expr;
             #frame_barrier_const
+            #scheduling_const
         }
     };
     let cardinality_marker = match cardinality {
@@ -1963,7 +1984,30 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // rewrites this `#[actor]` to `#[actor(skip_markers)]` so this
     // expansion does not duplicate them. The native-only impls below
     // still emit unchanged.
-    let const_tokens = consts.iter();
+    // Wrap the `SCHEDULING` const value in a self-contained block with
+    // a local `use ::aether_actor::Scheduling`. Symmetric with the
+    // bridge path: the user types `Scheduling::Dedicated` ergonomically
+    // without needing a file-level `use aether_actor::Scheduling`
+    // import. NAMESPACE / FRAME_BARRIER pass through unchanged because
+    // their RHSes are primitives that don't require resolution.
+    let const_tokens: Vec<TokenStream2> = consts
+        .iter()
+        .map(|c| {
+            if c.ident == "SCHEDULING" {
+                let expr = &c.expr;
+                let attrs = &c.attrs;
+                quote! {
+                    #(#attrs)*
+                    const SCHEDULING: ::aether_actor::Scheduling = {
+                        use ::aether_actor::Scheduling;
+                        #expr
+                    };
+                }
+            } else {
+                quote! { #c }
+            }
+        })
+        .collect();
     let actor_impl = if opts.skip_markers || consts.is_empty() {
         quote! {}
     } else {

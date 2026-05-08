@@ -42,6 +42,7 @@ mod native {
         type Config = ();
 
         const NAMESPACE: &'static str = "aether.test_bench";
+        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {

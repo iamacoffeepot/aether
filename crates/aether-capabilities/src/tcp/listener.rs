@@ -69,6 +69,7 @@ mod listener_native {
     impl NativeActor for TcpListenerActor {
         type Config = TcpListenerConfig;
         const NAMESPACE: &'static str = "aether.tcp.listener";
+        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         fn init(
             mut config: TcpListenerConfig,

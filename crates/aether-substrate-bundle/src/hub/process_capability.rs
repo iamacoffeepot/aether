@@ -114,6 +114,7 @@ mod native {
     impl NativeActor for ProcessCapability {
         type Config = ProcessCapabilityConfig;
         const NAMESPACE: &'static str = "aether.process";
+        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         fn init(
             cfg: ProcessCapabilityConfig,

@@ -48,6 +48,40 @@ pub trait Actor: Sized + Send + 'static {
     /// drawing-side capabilities and any wasm component that wants
     /// per-frame coupling will too.
     const FRAME_BARRIER: bool = false;
+
+    /// Issue 635 dispatch placement. `Pooled` (the default) routes the
+    /// actor onto the chassis-owned worker pool — many actors drained
+    /// over a small thread set. `Dedicated` opts the actor out of pool
+    /// scheduling and back onto its own OS thread (today's behavior),
+    /// for actors that own a long-running blocking primitive their
+    /// handler must not yield from (TCP `accept`, file watch reads,
+    /// `wait_reply` parking).
+    ///
+    /// Phase 1 ships every existing actor with `SCHEDULING = Dedicated`
+    /// so the default flip in later phases is bit-identical. The
+    /// runtime branches on this const at boot — `Dedicated` actors take
+    /// the legacy `thread::spawn` path; `Pooled` actors register a
+    /// dispatcher slot with the pool. The `FRAME_BARRIER` const is
+    /// orthogonal: a frame-bound actor can be either `Pooled` or
+    /// `Dedicated`.
+    const SCHEDULING: Scheduling = Scheduling::Pooled;
+}
+
+/// Issue 635 dispatch placement (see [`Actor::SCHEDULING`]). Equality
+/// is structural — the runtime does `match A::SCHEDULING { Pooled => …,
+/// Dedicated => … }` once at boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scheduling {
+    /// Drain the actor's inbox cooperatively on the chassis worker
+    /// pool. Default. Suitable for actors whose handlers return
+    /// promptly — drain a mail, push state, return.
+    Pooled,
+    /// Drain the actor on its own OS thread. Required for actors that
+    /// call `wait_reply` from a handler or own a runloop blocking on a
+    /// non-mail external source the chassis can't reify (TCP `accept`,
+    /// file-watch event sources). Until the ladder of caps converts
+    /// to the pool path, every shipped actor is `Dedicated`.
+    Dedicated,
 }
 
 /// Cardinality marker: only one instance of this actor can be live per
