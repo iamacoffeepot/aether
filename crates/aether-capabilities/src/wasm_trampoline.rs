@@ -99,14 +99,20 @@ pub struct WasmTrampolineConfig {
     pub capabilities: ComponentCapabilities,
 }
 
-/// Per-component trampoline. Owns the wasm [`Component`] (which
-/// holds a clone of the trampoline's [`NativeTransport`] for
-/// inbox / wait_reply / outgoing send), and exposes lifecycle
-/// kind handlers ([`DropComponent`], [`ReplaceComponent`]) for
-/// agent-driven control. Everything else falls through to
-/// [`forward_to_wasm`].
+/// Per-component trampoline. Holds the wasm [`Component`]
+/// optionally — `None` means the wasm has been unloaded by
+/// [`DropComponent`] but the trampoline (and its mailbox name) is
+/// still alive, ready to be refilled by [`ReplaceComponent`] or
+/// recycled by a future load. Distinction matters: dropping the
+/// **component** is a wasm unload that preserves the addressable
+/// name; dropping the **trampoline** would kill the actor and
+/// tombstone the subname. The cap's `DropComponent` handler does
+/// the former; the latter happens at substrate teardown.
 pub struct WasmTrampoline {
-    component: Component,
+    /// `Some` while wasm is loaded; `None` after a `DropComponent`.
+    /// Mail arriving in the `None` state warn-drops via the
+    /// fallback (the trampoline is just an empty named slot).
+    component: Option<Component>,
     /// Held for [`Self::on_replace_component`] so a fresh
     /// `Component::instantiate` against the same engine + linker
     /// is reachable from the handler.
@@ -150,7 +156,7 @@ impl NativeActor for WasmTrampoline {
             )
         })?;
         Ok(Self {
-            component,
+            component: Some(component),
             engine: config.engine,
             linker: config.linker,
             registry: config.registry,
@@ -161,18 +167,24 @@ impl NativeActor for WasmTrampoline {
         })
     }
 
-    /// Drop the trampoline. Issues `ctx.shutdown()` so the
-    /// framework drains the inbox, runs `on_close`, and exits the
-    /// dispatcher. The cap that owns the trampoline references
-    /// learns about the death via `MonitorNotice` (issue 607
-    /// Phase 4b primitive) — for PR 1 the agent gets back
-    /// `DropResult::Ok` synchronously and the trampoline's actor
-    /// slot tombstones once the dispatcher finishes draining.
+    /// Drop the **wasm component**. Runs the guest's `on_drop`
+    /// hook, then drops the [`Component`]. The trampoline itself
+    /// stays alive — the mailbox `aether.component.trampoline:NAME`
+    /// remains addressable and reusable: agents can refill it via
+    /// [`ReplaceComponent`] without minting a new name. To kill
+    /// the trampoline (tombstone the subname), terminate the
+    /// substrate.
+    ///
+    /// Mail arriving in the dropped state falls through to
+    /// [`Self::forward_to_wasm`], which warn-drops because
+    /// `self.component` is `None`.
     #[handler]
     fn on_drop_component(&mut self, ctx: &mut NativeCtx<'_>, _payload: DropComponent) {
+        if let Some(mut component) = self.component.take() {
+            component.on_drop();
+        }
         ctx.transport()
             .send_reply_for_handler(ctx.reply_target(), &DropResult::Ok);
-        ctx.shutdown();
     }
 
     /// Replace the wasm component with a fresh module. ADR-0022 +
@@ -199,9 +211,18 @@ impl NativeActor for WasmTrampoline {
     /// dispatch shim do the rest.
     #[fallback]
     fn forward_to_wasm(&mut self, ctx: &mut NativeCtx<'_>, env: &Envelope) -> bool {
+        let Some(component) = self.component.as_mut() else {
+            tracing::warn!(
+                target: "aether_capabilities::wasm_trampoline",
+                mailbox = %self.mailbox,
+                kind = %env.kind_name,
+                "mail to trampoline with no wasm loaded (post-drop); discarded — re-load via aether.component.replace",
+            );
+            return true;
+        };
         let mail = Mail::new(self.mailbox, env.kind, env.payload.clone(), env.count)
             .with_reply_to(env.sender);
-        if let Err(e) = self.component.deliver(&mail) {
+        if let Err(e) = component.deliver(&mail) {
             tracing::error!(
                 target: "aether_capabilities::wasm_trampoline",
                 mailbox = %self.mailbox,
@@ -239,13 +260,26 @@ impl WasmTrampoline {
                 Err(error) => return ReplaceResult::Err { error },
             };
 
-        // Run on_replace on the old instance, lift any saved-state
-        // bundle, then drop the old component.
-        self.component.on_replace();
-        if let Some(err) = self.component.take_save_error() {
-            return ReplaceResult::Err { error: err };
-        }
-        let saved = self.component.take_saved_state();
+        // Run on_replace on the old instance and lift any saved-
+        // state bundle. If the trampoline is currently empty
+        // (post-DropComponent — load-after-drop refill), there's no
+        // prior wasm to drain; the new instance starts from scratch.
+        let saved = if let Some(mut old) = self.component.take() {
+            old.on_replace();
+            if let Some(err) = old.take_save_error() {
+                // Restore the old component so the trampoline isn't
+                // accidentally emptied by a save-state failure.
+                self.component = Some(old);
+                return ReplaceResult::Err { error: err };
+            }
+            let saved = old.take_saved_state();
+            // Old component drops at end of scope — its `on_drop`
+            // hook runs as part of `Drop`.
+            drop(old);
+            saved
+        } else {
+            None
+        };
 
         // Build a fresh `SubstrateCtx` for the new instance — same
         // mailer + registry/outbound/input references, new
@@ -270,22 +304,19 @@ impl WasmTrampoline {
             };
 
         // ADR-0016 §4: rehydrate the new instance if the old one
-        // produced a bundle. A failed rehydrate leaves the old
-        // component dropped — there's no clean rollback short of
-        // re-loading from the original wasm bytes, which we don't
-        // have. Surface the error and let the agent decide.
+        // produced a bundle. A failed rehydrate still installs the
+        // new component (the old one is already gone) and surfaces
+        // the error so the agent decides whether to roll forward.
         if let Some(bundle) = saved
             && let Err(e) = new_component.call_on_rehydrate(&bundle)
         {
-            self.component = new_component;
+            self.component = Some(new_component);
             return ReplaceResult::Err {
                 error: format!("on_rehydrate failed: {e}"),
             };
         }
 
-        // Old component drops here when `self.component` is
-        // overwritten — its `on_drop` runs as part of `Drop`.
-        self.component = new_component;
+        self.component = Some(new_component);
 
         ReplaceResult::Ok { capabilities }
     }
