@@ -1,12 +1,12 @@
 // Test-bench chassis binary entry point.
 //
 // Reads chassis-relevant env vars into a `TestBenchEnv`, asks
-// `TestBenchChassis::build_passive` to assemble the substrate +
-// passive capabilities (Log + Render) via the chassis_builder
-// `Builder`, adds the io capability on the legacy
-// `boot.add_capability` path, creates the offscreen `Gpu`, then
-// drives the events_rx loop on the main thread. The chassis is
-// embedder-driven (no `DriverCapability`) — `main()` IS the driver.
+// `TestBenchChassis::build_passive` to assemble the substrate plus
+// every capability (Log, Render, Io if roots pre-validate, etc.)
+// through the chassis_builder `Builder`, creates the offscreen
+// `Gpu`, then drives the events_rx loop on the main thread. The
+// chassis is embedder-driven (no `DriverCapability`) — `main()` IS
+// the driver.
 //
 // In-process counterpart lives in `aether-substrate-test-bench::TestBench`
 // (the `TestBench::start()` API ADR-0067 introduced); both paths
@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use aether_capabilities::FsCapability;
 use aether_data::{Kind, encode_empty};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
 use aether_substrate::{
@@ -76,21 +75,17 @@ fn main() -> anyhow::Result<()> {
         observed_kinds: None,
         events_tx,
         capture_queue: capture_queue.clone(),
+        namespace_roots: Some(namespace_roots),
     };
 
     let TestBenchBuild {
         passive,
-        mut boot,
+        boot,
         render_handles,
         kind_tick,
         kind_frame_stats,
         hub,
     } = TestBenchChassis::build_passive(env)?;
-
-    // Io cap on the `boot.add_actor` path — the binary fails fast on
-    // adapter init failure (the in-process API silent-skips for
-    // systems without writable default roots).
-    boot.add_actor::<FsCapability>(namespace_roots)?;
 
     let (width, height) = parse_size_env();
     let gpu = Gpu::new(width, height, render_handles.clone());

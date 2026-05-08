@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::hub::HubClient;
 use aether_capabilities::{
-    BroadcastCapability, CaptureBackend, HandleCapability, HeadlessWindowCapability,
+    BroadcastCapability, CaptureBackend, FsCapability, HandleCapability, HeadlessWindowCapability,
     InputCapability, InputConfig, LogCapability, RenderCapability, RenderConfig, RenderHandles,
-    TcpCapability,
+    TcpCapability, fs::NamespaceRoots,
 };
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
@@ -98,6 +98,15 @@ pub struct TestBenchEnv {
     /// embedder's frame loop drains it on each `RedrawRequested`-
     /// equivalent step.
     pub capture_queue: CaptureQueue,
+    /// Optional `aether.fs` roots. When `Some`, the chassis
+    /// pre-validates the roots via [`NamespaceRoots::ensure_dirs`]
+    /// and chains `with_actor::<FsCapability>(roots)` into the
+    /// builder. If pre-validation fails (e.g. a save root that
+    /// points at a regular file), the chassis warns and skips the
+    /// fs cap rather than aborting the whole boot — matches the
+    /// pre-issue-673 silent-skip semantics. When `None`, fs is not
+    /// booted at all.
+    pub namespace_roots: Option<NamespaceRoots>,
 }
 
 /// Output of [`TestBenchChassis::build_passive`]. Bundles the
@@ -147,6 +156,7 @@ impl TestBenchChassis {
             observed_kinds,
             events_tx,
             capture_queue,
+            namespace_roots,
         } = env;
 
         let boot = SubstrateBoot::builder(&name, &version).build()?;
@@ -195,7 +205,33 @@ impl TestBenchChassis {
             input_subscribers: Arc::clone(&boot.input_subscribers),
         };
 
-        let passive =
+        // Pre-validate fs roots if supplied. Pre-validation
+        // mirrors what `LocalFileAdapter::new` does inside
+        // `FsCapability::init`: create_dir_all + canonicalize each
+        // root. If validation succeeds, chain `with_actor`. If it
+        // fails (e.g. save root pointing at a regular file on a CI
+        // machine without writable defaults), warn and skip the fs cap —
+        // the chassis still boots, components addressing
+        // `aether.fs` see "unknown mailbox" mail-drops. Pre-issue-673
+        // this was a post-build `boot.add_actor::<FsCapability>` call
+        // with the same silent-skip semantics; the new shape moves
+        // the validation up so all caps go through one boot path.
+        let io_roots = match namespace_roots {
+            Some(roots) => match roots.ensure_dirs() {
+                Ok(()) => Some(roots),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "aether_substrate::fs",
+                        error = %e,
+                        "io cap boot skipped in TestBench (root pre-validation failed; expected on systems without writable default roots)",
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let mut builder =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
                 .with_actor::<BroadcastCapability>(())
                 .with_actor::<HandleCapability>(())
@@ -205,9 +241,11 @@ impl TestBenchChassis {
                 .with_actor::<TcpCapability>(())
                 .with_actor::<RenderCapability>(render_config)
                 .with_actor::<HeadlessWindowCapability>(())
-                .with_actor::<TestBenchCapability>(test_bench_cap_config)
-                .with_log_drain::<LogCapability>()
-                .build_passive()?;
+                .with_actor::<TestBenchCapability>(test_bench_cap_config);
+        if let Some(roots) = io_roots {
+            builder = builder.with_actor::<FsCapability>(roots);
+        }
+        let passive = builder.with_log_drain::<LogCapability>().build_passive()?;
 
         // Issue 629 / Phase A: render publishes its `RenderHandles`
         // bundle on the chassis's `ExportedHandles` map during `init`.
