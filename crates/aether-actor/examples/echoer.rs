@@ -3,7 +3,7 @@
 //! `demo.response { seq }` to whatever component sent it.
 //!
 //! ADR-0033 phase 3: uses `#[actor]` as the only receive path.
-//! The synthesized dispatcher reads `ctx.reply_to()` (threaded from the
+//! The synthesized dispatcher reads `ctx.reply_target()` (threaded from the
 //! inbound mail by `#[actor]`) so the handler body never touches
 //! `Mail<'_>` directly.
 
@@ -44,7 +44,7 @@ impl FfiActor for Echoer {
 
     #[handler]
     fn on_request(&mut self, ctx: &mut FfiCtx<'_>, req: Request) {
-        if let Some(sender) = ctx.reply_to() {
+        if let Some(sender) = ctx.reply_target() {
             ctx.reply_kind(sender, self.response, &Response { seq: req.seq });
         }
     }

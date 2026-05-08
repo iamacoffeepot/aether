@@ -96,7 +96,7 @@ impl FfiActor for Hello {
     /// are in flight.
     #[handler]
     fn on_ping(&mut self, ctx: &mut FfiCtx<'_>, ping: Ping) {
-        if let Some(sender) = ctx.reply_to() {
+        if let Some(sender) = ctx.reply_target() {
             ctx.reply_kind(sender, self.pong, &Pong { seq: ping.seq });
         }
     }

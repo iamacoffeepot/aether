@@ -39,7 +39,7 @@ pub trait OutboundReply: MailSender {
     /// component-origin and broadcast-origin mail; `Some(_)` when the
     /// inbound carries a routable originator (Claude session, peer
     /// component, remote engine mailbox).
-    fn reply_to(&self) -> Option<Self::ReplyHandle>;
+    fn reply_target(&self) -> Option<Self::ReplyHandle>;
 
     /// Local-component origin of the mail currently being dispatched,
     /// or `None` for mail with no local sender (broadcast,
@@ -59,4 +59,16 @@ pub trait OutboundReply: MailSender {
     /// `Serialize` so the bound is documentation, not a breaking
     /// change.
     fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K);
+
+    /// Reply to an explicit `sender` rather than the dispatcher-stamped
+    /// reply target. Used by the parked-sender pattern: caps that stash
+    /// a [`Self::ReplyHandle`] from one inbound and answer it later from
+    /// a different handler (e.g. `aether-tcp`'s pending-unbinds, where
+    /// the bind ack waits for the listener's monitor notice before
+    /// firing).
+    ///
+    /// Same wire-shape contract as [`Self::reply`]. Native impls route
+    /// through `NativeBinding::send_reply_for_handler`; FFI impls route
+    /// through [`crate::ffi::bridge::MAIL_BRIDGE::reply_mail`].
+    fn reply_to<K: Kind + serde::Serialize>(&mut self, sender: Self::ReplyHandle, payload: &K);
 }

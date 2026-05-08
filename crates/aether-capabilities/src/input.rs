@@ -25,6 +25,7 @@ pub use native::InputConfig;
 mod native {
     use super::{SubscribeInput, SubscribeInputResult, UnsubscribeInput};
     use aether_actor::actor;
+    use aether_actor::actor::ctx::OutboundReply;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::input::InputSubscribers;
@@ -84,8 +85,7 @@ mod native {
                 }
                 Err(error) => SubscribeInputResult::Err { error },
             };
-            ctx.binding()
-                .send_reply_for_handler(ctx.reply_target(), &result);
+            ctx.reply(&result);
         }
 
         /// Unsubscribe a mailbox from an input stream (ADR-0021).
@@ -104,8 +104,7 @@ mod native {
                 }
                 Err(error) => SubscribeInputResult::Err { error },
             };
-            ctx.binding()
-                .send_reply_for_handler(ctx.reply_target(), &result);
+            ctx.reply(&result);
         }
     }
 

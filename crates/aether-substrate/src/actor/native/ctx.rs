@@ -61,13 +61,6 @@ impl<'a> NativeCtx<'a> {
         Self { binding, sender }
     }
 
-    /// Borrow the actor's [`NativeBinding`]. Exposed for stage-2 caps
-    /// that need to call low-level binding helpers the SDK doesn't yet
-    /// wrap.
-    pub fn binding(&self) -> &NativeBinding {
-        self.binding
-    }
-
     /// The reply target for the mail currently being dispatched.
     /// Useful when a handler wants to inspect the originator (audit
     /// trails, multi-tenant routing) without going through
@@ -118,6 +111,17 @@ impl<'a> NativeCtx<'a> {
     /// can call `shutdown()` to opt in to flag-based exit.
     pub fn shutdown(&self) {
         self.binding.signal_shutdown();
+    }
+
+    /// ADR-0063 fail-fast: bring the substrate down with `reason`.
+    /// Diverging — does not return. Used by handlers that observe a
+    /// non-recoverable invariant violation (today: the wasm trampoline
+    /// on a guest trap). Native impl forwards to
+    /// [`NativeBinding::fatal_abort`]. See also the [`crate::ffi::FfiCtx`]
+    /// counterpart, which `panic!`s — the substrate's wasm runtime
+    /// catches the trap and ADR-0063 escalates symmetrically.
+    pub fn fatal_abort(&self, reason: String) -> ! {
+        self.binding.fatal_abort(reason);
     }
 
     /// Issue 607 Phase 4b (ADR-0079): register the calling actor as a
@@ -268,19 +272,19 @@ impl<'a> NativeInitCtx<'a> {
         }
     }
 
-    /// Borrow the Arc'd cap-bound [`NativeBinding`]. Used by the wasm
-    /// trampoline at init to install itself on the
-    /// [`crate::actor::wasm::component::ComponentCtx`] so the
-    /// `wait_reply_p32` host fn can route through this binding.
-    pub fn binding_arc(&self) -> &Arc<NativeBinding> {
-        self.binding
-    }
-
-    /// Borrow the cap-bound [`NativeBinding`]. Caps rarely reach for
-    /// this — `Sender::send::<R>(...)` covers the typed-send path —
-    /// but stage-2 migrations may want it during init for one-shot
-    /// outbound mail.
-    pub fn binding(&self) -> &NativeBinding {
+    /// Substrate-internal: borrow the Arc'd cap-bound
+    /// [`NativeBinding`]. Used by the wasm trampoline at init to
+    /// install itself on the [`crate::actor::wasm::component::ComponentCtx`]
+    /// so the `wait_reply_p32` host fn can route through this binding.
+    ///
+    /// Double-underscore "not part of the public API" marker
+    /// (matching `__new` / `__set_reply_to` elsewhere). Issue #668
+    /// relocates the wasm trampoline into a substrate-internal
+    /// location so this can become `pub(crate)` cleanly; in the
+    /// meantime the trampoline lives in `aether-capabilities` and
+    /// needs `pub` reachability.
+    #[doc(hidden)]
+    pub fn __binding_arc(&self) -> &Arc<NativeBinding> {
         self.binding
     }
 
@@ -420,7 +424,7 @@ impl<'a> OutboundReply for NativeCtx<'a> {
     /// [`Self::reply`] inspecting the inner `ReplyTarget`; the trait's
     /// `Option<Self::ReplyHandle>` shape exists for the FFI side,
     /// where a guest genuinely sees no reply target.
-    fn reply_to(&self) -> Option<ReplyTo> {
+    fn reply_target(&self) -> Option<ReplyTo> {
         Some(self.sender)
     }
 
@@ -433,6 +437,10 @@ impl<'a> OutboundReply for NativeCtx<'a> {
 
     fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
         self.binding.send_reply_for_handler(self.sender, payload);
+    }
+
+    fn reply_to<K: Kind + serde::Serialize>(&mut self, sender: ReplyTo, payload: &K) {
+        self.binding.send_reply_for_handler(sender, payload);
     }
 }
 

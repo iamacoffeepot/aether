@@ -45,6 +45,7 @@
 use std::sync::Arc;
 
 use aether_actor::actor;
+use aether_actor::actor::ctx::OutboundReply;
 use aether_kinds::{
     ComponentCapabilities, DropComponent, DropResult, ReplaceComponent, ReplaceResult,
 };
@@ -148,7 +149,7 @@ impl NativeActor for WasmTrampoline {
         // can drain *this* trampoline's inbox + overflow (issue 634
         // Phase 4 PR 3 — single source of inbox truth lives on
         // `NativeBinding`, not on `ComponentCtx`).
-        substrate_ctx.install_binding(Arc::clone(ctx.binding_arc()));
+        substrate_ctx.install_binding(Arc::clone(ctx.__binding_arc()));
         let component = Component::instantiate(
             &config.engine,
             &config.linker,
@@ -188,8 +189,7 @@ impl NativeActor for WasmTrampoline {
         if let Some(mut component) = self.component.take() {
             component.on_drop();
         }
-        ctx.binding()
-            .send_reply_for_handler(ctx.reply_target(), &DropResult::Ok);
+        ctx.reply(&DropResult::Ok);
     }
 
     /// Replace the wasm component with a fresh module. ADR-0022 +
@@ -202,8 +202,7 @@ impl NativeActor for WasmTrampoline {
     #[handler]
     fn on_replace_component(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
         let result = self.handle_replace(payload);
-        ctx.binding()
-            .send_reply_for_handler(ctx.reply_target(), &result);
+        ctx.reply(&result);
     }
 
     /// Forward un-handled mail to the wasm guest.
@@ -233,7 +232,7 @@ impl NativeActor for WasmTrampoline {
             // substrate. Wedge detection (CPU-loop guests) waits on a
             // future epoch-deadline ADR — symmetric with native
             // actors, which have no wedge guard either today.
-            ctx.binding().fatal_abort(format!(
+            ctx.fatal_abort(format!(
                 "component {} (kind {}) trapped: {e}",
                 self.mailbox, env.kind_name,
             ));

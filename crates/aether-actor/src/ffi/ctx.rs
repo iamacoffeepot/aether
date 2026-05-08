@@ -208,8 +208,8 @@ impl<'a> FfiCtx<'a> {
     }
 
     /// Reply target for the mail currently being dispatched. Mirrors
-    /// [`OutboundReply::reply_to`].
-    pub fn reply_to(&self) -> Option<ReplyTo> {
+    /// [`OutboundReply::reply_target`].
+    pub fn reply_target(&self) -> Option<ReplyTo> {
         self.sender.map(ReplyTo::__from_raw)
     }
 
@@ -223,6 +223,16 @@ impl<'a> FfiCtx<'a> {
     /// from a runtime instance name.
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0)
+    }
+
+    /// ADR-0063 fail-fast: bring the substrate down with `reason`.
+    /// Diverging — does not return. The body `panic!`s; the substrate's
+    /// wasm runtime catches the trap and ADR-0063 escalates the
+    /// substrate-side fatal_abort path. Symmetric to
+    /// `aether_substrate::actor::native::NativeCtx::fatal_abort` so
+    /// trap-escalation reads the same on both sides.
+    pub fn fatal_abort(&self, reason: alloc::string::String) -> ! {
+        panic!("aether-actor: fatal_abort: {reason}")
     }
 }
 
@@ -263,7 +273,7 @@ impl<'a> MailSender for FfiCtx<'a> {
 impl<'a> OutboundReply for FfiCtx<'a> {
     type ReplyHandle = ReplyTo;
 
-    fn reply_to(&self) -> Option<ReplyTo> {
+    fn reply_target(&self) -> Option<ReplyTo> {
         self.sender.map(ReplyTo::__from_raw)
     }
 
@@ -276,6 +286,11 @@ impl<'a> OutboundReply for FfiCtx<'a> {
             let bytes = payload.encode_into_bytes();
             MAIL_BRIDGE.reply_mail(raw, K::ID.0, &bytes, 1);
         }
+    }
+
+    fn reply_to<K: Kind + serde::Serialize>(&mut self, sender: ReplyTo, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        MAIL_BRIDGE.reply_mail(sender.raw(), K::ID.0, &bytes, 1);
     }
 }
 
