@@ -173,8 +173,8 @@ mod native {
     };
     use aether_actor::{MailCtx, actor};
     use aether_kinds::FetchResult;
-    use aether_substrate::capability::BootError;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
 
     /// `ureq`-backed adapter. Holds the shared agent, the allowlist
     /// (empty = deny all), the response cap, and the `require_https`
@@ -450,12 +450,13 @@ mod native {
         };
         use aether_actor::Actor;
         use aether_data::{Kind, MailboxId};
-        use aether_substrate::capability::{BootError, ChassisBuilder};
+        use aether_substrate::actor::native::ctx::NativeCtx;
+        use aether_substrate::actor::native::transport::NativeTransport;
+        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::ReplyTo;
-        use aether_substrate::mailer::Mailer;
-        use aether_substrate::native_actor::NativeCtx;
-        use aether_substrate::native_transport::NativeTransport;
-        use aether_substrate::registry::Registry;
+        use aether_substrate::mail::mailer::Mailer;
+        use aether_substrate::mail::registry::Registry;
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
             let registry = Arc::new(Registry::new());
@@ -498,16 +499,16 @@ mod native {
 
         use aether_data::{ReplyTarget, SessionToken, Uuid};
 
-        use aether_substrate::outbound::EgressEvent;
+        use aether_substrate::mail::outbound::EgressEvent;
 
         fn session_sender() -> ReplyTo {
             ReplyTo::to(ReplyTarget::Session(SessionToken(Uuid::nil())))
         }
 
         fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
-            let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
+            let (outbound, rx) = aether_substrate::mail::outbound::HubOutbound::attached_loopback();
             let mailer = Arc::new(Mailer::new());
-            mailer.wire(Arc::new(aether_substrate::registry::Registry::new()));
+            mailer.wire(Arc::new(aether_substrate::mail::registry::Registry::new()));
             mailer.wire_outbound(outbound);
             (mailer, rx)
         }

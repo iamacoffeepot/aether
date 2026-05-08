@@ -75,8 +75,8 @@ mod native {
     use aether_data::{MailboxId, ReplyTarget, ReplyTo};
     use aether_kinds::SetMasterGainResult;
 
-    use aether_substrate::capability::BootError;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
 
     use super::{NoteOff, NoteOn, SetMasterGain};
 
@@ -876,9 +876,10 @@ mod native {
     mod tests {
         use super::*;
         use aether_actor::Actor;
-        use aether_substrate::capability::{BootError, ChassisBuilder};
-        use aether_substrate::mailer::Mailer;
-        use aether_substrate::registry::Registry;
+        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::chassis::error::BootError;
+        use aether_substrate::mail::mailer::Mailer;
+        use aether_substrate::mail::registry::Registry;
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
             let registry = Arc::new(Registry::new());

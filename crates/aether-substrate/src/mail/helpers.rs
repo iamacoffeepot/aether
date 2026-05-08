@@ -1,21 +1,15 @@
-//! Decode + envelope-resolution helpers used by
-//! `aether-capabilities::ComponentHostCapability` and the
-//! `RenderCapability` capture handler (issue 603 Phase 2). Standalone
-//! module so non-capability substrate consumers can pull `decode_payload`
-//! / `resolve_bundle` without dragging in the capability crate.
+//! Mail-side helpers shared by chassis dispatchers and capabilities.
+//!
+//! `register_or_match_all` registers every descriptor from a component's
+//! embedded manifest; `resolve_bundle` resolves a list of envelopes
+//! against the registry into fully-typed `Mail`s. The chassis-side
+//! decode helper lives in `chassis/helpers.rs`.
 
 use aether_data::KindDescriptor;
 use aether_kinds::MailEnvelope;
 
 use crate::mail::Mail;
-use crate::registry::Registry;
-
-/// Postcard-decode a control-plane payload with the one error-message
-/// shape every handler uses. Handlers wrap the `String` in their own
-/// `*Result::Err` variant — the shape is uniform, the enum differs.
-pub fn decode_payload<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
-    postcard::from_bytes(bytes).map_err(|e| format!("postcard decode failed: {e}"))
-}
+use crate::mail::registry::Registry;
 
 /// Resolve every envelope in `bundle` against the registry, returning
 /// fully-typed `Mail`s. On any resolve failure, return a formatted

@@ -20,8 +20,8 @@ use std::time::{Duration, Instant};
 
 use aether_data::{Kind, ReplyTo};
 use aether_substrate::{
-    Actor, Builder, BuiltChassis, Chassis, NativeActor, NativeCtx, NativeInitCtx, NeverDriver,
-    PassiveChassis, capability::BootError, mail::MailboxId, mailer::Mailer, registry::Registry,
+    Actor, BootError, Builder, BuiltChassis, Chassis, Mailer, NativeActor, NativeCtx,
+    NativeInitCtx, NeverDriver, PassiveChassis, Registry, mail::MailboxId,
 };
 
 /// Postcard-shape kind via the derive — exercises the
@@ -117,7 +117,7 @@ fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
 }
 
 fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
-    use aether_substrate::registry::MailboxEntry;
+    use aether_substrate::mail::registry::MailboxEntry;
     let id: MailboxId = registry.lookup(recipient).expect("mailbox registered");
     let MailboxEntry::Closure(handler) = registry.entry(id).expect("entry exists") else {
         panic!("expected mailbox entry under {recipient}");

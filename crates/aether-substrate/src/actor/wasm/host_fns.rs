@@ -7,7 +7,7 @@
 use aether_actor::MailTransport;
 use wasmtime::{Caller, Linker};
 
-use crate::component::{ComponentCtx, StateBundle};
+use crate::actor::wasm::component::{ComponentCtx, StateBundle};
 use crate::mail::{KindId, MailboxId, ReplyTarget};
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).

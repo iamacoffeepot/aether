@@ -13,7 +13,7 @@
 //! # Phase 2A scope
 //!
 //! - Trait family + builder + ctx wiring.
-//! - The existing [`crate::capability::ChassisBuilder`] is unchanged
+//! - The existing [`crate::chassis::ctx::ChassisBuilder`] is unchanged
 //!   and remains the construction site for current chassis. Phases
 //!   3-7 (per ADR-0071) migrate each chassis to the new builder.
 //! - [`Chassis::Driver`] / [`Chassis::Env`] / [`Chassis::build`] are
@@ -28,14 +28,17 @@ use std::marker::PhantomData;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
 
-use crate::capability::{BootError, ChassisCtx, FacadeHandle, FallbackRouter, MailboxClaim};
+use crate::actor::native::transport::NativeTransport;
+use crate::actor::native::{
+    ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
+};
 use crate::chassis::Chassis;
-use crate::lifecycle::{FatalAborter, PanicAborter};
+use crate::chassis::ctx::{ChassisCtx, FacadeHandle, FallbackRouter, MailboxClaim};
+use crate::chassis::error::BootError;
 use crate::mail::MailboxId;
-use crate::mailer::Mailer;
-use crate::native_actor::{ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx};
-use crate::native_transport::NativeTransport;
-use crate::registry::Registry;
+use crate::mail::mailer::Mailer;
+use crate::mail::registry::Registry;
+use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use aether_actor::Actor;
 use aether_actor::Dispatch;
 use aether_actor::HandlesKind;
@@ -202,7 +205,7 @@ impl<'a> DriverCtx<'a> {
 
     /// Snapshot of every frame-bound mailbox's pending counter
     /// collected during passive boot. Drivers stash this clone and
-    /// hand it to [`crate::frame_loop::drain_frame_bound_or_abort`]
+    /// hand it to [`crate::chassis::frame_loop::drain_frame_bound_or_abort`]
     /// each frame so render submit waits for inbound mail to drain
     /// alongside component drains (ADR-0074 §Decision 5).
     ///
@@ -584,13 +587,13 @@ fn alloc_native_actor_thread_name<A: Actor>() -> String {
 }
 
 /// Shutdown adapter for a [`NativeActor`] booted through
-/// [`Builder::with_actor`]. Drops the [`crate::capability::MailboxSender`]
+/// [`Builder::with_actor`]. Drops the [`crate::chassis::ctx::MailboxSender`]
 /// to disconnect the channel (the dispatcher's `recv_blocking` returns
 /// `None` and the thread exits), then joins the thread. Mirrors
 /// [`FacadeShutdown`] for the legacy facade path.
 struct NativeActorShutdown {
     thread: Option<std::thread::JoinHandle<()>>,
-    mailbox_sender: Option<crate::capability::MailboxSender>,
+    mailbox_sender: Option<crate::chassis::ctx::MailboxSender>,
 }
 
 impl DynShutdown for NativeActorShutdown {
@@ -644,7 +647,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// Construct a fresh builder against the given substrate handles.
     /// Defaults the cross-class `wait_reply` aborter to
     /// [`PanicAborter`]; production drivers swap in
-    /// [`crate::lifecycle::OutboundFatalAborter`] via
+    /// [`crate::runtime::lifecycle::OutboundFatalAborter`] via
     /// [`Self::with_aborter`] before `build()` / `build_passive()`.
     pub fn new(registry: Arc<Registry>, mailer: Arc<Mailer>) -> Self {
         Self {
@@ -1172,8 +1175,8 @@ impl<C: Chassis> PassiveChassis<C> {
     /// Snapshot of every frame-bound mailbox's pending counter
     /// collected during passive boot. Embedders (TestBench, bin
     /// drivers) clone this once and feed it to
-    /// [`crate::frame_loop::drain_frame_bound_or_abort`] each frame —
-    /// same role as [`crate::chassis_builder::DriverCtx::frame_bound_pending`]
+    /// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`] each frame —
+    /// same role as [`crate::chassis::builder::DriverCtx::frame_bound_pending`]
     /// on the driver-build path.
     pub fn frame_bound_pending(&self) -> Vec<(MailboxId, Arc<AtomicU64>)> {
         self.booted.frame_bound_pending.clone()
@@ -1274,20 +1277,20 @@ mod tests {
     }
     impl aether_actor::Singleton for StubLog {}
 
-    impl crate::native_actor::NativeActor for StubLog {
+    impl crate::actor::native::NativeActor for StubLog {
         type Config = ();
         fn init(
             _: Self::Config,
-            _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
         ) -> Result<Self, BootError> {
             Ok(Self)
         }
     }
 
-    impl crate::native_actor::NativeDispatch for StubLog {
+    impl crate::actor::native::NativeDispatch for StubLog {
         fn __aether_dispatch_envelope(
             &mut self,
-            _ctx: &mut crate::native_actor::NativeCtx<'_>,
+            _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
             _kind: crate::mail::KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -1407,21 +1410,21 @@ mod tests {
         }
         impl aether_actor::Singleton for FailingCap {}
 
-        impl crate::native_actor::NativeActor for FailingCap {
+        impl crate::actor::native::NativeActor for FailingCap {
             type Config = ();
             fn init(
                 _: (),
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Err(BootError::Other(Box::new(std::io::Error::other(
                     "intentional init failure for Phase 7 cleanup test",
                 ))))
             }
         }
-        impl crate::native_actor::NativeDispatch for FailingCap {
+        impl crate::actor::native::NativeDispatch for FailingCap {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 _kind: crate::mail::KindId,
                 _payload: &[u8],
             ) -> Option<()> {
@@ -1459,7 +1462,7 @@ mod tests {
     /// gate.
     #[test]
     fn with_actor_boots_dispatches_and_tears_down() {
-        use crate::registry::MailboxEntry;
+        use crate::mail::registry::MailboxEntry;
         use aether_data::{Kind, ReplyTo as DataReplyTo};
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -1495,11 +1498,11 @@ mod tests {
         impl aether_actor::Singleton for ProbeCap {}
         impl aether_actor::HandlesKind<Ping> for ProbeCap {}
 
-        impl crate::native_actor::NativeActor for ProbeCap {
+        impl crate::actor::native::NativeActor for ProbeCap {
             type Config = Arc<AtomicU32>;
             fn init(
                 config: Self::Config,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self { received: config })
             }
@@ -1508,10 +1511,10 @@ mod tests {
         // Hand-rolled NativeDispatch — what the macro arm emits in
         // task #731. The if-arm decodes Ping bytes, calls the
         // handler, returns Some(()) on success.
-        impl crate::native_actor::NativeDispatch for ProbeCap {
+        impl crate::actor::native::NativeDispatch for ProbeCap {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -1588,20 +1591,20 @@ mod tests {
         }
         impl aether_actor::Singleton for FrameBoundProbe {}
 
-        impl crate::native_actor::NativeActor for FrameBoundProbe {
+        impl crate::actor::native::NativeActor for FrameBoundProbe {
             type Config = ();
             fn init(
                 _: (),
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self)
             }
         }
 
-        impl crate::native_actor::NativeDispatch for FrameBoundProbe {
+        impl crate::actor::native::NativeDispatch for FrameBoundProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 _kind: crate::mail::KindId,
                 _payload: &[u8],
             ) -> Option<()> {
@@ -1631,7 +1634,7 @@ mod tests {
     /// the stamping wiring can't silently regress.
     #[test]
     fn with_actor_stamps_local_for_init_and_handler() {
-        use crate::registry::MailboxEntry;
+        use crate::mail::registry::MailboxEntry;
         use aether_actor::Local;
         use aether_data::{Kind, ReplyTo as DataReplyTo};
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -1677,11 +1680,11 @@ mod tests {
         #[aether_actor::local]
         struct Counter(u32);
 
-        impl crate::native_actor::NativeActor for LocalProbe {
+        impl crate::actor::native::NativeActor for LocalProbe {
             type Config = Arc<AtomicU32>;
             fn init(
                 config: Self::Config,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 // Init runs inside the chassis builder's stamp guard
                 // — write a sentinel so the handler test below proves
@@ -1691,10 +1694,10 @@ mod tests {
             }
         }
 
-        impl crate::native_actor::NativeDispatch for LocalProbe {
+        impl crate::actor::native::NativeDispatch for LocalProbe {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -1762,8 +1765,8 @@ mod tests {
     /// `after_init` mail dispatches as the child's first envelope.
     #[test]
     fn ctx_spawn_child_routes_through_handler() {
-        use crate::registry::MailboxEntry;
-        use crate::spawn::Subname;
+        use crate::actor::native::spawn::Subname;
+        use crate::mail::registry::MailboxEntry;
         use aether_actor::{HandlesKind, Instanced};
         use aether_data::{Kind, KindId as DataKindId, ReplyTo as DataReplyTo};
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -1814,19 +1817,19 @@ mod tests {
         }
         impl Instanced for ChildCap {}
         impl HandlesKind<Ping> for ChildCap {}
-        impl crate::native_actor::NativeActor for ChildCap {
+        impl crate::actor::native::NativeActor for ChildCap {
             type Config = Arc<AtomicU32>;
             fn init(
                 config: Self::Config,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self { received: config })
             }
         }
-        impl crate::native_actor::NativeDispatch for ChildCap {
+        impl crate::actor::native::NativeDispatch for ChildCap {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -1848,11 +1851,11 @@ mod tests {
         }
         impl aether_actor::Singleton for ParentCap {}
         impl HandlesKind<Hatch> for ParentCap {}
-        impl crate::native_actor::NativeActor for ParentCap {
+        impl crate::actor::native::NativeActor for ParentCap {
             type Config = (Arc<AtomicU32>, Arc<AtomicU32>);
             fn init(
                 (spawn_count, child_received): Self::Config,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self {
                     spawn_count,
@@ -1860,10 +1863,10 @@ mod tests {
                 })
             }
         }
-        impl crate::native_actor::NativeDispatch for ParentCap {
+        impl crate::actor::native::NativeDispatch for ParentCap {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -1944,8 +1947,8 @@ mod tests {
     /// `SpawnError::SubnameRetired`.
     #[test]
     fn ctx_shutdown_marks_dead_runs_on_close_tombstones_id() {
-        use crate::registry::MailboxEntry;
-        use crate::spawn::{SpawnError, Subname};
+        use crate::actor::native::spawn::{SpawnError, Subname};
+        use crate::mail::registry::MailboxEntry;
         use aether_actor::{HandlesKind, Instanced};
         use aether_data::{Kind, KindId as DataKindId};
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -1977,24 +1980,24 @@ mod tests {
         }
         impl Instanced for Closer {}
         impl HandlesKind<Quit> for Closer {}
-        impl crate::native_actor::NativeActor for Closer {
+        impl crate::actor::native::NativeActor for Closer {
             type Config = Arc<AtomicU32>;
             fn init(
                 config: Self::Config,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self {
                     close_observed: config,
                 })
             }
-            fn on_close(&mut self, _ctx: &mut crate::native_actor::NativeCtx<'_>) {
+            fn on_close(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl crate::native_actor::NativeDispatch for Closer {
+        impl crate::actor::native::NativeDispatch for Closer {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -2090,8 +2093,8 @@ mod tests {
     /// tombstoned, and (3) the registry's forward index drained.
     #[test]
     fn ctx_monitor_fires_notice_at_target_close() {
-        use crate::registry::MailboxEntry;
-        use crate::spawn::Subname;
+        use crate::actor::native::spawn::Subname;
+        use crate::mail::registry::MailboxEntry;
         use aether_actor::{HandlesKind, Instanced};
         use aether_data::{Kind, KindId as DataKindId};
         use std::sync::Mutex;
@@ -2145,19 +2148,19 @@ mod tests {
         }
         impl Instanced for Target {}
         impl HandlesKind<Quit> for Target {}
-        impl crate::native_actor::NativeActor for Target {
+        impl crate::actor::native::NativeActor for Target {
             type Config = ();
             fn init(
                 _: Self::Config,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self)
             }
         }
-        impl crate::native_actor::NativeDispatch for Target {
+        impl crate::actor::native::NativeDispatch for Target {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -2176,7 +2179,7 @@ mod tests {
         struct Watcher {
             notice_count: Arc<AtomicU32>,
             last_target: Arc<AtomicU64>,
-            handle: Mutex<Option<crate::native_actor::MonitorHandle>>,
+            handle: Mutex<Option<crate::actor::monitor::MonitorHandle>>,
         }
         impl aether_actor::Actor for Watcher {
             const NAMESPACE: &'static str = "test.monitor.watcher";
@@ -2184,11 +2187,11 @@ mod tests {
         impl Instanced for Watcher {}
         impl HandlesKind<WatchOrder> for Watcher {}
         impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
-        impl crate::native_actor::NativeActor for Watcher {
+        impl crate::actor::native::NativeActor for Watcher {
             type Config = (Arc<AtomicU32>, Arc<AtomicU64>);
             fn init(
                 config: Self::Config,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self {
                     notice_count: config.0,
@@ -2197,10 +2200,10 @@ mod tests {
                 })
             }
         }
-        impl crate::native_actor::NativeDispatch for Watcher {
+        impl crate::actor::native::NativeDispatch for Watcher {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -2351,8 +2354,8 @@ mod tests {
     /// watcher is the one closing; targets are still alive).
     #[test]
     fn watcher_close_prunes_targets_forward_index() {
-        use crate::registry::MailboxEntry;
-        use crate::spawn::Subname;
+        use crate::actor::native::spawn::Subname;
+        use crate::mail::registry::MailboxEntry;
         use aether_actor::{HandlesKind, Instanced};
         use aether_data::{Kind, KindId as DataKindId};
         use std::sync::Mutex;
@@ -2401,19 +2404,19 @@ mod tests {
             const NAMESPACE: &'static str = "test.monitor.target2";
         }
         impl Instanced for Target {}
-        impl crate::native_actor::NativeActor for Target {
+        impl crate::actor::native::NativeActor for Target {
             type Config = ();
             fn init(
                 _: Self::Config,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self)
             }
         }
-        impl crate::native_actor::NativeDispatch for Target {
+        impl crate::actor::native::NativeDispatch for Target {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 _kind: crate::mail::KindId,
                 _payload: &[u8],
             ) -> Option<()> {
@@ -2422,7 +2425,7 @@ mod tests {
         }
 
         struct Watcher {
-            handle: Mutex<Option<crate::native_actor::MonitorHandle>>,
+            handle: Mutex<Option<crate::actor::monitor::MonitorHandle>>,
             close_observed: Arc<AtomicU32>,
         }
         impl aether_actor::Actor for Watcher {
@@ -2431,25 +2434,25 @@ mod tests {
         impl Instanced for Watcher {}
         impl HandlesKind<WatchOrder> for Watcher {}
         impl HandlesKind<Quit> for Watcher {}
-        impl crate::native_actor::NativeActor for Watcher {
+        impl crate::actor::native::NativeActor for Watcher {
             type Config = Arc<AtomicU32>;
             fn init(
                 config: Self::Config,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self {
                     handle: Mutex::new(None),
                     close_observed: config,
                 })
             }
-            fn on_close(&mut self, _ctx: &mut crate::native_actor::NativeCtx<'_>) {
+            fn on_close(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
-        impl crate::native_actor::NativeDispatch for Watcher {
+        impl crate::actor::native::NativeDispatch for Watcher {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -2567,8 +2570,8 @@ mod tests {
     ///     name returns `None` from `resolve_actor`.
     #[test]
     fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
-        use crate::registry::MailboxEntry;
-        use crate::spawn::Subname;
+        use crate::actor::native::spawn::Subname;
+        use crate::mail::registry::MailboxEntry;
         use aether_actor::{HandlesKind, Instanced};
         use aether_data::{Kind, KindId as DataKindId};
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -2606,19 +2609,19 @@ mod tests {
         }
         impl Instanced for Member {}
         impl HandlesKind<Quit> for Member {}
-        impl crate::native_actor::NativeActor for Member {
+        impl crate::actor::native::NativeActor for Member {
             type Config = u32;
             fn init(
                 tag: u32,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self { tag })
             }
         }
-        impl crate::native_actor::NativeDispatch for Member {
+        impl crate::actor::native::NativeDispatch for Member {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -2730,7 +2733,7 @@ mod tests {
     /// None.
     #[test]
     fn resolve_actor_returns_none_on_type_mismatch() {
-        use crate::spawn::Subname;
+        use crate::actor::native::spawn::Subname;
         use aether_actor::Instanced;
 
         struct Foo;
@@ -2738,19 +2741,19 @@ mod tests {
             const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
         }
         impl Instanced for Foo {}
-        impl crate::native_actor::NativeActor for Foo {
+        impl crate::actor::native::NativeActor for Foo {
             type Config = ();
             fn init(
                 _: (),
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self)
             }
         }
-        impl crate::native_actor::NativeDispatch for Foo {
+        impl crate::actor::native::NativeDispatch for Foo {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 _kind: crate::mail::KindId,
                 _payload: &[u8],
             ) -> Option<()> {
@@ -2763,19 +2766,19 @@ mod tests {
             const NAMESPACE: &'static str = "test.resolve_mismatch.bar";
         }
         impl Instanced for Bar {}
-        impl crate::native_actor::NativeActor for Bar {
+        impl crate::actor::native::NativeActor for Bar {
             type Config = ();
             fn init(
                 _: (),
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self)
             }
         }
-        impl crate::native_actor::NativeDispatch for Bar {
+        impl crate::actor::native::NativeDispatch for Bar {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 _kind: crate::mail::KindId,
                 _payload: &[u8],
             ) -> Option<()> {
@@ -2826,8 +2829,8 @@ mod tests {
     ///      that's monitor-driven, opt-in.
     #[test]
     fn instanced_can_spawn_grandchild() {
-        use crate::registry::MailboxEntry;
-        use crate::spawn::Subname;
+        use crate::actor::native::spawn::Subname;
+        use crate::mail::registry::MailboxEntry;
         use aether_actor::{HandlesKind, Instanced};
         use aether_data::{Kind, KindId as DataKindId};
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -2900,19 +2903,19 @@ mod tests {
         }
         impl Instanced for Grandchild {}
         impl HandlesKind<Ping> for Grandchild {}
-        impl crate::native_actor::NativeActor for Grandchild {
+        impl crate::actor::native::NativeActor for Grandchild {
             type Config = Arc<AtomicU32>;
             fn init(
                 config: Self::Config,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self { received: config })
             }
         }
-        impl crate::native_actor::NativeDispatch for Grandchild {
+        impl crate::actor::native::NativeDispatch for Grandchild {
             fn __aether_dispatch_envelope(
                 &mut self,
-                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
             ) -> Option<()> {
@@ -2934,21 +2937,21 @@ mod tests {
         impl Instanced for Parent {}
         impl HandlesKind<Hatch> for Parent {}
         impl HandlesKind<Quit> for Parent {}
-        impl crate::native_actor::NativeActor for Parent {
+        impl crate::actor::native::NativeActor for Parent {
             type Config = Arc<AtomicU32>;
             fn init(
                 config: Self::Config,
-                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
             ) -> Result<Self, BootError> {
                 Ok(Self {
                     grandchild_received: config,
                 })
             }
         }
-        impl crate::native_actor::NativeDispatch for Parent {
+        impl crate::actor::native::NativeDispatch for Parent {
             fn __aether_dispatch_envelope(
                 &mut self,
-                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
             ) -> Option<()> {

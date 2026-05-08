@@ -20,8 +20,8 @@ use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_kinds::{FrameStats, Tick};
-use aether_substrate::capability::BootError;
-use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
+use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
+use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
     Chassis, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
 };

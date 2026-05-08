@@ -18,7 +18,7 @@
 //! test-bench; chassis bins chain `with_actor::<BroadcastCapability>(())`
 //! alongside the rest of the cap set.
 //!
-//! [`HubOutbound::egress_broadcast`]: aether_substrate::outbound::HubOutbound::egress_broadcast
+//! [`HubOutbound::egress_broadcast`]: aether_substrate::mail::outbound::HubOutbound::egress_broadcast
 
 // `HUB_BROADCAST_MAILBOX_NAME` must be importable at file root because
 // `#[bridge]` lifts the `const NAMESPACE` expression onto an always-on
@@ -32,9 +32,10 @@ mod native {
     use std::sync::Arc;
 
     use aether_actor::{Actor, actor};
-    use aether_substrate::capability::{BootError, Envelope};
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::outbound::HubOutbound;
+    use aether_substrate::actor::native::envelope::Envelope;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::outbound::HubOutbound;
 
     /// `hub.claude.broadcast` mailbox cap. Holds an `Arc<HubOutbound>`
     /// grabbed at boot from `NativeInitCtx::mailer().outbound()`.

@@ -188,7 +188,7 @@ impl EgressBackend for DroppingBackend {
 /// an enum so test code can drain a `Receiver<EgressEvent>` and assert
 /// on the egress shape without depending on the hub-protocol crate.
 /// Used by `RecordingBackend` (which the substrate's own integration
-/// tests wire up via `crate::outbound::HubOutbound::attached_loopback`); the hub-aware
+/// tests wire up via `crate::mail::outbound::HubOutbound::attached_loopback`); the hub-aware
 /// loopback that returns `EngineToHub` frames lives in `aether-hub`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EgressEvent {

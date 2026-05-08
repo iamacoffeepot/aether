@@ -1,33 +1,13 @@
-//! ADR-0070 Phase 1: capability trait, chassis builder, and ctx.
+//! ADR-0070 Phase 1: chassis builder and ctx (the legacy `ChassisBuilder`
+//! path; `chassis::builder::Builder` is the ADR-0071 successor).
 //!
-//! This module is purely additive. Existing chassis boot paths
-//! (`SubstrateBoot::builder`) keep working unchanged; nothing yet
-//! consumes the new builder. Phases 2–5 migrate each native sink
-//! (handle, log, io, net, audio, render+camera) into a submodule of
-//! `crate::capabilities` that implements [`Capability`]; Phase 4
-//! wires the dispatch path to consult [`ChassisCtx::claim_fallback_router`]
-//! and removes the substrate-side bubble-up in `Mailer`.
-//!
-//! The shape mirrors a wasm component (kinds + dispatcher + state +
-//! lifecycle) but compiled in: a native capability owns mailboxes,
-//! a Rust dispatcher, Rust state, and a `boot`/`shutdown` lifecycle.
-//! See ADR-0070 for the full rationale.
-//!
-//! # Phase 1 scope
-//!
-//! - Trait + builder + ctx wiring against an `Arc<Registry>` and
-//!   `Arc<Mailer>` supplied by the chassis.
-//! - [`ChassisCtx::claim_mailbox`] registers an mpsc-fed sink on the
-//!   registry under the given name and hands the capability the
-//!   receiver. The registered handler converts each borrowed sink
-//!   call into an owned [`Envelope`] and forwards it.
-//! - [`ChassisCtx::claim_fallback_router`] stores a single fallback
-//!   handler; substrate dispatch does not consult it yet (Phase 4).
-//! - No sinks are migrated yet — `crate::capabilities` is an empty
-//!   submodule placeholder that future PRs populate.
+//! Boot machinery shared with the new builder (claim helpers, the
+//! native-actor boot trampoline, the booted-chassis wrapper). Sibling
+//! modules: error types live in `chassis::error`; the cross-flavour
+//! [`Envelope`](crate::actor::native::envelope::Envelope) shape lives
+//! in `actor::native::envelope`.
 
 use std::collections::HashSet;
-use std::error::Error as StdError;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,25 +19,12 @@ use std::time::{Duration, Instant};
 use aether_actor::Actor;
 use aether_actor::Dispatch;
 
-use crate::lifecycle::{FatalAborter, PanicAborter};
+use crate::actor::native::envelope::Envelope;
+use crate::chassis::error::{BootError, WedgedFrameBound};
+use crate::mail::mailer::Mailer;
+use crate::mail::registry::Registry;
 use crate::mail::{KindId, MailboxId, ReplyTo};
-use crate::mailer::Mailer;
-use crate::registry::{NameConflict, Registry};
-
-/// One mail delivered to a capability through its mpsc receiver.
-///
-/// Sinks today receive borrowed args (`&str`, `&[u8]`); routing across
-/// an mpsc channel forces ownership. Capabilities that care about
-/// ergonomics destructure this once at the top of their loop.
-#[derive(Debug)]
-pub struct Envelope {
-    pub kind: KindId,
-    pub kind_name: String,
-    pub origin: Option<String>,
-    pub sender: ReplyTo,
-    pub payload: Vec<u8>,
-    pub count: u32,
-}
+use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 
 /// Result returned from [`ChassisCtx::claim_mailbox`].
 ///
@@ -138,28 +105,6 @@ pub struct FrameBoundClaim {
     pub pending: Arc<AtomicU64>,
 }
 
-/// Diagnostic returned from [`BootedChassis::drain_frame_bound`] when
-/// a frame-bound capability's inbox didn't drain within the budget.
-/// The chassis frame loop routes this through `lifecycle::fatal_abort`
-/// the same way component-side wedges do — see
-/// [`crate::frame_loop::drain_frame_bound_or_abort`].
-#[derive(Debug, Clone, Copy)]
-pub struct WedgedFrameBound {
-    pub mailbox: MailboxId,
-    pub pending: u64,
-    pub waited: Duration,
-}
-
-impl fmt::Display for WedgedFrameBound {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "frame-bound dispatcher wedged: mailbox={} pending={} waited={:?}",
-            self.mailbox, self.pending, self.waited,
-        )
-    }
-}
-
 /// Generic fallback-router handler: invoked by substrate dispatch when a
 /// local mailbox lookup misses. Phase 1 stores the handler but does
 /// not call it; Phase 4 wires `Mailer::push` to consult the slot in
@@ -171,64 +116,6 @@ impl fmt::Display for WedgedFrameBound {
 /// slot; other implementations are possible (test routers, multi-hub
 /// fan-out).
 pub type FallbackRouter = Arc<dyn Fn(&Envelope) -> bool + Send + Sync + 'static>;
-
-/// Failure modes capability boot can raise. Per ADR-0063, any boot
-/// error aborts the chassis before user code runs — no partial boots.
-#[derive(Debug)]
-pub enum BootError {
-    /// The mailbox name is already bound, either to another
-    /// capability that claimed it earlier or to a legacy
-    /// `Registry::register_closure` call from `SubstrateBoot::build`.
-    /// Phase 2-5 expect this during the side-by-side period and
-    /// remove the legacy registration in the same diff.
-    MailboxAlreadyClaimed { name: String },
-    /// A second capability tried to register a fallback router after
-    /// one was already installed. The slot is single-claim by design.
-    FallbackRouterAlreadyClaimed,
-    /// Anything else a capability's boot wants to surface.
-    Other(Box<dyn StdError + Send + Sync + 'static>),
-}
-
-impl fmt::Display for BootError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BootError::MailboxAlreadyClaimed { name } => {
-                write!(f, "mailbox {name:?} already claimed")
-            }
-            BootError::FallbackRouterAlreadyClaimed => {
-                f.write_str("fallback router slot already claimed")
-            }
-            BootError::Other(e) => write!(f, "capability boot failed: {e}"),
-        }
-    }
-}
-
-impl StdError for BootError {
-    fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match self {
-            BootError::Other(e) => Some(&**e),
-            _ => None,
-        }
-    }
-}
-
-impl From<NameConflict> for BootError {
-    fn from(e: NameConflict) -> Self {
-        BootError::MailboxAlreadyClaimed { name: e.name }
-    }
-}
-
-/// Forward `anyhow::Error` (which `wasmtime::Error` is a re-export
-/// of) into [`BootError::Other`]. Used by every boot-path that
-/// bubbles a catch-all error: wasmtime calls in `SubstrateBoot::build`,
-/// the chassis-bundle's `connect_hub_client` (anyhow over TCP), etc.
-/// Chassis trait impls can `?` either kind of error directly without
-/// per-call `.map_err` glue.
-impl From<wasmtime::Error> for BootError {
-    fn from(e: wasmtime::Error) -> Self {
-        BootError::Other(Box::new(std::io::Error::other(format!("{e}"))))
-    }
-}
 
 /// Marker trait for type-erased chassis-stored entries. Pre-PR-E3
 /// the `BootedChassis` and `chassis_builder` passive lists held both
@@ -271,16 +158,16 @@ pub struct ChassisCtx<'a> {
     /// claimed mailbox id here in addition to pushing onto the
     /// pending-counter list.
     frame_bound_set: &'a Arc<RwLock<HashSet<MailboxId>>>,
-    /// Indirection over [`crate::lifecycle::fatal_abort`] cloned into
+    /// Indirection over [`crate::runtime::lifecycle::fatal_abort`] cloned into
     /// every [`crate::NativeTransport`] this ctx builds, so the
     /// cross-class `wait_reply` guard (ADR-0074 §Decision 5) can
     /// abort without each capability needing to plumb
     /// [`crate::HubOutbound`] itself. Defaults to
     /// [`PanicAborter`] when the chassis builder doesn't override —
     /// production drivers swap in
-    /// [`crate::lifecycle::OutboundFatalAborter`] via
+    /// [`crate::runtime::lifecycle::OutboundFatalAborter`] via
     /// [`ChassisBuilder::with_aborter`] /
-    /// [`crate::chassis_builder::Builder::with_aborter`].
+    /// [`crate::chassis::builder::Builder::with_aborter`].
     aborter: &'a Arc<dyn FatalAborter>,
     /// Issue #601: every actor-mailbox claim (`claim_mailbox_*`,
     /// `claim_frame_bound_mailbox_*`, `claim_mailbox_drop_on_shutdown_*`)
@@ -306,7 +193,7 @@ pub struct ChassisCtx<'a> {
 
 impl<'a> ChassisCtx<'a> {
     /// Internal constructor used by [`ChassisBuilder::build`] and the
-    /// ADR-0071 [`crate::chassis_builder::Builder`]. Eight refs is one
+    /// ADR-0071 [`crate::chassis::builder::Builder`]. Eight refs is one
     /// over clippy's default; the alternative — a builder-of-the-builder
     /// — pays the same plumbing cost without adding clarity, since
     /// every chassis path that constructs a `ChassisCtx` already has
@@ -607,7 +494,7 @@ impl<'a> ChassisCtx<'a> {
 
     /// Read the list of frame-bound pending counters collected so far
     /// from earlier `claim_frame_bound_mailbox` calls. Used by
-    /// [`crate::chassis_builder::DriverCtx::frame_bound_pending`] to
+    /// [`crate::chassis::builder::DriverCtx::frame_bound_pending`] to
     /// snapshot the list at driver-boot time; capabilities that just
     /// want their own counter should hold the `Arc<AtomicU64>` from
     /// their [`FrameBoundClaim`] directly instead.
@@ -894,7 +781,7 @@ where
     // installed inbox), unclaim the mailbox, release the namespace.
     let init_result = {
         let mailer_clone = ctx.mail_send_handle();
-        let mut init_ctx = crate::native_actor::NativeInitCtx::new(
+        let mut init_ctx = crate::actor::native::ctx::NativeInitCtx::new(
             &transport,
             &mut throwaway_handles,
             mailer_clone,
@@ -953,7 +840,7 @@ where
                     aether_actor::log::with_actor_dispatch(
                         &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
                         || {
-                            let mut native_ctx = crate::native_actor::NativeCtx::new(
+                            let mut native_ctx = crate::actor::native::ctx::NativeCtx::new(
                                 &transport_for_thread,
                                 env.sender,
                             );
@@ -999,7 +886,7 @@ where
                     aether_actor::log::with_actor_dispatch(
                         &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
                         || {
-                            let mut native_ctx = crate::native_actor::NativeCtx::new(
+                            let mut native_ctx = crate::actor::native::ctx::NativeCtx::new(
                                 &transport_for_thread,
                                 env.sender,
                             );
@@ -1026,7 +913,7 @@ where
                 aether_actor::log::with_actor_dispatch(
                     &*transport_for_thread as &dyn aether_actor::log::MailDispatch,
                     || {
-                        let mut close_ctx = crate::native_actor::NativeCtx::new(
+                        let mut close_ctx = crate::actor::native::ctx::NativeCtx::new(
                             &transport_for_thread,
                             crate::mail::ReplyTo::NONE,
                         );
@@ -1121,7 +1008,7 @@ impl ChassisBuilder {
     /// Defaults the cross-class `wait_reply` aborter to
     /// [`PanicAborter`] — appropriate for tests and embedder-driven
     /// chassis. Production drivers swap in
-    /// [`crate::lifecycle::OutboundFatalAborter`] via
+    /// [`crate::runtime::lifecycle::OutboundFatalAborter`] via
     /// [`Self::with_aborter`] before `build()`.
     pub fn new(registry: Arc<Registry>, mailer: Arc<Mailer>) -> Self {
         Self {
@@ -1134,7 +1021,7 @@ impl ChassisBuilder {
 
     /// Override the default [`PanicAborter`] with a chassis-supplied
     /// [`FatalAborter`]. Production drivers (desktop, headless) call
-    /// this with an [`crate::lifecycle::OutboundFatalAborter`] cloned
+    /// this with an [`crate::runtime::lifecycle::OutboundFatalAborter`] cloned
     /// from their [`crate::HubOutbound`] so a cross-class
     /// `wait_reply` violation broadcasts `SubstrateDying` before
     /// process exit. Single-call: a second invocation overwrites the
@@ -1176,7 +1063,7 @@ impl ChassisBuilder {
 
     /// Issue 552 stage 2: boot a [`crate::NativeActor`] with its
     /// associated `Config`. Mirrors
-    /// [`crate::chassis_builder::Builder::with_actor`] for the legacy
+    /// [`crate::chassis::builder::Builder::with_actor`] for the legacy
     /// `ChassisBuilder` boot path used by [`crate::SubstrateBoot::build`].
     /// Both paths exist side-by-side until stage 2c retires the legacy
     /// builder; this method lets caps migrate onto `NativeActor` without
@@ -1311,7 +1198,7 @@ pub struct BootedChassis {
     /// Aborter cloned into every [`crate::NativeTransport`] this
     /// chassis builds. Defaulted to [`PanicAborter`] by
     /// [`ChassisBuilder::new`]; production drivers swap in
-    /// [`crate::lifecycle::OutboundFatalAborter`] via
+    /// [`crate::runtime::lifecycle::OutboundFatalAborter`] via
     /// [`ChassisBuilder::with_aborter`].
     aborter: Arc<dyn FatalAborter>,
     /// Issue 607 Phase 2 / Phase 3 (ADR-0079): per-chassis actor
@@ -1356,7 +1243,7 @@ impl BootedChassis {
     /// register. Used by render-touching tests to assert the
     /// frame-bound claim machinery wired up; production paths read
     /// the `pending` counter through
-    /// [`crate::frame_loop::drain_frame_bound_or_abort`].
+    /// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`].
     pub fn frame_bound_pending(&self) -> &[(MailboxId, Arc<AtomicU64>)] {
         &self.frame_bound_pending
     }
@@ -1593,7 +1480,7 @@ mod tests {
         let id = registry
             .lookup(StubCap::NAMESPACE)
             .expect("stub mailbox registered");
-        let crate::registry::MailboxEntry::Closure(handler) =
+        let crate::mail::registry::MailboxEntry::Closure(handler) =
             registry.entry(id).expect("entry exists")
         else {
             panic!("expected mailbox entry");

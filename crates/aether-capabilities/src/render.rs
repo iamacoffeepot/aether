@@ -46,13 +46,13 @@ mod native {
     use aether_actor::actor;
     use aether_data::Kind;
     use aether_kinds::{CaptureFrameResult, DRAW_TRIANGLE_BYTES};
-    use aether_substrate::capability::BootError;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::capture::{CaptureQueue, PendingCapture};
-    use aether_substrate::control_helpers::resolve_bundle;
-    use aether_substrate::mailer::Mailer;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::outbound::HubOutbound;
-    use aether_substrate::registry::Registry;
+    use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::helpers::resolve_bundle;
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::outbound::HubOutbound;
+    use aether_substrate::mail::registry::Registry;
     use aether_substrate::render::{
         CaptureMeta, IDENTITY_VIEW_PROJ, Pipeline, RenderError, Targets, build_main_pipeline,
         finish_capture, prepare_capture_copy, record_main_pass,
@@ -553,10 +553,10 @@ mod native {
 
         use super::*;
         use aether_actor::Actor;
-        use aether_substrate::capability::ChassisBuilder;
+        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::mail::mailer::Mailer;
+        use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{KindId, ReplyTo};
-        use aether_substrate::mailer::Mailer;
-        use aether_substrate::registry::{MailboxEntry, Registry};
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
             let registry = Arc::new(Registry::new());
@@ -695,9 +695,9 @@ mod native_headless {
 
     use aether_actor::actor;
     use aether_kinds::CaptureFrameResult;
-    use aether_substrate::capability::BootError;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::outbound::HubOutbound;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::outbound::HubOutbound;
 
     use super::{Camera, CaptureFrame, DrawTriangle};
 

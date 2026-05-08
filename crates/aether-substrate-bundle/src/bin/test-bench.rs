@@ -19,7 +19,9 @@ use std::time::Instant;
 use aether_capabilities::IoCapability;
 use aether_data::{Kind, encode_empty};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
-use aether_substrate::{Chassis, capture::CaptureQueue, frame_loop, mail::Mail, subscribers_for};
+use aether_substrate::{
+    Chassis, capture::CaptureQueue, chassis::frame_loop, mail::Mail, subscribers_for,
+};
 use aether_substrate_bundle::test_bench::{
     TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
     events::{self, ChassisEvent},

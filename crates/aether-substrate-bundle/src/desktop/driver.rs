@@ -29,10 +29,12 @@ use aether_kinds::{
     SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, Tick, WindowMode, WindowSize,
     keycode,
 };
-use aether_substrate::capability::{BootError, Envelope};
-use aether_substrate::chassis_builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
+use aether_substrate::actor::native::envelope::Envelope;
+use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
+use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    HubOutbound, InputSubscribers, Mailer, SubstrateBoot, frame_loop,
+    HubOutbound, InputSubscribers, Mailer, SubstrateBoot,
+    chassis::frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
 };

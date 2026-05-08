@@ -22,7 +22,7 @@
 //! a `#[fallback]` handler that fans the envelope out to every
 //! attached MCP session.
 //!
-//! [`NativeActor`]: aether_substrate::native_actor::NativeActor
+//! [`NativeActor`]: aether_substrate::actor::native::NativeActor
 //! [`Actor`]: aether_actor::Actor
 
 #[cfg(feature = "audio")]

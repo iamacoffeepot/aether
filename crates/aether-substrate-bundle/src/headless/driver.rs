@@ -21,10 +21,10 @@ use std::time::{Duration, Instant};
 use crate::hub::HubClient;
 use aether_data::{Kind, KindId, encode_empty};
 use aether_kinds::Tick;
-use aether_substrate::capability::BootError;
-use aether_substrate::chassis_builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
+use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
+use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    InputSubscribers, Mailer, SubstrateBoot, frame_loop, mail::Mail, subscribers_for,
+    InputSubscribers, Mailer, SubstrateBoot, chassis::frame_loop, mail::Mail, subscribers_for,
 };
 
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-

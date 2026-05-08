@@ -34,10 +34,10 @@ use std::time::{Duration, Instant};
 use aether_data::encode;
 use aether_kinds::FrameStats;
 
-use crate::lifecycle;
+use crate::mail::mailer::Mailer;
+use crate::mail::outbound::HubOutbound;
 use crate::mail::{Mail, MailboxId};
-use crate::mailer::Mailer;
-use crate::outbound::HubOutbound;
+use crate::runtime::lifecycle;
 
 /// Frame-stats emission cadence. Hardcoded for v1; an env knob is
 /// deferred until a forcing function arrives. 120 frames at 60 Hz is
@@ -60,7 +60,7 @@ pub const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 /// pending counters
 /// [`crate::ChassisCtx::claim_frame_bound_mailbox`] collected for the
 /// chassis (snapshotted by drivers via
-/// [`crate::chassis_builder::DriverCtx::frame_bound_pending`]).
+/// [`crate::chassis::builder::DriverCtx::frame_bound_pending`]).
 ///
 /// Empty `pending` is a fast no-op — chassis without frame-bound
 /// capabilities (today: headless, hub) call this every frame at
@@ -142,7 +142,7 @@ mod tests {
     use aether_kinds::FrameStats;
 
     use super::*;
-    use crate::registry::Registry;
+    use crate::mail::registry::Registry;
 
     /// `emit_frame_stats` is a no-op on non-multiples of
     /// `LOG_EVERY_FRAMES`. Verified by sending into a sink that

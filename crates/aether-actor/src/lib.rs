@@ -188,8 +188,8 @@ pub use aether_data::{Instanced, Singleton};
 ///
 /// ```ignore
 /// aether_actor::native_only! {
-///     use aether_substrate::capability::BootError;
-///     use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+///     use aether_substrate::chassis::error::BootError;
+///     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 ///
 ///     fn put_error_to_handle_error(e: PutError) -> HandleError { ... }
 /// }

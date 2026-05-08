@@ -22,9 +22,9 @@ mod native {
     use aether_kinds::{
         HandleError, HandlePinResult, HandlePublishResult, HandleReleaseResult, HandleUnpinResult,
     };
-    use aether_substrate::capability::BootError;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
     use aether_substrate::handle_store::{HandleStore, PutError};
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
 
     /// `aether.handle` mailbox cap. Owns the substrate's `HandleStore`.
     pub struct HandleCapability {
@@ -160,11 +160,11 @@ mod native {
         use super::{
             Arc, BootError, HandleCapability, HandlePublish, HandlePublishResult, HandleStore,
         };
-        use aether_substrate::capability::ChassisBuilder;
+        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::mail::mailer::Mailer;
+        use aether_substrate::mail::outbound::EgressEvent;
+        use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{ReplyTarget, ReplyTo};
-        use aether_substrate::mailer::Mailer;
-        use aether_substrate::outbound::EgressEvent;
-        use aether_substrate::registry::{MailboxEntry, Registry};
 
         fn fresh_substrate() -> (
             Arc<HandleStore>,
@@ -177,7 +177,7 @@ mod native {
             for d in aether_kinds::descriptors::all() {
                 let _ = registry.register_kind_with_descriptor(d);
             }
-            let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
+            let (outbound, rx) = aether_substrate::mail::outbound::HubOutbound::attached_loopback();
             let mailer = Arc::new(Mailer::new());
             mailer.wire(Arc::clone(&registry));
             mailer.wire_outbound(outbound);

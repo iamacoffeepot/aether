@@ -21,8 +21,8 @@ use aether_capabilities::{
     http::HttpConfig as HttpConf,
 };
 use aether_kinds::WindowMode;
-use aether_substrate::capability::BootError;
-use aether_substrate::chassis_builder::{Builder, BuiltChassis};
+use aether_substrate::chassis::builder::{Builder, BuiltChassis};
+use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};
 use winit::error::EventLoopError;
 use winit::event_loop::EventLoop;
@@ -202,8 +202,10 @@ impl DesktopChassis {
         // cross-class `wait_reply` aborter to broadcast
         // `SubstrateDying` before exit. Built before `boot` moves
         // into the driver.
-        let aborter: Arc<dyn aether_substrate::lifecycle::FatalAborter> = Arc::new(
-            aether_substrate::lifecycle::OutboundFatalAborter::new(Arc::clone(&boot.outbound)),
+        let aborter: Arc<dyn aether_substrate::runtime::lifecycle::FatalAborter> = Arc::new(
+            aether_substrate::runtime::lifecycle::OutboundFatalAborter::new(Arc::clone(
+                &boot.outbound,
+            )),
         );
 
         // Issue 552 stage 2d: render is a NativeActor. The chassis

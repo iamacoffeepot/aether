@@ -18,8 +18,14 @@
 //! the [`BuiltChassis<C>`] anyway, and the indirection through a
 //! trait method that immediately delegated added no value.
 
-use crate::capability::BootError;
-use crate::chassis_builder::{BuiltChassis, DriverCapability};
+pub mod builder;
+pub mod ctx;
+pub mod error;
+pub mod frame_loop;
+pub mod helpers;
+
+use crate::chassis::builder::{BuiltChassis, DriverCapability};
+use crate::chassis::error::BootError;
 
 /// The composition contract a concrete chassis implements. Each
 /// chassis declares its driver and the env-shaped config it takes
@@ -36,7 +42,7 @@ use crate::chassis_builder::{BuiltChassis, DriverCapability};
 /// loop) still impl this trait so [`BuiltChassis<Self>`] /
 /// `PassiveChassis<Self>` can be parameterised by the chassis kind;
 /// they declare a phantom [`DriverCapability`] for `type Driver`
-/// (`crate::capability::NeverDriver`) and have `fn build` error
+/// (`crate::chassis::builder::NeverDriver`) and have `fn build` error
 /// pointing callers at the chassis's inherent `build_passive` —
 /// the trait method is never reached on passive chassis but its
 /// presence keeps the trait shape uniform across the workspace.
@@ -52,7 +58,7 @@ pub trait Chassis: Sized + 'static {
     /// The driver capability that owns this chassis's main thread.
     /// Desktop's winit driver, headless's std-timer driver, hub's
     /// listener-and-MCP driver. Passive chassis (test-bench)
-    /// declare [`crate::capability::NeverDriver`] here.
+    /// declare [`crate::chassis::builder::NeverDriver`] here.
     type Driver: DriverCapability;
 
     /// Resolved-config bag the chassis takes at build time. Each

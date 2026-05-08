@@ -10,7 +10,7 @@
 //! plus the [`Self::register_monitor`] / [`Self::deregister_monitor`]
 //! / [`Self::close_actor`] surface.
 //!
-//! Distinct from [`crate::registry::Registry`] — that one owns
+//! Distinct from [`crate::mail::registry::Registry`] — that one owns
 //! mailbox-name → handler routing and kind descriptors. This one owns
 //! actor-state lifecycle. Future PRs may collapse the two; today they
 //! sit side-by-side so the lifecycle work doesn't perturb the routing
@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 
-use crate::capability::Envelope;
+use crate::actor::native::envelope::Envelope;
 use crate::mail::MailboxId;
 
 /// One actor slot in the registry. `Live` carries the inbox sender
@@ -107,7 +107,7 @@ pub struct MonitorEntry {
 }
 
 /// Failure modes for [`ActorRegistry::register_monitor`] /
-/// [`crate::native_actor::NativeCtx::monitor`]. ADR-0079 v1: monitors
+/// [`crate::actor::native::ctx::NativeCtx::monitor`]. ADR-0079 v1: monitors
 /// must address an actor that is currently `Live`. Tombstoned targets
 /// (retired-and-closed full names) can't be monitored — the mail
 /// wouldn't fire anyway, since the close fan-out already ran when the
@@ -212,7 +212,7 @@ impl ActorRegistry {
     /// failure path runs even on weird states).
     ///
     /// Crate-private — only the boot-failure paths in
-    /// [`crate::capability`] / [`crate::chassis_builder`] call this.
+    /// [`crate::chassis::ctx`] / [`crate::chassis::builder`] call this.
     pub(crate) fn release_namespace(&self, namespace: &'static str, type_id: TypeId) -> bool {
         let mut owners = self.name_owners.write().unwrap();
         match owners.get(namespace) {
@@ -316,7 +316,7 @@ impl ActorRegistry {
 
     /// Issue 607 Phase 4b (ADR-0079): register `watcher` as a monitor
     /// of `target`. Caller is responsible for sending the resulting
-    /// [`MonitorEntry`] back through a [`crate::native_actor::MonitorHandle`]
+    /// [`MonitorEntry`] back through a [`crate::actor::monitor::MonitorHandle`]
     /// so `Drop` deregisters the entry — bare callers (tests, internal
     /// fixtures) own the cleanup themselves.
     ///
@@ -375,7 +375,7 @@ impl ActorRegistry {
     /// Issue 607 Phase 4b (ADR-0079): undo a prior `register_monitor`
     /// call. Idempotent — removing a monitor that was already pruned
     /// (e.g. because the target closed and the close path drained the
-    /// forward index) is a no-op. Called by [`crate::native_actor::MonitorHandle::Drop`]
+    /// forward index) is a no-op. Called by [`crate::actor::monitor::MonitorHandle::Drop`]
     /// when the handle goes out of scope.
     pub(crate) fn deregister_monitor(&self, watcher: MailboxId, target: MailboxId) {
         if let Some(entries) = self.monitors_of.write().unwrap().get_mut(&target) {
@@ -474,7 +474,7 @@ mod tests {
     /// liveness check passes. Uses a throwaway sender so the test
     /// doesn't drag in `NativeActor`.
     fn insert_live_stub(r: &ActorRegistry, id: MailboxId) {
-        let (tx, _rx) = std::sync::mpsc::channel::<crate::capability::Envelope>();
+        let (tx, _rx) = std::sync::mpsc::channel::<crate::actor::native::envelope::Envelope>();
         struct Stub;
         r.insert_live(
             id,

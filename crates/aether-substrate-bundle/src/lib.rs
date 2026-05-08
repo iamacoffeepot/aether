@@ -34,8 +34,14 @@ pub use aether_capabilities::{BroadcastCapability, ComponentHostCapability, Comp
 pub use aether_substrate::{
     Chassis, Component, ComponentCtx, HubOutbound, InputSubscribers, KindId, Mail, MailKind,
     MailboxEntry, MailboxHandler, MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,
+    actor::wasm::{component, host_fns, kind_manifest, reply_table},
     capture::{CaptureQueue, PendingCapture},
-    component, frame_loop, host_fns, input, kind_manifest, log_install, mail, mailer,
-    new_subscribers, registry, remove_from_all, reply_table, subscribers_for,
+    chassis::frame_loop,
+    input, mail,
+    mail::mailer,
+    mail::registry,
+    new_subscribers, remove_from_all,
+    runtime::log_install,
+    subscribers_for,
 };
 pub use hub::{HubClient, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail};
