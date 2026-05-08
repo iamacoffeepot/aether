@@ -15,7 +15,7 @@
 //! sibling cdylib this crate can't import without colliding FFI
 //! exports.
 
-use aether_actor::{BootError, Sender, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_capabilities::BroadcastCapability;
 use aether_data::{Kind, Schema};
 use aether_kinds::Tick;
@@ -47,22 +47,25 @@ pub struct Caller {
 }
 
 #[actor]
-impl WasmActor for Caller {
+impl FfiActor for Caller {
     const NAMESPACE: &'static str = "caller";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(Caller { next_seq: 0 })
     }
 
     #[handler]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         ctx.send_to_named("echoer", &Request { seq });
     }
 
     #[handler]
-    fn on_response(&mut self, ctx: &mut WasmCtx<'_>, resp: Response) {
+    fn on_response(&mut self, ctx: &mut FfiCtx<'_>, resp: Response) {
         ctx.actor::<BroadcastCapability>()
             .send(&Observation { seq: resp.seq });
     }

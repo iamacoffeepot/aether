@@ -66,7 +66,7 @@ impl<K: Kind> KindId<K> {
 /// resolution time.
 ///
 /// Built via `resolve_mailbox::<K, T>(name)` during init. The `T`
-/// parameter selects the transport — it's `WasmTransport` inside a
+/// parameter selects the transport — it's `FfiTransport` inside a
 /// guest cdylib (via the `aether-component::Mailbox<K>` 1-arg alias) and
 /// will be `NativeTransport` inside a native capability when ADR-0074
 /// Phase 2 lands.
@@ -117,7 +117,7 @@ impl<K: Kind, T: MailTransport> Mailbox<K, T> {
     /// explicit transport reference, so the actor's identity (and per-
     /// actor state like the correlation counter on `NativeTransport`)
     /// is type-system-tracked rather than hidden in a thread-local.
-    /// `WasmTransport` is a ZST, so passing `&WASM_TRANSPORT` from
+    /// `FfiTransport` is a ZST, so passing `&FFI_TRANSPORT` from
     /// `aether-component` is free; `NativeTransport` rides on the
     /// capability that owns it.
     ///
@@ -223,7 +223,7 @@ impl<'a, R: crate::Actor, T: MailTransport> ActorMailbox<'a, R, T> {
     ///
     /// ```compile_fail
     /// use aether_actor::{Actor, HandlesKind, Singleton, MailTransport};
-    /// use aether_actor::wasm::WASM_TRANSPORT;
+    /// use aether_actor::ffi::FFI_TRANSPORT;
     /// use aether_data::Kind;
     ///
     /// // Two kinds; the receiver only handles the first.
@@ -243,7 +243,7 @@ impl<'a, R: crate::Actor, T: MailTransport> ActorMailbox<'a, R, T> {
     /// impl HandlesKind<KindOk> for R {}     // R handles KindOk only
     ///
     /// // Build a ctx, then take the mailbox via ctx.actor::<R>().
-    /// let ctx = aether_actor::Ctx::__new(&WASM_TRANSPORT);
+    /// let ctx = aether_actor::Ctx::__new(&FFI_TRANSPORT);
     /// ctx.actor::<R>().send(&KindWrong);   // ← compile error: R does not impl HandlesKind<KindWrong>
     /// ```
     pub fn send<K>(&self, payload: &K)
@@ -406,7 +406,7 @@ mod tests {
             }
         }
         // Single-threaded test stub — Send + Sync needed because the
-        // SDK trait requires them. Real transports (WasmTransport ZST,
+        // SDK trait requires them. Real transports (FfiTransport ZST,
         // NativeTransport) carry these properly.
         unsafe impl Send for RecordingTransport {}
         unsafe impl Sync for RecordingTransport {}

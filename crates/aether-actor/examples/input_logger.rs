@@ -14,7 +14,7 @@
 //! kind at init, so the test harness just loads the component and
 //! starts driving input — no manual `subscribe_input` needed.
 
-use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_capabilities::BroadcastCapability;
 use aether_data::{Kind, Schema};
 use aether_kinds::{Key, MouseButton, MouseMove, Tick};
@@ -31,21 +31,24 @@ pub struct InputObserved {
 pub struct InputLogger;
 
 #[actor]
-impl WasmActor for InputLogger {
+impl FfiActor for InputLogger {
     const NAMESPACE: &'static str = "input_logger";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(InputLogger)
     }
 
     #[handler]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) {
         ctx.actor::<BroadcastCapability>()
             .send(&InputObserved { stream: 0, code: 0 });
     }
 
     #[handler]
-    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
+    fn on_key(&mut self, ctx: &mut FfiCtx<'_>, key: Key) {
         ctx.actor::<BroadcastCapability>().send(&InputObserved {
             stream: 1,
             code: key.code,
@@ -53,13 +56,13 @@ impl WasmActor for InputLogger {
     }
 
     #[handler]
-    fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, _mb: MouseButton) {
+    fn on_mouse_button(&mut self, ctx: &mut FfiCtx<'_>, _mb: MouseButton) {
         ctx.actor::<BroadcastCapability>()
             .send(&InputObserved { stream: 2, code: 0 });
     }
 
     #[handler]
-    fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, m: MouseMove) {
+    fn on_mouse_move(&mut self, ctx: &mut FfiCtx<'_>, m: MouseMove) {
         ctx.actor::<BroadcastCapability>().send(&InputObserved {
             stream: 3,
             code: m.x as u32,

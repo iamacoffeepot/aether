@@ -22,7 +22,7 @@
 //! on the trunk for those without pulling in this crate's
 //! `Component` impl. Per ADR-0066.
 
-use aether_actor::{BootError, KindId, Sender, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, KindId, MailSender, Resolver, actor};
 use aether_capabilities::BroadcastCapability;
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, CLIENT_OBSERVER, GAME_DRAW, GAME_PLAYING, GAME_WON_O, GAME_WON_X, GameState,
@@ -57,10 +57,13 @@ pub struct TicTacToe {
 /// every session. Send `tic_tac_toe.reset` (empty payload) to start a
 /// fresh game.
 #[actor]
-impl WasmActor for TicTacToe {
+impl FfiActor for TicTacToe {
     const NAMESPACE: &'static str = "tic_tac_toe";
 
-    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(TicTacToe {
             state: GameState::new_game(),
             move_result_kind: ctx.resolve::<MoveResult>(),
@@ -79,7 +82,7 @@ impl WasmActor for TicTacToe {
     /// whose turn it is, and the resulting `state.last_move_player`
     /// tells you which side actually got placed.
     #[handler]
-    fn on_play_move(&mut self, ctx: &mut WasmCtx<'_>, mv: PlayMove) {
+    fn on_play_move(&mut self, ctx: &mut FfiCtx<'_>, mv: PlayMove) {
         let status = self.apply_move(mv.row, mv.col);
         self.reply(ctx, status);
         if status == MOVE_OK {
@@ -96,7 +99,7 @@ impl WasmActor for TicTacToe {
     /// in-progress game. The reply always has `status == MOVE_OK`
     /// and the broadcast is fire-and-forget.
     #[handler]
-    fn on_reset(&mut self, ctx: &mut WasmCtx<'_>, _r: Reset) {
+    fn on_reset(&mut self, ctx: &mut FfiCtx<'_>, _r: Reset) {
         self.state = GameState::new_game();
         self.reply(ctx, MOVE_OK);
         ctx.actor::<BroadcastCapability>().send(&self.state);
@@ -143,7 +146,7 @@ impl TicTacToe {
         MOVE_OK
     }
 
-    fn reply(&self, ctx: &mut WasmCtx<'_>, status: u8) {
+    fn reply(&self, ctx: &mut FfiCtx<'_>, status: u8) {
         let Some(sender) = ctx.reply_to() else {
             return;
         };
@@ -152,7 +155,7 @@ impl TicTacToe {
             _pad: [0; 7],
             state: self.state,
         };
-        ctx.reply(sender, self.move_result_kind, &result);
+        ctx.reply_kind(sender, self.move_result_kind, &result);
     }
 }
 

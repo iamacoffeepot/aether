@@ -11,7 +11,7 @@
 //!
 //! Grid is still capped at 16×16 (pre-ADR-0028 carryover).
 
-use aether_actor::{BootError, KindId, Sender, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, KindId, MailSender, Resolver, actor};
 use aether_camera::{CameraTopdownSet, TopdownParams};
 use aether_capabilities::RenderCapability;
 use aether_data::{Kind, Schema};
@@ -137,10 +137,13 @@ pub struct Sokoban {
 ///   no-op.
 /// - `SokobanReset` — reload the active level.
 #[actor]
-impl WasmActor for Sokoban {
+impl FfiActor for Sokoban {
     const NAMESPACE: &'static str = "sokoban";
 
-    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         let mut me = Sokoban {
             state: SokobanState::default(),
             state_kind: ctx.resolve::<SokobanState>(),
@@ -157,7 +160,7 @@ impl WasmActor for Sokoban {
     }
 
     #[handler]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) {
         self.render_grid(ctx);
         let (px, py) = self.player_world_pos();
         self.render_player(ctx, px, py);
@@ -176,20 +179,20 @@ impl WasmActor for Sokoban {
     /// Hold doesn't auto-repeat: one press = one step. For scripted
     /// moves, send a fresh `Key` per cell.
     #[handler]
-    fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, key: Key) {
+    fn on_key(&mut self, _ctx: &mut FfiCtx<'_>, key: Key) {
         if let Some((dx, dy)) = step_delta(key.code) {
             self.apply_step(dx, dy);
         }
     }
 
     #[handler]
-    fn on_reset(&mut self, ctx: &mut WasmCtx<'_>, _rst: SokobanReset) {
+    fn on_reset(&mut self, ctx: &mut FfiCtx<'_>, _rst: SokobanReset) {
         self.load_level(self.state.level_id);
         self.reply_state(ctx);
     }
 
     #[handler]
-    fn on_load_level(&mut self, ctx: &mut WasmCtx<'_>, load: SokobanLoadLevel) {
+    fn on_load_level(&mut self, ctx: &mut FfiCtx<'_>, load: SokobanLoadLevel) {
         self.load_level(load.id);
         self.reply_state(ctx);
     }
@@ -318,7 +321,7 @@ impl Sokoban {
 
     /// Emit one `DrawTriangle` for the player body, centered at the
     /// supplied world coords.
-    fn render_player(&self, ctx: &mut WasmCtx<'_>, px: f32, py: f32) {
+    fn render_player(&self, ctx: &mut FfiCtx<'_>, px: f32, py: f32) {
         let body = DrawTriangle {
             verts: [
                 Vertex {
@@ -350,14 +353,14 @@ impl Sokoban {
         ctx.actor::<RenderCapability>().send(&body);
     }
 
-    fn reply_state(&self, ctx: &mut WasmCtx<'_>) {
+    fn reply_state(&self, ctx: &mut FfiCtx<'_>) {
         let Some(sender) = ctx.reply_to() else {
             return;
         };
-        ctx.reply(sender, self.state_kind, &self.state);
+        ctx.reply_kind(sender, self.state_kind, &self.state);
     }
 
-    fn render_grid(&self, ctx: &mut WasmCtx<'_>) {
+    fn render_grid(&self, ctx: &mut FfiCtx<'_>) {
         let w = self.state.width as usize;
         let h = self.state.height as usize;
         if w == 0 || h == 0 {

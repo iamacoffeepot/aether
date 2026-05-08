@@ -1,6 +1,6 @@
 //! Issue 552 stage 1: cross-transport actor-typed sender surface.
 //!
-//! Both the wasm-guest [`Ctx<'a, WasmTransport>`] and the native
+//! Both the wasm-guest [`Ctx<'a, FfiTransport>`] and the native
 //! [`aether_substrate::NativeCtx<'a>`] implement [`Sender`] and
 //! [`MailCtx`]. The traits are the language stage-3 senders walk
 //! against once `resolve_mailbox::<K>(name)` retires — `ctx.send::<R>(&kind)`
@@ -34,7 +34,7 @@ use crate::actor::{Actor, HandlesKind};
 
 /// Outbound-mail surface every actor ctx exposes. Implementations
 /// route through their owning transport — the wasm impl on
-/// [`crate::Ctx<'a, WasmTransport>`] dispatches through host fns;
+/// [`crate::Ctx<'a, FfiTransport>`] dispatches through host fns;
 /// the native impl on `NativeCtx<'_>` (in `aether-substrate`)
 /// pushes onto the cross-actor `Arc<Mailer>` queue.
 ///
@@ -78,7 +78,7 @@ pub trait Sender {
 /// internally.
 ///
 /// Init contexts deliberately don't implement this — there's no
-/// inbound-mail context at boot time. Per-handler ctxs (`WasmCtx`,
+/// inbound-mail context at boot time. Per-handler ctxs (`FfiCtx`,
 /// `NativeCtx`) do.
 ///
 /// Note: Stage 1 deliberately omits a `sender()` accessor. The

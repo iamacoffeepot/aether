@@ -13,7 +13,7 @@
 //! to wasm; load via `mcp__aether-hub__load_component` and send
 //! `demo.postcard_request` to verify the dispatch.
 
-use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_capabilities::BroadcastCapability;
 use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
@@ -43,10 +43,13 @@ pub struct PostcardObserved {
 pub struct PostcardEchoer;
 
 #[actor]
-impl WasmActor for PostcardEchoer {
+impl FfiActor for PostcardEchoer {
     const NAMESPACE: &'static str = "postcard_echoer";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(PostcardEchoer)
     }
 
@@ -55,7 +58,7 @@ impl WasmActor for PostcardEchoer {
     /// (synthesised by the Kind derive on `PostcardRequest` based on
     /// the absence of `#[repr(C)]`) already knows the wire shape.
     #[handler]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, req: PostcardRequest) {
+    fn on_request(&mut self, ctx: &mut FfiCtx<'_>, req: PostcardRequest) {
         ctx.actor::<BroadcastCapability>().send(&PostcardObserved {
             tag_len: req.tag.len() as u32,
             payload_len: req.payload.len() as u32,

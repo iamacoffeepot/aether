@@ -2,7 +2,7 @@
 //! only handle round-trips). Each family carries its own error enum
 //! (e.g. `SyncHandleError`), so the helper is generic over both the
 //! reply kind `K` and an error type that implements [`WaitError`].
-//! The transport `T` is the third generic — picks `WasmTransport` for
+//! The transport `T` is the third generic — picks `FfiTransport` for
 //! guests and `NativeTransport` for native capabilities (Phase 2).
 //!
 //! The wasm-side `io::*_sync` / `net::fetch_blocking` wrappers that

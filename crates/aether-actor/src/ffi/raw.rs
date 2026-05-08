@@ -1,19 +1,26 @@
 // Raw FFI boundary with the substrate. This is the only place in a
-// guest component tree that should write `extern "C"` decls or host-stub
-// panics; everything else goes through the typed wrappers in `lib.rs`.
+// guest tree that should write `extern "C"` decls or host-stub panics;
+// everything else goes through the typed wrappers in `lib.rs`.
 //
-// On wasm32 the fns are imports from the `aether` module the substrate
-// exposes (see `aether-substrate/src/host_fns.rs`). On any other target
-// they're stubs that panic if called, which keeps the crate (and every
-// component that depends on it) compilable for `cargo test --workspace`
-// on the host — components can still be unit-tested for pure logic
-// there, they just can't cross the FFI.
+// On the FFI guest target (today: `wasm32-unknown-unknown`) the fns
+// are imports from the `aether` module the substrate's wasm runtime
+// exposes (see `aether-substrate/src/actor/wasm/host_fns.rs`). On
+// any other target they're stubs that panic if called, which keeps
+// the crate (and every actor crate that depends on it) compilable
+// for `cargo test --workspace` on the host — actors can still be
+// unit-tested for pure logic there, they just can't cross the FFI.
 //
-// ADR-0024 Phase 1: the wasm-visible import names carry a `_p32`
+// The `target_arch = "wasm32"` cfg gate matches the only FFI host
+// the substrate ships today. A future C / OS-process host would
+// either pick a different gate or drop the cfg entirely; the
+// import surface itself is target-agnostic.
+//
+// ADR-0024 Phase 1: the FFI-visible import names carry a `_p32`
 // suffix in anticipation of a future `_p64` sibling for wasm64
-// components. The Rust-side identifiers stay un-suffixed (`send_mail`,
-// not `send_mail_p32`) so callers in `lib.rs` don't have to thread the
-// suffix through every callsite — `#[link_name]` does the remap.
+// guests. The Rust-side identifiers stay un-suffixed (`send_mail`,
+// not `send_mail_p32`) so callers in `lib.rs` don't have to thread
+// the suffix through every call site — `#[link_name]` does the
+// remap.
 
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "aether")]
@@ -51,7 +58,7 @@ unsafe extern "C" {
     /// for the substrate to surface in `LoadResult::Err` after the
     /// guest's `init` returns non-zero. The `export!` macro is the
     /// only intended caller — user code returns `Err(BootError)`
-    /// from `WasmActor::init` and the macro plumbs the bytes
+    /// from `FfiActor::init` and the macro plumbs the bytes
     /// through this import. Bytes at `(ptr, len)` are copied out of
     /// guest memory before the call returns.
     #[link_name = "init_failed_p32"]
@@ -59,32 +66,32 @@ unsafe extern "C" {
 }
 
 /// # Safety
-/// Host-target stub for the wasm `aether::send_mail` import. Always
-/// panics — callers on non-wasm targets are misusing the SDK.
+/// Host-side stub for the FFI `aether::send_mail` import. Always
+/// panics — callers outside the FFI guest are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn send_mail(_recipient: u64, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
-    panic!("aether-component: send_mail called on non-wasm target");
+    panic!("aether-actor: send_mail called outside the FFI guest");
 }
 
 /// # Safety
-/// Host-target stub for the wasm `aether::reply_mail` import. Always
-/// panics — callers on non-wasm targets are misusing the SDK.
+/// Host-side stub for the FFI `aether::reply_mail` import. Always
+/// panics — callers outside the FFI guest are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
-    panic!("aether-component: reply_mail called on non-wasm target");
+    panic!("aether-actor: reply_mail called outside the FFI guest");
 }
 
 /// # Safety
-/// Host-target stub for the wasm `aether::save_state` import. Always
-/// panics — callers on non-wasm targets are misusing the SDK.
+/// Host-side stub for the FFI `aether::save_state` import. Always
+/// panics — callers outside the FFI guest are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
-    panic!("aether-component: save_state called on non-wasm target");
+    panic!("aether-actor: save_state called outside the FFI guest");
 }
 
 /// # Safety
-/// Host-target stub for the wasm `aether::wait_reply` import. Always
-/// panics — callers on non-wasm targets are misusing the SDK.
+/// Host-side stub for the FFI `aether::wait_reply` import. Always
+/// panics — callers outside the FFI guest are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn wait_reply(
     _expected_kind: u64,
@@ -93,21 +100,21 @@ pub unsafe fn wait_reply(
     _timeout_ms: u32,
     _expected_correlation: u64,
 ) -> i32 {
-    panic!("aether-component: wait_reply called on non-wasm target");
+    panic!("aether-actor: wait_reply called outside the FFI guest");
 }
 
 /// # Safety
-/// Host-target stub for the wasm `aether::prev_correlation` import.
-/// Always panics — callers on non-wasm targets are misusing the SDK.
+/// Host-side stub for the FFI `aether::prev_correlation` import.
+/// Always panics — callers outside the FFI guest are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn prev_correlation() -> u64 {
-    panic!("aether-component: prev_correlation called on non-wasm target");
+    panic!("aether-actor: prev_correlation called outside the FFI guest");
 }
 
 /// # Safety
-/// Host-target stub for the wasm `aether::init_failed` import.
-/// Always panics — callers on non-wasm targets are misusing the SDK.
+/// Host-side stub for the FFI `aether::init_failed` import.
+/// Always panics — callers outside the FFI guest are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn init_failed(_ptr: u32, _len: u32) {
-    panic!("aether-component: init_failed called on non-wasm target");
+    panic!("aether-actor: init_failed called outside the FFI guest");
 }

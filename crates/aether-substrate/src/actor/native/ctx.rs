@@ -2,11 +2,26 @@
 //! dispatcher trampoline fires. The trait + dispatch surface live in
 //! the parent module (`super`); the cross-flavour `MonitorHandle` lives
 //! in `crate::actor::monitor`.
+//!
+//! Issue 663 phase B added per-stage capability-trait impls
+//! ([`MailSender`], [`OutboundReply`], [`LifecycleControl`]) on
+//! [`NativeCtx`] / [`NativeInitCtx`] alongside the existing inherent
+//! methods, so user-facing handler bodies are now spelled in the same
+//! cross-transport vocabulary FFI guests use. Substrate-internal
+//! accessors (`mailer`, `publish_handle`, `transport_arc`, `self_id`,
+//! plus the `spawn_child` builder) stay inherent — they expose
+//! types that don't belong on a cross-transport trait
+//! (`Arc<Mailer>`, `Arc<Spawner>`, the chassis `ExportedHandles` map,
+//! the substrate-only `SpawnBuilder<'_, A>` whose
+//! `A: NativeActor + NativeDispatch` bound can't sit on a trait
+//! method declared in `aether-actor`). The inherent + trait surface
+//! coexist; cap authors reach for whichever is in scope.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use aether_actor::actor::ctx::{LifecycleControl, MailSender, OutboundReply};
 use aether_actor::{Actor, ActorMailbox, HandlesKind, MailCtx, Sender, Singleton};
 use aether_data::{Kind, mailbox_id_from_name};
 
@@ -348,6 +363,75 @@ impl<'a> Sender for NativeInitCtx<'a> {
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let mailbox = aether_actor::resolve_mailbox::<K, NativeTransport>(name);
         mailbox.send(self.transport, payload);
+    }
+}
+
+// Issue 663 phase B layers the per-stage capability trait impls on top
+// of the existing `Sender` / `MailCtx` impls. Default-impl bodies on
+// `MailSender` cover `actor::<R>()` / `resolve_actor` / `send` /
+// `send_many` / `send_to_named`, so each impl below only spells out
+// the stage-specific accessors. `LifecycleControl::shutdown` /
+// `monitor` forward to the existing inherent methods that today
+// reach into the substrate-internal spawner + actor registry; future
+// FFI-side wiring (issue 607 phase 4 / ADR-0079) will program against
+// the trait the same way native callers do.
+
+impl<'a> MailSender for NativeCtx<'a> {
+    type Transport = NativeTransport;
+    fn transport(&self) -> &NativeTransport {
+        self.transport
+    }
+}
+
+impl<'a> OutboundReply for NativeCtx<'a> {
+    type ReplyHandle = ReplyTo;
+
+    /// Always `Some` on native — the substrate's per-handler dispatcher
+    /// builds a `ReplyTo` for every inbound (broadcast / no-reply mail
+    /// rides as `ReplyTarget::None` inside the wrapper). The
+    /// always-Some invariant is preserved by [`Self::origin`] /
+    /// [`Self::reply`] inspecting the inner `ReplyTarget`; the trait's
+    /// `Option<Self::ReplyHandle>` shape exists for the FFI side,
+    /// where a guest genuinely sees no reply target.
+    fn reply_to(&self) -> Option<ReplyTo> {
+        Some(self.sender)
+    }
+
+    fn origin(&self) -> Option<aether_data::MailboxId> {
+        match self.sender.target {
+            crate::mail::ReplyTarget::Component(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
+        self.transport.send_reply_for_handler(self.sender, payload);
+    }
+}
+
+impl<'a> LifecycleControl for NativeCtx<'a> {
+    type MonitorHandle = MonitorHandle;
+    type MonitorError = MonitorError;
+
+    fn shutdown(&self) {
+        self.transport.signal_shutdown();
+    }
+
+    fn monitor(&self, target: aether_data::MailboxId) -> Result<MonitorHandle, MonitorError> {
+        let spawner = self.transport.spawner().expect(
+            "NativeCtx::monitor requires a chassis-built transport (no spawner installed — likely a `new_for_test` transport)",
+        );
+        let registry = Arc::clone(spawner.actor_registry());
+        let watcher = self.transport.self_mailbox();
+        registry.register_monitor(watcher, target)?;
+        Ok(MonitorHandle::new(registry, watcher, target))
+    }
+}
+
+impl<'a> MailSender for NativeInitCtx<'a> {
+    type Transport = NativeTransport;
+    fn transport(&self) -> &NativeTransport {
+        self.transport
     }
 }
 

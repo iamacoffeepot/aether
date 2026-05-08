@@ -35,7 +35,7 @@ use tracing_subscriber::{Layer, fmt as tsfmt};
 
 /// Mail egress hook the actor-aware drain path calls into. Lives in
 /// the substrate side because chassis machinery is the only consumer
-/// — the wasm side ships through `WASM_TRANSPORT` directly. The
+/// — the wasm side ships through `FFI_TRANSPORT` directly. The
 /// chassis stamps an actor's transport per-handler via
 /// [`with_actor_dispatch`]; the substrate-registered
 /// `aether-actor` shipper hook ([`ship_via_stamped_dispatch`])
@@ -84,7 +84,7 @@ impl Drop for DispatchGuard {
 /// drop guard.
 ///
 /// Native-only: wasm doesn't carry a per-actor dispatch stamp —
-/// `WASM_TRANSPORT` is a process global covering the single actor in
+/// `FFI_TRANSPORT` is a process global covering the single actor in
 /// each linear memory.
 ///
 /// SAFETY: the caller guarantees `dispatch` outlives `f`. Inside the

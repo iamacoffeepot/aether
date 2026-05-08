@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use aether_actor::{BootError, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Persistence, Resolver, actor};
 use aether_data::Kind;
 use aether_data::{INPUTS_SECTION_VERSION, InputsRecord};
 use bytemuck::{Pod, Zeroable};
@@ -44,27 +44,34 @@ struct Ping {
 struct ManifestProbe;
 
 #[actor]
-impl WasmActor for ManifestProbe {
+impl FfiActor for ManifestProbe {
     const NAMESPACE: &'static str = "manifest_probe";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(Self)
     }
 
     /// # Agent
     /// Increments the tick counter.
     #[handler]
-    fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {}
+    fn on_tick(&mut self, _ctx: &mut FfiCtx<'_>, _tick: Tick) {}
 
     #[handler]
-    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
+    fn on_ping(&mut self, _ctx: &mut FfiCtx<'_>, _ping: Ping) {}
 
     /// # Agent
     /// Catch-all for anything else.
     #[fallback]
-    fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
+    fn on_other(&mut self, _ctx: &mut FfiCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 
-    fn on_drop(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
+    fn on_drop<C>(&mut self, _ctx: &mut C)
+    where
+        C: MailSender + Persistence,
+    {
+    }
 }
 
 fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {

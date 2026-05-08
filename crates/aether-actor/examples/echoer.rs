@@ -7,7 +7,7 @@
 //! inbound mail by `#[actor]`) so the handler body never touches
 //! `Mail<'_>` directly.
 
-use aether_actor::{BootError, KindId, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, KindId, MailSender, Resolver, actor};
 use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
@@ -30,19 +30,22 @@ pub struct Echoer {
 }
 
 #[actor]
-impl WasmActor for Echoer {
+impl FfiActor for Echoer {
     const NAMESPACE: &'static str = "echoer";
 
-    fn init(ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(Echoer {
             response: ctx.resolve::<Response>(),
         })
     }
 
     #[handler]
-    fn on_request(&mut self, ctx: &mut WasmCtx<'_>, req: Request) {
+    fn on_request(&mut self, ctx: &mut FfiCtx<'_>, req: Request) {
         if let Some(sender) = ctx.reply_to() {
-            ctx.reply(sender, self.response, &Response { seq: req.seq });
+            ctx.reply_kind(sender, self.response, &Response { seq: req.seq });
         }
     }
 }

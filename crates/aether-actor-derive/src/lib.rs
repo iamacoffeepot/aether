@@ -723,7 +723,7 @@ fn to_screaming_snake_case(s: &str) -> String {
 // comment — the `# Agent` heading sits alongside `# Safety`/`# Examples`
 // as a conventional reader-specific section.
 
-/// Outer attribute on an `impl WasmActor for X` (or `impl Component for X`)
+/// Outer attribute on an `impl FfiActor for X` (or `impl Component for X`)
 /// block. Reads the `#[handler]` / `#[fallback]` methods inside, then emits:
 ///
 /// - One `impl HandlesKind<K> for X` per handler kind (gates type-driven
@@ -1188,7 +1188,7 @@ pub fn handler(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     // macro expansion and so rust-analyzer doesn't redline it.
     syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[handler] may only appear inside a `#[actor] impl WasmActor for T` block",
+        "#[handler] may only appear inside a `#[actor] impl FfiActor for T` block",
     )
     .to_compile_error()
     .into()
@@ -1201,7 +1201,7 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     // compile-time error.
     syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[fallback] may only appear inside a `#[actor] impl WasmActor for T` block",
+        "#[fallback] may only appear inside a `#[actor] impl FfiActor for T` block",
     )
     .to_compile_error()
     .into()
@@ -1380,7 +1380,7 @@ fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2>
     if let Some((_, trait_path, _)) = item.trait_.as_ref() {
         // Pattern-match the trait path's last identifier so the macro
         // works regardless of the user's import style — bare
-        // `WasmActor` / `NativeActor`, `aether_actor::WasmActor`,
+        // `FfiActor` / `NativeActor`, `aether_actor::FfiActor`,
         // `aether_substrate::NativeActor`, etc. all resolve here.
         let last = trait_path
             .segments
@@ -1389,9 +1389,9 @@ fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2>
             .unwrap_or_default();
         match last.as_str() {
             "NativeActor" => expand_native_actor_trait(item, opts),
-            // `WasmActor` is the post-552 trait name; `Component` is
+            // `FfiActor` is the post-552 trait name; `Component` is
             // the back-compat alias retained until stage 4.
-            "WasmActor" | "Component" => {
+            "FfiActor" | "Component" => {
                 if opts.skip_markers {
                     return Err(syn::Error::new_spanned(
                         trait_path,
@@ -1404,7 +1404,7 @@ fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2>
             other => Err(syn::Error::new_spanned(
                 trait_path,
                 format!(
-                    "#[actor] expects `impl WasmActor for X`, `impl NativeActor for X`, or \
+                    "#[actor] expects `impl FfiActor for X`, `impl NativeActor for X`, or \
                      `impl Component for X` (back-compat alias) — got `{other}`",
                 ),
             )),
@@ -1444,9 +1444,9 @@ fn attr_is_fallback(attr: &Attribute) -> bool {
         .is_some_and(|s| s.ident == "fallback")
 }
 
-/// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
+/// Wasm-actor expansion — `#[actor] impl FfiActor for X` (or
 /// the back-compat `impl Component for X`). Emits the full wasm
-/// surface: dispatch table referencing `aether_actor::WasmCtx<'_>`,
+/// surface: dispatch table referencing `aether_actor::FfiCtx<'_>`,
 /// init wrapper, `aether.kinds.inputs` manifest consts, kind retention
 /// statics, plus the `HandlesKind<K>` and `Actor` impls common to both
 /// shapes.
@@ -1469,7 +1469,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
     // Issue 525 Phase 1B: pass-through trait consts (today: NAMESPACE,
     // FRAME_BARRIER) so each component declares them inside its
-    // `#[actor] impl WasmActor for C` block alongside `init` /
+    // `#[actor] impl FfiActor for C` block alongside `init` /
     // `#[handler]` methods.
     let mut consts: Vec<syn::ImplItemConst> = Vec::new();
 
@@ -1577,10 +1577,10 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
     let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers);
 
     // Issue 525 Phase 4: trait consts (NAMESPACE, FRAME_BARRIER) live
-    // on the `Actor` super-trait, not `Component` / `WasmActor`. Route
+    // on the `Actor` super-trait, not `Component` / `FfiActor`. Route
     // any const items the user declared inside `#[actor] impl
     // Component for X` to a sibling `impl ::aether_actor::Actor`
-    // block so satisfying `WasmActor: Actor` works without making the
+    // block so satisfying `FfiActor: Actor` works without making the
     // user split the impl manually.
     let const_tokens = consts.iter();
     let actor_impl = if consts.is_empty() {
@@ -1623,7 +1623,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
             #[doc(hidden)]
             pub fn __aether_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_>,
+                __aether_ctx: &mut ::aether_actor::FfiCtx<'_>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #dispatch_body
