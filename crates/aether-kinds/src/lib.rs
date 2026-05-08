@@ -1002,7 +1002,7 @@ mod control_plane {
     }
 
     // ADR-0041 substrate file I/O. Four request kinds on the
-    // `"aether.io"` sink (read / write / delete / list), paired
+    // `"aether.fs"` mailbox (read / write / delete / list), paired
     // 1:1 with reply kinds
     // that carry a structured `IoError` on failure. All postcard-
     // shaped because every request carries String namespace/path
@@ -1029,11 +1029,11 @@ mod control_plane {
         AdapterError(String),
     }
 
-    /// `aether.io.read` — request the substrate read a file and reply
-    /// with its bytes. Mailed to the `"aether.io"` sink; reply
+    /// `aether.fs.read` — request the substrate read a file and reply
+    /// with its bytes. Mailed to the `"aether.fs"` mailbox; reply
     /// lands via `reply_mail` as `ReadResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.io.read")]
+    #[kind(name = "aether.fs.read")]
     pub struct Read {
         pub namespace: String,
         pub path: String,
@@ -1043,11 +1043,11 @@ mod control_plane {
     /// the originating `Read` so the caller can correlate the reply
     /// to its source request without threading a pending-op queue or
     /// allocating correlation ids — operation identity comes from the
-    /// reply kind itself (`aether.io.read_result`), target identity
+    /// reply kind itself (`aether.fs.read_result`), target identity
     /// from the echoed fields. `Ok` carries the full file contents;
     /// `Err` carries an `IoError` variant.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.io.read_result")]
+    #[kind(name = "aether.fs.read_result")]
     pub enum ReadResult {
         Ok {
             namespace: String,
@@ -1061,13 +1061,13 @@ mod control_plane {
         },
     }
 
-    /// `aether.io.write` — request the substrate write `bytes` to
+    /// `aether.fs.write` — request the substrate write `bytes` to
     /// `namespace://path`. v1's local-file adapter stages to a
     /// temporary sibling and `rename`s on success so a crash
     /// mid-write leaves either the old contents or the new, never a
     /// torn file. Reply: `WriteResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.io.write")]
+    #[kind(name = "aether.fs.write")]
     pub struct Write {
         pub namespace: String,
         pub path: String,
@@ -1082,7 +1082,7 @@ mod control_plane {
     /// namespaces (e.g. `assets://`), `AdapterError` for disk-full /
     /// permission / rename failures.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.io.write_result")]
+    #[kind(name = "aether.fs.write_result")]
     pub enum WriteResult {
         Ok {
             namespace: String,
@@ -1095,12 +1095,12 @@ mod control_plane {
         },
     }
 
-    /// `aether.io.delete` — request the substrate remove a file.
+    /// `aether.fs.delete` — request the substrate remove a file.
     /// Missing files surface as `NotFound` (not silent success) so
     /// callers that care about the distinction can tell; callers
     /// that don't ignore it. Reply: `DeleteResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.io.delete")]
+    #[kind(name = "aether.fs.delete")]
     pub struct Delete {
         pub namespace: String,
         pub path: String,
@@ -1111,7 +1111,7 @@ mod control_plane {
     /// adapter-reported failure, including `NotFound` for a file that
     /// wasn't there to delete.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.io.delete_result")]
+    #[kind(name = "aether.fs.delete_result")]
     pub enum DeleteResult {
         Ok {
             namespace: String,
@@ -1124,12 +1124,12 @@ mod control_plane {
         },
     }
 
-    /// `aether.io.list` — enumerate entries under `prefix` in
+    /// `aether.fs.list` — enumerate entries under `prefix` in
     /// `namespace`. Shallow (no recursion) and prefix-filtered —
     /// callers that want a tree walk paginate themselves. Empty
     /// `prefix` lists the namespace root. Reply: `ListResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.io.list")]
+    #[kind(name = "aether.fs.list")]
     pub struct List {
         pub namespace: String,
         pub prefix: String,
@@ -1143,7 +1143,7 @@ mod control_plane {
     /// matched"; `Err { UnknownNamespace }` means the namespace itself
     /// wasn't registered.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.io.list_result")]
+    #[kind(name = "aether.fs.list_result")]
     pub enum ListResult {
         Ok {
             namespace: String,
@@ -1665,14 +1665,14 @@ mod tests {
             SetMasterGainResult::NAME,
             "aether.audio.set_master_gain_result"
         );
-        assert_eq!(Read::NAME, "aether.io.read");
-        assert_eq!(ReadResult::NAME, "aether.io.read_result");
-        assert_eq!(Write::NAME, "aether.io.write");
-        assert_eq!(WriteResult::NAME, "aether.io.write_result");
-        assert_eq!(Delete::NAME, "aether.io.delete");
-        assert_eq!(DeleteResult::NAME, "aether.io.delete_result");
-        assert_eq!(List::NAME, "aether.io.list");
-        assert_eq!(ListResult::NAME, "aether.io.list_result");
+        assert_eq!(Read::NAME, "aether.fs.read");
+        assert_eq!(ReadResult::NAME, "aether.fs.read_result");
+        assert_eq!(Write::NAME, "aether.fs.write");
+        assert_eq!(WriteResult::NAME, "aether.fs.write_result");
+        assert_eq!(Delete::NAME, "aether.fs.delete");
+        assert_eq!(DeleteResult::NAME, "aether.fs.delete_result");
+        assert_eq!(List::NAME, "aether.fs.list");
+        assert_eq!(ListResult::NAME, "aether.fs.list_result");
     }
 
     #[test]
@@ -1768,7 +1768,7 @@ mod tests {
     // Vec<u8>, reply types are Ok/Err enums with the error arm
     // wrapping `IoError`. postcard roundtrip proves the derived
     // Serialize/Deserialize agree on the wire for each shape.
-    mod io_roundtrips {
+    mod fs_roundtrips {
         use super::*;
         use alloc::string::ToString;
         use alloc::vec;

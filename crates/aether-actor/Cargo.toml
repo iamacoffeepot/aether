@@ -19,7 +19,7 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 # ADR-0030 Phase 2: `InitCtx::subscribe_input` self-addresses
 # `aether.input.subscribe` for every `K::IS_INPUT` handler kind.
 # The wasm-shim helpers in `wasm::{io, net, log}` (folded in by issue
-# 552 stage 0) also build `aether.io.*` / `aether.net.*` / `aether.log.*`
+# 552 stage 0) also build `aether.fs.*` / `aether.net.*` / `aether.log.*`
 # request kinds — that whole vocabulary lives in `aether-kinds`.
 aether-kinds = { path = "../aether-kinds" }
 bytemuck = { version = "1", default-features = false }

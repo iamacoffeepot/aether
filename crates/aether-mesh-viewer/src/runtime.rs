@@ -2,7 +2,7 @@
 //! surface (ADR-0041), parses it into `DrawTriangle`s, and replays the
 //! cached list to the `"aether.render"` sink every tick.
 //!
-//! Dispatches on the file extension echoed back on `aether.io.read_result`:
+//! Dispatches on the file extension echoed back on `aether.fs.read_result`:
 //!
 //! - `.dsl` → `aether-mesh`'s parser + mesher (ADR-0026 + ADR-0051).
 //!   Filled triangles use the DSL's `:color N` palette indices; the
@@ -15,7 +15,7 @@
 //!
 //! This runtime supersedes the old `aether-mesh-editor-component`
 //! (its inline `set_text` path is gone — write the DSL to a file via
-//! `aether.io.write` and call `aether.mesh.load` instead) and the
+//! `aether.fs.write` and call `aether.mesh.load` instead) and the
 //! `aether-static-mesh-component` (its `aether.static_mesh.load` kind
 //! was renamed to `aether.mesh.load`).
 //!
@@ -24,7 +24,7 @@
 //! 1. Send `aether.mesh.load { namespace, path }` pointing at a `.dsl`
 //!    or `.obj` file inside one of the substrate's I/O namespaces
 //!    (`save`, `assets`, `config`).
-//! 2. The component fires `aether.io.read` and waits for the reply.
+//! 2. The component fires `aether.fs.read` and waits for the reply.
 //! 3. On reply, the cached triangle list is replaced atomically. Any
 //!    parse or mesh failure leaves the prior cache intact (silent
 //!    drop; errors surface via `engine_logs`).
@@ -68,7 +68,7 @@ pub struct MeshViewer {
 /// `.obj` file. After the substrate's read reply comes back the mesh
 /// renders every frame; `capture_frame` verifies. Send another `load`
 /// to swap the cached mesh. Iterate on a DSL by writing the new source
-/// via `aether.io.write` and re-sending `aether.mesh.load` against the
+/// via `aether.fs.write` and re-sending `aether.mesh.load` against the
 /// same path.
 #[actor]
 impl WasmActor for MeshViewer {
@@ -94,7 +94,7 @@ impl WasmActor for MeshViewer {
     }
 
     /// Triggers an asynchronous mesh load. Reply arrives as
-    /// `aether.io.read_result`; the parser is picked from the file
+    /// `aether.fs.read_result`; the parser is picked from the file
     /// extension at that point.
     ///
     /// # Agent

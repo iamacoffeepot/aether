@@ -29,10 +29,10 @@
 pub mod audio;
 pub mod broadcast;
 pub mod component;
+pub mod fs;
 pub mod handle;
 pub mod http;
 pub mod input;
-pub mod io;
 pub mod log;
 #[cfg(feature = "render")]
 pub mod render;
@@ -61,7 +61,7 @@ pub use input::InputCapability;
 #[cfg(not(target_arch = "wasm32"))]
 pub use input::InputConfig;
 
-pub use io::IoCapability;
+pub use fs::IoCapability;
 pub use log::LogCapability;
 #[cfg(feature = "render")]
 pub use render::HeadlessRenderCapability;

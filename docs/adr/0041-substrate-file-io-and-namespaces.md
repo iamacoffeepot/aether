@@ -3,6 +3,8 @@
 - **Status:** Proposed
 - **Date:** 2026-04-23
 
+> **Amendment (issue #633, 2026-05-08).** The mailbox was renamed from `aether.io` to `aether.fs` and the eight kinds from `aether.io.*` to `aether.fs.*`. The new name matches `std::fs` muscle memory and disambiguates from network IO (`aether.tcp`, `aether.http`). The decision rationale, four-kind shape, namespace-prefix-with-adapter design, and configuration layering below are unchanged — read every `aether.io` reference in the body as `aether.fs`. The ADR title and filename keep "file io" because that still describes the v1 adapter and the broader storage abstraction.
+
 ## Context
 
 Components today cannot touch the filesystem. Everything that crosses the wasm boundary goes through the mail system; I/O has no sink. That's fine for the pure-compute pipeline the substrate has been to date, but it forecloses three real forcing functions:

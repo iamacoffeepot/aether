@@ -45,8 +45,8 @@ pub enum Step {
         name: Option<String>,
     },
     /// Generic mail send. `recipient` is a mailbox name (e.g.
-    /// `"aether.io"`); `kind` names the payload kind in the
-    /// substrate's descriptor inventory (e.g. `"aether.io.write"`);
+    /// `"aether.fs"`); `kind` names the payload kind in the
+    /// substrate's descriptor inventory (e.g. `"aether.fs.write"`);
     /// `params` is the YAML body the schema encoder maps onto the
     /// kind's wire shape.
     SendMail {
@@ -235,8 +235,8 @@ steps:
     path: /tmp/mesh-viewer.wasm
     name: mv
   - op: send_mail
-    recipient: aether.io
-    kind: aether.io.write
+    recipient: aether.fs
+    kind: aether.fs.write
     params:
       namespace: save
       path: greeting.txt
@@ -257,8 +257,8 @@ steps:
                 kind,
                 params,
             } => {
-                assert_eq!(recipient, "aether.io");
-                assert_eq!(kind, "aether.io.write");
+                assert_eq!(recipient, "aether.fs");
+                assert_eq!(kind, "aether.fs.write");
                 let mapping = params.as_mapping().expect("params is mapping");
                 assert_eq!(
                     mapping.get(serde_yml::Value::String("namespace".to_owned())),

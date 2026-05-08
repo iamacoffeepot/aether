@@ -20,7 +20,7 @@ use aether_capabilities::{
     BroadcastCapability, ComponentHostCapability, ComponentHostConfig, HandleCapability,
     HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability, InputCapability,
     InputConfig, IoCapability, LogCapability, TcpCapability, UnsupportedTestBenchCapability,
-    http::HttpConfig as HttpConf, io::NamespaceRoots,
+    fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_data::{Kind, KindId};
 use aether_kinds::{FrameStats, SetMasterGain, SetMasterGainResult, Tick};
