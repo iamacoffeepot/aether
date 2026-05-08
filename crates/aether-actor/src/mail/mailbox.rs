@@ -8,7 +8,7 @@ use core::marker::PhantomData;
 
 use aether_data::{Kind, mailbox_id_from_name};
 
-use crate::transport::MailTransport;
+use crate::mail::transport::MailTransport;
 
 /// Phantom-typed wrapper around a resolved kind id. A `KindId<Tick>`
 /// cannot be passed where a `KindId<DrawTriangle>` is expected — the
@@ -328,7 +328,7 @@ mod tests {
     mod actor_typed_send {
         use super::super::ActorMailbox;
         use crate::actor::{Actor, HandlesKind, Singleton};
-        use crate::transport::MailTransport;
+        use crate::mail::transport::MailTransport;
         use ::aether_data::{Kind, MailboxId, mailbox_id_from_name};
         use alloc::vec::Vec;
         use core::cell::RefCell;

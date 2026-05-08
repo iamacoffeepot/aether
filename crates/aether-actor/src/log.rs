@@ -111,17 +111,18 @@ pub trait MailDispatch: Send + Sync {
     fn send(&self, mailbox: MailboxId, kind: KindId, payload: &[u8]);
 }
 
-/// Every [`crate::transport::MailTransport`] is a valid
+/// Every [`crate::mail::transport::MailTransport`] is a valid
 /// [`MailDispatch`] — `send_mail`'s signature already matches
 /// what the drain path needs. Lets the chassis pass an actor's
 /// transport into [`with_actor_dispatch`] without a hand-rolled
 /// shim per call site.
 impl<T> MailDispatch for T
 where
-    T: crate::transport::MailTransport + Send + Sync + ?Sized,
+    T: crate::mail::transport::MailTransport + Send + Sync + ?Sized,
 {
     fn send(&self, mailbox: MailboxId, kind: KindId, payload: &[u8]) {
-        let _ = crate::transport::MailTransport::send_mail(self, mailbox.0, kind.0, payload, 1);
+        let _ =
+            crate::mail::transport::MailTransport::send_mail(self, mailbox.0, kind.0, payload, 1);
     }
 }
 
@@ -283,7 +284,7 @@ impl Drop for PipelineGuard {
 
 #[cfg(target_arch = "wasm32")]
 fn ship_batch_via_wasm_transport(mailbox: MailboxId, batch: LogBatch) {
-    use crate::transport::MailTransport;
+    use crate::mail::transport::MailTransport;
     let bytes = match postcard::to_allocvec(&batch) {
         Ok(b) => b,
         Err(_) => return,

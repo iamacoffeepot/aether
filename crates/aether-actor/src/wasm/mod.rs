@@ -48,7 +48,7 @@
 use alloc::borrow::Cow;
 use alloc::string::String;
 
-use crate::transport::MailTransport;
+use crate::mail::transport::MailTransport;
 
 pub mod raw;
 
@@ -177,11 +177,11 @@ impl MailTransport for WasmTransport {
 // `WasmInitCtx<'_>`, `WasmDropCtx<'_>` — the alias pins
 // `T = WasmTransport`.
 
-/// Wasm-flavoured [`crate::mailbox::Mailbox`]. Pinned via the original
+/// Wasm-flavoured [`crate::mail::mailbox::Mailbox`]. Pinned via the original
 /// module path (not the crate-root re-export) so this alias doesn't
 /// recurse onto itself when the same `Mailbox` name is re-exported at
 /// the crate root.
-pub type Mailbox<K> = crate::mailbox::Mailbox<K, WasmTransport>;
+pub type Mailbox<K> = crate::mail::mailbox::Mailbox<K, WasmTransport>;
 /// Wasm-flavoured [`crate::Ctx`]. Issue 552 stage 0 renamed the prior
 /// `Ctx` alias to `WasmCtx` so the public surface mirrors the
 /// upcoming `NativeCtx` (stage 1) symmetrically.
@@ -199,7 +199,7 @@ pub type WasmDropCtx<'a> = crate::DropCtx<'a, WasmTransport>;
 /// is at [`crate::resolve_mailbox`] for hand-rolled callers that want
 /// a non-wasm transport.
 pub const fn resolve_mailbox<K: aether_data::Kind>(mailbox_name: &str) -> Mailbox<K> {
-    crate::mailbox::resolve_mailbox::<K, WasmTransport>(mailbox_name)
+    crate::mail::mailbox::resolve_mailbox::<K, WasmTransport>(mailbox_name)
 }
 
 /// User-implemented WASM component. ADR-0014 commits to `Self`-is-state —

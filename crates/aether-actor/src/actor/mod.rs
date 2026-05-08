@@ -1,7 +1,12 @@
-//! Marker traits for the actor model. Pure compile-time markers — no
-//! transport machinery, no lifecycle methods, just identity (`Actor`),
-//! singleton-ness (`Singleton`), per-handler-kind gating
-//! (`HandlesKind`), and the native dispatch entry-point (`Dispatch`).
+//! Actor SDK primitive: the marker trait surface (here in `mod.rs`)
+//! plus per-mail / per-init / per-drop ctx machinery
+//! ([`ctx`](crate::actor::ctx)), the `Sender` / `MailCtx` traits
+//! ([`sender`](crate::actor::sender)), and the `Slot` single-instance
+//! backing store ([`slot`](crate::actor::slot)). Marker traits are
+//! pure compile-time markers — no transport machinery, no lifecycle
+//! methods, just identity (`Actor`), singleton-ness (`Singleton`),
+//! per-handler-kind gating (`HandlesKind`), and the native dispatch
+//! entry-point (`Dispatch`).
 //!
 //! Pre-PR-C of issue 533 these lived here. Issue 533's facade pattern
 //! (ADR-0075) put chassis cap structs in `aether-kinds`, which meant
@@ -16,6 +21,10 @@
 //! cycle that forced the down-move evaporated, and PR E4 (this PR)
 //! restores the markers to their natural home alongside the rest of
 //! the actor SDK.
+
+pub mod ctx;
+pub mod sender;
+pub mod slot;
 
 use aether_data::{Kind, ReplyTo};
 
