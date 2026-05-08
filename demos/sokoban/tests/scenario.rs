@@ -27,6 +27,16 @@ use aether_substrate_bundle::test_bench::TestBench;
 // pattern.
 use aether_demo_sokoban as _;
 
+/// User-facing component name passed to `LoadComponent`.
+const COMPONENT_NAME: &str = "world";
+
+/// Full mailbox address the substrate registers for the loaded
+/// component (issue 634 Phase 4 PR 1). Mail to the bare
+/// `COMPONENT_NAME` warn-drops as unknown — agents address the
+/// trampoline by its full `aether.component.trampoline:NAME` form,
+/// which is what `LoadResult.name` returns.
+const COMPONENT_ADDRESS: &str = "aether.component.trampoline:world";
+
 /// Probe for any usable wgpu adapter.
 fn has_wgpu_adapter() -> bool {
     let instance =
@@ -131,10 +141,10 @@ fn default_level_renders_grid_and_player() {
         steps: vec![
             Step::LoadComponent {
                 path: wasm_path.to_string_lossy().into_owned(),
-                name: Some("world".to_owned()),
+                name: Some(COMPONENT_NAME.to_owned()),
             },
             Step::Advance { ticks: 3 },
-            tick_to("world"),
+            tick_to(COMPONENT_ADDRESS),
             Step::Capture,
             Step::Assert {
                 check: Check::MailObserved {
@@ -173,18 +183,18 @@ fn key_press_keeps_render_path_alive() {
         steps: vec![
             Step::LoadComponent {
                 path: wasm_path.to_string_lossy().into_owned(),
-                name: Some("world".to_owned()),
+                name: Some(COMPONENT_NAME.to_owned()),
             },
             Step::Advance { ticks: 2 },
             // Press D — sokoban steps the player east; the WASD/arrow
             // mapping lives in `step_delta` inside the demo's lib.rs.
             Step::SendMail {
-                recipient: "world".to_owned(),
+                recipient: COMPONENT_ADDRESS.to_owned(),
                 kind: "aether.key".to_owned(),
                 params: serde_yml::from_str(&key_d_yaml).expect("key params parse"),
             },
             Step::Advance { ticks: 2 },
-            tick_to("world"),
+            tick_to(COMPONENT_ADDRESS),
             Step::Capture,
             Step::Assert {
                 check: Check::MailObserved {

@@ -33,6 +33,16 @@ use aether_substrate_bundle::test_bench::TestBench;
 // PR 432 / 434 / 436 used for the trunk-rlib pattern.
 use aether_demo_tic_tac_toe as _;
 
+/// User-facing component name passed to `LoadComponent`.
+const COMPONENT_NAME: &str = "ttt";
+
+/// Full mailbox address the substrate registers for the loaded
+/// component (issue 634 Phase 4 PR 1). Mail to the bare
+/// `COMPONENT_NAME` warn-drops as unknown — agents address the
+/// trampoline by its full `aether.component.trampoline:NAME` form,
+/// which is what `LoadResult.name` returns.
+const COMPONENT_ADDRESS: &str = "aether.component.trampoline:ttt";
+
 /// Probe for any usable wgpu adapter.
 fn has_wgpu_adapter() -> bool {
     let instance =
@@ -114,12 +124,12 @@ fn legal_move_broadcasts_game_state() {
         steps: vec![
             Step::LoadComponent {
                 path: wasm_path.to_string_lossy().into_owned(),
-                name: Some("ttt".to_owned()),
+                name: Some(COMPONENT_NAME.to_owned()),
             },
             Step::Advance { ticks: 1 },
             // X plays top-left.
             Step::SendMail {
-                recipient: "ttt".to_owned(),
+                recipient: COMPONENT_ADDRESS.to_owned(),
                 kind: "tic_tac_toe.play_move".to_owned(),
                 params: serde_yml::from_str("row: 0\ncol: 0\n_pad: [0, 0]")
                     .expect("play_move params parse"),
@@ -161,12 +171,12 @@ fn out_of_bounds_move_does_not_broadcast() {
         steps: vec![
             Step::LoadComponent {
                 path: wasm_path.to_string_lossy().into_owned(),
-                name: Some("ttt".to_owned()),
+                name: Some(COMPONENT_NAME.to_owned()),
             },
             Step::Advance { ticks: 1 },
             // Row 5 is out of bounds (board is 3×3).
             Step::SendMail {
-                recipient: "ttt".to_owned(),
+                recipient: COMPONENT_ADDRESS.to_owned(),
                 kind: "tic_tac_toe.play_move".to_owned(),
                 params: serde_yml::from_str("row: 5\ncol: 0\n_pad: [0, 0]")
                     .expect("play_move params parse"),
@@ -203,11 +213,11 @@ fn reset_broadcasts_game_state() {
         steps: vec![
             Step::LoadComponent {
                 path: wasm_path.to_string_lossy().into_owned(),
-                name: Some("ttt".to_owned()),
+                name: Some(COMPONENT_NAME.to_owned()),
             },
             Step::Advance { ticks: 1 },
             Step::SendMail {
-                recipient: "ttt".to_owned(),
+                recipient: COMPONENT_ADDRESS.to_owned(),
                 kind: "tic_tac_toe.reset".to_owned(),
                 params: serde_yml::Value::Null,
             },
