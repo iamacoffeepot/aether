@@ -488,11 +488,12 @@ impl ApplicationHandler<UserEvent> for App {
                         self.publish_window_size(size.width, size.height);
                     }
                 }
-                frame_loop::drain_or_abort(&self.queue, &self.outbound);
                 // ADR-0074 §Decision 5: render's inbox must quiesce
                 // before submit so any DrawTriangle / aether.camera
                 // mail this frame is integrated into the recorded
-                // pass.
+                // pass. (The pre-Phase-4 component drain barrier is
+                // retired; trampoline traps fail-fast directly via
+                // `NativeTransport::fatal_abort`.)
                 frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
                 if let Some(gpu) = self.gpu.as_mut() {
                     match pending_capture {
@@ -653,22 +654,19 @@ impl DriverCapability for DesktopDriverCapability {
             hub,
         } = self;
 
-        // Issue 552 stage 2d: render migrated onto NativeActor. The
-        // chassis builder constructs the cap inside `init`; the driver
-        // pulls the booted `Arc<RenderCapability>` here via
-        // `DriverCtx::actor` and clones the cheap Arc-shared handles.
-        // The frame-bound pending counter is registered through the
-        // FRAME_BARRIER claim machinery and surfaces via
+        // Issue 629 / Phase A: render publishes its `RenderHandles`
+        // bundle on the chassis's `ExportedHandles` map during `init`.
+        // The driver retrieves the bundle via `DriverCtx::handle::<H>()`
+        // — no `Arc<RenderCapability>` ever escapes the dispatcher
+        // thread. The frame-bound pending counter is registered through
+        // the FRAME_BARRIER claim machinery and surfaces via
         // `ctx.frame_bound_pending()`.
-        let render_cap = ctx
-            .actor::<aether_capabilities::RenderCapability>()
-            .ok_or_else(|| {
-                BootError::Other(Box::new(std::io::Error::other(
-                    "DesktopDriverCapability::boot: RenderCapability must be booted before the driver \
-                     (verify the chassis builder calls `with_actor::<RenderCapability>(config)` before `driver(...)`)",
-                )))
-            })?;
-        let render_handles = render_cap.handles();
+        let render_handles: RenderHandles = ctx.handle::<RenderHandles>().ok_or_else(|| {
+            BootError::Other(Box::new(std::io::Error::other(
+                "DesktopDriverCapability::boot: RenderHandles must be published before the driver \
+                 (verify the chassis builder calls `with_actor::<RenderCapability>(config)` before `driver(...)`)",
+            )))
+        })?;
         let triangles_rendered = Arc::clone(&render_handles.triangles_rendered);
         let frame_bound_pending = ctx.frame_bound_pending();
 

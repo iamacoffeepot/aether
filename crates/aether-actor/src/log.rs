@@ -64,8 +64,8 @@ impl Local for LogBuffer {}
 /// configured override) mailbox id [`drain_buffer`] ships
 /// [`LogBatch`] mails to. Issue #601: replaces the retired
 /// `PROCESS.log_mailbox` cell with a per-actor slot the chassis
-/// installs via the `aether.control.configure_log_drain` mail
-/// every actor's `#[handlers]` derive auto-handles.
+/// installs via the `aether.log.configure_drain` mail every
+/// actor's `#[handlers]` derive auto-handles.
 ///
 /// Default `MailboxId(0)` — meaning "no drain configured." Until
 /// the chassis-pushed `ConfigureLogDrain` mail arrives, drain calls

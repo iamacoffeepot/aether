@@ -12,10 +12,11 @@ use std::sync::{Arc, Mutex};
 
 use crate::hub::HubClient;
 use aether_capabilities::{
-    BroadcastCapability, CaptureBackend, HandleCapability, HeadlessWindowCapability, LogCapability,
-    RenderCapability, RenderConfig, RenderHandles,
+    BroadcastCapability, CaptureBackend, HandleCapability, HeadlessWindowCapability,
+    InputCapability, InputConfig, LogCapability, RenderCapability, RenderConfig, RenderHandles,
+    TcpCapability,
 };
-use aether_capabilities::{ControlPlaneCapability, ControlPlaneConfig};
+use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_kinds::{FrameStats, Tick};
@@ -150,7 +151,7 @@ impl TestBenchChassis {
 
         let boot = SubstrateBoot::builder(&name, &version).build()?;
         let _ = workers;
-        let control_plane_config = ControlPlaneConfig {
+        let component_host_config = ComponentHostConfig {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
@@ -190,32 +191,34 @@ impl TestBenchChassis {
             events: events_tx.clone(),
         };
 
+        let input_config = InputConfig {
+            input_subscribers: Arc::clone(&boot.input_subscribers),
+        };
+
         let passive =
             Builder::<TestBenchChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
                 .with_actor::<BroadcastCapability>(())
                 .with_actor::<HandleCapability>(())
                 .with_actor::<LogCapability>(())
-                .with_actor::<ControlPlaneCapability>(control_plane_config)
+                .with_actor::<InputCapability>(input_config)
+                .with_actor::<ComponentHostCapability>(component_host_config)
+                .with_actor::<TcpCapability>(())
                 .with_actor::<RenderCapability>(render_config)
                 .with_actor::<HeadlessWindowCapability>(())
                 .with_actor::<TestBenchCapability>(test_bench_cap_config)
                 .with_log_drain::<LogCapability>()
                 .build_passive()?;
 
-        // Issue 552 stage 2d: pull the booted `Arc<RenderCapability>`
-        // out of the `PassiveChassis` actors map and clone the
-        // Arc-shared handles. Pre-2d the chassis main extracted handles
-        // before moving the cap into the chassis builder; with the
-        // NativeActor shape, init runs inside `with_actor::<...>` so
-        // there's no pre-build cap to call `handles()` on.
-        let render_handles = passive
-            .actor::<RenderCapability>()
-            .ok_or_else(|| {
+        // Issue 629 / Phase A: render publishes its `RenderHandles`
+        // bundle on the chassis's `ExportedHandles` map during `init`.
+        // Embedders retrieve via `PassiveChassis::handle::<H>()` — no
+        // `Arc<RenderCapability>` ever escapes the dispatcher thread.
+        let render_handles: aether_capabilities::RenderHandles =
+            passive.handle::<aether_capabilities::RenderHandles>().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "TestBenchChassis::build: RenderCapability not booted via with_actor",
+                    "TestBenchChassis::build: RenderHandles not published — RenderCapability must boot via with_actor before TestBench builds",
                 )
-            })?
-            .handles();
+            })?;
 
         let hub = crate::hub::connect_hub_client(&boot, hub_url.as_deref())?;
 

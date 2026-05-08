@@ -28,14 +28,18 @@
 #[cfg(feature = "audio")]
 pub mod audio;
 pub mod broadcast;
-pub mod control;
+pub mod component;
 pub mod handle;
 pub mod http;
+pub mod input;
 pub mod io;
 pub mod log;
 #[cfg(feature = "render")]
 pub mod render;
+pub mod tcp;
 pub mod test_bench;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod wasm_trampoline;
 pub mod window;
 
 #[cfg(feature = "audio")]
@@ -43,16 +47,20 @@ pub use audio::AudioCapability;
 #[cfg(feature = "audio-native")]
 pub use audio::AudioConfig;
 pub use broadcast::BroadcastCapability;
-pub use control::ControlPlaneCapability;
-// `ControlPlaneConfig` is wasmtime-bound (it holds `Arc<Engine>` /
+pub use component::ComponentHostCapability;
+// `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<SubstrateCtx>>`). It re-exports only on the native
 // target — wasm-component consumers see the cap stub via
-// `ControlPlaneCapability` for typed `ctx.actor::<...>()` addressing
+// `ComponentHostCapability` for typed `ctx.actor::<...>()` addressing
 // without dragging the wasmtime stack into the wasm graph.
 #[cfg(not(target_arch = "wasm32"))]
-pub use control::ControlPlaneConfig;
+pub use component::ComponentHostConfig;
 pub use handle::HandleCapability;
 pub use http::{HttpCapability, HttpConfig};
+pub use input::InputCapability;
+#[cfg(not(target_arch = "wasm32"))]
+pub use input::InputConfig;
+
 pub use io::IoCapability;
 pub use log::LogCapability;
 #[cfg(feature = "render")]
@@ -61,5 +69,8 @@ pub use render::HeadlessRenderCapability;
 pub use render::RenderCapability;
 #[cfg(feature = "render-native")]
 pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
+pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
+#[cfg(not(target_arch = "wasm32"))]
+pub use wasm_trampoline::{WasmTrampoline, full_name as wasm_trampoline_full_name};
 pub use window::HeadlessWindowCapability;

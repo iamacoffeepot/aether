@@ -78,10 +78,11 @@ postcard = { version = "1.1", optional = true, features = ["alloc"] }
 tracing = { version = "0.1", optional = true }
 ureq = { version = "3", optional = true, features = ["rustls"] }
 url = { version = "2", optional = true }
-# wasmtime is reached for by ControlPlaneCapability (issue 603) — the
-# cap holds the Engine/Linker/Module the substrate previously held in
-# its `ControlPlane` struct. Same `wasmtime = "30"` aether-substrate
-# uses; chassis builds get a single wasmtime in the dep tree.
+# wasmtime is reached for by ComponentHostCapability (issue 603 +
+# issue 638 phase 3 rename) — the cap holds the Engine/Linker/Module
+# the substrate previously held in its `ControlPlane` struct. Same
+# `wasmtime = "30"` aether-substrate uses; chassis builds get a single
+# wasmtime in the dep tree.
 wasmtime = { version = "30", optional = true }
 wgpu = { version = "29.0.1", optional = true }
 png = { version = "0.17", optional = true }

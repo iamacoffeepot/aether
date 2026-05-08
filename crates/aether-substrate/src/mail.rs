@@ -28,20 +28,20 @@ pub type MailKind = KindId;
 /// implies; `count` is the number of items the layout implies, where
 /// applicable.
 ///
-/// Reply routing is carried in two complementary fields. Neither
-/// describes where the mail came from; both describe where a reply
-/// would go if the receiver chooses to make one.
-/// - `reply_to` is the remote destination (ADR-0008 / ADR-0037).
-///   `Session` means reply routes back to a Claude MCP session;
-///   `EngineMailbox` means reply routes to a component on another
-///   engine; `None` means no remote reply target.
-/// - `from_component` is the `MailboxId` of a local originating
-///   component for mail enqueued by `SubstrateCtx::send` (ADR-0017).
-///   `Some` means reply routes back to that local mailbox.
+/// `reply_to` describes where a reply would go if the receiver chooses
+/// to make one (ADR-0008 / ADR-0037 / ADR-0017). It is *not* a "from"
+/// field — it is the structural reply destination, which happens to
+/// double as "who sent me this" when the variant is `Component`.
+/// - `Session` — reply routes back to a Claude MCP session.
+/// - `EngineMailbox` — reply routes to a component on another engine.
+/// - `Component` — reply routes back to a local peer component
+///   (set by `SubstrateCtx::send` / `NativeTransport::send_mail`).
+/// - `None` — no reply target (broadcast-origin or substrate-
+///   generated mail).
 ///
-/// Both-absent (`reply_to = None`, `from_component = None`) means
-/// broadcast-origin or substrate-generated mail with no reply
-/// target.
+/// Pre-issue-#644 a redundant `from_component: Option<MailboxId>`
+/// also rode here, set by `with_origin` to the same id
+/// `reply_to.target = Component(_)` already carried.
 #[derive(Debug)]
 pub struct Mail {
     pub recipient: MailboxId,
@@ -49,7 +49,6 @@ pub struct Mail {
     pub payload: Vec<u8>,
     pub count: u32,
     pub reply_to: ReplyTo,
-    pub from_component: Option<MailboxId>,
 }
 
 impl Mail {
@@ -60,26 +59,17 @@ impl Mail {
             payload,
             count,
             reply_to: ReplyTo::NONE,
-            from_component: None,
         }
     }
 
-    /// Attach a reply-to destination (session or engine mailbox).
-    /// Used by the hub client when forwarding inbound frames
-    /// (ADR-0008) and by the hub-chassis loopback when delivering
-    /// bubbled-up mail (ADR-0037 Phase 2); other mail paths leave
-    /// the default `ReplyTo::None`.
+    /// Attach a reply-to destination. Used by the hub client when
+    /// forwarding inbound frames (ADR-0008), the hub-chassis loopback
+    /// when delivering bubbled-up mail (ADR-0037 Phase 2), and
+    /// `SubstrateCtx::send` / `NativeTransport::send_mail` for
+    /// peer-to-peer component sends (target = `Component(sender)`).
+    /// Other mail paths leave the default `ReplyTo::None`.
     pub fn with_reply_to(mut self, reply_to: ReplyTo) -> Self {
         self.reply_to = reply_to;
-        self
-    }
-
-    /// Attach the originating component's mailbox id. Set by
-    /// `SubstrateCtx::send` when enqueueing component-to-component
-    /// mail (ADR-0017) so `Component::deliver` can allocate a
-    /// Component-variant reply handle for the receiving guest.
-    pub fn with_origin(mut self, origin: MailboxId) -> Self {
-        self.from_component = Some(origin);
         self
     }
 }

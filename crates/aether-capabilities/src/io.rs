@@ -234,7 +234,7 @@ pub fn build_registry(
     Ok((Arc::new(registry), roots))
 }
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -800,7 +800,7 @@ mod native {
         fn duplicate_claim_rejects_with_typed_error() {
             let root = scratch_root("collide");
             let (registry, mailer) = fresh_substrate();
-            registry.register_sink(IoCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            registry.register_closure(IoCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
             let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<IoCapability>(roots_under(&root))

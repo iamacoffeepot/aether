@@ -310,7 +310,7 @@ pub struct LoadComponentArgs {
     pub timeout_ms: Option<u32>,
 }
 
-/// Wire-format mirror of `aether.control.load_result`. Postcard-
+/// Wire-format mirror of `aether.component.load_result`. Postcard-
 /// decoded from the substrate's reply payload. Must stay in lockstep
 /// with `aether-kinds::LoadResult` — that type is canonical.
 #[derive(Debug, Deserialize)]
@@ -395,7 +395,7 @@ pub struct ReplaceComponentArgs {
     pub timeout_ms: Option<u32>,
 }
 
-/// Wire-format mirror of `aether.control.replace_result`. Must stay
+/// Wire-format mirror of `aether.component.replace_result`. Must stay
 /// in lockstep with `aether-kinds::ReplaceResult`.
 #[derive(Debug, Deserialize)]
 pub(super) enum ReplaceResultWire {

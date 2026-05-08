@@ -250,6 +250,18 @@ impl NativeTransport {
         self.shutdown_flag.store(true, Ordering::Release);
     }
 
+    /// ADR-0063 fail-fast: bring the substrate down with `reason`.
+    /// Diverging — does not return. Production substrates exit via
+    /// [`crate::lifecycle::fatal_abort`] (broadcasts `SubstrateDying`
+    /// then calls `process::exit(2)`); test substrates panic instead.
+    /// The trampoline calls this when the wasm guest traps, so a
+    /// faulty component takes down the substrate cleanly with a useful
+    /// log message rather than leaving a tombstoned trampoline whose
+    /// failure mode is invisible to callers.
+    pub fn fatal_abort(&self, reason: String) -> ! {
+        self.aborter.abort(reason);
+    }
+
     /// Read the self-shutdown flag. Polled by the dispatcher trampoline
     /// after each handler dispatch — substrate-shutdown
     /// (channel-disconnect) flows through the same drain path without
@@ -262,7 +274,7 @@ impl NativeTransport {
     /// Block until the next envelope arrives on this actor's inbox.
     /// Returns `None` when the channel disconnects (the channel-drop
     /// shutdown signal — capability's `RunningCapability::shutdown`
-    /// dropped its [`crate::capability::SinkSender`], the registry
+    /// dropped its [`crate::capability::MailboxSender`], the registry
     /// handler can no longer upgrade its [`std::sync::Weak`], the
     /// inbox's last sender is gone) or when no inbox is installed.
     ///
@@ -329,9 +341,8 @@ impl MailTransport for NativeTransport {
         let recipient_id = MailboxId(recipient);
         let reply_to =
             ReplyTo::with_correlation(ReplyTarget::Component(self.self_mailbox), correlation);
-        let mail = Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count)
-            .with_reply_to(reply_to)
-            .with_origin(self.self_mailbox);
+        let mail =
+            Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count).with_reply_to(reply_to);
         // Record `correlation -> recipient` for the cross-class
         // `wait_reply` guard. We record on every send (the FFI here
         // can't tell fire-and-forget from request/reply) and let
@@ -524,7 +535,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Envelope>();
         // Register a sink so push routes somewhere instead of
         // hitting the unknown-recipient warn.
-        registry.register_sink(
+        registry.register_closure(
             "test.sink",
             Arc::new(move |kind, kind_name, origin, sender, payload, count| {
                 let _ = tx.send(Envelope {
@@ -627,7 +638,7 @@ mod tests {
     fn cross_class_wait_reply_aborts_when_caller_frame_bound_and_recipient_free_running() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_sink(
+        registry.register_closure(
             "test.free.running",
             Arc::new(move |kind, kind_name, origin, sender, payload, count| {
                 let _ = tx.send(Envelope {
@@ -665,7 +676,7 @@ mod tests {
     fn cross_class_wait_reply_does_not_abort_when_recipient_also_frame_bound() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_sink(
+        registry.register_closure(
             "test.frame.bound",
             Arc::new(move |kind, kind_name, origin, sender, payload, count| {
                 let _ = tx.send(Envelope {
@@ -710,7 +721,7 @@ mod tests {
     fn cross_class_wait_reply_does_not_abort_when_caller_free_running() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_sink(
+        registry.register_closure(
             "test.any",
             Arc::new(move |kind, kind_name, origin, sender, payload, count| {
                 let _ = tx.send(Envelope {
@@ -748,7 +759,7 @@ mod tests {
     fn wait_reply_prunes_pending_recipient_on_timeout() {
         let (registry, mailer) = fresh_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        registry.register_sink(
+        registry.register_closure(
             "test.prune",
             Arc::new(move |kind, kind_name, origin, sender, payload, count| {
                 let _ = tx.send(Envelope {

@@ -13,7 +13,7 @@
 // of the mod (always-on, outside the cfg gate).
 use aether_kinds::{HandlePin, HandlePublish, HandleRelease, HandleUnpin};
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native {
     use std::sync::Arc;
 
@@ -207,8 +207,8 @@ mod native {
             let id = registry
                 .lookup(HandleCapability::NAMESPACE)
                 .expect("mailbox registered");
-            let MailboxEntry::Sink(handler) = registry.entry(id).expect("entry") else {
-                panic!("expected sink entry");
+            let MailboxEntry::Closure(handler) = registry.entry(id).expect("entry") else {
+                panic!("expected mailbox entry");
             };
 
             let req = HandlePublish {
@@ -283,7 +283,7 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (_store, mailer, registry, _rx) = fresh_substrate();
-            registry.register_sink(HandleCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            registry.register_closure(HandleCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
 
             let err = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<HandleCapability>(())

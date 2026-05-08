@@ -125,9 +125,12 @@ fn camera_destroy_main_keeps_substrate_alive() {
                     min_count: 1,
                 },
             },
-            // Drop the only camera the component was bootstrapped with.
+            // Drop the only camera the component was bootstrapped
+            // with. Per issue 634 Phase 4, agents address loaded
+            // components at the trampoline's full name
+            // (`aether.component.trampoline:NAME`).
             Step::SendMail {
-                recipient: "cam".to_owned(),
+                recipient: "aether.component.trampoline:cam".to_owned(),
                 kind: "aether.camera.destroy".to_owned(),
                 params: serde_yml::from_str("name: main").expect("destroy params parse"),
             },

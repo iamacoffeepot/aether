@@ -815,46 +815,87 @@ fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
 /// feature pulling its native dep set in.
 #[proc_macro_attribute]
 pub fn bridge(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let feature = match parse_bridge_attr(attr) {
-        Ok(f) => f,
+    let opts = match parse_bridge_attr(attr) {
+        Ok(o) => o,
         Err(e) => return e.to_compile_error().into(),
     };
     let item = parse_macro_input!(item as ItemMod);
-    match expand_bridge(item, feature) {
+    match expand_bridge(item, opts) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
 }
 
-/// Parse the optional `feature = "name"` argument on `#[bridge]`.
-/// Empty attr returns `None` (the default no-feature mode); anything
-/// else parses as a `syn::MetaNameValue` whose path must be `feature`
-/// and value must be a string literal.
-fn parse_bridge_attr(attr: TokenStream) -> syn::Result<Option<String>> {
-    if attr.is_empty() {
-        return Ok(None);
-    }
-    let meta: syn::MetaNameValue = syn::parse(attr)?;
-    if !meta.path.is_ident("feature") {
-        return Err(syn::Error::new_spanned(
-            &meta.path,
-            "#[bridge] only accepts `feature = \"name\"`",
-        ));
-    }
-    let syn::Expr::Lit(syn::ExprLit {
-        lit: syn::Lit::Str(s),
-        ..
-    }) = meta.value
-    else {
-        return Err(syn::Error::new_spanned(
-            &meta.path,
-            "#[bridge(feature = ...)] expects a string literal",
-        ));
-    };
-    Ok(Some(s.value()))
+/// Cardinality declaration on `#[bridge]`. The bridge attribute is the
+/// natural site for this because the bridge owns two struct definition
+/// sites (the wasm stub at file root + the native struct in `mod
+/// native`), and a cardinality marker impl needs to land at file root
+/// to cover both. Pre-issue-625 the bridge auto-emitted Singleton; the
+/// refactor makes the choice explicit (and adds Instanced as the
+/// counterpart).
+#[derive(Clone, Copy)]
+enum BridgeCardinality {
+    Singleton,
+    Instanced,
 }
 
-fn expand_bridge(mut item_mod: ItemMod, feature: Option<String>) -> syn::Result<TokenStream2> {
+#[derive(Default)]
+struct BridgeOpts {
+    cardinality: Option<BridgeCardinality>,
+    feature: Option<String>,
+}
+
+/// Parse `#[bridge]`'s optional arguments. Recognised:
+/// - `singleton` (positional flag) — emit `impl Singleton for X`
+/// - `instanced` (positional flag) — emit `impl Instanced for X`
+/// - `feature = "name"` — gate the inner mod on the named feature
+///
+/// Empty attr (`#[bridge]`) emits no cardinality marker; the author is
+/// expected to hand-roll one (test fixtures, future cases). Mixing
+/// `singleton` and `instanced` is rejected — a cap is one or the other.
+fn parse_bridge_attr(attr: TokenStream) -> syn::Result<BridgeOpts> {
+    let mut opts = BridgeOpts::default();
+    if attr.is_empty() {
+        return Ok(opts);
+    }
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("singleton") {
+            if matches!(opts.cardinality, Some(BridgeCardinality::Instanced)) {
+                return Err(meta.error(
+                    "#[bridge] cannot declare both `singleton` and `instanced` — \
+                     cardinality is mutually exclusive (ADR-0079)",
+                ));
+            }
+            opts.cardinality = Some(BridgeCardinality::Singleton);
+            Ok(())
+        } else if meta.path.is_ident("instanced") {
+            if matches!(opts.cardinality, Some(BridgeCardinality::Singleton)) {
+                return Err(meta.error(
+                    "#[bridge] cannot declare both `singleton` and `instanced` — \
+                     cardinality is mutually exclusive (ADR-0079)",
+                ));
+            }
+            opts.cardinality = Some(BridgeCardinality::Instanced);
+            Ok(())
+        } else if meta.path.is_ident("feature") {
+            let value = meta.value()?;
+            let lit: syn::LitStr = value.parse()?;
+            opts.feature = Some(lit.value());
+            Ok(())
+        } else {
+            Err(meta
+                .error("#[bridge] only accepts `singleton`, `instanced`, or `feature = \"name\"`"))
+        }
+    });
+    syn::parse::Parser::parse(parser, attr)?;
+    Ok(opts)
+}
+
+fn expand_bridge(mut item_mod: ItemMod, opts: BridgeOpts) -> syn::Result<TokenStream2> {
+    let BridgeOpts {
+        cardinality,
+        feature,
+    } = opts;
     let Some((brace, items)) = item_mod.content.take() else {
         return Err(syn::Error::new_spanned(
             &item_mod,
@@ -978,7 +1019,7 @@ fn expand_bridge(mut item_mod: ItemMod, feature: Option<String>) -> syn::Result<
         // flavours — strict typed receiver (only `#[handler]`s),
         // catch-all cap (only `#[fallback]`), or hybrid (typed
         // handlers + a `#[fallback]` runtime safety net). The hybrid
-        // shape is what `ControlPlaneCapability` uses: declared kinds
+        // shape is what `ComponentHostCapability` uses: declared kinds
         // it accepts are typed; unknown kinds (Phase 1 chassis-
         // peripheral migration window) ride the fallback. Hybrid emits
         // per-handler `HandlesKind<K>` impls (no blanket — declared
@@ -1042,14 +1083,27 @@ fn expand_bridge(mut item_mod: ItemMod, feature: Option<String>) -> syn::Result<
         #native_cfg
         pub use #mod_ident::#type_ident;
     };
-    let singleton_marker = quote! {
-        impl #impl_generics ::aether_actor::Singleton for #self_ty #where_clause {}
-    };
+    // Issue 625: cardinality is an explicit declaration on the bridge
+    // attribute per ADR-0079. The bridge sits over two struct
+    // definition sites — the wasm stub at file root and the native
+    // struct inside `mod native` — and the cardinality marker impl
+    // must land at file root to cover both. The author writes
+    // `#[bridge(singleton)]` or `#[bridge(instanced)]`; absence is
+    // hand-rolled (test fixtures, future cases that don't fit either).
     let actor_marker = quote! {
         impl #impl_generics ::aether_actor::Actor for #self_ty #where_clause {
             const NAMESPACE: &'static str = #namespace_expr;
             #frame_barrier_const
         }
+    };
+    let cardinality_marker = match cardinality {
+        Some(BridgeCardinality::Singleton) => Some(quote! {
+            impl #impl_generics ::aether_actor::Singleton for #self_ty #where_clause {}
+        }),
+        Some(BridgeCardinality::Instanced) => Some(quote! {
+            impl #impl_generics ::aether_actor::Instanced for #self_ty #where_clause {}
+        }),
+        None => None,
     };
     // Issue 576 + issue 603: only-fallback (true catch-all) caps emit
     // one blanket `impl<K: Kind> HandlesKind<K> for X {}` so typed
@@ -1107,8 +1161,8 @@ fn expand_bridge(mut item_mod: ItemMod, feature: Option<String>) -> syn::Result<
     let mod_attrs = std::mem::take(&mut item_mod.attrs);
     Ok(quote! {
         #stub_and_reexport
-        #singleton_marker
         #actor_marker
+        #cardinality_marker
         #(#handles_kind_markers)*
 
         #(#mod_attrs)*
@@ -1204,17 +1258,15 @@ pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// `#[derive(Singleton)]` — emits `impl ::aether_actor::Singleton for T {}`.
 ///
-/// Issue 552 stage 0: explicit opt-in marker that an actor type is
-/// the sole instance of its kind in a chassis. The trait itself is a
-/// simple marker — no methods. Future stages may grow `Singleton`
-/// into a richer trait (e.g. an associated `unique_name() -> &str`)
-/// at which point this derive emits the additional bodies; today
-/// it's just the marker.
-///
-/// Kept as `#[derive(Singleton)]` rather than auto-emitted by
-/// `#[actor]` so opting OUT (multi-instance actors, when stage 5+
-/// introduces them) is non-breaking — the absence of the derive
-/// becomes the opt-out signal instead of a new attribute syntax.
+/// Per ADR-0079 (issue 607) cardinality is first-class:
+/// [`Singleton`] and [`Instanced`] are mutually exclusive at the type
+/// level. Issue 625 made the choice explicit at the struct
+/// definition rather than auto-emitted by `#[bridge]` — `Singleton`
+/// is a property of the type, not of any one trait it implements.
+/// Authors place `#[derive(Singleton)]` on the cap struct alongside
+/// `pub struct X` inside the bridge mod; absence selects the other
+/// cardinality (and the type-system catches mistakes — `Builder::with_actor`
+/// requires `Singleton`, `ctx.spawn_child` requires `Instanced`).
 #[proc_macro_derive(Singleton)]
 pub fn derive_singleton(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -1222,6 +1274,27 @@ pub fn derive_singleton(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     quote! {
         impl #impl_generics ::aether_actor::Singleton for #name #ty_generics #where_clause {}
+    }
+    .into()
+}
+
+/// `#[derive(Instanced)]` — emits `impl ::aether_actor::Instanced for T {}`.
+///
+/// The instanced counterpart of [`derive_singleton`]. Per ADR-0079
+/// (issue 607), instanced actors carry a runtime subname under their
+/// `NAMESPACE` prefix — full names hash to `"{NAMESPACE}:{subname}"`
+/// (e.g. `aether.tcp.listener:8080`). Authors place
+/// `#[derive(Instanced)]` on the cap struct inside the bridge mod;
+/// `Builder::with_actor` rejects instanced types at compile time
+/// (the chassis-builder boots singletons only), and
+/// `ctx.spawn_child` requires the `Instanced` bound.
+#[proc_macro_derive(Instanced)]
+pub fn derive_instanced(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    quote! {
+        impl #impl_generics ::aether_actor::Instanced for #name #ty_generics #where_clause {}
     }
     .into()
 }
@@ -1774,6 +1847,15 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     let mut fallback: Option<NativeFallbackFn> = None;
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
     let mut consts: Vec<syn::ImplItemConst> = Vec::new();
+    // Issue 607 Phase 4a (ADR-0079): `on_close` is a `NativeActor` trait
+    // method with a default empty body. When a cap overrides it, the
+    // override must land inside the trait impl block (so the
+    // dispatcher trampoline's `actor.on_close(...)` resolves to the
+    // override via trait dispatch). Pre-issue-625 the macro routed
+    // every non-handler / non-init fn into the inherent impl, so
+    // `on_close` overrides triggered a dead_code warning and (worse)
+    // didn't override the trait method at all.
+    let mut lifecycle_methods: Vec<syn::ImplItemFn> = Vec::new();
 
     for impl_item in item.items {
         match impl_item {
@@ -1819,6 +1901,8 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                     fallback = Some(NativeFallbackFn { method: f });
                 } else if f.sig.ident == "init" {
                     init_method = Some(f);
+                } else if f.sig.ident == "on_close" {
+                    lifecycle_methods.push(f);
                 } else {
                     helpers.push(f);
                 }
@@ -1852,7 +1936,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     // Issue 576 + issue 603: native actors come in three flavours —
     // strict typed receiver (only `#[handler]`s), catch-all cap (only
     // `#[fallback]`), or hybrid (typed handlers + a `#[fallback]`
-    // runtime safety net). `ControlPlaneCapability` uses the hybrid
+    // runtime safety net). `ComponentHostCapability` uses the hybrid
     // shape: declared `LoadComponent` / `DropComponent` / etc. land on
     // typed handlers; chassis-peripheral kinds (Phase 1 migration)
     // ride the fallback. The fallback runs only on dispatch table
@@ -1994,7 +2078,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         let method_ident = &f.method.sig.ident;
         quote! {
             fn __aether_dispatch_fallback(
-                &self,
+                &mut self,
                 __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
                 __aether_env: &::aether_substrate::capability::Envelope,
             ) -> bool {
@@ -2027,12 +2111,13 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
         impl #impl_generics #trait_path for #self_ty #where_clause {
             #config_type
             #init_method
+            #(#lifecycle_methods)*
         }
 
         #[cfg(not(target_arch = "wasm32"))]
         impl #impl_generics ::aether_substrate::NativeDispatch for #self_ty #where_clause {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
                 __aether_kind: ::aether_substrate::mail::KindId,
                 __aether_payload: &[u8],
@@ -2077,31 +2162,28 @@ struct NativeFallbackFn {
 }
 
 /// Validate a native `#[fallback]` method signature. Required shape:
-/// `(&self, ctx: &mut NativeCtx<'_>, env: &Envelope)`. The third
-/// argument's exact type isn't checked here — the synthesized
-/// override calls `self.<fallback>(ctx, env)` and the user's fn body
-/// will type-error against `&Envelope` if they wrote the wrong
-/// parameter type.
+/// `(&self | &mut self, ctx: &mut NativeCtx<'_>, env: &Envelope)`.
+/// The third argument's exact type isn't checked here — the
+/// synthesized override calls `self.<fallback>(ctx, env)` and the
+/// user's fn body will type-error against `&Envelope` if they wrote
+/// the wrong parameter type.
+///
+/// Issue 629 / Phase B: `&mut self` is now allowed alongside `&self`.
+/// The dispatcher owns the cap as `Box<A>` and calls the fallback
+/// through `&mut Box<A>`, so either receiver shape works.
 fn validate_native_fallback_sig(sig: &Signature) -> syn::Result<()> {
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
             "#[fallback] on `impl NativeActor for X` must have signature \
-             `(&self, ctx: &mut NativeCtx<'_>, env: &Envelope)`",
+             `(&self | &mut self, ctx: &mut NativeCtx<'_>, env: &Envelope)`",
         ));
     }
     let first = &sig.inputs[0];
-    let FnArg::Receiver(recv) = first else {
+    if !matches!(first, FnArg::Receiver(_)) {
         return Err(syn::Error::new_spanned(
             first,
-            "#[fallback] first parameter must be `&self`",
-        ));
-    };
-    if recv.mutability.is_some() {
-        return Err(syn::Error::new_spanned(
-            recv,
-            "#[fallback] receiver must be `&self`, not `&mut self` — \
-             native caps share state across threads via interior mutability behind `Arc<Self>`",
+            "#[fallback] first parameter must be `&self` or `&mut self`",
         ));
     }
     let third = &sig.inputs[2];
@@ -2115,42 +2197,38 @@ fn validate_native_fallback_sig(sig: &Signature) -> syn::Result<()> {
 }
 
 /// Extract `K` from a `#[actor] impl NativeActor` handler method's
-/// third parameter. Required signature: `(&self, ctx: &mut NativeCtx<'_>, mail: K)`.
-/// The `&self` (vs `&mut self`) is load-bearing — the actor lives
-/// behind `Arc<Self>` and shares the ref across dispatcher / lookup
-/// consumers.
-/// Extract `K` from a NativeActor handler's third parameter and a
-/// flag for slice-handler shape. Accepts:
-///   - `(&self, ctx: &mut NativeCtx<'_>, mail: K)` — single-payload
-///     handler, decodes via `Kind::decode_from_bytes`.
-///   - `(&self, ctx: &mut NativeCtx<'_>, mails: &[K])` — batched
-///     cast-shape handler, decodes the whole envelope as a contiguous
-///     `&[K]` slice via `decode_cast_slice` so a single envelope with
-///     `count > 1` (`Mailbox::send_many`, ADR-0019) reaches the
-///     handler intact. Only meaningful for cast-shape kinds; postcard
-///     kinds have no batch wire.
+/// third parameter and a flag for slice-handler shape. Accepts:
+///   - `(&self | &mut self, ctx: &mut NativeCtx<'_>, mail: K)` —
+///     single-payload handler, decodes via `Kind::decode_from_bytes`.
+///   - `(&self | &mut self, ctx: &mut NativeCtx<'_>, mails: &[K])` —
+///     batched cast-shape handler, decodes the whole envelope as a
+///     contiguous `&[K]` slice via `decode_cast_slice` so a single
+///     envelope with `count > 1` (`Mailbox::send_many`, ADR-0019)
+///     reaches the handler intact. Only meaningful for cast-shape
+///     kinds; postcard kinds have no batch wire.
+///
+/// Issue 629 / Phase B: `&mut self` is now allowed alongside `&self`.
+/// The dispatcher owns the cap as `Box<A>` and calls each handler
+/// through `&mut Box<A>`, so either receiver shape works. Caps with
+/// mutable state migrate from interior mutability (`Mutex` / `Atomic`)
+/// to plain fields by flipping handler signatures to `&mut self` per
+/// cap.
 fn extract_native_actor_handler_kind(sig: &Signature) -> syn::Result<(Type, bool)> {
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
             "#[actor] impl NativeActor #[handler] method must have signature \
-             `(&self, ctx: &mut NativeCtx<'_>, arg: K)` (or `mail: &[K]` for batched cast kinds)",
+             `(&self | &mut self, ctx: &mut NativeCtx<'_>, arg: K)` \
+             (or `mail: &[K]` for batched cast kinds)",
         ));
     }
     let first = &sig.inputs[0];
-    let FnArg::Receiver(recv) = first else {
+    if !matches!(first, FnArg::Receiver(_)) {
         return Err(syn::Error::new_spanned(
             first,
-            "#[handler] first parameter must be `&self` (NativeActor caps share state via Arc)",
+            "#[handler] first parameter must be `&self` or `&mut self`",
         ));
     };
-    if recv.mutability.is_some() {
-        return Err(syn::Error::new_spanned(
-            recv,
-            "#[actor] impl NativeActor #[handler] receiver must be `&self`, not `&mut self` — \
-             native caps share state across threads via interior mutability behind `Arc<Self>`",
-        ));
-    }
     let third = &sig.inputs[2];
     let FnArg::Typed(pt) = third else {
         return Err(syn::Error::new_spanned(

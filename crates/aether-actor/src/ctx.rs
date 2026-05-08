@@ -20,8 +20,8 @@ use aether_data::{Kind, Schema, mailbox_id_from_name};
 
 use crate::actor::{Actor, HandlesKind, Singleton};
 use crate::mail::ReplyTo;
+use crate::mailbox::{ActorMailbox, KindId, Mailbox, resolve, resolve_mailbox};
 use crate::sender::{MailCtx, Sender};
-use crate::sink::{ActorMailbox, KindId, Mailbox, resolve, resolve_mailbox};
 use crate::transport::MailTransport;
 
 /// Init-only capability handle. The type split between `InitCtx` and
@@ -34,8 +34,8 @@ use crate::transport::MailTransport;
 /// touching a thread-local. The component's own mailbox id rides
 /// here too — the substrate passes it into `init` at instantiation
 /// (ADR-0030 Phase 2) and the SDK uses it to self-address
-/// `aether.control.subscribe_input` mails for every `K::IS_INPUT`
-/// kind handled by the component.
+/// `aether.input.subscribe` mails for every `K::IS_INPUT` kind
+/// handled by the component.
 pub struct InitCtx<'a, T: MailTransport> {
     transport: &'a T,
     mailbox: u64,
@@ -82,19 +82,19 @@ impl<'a, T: MailTransport> InitCtx<'a, T> {
         resolve_mailbox::<K, T>(name)
     }
 
-    /// Send `aether.control.subscribe_input` with this component's
-    /// mailbox as the subscriber for `K`. ADR-0068 keys subscriber
-    /// sets by `KindId` directly, so this collapses to a one-line
-    /// send: any `Kind` is sendable, the substrate's platform thread
-    /// fans out only for kinds it actually publishes, and a subscribe
-    /// for a non-stream kind is a harmless no-op.
+    /// Send `aether.input.subscribe` with this component's mailbox as
+    /// the subscriber for `K`. ADR-0068 keys subscriber sets by
+    /// `KindId` directly, so this collapses to a one-line send: any
+    /// `Kind` is sendable, the substrate's platform thread fans out
+    /// only for kinds it actually publishes, and a subscribe for a
+    /// non-stream kind is a harmless no-op.
     pub fn subscribe_input<K: Kind + 'static>(&self) {
         use aether_kinds::SubscribeInput;
         let payload = SubscribeInput {
             kind: <K as Kind>::ID,
             mailbox: ::aether_data::MailboxId(self.mailbox),
         };
-        resolve_mailbox::<SubscribeInput, T>("aether.control").send(self.transport, &payload);
+        resolve_mailbox::<SubscribeInput, T>("aether.input").send(self.transport, &payload);
     }
 
     /// Singleton sender shortcut: returns a typed [`ActorMailbox`] that

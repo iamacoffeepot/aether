@@ -424,7 +424,7 @@ impl TestBench {
     /// pattern is "send → await → decode" — e.g. the `aether.io`
     /// `Read`/`Write`/`Delete`/`List` round trips. `advance` and
     /// `capture` are specialisations of this same shape against the
-    /// `aether.control` mailbox.
+    /// `aether.component` mailbox.
     pub fn send_and_await_reply<K, R>(
         &mut self,
         recipient_name: &str,
@@ -550,7 +550,7 @@ impl TestBench {
         // wait around 60 s. Long enough to absorb wasm compile under
         // parallel test contention on a 2-core CI runner (issue 603
         // made `aether.control` mail dispatch through
-        // `ControlPlaneCapability`'s thread instead of inline on the
+        // `ComponentHostCapability`'s thread instead of inline on the
         // caller, so a `LoadComponent` step needs the wait to ride
         // out the dispatcher hop + wasmtime compile under high CPU
         // pressure when N test binaries run in parallel).
@@ -566,11 +566,10 @@ impl TestBench {
 
         let mut quiet_iterations = 0u32;
         for iteration in 0..MAX_ITERATIONS {
-            // Settle the queue. The control mail we pushed flows
-            // through the dispatcher → control plane → chassis
-            // handler, which produces an event on `events_rx` for
-            // Advance/CaptureRequested kinds.
-            self.queue.drain_all_with_budget(frame_loop::DRAIN_BUDGET);
+            // The control mail we pushed flows through the dispatcher
+            // → control plane → chassis handler synchronously on push,
+            // which produces an event on `events_rx` for Advance /
+            // CaptureRequested kinds before this loop body runs.
 
             // Drain any pending chassis events. Each invocation
             // potentially produces a reply on `outbound`.
@@ -668,10 +667,26 @@ impl TestBench {
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
             }
         }
-        frame_loop::drain_or_abort(&self.queue, &self.outbound);
+        // Wait for instanced actors (today: wasm trampolines) to
+        // process the just-pushed Tick before draining frame-bound
+        // caps. Without this, broadcasts the trampoline emits in
+        // response to the Tick land in the broadcast cap's inbox
+        // *after* `drain_frame_bound_or_abort` returns, and
+        // `pump_until_reply` sees `AdvanceResult` before the
+        // tick_observed broadcasts make the loopback round-trip.
+        // Production drivers don't share this wait — they let
+        // trampolines run free at their own cadence. Generous
+        // 5 s deadline matches the pre-Phase-4 implicit drain budget
+        // for slow CI; a never-quiescing actor surfaces as a test
+        // timeout, not a substrate abort (wedge detection waits on
+        // a future epoch-deadline ADR, symmetric with native).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let _ = self._passive.wait_instanced_quiesce(deadline);
         // ADR-0074 §Decision 5: render's inbox must quiesce before
         // submit so any DrawTriangle / aether.camera mail this frame
-        // is integrated into the recorded pass.
+        // is integrated into the recorded pass. (The pre-Phase-4
+        // component drain barrier is retired; trampoline traps
+        // fail-fast directly via `NativeTransport::fatal_abort`.)
         frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
 
         match self.capture_queue.take() {
@@ -702,10 +717,6 @@ impl TestBench {
             // `AdvanceResult` first and return before the broadcast
             // dispatcher's `egress_broadcast` reached outbound, dropping
             // `aether.observation.frame_stats` from `observed_kinds`.
-            // `drain_frame_bound_or_abort` waits on the broadcast cap's
-            // pending counter directly — caps register as sinks, not
-            // components, so `drain_or_abort` (which only drains
-            // `MailboxEntry::Component` entries) wouldn't help.
             frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
             let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             tracing::info!(
@@ -818,7 +829,7 @@ mod tests {
         }
         impl NativeDispatch for Child {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 _ctx: &mut NativeCtx<'_>,
                 kind: aether_substrate::KindId,
                 payload: &[u8],
@@ -889,11 +900,11 @@ mod tests {
 
         // Live registry slots are populated by id.
         assert!(
-            tb.actor_registry().live_actor(id_a).is_some(),
+            tb.actor_registry().is_live(id_a),
             "first instance should be Live in the actor registry"
         );
         assert!(
-            tb.actor_registry().live_actor(id_b).is_some(),
+            tb.actor_registry().is_live(id_b),
             "second instance should be Live in the actor registry"
         );
     }

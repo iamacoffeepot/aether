@@ -42,7 +42,12 @@ use aether_test_fixture_probe::SetRender;
 // and `aether_kinds::descriptors::all()` won't see fixture kinds.
 use aether_test_fixture_probe as _;
 
+/// Caller-supplied component name passed to `LoadComponent`.
 const PROBE_NAME: &str = "probe";
+/// Full trampoline address the substrate registers under post-issue-634
+/// Phase 4. Mail destined for the loaded probe goes here, not to the
+/// bare `PROBE_NAME` (which isn't a registered mailbox).
+const PROBE_ADDRESS: &str = "aether.component.trampoline:probe";
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 
 /// Build a `MailEnvelope` for a `CaptureFrame` mail bundle. Uses
@@ -60,15 +65,16 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> MailEnvelope {
 /// Loads the probe into the bench, blocking until the substrate
 /// replies with `LoadResult` so subsequent `advance` calls see a
 /// fully-instantiated and tick-subscribed component. Pre-Phase-4 of
-/// issue 603 the bench's `aether.control` mailbox served as a single
-/// FIFO point for both load and advance; Phase 4 split advance onto
+/// issue 603 the bench's `aether.control` mailbox (renamed to
+/// `aether.component` in issue 638 phase 3) served as a single FIFO
+/// point for both load and advance; Phase 4 split advance onto
 /// `aether.test_bench`, so load is no longer naturally ordered ahead
 /// of advance — the test must await `LoadResult` explicitly.
 fn load_probe(bench: &mut TestBench, wasm_path: &Path) {
     let wasm = std::fs::read(wasm_path).expect("read fixture wasm");
     let result: aether_kinds::LoadResult = bench
         .send_and_await_reply(
-            "aether.control",
+            "aether.component",
             &LoadComponent {
                 wasm,
                 name: Some(PROBE_NAME.to_owned()),
@@ -103,7 +109,7 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
 }
 
 /// Dropping the probe stops further tick_observed broadcasts.
-/// Validates that `aether.control.drop_component` removes the
+/// Validates that `aether.component.drop` removes the
 /// mailbox from the input subscriber set so subsequent ticks don't
 /// reach it (ADR-0021 + ADR-0038 actor lifecycle).
 #[test]
@@ -122,14 +128,14 @@ fn drop_component_silences_tick_echoes() {
         bench.observed_kinds(),
     );
 
-    // Phase 4 split advance off `aether.control`, so the drop mail no
+    // Phase 4 split advance off `aether.component` (formerly `aether.control`), so the drop mail no
     // longer naturally orders ahead of the next advance. Await
     // `DropResult` explicitly so the probe's mailbox is fully gone
     // before the next advance dispatches ticks.
-    let probe_mbox = mailbox_id_from_name(PROBE_NAME);
+    let probe_mbox = mailbox_id_from_name(PROBE_ADDRESS);
     let drop_result: aether_kinds::DropResult = bench
         .send_and_await_reply(
-            "aether.control",
+            "aether.component",
             &DropComponent {
                 mailbox_id: probe_mbox,
             },
@@ -179,7 +185,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // frame_vertices buffer right before the GPU readback.
     let pre = vec![
         envelope(
-            PROBE_NAME,
+            PROBE_ADDRESS,
             &SetRender {
                 r: 200,
                 g: 32,
@@ -188,7 +194,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
             },
         ),
         MailEnvelope {
-            recipient_name: PROBE_NAME.to_owned(),
+            recipient_name: PROBE_ADDRESS.to_owned(),
             kind_name: "aether.tick".to_owned(),
             payload: Vec::new(),
             count: 1,
@@ -198,7 +204,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // render state to invisible so the post-cleanup capture is back
     // at the chassis clear color.
     let after = vec![envelope(
-        PROBE_NAME,
+        PROBE_ADDRESS,
         &SetRender {
             r: 0,
             g: 0,
@@ -251,14 +257,14 @@ fn replace_component_preserves_mailbox_identity() {
         bench.observed_kinds(),
     );
 
-    // Phase 4 of issue 603 split advance off `aether.control`, so
+    // Phase 4 of issue 603 split advance off `aether.component`, so
     // replace mail no longer naturally orders ahead of the next
     // advance. Await `ReplaceResult` explicitly.
-    let probe_mbox = mailbox_id_from_name(PROBE_NAME);
+    let probe_mbox = mailbox_id_from_name(PROBE_ADDRESS);
     let wasm = std::fs::read(&wasm_path).expect("re-read fixture wasm");
     let replace_result: aether_kinds::ReplaceResult = bench
         .send_and_await_reply(
-            "aether.control",
+            "aether.component",
             &ReplaceComponent {
                 mailbox_id: probe_mbox,
                 wasm,

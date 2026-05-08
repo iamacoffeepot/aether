@@ -72,7 +72,7 @@ pub struct MailboxClaim {
 
 /// Result returned from [`ChassisCtx::claim_mailbox_drop_on_shutdown`].
 ///
-/// Same as [`MailboxClaim`] plus a strong [`SinkSender`] the
+/// Same as [`MailboxClaim`] plus a strong [`MailboxSender`] the
 /// capability is expected to drop during shutdown to break the
 /// channel — the channel-drop + join lifecycle ADR-0074 §Decision 5
 /// settles on. The registry's sink-handler closure holds only a
@@ -87,7 +87,7 @@ pub struct MailboxClaim {
 pub struct DropOnShutdownClaim {
     pub id: MailboxId,
     pub receiver: mpsc::Receiver<Envelope>,
-    pub sink_sender: SinkSender,
+    pub mailbox_sender: MailboxSender,
 }
 
 /// Strong handle to the inbound `Sender<Envelope>` for a mailbox
@@ -96,14 +96,14 @@ pub struct DropOnShutdownClaim {
 /// dropping it disconnects the channel and lets the dispatcher's
 /// `recv()` return `Err(Disconnected)` immediately.
 #[derive(Debug)]
-pub struct SinkSender {
+pub struct MailboxSender {
     // Held purely for its `Drop` side effect. When this `Arc` drops
     // and refcount hits zero, the inner `Sender` drops, the channel
     // disconnects, and the dispatcher exits its `recv()` loop.
     _inner: Arc<mpsc::Sender<Envelope>>,
 }
 
-impl SinkSender {
+impl MailboxSender {
     /// Internal constructor — only
     /// [`ChassisCtx::claim_mailbox_drop_on_shutdown`] /
     /// [`ChassisCtx::claim_frame_bound_mailbox`] build these.
@@ -131,7 +131,7 @@ impl SinkSender {
 pub struct FrameBoundClaim {
     pub id: MailboxId,
     pub receiver: mpsc::Receiver<Envelope>,
-    pub sink_sender: SinkSender,
+    pub mailbox_sender: MailboxSender,
     /// Shared with the registry's sink handler. The handler increments
     /// before pushing into the mpsc; the capability's dispatcher must
     /// decrement after each `dispatch()` returns.
@@ -178,7 +178,7 @@ pub type FallbackRouter = Arc<dyn Fn(&Envelope) -> bool + Send + Sync + 'static>
 pub enum BootError {
     /// The mailbox name is already bound, either to another
     /// capability that claimed it earlier or to a legacy
-    /// `Registry::register_sink` call from `SubstrateBoot::build`.
+    /// `Registry::register_closure` call from `SubstrateBoot::build`.
     /// Phase 2-5 expect this during the side-by-side period and
     /// remove the legacy registration in the same diff.
     MailboxAlreadyClaimed { name: String },
@@ -286,12 +286,12 @@ pub struct ChassisCtx<'a> {
     /// `claim_frame_bound_mailbox_*`, `claim_mailbox_drop_on_shutdown_*`)
     /// appends its `MailboxId` here. The chassis builder reads the
     /// list after `boot_passives` to dispatch
-    /// `aether.control.configure_log_drain` mail to each booted actor
+    /// `aether.log.configure_drain` mail to each booted actor
     /// so its `LogDrainSlot` resolves to the chassis's declared drain
     /// (`Builder::with_log_drain<T>()`).
     ///
     /// Sink-only registrations (e.g. `AETHER_DIAGNOSTICS`) go through
-    /// `Registry::register_sink` directly and do *not* land here —
+    /// `Registry::register_closure` directly and do *not* land here —
     /// they're not actors and have no `LogDrainSlot` to install.
     claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
     /// Issue 607 Phase 3b (ADR-0079): the chassis's
@@ -361,7 +361,7 @@ impl<'a> ChassisCtx<'a> {
     pub fn claim_mailbox_with_override(&mut self, name: &str) -> Result<MailboxClaim, BootError> {
         let (tx, rx) = mpsc::channel::<Envelope>();
         let tx = Arc::new(tx);
-        let id = self.registry.try_register_sink(
+        let id = self.registry.try_register_closure(
             name.to_owned(),
             Arc::new(
                 move |kind: KindId,
@@ -393,7 +393,7 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Variant of [`Self::claim_mailbox`] that returns a strong
-    /// [`SinkSender`] alongside the receiver. Claims under
+    /// [`MailboxSender`] alongside the receiver. Claims under
     /// `C::NAMESPACE`. See
     /// [`Self::claim_mailbox_drop_on_shutdown_with_override`] for the
     /// arbitrary-name escape hatch.
@@ -404,9 +404,9 @@ impl<'a> ChassisCtx<'a> {
     }
 
     /// Variant of [`Self::claim_mailbox_with_override`] that returns
-    /// a strong [`SinkSender`] alongside the receiver. The registry
+    /// a strong [`MailboxSender`] alongside the receiver. The registry
     /// holds only a [`std::sync::Weak`] reference to the sender, so
-    /// when the capability drops the `SinkSender` (during shutdown),
+    /// when the capability drops the `MailboxSender` (during shutdown),
     /// the channel disconnects and the dispatcher's `recv()` returns
     /// `Err(Disconnected)`.
     ///
@@ -420,14 +420,14 @@ impl<'a> ChassisCtx<'a> {
         name: &str,
     ) -> Result<DropOnShutdownClaim, BootError> {
         let (tx, rx) = mpsc::channel::<Envelope>();
-        // Strong Arc rides on `DropOnShutdownClaim.sink_sender` and
+        // Strong Arc rides on `DropOnShutdownClaim.mailbox_sender` and
         // lives for the capability's lifetime. The registry handler
         // only upgrades a `Weak` per call, so when the capability
         // drops its strong handle, the inner `Sender` also drops
         // and the dispatcher's `recv()` returns `Err(Disconnected)`.
         let tx = Arc::new(tx);
         let weak = Arc::downgrade(&tx);
-        let id = self.registry.try_register_sink(
+        let id = self.registry.try_register_closure(
             name.to_owned(),
             Arc::new(
                 move |kind: KindId,
@@ -466,7 +466,7 @@ impl<'a> ChassisCtx<'a> {
         Ok(DropOnShutdownClaim {
             id,
             receiver: rx,
-            sink_sender: SinkSender::new(tx),
+            mailbox_sender: MailboxSender::new(tx),
         })
     }
 
@@ -501,7 +501,7 @@ impl<'a> ChassisCtx<'a> {
         let weak = Arc::downgrade(&tx);
         let pending = Arc::new(AtomicU64::new(0));
         let pending_for_handler = Arc::clone(&pending);
-        let id = self.registry.try_register_sink(
+        let id = self.registry.try_register_closure(
             name.to_owned(),
             Arc::new(
                 move |kind: KindId,
@@ -555,9 +555,28 @@ impl<'a> ChassisCtx<'a> {
         Ok(FrameBoundClaim {
             id,
             receiver: rx,
-            sink_sender: SinkSender::new(tx),
+            mailbox_sender: MailboxSender::new(tx),
             pending,
         })
+    }
+
+    /// Issue 607 Phase 7: undo a previous `claim_*_mailbox` call.
+    /// Removes the sink from the chassis registry, the (id, counter)
+    /// entry from `frame_bound_pending`, the id from
+    /// `frame_bound_set`, and the id from `claimed_actor_mailboxes`.
+    /// Idempotent: calling on an id that wasn't claimed is a no-op.
+    ///
+    /// Used in the singleton-boot unwind path (chassis_builder /
+    /// capability) when `init` fails after the cap mailbox was
+    /// claimed. Without this, the failed cap leaves a sink registered
+    /// against its namespace and a stuck counter in
+    /// `frame_bound_pending` that the chassis frame loop would wait
+    /// for forever.
+    pub fn unclaim_mailbox(&mut self, id: MailboxId) {
+        self.registry.remove_closure(id);
+        self.frame_bound_pending.retain(|(i, _)| *i != id);
+        self.frame_bound_set.write().unwrap().remove(&id);
+        self.claimed_actor_mailboxes.retain(|i| *i != id);
     }
 
     /// Clone-able mail-send handle. Capabilities stash this into
@@ -643,7 +662,7 @@ impl<'a> ChassisCtx<'a> {
 ///
 /// The chassis owns this; the cap (with its [`Dispatch`] impl) lives
 /// inside the dispatcher thread. Dropping the handle drops the
-/// [`SinkSender`] (channel disconnects), the dispatcher's `recv()`
+/// [`MailboxSender`] (channel disconnects), the dispatcher's `recv()`
 /// returns `Err(Disconnected)`, the thread exits, and the captured
 /// cap drops with it — running its `Drop` impl on the dispatcher
 /// thread (where any backend resource cleanup happens).
@@ -657,7 +676,7 @@ pub struct FacadeHandle<C: 'static> {
     /// `take()` it before joining the thread; once gone, the
     /// registry's `Weak` upgrade fails on subsequent sends and the
     /// dispatcher's `recv()` returns `Err(Disconnected)`.
-    sink_sender: Option<SinkSender>,
+    mailbox_sender: Option<MailboxSender>,
     _cap: PhantomData<fn() -> C>,
 }
 
@@ -666,7 +685,7 @@ impl<C: 'static> Drop for FacadeHandle<C> {
         // Sender first — that's what disconnects the channel and lets
         // the dispatcher thread exit. Joining a still-alive sender
         // would hang.
-        self.sink_sender.take();
+        self.mailbox_sender.take();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -676,7 +695,7 @@ impl<C: 'static> Drop for FacadeHandle<C> {
 // `FacadeHandle<C>` is itself the chassis-stored entry — the cap C
 // lives inside the dispatcher thread. `Send` is the only ActorErased
 // requirement; the handle's fields (`Option<JoinHandle>`,
-// `Option<SinkSender>`, PhantomData) are all `Send`.
+// `Option<MailboxSender>`, PhantomData) are all `Send`.
 impl<C: 'static> ActorErased for FacadeHandle<C> {}
 
 impl<'a> ChassisCtx<'a> {
@@ -685,7 +704,7 @@ impl<'a> ChassisCtx<'a> {
     /// through its [`Dispatch`] impl. ADR-0075 §Decision 3.
     ///
     /// The cap is moved into the thread; the returned [`FacadeHandle`]
-    /// owns the [`SinkSender`] + [`JoinHandle`]. On chassis shutdown
+    /// owns the [`MailboxSender`] + [`JoinHandle`]. On chassis shutdown
     /// the handle drops, the channel disconnects, the thread exits,
     /// and the cap's `Drop` runs on the dispatcher thread (so any
     /// backend cleanup that touches non-Send resources stays on the
@@ -703,23 +722,23 @@ impl<'a> ChassisCtx<'a> {
         // chassis's `frame_bound_pending` Vec. Free-running caps go
         // through the regular drop-on-shutdown claim. The dispatch
         // loop is identical apart from the post-dispatch decrement.
-        let (receiver, sink_sender, pending) = if C::FRAME_BARRIER {
+        let (receiver, mailbox_sender, pending) = if C::FRAME_BARRIER {
             let claim = self.claim_frame_bound_mailbox_with_override(C::NAMESPACE)?;
             let FrameBoundClaim {
                 id: _,
                 receiver,
-                sink_sender,
+                mailbox_sender,
                 pending,
             } = claim;
-            (receiver, sink_sender, Some(pending))
+            (receiver, mailbox_sender, Some(pending))
         } else {
             let claim = self.claim_mailbox_drop_on_shutdown_with_override(C::NAMESPACE)?;
             let DropOnShutdownClaim {
                 id: _,
                 receiver,
-                sink_sender,
+                mailbox_sender,
             } = claim;
-            (receiver, sink_sender, None)
+            (receiver, mailbox_sender, None)
         };
 
         let mut owned = cap;
@@ -760,7 +779,7 @@ impl<'a> ChassisCtx<'a> {
 
         Ok(FacadeHandle {
             thread: Some(thread),
-            sink_sender: Some(sink_sender),
+            mailbox_sender: Some(mailbox_sender),
             _cap: PhantomData,
         })
     }
@@ -822,17 +841,30 @@ where
     // counter; the dispatcher decrements after each handler dispatch
     // so the per-frame drain barrier (ADR-0074 §Decision 5) sees the
     // counter drop in lock-step with handler progress.
-    let (mailbox_id, receiver, sink_sender, pending) = if A::FRAME_BARRIER {
-        let claim = ctx.claim_frame_bound_mailbox::<A>()?;
-        (
-            claim.id,
-            claim.receiver,
-            claim.sink_sender,
-            Some(claim.pending),
-        )
+    //
+    // Issue 607 Phase 7: if the mailbox claim fails, release the
+    // namespace claim we made above before propagating.
+    let claim_result = if A::FRAME_BARRIER {
+        ctx.claim_frame_bound_mailbox::<A>().map(|claim| {
+            (
+                claim.id,
+                claim.receiver,
+                claim.mailbox_sender,
+                Some(claim.pending),
+            )
+        })
     } else {
-        let claim = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
-        (claim.id, claim.receiver, claim.sink_sender, None)
+        ctx.claim_mailbox_drop_on_shutdown::<A>()
+            .map(|claim| (claim.id, claim.receiver, claim.mailbox_sender, None))
+    };
+    let (mailbox_id, receiver, mailbox_sender, pending) = match claim_result {
+        Ok(c) => c,
+        Err(e) => {
+            ctx.spawner_arc()
+                .actor_registry()
+                .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+            return Err(e);
+        }
     };
 
     let transport = Arc::new(crate::NativeTransport::from_ctx(
@@ -842,13 +874,14 @@ where
     ));
     transport.install_inbox(receiver);
 
-    // The legacy path doesn't carry a chassis-side `Actors` map; init
-    // contexts that don't need peer lookups (today: every cap migrating
-    // through this path — Handle, Audio, Io, Net, Render) work fine
-    // against an empty map. The new `Builder::with_actor` path threads
-    // a real map for caps that DO need peer lookups; both end up using
-    // the same NativeInitCtx + dispatcher trampoline shape.
-    let empty_actors = crate::Actors::new();
+    // The legacy path doesn't share the chassis's `ExportedHandles`
+    // map; init contexts that don't need to publish a driver-facing
+    // handle bundle (today: every cap migrating through this path —
+    // Handle, Audio, Io, Net) work fine against a throwaway map. The
+    // new `Builder::with_actor` path threads the real chassis-owned
+    // map; both end up using the same NativeInitCtx + dispatcher
+    // trampoline shape.
+    let mut throwaway_handles = crate::ExportedHandles::new();
 
     // Per-actor scratch storage (issue 582). Stamped into TLS via
     // `local::with_stamped` for the duration of `init` and
@@ -856,10 +889,16 @@ where
     // `chassis_builder::make_native_actor_boot`.
     let slots = Box::new(aether_actor::local::ActorSlots::new());
 
-    let actor = {
+    // Issue 607 Phase 7: failed init releases the slot before any
+    // dispatcher thread is spawned — drop the transport (and its
+    // installed inbox), unclaim the mailbox, release the namespace.
+    let init_result = {
         let mailer_clone = ctx.mail_send_handle();
-        let mut init_ctx =
-            crate::native_actor::NativeInitCtx::new(&transport, &empty_actors, mailer_clone);
+        let mut init_ctx = crate::native_actor::NativeInitCtx::new(
+            &transport,
+            &mut throwaway_handles,
+            mailer_clone,
+        );
         // Issue #581: drain the `LogBuffer` after init so cap-boot
         // tracing events surface to LogCapability promptly.
         aether_actor::local::with_stamped(&slots, || {
@@ -871,13 +910,25 @@ where
                     r
                 },
             )
-        })?
+        })
     };
-    drop(empty_actors); // explicit shape — no shared state outlives init
+    drop(throwaway_handles); // explicit shape — no shared state outlives init
+    let actor = match init_result {
+        Ok(a) => a,
+        Err(e) => {
+            drop(transport);
+            drop(mailbox_sender);
+            ctx.unclaim_mailbox(mailbox_id);
+            ctx.spawner_arc()
+                .actor_registry()
+                .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+            return Err(e);
+        }
+    };
 
-    let actor_arc: Arc<A> = Arc::new(actor);
+    // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
+    let mut actor: Box<A> = Box::new(actor);
 
-    let actor_for_thread = Arc::clone(&actor_arc);
     let transport_for_thread = Arc::clone(&transport);
     let actor_registry_for_thread = Arc::clone(ctx.spawner_arc().actor_registry());
     let mailer_for_thread = ctx.mail_send_handle();
@@ -906,14 +957,22 @@ where
                                 &transport_for_thread,
                                 env.sender,
                             );
-                            if actor_for_thread
+                            if actor
                                 .__aether_dispatch_envelope(
                                     &mut native_ctx,
                                     env.kind,
                                     &env.payload,
                                 )
                                 .is_none()
+                                && !actor
+                                    .__aether_dispatch_fallback(&mut native_ctx, &env)
                             {
+                                // Issue 576: catch-all caps override
+                                // `__aether_dispatch_fallback` and
+                                // return `true` after their fallback
+                                // runs, suppressing this warn. Strict
+                                // receivers keep the default (returns
+                                // `false`) and surface the miss.
                                 tracing::warn!(
                                     target: "aether_substrate::capability",
                                     actor = A::NAMESPACE,
@@ -944,11 +1003,17 @@ where
                                 &transport_for_thread,
                                 env.sender,
                             );
-                            let _ = actor_for_thread.__aether_dispatch_envelope(
-                                &mut native_ctx,
-                                env.kind,
-                                &env.payload,
-                            );
+                            if actor
+                                .__aether_dispatch_envelope(
+                                    &mut native_ctx,
+                                    env.kind,
+                                    &env.payload,
+                                )
+                                .is_none()
+                            {
+                                let _ = actor
+                                    .__aether_dispatch_fallback(&mut native_ctx, &env);
+                            }
                             aether_actor::log::drain_buffer();
                         },
                     );
@@ -965,7 +1030,7 @@ where
                             &transport_for_thread,
                             crate::mail::ReplyTo::NONE,
                         );
-                        actor_for_thread.on_close(&mut close_ctx);
+                        actor.on_close(&mut close_ctx);
                         aether_actor::log::drain_buffer();
                     },
                 );
@@ -1001,11 +1066,7 @@ where
 
     Ok(Box::new(LegacyNativeActorErased {
         thread: Some(thread),
-        sink_sender: Some(sink_sender),
-        // Hold the Arc<A> to keep the actor alive for the dispatcher
-        // thread's lifetime; on drop the dispatcher's recv exits and
-        // the Arc reaches refcount zero, dropping the actor itself.
-        _actor: actor_arc as Arc<dyn std::any::Any + Send + Sync>,
+        mailbox_sender: Some(mailbox_sender),
     }) as Box<dyn ActorErased>)
 }
 
@@ -1017,13 +1078,12 @@ fn alloc_legacy_native_actor_thread_name<A: aether_actor::Actor>() -> String {
 }
 
 /// Erased shutdown for a `NativeActor` booted through the legacy
-/// `ChassisBuilder.with_actor` path. Drops the [`SinkSender`] to
+/// `ChassisBuilder.with_actor` path. Drops the [`MailboxSender`] to
 /// disconnect the inbox channel (the dispatcher's `recv` returns
 /// `None` and the thread exits), then joins.
 struct LegacyNativeActorErased {
     thread: Option<std::thread::JoinHandle<()>>,
-    sink_sender: Option<SinkSender>,
-    _actor: Arc<dyn std::any::Any + Send + Sync>,
+    mailbox_sender: Option<MailboxSender>,
 }
 
 impl ActorErased for LegacyNativeActorErased {}
@@ -1032,7 +1092,7 @@ impl Drop for LegacyNativeActorErased {
     fn drop(&mut self) {
         // Sender first — disconnects the channel and lets the
         // dispatcher's recv return None so the thread exits.
-        self.sink_sender.take();
+        self.mailbox_sender.take();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -1533,10 +1593,10 @@ mod tests {
         let id = registry
             .lookup(StubCap::NAMESPACE)
             .expect("stub mailbox registered");
-        let crate::registry::MailboxEntry::Sink(handler) =
+        let crate::registry::MailboxEntry::Closure(handler) =
             registry.entry(id).expect("entry exists")
         else {
-            panic!("expected sink entry");
+            panic!("expected mailbox entry");
         };
         // Push an empty payload at an arbitrary kind id; StubCap's
         // dispatch returns None unconditionally, but the test only

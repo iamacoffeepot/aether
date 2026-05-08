@@ -92,6 +92,15 @@ pub struct Spawner {
     /// Monotonic counter for [`Subname::Counter`]. Per-Spawner so each
     /// chassis runs its own sequence; not shared across substrates.
     counter: AtomicU64,
+    /// Per-instanced-actor inbox-pending counters. Each spawn registers
+    /// one here; the sink handler increments on push, the dispatcher
+    /// loop decrements after dispatching. Used by the test bench's
+    /// `advance` loop to wait for trampolines to drain before
+    /// declaring a frame done — production drivers (desktop, headless)
+    /// don't read this. Wedge detection (CPU-loop wasm) waits on a
+    /// future epoch-deadline ADR; this counter is for synchronization,
+    /// not fail-fast.
+    instanced_pending: RwLock<Vec<(MailboxId, Arc<AtomicU64>)>>,
 }
 
 impl Spawner {
@@ -109,12 +118,46 @@ impl Spawner {
             frame_bound_set,
             aborter,
             counter: AtomicU64::new(0),
+            instanced_pending: RwLock::new(Vec::new()),
         }
     }
 
-    /// Borrow the actor registry. Read-only; spawn is the sole writer
-    /// in Phase 3 (Phase 4 adds the close path).
-    pub fn actor_registry(&self) -> &Arc<ActorRegistry> {
+    /// Wait for every spawned instanced actor's inbox to quiesce
+    /// (`pending == 0`), polling until either every counter is zero or
+    /// `deadline` passes. Returns `true` on quiesce, `false` on
+    /// timeout. Test-bench-only — production drivers don't poll this;
+    /// trampolines are free-running by design and a slow tick handler
+    /// stalls only the next frame's render, not the chassis.
+    ///
+    /// Wedge detection (a CPU-loop wasm guest) waits on a future
+    /// epoch-deadline ADR; this is a passive wait, not an abort
+    /// barrier.
+    pub fn wait_instanced_quiesce(&self, deadline: std::time::Instant) -> bool {
+        loop {
+            let still_pending = {
+                let counters = self.instanced_pending.read().unwrap();
+                counters.iter().any(|(_, c)| c.load(Ordering::Acquire) > 0)
+            };
+            if !still_pending {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+    }
+
+    /// Borrow the actor registry. Crate-private — substrate-internal
+    /// dispatcher trampolines (instanced spawn close path, singleton
+    /// boot path) use this to call `close_actor` / `mark_dead` /
+    /// `try_claim_namespace` etc. Cap handlers reaching for the
+    /// registry through `transport.spawner().actor_registry()` is
+    /// the wrong shape — caps that supervise a fleet hold their own
+    /// child map; caps that just send mail use the typed `ctx.actor`
+    /// / `ctx.resolve_actor` shortcuts. ADR-0079 supervisor-as-cap
+    /// pattern.
+    pub(crate) fn actor_registry(&self) -> &Arc<ActorRegistry> {
         &self.actor_registry
     }
 
@@ -191,9 +234,13 @@ impl Spawner {
         transport.install_inbox(rx);
 
         let actor = {
-            let empty_actors = crate::Actors::new();
+            // Instanced actors don't publish driver-facing sub-handles
+            // today — Phase 4+ may revisit. Pass a throwaway
+            // ExportedHandles to keep the init-ctx shape uniform with
+            // the singleton path.
+            let mut throwaway_handles = crate::ExportedHandles::new();
             let mut init_ctx =
-                NativeInitCtx::new(&transport, &empty_actors, Arc::clone(&self.mailer));
+                NativeInitCtx::new(&transport, &mut throwaway_handles, Arc::clone(&self.mailer));
             match A::init(config, &mut init_ctx) {
                 Ok(a) => a,
                 Err(e) => return Err(SpawnError::InitFailed(e)),
@@ -202,9 +249,9 @@ impl Spawner {
 
         // 5-7. Register sink + Live entry + pre-load mail. The actor
         // registry's `insert_live` and the mailbox registry's
-        // `try_register_sink` each take their own write lock; a
+        // `try_register_closure` each take their own write lock; a
         // collision on either step rolls back. Sequence chosen so the
-        // sink is the gating step (its `try_register_sink` is the
+        // sink is the gating step (its `try_register_closure` is the
         // only op that can fail with a name collision against a peer
         // singleton claim — the actor_registry slot is keyed on
         // MailboxId which already passed the tombstone check).
@@ -216,7 +263,13 @@ impl Spawner {
         // and external mail addressed to the dead mailbox warn-drops.
         let strong_sender: Arc<mpsc::Sender<Envelope>> = Arc::new(tx.clone());
         let weak_for_handler = Arc::downgrade(&strong_sender);
-        let registered = self.registry.try_register_sink(
+        // Per-actor inbox-pending counter. Sink handler ++ on push;
+        // dispatcher loop -- after handling. Used by the test bench's
+        // `wait_instanced_quiesce` to wait for the actor to drain
+        // between ticks. Production drivers don't read this.
+        let pending = Arc::new(AtomicU64::new(0));
+        let pending_for_handler = Arc::clone(&pending);
+        let registered = self.registry.try_register_closure(
             full_name.clone(),
             Arc::new(
                 move |kind: KindId,
@@ -241,7 +294,13 @@ impl Spawner {
                         payload: payload.to_vec(),
                         count,
                     };
+                    pending_for_handler.fetch_add(1, Ordering::AcqRel);
                     if tx.send(env).is_err() {
+                        // Receiver disconnected before we could deliver;
+                        // un-account for the increment so the counter
+                        // stays accurate (otherwise `wait_instanced_quiesce`
+                        // would never see zero).
+                        pending_for_handler.fetch_sub(1, Ordering::AcqRel);
                         tracing::warn!(
                             target: "aether_substrate::spawn",
                             kind = kind_name,
@@ -257,7 +316,11 @@ impl Spawner {
             Err(NameConflict { name }) => return Err(SpawnError::SubnameInUse { full_name: name }),
         }
 
-        let actor_arc: Arc<A> = Arc::new(actor);
+        // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
+        // The chassis-side actor_registry no longer holds a clone of
+        // the actor — only the sender + type_id + subname for routing
+        // and resolve_actor.
+        let mut actor: Box<A> = Box::new(actor);
 
         // Insert before pre-loading mail: the actor_registry holding
         // the sender is the canonical record that the slot is live.
@@ -269,8 +332,8 @@ impl Spawner {
             .insert_live(
                 id,
                 Arc::clone(&strong_sender),
-                Arc::clone(&actor_arc) as Arc<dyn std::any::Any + Send + Sync>,
                 TypeId::of::<A>(),
+                subname_str.clone(),
             )
             .is_err()
         {
@@ -280,27 +343,49 @@ impl Spawner {
             // 64-bit id even with distinct names. Treat as
             // SubnameInUse for the caller; the singleton's claim wins
             // (it landed first).
+            //
+            // Issue 607 Phase 7: the sink WAS registered above; remove
+            // it before returning so the failed spawn doesn't leave
+            // a dangling sink that warn-drops mail. The actor itself
+            // (init succeeded) drops naturally as `actor` falls out
+            // of scope.
+            self.registry.remove_closure(id);
             return Err(SpawnError::SubnameInUse { full_name });
         }
 
         // Pre-load bootstrap mail. tx is alive (rx is held by the
         // transport; nobody's polling yet), so these sends always
-        // succeed.
+        // succeed. Each pre-load increments the pending counter so
+        // `wait_instanced_quiesce` can see it before the actor's
+        // dispatcher consumes it.
         for env in after_init_mail {
+            pending.fetch_add(1, Ordering::AcqRel);
             // mpsc::Sender::send only fails when the receiver
             // disconnects; rx is alive here. Discard on the
             // theoretical impossibility.
             let _ = tx.send(env);
         }
 
+        // Register the pending counter for `wait_instanced_quiesce`
+        // *after* pre-load so the test bench observing this list sees
+        // a populated inbox at boot, not a phantom-empty one.
+        self.instanced_pending
+            .write()
+            .unwrap()
+            .push((id, Arc::clone(&pending)));
+
         // 8. Spawn dispatcher thread, move actor in. Mirrors the
         // existing `boot_native_actor` shape minus the frame-bound
         // pending-counter decrement (instanced actors are
         // free-running per the comment above).
-        let actor_for_thread = Arc::clone(&actor_arc);
+        //
+        // Issue 629 / Phase A: the dispatcher takes the Box<A> by
+        // move — the actor is owned exclusively by this thread for
+        // its lifetime; no Arc share with the chassis or registry.
         let transport_for_thread = Arc::clone(&transport);
         let actor_registry_for_thread = Arc::clone(&self.actor_registry);
         let mailer_for_thread = Arc::clone(&self.mailer);
+        let pending_for_thread = Arc::clone(&pending);
         let thread_name = alloc_instanced_thread_name(&full_name);
         // The local strong Arc was the populator for the Weak handler
         // ref; the actor_registry now holds an `Arc::clone` of the
@@ -327,9 +412,16 @@ impl Spawner {
                     };
                     let mut native_ctx =
                         crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
-                    if actor_for_thread
+                    // Issue 634 Phase 4: trampolines are instanced
+                    // actors that route every un-typed kind through
+                    // `#[fallback]` to the wasm guest. Mirror the
+                    // chassis_builder singleton dispatcher's two-step
+                    // (typed → fallback) so the fallback override
+                    // takes effect.
+                    if actor
                         .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
                         .is_none()
+                        && !actor.__aether_dispatch_fallback(&mut native_ctx, &env)
                     {
                         tracing::warn!(
                             target: "aether_substrate::spawn",
@@ -338,6 +430,7 @@ impl Spawner {
                             "instanced actor dispatch missed: kind not handled or decode failed"
                         );
                     }
+                    pending_for_thread.fetch_sub(1, Ordering::AcqRel);
                 }
 
                 // Drain remaining mail synchronously. The flag/disconnect
@@ -348,9 +441,10 @@ impl Spawner {
                 while let Some(env) = transport_for_thread.try_recv() {
                     let mut native_ctx =
                         crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
-                    if actor_for_thread
+                    if actor
                         .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
                         .is_none()
+                        && !actor.__aether_dispatch_fallback(&mut native_ctx, &env)
                     {
                         tracing::warn!(
                             target: "aether_substrate::spawn",
@@ -359,6 +453,7 @@ impl Spawner {
                             "instanced actor drain dispatch missed: kind not handled or decode failed"
                         );
                     }
+                    pending_for_thread.fetch_sub(1, Ordering::AcqRel);
                 }
 
                 // Last-chance close hook. ReplyTo is None because no
@@ -367,7 +462,7 @@ impl Spawner {
                     &transport_for_thread,
                     crate::mail::ReplyTo::NONE,
                 );
-                actor_for_thread.on_close(&mut close_ctx);
+                actor.on_close(&mut close_ctx);
 
                 // Issue 607 Phase 4b (ADR-0079): close path. Drain
                 // monitors_of[id] for fan-out, prune monitoring[id]
@@ -398,7 +493,7 @@ impl Spawner {
                     }
                 }
 
-                // actor_arc and transport_for_thread drop here on
+                // actor (Box) and transport_for_thread drop here on
                 // thread exit. The chassis-stored sender was already
                 // dropped when `close_actor`'s `mark_dead` flipped the
                 // entry from Live to Dead.

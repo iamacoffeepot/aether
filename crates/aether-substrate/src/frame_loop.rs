@@ -1,23 +1,25 @@
 //! Shared frame-loop policy helpers (issue 427).
 //!
-//! Three chassis binaries — desktop, test-bench, headless — drive a
-//! `Mailer::drain_all_with_budget` per frame and, every 120 frames,
-//! push a `FrameStats` observation to the broadcast mailbox. Pre-issue
-//! 427 each chassis open-coded the budget constant, the wedge / death
-//! handling, and the frame-stats emission. Any change to the wedge
-//! message, abort policy (ADR-0063), or stats cadence had to be made
-//! in three places.
+//! Two helpers, both invariant across chassis: the per-frame
+//! frame-bound drain barrier (ADR-0074 §Decision 5) and the cadenced
+//! `FrameStats` broadcast every 120 frames.
 //!
-//! This module owns the policy. The helpers take only the data they
-//! touch (`&Mailer`, `&HubOutbound`, mailbox / kind ids) so they're
-//! callable from any chassis without threading a chassis handle
-//! through. Behaviour matches the pre-refactor binaries exactly:
-//!
-//! - `drain_or_abort` runs the same `drain_all_with_budget` call,
-//!   logs structured deaths, and routes wedges / deaths through
-//!   `lifecycle::fatal_abort` with the same reason format strings.
+//! - `drain_frame_bound_or_abort` waits on each frame-bound cap's
+//!   pending counter under `DRAIN_BUDGET`; a counter that doesn't
+//!   reach zero is treated as wedged and routes through
+//!   `lifecycle::fatal_abort`.
 //! - `emit_frame_stats` does the 120-frame gate inside the helper —
 //!   chassis call sites become unconditional.
+//!
+//! Pre-Phase-4 there was a third helper, `drain_or_abort`, that
+//! polled a per-component pending-counter aggregate to detect dead /
+//! wedged wasm dispatchers. Issue 634 Phase 4 PR 1 retired the
+//! per-component routing path; PR 2 retired the polling barrier in
+//! favour of direct trap-abort at the trampoline (the trampoline
+//! holds a `FatalAborter` and aborts on `Component::deliver` Err).
+//! Wedge detection (CPU-loop wasm guests) waits on a future
+//! epoch-deadline ADR — symmetric with native actors, which have
+//! no wedge guard either.
 //!
 //! `WORKERS` deliberately stays chassis-side. Post-ADR-0038 it's
 //! declarative (the wire-stable `EngineInfo.workers` field, retained
@@ -36,7 +38,6 @@ use crate::lifecycle;
 use crate::mail::{Mail, MailboxId};
 use crate::mailer::Mailer;
 use crate::outbound::HubOutbound;
-use crate::supervisor::DrainSummary;
 
 /// Frame-stats emission cadence. Hardcoded for v1; an env knob is
 /// deferred until a forcing function arrives. 120 frames at 60 Hz is
@@ -54,37 +55,12 @@ pub const LOG_EVERY_FRAMES: u64 = 120;
 /// clean exit instead of a multi-minute wait.
 pub const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
-/// Drain every live component's inbox under `DRAIN_BUDGET`. On
-/// wedge or any death, log the diagnostic and route through
-/// `lifecycle::fatal_abort` with the substrate's standard reason
-/// format — pre-issue-427 each chassis duplicated this block; the
-/// helper is the single owner.
-///
-/// Wedge wins over deaths: if both are present in the same drain,
-/// the wedge aborts first because the wedged dispatcher is the
-/// active hazard (it's still running and may be holding state we
-/// care about). Deaths are logged structurally before the abort so
-/// `engine_logs` carries the per-mailbox detail even when the
-/// reason string only quotes the first one.
-pub fn drain_or_abort(queue: &Mailer, outbound: &HubOutbound) {
-    let summary = queue.drain_all_with_budget(DRAIN_BUDGET);
-    if let Some(reason) = abort_reason(&summary) {
-        lifecycle::fatal_abort(outbound, reason);
-    }
-}
-
 /// Wait for every frame-bound capability's inbox to drain under
-/// `DRAIN_BUDGET` (ADR-0074 §Decision 5). Mirrors [`drain_or_abort`]
-/// but works on the per-mailbox pending counters
+/// `DRAIN_BUDGET` (ADR-0074 §Decision 5). Works on the per-mailbox
+/// pending counters
 /// [`crate::ChassisCtx::claim_frame_bound_mailbox`] collected for the
 /// chassis (snapshotted by drivers via
 /// [`crate::chassis_builder::DriverCtx::frame_bound_pending`]).
-///
-/// Component drain runs first because component dispatchers are the
-/// upstream of capability mail; running it second would let
-/// component-emitted mail land in capability inboxes after we
-/// already cleared them. Order: component drain → frame-bound drain
-/// → render submit. Each chassis main calls these in that order.
 ///
 /// Empty `pending` is a fast no-op — chassis without frame-bound
 /// capabilities (today: headless, hub) call this every frame at
@@ -116,39 +92,6 @@ pub fn drain_frame_bound_or_abort(pending: &[(MailboxId, Arc<AtomicU64>)], outbo
             }
         }
     }
-}
-
-/// Compute the `fatal_abort` reason string for a drain summary, or
-/// `None` if the drain quiesced cleanly. Factored out of
-/// `drain_or_abort` so unit tests can pin the wedge / death message
-/// format without going through `lifecycle::fatal_abort` (which
-/// calls `std::process::exit`).
-///
-/// Wedge takes precedence over deaths when both are present —
-/// matches `drain_or_abort`'s ordering.
-fn abort_reason(summary: &DrainSummary) -> Option<String> {
-    if let Some((mailbox, waited)) = summary.wedged {
-        return Some(format!(
-            "dispatcher wedged: mailbox={mailbox} waited={waited:?}"
-        ));
-    }
-    if let Some(first) = summary.deaths.first() {
-        for d in &summary.deaths {
-            tracing::error!(
-                target: "aether_substrate::lifecycle",
-                mailbox = %d.mailbox,
-                mailbox_name = %d.mailbox_name,
-                last_kind = %d.last_kind,
-                reason = %d.reason,
-                "component died; substrate aborting (ADR-0063)",
-            );
-        }
-        return Some(format!(
-            "component died: {} (kind {}) — {}",
-            first.mailbox_name, first.last_kind, first.reason,
-        ));
-    }
-    None
 }
 
 /// Emit a `FrameStats` broadcast every `LOG_EVERY_FRAMES` frames.
@@ -194,178 +137,12 @@ pub fn emit_frame_stats(
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, RwLock};
-    use std::time::Duration;
 
     use aether_data::Kind;
     use aether_kinds::FrameStats;
 
     use super::*;
-    use crate::mail::MailboxId;
     use crate::registry::Registry;
-    use crate::supervisor::{ComponentRouter, ComponentSendOutcome, DrainDeath, DrainSummary};
-
-    /// Mock router that returns a pre-configured `DrainSummary` from
-    /// `drain_all_with_budget`. Lets the wedge / death format-string
-    /// tests exercise the real `Mailer::drain_all_with_budget` ⇒
-    /// `abort_reason` path without spinning a real wasm dispatcher.
-    /// The supervisor's own dispatcher-stuck coverage lives cap-side.
-    struct StubRouter {
-        summary: DrainSummary,
-    }
-
-    impl ComponentRouter for StubRouter {
-        fn route(&self, _recipient: MailboxId, _mail: Mail) -> ComponentSendOutcome {
-            ComponentSendOutcome::Unknown
-        }
-        fn drain_all_with_budget(&self, _budget: Duration) -> DrainSummary {
-            self.summary.clone()
-        }
-    }
-
-    /// `abort_reason` returns `None` for a clean drain summary.
-    #[test]
-    fn abort_reason_none_for_clean_summary() {
-        let summary = DrainSummary::default();
-        assert!(abort_reason(&summary).is_none());
-    }
-
-    /// `abort_reason` formats wedge messages with Display form for
-    /// the mailbox id (post-issue-435) — `mailbox={mailbox}`, not
-    /// `mailbox={mailbox:?}`. Pin the format string so a chassis
-    /// regression can't drift it back to Debug.
-    ///
-    /// The wedge path is what `drain_or_abort` would route to
-    /// `lifecycle::fatal_abort`; calling that directly would
-    /// `std::process::exit` and end the test. Asserting on
-    /// `abort_reason` (the same formatter) is the equivalent
-    /// assertion without the exit.
-    #[test]
-    fn abort_reason_formats_wedge_with_display_mailbox() {
-        let mailbox = MailboxId(0xDEAD_BEEF_CAFE_F00D_u64);
-        let waited = Duration::from_millis(5_000);
-        let summary = DrainSummary {
-            deaths: Vec::new(),
-            wedged: Some((mailbox, waited)),
-        };
-        let reason = abort_reason(&summary).expect("wedged summary yields a reason");
-        let expected = format!("dispatcher wedged: mailbox={mailbox} waited={waited:?}");
-        assert_eq!(reason, expected);
-        // Guard against accidental `{mailbox:?}` reintroduction —
-        // Display for `MailboxId` is `mbx-<hex>`, Debug wraps in the
-        // tuple-struct form.
-        assert!(
-            !reason.contains("MailboxId("),
-            "wedge reason must use Display, not Debug, for the mailbox id (got: {reason})",
-        );
-    }
-
-    /// Wedge takes precedence over deaths when both are present —
-    /// matches `drain_or_abort`'s ordering. The reason quotes the
-    /// wedge, deaths are logged structurally but don't show in the
-    /// reason string.
-    #[test]
-    fn abort_reason_wedge_wins_over_deaths() {
-        let mailbox = MailboxId(0x42);
-        let waited = Duration::from_secs(5);
-        let summary = DrainSummary {
-            deaths: vec![DrainDeath {
-                mailbox: MailboxId(0x99),
-                mailbox_name: "doomed".into(),
-                last_kind: "test.kind".into(),
-                reason: "trap".into(),
-            }],
-            wedged: Some((mailbox, waited)),
-        };
-        let reason = abort_reason(&summary).expect("non-empty summary");
-        assert!(reason.starts_with("dispatcher wedged:"));
-        assert!(!reason.contains("component died:"));
-    }
-
-    /// `abort_reason` formats death messages with the first death's
-    /// mailbox name + last kind + reason. Pins the format string.
-    #[test]
-    fn abort_reason_formats_first_death() {
-        let summary = DrainSummary {
-            deaths: vec![DrainDeath {
-                mailbox: MailboxId(0x77),
-                mailbox_name: "alpha".into(),
-                last_kind: "kind.alpha".into(),
-                reason: "alpha trap".into(),
-            }],
-            wedged: None,
-        };
-        let reason = abort_reason(&summary).expect("death yields a reason");
-        assert_eq!(
-            reason,
-            "component died: alpha (kind kind.alpha) — alpha trap",
-        );
-    }
-
-    /// `Mailer::drain_all_with_budget` propagates the supervisor's
-    /// summary verbatim, and the wedge `abort_reason` carries the
-    /// originating mailbox via the `Display` formatter (post-issue-435).
-    /// Calling `drain_or_abort` directly would `std::process::exit` at
-    /// the end, so the test runs the same drain the helper runs and
-    /// the same formatter, just with the terminal
-    /// `lifecycle::fatal_abort` step swapped for an equality
-    /// assertion.
-    ///
-    /// Cap-side coverage of the dispatcher-stuck primitive
-    /// (`bump_pending_for_test` on a real `ComponentEntry`) lives in
-    /// `aether-capabilities`; here a stub router stands in for the
-    /// supervisor so the format-string contract gets unit coverage
-    /// even on chassis variants that don't host components.
-    #[test]
-    fn drain_all_with_budget_propagates_supervisor_wedge() {
-        let registry = Arc::new(Registry::new());
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry));
-
-        let mailbox = MailboxId(0xDEAD_BEEF_CAFE_F00D_u64);
-        let waited = Duration::from_millis(50);
-        let summary = DrainSummary {
-            deaths: Vec::new(),
-            wedged: Some((mailbox, waited)),
-        };
-        mailer.install_component_router(Arc::new(StubRouter {
-            summary: summary.clone(),
-        }));
-
-        let observed = mailer.drain_all_with_budget(waited);
-        let (wedge_mailbox, _waited) = observed
-            .wedged
-            .as_ref()
-            .expect("stub supervisor produced a wedged summary");
-        assert_eq!(*wedge_mailbox, mailbox);
-
-        let reason = abort_reason(&observed).expect("wedged summary yields a reason");
-        assert!(
-            reason.starts_with("dispatcher wedged: mailbox="),
-            "reason must lead with `dispatcher wedged: mailbox=` (got: {reason})",
-        );
-        assert!(reason.contains("waited="));
-        // Display formatter for `MailboxId` is `mbx-<hex>`, not the
-        // `MailboxId(<n>)` Debug form.
-        assert!(
-            !reason.contains("MailboxId("),
-            "wedge reason must format mailbox via Display, not Debug (got: {reason})",
-        );
-    }
-
-    /// `Mailer::drain_all_with_budget` returns an empty summary when
-    /// no supervisor has installed a router. Chassis without a
-    /// component supervisor (today: hub) take this path each frame
-    /// without reaching for a missing router.
-    #[test]
-    fn drain_all_with_budget_empty_without_supervisor() {
-        let registry = Arc::new(Registry::new());
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry));
-
-        let observed = mailer.drain_all_with_budget(Duration::from_millis(10));
-        assert!(observed.deaths.is_empty());
-        assert!(observed.wedged.is_none());
-    }
 
     /// `emit_frame_stats` is a no-op on non-multiples of
     /// `LOG_EVERY_FRAMES`. Verified by sending into a sink that
@@ -376,7 +153,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let captured: Arc<RwLock<Vec<Vec<u8>>>> = Arc::new(RwLock::new(Vec::new()));
         let captured_for_sink = Arc::clone(&captured);
-        registry.register_sink(
+        registry.register_closure(
             aether_kinds::HUB_BROADCAST_MAILBOX_NAME,
             Arc::new(
                 move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {
@@ -401,7 +178,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let captured: Arc<RwLock<Vec<Vec<u8>>>> = Arc::new(RwLock::new(Vec::new()));
         let captured_for_sink = Arc::clone(&captured);
-        registry.register_sink(
+        registry.register_closure(
             aether_kinds::HUB_BROADCAST_MAILBOX_NAME,
             Arc::new(
                 move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {

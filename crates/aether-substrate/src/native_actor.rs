@@ -14,7 +14,7 @@
 //! ```ignore
 //! #[capability]
 //! #[derive(Singleton)]
-//! pub struct ExampleCap { /* state behind interior mutability */ }
+//! pub struct ExampleCap { /* plain fields — single-threaded ownership */ }
 //!
 //! #[actor]
 //! impl NativeActor for ExampleCap {
@@ -27,20 +27,27 @@
 //! }
 //! ```
 //!
-//! Per-handler `&self` (Arc-shared) — caps put their mutable state
-//! behind interior mutability (today: `Arc<Mutex<…>>`,
-//! `Arc<HandleStore>`, `crossbeam_queue::ArrayQueue`). The dispatcher
-//! borrows `&Arc<Self>` from the chassis [`Actors`] map, builds a
-//! per-mail [`NativeCtx`], and calls
-//! [`NativeDispatch::dispatch`].
+//! Issue 629 / Phase A: actors are owned by their dispatcher thread
+//! as `Box<A>` — the cross-thread `Arc<dyn Any + Send + Sync>` storage
+//! is retired. [`NativeDispatch`] takes `&mut self`; `#[handler]`
+//! methods can take either `&self` or `&mut self` (Phase B sweeps caps
+//! to `&mut self` cap by cap as state migrates off interior mutability).
+//!
+//! Cross-thread access from drivers / embedders flows through
+//! cap-exported sub-handles published in `init` via
+//! [`NativeInitCtx::publish_handle`] and retrieved via
+//! [`crate::DriverCtx::handle`]. The actor itself never escapes its
+//! dispatcher thread.
 //!
 //! ## What does NOT live here
 //!
 //! - `actor::<A>()` lookups on per-handler ctx. Once dispatchers are
 //!   running, caps and components communicate via mail — peering at
 //!   sibling state recreates the shared-state coupling the actor
-//!   model is designed to eliminate. Lookups live on
-//!   [`NativeInitCtx`], `DriverCtx`, and `PassiveChassis` only.
+//!   model is designed to eliminate. The chassis-level
+//!   `chassis.actor::<X>() -> Arc<X>` retired with issue 629 / Phase A;
+//!   external runtimes (drivers, TestBench, MCP) reach for
+//!   cap-exported handles instead.
 //!
 //! ## Catch-all caps (issue 576)
 //!
@@ -74,13 +81,12 @@ use crate::native_transport::NativeTransport;
 /// type is moved into [`Self::init`] by the chassis builder; pass
 /// `()` for caps with no configuration.
 ///
-/// `: Actor + Send + Sync` ensures `Arc<Self>` is shareable across
-/// the dispatcher thread, the chassis lookup map, and any post-init
-/// driver/embedder consumer. `Sync` is the new requirement vs
-/// pre-552 caps — every existing cap satisfies it (mutable state is
-/// behind `Arc<Mutex<…>>` / `Arc<HandleStore>` / atomic counters
-/// already), so the migration in stage 2 is mechanical.
-pub trait NativeActor: Actor + Sync {
+/// Issue 629 / Phase A: bound is `: Actor` only (which gives
+/// `Send + 'static`). The dispatcher thread owns the cap as `Box<Self>`
+/// for its lifetime — no cross-thread `Arc` share, no `Sync` bound.
+/// Cap state can be plain fields without interior-mutability gymnastics
+/// once Phase B sweeps each cap.
+pub trait NativeActor: Actor {
     /// Configuration the chassis builder threads through to
     /// [`Self::init`]. `()` for caps without configuration; the
     /// actual config struct (e.g. `AudioConfig`) for caps that
@@ -111,10 +117,10 @@ pub trait NativeActor: Actor + Sync {
     ///   `ctx.shutdown()`. From the dispatcher's perspective this is
     ///   identical to self-shutdown.
     ///
-    /// `&self` matches the handler convention: caps put any mutable
-    /// state behind interior mutability. Default empty — opt-in for
-    /// caps that need to publish a final broadcast or flush state.
-    fn on_close(&self, _ctx: &mut NativeCtx<'_>) {}
+    /// Issue 629 / Phase A: `&mut self` since the dispatcher thread
+    /// owns the cap exclusively. Default empty — opt-in for caps that
+    /// need to publish a final broadcast or flush state.
+    fn on_close(&mut self, _ctx: &mut NativeCtx<'_>) {}
 }
 
 /// Sum dispatch entry-point — emitted once per `#[actor] impl
@@ -123,21 +129,18 @@ pub trait NativeActor: Actor + Sync {
 /// returns `Some(())` on match + decode success or `None` on unknown
 /// kind / decode failure.
 ///
-/// `&self` because the actor lives behind an `Arc<Self>` shared with
-/// the chassis lookup map and any post-init driver/embedder consumer.
+/// Issue 629 / Phase A: `&mut self` since the dispatcher thread owns
+/// the cap as `Box<Self>` and is the sole entry-point. `: Send +
+/// 'static` (no `Sync`) — the cap is not shared across threads.
+///
 /// Per-handler-kind compile checks come from
 /// [`aether_actor::HandlesKind`] (one impl per handler the macro
 /// emits); a future per-K `NativeDispatch<K>` may layer on top if a
-/// caller wants a typed `dispatch_kind::<K>` entry, but stage 1
+/// caller wants a typed `dispatch_kind::<K>` entry, but Phase A
 /// doesn't need it.
-///
-/// Distinct from [`aether_actor::Dispatch`] (the legacy substrate-
-/// side dispatch on `&mut self`, used by today's `with(cap)` boot
-/// path). Stage 2 migrates caps onto the new entry; for stage 1
-/// both coexist.
-pub trait NativeDispatch: Send + Sync + 'static {
+pub trait NativeDispatch: Send + 'static {
     fn __aether_dispatch_envelope(
-        &self,
+        &mut self,
         ctx: &mut NativeCtx<'_>,
         kind: KindId,
         payload: &[u8],
@@ -150,7 +153,11 @@ pub trait NativeDispatch: Send + Sync + 'static {
     /// `#[fallback]` method, returning `true` after the user's
     /// fallback runs so the trampoline knows to suppress the warn
     /// log.
-    fn __aether_dispatch_fallback(&self, _ctx: &mut NativeCtx<'_>, _envelope: &Envelope) -> bool {
+    fn __aether_dispatch_fallback(
+        &mut self,
+        _ctx: &mut NativeCtx<'_>,
+        _envelope: &Envelope,
+    ) -> bool {
         false
     }
 }
@@ -363,20 +370,21 @@ impl<'a> MailCtx for NativeCtx<'a> {
 /// Boot-time context for [`NativeActor::init`]. Carries a borrow of
 /// the actor's transport (for init-time mail), a borrow of the
 /// actors-so-far [`Actors`] map (so init can peer at caps booted
-/// earlier in the chain via [`Self::peer`]), and a clone of the
-/// substrate's mailer for caps that need to register an outbound
-/// hook at boot.
+/// chassis's [`ExportedHandles`] map (so the cap can publish a
+/// driver-facing sub-handle via [`Self::publish_handle`]), and a
+/// clone of the substrate's mailer for caps that need to register an
+/// outbound hook at boot.
 ///
-/// `peer::<HandleCapability>()` (the type-keyed `Arc` lookup) is
-/// distinct from `actor::<R>()` (the typed sender shortcut, mirror of
-/// [`aether_actor::Ctx::actor`]) — peer is for boot-time setup that
-/// genuinely needs to inspect a sibling cap's `Arc`-shared state;
-/// actor is for sending mail. Memory: "actor::<A>() lookup is
-/// bootstrap-only" stays in force for `peer`; messaging is the
-/// runtime shape.
+/// Issue 629 / Phase A: the legacy `peer::<A>() -> Arc<A>` accessor
+/// retired here (closes issue 628). Sibling caps communicate via mail
+/// at runtime ([`Self::actor`] / [`Self::resolve_actor`] return
+/// typed senders). Caps that genuinely need cross-thread state
+/// access from drivers / embedders publish a handle bundle via
+/// [`Self::publish_handle`] and the consumer retrieves it through
+/// [`crate::DriverCtx::handle`].
 pub struct NativeInitCtx<'a> {
     transport: &'a NativeTransport,
-    actors: &'a Actors,
+    handles: &'a mut ExportedHandles,
     mailer: Arc<Mailer>,
 }
 
@@ -385,12 +393,12 @@ impl<'a> NativeInitCtx<'a> {
     /// builds these.
     pub(crate) fn new(
         transport: &'a NativeTransport,
-        actors: &'a Actors,
+        handles: &'a mut ExportedHandles,
         mailer: Arc<Mailer>,
     ) -> Self {
         Self {
             transport,
-            actors,
+            handles,
             mailer,
         }
     }
@@ -408,9 +416,9 @@ impl<'a> NativeInitCtx<'a> {
     /// `Actor::NAMESPACE`; for instanced actors it's
     /// `"{NAMESPACE}:{subname}"` (ADR-0079). Init may use this to
     /// publish its own address — e.g. dispatch
-    /// `aether.control.subscribe_input { mailbox: ctx.self_id() }`
-    /// before registration completes; replies route correctly once the
-    /// spawn lifecycle finishes inserting the entry.
+    /// `aether.input.subscribe { mailbox: ctx.self_id() }` before
+    /// registration completes; replies route correctly once the spawn
+    /// lifecycle finishes inserting the entry.
     pub fn self_id(&self) -> crate::mail::MailboxId {
         self.transport.self_mailbox()
     }
@@ -422,15 +430,20 @@ impl<'a> NativeInitCtx<'a> {
         Arc::clone(&self.mailer)
     }
 
-    /// Look up an earlier-booted cap by type and clone its `Arc`.
-    /// `None` if the cap hasn't booted yet (chain order matters —
-    /// `with::<A>(…)` → `with::<B>(…)` lets B's `init` see A but
-    /// not vice versa). Use cases are limited to boot-time wiring
-    /// (driver pre-build, capability chains that genuinely need a
-    /// sibling's `Arc`-shared state); for sending mail to a sibling,
-    /// reach for [`Self::actor`] / [`Self::resolve_actor`] instead.
-    pub fn peer<A: NativeActor>(&self) -> Option<Arc<A>> {
-        self.actors.get::<A>()
+    /// Issue 629 / Phase A: publish a sub-handle bundle for cross-
+    /// thread access from drivers / embedders. The handle is stored in
+    /// the chassis's [`ExportedHandles`] map keyed by `TypeId::of::<H>`
+    /// and retrieved via [`crate::DriverCtx::handle`]. Caps that don't
+    /// need driver-side state access never call this.
+    ///
+    /// `H: Any + Send + Sync` so the chassis-side map can hand the
+    /// stored bundle back across thread boundaries; typically `H` is
+    /// a `Clone` struct of `Arc`-wrapped fields (e.g. `RenderHandles`
+    /// from ADR-0078).
+    pub fn publish_handle<H: Any + Send + Sync + 'static>(&mut self, handle: H) {
+        self.handles
+            .by_type
+            .insert(TypeId::of::<H>(), Box::new(handle));
     }
 
     /// Singleton sender shortcut: returns a typed [`ActorMailbox`]
@@ -478,52 +491,52 @@ impl<'a> Sender for NativeInitCtx<'a> {
     }
 }
 
-/// Type-keyed map of booted native actors. Owned by
-/// `BootedPassives`; borrowed into [`NativeInitCtx`],
-/// `DriverCtx`, and `PassiveChassis` via accessor methods. Stage 1's
-/// minimal storage — stage 2's actor migrations populate it; stage 3+
-/// consumers (drivers, embedders) read from it.
-pub struct Actors {
-    by_type: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+/// Issue 629 / Phase A: type-keyed map of cap-exported sub-handles
+/// for cross-thread access from drivers / embedders. Caps publish
+/// during `init` via [`NativeInitCtx::publish_handle`]; consumers
+/// retrieve via [`crate::DriverCtx::handle`]. Owned by
+/// `BootedPassives`; borrowed mutably into each cap's [`NativeInitCtx`]
+/// in turn, then borrowed immutably by `DriverCtx`.
+///
+/// Replaces the pre-629 `Actors` struct that stored `Arc<dyn Any +
+/// Send + Sync>` per booted cap — the cross-thread `Arc<A>` share was
+/// the worker-pool-era legacy ADR-0038 made obsolete. Handles are
+/// keyed by *handle* `TypeId` (e.g. `RenderHandles`), not by *actor*
+/// `TypeId`, since the actor itself never escapes its dispatcher
+/// thread.
+pub struct ExportedHandles {
+    pub(crate) by_type: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
 
-impl Default for Actors {
+impl Default for ExportedHandles {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Actors {
+impl ExportedHandles {
     pub fn new() -> Self {
         Self {
             by_type: HashMap::new(),
         }
     }
 
-    /// Insert a freshly-booted `Arc<A>`. The chassis builder calls
-    /// this once per `with_actor::<A>(config)` after `A::init`
-    /// returns Ok. Returns the prior value (if any) so the builder
-    /// can detect double-`with_actor::<A>` and surface a typed
-    /// error.
-    pub fn insert<A: NativeActor>(&mut self, actor: Arc<A>) -> Option<Arc<dyn Any + Send + Sync>> {
-        self.by_type.insert(TypeId::of::<A>(), actor)
+    /// Retrieve a cloned copy of the published handle bundle of type
+    /// `H`, or `None` if no cap published one. The chassis-side
+    /// reader; caps publish via [`NativeInitCtx::publish_handle`].
+    pub fn get<H: Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
+        self.by_type
+            .get(&TypeId::of::<H>())
+            .and_then(|b| b.downcast_ref::<H>())
+            .cloned()
     }
 
-    /// Retrieve a clone of the booted `Arc<A>` if `A` has booted.
-    /// `None` if `A` hasn't been added yet, or if a different type
-    /// happens to share the `TypeId` slot (impossible in safe Rust
-    /// modulo unsoundness bugs).
-    pub fn get<A: NativeActor>(&self) -> Option<Arc<A>> {
-        let any_arc = self.by_type.get(&TypeId::of::<A>())?;
-        Arc::downcast::<A>(Arc::clone(any_arc)).ok()
-    }
-
-    /// `true` when no actors have booted yet. Useful for tests.
+    /// `true` when no cap has published a handle yet. Useful for tests.
     pub fn is_empty(&self) -> bool {
         self.by_type.is_empty()
     }
 
-    /// Number of booted actors. Useful for tests.
+    /// Number of published handle bundles.
     pub fn len(&self) -> usize {
         self.by_type.len()
     }
@@ -586,8 +599,11 @@ mod tests {
     use aether_data::KindId as DataKindId;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// Hand-rolled `Actor` impl so the test doesn't depend on the
-    /// macro arm (which lands later in the same PR).
+    /// Hand-rolled `Actor` impl referenced only by the `_assert_actor_send`
+    /// type-level check below. The struct never gets constructed at
+    /// runtime — its purpose is to fail to instantiate the assert if
+    /// `NativeActor` ever loses its `Send + 'static` bound.
+    #[allow(dead_code)]
     struct StubActor {
         boots: AtomicU32,
     }
@@ -607,68 +623,48 @@ mod tests {
         }
     }
 
-    /// Second stub actor type so we can exercise type-keyed lookup.
-    struct OtherActor;
-
-    impl Actor for OtherActor {
-        const NAMESPACE: &'static str = "test.other";
-    }
-
-    impl aether_actor::Singleton for OtherActor {}
-
-    impl NativeActor for OtherActor {
-        type Config = ();
-        fn init(_: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self)
-        }
+    /// Issue 629 / Phase A: handle-export round-trip. Caps publish a
+    /// handle bundle during `init`; consumers retrieve a clone via
+    /// `get::<H>()`.
+    #[derive(Clone)]
+    struct StubHandles {
+        counter: Arc<AtomicU32>,
     }
 
     #[test]
-    fn actors_insert_and_get_roundtrip() {
-        let mut actors = Actors::new();
-        assert!(actors.is_empty());
-        let stub = Arc::new(StubActor {
-            boots: AtomicU32::new(0),
-        });
-        let prior = actors.insert::<StubActor>(Arc::clone(&stub));
-        assert!(prior.is_none());
-        assert_eq!(actors.len(), 1);
+    fn handles_insert_and_get_roundtrip() {
+        let mut handles = ExportedHandles::new();
+        assert!(handles.is_empty());
+        let counter = Arc::new(AtomicU32::new(0));
+        handles.by_type.insert(
+            TypeId::of::<StubHandles>(),
+            Box::new(StubHandles {
+                counter: Arc::clone(&counter),
+            }),
+        );
+        assert_eq!(handles.len(), 1);
 
-        let retrieved: Arc<StubActor> = actors.get::<StubActor>().expect("StubActor was inserted");
-        retrieved.boots.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(stub.boots.load(Ordering::SeqCst), 1);
+        let retrieved: StubHandles = handles.get::<StubHandles>().expect("StubHandles published");
+        retrieved.counter.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
     #[test]
-    fn actors_get_distinguishes_types() {
-        let mut actors = Actors::new();
-        actors.insert::<StubActor>(Arc::new(StubActor {
-            boots: AtomicU32::new(0),
-        }));
-        assert!(actors.get::<StubActor>().is_some());
-        assert!(actors.get::<OtherActor>().is_none());
+    fn handles_get_returns_none_for_unpublished_type() {
+        let handles = ExportedHandles::new();
+        assert!(handles.get::<StubHandles>().is_none());
     }
 
-    #[test]
-    fn actors_double_insert_returns_prior() {
-        let mut actors = Actors::new();
-        actors.insert::<StubActor>(Arc::new(StubActor {
-            boots: AtomicU32::new(0),
-        }));
-        let second = actors.insert::<StubActor>(Arc::new(StubActor {
-            boots: AtomicU32::new(0),
-        }));
-        assert!(second.is_some(), "second insert returns the displaced Arc");
-    }
-
-    /// Compile-time signal that `NativeActor: Actor + Sync` plus
-    /// `Arc<A>` round-trips through `Arc<dyn Any + Send + Sync>`.
-    /// If a future change to `Actor` drops `Send + 'static` or to
-    /// `NativeActor` drops `Sync`, the asserts here fail to
-    /// instantiate.
-    fn _assert_arc_shareable() {
-        fn requires<T: Any + Send + Sync>() {}
-        requires::<StubActor>();
+    /// Compile-time signal that `NativeActor` is `Send + 'static` (no
+    /// `Sync`), and that `ExportedHandles` values are
+    /// `Send + Sync + Clone` so cross-thread driver access works.
+    /// If a future change to `Actor` drops `Send + 'static`, the
+    /// asserts here fail to instantiate.
+    fn _assert_actor_send() {
+        fn requires_send<T: Send + 'static>() {}
+        fn requires_handle<H: Any + Send + Sync + Clone + 'static>() {}
+        requires_send::<StubActor>();
+        requires_handle::<StubHandles>();
         // Avoid an unused-import diagnostic when the compiler
         // dead-code-eliminates the helper.
         let _ = DataKindId(0);

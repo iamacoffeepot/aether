@@ -154,10 +154,10 @@ pub enum LogLevel {
 /// local mailbox id so the hub-chassis's reply peripheral can
 /// route replies back to it. The source `engine_id` isn't on the
 /// wire — the hub knows which TCP connection the frame arrived on.
-/// `None` means "no reply target" (broadcast-origin, substrate-
-/// generated, no `from_component` attribution); the hub-side
-/// sender handle will be `NO_REPLY_HANDLE` for the receiving
-/// component.
+/// `None` means "no reply target" (broadcast-origin or substrate-
+/// generated mail, where `Mail::reply_to.target != Component(_)`);
+/// the hub-side sender handle will be `NO_REPLY_HANDLE` for the
+/// receiving component.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineMailToHubSubstrateFrame {
     pub recipient_mailbox_id: MailboxId,
@@ -219,8 +219,8 @@ pub struct MailByIdFrame {
 /// (ADR-0008): engine-originated mail addressed to a Claude session
 /// or broadcast to all sessions. `KindsChanged` (ADR-0010 §4) tells
 /// the hub to replace its cached descriptor list for this engine —
-/// needed after `aether.control.load_component` /
-/// `aether.control.replace_component` registers a new kind, which the
+/// needed after `aether.component.load` /
+/// `aether.component.replace` registers a new kind, which the
 /// hub would otherwise miss since its cache is pinned at `Hello`.
 /// `LogBatch` (ADR-0023) carries captured log entries from the
 /// substrate's tracing layer; the hub appends them to a per-engine

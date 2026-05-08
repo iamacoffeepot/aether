@@ -33,7 +33,7 @@ use crate::chassis::Chassis;
 use crate::lifecycle::{FatalAborter, PanicAborter};
 use crate::mail::MailboxId;
 use crate::mailer::Mailer;
-use crate::native_actor::{Actors, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx};
+use crate::native_actor::{ExportedHandles, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx};
 use crate::native_transport::NativeTransport;
 use crate::registry::Registry;
 use aether_actor::Actor;
@@ -140,7 +140,7 @@ struct FacadeShutdown<C: 'static> {
 
 impl<C: 'static> DynShutdown for FacadeShutdown<C> {
     fn shutdown_dyn(mut self: Box<Self>) {
-        // Drop the handle eagerly: drops SinkSender, channel
+        // Drop the handle eagerly: drops MailboxSender, channel
         // disconnects, dispatcher thread exits, cap drops. Equivalent
         // to letting `Box<Self>` drop, but explicit so the order is
         // documented.
@@ -171,17 +171,19 @@ impl DynShutdown for FallbackShutdown {
 /// wanting cap state get it through pre-build accessors (today only
 /// render via `RenderHandles`).
 ///
-/// Issue 552 stage 1: also borrows the chassis's [`Actors`] map so
-/// drivers can pull `Arc<A>` for caps booted via [`Builder::with_actor`].
-/// `actor::<A>()` returns `None` if `A` wasn't booted.
+/// Issue 629 / Phase A: borrows the chassis's [`ExportedHandles`]
+/// map. Drivers retrieve cap-published handle bundles via
+/// [`Self::handle`]. The pre-629 `actor::<A>() -> Arc<A>` accessor
+/// retired — the actor itself never escapes its dispatcher thread, so
+/// drivers consume cap-exported handle clones instead.
 pub struct DriverCtx<'a> {
     inner: ChassisCtx<'a>,
-    actors: &'a Actors,
+    handles: &'a ExportedHandles,
 }
 
 impl<'a> DriverCtx<'a> {
-    fn new(inner: ChassisCtx<'a>, actors: &'a Actors) -> Self {
-        Self { inner, actors }
+    fn new(inner: ChassisCtx<'a>, handles: &'a ExportedHandles) -> Self {
+        Self { inner, handles }
     }
 
     /// Drivers have no `NAMESPACE` const to delegate against — claim
@@ -211,15 +213,14 @@ impl<'a> DriverCtx<'a> {
         self.inner.frame_bound_pending().to_vec()
     }
 
-    /// Issue 552 stage 1: look up an earlier-booted [`NativeActor`]
-    /// by type and clone its `Arc`. `None` if the cap wasn't booted
-    /// through [`Builder::with_actor`] (legacy `with(cap)` boots
-    /// don't populate the actors map). Drivers reach for this when
-    /// they need to clone a cap-owned handle (today: render's
-    /// `RenderHandles` once `RenderCapability` migrates to
-    /// `NativeActor` in stage 2).
-    pub fn actor<A: NativeActor>(&self) -> Option<Arc<A>> {
-        self.actors.get::<A>()
+    /// Issue 629 / Phase A: retrieve a clone of a cap-published handle
+    /// bundle of type `H`. `None` if no cap published one (typically
+    /// because the cap that owns the handle wasn't booted on this
+    /// chassis). Drivers use this to pull `RenderHandles` and similar
+    /// driver-facing sub-handle bundles without reaching for the cap
+    /// itself.
+    pub fn handle<H: std::any::Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
+        self.handles.get::<H>()
     }
 }
 
@@ -246,21 +247,27 @@ impl sealed::Sealed for HasDriver {}
 impl BuilderState for NoDriver {}
 impl BuilderState for HasDriver {}
 
-/// Issue 552 stage 1: every `PassiveBoot` closure now receives both a
-/// [`ChassisCtx`] (registry / mailer / fallback / frame-bound state)
-/// and a `&mut Actors` view so the new [`Builder::with_actor::<A>`]
-/// path can insert booted `Arc<A>` instances. Closures from
-/// [`make_passive_boot`] / [`make_fallback_router_boot`] ignore the
-/// second arg; the new [`make_native_actor_boot`] uses it.
-type PassiveBoot =
-    Box<dyn FnOnce(&mut ChassisCtx<'_>, &mut Actors) -> Result<Box<dyn DynShutdown>, BootError>>;
+/// Every `PassiveBoot` closure receives a [`ChassisCtx`] (registry /
+/// mailer / fallback / frame-bound state) and a `&mut ExportedHandles`
+/// view. Issue 629 / Phase A: the second arg is the chassis's
+/// handle-export map — caps publish driver-facing sub-handle bundles
+/// during their `init` (via [`NativeInitCtx::publish_handle`]).
+/// Closures from [`make_passive_boot`] / [`make_fallback_router_boot`]
+/// ignore it; [`make_native_actor_boot`] threads it through to the
+/// init ctx.
+type PassiveBoot = Box<
+    dyn FnOnce(
+        &mut ChassisCtx<'_>,
+        &mut ExportedHandles,
+    ) -> Result<Box<dyn DynShutdown>, BootError>,
+>;
 type DriverBoot = Box<dyn FnOnce(&mut DriverCtx<'_>) -> Result<Box<dyn DriverRunning>, BootError>>;
 
 fn make_passive_boot<C>(cap: C) -> PassiveBoot
 where
     C: Actor + Dispatch + Send + 'static,
 {
-    Box::new(move |ctx, _actors| {
+    Box::new(move |ctx, _handles| {
         let handle = ctx.spawn_actor_dispatcher(cap)?;
         Ok(Box::new(FacadeShutdown {
             handle: Some(handle),
@@ -269,7 +276,7 @@ where
 }
 
 fn make_fallback_router_boot(handler: FallbackRouter) -> PassiveBoot {
-    Box::new(move |ctx, _actors| {
+    Box::new(move |ctx, _handles| {
         ctx.claim_fallback_router(handler)?;
         Ok(Box::new(FallbackShutdown) as Box<dyn DynShutdown>)
     })
@@ -296,7 +303,7 @@ fn make_native_actor_boot<A>(config: A::Config) -> PassiveBoot
 where
     A: NativeActor + NativeDispatch,
 {
-    Box::new(move |ctx, actors| {
+    Box::new(move |ctx, handles| {
         // Issue 607 Phase 3b (ADR-0079): claim namespace ownership for
         // this singleton's `Actor::NAMESPACE`. The actor registry
         // tracks one TypeId per namespace across both cardinalities
@@ -324,17 +331,33 @@ where
         // frame loop. Free-running caps take the regular drop-on-
         // shutdown claim. Both share the same dispatcher trampoline
         // shape apart from the post-dispatch decrement.
-        let (mailbox_id, receiver, sink_sender, pending) = if A::FRAME_BARRIER {
-            let claim = ctx.claim_frame_bound_mailbox::<A>()?;
-            (
-                claim.id,
-                claim.receiver,
-                claim.sink_sender,
-                Some(claim.pending),
-            )
+        //
+        // Issue 607 Phase 7: if the mailbox claim fails (name
+        // collision against a peer cap claiming the same mailbox
+        // through `register_closure`), release the namespace claim we
+        // just made — otherwise a later cap with a different TypeId
+        // legitimately claiming the same namespace can't.
+        let claim_result = if A::FRAME_BARRIER {
+            ctx.claim_frame_bound_mailbox::<A>().map(|claim| {
+                (
+                    claim.id,
+                    claim.receiver,
+                    claim.mailbox_sender,
+                    Some(claim.pending),
+                )
+            })
         } else {
-            let claim = ctx.claim_mailbox_drop_on_shutdown::<A>()?;
-            (claim.id, claim.receiver, claim.sink_sender, None)
+            ctx.claim_mailbox_drop_on_shutdown::<A>()
+                .map(|claim| (claim.id, claim.receiver, claim.mailbox_sender, None))
+        };
+        let (mailbox_id, receiver, mailbox_sender, pending) = match claim_result {
+            Ok(c) => c,
+            Err(e) => {
+                ctx.spawner_arc()
+                    .actor_registry()
+                    .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+                return Err(e);
+            }
         };
 
         // Per-cap transport. `NativeTransport::from_ctx` pulls the
@@ -351,14 +374,20 @@ where
         let slots = Box::new(aether_actor::local::ActorSlots::new());
 
         // Boot the cap through `init`. The NativeInitCtx borrows the
-        // actors-so-far map (read-only) plus the transport (read-only)
+        // chassis's ExportedHandles (mutable, so the cap may publish
+        // a driver-facing handle bundle) plus the transport (read-only)
         // plus a mailer clone for outbound hooks. Issue #581: also
         // stamp the actor's transport as the in-actor `MailDispatch`
         // around `init` so any `tracing::*` event the cap fires
         // during boot drains to LogCapability when init returns.
-        let actor = {
+        //
+        // Issue 607 Phase 7: failed init releases the slot before any
+        // dispatcher thread is spawned — drop the transport
+        // (including its installed inbox), unclaim the mailbox, and
+        // release the namespace.
+        let init_result = {
             let mailer_clone = ctx.mail_send_handle();
-            let mut init_ctx = NativeInitCtx::new(&transport, actors, mailer_clone);
+            let mut init_ctx = NativeInitCtx::new(&transport, handles, mailer_clone);
             aether_actor::local::with_stamped(&slots, || {
                 aether_actor::log::with_actor_dispatch(
                     &*transport as &dyn aether_actor::log::MailDispatch,
@@ -368,25 +397,36 @@ where
                         r
                     },
                 )
-            })?
+            })
         };
-        let actor_arc: Arc<A> = Arc::new(actor);
+        let actor = match init_result {
+            Ok(a) => a,
+            Err(e) => {
+                drop(transport);
+                drop(mailbox_sender);
+                ctx.unclaim_mailbox(mailbox_id);
+                ctx.spawner_arc()
+                    .actor_registry()
+                    .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+                return Err(e);
+            }
+        };
 
-        // Insert into the chassis lookup map. Earlier-booted caps
-        // already inserted; later-booted caps will. Double-insert
-        // can't happen because mailbox name is the dedup key (the
-        // claim above would have failed first).
-        actors.insert::<A>(Arc::clone(&actor_arc));
+        // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
+        // The actor lives exclusively on the dispatcher thread —
+        // no chassis-side Arc share, no cross-thread access path.
+        // Drivers / embedders consume cap-published handle bundles
+        // from the chassis's `ExportedHandles` map instead.
+        let mut actor: Box<A> = Box::new(actor);
 
-        // Spawn the dispatcher thread. The thread owns one Arc<A>,
-        // one Arc<NativeTransport>, and the per-actor `ActorSlots`
+        // Spawn the dispatcher thread. The thread owns the Box<A>,
+        // an Arc<NativeTransport>, and the per-actor `ActorSlots`
         // (moved in by value); it loops `recv_blocking()` on the
         // transport (which pulls from the installed inbox and
-        // disconnects when the chassis drops its `sink_sender`) and
+        // disconnects when the chassis drops its `mailbox_sender`) and
         // routes each envelope through `__aether_dispatch_envelope`,
         // wrapped in `local::with_stamped` so handler bodies
         // see the per-actor storage.
-        let actor_for_thread = Arc::clone(&actor_arc);
         let transport_for_thread = Arc::clone(&transport);
         let actor_registry_for_thread = Arc::clone(ctx.spawner_arc().actor_registry());
         let mailer_for_thread = ctx.mail_send_handle();
@@ -403,7 +443,7 @@ where
                 // sequence below. Singletons don't tombstone (their
                 // mailbox slot stays in `Registry`); the chassis's
                 // `BootedPassives::shutdown_in_place` reverse-drops
-                // the SinkSender to fully disconnect the sink.
+                // the MailboxSender to fully disconnect the sink.
                 loop {
                     if transport_for_thread.should_shutdown() {
                         break;
@@ -423,10 +463,10 @@ where
                             || {
                                 let mut ctx =
                                     NativeCtx::new(&transport_for_thread, env.sender);
-                                if actor_for_thread
+                                if actor
                                     .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
                                     .is_none()
-                                    && !actor_for_thread
+                                    && !actor
                                         .__aether_dispatch_fallback(&mut ctx, &env)
                                 {
                                     // Issue 576: catch-all caps override
@@ -464,7 +504,7 @@ where
                             || {
                                 let mut ctx =
                                     NativeCtx::new(&transport_for_thread, env.sender);
-                                let _ = actor_for_thread
+                                let _ = actor
                                     .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload);
                                 aether_actor::log::drain_buffer();
                             },
@@ -486,7 +526,7 @@ where
                                 &transport_for_thread,
                                 crate::mail::ReplyTo::NONE,
                             );
-                            actor_for_thread.on_close(&mut close_ctx);
+                            actor.on_close(&mut close_ctx);
                             aether_actor::log::drain_buffer();
                         },
                     );
@@ -527,7 +567,7 @@ where
 
         Ok(Box::new(NativeActorShutdown {
             thread: Some(thread),
-            sink_sender: Some(sink_sender),
+            mailbox_sender: Some(mailbox_sender),
         }) as Box<dyn DynShutdown>)
     })
 }
@@ -544,13 +584,13 @@ fn alloc_native_actor_thread_name<A: Actor>() -> String {
 }
 
 /// Shutdown adapter for a [`NativeActor`] booted through
-/// [`Builder::with_actor`]. Drops the [`crate::capability::SinkSender`]
+/// [`Builder::with_actor`]. Drops the [`crate::capability::MailboxSender`]
 /// to disconnect the channel (the dispatcher's `recv_blocking` returns
 /// `None` and the thread exits), then joins the thread. Mirrors
 /// [`FacadeShutdown`] for the legacy facade path.
 struct NativeActorShutdown {
     thread: Option<std::thread::JoinHandle<()>>,
-    sink_sender: Option<crate::capability::SinkSender>,
+    mailbox_sender: Option<crate::capability::MailboxSender>,
 }
 
 impl DynShutdown for NativeActorShutdown {
@@ -558,7 +598,7 @@ impl DynShutdown for NativeActorShutdown {
         // Sender first — disconnects the channel and lets the
         // dispatcher's `recv_blocking` return None so the thread
         // exits. Joining a still-attached sender would hang.
-        self.sink_sender.take();
+        self.mailbox_sender.take();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -586,14 +626,13 @@ pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     aborter: Arc<dyn FatalAborter>,
     /// Issue #601: chassis-declared log-drain target. `None` until the
     /// chassis calls [`Self::with_log_drain`]; on `build()` the
-    /// mailbox id is dispatched as `aether.control.configure_log_drain`
-    /// mail to every booted actor so each actor's `LogDrainSlot` is
-    /// installed. The same mail also goes to `aether.control` so the
-    /// [`crate::control::ControlPlane`]'s dispatch arm stores the
-    /// drain for the runtime `load_component` path — runtime-loaded
+    /// mailbox id is dispatched as `aether.log.configure_drain` mail
+    /// to every booted actor so each actor's `LogDrainSlot` is
+    /// installed. `ComponentHostCapability` snapshots the same drain
+    /// for the runtime `load_component` path — runtime-loaded
     /// components receive `ConfigureLogDrain` themselves on
     /// registration. The chassis Builder declares the drain; the
-    /// runtime state lives entirely in `ControlPlane` and per-actor
+    /// runtime state lives entirely in `ComponentHostCapability` and per-actor
     /// `LogDrainSlot`s, set the same way every actor's slot is set:
     /// via mail.
     log_drain: Option<MailboxId>,
@@ -684,8 +723,8 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// be a [`NativeActor`] that handles [`LogBatch`] (the cap's
     /// mailbox id is derived from `T::NAMESPACE` at compile time).
     /// On `build()` / `build_passive()` the chassis dispatches a
-    /// `aether.control.configure_log_drain` mail to every booted actor
-    /// so each actor's `LogDrainSlot` resolves to this mailbox; the
+    /// `aether.log.configure_drain` mail to every booted actor so each
+    /// actor's `LogDrainSlot` resolves to this mailbox; the
     /// auto-emitted handler in `#[actor]` does the install.
     ///
     /// No call → `log_drain` stays `None`, no `ConfigureLogDrain`
@@ -725,10 +764,11 @@ impl<C: Chassis> Builder<C, NoDriver> {
     pub fn build_passive(self) -> Result<PassiveChassis<C>, BootError> {
         let booted = boot_passives(&self.registry, &self.mailer, &self.aborter, self.passives)?;
         // Issue #601: push `ConfigureLogDrain` to every booted actor
-        // and to `aether.control` so every per-actor `LogDrainSlot`
-        // (auto-emitted handler) plus the `ControlPlane`'s drain slot
-        // (for the runtime load path) resolve to the chassis-declared
-        // target. No-op if the chassis didn't call `with_log_drain`.
+        // and to `aether.component` so every per-actor `LogDrainSlot`
+        // (auto-emitted handler) plus the `ComponentHostCapability`'s
+        // drain slot (for the runtime load path) resolve to the
+        // chassis-declared target. No-op if the chassis didn't call
+        // `with_log_drain`.
         dispatch_configure_log_drain(
             &self.registry,
             &self.mailer,
@@ -799,7 +839,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
 
         let mut booted = boot_passives(&registry, &mailer, &aborter, passives)?;
         // Issue #601: push `ConfigureLogDrain` to every booted actor
-        // and to `aether.control` so the runtime load path picks up
+        // and to `aether.component` so the runtime load path picks up
         // the chassis-declared drain through the same mail every
         // actor receives.
         dispatch_configure_log_drain(
@@ -819,7 +859,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
                 &mut booted.claimed_actor_mailboxes,
                 &booted.spawner,
             );
-            let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.actors);
+            let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.handles);
             driver_boot(&mut driver_ctx)?
         };
 
@@ -835,13 +875,13 @@ impl<C: Chassis> Builder<C, HasDriver> {
 struct BootedPassives {
     shutdowns: Vec<Box<dyn DynShutdown>>,
     fallback: Option<FallbackRouter>,
-    /// Issue 552 stage 1: type-keyed map of booted [`NativeActor`]s.
-    /// Populated by [`Builder::with_actor`] entries; the legacy
-    /// `with(cap)` path leaves it empty. Borrowed (read-only) into
-    /// [`DriverCtx`] and surfaced through [`PassiveChassis::actor`]
-    /// / [`BuiltChassis`]'s lookup so drivers / embedders can pull
-    /// `Arc<A>` for cap state without going through mail.
-    actors: Actors,
+    /// Issue 629 / Phase A: cap-published handle bundles. Populated
+    /// during each cap's `init` via [`NativeInitCtx::publish_handle`].
+    /// Borrowed (read-only) into [`DriverCtx::handle`] so drivers
+    /// retrieve a clone of the published bundle. Replaces the pre-629
+    /// type-keyed actor map; the actor itself never escapes its
+    /// dispatcher thread.
+    handles: ExportedHandles,
     /// Per-mailbox pending counters from
     /// [`ChassisCtx::claim_frame_bound_mailbox`] calls — collected
     /// during passive boot, exposed to the driver via
@@ -883,7 +923,7 @@ struct BootedPassives {
 /// Sends through the same `Mailer` every other mail uses — each actor
 /// mailbox routes the envelope to the auto-emitted `ConfigureLogDrain`
 /// arm in `#[handlers]`, which installs the per-actor `LogDrainSlot`.
-/// Issue 603: `ControlPlaneCapability` is now a normal actor booted
+/// Issue 603: `ComponentHostCapability` is now a normal actor booted
 /// through this Builder, so its mailbox lands in
 /// `claimed_actor_mailboxes` like every other cap and the pre-603
 /// special-case lookup of `aether.control` retired.
@@ -927,7 +967,7 @@ fn boot_passives(
 ) -> Result<BootedPassives, BootError> {
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
     let mut fallback: Option<FallbackRouter> = None;
-    let mut actors = Actors::new();
+    let mut handles = ExportedHandles::new();
     let mut frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)> = Vec::new();
     let frame_bound_set: Arc<RwLock<HashSet<MailboxId>>> = Arc::new(RwLock::new(HashSet::new()));
     let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
@@ -950,7 +990,7 @@ fn boot_passives(
             &mut claimed_actor_mailboxes,
             &spawner,
         );
-        match boot(&mut ctx, &mut actors) {
+        match boot(&mut ctx, &mut handles) {
             Ok(shutdown) => shutdowns.push(shutdown),
             Err(e) => {
                 while let Some(s) = shutdowns.pop() {
@@ -963,7 +1003,7 @@ fn boot_passives(
     Ok(BootedPassives {
         shutdowns,
         fallback,
-        actors,
+        handles,
         frame_bound_pending,
         frame_bound_set,
         aborter: Arc::clone(aborter),
@@ -992,13 +1032,59 @@ impl<C: Chassis> fmt::Debug for BuiltChassis<C> {
 }
 
 impl<C: Chassis> BuiltChassis<C> {
-    /// Issue 552 stage 1: look up a [`NativeActor`] booted via
-    /// [`Builder::with_actor`]. `None` if `A` wasn't booted on this
-    /// chassis. Useful for embedders that hold a [`BuiltChassis`]
-    /// directly (today: hand-written test harnesses; bin chassis
-    /// hand off to `run()` and don't keep the chassis around).
-    pub fn actor<A: NativeActor>(&self) -> Option<Arc<A>> {
-        self.booted.actors.get::<A>()
+    /// Issue 607 Phase 5 (ADR-0079): look up a single instanced actor
+    /// by its per-instance subname. Returns `Some(MailboxId)` only if
+    /// `(A::NAMESPACE, subname)` resolves to a `Live` slot in the
+    /// chassis's [`crate::ActorRegistry`] whose `TypeId` matches `A`.
+    /// `None` for missing names, tombstoned names, or type
+    /// mismatches.
+    ///
+    /// Issue 629 / Phase A: returns the address (`MailboxId`) instead
+    /// of `Arc<A>`. The actor itself never escapes its dispatcher
+    /// thread; callers that need to interact with the resolved
+    /// instance mail it. Wrong-cardinality calls fail to compile via
+    /// the `Instanced` bound.
+    ///
+    /// ```compile_fail
+    /// # use aether_substrate::{BuiltChassis, NativeActor};
+    /// # use aether_actor::Singleton;
+    /// // Calling resolve_actor::<X>(...) on a Singleton fails to
+    /// // compile — the Instanced bound is missing.
+    /// fn _wrong<C: aether_substrate::Chassis, A: Singleton + NativeActor>(
+    ///     chassis: &BuiltChassis<C>,
+    /// ) {
+    ///     let _ = chassis.resolve_actor::<A>("anything");
+    /// }
+    /// ```
+    pub fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
+        &self,
+        subname: &str,
+    ) -> Option<MailboxId> {
+        let full_name = format!("{}:{}", A::NAMESPACE, subname);
+        let id = MailboxId(aether_data::mailbox_id_from_name(&full_name).0);
+        let type_id = self.booted.actor_registry.type_id_at(id)?;
+        if type_id != std::any::TypeId::of::<A>() {
+            return None;
+        }
+        Some(id)
+    }
+
+    /// Issue 607 Phase 5 (ADR-0079): enumerate every `Live` instance
+    /// of `A` along with its subname. Issue 629 / Phase A: returns
+    /// `(subname, MailboxId)` pairs (not `Arc<A>`); the actor itself
+    /// never escapes its dispatcher thread.
+    ///
+    /// **Diagnostic / embedder-test affordance.** Caps that supervise
+    /// a fleet of instances (e.g. `TcpCapability` over
+    /// `TcpListenerActor`) hold their own cap-local map of children
+    /// and update it on `MonitorNotice` — they don't enumerate via
+    /// the chassis registry from a handler. Reach for this from a
+    /// driver / TestBench / scenario inspection step, not from
+    /// production cap state. ADR-0079 supervisor-as-cap pattern.
+    pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
+        &self,
+    ) -> Vec<(String, MailboxId)> {
+        self.booted.actor_registry.live_subnames_of_type::<A>()
     }
 
     /// Issue 607 Phase 3: chassis-level entry point for spawning an
@@ -1074,6 +1160,15 @@ impl<C: Chassis> PassiveChassis<C> {
         self.booted.shutdowns.is_empty()
     }
 
+    /// Issue 629 / Phase A: retrieve a clone of a cap-published handle
+    /// bundle of type `H`. Mirrors [`DriverCtx::handle`] for embedders
+    /// that drive a `PassiveChassis` directly (TestBench, integration
+    /// harnesses). `None` if no booted cap published a handle of that
+    /// type.
+    pub fn handle<H: std::any::Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
+        self.booted.handles.get::<H>()
+    }
+
     /// Snapshot of every frame-bound mailbox's pending counter
     /// collected during passive boot. Embedders (TestBench, bin
     /// drivers) clone this once and feed it to
@@ -1084,13 +1179,44 @@ impl<C: Chassis> PassiveChassis<C> {
         self.booted.frame_bound_pending.clone()
     }
 
-    /// Issue 552 stage 1: look up a [`NativeActor`] booted via
-    /// [`Builder::with_actor`]. `None` if `A` wasn't booted on this
-    /// chassis. Embedders (TestBench, integration tests) reach for
-    /// this when they need to peer at cap state without going
-    /// through mail.
-    pub fn actor<A: NativeActor>(&self) -> Option<Arc<A>> {
-        self.booted.actors.get::<A>()
+    /// Issue 607 Phase 5 (ADR-0079): mirror of
+    /// [`BuiltChassis::resolve_actor`] for embedders that drive
+    /// passive chassis directly (TestBench, integration tests).
+    /// Issue 629 / Phase A: returns the address (`MailboxId`); the
+    /// actor itself never escapes its dispatcher thread.
+    ///
+    /// ```compile_fail
+    /// # use aether_substrate::{PassiveChassis, NativeActor};
+    /// # use aether_actor::Singleton;
+    /// fn _wrong<C: aether_substrate::Chassis, A: Singleton + NativeActor>(
+    ///     chassis: &PassiveChassis<C>,
+    /// ) {
+    ///     let _ = chassis.resolve_actor::<A>("anything");
+    /// }
+    /// ```
+    pub fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
+        &self,
+        subname: &str,
+    ) -> Option<MailboxId> {
+        let full_name = format!("{}:{}", A::NAMESPACE, subname);
+        let id = MailboxId(aether_data::mailbox_id_from_name(&full_name).0);
+        let type_id = self.booted.actor_registry.type_id_at(id)?;
+        if type_id != std::any::TypeId::of::<A>() {
+            return None;
+        }
+        Some(id)
+    }
+
+    /// Issue 607 Phase 5 (ADR-0079): mirror of
+    /// [`BuiltChassis::resolve_actors`] for embedders that drive
+    /// passive chassis directly. Issue 629 / Phase A: returns
+    /// `(subname, MailboxId)` pairs. Diagnostic-only contract: caps
+    /// that supervise a fleet hold their own cap-local map; this is
+    /// for tests and chassis-level introspection only.
+    pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
+        &self,
+    ) -> Vec<(String, MailboxId)> {
+        self.booted.actor_registry.live_subnames_of_type::<A>()
     }
 
     /// Issue 607 Phase 3: chassis-level entry point for spawning an
@@ -1120,6 +1246,18 @@ impl<C: Chassis> PassiveChassis<C> {
     pub fn actor_registry(&self) -> &Arc<crate::ActorRegistry> {
         &self.booted.actor_registry
     }
+
+    /// Wait for every spawned instanced actor's inbox to drain
+    /// (`pending == 0`), polling until quiet or `deadline` passes.
+    /// Returns `true` on quiesce, `false` on timeout. Test-bench-only:
+    /// production drivers don't poll this; trampolines are
+    /// free-running by design and a slow tick handler stalls only
+    /// the next frame's render, not the chassis. Wedge detection
+    /// (CPU-loop wasm) waits on a future epoch-deadline ADR — this
+    /// is a passive wait, not an abort barrier.
+    pub fn wait_instanced_quiesce(&self, deadline: std::time::Instant) -> bool {
+        self.booted.spawner.wait_instanced_quiesce(deadline)
+    }
 }
 
 #[cfg(test)]
@@ -1148,7 +1286,7 @@ mod tests {
 
     impl crate::native_actor::NativeDispatch for StubLog {
         fn __aether_dispatch_envelope(
-            &self,
+            &mut self,
             _ctx: &mut crate::native_actor::NativeCtx<'_>,
             _kind: crate::mail::KindId,
             _payload: &[u8],
@@ -1254,6 +1392,63 @@ mod tests {
         assert!(matches!(err, BootError::MailboxAlreadyClaimed { .. }));
     }
 
+    /// Issue 607 Phase 7: a singleton whose `init` returns `Err`
+    /// releases its slot before `with_actor` propagates the error.
+    /// After the failed build, the chassis's `Registry` has no sink
+    /// at the cap's namespace and the `ActorRegistry`'s `name_owners`
+    /// no longer claims the namespace — so a fresh chassis can boot
+    /// a different cap with the same namespace string (or the same
+    /// cap with a different config) without colliding.
+    #[test]
+    fn failed_singleton_init_releases_namespace_and_sink() {
+        struct FailingCap;
+        impl aether_actor::Actor for FailingCap {
+            const NAMESPACE: &'static str = "test.phase7.failing_cap";
+        }
+        impl aether_actor::Singleton for FailingCap {}
+
+        impl crate::native_actor::NativeActor for FailingCap {
+            type Config = ();
+            fn init(
+                _: (),
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Err(BootError::Other(Box::new(std::io::Error::other(
+                    "intentional init failure for Phase 7 cleanup test",
+                ))))
+            }
+        }
+        impl crate::native_actor::NativeDispatch for FailingCap {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<FailingCap>(())
+            .build_passive()
+            .expect_err("init failure must propagate");
+        // The error wraps init's std::io::Error message.
+        assert!(
+            format!("{err:?}").contains("intentional init failure"),
+            "expected init error to propagate, got {err:?}",
+        );
+
+        // Sink at the cap's namespace must be gone — Registry::lookup
+        // returns None for absent entries.
+        assert!(
+            registry.lookup(FailingCap::NAMESPACE).is_none(),
+            "sink at {} should be removed after failed init",
+            FailingCap::NAMESPACE,
+        );
+    }
+
     /// Issue 552 stage 1: end-to-end smoke for the new
     /// [`Builder::with_actor`] boot path. Boots a hand-rolled
     /// `NativeActor + NativeDispatch` fixture, looks it up via
@@ -1315,7 +1510,7 @@ mod tests {
         // handler, returns Some(()) on success.
         impl crate::native_actor::NativeDispatch for ProbeCap {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 _ctx: &mut crate::native_actor::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
@@ -1337,11 +1532,9 @@ mod tests {
             .build_passive()
             .expect("with_actor boot succeeds");
 
-        // PassiveChassis lookup returns the booted Arc.
-        let probe: Arc<ProbeCap> = chassis
-            .actor::<ProbeCap>()
-            .expect("ProbeCap registered in the actors map");
-        assert!(Arc::ptr_eq(&probe.received, &received));
+        // Issue 629 / Phase A: chassis-level `actor::<X>()` retired.
+        // The cap is owned by its dispatcher thread; the test verifies
+        // the cap is alive via the mail dispatch round-trip below.
 
         // Push one envelope at the cap's mailbox via the registry's
         // sink handler. The dispatcher thread pulls from its inbox
@@ -1349,7 +1542,7 @@ mod tests {
         let mailbox_id = registry
             .lookup(<ProbeCap as aether_actor::Actor>::NAMESPACE)
             .expect("with_actor claimed the mailbox");
-        let MailboxEntry::Sink(handler) = registry.entry(mailbox_id).expect("sink registered")
+        let MailboxEntry::Closure(handler) = registry.entry(mailbox_id).expect("sink registered")
         else {
             panic!("ProbeCap claim must be a sink entry");
         };
@@ -1407,7 +1600,7 @@ mod tests {
 
         impl crate::native_actor::NativeDispatch for FrameBoundProbe {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 _ctx: &mut crate::native_actor::NativeCtx<'_>,
                 _kind: crate::mail::KindId,
                 _payload: &[u8],
@@ -1500,7 +1693,7 @@ mod tests {
 
         impl crate::native_actor::NativeDispatch for LocalProbe {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 _ctx: &mut crate::native_actor::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
@@ -1526,7 +1719,7 @@ mod tests {
         let mailbox_id = registry
             .lookup(<LocalProbe as aether_actor::Actor>::NAMESPACE)
             .expect("with_actor claimed the mailbox");
-        let MailboxEntry::Sink(handler) = registry.entry(mailbox_id).expect("sink registered")
+        let MailboxEntry::Closure(handler) = registry.entry(mailbox_id).expect("sink registered")
         else {
             panic!("LocalProbe claim must be a sink entry");
         };
@@ -1632,7 +1825,7 @@ mod tests {
         }
         impl crate::native_actor::NativeDispatch for ChildCap {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 _ctx: &mut crate::native_actor::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
@@ -1669,7 +1862,7 @@ mod tests {
         }
         impl crate::native_actor::NativeDispatch for ParentCap {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 ctx: &mut crate::native_actor::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
@@ -1703,8 +1896,8 @@ mod tests {
         let parent_id = registry
             .lookup(<ParentCap as aether_actor::Actor>::NAMESPACE)
             .expect("ParentCap claimed");
-        let MailboxEntry::Sink(handler) = registry.entry(parent_id).expect("sink") else {
-            panic!("expected sink entry");
+        let MailboxEntry::Closure(handler) = registry.entry(parent_id).expect("sink") else {
+            panic!("expected mailbox entry");
         };
         let bytes = (Hatch { tag: 1 }).encode_into_bytes();
         handler(
@@ -1737,7 +1930,7 @@ mod tests {
         let child_id =
             crate::mail::MailboxId(aether_data::mailbox_id_from_name("test.spawn_child.child:0").0);
         assert!(
-            chassis.actor_registry().live_actor(child_id).is_some(),
+            chassis.actor_registry().is_live(child_id),
             "spawned child should be Live in the actor registry under the deterministic full-name id"
         );
 
@@ -1794,13 +1987,13 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn on_close(&self, _ctx: &mut crate::native_actor::NativeCtx<'_>) {
+            fn on_close(&mut self, _ctx: &mut crate::native_actor::NativeCtx<'_>) {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
         impl crate::native_actor::NativeDispatch for Closer {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 ctx: &mut crate::native_actor::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
@@ -1829,8 +2022,8 @@ mod tests {
         // registered sink handler. The handler's `ctx.shutdown()`
         // flips the dispatcher's flag; after the handler returns the
         // trampoline drains, runs `on_close`, marks Dead, tombstones.
-        let MailboxEntry::Sink(handler) = registry.entry(id).expect("sink registered") else {
-            panic!("expected sink entry for instanced actor");
+        let MailboxEntry::Closure(handler) = registry.entry(id).expect("sink registered") else {
+            panic!("expected mailbox entry for instanced actor");
         };
         let bytes = (Quit { tag: 1 }).encode_into_bytes();
         handler(
@@ -1859,13 +2052,11 @@ mod tests {
         // small window between the close-observed bump above and the
         // registry update.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while chassis.actor_registry().live_actor(id).is_some()
-            && std::time::Instant::now() < deadline
-        {
+        while chassis.actor_registry().is_live(id) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(
-            chassis.actor_registry().live_actor(id).is_none(),
+            !chassis.actor_registry().is_live(id),
             "registry slot should transition Live → Dead after on_close runs"
         );
         assert!(
@@ -1965,7 +2156,7 @@ mod tests {
         }
         impl crate::native_actor::NativeDispatch for Target {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 ctx: &mut crate::native_actor::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
@@ -2008,7 +2199,7 @@ mod tests {
         }
         impl crate::native_actor::NativeDispatch for Watcher {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 ctx: &mut crate::native_actor::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
@@ -2061,10 +2252,10 @@ mod tests {
         // Drive the watcher to register the monitor by pushing a
         // WatchOrder through its sink handler. After this returns
         // the watcher's handle is stored in `self.handle`.
-        let MailboxEntry::Sink(watcher_handler) =
+        let MailboxEntry::Closure(watcher_handler) =
             registry.entry(watcher_id).expect("watcher sink registered")
         else {
-            panic!("expected sink entry for watcher");
+            panic!("expected mailbox entry for watcher");
         };
         let order = WatchOrder {
             target_id: target_id.0,
@@ -2099,10 +2290,10 @@ mod tests {
         // Fire Quit at the target — its handler self-shuts; the
         // dispatcher's close path runs `close_actor`, which fans out
         // a MonitorNotice mail to watcher_id.
-        let MailboxEntry::Sink(target_handler) =
+        let MailboxEntry::Closure(target_handler) =
             registry.entry(target_id).expect("target sink registered")
         else {
-            panic!("expected sink entry for target");
+            panic!("expected mailbox entry for target");
         };
         target_handler(
             <Quit as Kind>::ID,
@@ -2133,13 +2324,11 @@ mod tests {
         // Wait for target slot to flip Dead (the close path runs
         // close_actor → mark_dead after fan-out).
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while chassis.actor_registry().live_actor(target_id).is_some()
-            && std::time::Instant::now() < deadline
-        {
+        while chassis.actor_registry().is_live(target_id) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(
-            chassis.actor_registry().live_actor(target_id).is_none(),
+            !chassis.actor_registry().is_live(target_id),
             "target slot should transition Live → Dead after close fan-out",
         );
         assert!(
@@ -2223,7 +2412,7 @@ mod tests {
         }
         impl crate::native_actor::NativeDispatch for Target {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 _ctx: &mut crate::native_actor::NativeCtx<'_>,
                 _kind: crate::mail::KindId,
                 _payload: &[u8],
@@ -2253,13 +2442,13 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn on_close(&self, _ctx: &mut crate::native_actor::NativeCtx<'_>) {
+            fn on_close(&mut self, _ctx: &mut crate::native_actor::NativeCtx<'_>) {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
         impl crate::native_actor::NativeDispatch for Watcher {
             fn __aether_dispatch_envelope(
-                &self,
+                &mut self,
                 ctx: &mut crate::native_actor::NativeCtx<'_>,
                 kind: crate::mail::KindId,
                 payload: &[u8],
@@ -2296,10 +2485,10 @@ mod tests {
             .expect("spawn watcher");
 
         // Watcher registers monitor against target.
-        let MailboxEntry::Sink(watcher_handler) =
+        let MailboxEntry::Closure(watcher_handler) =
             registry.entry(watcher_id).expect("watcher sink registered")
         else {
-            panic!("expected sink entry for watcher");
+            panic!("expected mailbox entry for watcher");
         };
         let order = WatchOrder {
             target_id: target_id.0,
@@ -2348,9 +2537,7 @@ mod tests {
         // Watcher slot tombstones; target slot still Live; target's
         // forward index drained of the dead watcher.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while chassis.actor_registry().live_actor(watcher_id).is_some()
-            && std::time::Instant::now() < deadline
-        {
+        while chassis.actor_registry().is_live(watcher_id) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(
@@ -2358,13 +2545,533 @@ mod tests {
             "watcher tombstoned",
         );
         assert!(
-            chassis.actor_registry().live_actor(target_id).is_some(),
+            chassis.actor_registry().is_live(target_id),
             "target should still be Live (watcher closed, not target)",
         );
         assert_eq!(
             chassis.actor_registry().monitor_count(target_id),
             0,
             "target's monitors_of should drop the dead watcher",
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 5 verify: `resolve_actor` and `resolve_actors`
+    /// against a multi-instance fixture. Spawns three instanced actors
+    /// under one type, asserts:
+    ///   - `resolve_actor::<A>("a")` finds the named instance.
+    ///   - `resolve_actor::<A>("missing")` returns `None`.
+    ///   - `resolve_actors::<A>()` enumerates all three (subname-keyed).
+    ///   - After one closes, the iterator drops to two and the closed
+    ///     name returns `None` from `resolve_actor`.
+    #[test]
+    fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
+        use crate::registry::MailboxEntry;
+        use crate::spawn::Subname;
+        use aether_actor::{HandlesKind, Instanced};
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Quit {
+            tag: u32,
+        }
+        impl Kind for Quit {
+            const NAME: &'static str = "test.resolve.quit";
+            const ID: DataKindId = DataKindId(0xF00D_F00D_F00D_F00D);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        // The `tag` field is set at init from the per-instance config
+        // and would be read by handler code; Phase A's resolve_actor
+        // returns MailboxId rather than `Arc<Member>` so the tag is no
+        // longer externally observable. Kept as an init payload so the
+        // spawn path covers the full Config-threaded shape.
+        #[allow(dead_code)]
+        struct Member {
+            tag: u32,
+        }
+        impl aether_actor::Actor for Member {
+            const NAMESPACE: &'static str = "test.resolve.member";
+        }
+        impl Instanced for Member {}
+        impl HandlesKind<Quit> for Member {}
+        impl crate::native_actor::NativeActor for Member {
+            type Config = u32;
+            fn init(
+                tag: u32,
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self { tag })
+            }
+        }
+        impl crate::native_actor::NativeDispatch for Member {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Quit::ID.0 {
+                    let _ = Quit::decode_from_bytes(payload)?;
+                    ctx.shutdown();
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let id_a = chassis
+            .spawn_actor::<Member>(Subname::Named("a"), 1)
+            .finish()
+            .expect("spawn a");
+        let _id_b = chassis
+            .spawn_actor::<Member>(Subname::Named("b"), 2)
+            .finish()
+            .expect("spawn b");
+        let id_c = chassis
+            .spawn_actor::<Member>(Subname::Named("c"), 3)
+            .finish()
+            .expect("spawn c");
+
+        // Issue 629 / Phase A: resolve_actor returns the address
+        // (`MailboxId`), not `Arc<A>`. Verify the address resolves and
+        // matches the spawn-time id.
+        let a_id = chassis.resolve_actor::<Member>("a").expect("a is live");
+        assert_eq!(a_id, id_a, "resolve_actor returns the matching MailboxId");
+
+        // Missing subname → None.
+        assert!(
+            chassis.resolve_actor::<Member>("missing").is_none(),
+            "unknown subname should return None",
+        );
+
+        // resolve_actors enumerates all three. Order is registry-defined
+        // (HashMap iteration), so collect into a sorted subname vec for
+        // assertions. The Member's per-instance tag is dispatcher-thread
+        // owned (Phase A) and not externally observable here; the
+        // subname uniquely identifies the instance.
+        let mut all: Vec<String> = chassis
+            .resolve_actors::<Member>()
+            .into_iter()
+            .map(|(name, _id)| name)
+            .collect();
+        all.sort();
+        assert_eq!(
+            all,
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            "resolve_actors should enumerate every Live instance subname",
+        );
+
+        // Close c — Quit it through the sink handler. After close,
+        // resolve_actors drops to two and resolve_actor::<Member>("c")
+        // returns None.
+        let MailboxEntry::Closure(handler) = registry.entry(id_c).expect("c sink registered")
+        else {
+            panic!("expected mailbox entry for c");
+        };
+        handler(
+            <Quit as Kind>::ID,
+            Quit::NAME,
+            None,
+            aether_data::ReplyTo::NONE,
+            &(Quit { tag: 1 }).encode_into_bytes(),
+            1,
+        );
+
+        // Wait for c's slot to flip Dead.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while chassis.actor_registry().is_live(id_c) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        assert!(
+            chassis.resolve_actor::<Member>("c").is_none(),
+            "closed instance should disappear from resolve_actor",
+        );
+        let mut after: Vec<String> = chassis
+            .resolve_actors::<Member>()
+            .into_iter()
+            .map(|(name, _id)| name)
+            .collect();
+        after.sort();
+        assert_eq!(
+            after,
+            vec!["a".to_owned(), "b".to_owned()],
+            "resolve_actors should drop the closed instance",
+        );
+
+        // Counter for unused warning. (`_id_a` / `_id_b` retain their
+        // names elsewhere; this guard keeps the compiler happy.)
+        let _ = AtomicU32::new(0).load(AtomicOrdering::SeqCst);
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 5: type mismatch through `resolve_actor` returns
+    /// `None` rather than a downcast that succeeds against the wrong
+    /// type. Two instanced types live under different namespaces; a
+    /// lookup with one type at the other's id mismatches and returns
+    /// None.
+    #[test]
+    fn resolve_actor_returns_none_on_type_mismatch() {
+        use crate::spawn::Subname;
+        use aether_actor::Instanced;
+
+        struct Foo;
+        impl aether_actor::Actor for Foo {
+            const NAMESPACE: &'static str = "test.resolve_mismatch.foo";
+        }
+        impl Instanced for Foo {}
+        impl crate::native_actor::NativeActor for Foo {
+            type Config = ();
+            fn init(
+                _: (),
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self)
+            }
+        }
+        impl crate::native_actor::NativeDispatch for Foo {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        struct Bar;
+        impl aether_actor::Actor for Bar {
+            const NAMESPACE: &'static str = "test.resolve_mismatch.bar";
+        }
+        impl Instanced for Bar {}
+        impl crate::native_actor::NativeActor for Bar {
+            type Config = ();
+            fn init(
+                _: (),
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self)
+            }
+        }
+        impl crate::native_actor::NativeDispatch for Bar {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let _ = chassis
+            .spawn_actor::<Foo>(Subname::Named("only"), ())
+            .finish()
+            .expect("spawn foo");
+
+        // Resolving with the same subname but the wrong type returns
+        // None — the namespaces differ so the hashed full names differ
+        // and Bar's "only" is just not present. (The TypeId guard
+        // would catch a hash collision.)
+        assert!(chassis.resolve_actor::<Bar>("only").is_none());
+
+        // resolve_actors::<Bar>() is empty because no Bar instances
+        // were spawned, even though a Foo with the same subname exists.
+        assert_eq!(chassis.resolve_actors::<Bar>().len(), 0);
+        assert_eq!(chassis.resolve_actors::<Foo>().len(), 1);
+
+        drop(chassis);
+    }
+
+    /// Issue 607 Phase 5.5 verify: an instanced parent's handler calls
+    /// `ctx.spawn_child::<Grandchild>(...)` to launch an instanced
+    /// grandchild. Phase 3b shipped `Arc<Spawner>` threading through
+    /// every spawned actor's transport precisely so this works; this
+    /// test is the first end-to-end coverage of the instanced→instanced
+    /// path. Phase 6b (TcpListenerActor → TcpSessionActor) structurally
+    /// depends on this — listeners spawning sessions IS the recursive
+    /// case.
+    ///
+    /// Asserts:
+    ///   1. Grandchild's `MailboxId` is `Live` in the registry.
+    ///   2. `chassis.resolve_actor::<Grandchild>(name)` resolves it.
+    ///   3. Grandchild's `after_init` mail dispatches as its first
+    ///      envelope (received counter bumps to 1).
+    ///   4. Closing the parent does NOT cascade-close the grandchild —
+    ///      no parent-child shutdown coupling is wired by default;
+    ///      that's monitor-driven, opt-in.
+    #[test]
+    fn instanced_can_spawn_grandchild() {
+        use crate::registry::MailboxEntry;
+        use crate::spawn::Subname;
+        use aether_actor::{HandlesKind, Instanced};
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        // Trigger to make the parent spawn its grandchild.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Hatch {
+            tag: u32,
+        }
+        impl Kind for Hatch {
+            const NAME: &'static str = "test.recursive.hatch";
+            const ID: DataKindId = DataKindId(0xA00A_A00A_A00A_A00A);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        // Pre-loaded onto the grandchild via after_init.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Ping {
+            tag: u32,
+        }
+        impl Kind for Ping {
+            const NAME: &'static str = "test.recursive.ping";
+            const ID: DataKindId = DataKindId(0xB00B_B00B_B00B_B00B);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        // Self-shutdown trigger for the parent.
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Quit {
+            tag: u32,
+        }
+        impl Kind for Quit {
+            const NAME: &'static str = "test.recursive.quit";
+            const ID: DataKindId = DataKindId(0xC00C_C00C_C00C_C00C);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        struct Grandchild {
+            received: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for Grandchild {
+            const NAMESPACE: &'static str = "test.recursive.grandchild";
+        }
+        impl Instanced for Grandchild {}
+        impl HandlesKind<Ping> for Grandchild {}
+        impl crate::native_actor::NativeActor for Grandchild {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self { received: config })
+            }
+        }
+        impl crate::native_actor::NativeDispatch for Grandchild {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut crate::native_actor::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Ping::ID.0 {
+                    let _ = Ping::decode_from_bytes(payload)?;
+                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        struct Parent {
+            grandchild_received: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for Parent {
+            const NAMESPACE: &'static str = "test.recursive.parent";
+        }
+        impl Instanced for Parent {}
+        impl HandlesKind<Hatch> for Parent {}
+        impl HandlesKind<Quit> for Parent {}
+        impl crate::native_actor::NativeActor for Parent {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::native_actor::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self {
+                    grandchild_received: config,
+                })
+            }
+        }
+        impl crate::native_actor::NativeDispatch for Parent {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                ctx: &mut crate::native_actor::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == Hatch::ID.0 {
+                    let _ = Hatch::decode_from_bytes(payload)?;
+                    // Recursive spawn: instanced parent → instanced
+                    // grandchild. Pre-load a Ping so the grandchild's
+                    // first envelope dispatches without an external
+                    // mail step.
+                    let _id = ctx
+                        .spawn_child::<Grandchild>(
+                            Subname::Named("only"),
+                            Arc::clone(&self.grandchild_received),
+                        )
+                        .after_init(Ping { tag: 0xCAFE })
+                        .finish()
+                        .expect("recursive spawn must succeed");
+                    return Some(());
+                }
+                if kind.0 == Quit::ID.0 {
+                    let _ = Quit::decode_from_bytes(payload)?;
+                    ctx.shutdown();
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let grandchild_received = Arc::new(AtomicU32::new(0));
+        let parent_id = chassis
+            .spawn_actor::<Parent>(Subname::Named("p1"), Arc::clone(&grandchild_received))
+            .finish()
+            .expect("spawn parent");
+
+        // Trigger parent → grandchild spawn.
+        let MailboxEntry::Closure(parent_handler) =
+            registry.entry(parent_id).expect("parent sink registered")
+        else {
+            panic!("expected mailbox entry for parent");
+        };
+        parent_handler(
+            <Hatch as Kind>::ID,
+            Hatch::NAME,
+            None,
+            aether_data::ReplyTo::NONE,
+            &(Hatch { tag: 1 }).encode_into_bytes(),
+            1,
+        );
+
+        // Wait for the grandchild's after_init Ping to dispatch (proves
+        // the recursive spawn happened AND the after_init plumbing
+        // works through it).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while grandchild_received.load(AtomicOrdering::SeqCst) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            grandchild_received.load(AtomicOrdering::SeqCst),
+            1,
+            "grandchild's after_init Ping should dispatch as its first envelope",
+        );
+
+        // Grandchild is Live in the registry under the deterministic
+        // full-name id (NAMESPACE = "test.recursive.grandchild",
+        // subname = "only").
+        let grandchild_id = crate::mail::MailboxId(
+            aether_data::mailbox_id_from_name("test.recursive.grandchild:only").0,
+        );
+        assert!(
+            chassis.actor_registry().is_live(grandchild_id),
+            "grandchild should be Live in the registry under the deterministic full-name id",
+        );
+
+        // Issue 629 / Phase A: resolve_actor returns the address.
+        // Verify it resolves and matches the registry id.
+        let resolved = chassis
+            .resolve_actor::<Grandchild>("only")
+            .expect("resolve_actor must find the grandchild");
+        assert_eq!(
+            resolved, grandchild_id,
+            "resolve_actor returns the matching MailboxId",
+        );
+        // The grandchild is alive (verifies the dispatcher's Arc<AtomicU32>
+        // is the same one passed in via config — the test's `received`
+        // counter sees handler dispatches against the live instance).
+        let _ = &grandchild_received;
+
+        // Closing the parent does NOT cascade-close the grandchild.
+        // Parent-child shutdown coupling is opt-in via monitor; without
+        // it, the grandchild keeps running.
+        parent_handler(
+            <Quit as Kind>::ID,
+            Quit::NAME,
+            None,
+            aether_data::ReplyTo::NONE,
+            &(Quit { tag: 1 }).encode_into_bytes(),
+            1,
+        );
+
+        // Wait for parent slot to flip Dead.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while chassis.actor_registry().is_live(parent_id) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            chassis.actor_registry().is_tombstoned(parent_id),
+            "parent should have tombstoned",
+        );
+        // Grandchild survives — no cascade.
+        assert!(
+            chassis.actor_registry().is_live(grandchild_id),
+            "grandchild should outlive parent (no automatic cascade-close)",
+        );
+        assert!(
+            chassis.resolve_actor::<Grandchild>("only").is_some(),
+            "grandchild remains resolvable after parent's death",
         );
 
         drop(chassis);

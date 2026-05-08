@@ -7,7 +7,7 @@
 //! (ADR-0075) put chassis cap structs in `aether-kinds`, which meant
 //! both `aether-kinds` and `aether-actor` needed to reference the
 //! markers — but `aether-actor` already depended on `aether-kinds` (for
-//! `aether.control.subscribe_input`), so a forward dep would cycle.
+//! `aether.input.subscribe`), so a forward dep would cycle.
 //! PR C broke the cycle by moving the markers down to `aether-data`
 //! (the universal data layer both crates depend on); marked stopgap.
 //!
@@ -171,4 +171,37 @@ pub trait HandlesKind<K: Kind>: Actor {}
 /// matching their transport, and never appear in the same scope.
 pub trait Dispatch {
     fn __dispatch(&mut self, sender: ReplyTo, kind: u64, payload: &[u8]) -> Option<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue 625 (ADR-0079): `#[derive(Singleton)]` and
+    /// `#[derive(Instanced)]` are the explicit author-side surface
+    /// for cardinality. Trait mutual exclusion is documentation +
+    /// use-site bounds (no sealed-trait enforcement); this smoke
+    /// confirms both derives produce reachable marker impls
+    /// independently.
+    #[test]
+    fn singleton_derive_emits_marker_impl() {
+        #[derive(crate::Singleton)]
+        struct UniqueCap;
+        impl Actor for UniqueCap {
+            const NAMESPACE: &'static str = "test.cardinality.unique";
+        }
+        fn requires_singleton<T: Singleton>() {}
+        requires_singleton::<UniqueCap>();
+    }
+
+    #[test]
+    fn instanced_derive_emits_marker_impl() {
+        #[derive(crate::Instanced)]
+        struct PerThing;
+        impl Actor for PerThing {
+            const NAMESPACE: &'static str = "test.cardinality.per_thing";
+        }
+        fn requires_instanced<T: Instanced>() {}
+        requires_instanced::<PerThing>();
+    }
 }

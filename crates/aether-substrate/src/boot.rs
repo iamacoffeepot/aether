@@ -11,11 +11,11 @@
 //!
 //! Issue 603 retired the substrate-side construction of the
 //! `ControlPlane` sink. The wasm-component supervisor is now
-//! `aether-capabilities::ControlPlaneCapability`, booted by chassis
-//! mains via `Builder::with_actor::<ControlPlaneCapability>(...)`. The
+//! `aether-capabilities::ComponentHostCapability`, booted by chassis
+//! mains via `Builder::with_actor::<ComponentHostCapability>(...)`. The
 //! shared boot still wires every dependency the cap needs (engine,
 //! linker, hub outbound, input subscribers) and exposes them as fields
-//! the chassis main passes into `ControlPlaneConfig` at the call site.
+//! the chassis main passes into `ComponentHostConfig` at the call site.
 //!
 //! **Hub connect is explicit.** `build()` does NOT dial
 //! `AETHER_HUB_URL`. The chassis registers its own sinks and any
@@ -24,7 +24,7 @@
 //! through `Builder::with()`. Without this separation, a hub-driven
 //! `load_component` could race ahead of the chassis's main thread
 //! and bind a chassis sink name to a freshly-loaded component before
-//! the chassis's later `register_sink` call, panicking the substrate
+//! the chassis's later `register_closure` call, panicking the substrate
 //! (issue #262).
 //!
 //! **Env-var reading is the chassis's job.** Per issue 464,
@@ -51,9 +51,9 @@ use crate::{
 /// gets dropped when the chassis shuts down.
 ///
 /// Issue 603: `engine`, `linker`, `outbound`, `input_subscribers` are
-/// the inputs `ControlPlaneCapability` consumes through
-/// `ControlPlaneConfig` when the chassis main installs the
-/// supervisor via `Builder::with_actor::<ControlPlaneCapability>(...)`.
+/// the inputs `ComponentHostCapability` consumes through
+/// `ComponentHostConfig` when the chassis main installs the
+/// supervisor via `Builder::with_actor::<ComponentHostCapability>(...)`.
 /// The substrate boot doesn't construct the cap itself — it just
 /// holds the dependencies the cap will need.
 pub struct SubstrateBoot {
@@ -175,8 +175,8 @@ impl<'a> SubstrateBootBuilder<'a> {
     /// (engine, registry, mailer, linker, outbound, input subscribers)
     /// for chassis-level cap composition. Does NOT install the
     /// wasm-component supervisor — that's
-    /// `aether-capabilities::ControlPlaneCapability`, booted through
-    /// `Builder::with_actor::<ControlPlaneCapability>(...)` by the
+    /// `aether-capabilities::ComponentHostCapability`, booted through
+    /// `Builder::with_actor::<ComponentHostCapability>(...)` by the
     /// chassis main using the fields exposed on [`SubstrateBoot`].
     /// Does NOT dial the hub — chassis mains compose
     /// `aether_hub::HubClientCapability` themselves (issue #262).
@@ -209,7 +209,7 @@ impl<'a> SubstrateBootBuilder<'a> {
         // today; the sink is structured as a general diagnostic
         // channel so future diagnostic kinds can land here without
         // needing another sink.
-        registry.register_sink(
+        registry.register_closure(
             AETHER_DIAGNOSTICS,
             Arc::new(
                 |_kind: aether_data::KindId,
@@ -294,7 +294,7 @@ mod tests {
         // The boot is alive; chassis sinks can be registered without
         // racing a hub-driven load.
         boot.registry
-            .register_sink("test_chassis_sink", Arc::new(|_, _, _, _, _, _| {}));
+            .register_closure("test_chassis_sink", Arc::new(|_, _, _, _, _, _| {}));
         // No backend attached → `is_connected()` is false. Chassis
         // crates that want a hub bridge wire `HubClientCapability`
         // themselves through their `Builder`.

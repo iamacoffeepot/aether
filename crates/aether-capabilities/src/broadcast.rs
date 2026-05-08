@@ -27,7 +27,7 @@
 // need cfg gating.
 use aether_kinds::HUB_BROADCAST_MAILBOX_NAME;
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native {
     use std::sync::Arc;
 

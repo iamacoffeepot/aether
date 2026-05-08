@@ -46,9 +46,9 @@ pub struct SubstrateCtx {
     /// ADR-0021 subscriber sets, shared with the platform-event
     /// publisher in `main.rs`. `#[actor]`-decorated components
     /// auto-subscribe every `K::IS_INPUT` handler kind by mailing
-    /// `aether.control.subscribe_input` from the init prologue the
-    /// macro prepends (ADR-0033 phase 3), which the control plane
-    /// processes and mutates this set.
+    /// `aether.input.subscribe` from the init prologue the macro
+    /// prepends (ADR-0033 phase 3); `InputCapability` processes the
+    /// mail and mutates this set.
     pub input_subscribers: InputSubscribers,
     /// ADR-0013 + ADR-0017: handle→entry map populated by
     /// `Component::deliver` whenever an inbound mail has a meaningful
@@ -190,7 +190,7 @@ impl SubstrateCtx {
         let correlation = self.mint_correlation();
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Component(self.sender), correlation);
 
-        if let Some(MailboxEntry::Sink(handler)) = self.registry.entry(recipient) {
+        if let Some(MailboxEntry::Closure(handler)) = self.registry.entry(recipient) {
             let kind_name = self.registry.kind_name(kind).unwrap_or_default();
             // Component-originated mail: the sender is this ctx's
             // mailbox, so its registry name is the `origin` any
@@ -213,17 +213,16 @@ impl SubstrateCtx {
 
         // Component / dropped / unknown all funnel through `Mailer::push`:
         // - Component (ADR-0017): mail enters the recipient's inbox with
-        //   `from_component = self.sender` so `Component::deliver` can
-        //   allocate a Component-variant `ReplyEntry`.
+        //   `reply_to.target = Component(self.sender)` so
+        //   `Component::deliver` can allocate a Component-variant
+        //   `ReplyEntry`.
         // - Dropped: warn-drops in `route_mail`.
         // - Unknown (ADR-0037): bubbles up to the hub-substrate via
-        //   `MailToHubSubstrate` with `source_mailbox_id = self.sender`
-        //   when a `HubOutbound` is connected; warn-drops otherwise.
-        self.queue.push(
-            Mail::new(recipient, kind, payload, count)
-                .with_reply_to(reply_to)
-                .with_origin(self.sender),
-        );
+        //   `MailToHubSubstrate`; the `source_mailbox_id` it carries is
+        //   recovered from `reply_to.target` when it's a Component
+        //   variant (warn-drops otherwise).
+        self.queue
+            .push(Mail::new(recipient, kind, payload, count).with_reply_to(reply_to));
     }
 }
 
@@ -242,7 +241,9 @@ mod tests {
     fn unknown_recipient_bubbles_up_with_sender_mailbox() {
         let (outbound, outbound_rx) = crate::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
-        let sender = registry.register_component("client");
+        let sender = registry
+            .try_register_closure("client", Arc::new(|_, _, _, _, _, _| {}))
+            .expect("register client mailbox");
 
         let mailer = Arc::new(Mailer::new());
         mailer.wire(Arc::clone(&registry));
@@ -287,7 +288,9 @@ mod tests {
     fn unknown_recipient_without_outbound_warn_drops() {
         let (outbound, outbound_rx) = crate::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
-        let sender = registry.register_component("client");
+        let sender = registry
+            .try_register_closure("client", Arc::new(|_, _, _, _, _, _| {}))
+            .expect("register client mailbox");
 
         let mailer = Arc::new(Mailer::new());
         mailer.wire(Arc::clone(&registry));

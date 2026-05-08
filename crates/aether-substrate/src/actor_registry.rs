@@ -26,23 +26,35 @@ use crate::mail::MailboxId;
 
 /// One actor slot in the registry. `Live` carries the inbox sender
 /// (for direct mail routing into the dispatcher), the actor's
-/// type-erased `Arc` (for `resolve_actor`-style downcasts), and the
-/// actor's `TypeId` (gates type-keyed lookups). `Dead` is a sentinel
-/// for entries whose dispatcher has joined and whose actor has
-/// dropped — mail addressed to the slot warn-drops, and `spawn_child`
-/// rejects the name for reuse. ADR-0079 §Drop / lifecycle.
+/// `TypeId` (gates type-keyed `resolve_actors` enumeration), and its
+/// subname (Phase 5 — surfaced through
+/// [`super::PassiveChassis::resolve_actors`] so callers can iterate
+/// `(subname, MailboxId)` pairs). `Dead` is a sentinel for entries
+/// whose dispatcher has joined and whose actor has dropped — mail
+/// addressed to the slot warn-drops, and `spawn_child` rejects the
+/// name for reuse. ADR-0079 §Drop / lifecycle.
+///
+/// Issue 629 / Phase A: the pre-629 `actor: Arc<dyn Any + Send + Sync>`
+/// field retired. The actor itself is owned exclusively by its
+/// dispatcher thread as `Box<A>`; the registry no longer holds a
+/// cross-thread share. Type-keyed lookups (`resolve_actor` /
+/// `resolve_actors`) return [`MailboxId`] addresses, not `Arc<A>`.
 ///
 /// `sender` is `Arc<Sender<Envelope>>` so the registry's sink
 /// handler can hold a `Weak<Sender>` and upgrade only while the
 /// actor is `Live`; on `mark_dead` the Arc drops and the weak
 /// upgrade fails, making mail addressed to a dead instanced
 /// mailbox warn-drop.
+///
+/// `subname` is empty (`String::new()`) for slot inserts that don't
+/// originate from the spawn path (singletons today never `insert_live`;
+/// future Phase 7 alignment may revisit).
 #[derive(Clone)]
 pub enum ActorEntry {
     Live {
         sender: Arc<Sender<Envelope>>,
-        actor: Arc<dyn std::any::Any + Send + Sync>,
         type_id: TypeId,
+        subname: String,
     },
     Dead,
 }
@@ -118,16 +130,18 @@ impl ActorRegistry {
         Self::default()
     }
 
-    /// `Some(actor)` only if the slot at `id` is `Live`. `Dead` and
-    /// missing both return `None` — callers can't distinguish via this
-    /// path, by design (ADR-0079: `Dead` is opaque to lookup; spawn-time
-    /// retirement check goes through [`Self::is_tombstoned`]).
-    pub fn live_actor(&self, id: MailboxId) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+    /// Issue 629 / Phase A: `true` only if the slot at `id` is `Live`.
+    /// Replaces the pre-629 `live_actor(id) -> Option<Arc<dyn Any +
+    /// Send + Sync>>` accessor; the actor itself no longer escapes its
+    /// dispatcher thread. Callers that needed the actor reference now
+    /// read a cap-exported handle (drivers) or send mail (peers).
+    /// `Dead` and missing both return `false` — callers can't
+    /// distinguish via this path, by design (ADR-0079: `Dead` is opaque
+    /// to lookup; spawn-time retirement check goes through
+    /// [`Self::is_tombstoned`]).
+    pub fn is_live(&self, id: MailboxId) -> bool {
         let actors = self.actors.read().unwrap();
-        match actors.get(&id) {
-            Some(ActorEntry::Live { actor, .. }) => Some(Arc::clone(actor)),
-            _ => None,
-        }
+        matches!(actors.get(&id), Some(ActorEntry::Live { .. }))
     }
 
     /// `Some(sender)` only if the slot at `id` is `Live`. The returned
@@ -144,7 +158,7 @@ impl ActorRegistry {
 
     /// `TypeId` of the actor occupying the slot at `id`, or `None` if
     /// the slot is `Dead` or missing. The downcast-safety counterpart
-    /// to [`Self::live_actor`].
+    /// to [`Self::is_live`].
     pub fn type_id_at(&self, id: MailboxId) -> Option<TypeId> {
         let actors = self.actors.read().unwrap();
         match actors.get(&id) {
@@ -187,16 +201,45 @@ impl ActorRegistry {
         }
     }
 
+    /// Issue 607 Phase 7: release ownership of `namespace` iff
+    /// `type_id` currently owns it. Used in the chassis-boot unwind
+    /// path when a singleton's `init` fails — without this release,
+    /// the failed cap's namespace stays claimed and a later cap with
+    /// a different `TypeId` legitimately claiming the same namespace
+    /// (after the failed cap is gone) collides. Returns `true` if the
+    /// entry was released, `false` if absent or owned by a different
+    /// type (typically a caller bug, but we don't panic — the boot
+    /// failure path runs even on weird states).
+    ///
+    /// Crate-private — only the boot-failure paths in
+    /// [`crate::capability`] / [`crate::chassis_builder`] call this.
+    pub(crate) fn release_namespace(&self, namespace: &'static str, type_id: TypeId) -> bool {
+        let mut owners = self.name_owners.write().unwrap();
+        match owners.get(namespace) {
+            Some(&existing) if existing == type_id => {
+                owners.remove(namespace);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Insert a `Live` actor entry under `id`. Returns `Err(())` if a
     /// `Live` entry already exists at `id` (caller must check
     /// `is_tombstoned` separately for the retired-name case). Used by
     /// the spawn primitive after init succeeds.
+    ///
+    /// `subname` is the per-instance segment Phase 5
+    /// [`super::PassiveChassis::resolve_actors`] iterates over;
+    /// callers that don't originate from the spawn path (today: none;
+    /// tests use empty strings) pass `""` and accept they won't show
+    /// up in the resolve_actors iterator.
     pub(crate) fn insert_live(
         &self,
         id: MailboxId,
         sender: Arc<Sender<Envelope>>,
-        actor: Arc<dyn std::any::Any + Send + Sync>,
         type_id: TypeId,
+        subname: String,
     ) -> Result<(), ()> {
         let mut actors = self.actors.write().unwrap();
         match actors.get(&id) {
@@ -209,13 +252,51 @@ impl ActorRegistry {
                     id,
                     ActorEntry::Live {
                         sender,
-                        actor,
                         type_id,
+                        subname,
                     },
                 );
                 Ok(())
             }
         }
+    }
+
+    /// Issue 607 Phase 5 (ADR-0079): walk every `Live` slot whose
+    /// `TypeId` matches `T` and hand the caller `(subname, MailboxId)`.
+    /// Used by [`super::PassiveChassis::resolve_actors`] /
+    /// [`super::BuiltChassis::resolve_actors`] for chassis-level
+    /// enumeration of instanced actors.
+    ///
+    /// **Crate-private on purpose.** Cap handlers should not introspect
+    /// the registry at runtime — caps that supervise a fleet of
+    /// instances (e.g. `TcpCapability` over `TcpListenerActor`) hold
+    /// their own cap-local map of children and update it on
+    /// `MonitorNotice`. The chassis-level surface is for
+    /// embedder/test diagnostics, not in-handler state. ADR-0079
+    /// supervisor-as-cap pattern.
+    ///
+    /// Issue 629 / Phase A: returns `(subname, MailboxId)` instead of
+    /// `(subname, Arc<T>)`. The actor itself no longer escapes its
+    /// dispatcher thread — callers that need to reach into instance
+    /// state mail the address; the registry only owns addressing data.
+    ///
+    /// Both Vec slot allocations land while the read lock is held; the
+    /// lock drops before the caller iterates.
+    pub(crate) fn live_subnames_of_type<T>(&self) -> Vec<(String, MailboxId)>
+    where
+        T: std::any::Any + 'static,
+    {
+        let actors = self.actors.read().unwrap();
+        let target = TypeId::of::<T>();
+        actors
+            .iter()
+            .filter_map(|(id, entry)| match entry {
+                ActorEntry::Live {
+                    type_id, subname, ..
+                } if *type_id == target => Some((subname.clone(), *id)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Issue 607 Phase 4a (ADR-0079): flip the slot at `id` from
@@ -380,7 +461,7 @@ mod tests {
     #[test]
     fn fresh_registry_is_empty() {
         let r = ActorRegistry::new();
-        assert!(r.live_actor(MailboxId(1)).is_none());
+        assert!(!r.is_live(MailboxId(1)));
         assert!(r.live_sender(MailboxId(1)).is_none());
         assert!(r.type_id_at(MailboxId(1)).is_none());
         assert!(!r.is_tombstoned(MailboxId(1)));
@@ -390,14 +471,18 @@ mod tests {
     }
 
     /// Helper: insert a `Live` slot at `id` so `register_monitor`'s
-    /// liveness check passes. Uses a throwaway sender + actor so the
-    /// test doesn't drag in `NativeActor`.
+    /// liveness check passes. Uses a throwaway sender so the test
+    /// doesn't drag in `NativeActor`.
     fn insert_live_stub(r: &ActorRegistry, id: MailboxId) {
         let (tx, _rx) = std::sync::mpsc::channel::<crate::capability::Envelope>();
         struct Stub;
-        let actor: Arc<dyn std::any::Any + Send + Sync> = Arc::new(Stub);
-        r.insert_live(id, Arc::new(tx), actor, std::any::TypeId::of::<Stub>())
-            .expect("fresh slot");
+        r.insert_live(
+            id,
+            Arc::new(tx),
+            std::any::TypeId::of::<Stub>(),
+            String::new(),
+        )
+        .expect("fresh slot");
     }
 
     #[test]

@@ -478,6 +478,203 @@ pub struct MonitorNotice {
 // components anyway).
 
 pub use control_plane::*;
+pub use tcp::*;
+
+mod tcp {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    use serde::{Deserialize, Serialize};
+
+    /// `aether.tcp.bind_listener` — request the singleton
+    /// `TcpCapability` to spawn a fresh `TcpListenerActor` bound to
+    /// `addr`. The cap parses `addr` via `std::net::ToSocketAddrs`
+    /// (so `"127.0.0.1:8080"` and `"0.0.0.0:0"` both work; the
+    /// latter asks the OS to pick a free port). Optional `name`
+    /// overrides the default subname (the bound port string); pass
+    /// `None` for the default. Reply: `BindListenerResult`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.tcp.bind_listener")]
+    pub struct BindListener {
+        pub addr: String,
+        pub name: Option<String>,
+    }
+
+    /// Reply to `BindListener`. `Ok` carries the resolved listener
+    /// name (the deterministic subname under
+    /// `aether.tcp.listener:<name>`), the listener's `MailboxId`,
+    /// and the actually-bound local port (load-bearing when `addr`
+    /// requested port 0). `Err` carries a human-readable reason —
+    /// addr parse failures, port-in-use, OS bind errors, namespace
+    /// collisions.
+    ///
+    /// Per project memory `feedback_mcp_mailbox_id_json_precision`:
+    /// `MailboxId` round-trips imprecisely over JSON. Agents
+    /// addressing the listener via subsequent MCP calls should use
+    /// `listener_name` (the deterministic full name); `listener_id`
+    /// is the wire id for native peers.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.tcp.bind_listener_result")]
+    pub enum BindListenerResult {
+        Ok {
+            listener_name: String,
+            listener_id: aether_data::MailboxId,
+            local_port: u16,
+        },
+        Err {
+            addr: String,
+            reason: String,
+        },
+    }
+
+    /// `aether.tcp.unbind_listener` — request the singleton
+    /// `TcpCapability` to close a listener by subname. The cap
+    /// resolves the listener via `chassis.resolve_actor`, mails
+    /// `Close` to it, monitors its close, and replies once
+    /// `MonitorNotice` arrives. Asynchronous reply: the response
+    /// only fires after the listener's accept thread has joined
+    /// and its slot has tombstoned.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.tcp.unbind_listener")]
+    pub struct UnbindListener {
+        pub listener_name: String,
+    }
+
+    /// Reply to `UnbindListener`. `Ok` once the listener has
+    /// tombstoned (the cap waited on `MonitorNotice` before
+    /// replying). `Err` for unknown listener names, listeners
+    /// already tombstoned at the time of the unbind request, or
+    /// fan-out failures.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.tcp.unbind_listener_result")]
+    pub enum UnbindListenerResult {
+        Ok {
+            listener_name: String,
+        },
+        Err {
+            listener_name: String,
+            reason: String,
+        },
+    }
+
+    /// `aether.tcp.list_listeners` — enumerate every live listener
+    /// the singleton knows about. The cap reaches for
+    /// `chassis.resolve_actors::<TcpListenerActor>()` (Phase 5)
+    /// and walks the live fleet. Reply: `ListListenersResult`.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.tcp.list_listeners")]
+    pub struct ListListeners {}
+
+    /// One entry in `ListListenersResult`. `name` is the subname
+    /// (e.g. `"8080"`); `addr` is the requested bind addr passed
+    /// to `BindListener`; `port` is the actually-bound local port.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct ListenerInfo {
+        pub name: String,
+        pub addr: String,
+        pub port: u16,
+    }
+
+    /// Reply to `ListListeners`. Always `Ok` — listing has no
+    /// failure mode that can't be expressed by an empty list.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.tcp.list_listeners_result")]
+    pub struct ListListenersResult {
+        pub listeners: Vec<ListenerInfo>,
+    }
+
+    /// `aether.tcp.close` — peer asks a `TcpListenerActor` to
+    /// gracefully close. Mailed by `TcpCapability::on_unbind`; the
+    /// listener's handler signals its accept thread, joins, and
+    /// calls `ctx.shutdown()`. Fire-and-forget at the kind level
+    /// (the close response rides via the cap's monitor on the
+    /// listener, not via this kind).
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.tcp.close")]
+    pub struct Close {}
+
+    /// `aether.tcp.connection_ready` — sidecar accept thread → listener
+    /// dispatcher wake. Issue 607 Phase 6b: the listener's accept
+    /// thread blocks on `accept()`, pushes the resulting `TcpStream`
+    /// over an mpsc into the dispatcher, then fires this mail at its
+    /// own listener mailbox to wake the handler. The handler drains
+    /// the mpsc and spawns a `TcpSessionActor` per pending stream.
+    /// Empty payload — the actual stream rides the mpsc, not the mail
+    /// envelope (a live `TcpStream` is not wire-shaped).
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.tcp.connection_ready")]
+    pub struct ConnectionReady {}
+
+    /// `aether.tcp.session_data_ready` — sidecar read thread → session
+    /// dispatcher wake. Mirror of [`ConnectionReady`] for the session
+    /// read path: the read thread blocks on `read()`, pushes bytes via
+    /// mpsc, fires this mail at its own session mailbox. The handler
+    /// drains the mpsc and broadcasts each chunk as [`SessionData`].
+    /// Empty payload.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.tcp.session_data_ready")]
+    pub struct SessionDataReady {}
+
+    /// `aether.tcp.session_data` — broadcast emitted by a
+    /// `TcpSessionActor` on each chunk read from its peer. Carries
+    /// the session subname (`conn-N`), the peer address as a string,
+    /// and the bytes received in one `read()` call. Postcard-shaped
+    /// (variable-length payload) — agents drain via `receive_mail`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.tcp.session_data")]
+    pub struct SessionData {
+        pub session_name: String,
+        pub peer: String,
+        pub bytes: Vec<u8>,
+    }
+
+    /// `aether.tcp.session_write` — peer mails this to a
+    /// `TcpSessionActor` to write `bytes` to the connected stream.
+    /// Fire-and-forget; the session's handler does a blocking write
+    /// on the dispatcher thread (writes are typically fast and
+    /// dispatcher-thread initiated, so a sidecar isn't needed for
+    /// the write path).
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.tcp.session_write")]
+    pub struct SessionWrite {
+        pub bytes: Vec<u8>,
+    }
+
+    /// `aether.tcp.session_close` — peer asks the session to close
+    /// gracefully. Mailed via `ctx.actor::<TcpSessionActor>(...)` or
+    /// resolved by subname. The session's handler calls
+    /// `ctx.shutdown()`; the close fan-out fires `MonitorNotice` to
+    /// the parent listener (which spawned it).
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.tcp.session_close")]
+    pub struct SessionClose {}
+
+    /// `aether.tcp.session_closed` — broadcast emitted on session
+    /// close. Carries the session subname, the peer address, and a
+    /// human-readable reason ("eof", "read error: ...", "explicit
+    /// close", etc.). Agents observe via `receive_mail` to know when
+    /// a session terminated and clean up any per-session state they
+    /// were tracking.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.tcp.session_closed")]
+    pub struct SessionClosed {
+        pub session_name: String,
+        pub peer: String,
+        pub reason: String,
+    }
+}
 
 mod control_plane {
     use alloc::string::String;
@@ -485,15 +682,15 @@ mod control_plane {
 
     use serde::{Deserialize, Serialize};
 
-    /// `aether.control.load_component` — request the substrate load a
-    /// WASM component into a freshly allocated mailbox. Carries the
-    /// raw WASM bytes and an optional human-readable name. The
+    /// `aether.component.load` — request the substrate load a WASM
+    /// component into a freshly allocated mailbox. Carries the raw
+    /// WASM bytes and an optional human-readable name. The
     /// component's kind vocabulary ships embedded in the wasm's
     /// `aether.kinds` custom section (ADR-0028) — the substrate
     /// reads it directly and the loader doesn't need to declare
     /// anything. Substrate replies with `LoadResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.load_component")]
+    #[kind(name = "aether.component.load")]
     pub struct LoadComponent {
         pub wasm: Vec<u8>,
         pub name: Option<String>,
@@ -506,7 +703,7 @@ mod control_plane {
     /// (ADR-0033). `Err` carries the failure reason — kind-descriptor
     /// conflict, invalid WASM, name conflict, etc.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.load_result")]
+    #[kind(name = "aether.component.load_result")]
     pub enum LoadResult {
         Ok {
             mailbox_id: aether_data::MailboxId,
@@ -554,10 +751,10 @@ mod control_plane {
         pub doc: Option<String>,
     }
 
-    /// `aether.control.drop_component` — remove a component from the
+    /// `aether.component.drop` — remove a component from the
     /// substrate and invalidate its mailbox id. Reply: `DropResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.drop_component")]
+    #[kind(name = "aether.component.drop")]
     pub struct DropComponent {
         pub mailbox_id: aether_data::MailboxId,
     }
@@ -565,13 +762,13 @@ mod control_plane {
     /// Reply to `DropComponent`. `Ok` on success; `Err` if the
     /// mailbox was unknown, wasn't a component, or already dropped.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.drop_result")]
+    #[kind(name = "aether.component.drop_result")]
     pub enum DropResult {
         Ok,
         Err { error: String },
     }
 
-    /// `aether.control.replace_component` — atomically rebind a target
+    /// `aether.component.replace` — atomically rebind a target
     /// mailbox id to a freshly instantiated component. ADR-0022: the
     /// substrate freezes the target, drains in-flight mail through
     /// the old instance, then swaps. If the drain exceeds
@@ -580,7 +777,7 @@ mod control_plane {
     /// vocabulary rides in the wasm's `aether.kinds` custom section
     /// (ADR-0028). Reply: `ReplaceResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.replace_component")]
+    #[kind(name = "aether.component.replace")]
     pub struct ReplaceComponent {
         pub mailbox_id: aether_data::MailboxId,
         pub wasm: Vec<u8>,
@@ -591,7 +788,7 @@ mod control_plane {
     /// advertised capabilities on `Ok` so the hub's cached state
     /// reflects the swapped binary; `Err` carries a free-form reason.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.replace_result")]
+    #[kind(name = "aether.component.replace_result")]
     pub enum ReplaceResult {
         Ok { capabilities: ComponentCapabilities },
         Err { error: String },
@@ -600,29 +797,28 @@ mod control_plane {
     // ADR-0021 publish/subscribe routing for substrate input streams,
     // ADR-0068 keying. The substrate maintains one subscriber set per
     // input `KindId`; a `SubscribeInput` names the kind id and the
-    // mailbox to add. Reserved kind names `aether.control.subscribe_input`
-    // / `aether.control.unsubscribe_input` /
-    // `aether.control.subscribe_input_result` match the namespace used
-    // for load/drop/replace; the substrate handles them inline and
-    // replies via reply-to-sender.
+    // mailbox to add. Issue 638 Phase 2 rehomed these kinds from
+    // `aether.control.*` to `aether.input.*`; the chassis-owned
+    // `InputCapability` handles them inline and replies via
+    // reply-to-sender.
 
-    /// `aether.control.subscribe_input` — add `mailbox` to the
-    /// subscriber set for `kind`. Idempotent: subscribing a mailbox
-    /// already in the set is still `Ok` (subscriptions are a set, not
-    /// a counter). Reply: `SubscribeInputResult`.
+    /// `aether.input.subscribe` — add `mailbox` to the subscriber set
+    /// for `kind`. Idempotent: subscribing a mailbox already in the
+    /// set is still `Ok` (subscriptions are a set, not a counter).
+    /// Reply: `SubscribeInputResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.subscribe_input")]
+    #[kind(name = "aether.input.subscribe")]
     pub struct SubscribeInput {
         pub kind: aether_data::KindId,
         pub mailbox: aether_data::MailboxId,
     }
 
-    /// `aether.control.unsubscribe_input` — remove `mailbox` from the
+    /// `aether.input.unsubscribe` — remove `mailbox` from the
     /// subscriber set for `kind`. Idempotent: unsubscribing a mailbox
     /// that isn't subscribed is still `Ok`. Reply:
     /// `SubscribeInputResult`.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.unsubscribe_input")]
+    #[kind(name = "aether.input.unsubscribe")]
     pub struct UnsubscribeInput {
         pub kind: aether_data::KindId,
         pub mailbox: aether_data::MailboxId,
@@ -632,15 +828,15 @@ mod control_plane {
     /// failure mode: the target mailbox id doesn't name a live
     /// component (unknown, a sink, or already dropped).
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-    #[kind(name = "aether.control.subscribe_input_result")]
+    #[kind(name = "aether.input.subscribe_result")]
     pub enum SubscribeInputResult {
         Ok,
         Err { error: String },
     }
 
-    /// `aether.control.configure_log_drain` — chassis-pushed mail every
-    /// actor handles to pick up the configured log drain mailbox
-    /// (issue #601). The chassis dispatches one of these to every
+    /// `aether.log.configure_drain` — chassis-pushed mail every actor
+    /// handles to pick up the configured log drain mailbox (issue
+    /// #601). The chassis dispatches one of these to every
     /// freshly-instantiated actor before any other inbound mail; the
     /// SDK's `#[actor]` / `#[handlers]` derive auto-emits a handler
     /// that installs `mailbox` into the per-actor `LogDrainSlot` so
@@ -657,7 +853,7 @@ mod control_plane {
     #[derive(
         Copy, Clone, Debug, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
     )]
-    #[kind(name = "aether.control.configure_log_drain")]
+    #[kind(name = "aether.log.configure_drain")]
     pub struct ConfigureLogDrain {
         pub mailbox: aether_data::MailboxId,
     }
@@ -1438,18 +1634,15 @@ mod tests {
         assert_eq!(FrameStats::NAME, "aether.observation.frame_stats");
         assert_eq!(Ping::NAME, "aether.ping");
         assert_eq!(Pong::NAME, "aether.pong");
-        assert_eq!(LoadComponent::NAME, "aether.control.load_component");
-        assert_eq!(ReplaceComponent::NAME, "aether.control.replace_component");
-        assert_eq!(DropComponent::NAME, "aether.control.drop_component");
-        assert_eq!(LoadResult::NAME, "aether.control.load_result");
-        assert_eq!(DropResult::NAME, "aether.control.drop_result");
-        assert_eq!(ReplaceResult::NAME, "aether.control.replace_result");
-        assert_eq!(SubscribeInput::NAME, "aether.control.subscribe_input");
-        assert_eq!(UnsubscribeInput::NAME, "aether.control.unsubscribe_input");
-        assert_eq!(
-            SubscribeInputResult::NAME,
-            "aether.control.subscribe_input_result"
-        );
+        assert_eq!(LoadComponent::NAME, "aether.component.load");
+        assert_eq!(ReplaceComponent::NAME, "aether.component.replace");
+        assert_eq!(DropComponent::NAME, "aether.component.drop");
+        assert_eq!(LoadResult::NAME, "aether.component.load_result");
+        assert_eq!(DropResult::NAME, "aether.component.drop_result");
+        assert_eq!(ReplaceResult::NAME, "aether.component.replace_result");
+        assert_eq!(SubscribeInput::NAME, "aether.input.subscribe");
+        assert_eq!(UnsubscribeInput::NAME, "aether.input.unsubscribe");
+        assert_eq!(SubscribeInputResult::NAME, "aether.input.subscribe_result");
         assert_eq!(CaptureFrame::NAME, "aether.render.capture_frame");
         assert_eq!(
             CaptureFrameResult::NAME,

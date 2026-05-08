@@ -37,7 +37,7 @@ pub use native::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 // auto-emitted re-export. It carries no auxiliary native-only types,
 // so nothing extra to surface here.
 
-#[aether_actor::bridge(feature = "render-native")]
+#[aether_actor::bridge(singleton, feature = "render-native")]
 mod native {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -190,6 +190,10 @@ mod native {
                     "registry must be wired on Mailer before RenderCapability::init",
                 )))
             })?;
+            // Issue 629 / Phase A: publish the driver-facing handle
+            // bundle on the chassis's `ExportedHandles` map so the
+            // desktop driver retrieves it via `DriverCtx::handle::<RenderHandles>()`.
+            ctx.publish_handle(handles.clone());
             Ok(Self {
                 handles,
                 config,
@@ -566,8 +570,8 @@ mod native {
 
         fn deliver(registry: &Registry, name: &str, kind: KindId, payload: &[u8]) {
             let id = registry.lookup(name).expect("mailbox registered");
-            let MailboxEntry::Sink(handler) = registry.entry(id).expect("entry exists") else {
-                panic!("expected sink entry for {name}");
+            let MailboxEntry::Closure(handler) = registry.entry(id).expect("entry exists") else {
+                panic!("expected mailbox entry for {name}");
             };
             handler(kind, "test.kind", None, ReplyTo::NONE, payload, 1);
         }
@@ -685,7 +689,7 @@ mod native {
     }
 }
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native_headless {
     use std::sync::Arc;
 

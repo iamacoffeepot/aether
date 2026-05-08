@@ -161,7 +161,7 @@ fn parse_default_timeout_env() -> Duration {
     Duration::from_millis(ms as u64)
 }
 
-#[aether_actor::bridge]
+#[aether_actor::bridge(singleton)]
 mod native {
     use std::collections::HashSet;
     use std::sync::Arc;
@@ -550,7 +550,7 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (registry, mailer) = fresh_substrate();
-            registry.register_sink(HttpCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            registry.register_closure(HttpCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
             let config = HttpConfig {
                 disabled: true,
                 ..HttpConfig::default()
