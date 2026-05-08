@@ -296,7 +296,7 @@ impl Component {
         // they just don't get auto-subscribe, which they never did.
         //
         // Issue 525 Phase 4b / issue 531: a non-zero return value
-        // means the guest's `WasmActor::init` returned `Err(BootError)`
+        // means the guest's `FfiActor::init` returned `Err(BootError)`
         // and staged the message via `init_failed_p32`. Drain the
         // staged string off the ctx and surface it as a wasmtime
         // error so the existing `dispatch_load_component` failure

@@ -15,7 +15,7 @@
 //! the SDK contract — `LogBuffer`, `LogDrainSlot`, `drain_buffer`
 //! itself — stays in this crate so the `#[handlers]` derive can emit
 //! a single path that resolves on both wasm and native targets.
-//! Wasm doesn't need a hook: it ships through [`crate::WASM_TRANSPORT`]
+//! Wasm doesn't need a hook: it ships through [`crate::FFI_TRANSPORT`]
 //! directly since the linear memory IS the actor.
 //!
 //! There is no host branch. `tracing::*` events fired outside any
@@ -264,7 +264,7 @@ fn ship_batch_via_wasm_transport(mailbox: MailboxId, batch: LogBatch) {
         Ok(b) => b,
         Err(_) => return,
     };
-    crate::WASM_TRANSPORT.send_mail(mailbox.0, <LogBatch as Kind>::ID.0, &bytes, 1);
+    crate::FFI_TRANSPORT.send_mail(mailbox.0, <LogBatch as Kind>::ID.0, &bytes, 1);
 }
 
 /// Hard cap on the per-event message bytes. Trims oversize

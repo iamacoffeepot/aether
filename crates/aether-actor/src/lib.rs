@@ -1,21 +1,18 @@
-//! aether-actor: actor SDK shared by WASM components and (eventually)
-//! native capabilities. Issue 552 stage 0 folded the prior
-//! `aether-component` crate's wasm-guest shim in here as `wasm` —
-//! the SDK and its wasm-guest impl now share one home so the
-//! proc-macro path emissions (`::aether_actor::WasmCtx<'_>`, etc.)
-//! resolve through one crate name regardless of whether the consumer
-//! is a wasm component or a native test fixture. The
-//! `aether-data-derive` macro crate consolidated into `aether-actor-derive`
-//! at the same time.
+//! aether-actor: transport-agnostic actor SDK shared by FFI guests
+//! (today: wasm components) and native capabilities. Issue 552 stage 0
+//! folded the prior `aether-component` crate's guest shim in here so
+//! the SDK and its FFI binding layer share one home; issue 663 then
+//! renamed the binding layer from `wasm` to `ffi` to reflect that any
+//! host satisfying the `_p32` import surface can drive an actor
+//! through it (the wasm runtime in `aether_substrate::actor::wasm` is
+//! one consumer; future C / OS-process hosts would be others).
 //!
 //! ADR-0074 §Decision settled the actor model: components and
 //! capabilities collapse into one actor primitive — one mpsc inbox,
 //! one OS thread, one `MailboxId` — and share this SDK over two
-//! transport implementations. Phase 1 lifted the SDK out of
-//! `aether-component`; issue 552 stage 0 then collapsed the wasm
-//! shim back in here so the SDK + transport impls share one crate.
-//! `NativeTransport` arrives in stage 1 alongside the per-handler
-//! `NativeCtx<'_>` ctx surface that mirrors [`wasm::WasmCtx<'_>`].
+//! transport implementations. The FFI side rides
+//! [`ffi::FfiTransport`]; the native side rides
+//! `aether_substrate::actor::native::transport::NativeTransport`.
 //!
 //! Public surface:
 //!   - [`MailTransport`] — the five-method trait every transport
@@ -23,26 +20,30 @@
 //!     byte-for-byte.
 //!   - [`Mail`], [`PriorState`], [`ReplyTo`], [`KindId`] —
 //!     transport-free types: pure decode / phantom typing.
-//!   - [`Mailbox`], [`Ctx`], [`InitCtx`], [`DropCtx`] — generic over
-//!     `T: MailTransport`; method bodies dispatch through `T::*`.
-//!     The wasm-flavoured 1-arg aliases ([`WasmCtx`], [`WasmInitCtx`],
-//!     [`WasmDropCtx`]) live in [`wasm`] alongside [`WasmTransport`].
+//!   - [`Mailbox`] — generic over `T: MailTransport`; method bodies
+//!     dispatch through `T::*`. The 1-arg FFI alias
+//!     ([`ffi::Mailbox<K>`]) lives in [`ffi`] alongside
+//!     [`ffi::FfiTransport`].
+//!   - [`actor::ctx`] — per-stage capability traits ([`MailSender`],
+//!     [`OutboundReply`], [`Resolver`], [`Persistence`],
+//!     [`LifecycleControl`]). FFI ctxs in [`ffi::ctx`] and substrate's
+//!     `NativeCtx` family impl the relevant subset.
 //!   - [`Slot`] — single-instance backing store the consumer's
 //!     [`export!`] macro emits as a `static`.
 //!   - [`WaitError`] + [`wait_reply`] + [`decode_wait_reply`] —
 //!     ADR-0042 sync round-trip helper, generic over the reply kind,
 //!     the error enum, and the transport.
-//!   - [`wasm`] — wasm-guest impl: [`WasmTransport`] +
-//!     [`WasmActor`] trait + [`Replaceable`] hook trait + the
+//!   - [`ffi`] — FFI binding layer: [`ffi::FfiTransport`] +
+//!     [`ffi::FfiActor`] trait + [`ffi::Replaceable`] hook trait + the
 //!     [`export!`] macro that pins `init` / `receive` / lifecycle FFI
 //!     exports plus the `aether.kinds.inputs` / `aether.namespace`
 //!     custom-section statics.
 //!
-//! No FFI imports are pulled in unconditionally — the wasm host-fn
-//! externs in [`wasm::raw`] live behind a `#[cfg(target_arch =
-//! "wasm32")]` block and the native-target stubs panic if invoked,
-//! so the crate compiles for `cargo test --workspace` on the host
-//! without dragging the FFI surface into the linker.
+//! No FFI imports are pulled in unconditionally — the host-fn externs
+//! in [`ffi::raw`] live behind a `#[cfg(target_arch = "wasm32")]`
+//! block and the native-target stubs panic if invoked, so the crate
+//! compiles for `cargo test --workspace` on the host without dragging
+//! the FFI surface into the linker.
 
 #![no_std]
 
@@ -56,12 +57,12 @@ extern crate alloc;
 extern crate self as aether_actor;
 
 pub mod actor;
+pub mod ffi;
 pub mod local;
 pub mod log;
 pub mod mail;
-pub mod wasm;
 
-pub use actor::ctx::{Ctx, DropCtx, InitCtx};
+pub use actor::ctx::{LifecycleControl, MailSender, OutboundReply, Persistence, Resolver};
 pub use actor::sender::{MailCtx, Sender};
 pub use actor::slot::Slot;
 pub use actor::{
@@ -71,7 +72,7 @@ pub use actor::{
 pub use local::Local;
 // Generic 2-arg `Mailbox<K, T>` stays accessible as
 // `aether_actor::mail::mailbox::Mailbox`. At the crate root we
-// re-export the 1-arg wasm alias (defined in `wasm`) under the same
+// re-export the 1-arg FFI alias (defined in `ffi`) under the same
 // `Mailbox` name so existing `aether_component::Mailbox<K>` consumers
 // keep their call shape when migrating to `aether_actor::*`.
 pub use mail::mailbox::{ActorMailbox, KindId, resolve, resolve_mailbox};
@@ -79,27 +80,14 @@ pub use mail::sync::{WaitError, decode_wait_reply, wait_reply};
 pub use mail::transport::MailTransport;
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
 
-// Wasm-guest surface promoted to the crate root so consumers see
-// `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc.
-// without an extra `wasm::` segment. Replaces the prior crate-root
-// re-exports `aether-component` provided. `Mailbox<K>` here is the
-// wasm 1-arg alias — the generic form is reachable through `sink`.
-pub use wasm::{
-    BootError, Component, Mailbox, Replaceable, WASM_TRANSPORT, WasmActor, WasmCtx, WasmDropCtx,
-    WasmInitCtx, WasmTransport,
+// FFI surface promoted to the crate root so consumers see
+// `aether_actor::FfiCtx<'_>` / `aether_actor::FfiActor` / etc. without
+// an extra `ffi::` segment. `Mailbox<K>` here is the FFI 1-arg alias —
+// the generic form is reachable through `mail::mailbox::Mailbox<K, T>`.
+pub use ffi::{
+    BootError, FFI_TRANSPORT, FfiActor, FfiCtx, FfiDropCtx, FfiInitCtx, FfiTransport, Mailbox,
+    Replaceable,
 };
-// Wasm helper modules retired:
-//   - issue #581 — `log` shim replaced by the unified actor-aware
-//     path at `aether_actor::log` (both targets).
-//   - issue #589 — `net` helpers had zero callers; components now
-//     send `Fetch` directly via `ctx.actor::<HttpCapability>().send(...)`
-//     (the cap was renamed from `NetCapability` in issue #612).
-//   - issue #591 — `io` helpers replaced by the same typed-sender
-//     shape (`ctx.actor::<IoCapability>().send(&Read { .. })`); the
-//     sync wait_reply helpers (`*_sync` + `SyncIoError`) had a single
-//     consumer (the `save_counter` example) and were retired alongside
-//     it. Their placement against the ctx surface is being rethought
-//     before any sync round-trip surface returns.
 
 // Issue 442 / ADR-0033: `MailTransport` doubles as a re-export name
 // for the trait when consumers want to spell out the bound. Kept

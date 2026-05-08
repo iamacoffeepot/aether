@@ -51,7 +51,7 @@ unsafe extern "C" {
     /// for the substrate to surface in `LoadResult::Err` after the
     /// guest's `init` returns non-zero. The `export!` macro is the
     /// only intended caller — user code returns `Err(BootError)`
-    /// from `WasmActor::init` and the macro plumbs the bytes
+    /// from `FfiActor::init` and the macro plumbs the bytes
     /// through this import. Bytes at `(ptr, len)` are copied out of
     /// guest memory before the call returns.
     #[link_name = "init_failed_p32"]

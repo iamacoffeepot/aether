@@ -51,20 +51,20 @@ mod wasm {
     /// thread of the wasm linear memory: every component runs on
     /// one logical thread inside its own linear memory, so the
     /// static can never be racily aliased across threads. Same
-    /// loophole `WASM_TRANSPORT` uses.
+    /// loophole `FFI_TRANSPORT` uses.
     ///
     /// `BTreeMap` instead of `HashMap` because `BTreeMap::new()`
     /// is `const fn` and `aether-actor` is `no_std + alloc` — we
     /// don't pull in `hashbrown`. The map holds at most a handful
     /// of entries per actor in practice (one per `Local`-
     /// implementing type), so the log-N lookup cost is irrelevant.
-    pub(super) struct WasmActorSlots {
+    pub(super) struct FfiActorSlots {
         inner: UnsafeCell<RefCell<BTreeMap<TypeId, Box<dyn Any>>>>,
     }
 
-    unsafe impl Sync for WasmActorSlots {}
+    unsafe impl Sync for FfiActorSlots {}
 
-    impl WasmActorSlots {
+    impl FfiActorSlots {
         const fn new() -> Self {
             Self {
                 inner: UnsafeCell::new(RefCell::new(BTreeMap::new())),
@@ -117,7 +117,7 @@ mod wasm {
         }
     }
 
-    pub(super) static WASM_SLOTS: WasmActorSlots = WasmActorSlots::new();
+    pub(super) static WASM_SLOTS: FfiActorSlots = FfiActorSlots::new();
 }
 
 #[cfg(not(target_arch = "wasm32"))]

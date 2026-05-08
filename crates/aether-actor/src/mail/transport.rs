@@ -1,11 +1,11 @@
 //! ADR-0074 §Decision: the actor SDK's split point. Every byte
 //! crossing the actor↔chassis boundary is funnelled through one
 //! `MailTransport` impl chosen at compile time by the consumer crate
-//! — `aether-component`'s `WasmTransport` (delegates to `_p32` host
+//! — `aether-component`'s `FfiTransport` (delegates to `_p32` host
 //! fns) for WASM guests, `aether-substrate`'s `NativeTransport`
 //! (owned by each native capability) for native actors.
 //!
-//! Trait methods take `&self`, not associated functions. WasmTransport
+//! Trait methods take `&self`, not associated functions. FfiTransport
 //! is a ZST, so its `&self` is unused and the dispatch lowers to a
 //! direct call to the matching host fn — no overhead. NativeTransport
 //! is a regular struct each capability owns, holding the per-actor

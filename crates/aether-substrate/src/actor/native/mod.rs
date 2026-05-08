@@ -1,6 +1,6 @@
 //! Issue 552 stage 1: native chassis-cap actor surface.
 //!
-//! The native counterpart of `aether_actor::WasmActor`. Stage 1
+//! The native counterpart of `aether_actor::FfiActor`. Stage 1
 //! introduces the type-level vocabulary; Stage 2 migrates the
 //! existing capabilities (Log, Handle, Io, Net, Audio, Render) onto
 //! it. Stage 1's deliverable is the trait + ctx + dispatch

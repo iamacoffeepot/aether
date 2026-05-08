@@ -31,7 +31,7 @@
 //! 4. Every `aether.tick` re-emits the cached triangles to
 //!    `"aether.render"`.
 
-use aether_actor::{BootError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
 use aether_capabilities::{IoCapability, RenderCapability};
 use aether_kinds::{DrawTriangle, Read, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
@@ -71,10 +71,10 @@ pub struct MeshViewer {
 /// via `aether.fs.write` and re-sending `aether.mesh.load` against the
 /// same path.
 #[actor]
-impl WasmActor for MeshViewer {
+impl FfiActor for MeshViewer {
     const NAMESPACE: &'static str = "mesh_viewer";
 
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, BootError> {
+    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
         Ok(MeshViewer {
             triangles: Vec::new(),
         })
@@ -87,7 +87,7 @@ impl WasmActor for MeshViewer {
     /// after a `load`, the file failed to read / parse / mesh — check
     /// `engine_logs`.
     #[handler]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut FfiCtx<'_>, _tick: Tick) {
         if !self.triangles.is_empty() {
             ctx.actor::<RenderCapability>().send_many(&self.triangles);
         }
@@ -102,7 +102,7 @@ impl WasmActor for MeshViewer {
     /// `"assets"`, `"config"`. `path` is relative to the namespace
     /// root and must end in `.dsl` or `.obj`.
     #[handler]
-    fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) {
+    fn on_load(&mut self, ctx: &mut FfiCtx<'_>, msg: LoadMesh) {
         tracing::info!(
             target: "aether_mesh_viewer",
             namespace = %msg.namespace,
@@ -124,7 +124,7 @@ impl WasmActor for MeshViewer {
     /// # Agent
     /// Substrate-driven; do not send manually.
     #[handler]
-    fn on_read_result(&mut self, _ctx: &mut WasmCtx<'_>, r: ReadResult) {
+    fn on_read_result(&mut self, _ctx: &mut FfiCtx<'_>, r: ReadResult) {
         let (path, bytes) = match r {
             ReadResult::Ok { path, bytes, .. } => (path, bytes),
             ReadResult::Err {
