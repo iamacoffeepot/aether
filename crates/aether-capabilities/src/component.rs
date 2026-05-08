@@ -151,12 +151,12 @@ mod native {
         /// handler swaps `Component` internally and replies
         /// `ReplaceResult`. ADR-0022 + ADR-0038 splice invariants
         /// hold because the inbox channel is the trampoline's
-        /// framework transport, which outlives the swap.
+        /// `NativeBinding`, which outlives the swap.
         ///
         /// # Agent
         /// `ReplaceComponent { mailbox_id, wasm, drain_timeout_ms }`.
         /// `drain_timeout_ms` is accepted for wire compatibility but
-        /// ignored under the trampoline's transport-stable replace.
+        /// ignored under the trampoline's binding-stable replace.
         #[handler]
         fn on_replace_component(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
             self.forward_to_trampoline(ctx, payload.mailbox_id, ReplaceComponent::ID, &payload);
@@ -208,7 +208,7 @@ mod native {
             // claims the namespace, registers the closure-bound
             // mailbox at `aether.component.trampoline:NAME`, runs
             // `WasmTrampoline::init` (which instantiates `Component`
-            // against the trampoline's transport), and starts the
+            // against the trampoline's binding), and starts the
             // dispatcher thread. The returned id is the trampoline's
             // mailbox.
             let trampoline_config = WasmTrampolineConfig {
