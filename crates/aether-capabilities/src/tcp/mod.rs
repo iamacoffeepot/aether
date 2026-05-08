@@ -76,7 +76,8 @@ mod cap_native {
         BindListenerResult, Close, ListListenersResult, ListenerInfo, TcpListenerActor,
         TcpListenerConfig, UnbindListenerResult,
     };
-    use aether_actor::{MailCtx, actor};
+    use aether_actor::actor;
+    use aether_actor::actor::ctx::OutboundReply;
     use aether_substrate::actor::monitor::MonitorHandle;
     use aether_substrate::actor::native::spawn::Subname;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -311,7 +312,7 @@ mod cap_native {
             // Fire the parked unbind reply if one was waiting.
             let parked = self.pending_unbinds.remove(&notice.target);
             if let Some(parked) = parked {
-                ctx.binding().send_reply_for_handler(
+                ctx.reply_to(
                     parked.sender,
                     &UnbindListenerResult::Ok {
                         listener_name: parked.listener_name,

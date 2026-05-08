@@ -34,6 +34,7 @@ mod native {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use aether_actor::actor;
+    use aether_actor::actor::ctx::OutboundReply;
     use aether_data::Kind;
     use aether_kinds::LoadResult;
     use wasmtime::{Engine, Linker, Module};
@@ -123,8 +124,7 @@ mod native {
         #[handler]
         fn on_load_component(&mut self, ctx: &mut NativeCtx<'_>, payload: LoadComponent) {
             let result = self.handle_load(ctx, payload);
-            ctx.binding()
-                .send_reply_for_handler(ctx.reply_target(), &result);
+            ctx.reply(&result);
         }
 
         /// Drop a component by its mailbox id. Forwards
