@@ -173,12 +173,15 @@ impl<'a> FfiCtx<'a> {
         self.sender = sender.map(|s| s.raw());
     }
 
-    /// 3-arg back-compat reply: explicit `sender` + `kind`. Pre-trait
-    /// callers (older examples and demos) thread `mail.reply_to()` and
-    /// a cached `KindId<K>` through this method. The [`OutboundReply::reply`]
-    /// trait method is the new shape — it pulls the sender from
-    /// internal state and infers the kind from `K`.
-    pub fn reply<K: Kind>(&self, sender: ReplyTo, kind: KindId<K>, payload: &K) {
+    /// Reply with an explicit `sender` + cached `KindId<K>`. Sits
+    /// alongside the trait-driven [`OutboundReply::reply`] which uses
+    /// the dispatcher-stamped sender plus `K::ID`. Useful for FFI
+    /// guests sending cast-shaped types that don't impl
+    /// `serde::Serialize` (the trait method's bound covers native's
+    /// postcard reply path; FFI's `reply_mail` only ships bytes via
+    /// [`Kind::encode_into_bytes`], so the bound is over-strict for
+    /// guest-side cast kinds).
+    pub fn reply_kind<K: Kind>(&self, sender: ReplyTo, kind: KindId<K>, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.transport
             .reply_mail(sender.raw(), kind.raw(), &bytes, 1);

@@ -22,7 +22,7 @@
 //! on the trunk for those without pulling in this crate's
 //! `Component` impl. Per ADR-0066.
 
-use aether_actor::{BootError, KindId, Sender, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, KindId, MailSender, Resolver, actor};
 use aether_capabilities::BroadcastCapability;
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, CLIENT_OBSERVER, GAME_DRAW, GAME_PLAYING, GAME_WON_O, GAME_WON_X, GameState,
@@ -60,7 +60,10 @@ pub struct TicTacToe {
 impl FfiActor for TicTacToe {
     const NAMESPACE: &'static str = "tic_tac_toe";
 
-    fn init(ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(TicTacToe {
             state: GameState::new_game(),
             move_result_kind: ctx.resolve::<MoveResult>(),
@@ -152,7 +155,7 @@ impl TicTacToe {
             _pad: [0; 7],
             state: self.state,
         };
-        ctx.reply(sender, self.move_result_kind, &result);
+        ctx.reply_kind(sender, self.move_result_kind, &result);
     }
 }
 

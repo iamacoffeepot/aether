@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiDropCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Persistence, Resolver, actor};
 use aether_data::Kind;
 use aether_data::{INPUTS_SECTION_VERSION, InputsRecord};
 use bytemuck::{Pod, Zeroable};
@@ -47,7 +47,10 @@ struct ManifestProbe;
 impl FfiActor for ManifestProbe {
     const NAMESPACE: &'static str = "manifest_probe";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(Self)
     }
 
@@ -64,7 +67,11 @@ impl FfiActor for ManifestProbe {
     #[fallback]
     fn on_other(&mut self, _ctx: &mut FfiCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 
-    fn on_drop(&mut self, _ctx: &mut FfiDropCtx<'_>) {}
+    fn on_drop<C>(&mut self, _ctx: &mut C)
+    where
+        C: MailSender + Persistence,
+    {
+    }
 }
 
 fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {

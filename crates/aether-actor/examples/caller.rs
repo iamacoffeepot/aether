@@ -15,7 +15,7 @@
 //! sibling cdylib this crate can't import without colliding FFI
 //! exports.
 
-use aether_actor::{BootError, Sender, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_capabilities::BroadcastCapability;
 use aether_data::{Kind, Schema};
 use aether_kinds::Tick;
@@ -50,7 +50,10 @@ pub struct Caller {
 impl FfiActor for Caller {
     const NAMESPACE: &'static str = "caller";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(Caller { next_seq: 0 })
     }
 

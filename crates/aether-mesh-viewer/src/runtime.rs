@@ -31,7 +31,7 @@
 //! 4. Every `aether.tick` re-emits the cached triangles to
 //!    `"aether.render"`.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_capabilities::{IoCapability, RenderCapability};
 use aether_kinds::{DrawTriangle, Read, ReadResult, Tick, Vertex};
 use aether_math::Vec3;
@@ -74,7 +74,10 @@ pub struct MeshViewer {
 impl FfiActor for MeshViewer {
     const NAMESPACE: &'static str = "mesh_viewer";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(MeshViewer {
             triangles: Vec::new(),
         })

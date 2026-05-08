@@ -45,7 +45,7 @@
 //! That's as shape-y as this first pass gets; proper X / O glyphs
 //! are a rendering-polish pass for later.
 
-use aether_actor::{BootError, Sender, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_capabilities::RenderCapability;
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, GameState, LAST_MOVE_NONE, MoveResult, PLAYER_X, PlayMove, SERVER,
@@ -126,7 +126,10 @@ impl Default for TicTacToeClient {
 impl FfiActor for TicTacToeClient {
     const NAMESPACE: &'static str = "tic_tac_toe_client";
 
-    fn init(_ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(TicTacToeClient::default())
     }
 

@@ -16,7 +16,7 @@
 //! MCP via the same section so the harness sees typed capabilities
 //! plus author-written intent for each inbox.
 
-use aether_actor::{BootError, KindId, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, KindId, MailSender, Resolver, actor};
 use aether_capabilities::RenderCapability;
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
 
@@ -66,7 +66,10 @@ pub struct Hello {
 impl FfiActor for Hello {
     const NAMESPACE: &'static str = "hello";
 
-    fn init(ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         Ok(Hello {
             pong: ctx.resolve::<Pong>(),
         })
@@ -94,7 +97,7 @@ impl FfiActor for Hello {
     #[handler]
     fn on_ping(&mut self, ctx: &mut FfiCtx<'_>, ping: Ping) {
         if let Some(sender) = ctx.reply_to() {
-            ctx.reply(sender, self.pong, &Pong { seq: ping.seq });
+            ctx.reply_kind(sender, self.pong, &Pong { seq: ping.seq });
         }
     }
 }

@@ -51,6 +51,8 @@
 use alloc::borrow::Cow;
 use alloc::string::String;
 
+use crate::actor::ctx::{MailSender, OutboundReply, Persistence, Resolver};
+
 pub mod ctx;
 pub mod raw;
 pub mod transport;
@@ -144,11 +146,21 @@ pub trait FfiActor: crate::Actor {
     /// `ctx.subscribe_input::<K>()` for every `K::IS_INPUT` handler
     /// kind so the user body never needs to do it by hand.
     ///
+    /// Issue 663 phase D: the ctx parameter is generic — implementations
+    /// program against the [`Resolver`] + [`MailSender`] trait surface
+    /// rather than naming a concrete ctx type. The [`crate::export!`]
+    /// macro constructs a [`FfiInitCtx`] and Rust infers `C` at the
+    /// call site; user code never spells the ctx struct directly, so
+    /// future hosts beyond wasm can be plugged in without touching the
+    /// trait.
+    ///
     /// Returns `Result<Self, BootError>` so an actor that hits an
     /// unrecoverable startup condition (config parse failure, required
     /// handle missing, malformed env var) can surface its own message
     /// in `LoadResult::Err { error }`.
-    fn init(ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError>;
+    fn init<C>(ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender;
 
     /// Called once on the instance being dropped — both for
     /// `drop_component` and for the old instance of
@@ -156,7 +168,10 @@ pub trait FfiActor: crate::Actor {
     /// down linear memory. Default is no-op; override for cleanup
     /// (sending "goodbye" mail, flushing work to a sibling actor,
     /// logging).
-    fn on_drop(&mut self, ctx: &mut FfiDropCtx<'_>) {
+    fn on_drop<C>(&mut self, ctx: &mut C)
+    where
+        C: MailSender + Persistence,
+    {
         let _ = ctx;
     }
 }
@@ -178,7 +193,10 @@ pub trait Replaceable: FfiActor {
     /// raw [`FfiDropCtx::save_state`][crate::actor::ctx::Persistence::save_state]
     /// only when persisting a non-kind blob or driving an explicit
     /// migration off the leading id.
-    fn on_replace(&mut self, ctx: &mut FfiDropCtx<'_>) {
+    fn on_replace<C>(&mut self, ctx: &mut C)
+    where
+        C: MailSender + Persistence,
+    {
         let _ = ctx;
     }
 
@@ -187,7 +205,10 @@ pub trait Replaceable: FfiActor {
     /// produced a state bundle via the `Persistence` trait's
     /// `save_state` / `save_state_kind`. Default ignores the prior
     /// state.
-    fn on_rehydrate(&mut self, ctx: &mut FfiCtx<'_>, prior: crate::PriorState<'_>) {
+    fn on_rehydrate<C>(&mut self, ctx: &mut C, prior: crate::PriorState<'_>)
+    where
+        C: OutboundReply,
+    {
         let _ = ctx;
         let _ = prior;
     }

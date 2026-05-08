@@ -11,7 +11,7 @@
 //!
 //! Grid is still capped at 16×16 (pre-ADR-0028 carryover).
 
-use aether_actor::{BootError, KindId, Sender, FfiActor, FfiCtx, FfiInitCtx, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, KindId, MailSender, Resolver, actor};
 use aether_camera::{CameraTopdownSet, TopdownParams};
 use aether_capabilities::RenderCapability;
 use aether_data::{Kind, Schema};
@@ -140,7 +140,10 @@ pub struct Sokoban {
 impl FfiActor for Sokoban {
     const NAMESPACE: &'static str = "sokoban";
 
-    fn init(ctx: &mut FfiInitCtx<'_>) -> Result<Self, BootError> {
+    fn init<C>(ctx: &mut C) -> Result<Self, BootError>
+    where
+        C: Resolver + MailSender,
+    {
         let mut me = Sokoban {
             state: SokobanState::default(),
             state_kind: ctx.resolve::<SokobanState>(),
@@ -354,7 +357,7 @@ impl Sokoban {
         let Some(sender) = ctx.reply_to() else {
             return;
         };
-        ctx.reply(sender, self.state_kind, &self.state);
+        ctx.reply_kind(sender, self.state_kind, &self.state);
     }
 
     fn render_grid(&self, ctx: &mut FfiCtx<'_>) {
