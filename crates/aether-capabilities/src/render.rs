@@ -549,10 +549,22 @@ mod native {
 
         use super::*;
         use aether_actor::Actor;
-        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::chassis::Chassis;
+        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
+        use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{KindId, ReplyTo};
+
+        struct TestChassis;
+        impl Chassis for TestChassis {
+            const PROFILE: &'static str = "test";
+            type Driver = NeverDriver;
+            type Env = ();
+            fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+                unreachable!("TestChassis is driven by Builder::new directly in unit tests")
+            }
+        }
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
             let registry = Arc::new(Registry::new());
@@ -577,9 +589,9 @@ mod native {
         #[test]
         fn capability_claims_render_mailbox_only() {
             let (registry, mailer) = fresh_substrate();
-            let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<RenderCapability>(RenderConfig::default())
-                .build()
+                .build_passive()
                 .expect("build succeeds");
             assert_eq!(chassis.len(), 1);
             assert!(registry.lookup(RenderCapability::NAMESPACE).is_some());
@@ -587,20 +599,18 @@ mod native {
             assert!(registry.lookup("aether.sink.camera").is_none());
         }
 
-        /// Boots render through the legacy `ChassisBuilder.with_actor`
-        /// path and asserts a `DrawTriangle` mail accumulates into the
-        /// frame_vertices buffer. The `RenderHandles` here is reached
-        /// via the chassis post-build (legacy ChassisBuilder doesn't
-        /// expose an actors map; the test asserts via the registry sink
-        /// the dispatcher drains rather than reading the cap state
-        /// directly). Coverage of `handles` accessor is in the desktop
-        /// chassis path post-2d.
+        /// Boots render through `Builder::with_actor` and asserts a
+        /// `DrawTriangle` mail accumulates into the frame_vertices
+        /// buffer. The `RenderHandles` here is reached via the chassis
+        /// post-build by waiting on the per-mailbox pending counter
+        /// the FRAME_BARRIER claim populates. Coverage of the
+        /// `handles` accessor is in the desktop chassis path.
         #[test]
         fn render_dispatcher_appends_triangles_to_frame_vertices() {
             let (registry, mailer) = fresh_substrate();
-            let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<RenderCapability>(RenderConfig::default())
-                .build()
+                .build_passive()
                 .expect("build succeeds");
 
             let one_triangle = vec![0u8; DRAW_TRIANGLE_BYTES];
@@ -611,60 +621,56 @@ mod native {
                 &one_triangle,
             );
 
-            // Wait briefly for the dispatcher thread to drain. The legacy
-            // `ChassisBuilder` boot path doesn't expose an Actors map for
-            // direct lookup, so the test waits on the per-mailbox pending
-            // counter the FRAME_BARRIER claim populates and treats a
-            // drain-to-zero as the dispatch happening. Pre-2d the test
-            // peeked at `cap.handles()` directly; the new shape doesn't
-            // expose that without a chassis-side actors map.
+            // Wait briefly for the dispatcher thread to drain. The
+            // test waits on the per-mailbox pending counter the
+            // FRAME_BARRIER claim populates and treats a drain-to-zero
+            // as the dispatch happening.
             for _ in 0..50 {
-                if chassis.frame_bound_pending().is_empty()
-                    || chassis.frame_bound_pending()[0].1.load(Ordering::Acquire) == 0
-                {
+                let pending = chassis.frame_bound_pending();
+                if pending.is_empty() || pending[0].1.load(Ordering::Acquire) == 0 {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(5));
             }
             // The pending counter must have hit zero — the dispatcher
             // ran the handler.
-            assert_eq!(chassis.frame_bound_pending().len(), 1);
+            let pending = chassis.frame_bound_pending();
+            assert_eq!(pending.len(), 1);
             assert_eq!(
-                chassis.frame_bound_pending()[0].1.load(Ordering::Acquire),
+                pending[0].1.load(Ordering::Acquire),
                 0,
                 "dispatcher should have processed the DrawTriangle"
             );
 
-            chassis.shutdown();
+            drop(chassis);
         }
 
         /// Frame-bound claim populates the chassis's `frame_bound_pending`
-        /// Vec. Direct render-internal-state assertions live on the
-        /// `with_actor`-via-`Builder` path (chassis_builder tests +
-        /// integration tests in the bundle), where the chassis-side
+        /// Vec. Direct render-internal-state assertions live on
+        /// integration tests in the bundle, where the chassis-side
         /// actors map exposes `Arc<RenderCapability>` for `handles()`
         /// access.
         #[test]
         fn render_registers_frame_bound_pending_counter() {
             let (registry, mailer) = fresh_substrate();
-            let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<RenderCapability>(RenderConfig::default())
-                .build()
+                .build_passive()
                 .expect("build succeeds");
             assert_eq!(
                 chassis.frame_bound_pending().len(),
                 1,
                 "render claimed through frame-bound path"
             );
-            chassis.shutdown();
+            drop(chassis);
         }
 
         #[test]
         fn camera_kind_drops_wrong_length_payload() {
             let (registry, mailer) = fresh_substrate();
-            let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&mailer))
+            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<RenderCapability>(RenderConfig::default())
-                .build()
+                .build_passive()
                 .expect("build succeeds");
 
             // 16 bytes — wrong length, decode fails, macro miss path
@@ -677,12 +683,12 @@ mod native {
             );
 
             std::thread::sleep(Duration::from_millis(50));
-            // No further assertion on internal state — the legacy
-            // `ChassisBuilder` boot path doesn't expose `Arc<RenderCapability>`.
-            // Decode failure is observable via the macro miss path's
-            // warn-log; this test asserts shutdown still proceeds cleanly
-            // (no dispatcher panic on malformed input).
-            chassis.shutdown();
+            // No further assertion on internal state — passive chassis
+            // doesn't expose `Arc<RenderCapability>`. Decode failure is
+            // observable via the macro miss path's warn-log; this test
+            // asserts shutdown still proceeds cleanly (no dispatcher
+            // panic on malformed input).
+            drop(chassis);
         }
     }
 }
