@@ -241,7 +241,9 @@ mod tests {
     fn unknown_recipient_bubbles_up_with_sender_mailbox() {
         let (outbound, outbound_rx) = crate::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
-        let sender = registry.register_component("client");
+        let sender = registry
+            .try_register_closure("client", Arc::new(|_, _, _, _, _, _| {}))
+            .expect("register client mailbox");
 
         let mailer = Arc::new(Mailer::new());
         mailer.wire(Arc::clone(&registry));
@@ -286,7 +288,9 @@ mod tests {
     fn unknown_recipient_without_outbound_warn_drops() {
         let (outbound, outbound_rx) = crate::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
-        let sender = registry.register_component("client");
+        let sender = registry
+            .try_register_closure("client", Arc::new(|_, _, _, _, _, _| {}))
+            .expect("register client mailbox");
 
         let mailer = Arc::new(Mailer::new());
         mailer.wire(Arc::clone(&registry));

@@ -169,17 +169,16 @@ mod native {
         }
     }
 
-    /// Shared validation: the mailbox id must name a live component.
-    /// Chassis-bound mailboxes and already-dropped mailboxes are
-    /// rejected with a human-readable error string the cap echoes
-    /// back via `SubscribeInputResult::Err`.
+    /// Shared validation: the mailbox id must name a live (non-dropped)
+    /// closure-bound mailbox. Issue 634 Phase 4 collapsed Component
+    /// and chassis-bound mailboxes into a single `Closure` variant —
+    /// trampolines and chassis caps both pass this check today.
+    /// Production callers (the input stream fan-out) only address
+    /// trampoline mailboxes here; chassis caps don't subscribe to
+    /// themselves.
     fn validate_subscriber_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
         match registry.entry(id) {
-            Some(MailboxEntry::Component) => Ok(()),
-            Some(MailboxEntry::Closure(_)) => Err(format!(
-                "mailbox {:?} is a chassis-bound mailbox, not a component",
-                id
-            )),
+            Some(MailboxEntry::Closure(_)) => Ok(()),
             Some(MailboxEntry::Dropped) => Err(format!("mailbox {:?} already dropped", id)),
             None => Err(format!("unknown mailbox id {:?}", id)),
         }

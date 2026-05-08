@@ -38,6 +38,8 @@ pub mod log;
 pub mod render;
 pub mod tcp;
 pub mod test_bench;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod wasm_trampoline;
 pub mod window;
 
 #[cfg(feature = "audio")]
@@ -69,4 +71,6 @@ pub use render::RenderCapability;
 pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
+#[cfg(not(target_arch = "wasm32"))]
+pub use wasm_trampoline::{WasmTrampoline, full_name as wasm_trampoline_full_name};
 pub use window::HeadlessWindowCapability;

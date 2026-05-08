@@ -202,25 +202,7 @@ mod tests {
     use super::*;
     use crate::mail::MailboxId;
     use crate::registry::Registry;
-    use crate::supervisor::{ComponentRouter, ComponentSendOutcome, DrainDeath, DrainSummary};
-
-    /// Mock router that returns a pre-configured `DrainSummary` from
-    /// `drain_all_with_budget`. Lets the wedge / death format-string
-    /// tests exercise the real `Mailer::drain_all_with_budget` ⇒
-    /// `abort_reason` path without spinning a real wasm dispatcher.
-    /// The supervisor's own dispatcher-stuck coverage lives cap-side.
-    struct StubRouter {
-        summary: DrainSummary,
-    }
-
-    impl ComponentRouter for StubRouter {
-        fn route(&self, _recipient: MailboxId, _mail: Mail) -> ComponentSendOutcome {
-            ComponentSendOutcome::Unknown
-        }
-        fn drain_all_with_budget(&self, _budget: Duration) -> DrainSummary {
-            self.summary.clone()
-        }
-    }
+    use crate::supervisor::{DrainDeath, DrainSummary};
 
     /// `abort_reason` returns `None` for a clean drain summary.
     #[test]
@@ -301,63 +283,14 @@ mod tests {
         );
     }
 
-    /// `Mailer::drain_all_with_budget` propagates the supervisor's
-    /// summary verbatim, and the wedge `abort_reason` carries the
-    /// originating mailbox via the `Display` formatter (post-issue-435).
-    /// Calling `drain_or_abort` directly would `std::process::exit` at
-    /// the end, so the test runs the same drain the helper runs and
-    /// the same formatter, just with the terminal
-    /// `lifecycle::fatal_abort` step swapped for an equality
-    /// assertion.
-    ///
-    /// Cap-side coverage of the dispatcher-stuck primitive
-    /// (`bump_pending_for_test` on a real `ComponentEntry`) lives in
-    /// `aether-capabilities`; here a stub router stands in for the
-    /// supervisor so the format-string contract gets unit coverage
-    /// even on chassis variants that don't host components.
+    /// Issue 634 Phase 4 PR 1 stub: the cap-installed
+    /// `ComponentRouter` retired with the trampoline migration, so
+    /// `Mailer::drain_all_with_budget` always returns an empty
+    /// summary now. PR 2 reframes the drain barrier against the
+    /// `ActorRegistry` and re-introduces fail-fast detection; until
+    /// then this is the only behaviour to pin.
     #[test]
-    fn drain_all_with_budget_propagates_supervisor_wedge() {
-        let registry = Arc::new(Registry::new());
-        let mailer = Arc::new(Mailer::new());
-        mailer.wire(Arc::clone(&registry));
-
-        let mailbox = MailboxId(0xDEAD_BEEF_CAFE_F00D_u64);
-        let waited = Duration::from_millis(50);
-        let summary = DrainSummary {
-            deaths: Vec::new(),
-            wedged: Some((mailbox, waited)),
-        };
-        mailer.install_component_router(Arc::new(StubRouter {
-            summary: summary.clone(),
-        }));
-
-        let observed = mailer.drain_all_with_budget(waited);
-        let (wedge_mailbox, _waited) = observed
-            .wedged
-            .as_ref()
-            .expect("stub supervisor produced a wedged summary");
-        assert_eq!(*wedge_mailbox, mailbox);
-
-        let reason = abort_reason(&observed).expect("wedged summary yields a reason");
-        assert!(
-            reason.starts_with("dispatcher wedged: mailbox="),
-            "reason must lead with `dispatcher wedged: mailbox=` (got: {reason})",
-        );
-        assert!(reason.contains("waited="));
-        // Display formatter for `MailboxId` is `mbx-<hex>`, not the
-        // `MailboxId(<n>)` Debug form.
-        assert!(
-            !reason.contains("MailboxId("),
-            "wedge reason must format mailbox via Display, not Debug (got: {reason})",
-        );
-    }
-
-    /// `Mailer::drain_all_with_budget` returns an empty summary when
-    /// no supervisor has installed a router. Chassis without a
-    /// component supervisor (today: hub) take this path each frame
-    /// without reaching for a missing router.
-    #[test]
-    fn drain_all_with_budget_empty_without_supervisor() {
+    fn drain_all_with_budget_returns_empty_summary() {
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new());
         mailer.wire(Arc::clone(&registry));
