@@ -352,9 +352,16 @@ impl Spawner {
                     };
                     let mut native_ctx =
                         crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
+                    // Issue 634 Phase 4: trampolines are instanced
+                    // actors that route every un-typed kind through
+                    // `#[fallback]` to the wasm guest. Mirror the
+                    // chassis_builder singleton dispatcher's two-step
+                    // (typed → fallback) so the fallback override
+                    // takes effect.
                     if actor
                         .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
                         .is_none()
+                        && !actor.__aether_dispatch_fallback(&mut native_ctx, &env)
                     {
                         tracing::warn!(
                             target: "aether_substrate::spawn",
@@ -376,6 +383,7 @@ impl Spawner {
                     if actor
                         .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
                         .is_none()
+                        && !actor.__aether_dispatch_fallback(&mut native_ctx, &env)
                     {
                         tracing::warn!(
                             target: "aether_substrate::spawn",

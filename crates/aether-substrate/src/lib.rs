@@ -5,15 +5,18 @@
 //! peripherals (window, GPU, TCP listener, event loop) live in the
 //! chassis crate that binds this as a dependency. See ADR-0035.
 //!
-//! The wasm-component supervisor — the actor that owns the per-mailbox
-//! component table, dispatcher threads, and the wasmtime Engine /
-//! Linker — lives in `aether-capabilities` as
-//! [`ComponentHostCapability`][cp] (issue 603). Substrate exposes the
-//! interface the supervisor implements via [`supervisor::ComponentRouter`]
-//! plus the structured drain outcomes ([`supervisor::DrainSummary`])
-//! the chassis frame loop matches on; it knows nothing about the
-//! supervisor's identity beyond "something installed itself on
-//! [`Mailer::install_component_router`]".
+//! Each loaded wasm component runs as a `WasmTrampoline` —
+//! a `NativeActor` instanced under `aether.component.trampoline:NAME`
+//! that delegates incoming mail to the wasm guest via `#[fallback]`
+//! (issue 634 Phase 4). The trampoline lives in
+//! `aether-capabilities`; the substrate-side
+//! `ComponentHostCapability` shrinks to a `LoadComponent` handler
+//! that spawns the trampoline (and forwarders for `DropComponent` /
+//! `ReplaceComponent`). The substrate exposes only the
+//! [`supervisor::DrainSummary`] / [`supervisor::DrainDeath`] types
+//! the chassis frame loop's fail-fast format strings still match
+//! against — Phase 4 PR 2 reframes the drain barrier and retires
+//! these.
 //!
 //! The `Chassis` trait (ADR-0035, redefined by ADR-0071) is universal
 //! but intentionally narrow: `const PROFILE` (the chassis's stable
@@ -92,9 +95,7 @@ pub use outbound::{
 pub use panic_hook::init_panic_hook;
 pub use registry::{MailboxEntry, MailboxHandler, Registry};
 pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
-pub use supervisor::{
-    ComponentRouter, ComponentSendOutcome, DrainDeath, DrainOutcome, DrainSummary,
-};
+pub use supervisor::{DrainDeath, DrainOutcome, DrainSummary};
 
 /// Well-known mailbox name for substrate-level diagnostic events
 /// delivered back to this engine. Today the only kind delivered here
