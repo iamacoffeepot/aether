@@ -18,6 +18,10 @@ use core::marker::PhantomData;
 
 use aether_data::{Kind, Schema, mailbox_id_from_name};
 
+use crate::actor::ctx::mail_sender::MailSender;
+use crate::actor::ctx::outbound_reply::OutboundReply;
+use crate::actor::ctx::persistence::Persistence;
+use crate::actor::ctx::resolver::Resolver;
 use crate::actor::sender::{MailCtx, Sender};
 use crate::actor::{Actor, HandlesKind, Singleton};
 use crate::mail::ReplyTo;
@@ -386,6 +390,88 @@ impl<'a, T: MailTransport> Sender for InitCtx<'a, T> {
 
     fn send_to_named<K: aether_data::Kind>(&mut self, name: &str, payload: &K) {
         resolve_mailbox::<K, T>(name).send(self.transport, payload);
+    }
+}
+
+// Issue 663 phase B layers the per-stage capability trait impls on top
+// of the existing `Sender` / `MailCtx` impls above. Default-impl
+// bodies on `MailSender` cover the routing methods, so each impl
+// below only spells out the stage-specific accessors. Phase C retires
+// the parametric `Ctx<'a, T>` core in favour of concrete FFI ctx
+// structs.
+
+impl<'a, T: MailTransport> MailSender for Ctx<'a, T> {
+    type Transport = T;
+    fn transport(&self) -> &T {
+        self.transport
+    }
+}
+
+impl<'a, T: MailTransport> OutboundReply for Ctx<'a, T> {
+    type ReplyHandle = ReplyTo;
+    fn reply_to(&self) -> Option<ReplyTo> {
+        self.sender.map(ReplyTo::__from_raw)
+    }
+
+    fn origin(&self) -> Option<aether_data::MailboxId> {
+        // FFI guests carry only the opaque reply handle, not a typed
+        // origin mailbox. The native impl in `aether-substrate` reads
+        // the structured `ReplyTarget` and surfaces a `Some(_)` for
+        // `ReplyTarget::Component`.
+        None
+    }
+
+    fn reply<K: Kind + serde::Serialize>(&mut self, payload: &K) {
+        if let Some(raw) = self.sender {
+            let bytes = payload.encode_into_bytes();
+            self.transport.reply_mail(raw, K::ID.0, &bytes, 1);
+        }
+    }
+}
+
+impl<'a, T: MailTransport> MailSender for InitCtx<'a, T> {
+    type Transport = T;
+    fn transport(&self) -> &T {
+        self.transport
+    }
+}
+
+impl<'a, T: MailTransport> Resolver for InitCtx<'a, T> {
+    fn mailbox_id(&self) -> u64 {
+        self.mailbox
+    }
+
+    fn resolve<K: Kind>(&self) -> KindId<K> {
+        resolve::<K>()
+    }
+
+    fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K, T> {
+        resolve_mailbox::<K, T>(name)
+    }
+
+    fn subscribe_input<K: Kind + 'static>(&self) {
+        use aether_kinds::SubscribeInput;
+        let payload = SubscribeInput {
+            kind: <K as Kind>::ID,
+            mailbox: aether_data::MailboxId(self.mailbox),
+        };
+        resolve_mailbox::<SubscribeInput, T>("aether.input").send(self.transport, &payload);
+    }
+}
+
+impl<'a, T: MailTransport> MailSender for DropCtx<'a, T> {
+    type Transport = T;
+    fn transport(&self) -> &T {
+        self.transport
+    }
+}
+
+impl<'a, T: MailTransport> Persistence for DropCtx<'a, T> {
+    fn save_state(&mut self, version: u32, bytes: &[u8]) {
+        let status = self.transport.save_state(version, bytes);
+        if status != 0 {
+            panic!("aether-actor: save_state failed (status {status})");
+        }
     }
 }
 

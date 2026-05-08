@@ -14,7 +14,6 @@
 use aether_data::{Kind, MailboxId};
 
 use crate::actor::ctx::mail_sender::MailSender;
-use crate::mail::ReplyTo;
 
 /// Per-handler reply surface, on top of [`MailSender`]. Handlers call
 /// [`Self::reply::<K>(&payload)`][Self::reply] to answer the inbound's
@@ -26,11 +25,21 @@ use crate::mail::ReplyTo;
 /// inbound-mail context at boot time. Drop contexts also do not —
 /// reply handles invalidate on teardown.
 pub trait OutboundReply: MailSender {
+    /// Per-impl reply-handle type. The wasm-side ctx pins this to
+    /// [`crate::mail::ReplyTo`] (an opaque `u32` host-supplied
+    /// handle); substrate's `NativeCtx` pins it to
+    /// `aether_data::ReplyTo` (the structured `target + correlation_id`
+    /// that `Mailer::send_reply` consumes). The two shapes carry
+    /// different information — issue 663 declines to unify them on a
+    /// single concrete type and instead lets each impl surface its
+    /// own.
+    type ReplyHandle;
+
     /// Reply target for the mail currently being dispatched. `None` for
-    /// component-origin and broadcast-origin mail; `Some(ReplyTo)` when
-    /// the inbound carries a routable originator (Claude session, peer
+    /// component-origin and broadcast-origin mail; `Some(_)` when the
+    /// inbound carries a routable originator (Claude session, peer
     /// component, remote engine mailbox).
-    fn reply_to(&self) -> Option<ReplyTo>;
+    fn reply_to(&self) -> Option<Self::ReplyHandle>;
 
     /// Local-component origin of the mail currently being dispatched,
     /// or `None` for mail with no local sender (broadcast,
