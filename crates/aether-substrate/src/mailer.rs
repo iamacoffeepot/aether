@@ -419,8 +419,14 @@ fn route_mail(
                 // `ReplyTo::EngineMailbox { engine_id, mailbox_id }`
                 // for the receiving component. `None` for mail
                 // with no local component origin (broadcast-
-                // originated, substrate-generated).
-                let source_mailbox_id = mail.from_component;
+                // originated, substrate-generated). Recovered from
+                // `reply_to.target = Component(_)` set by
+                // `SubstrateCtx::send` / `NativeTransport::send_mail`
+                // (issue #644).
+                let source_mailbox_id = match mail.reply_to.target {
+                    ReplyTarget::Component(id) => Some(id),
+                    _ => None,
+                };
                 // ADR-0042: carry the correlation through the bubble-
                 // up frame so a reply coming back via Phase-2 reply
                 // routing lands at the originator's `wait_reply_p32`.

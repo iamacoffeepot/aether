@@ -143,10 +143,12 @@ impl Component {
     /// ADR-0013 + ADR-0017: a fresh sender handle is allocated from
     /// the per-instance `ReplyTable` for every inbound that has a
     /// meaningful reply target — a Claude session (non-NIL
-    /// `SessionToken`) or another component (`from_component`
-    /// populated by `SubstrateCtx::send`). Broadcast-origin and
-    /// system-generated mail pass `NO_REPLY_HANDLE` so the guest's
-    /// `mail.reply_to()` accessor returns `None`.
+    /// `SessionToken`), a remote engine mailbox, or a peer component
+    /// (`reply_to.target = ReplyTarget::Component(_)` populated by
+    /// `SubstrateCtx::send` / `NativeTransport::send_mail`).
+    /// Broadcast-origin and system-generated mail pass
+    /// `NO_REPLY_HANDLE` so the guest's `mail.reply_to()` accessor
+    /// returns `None`.
     pub fn deliver(&mut self, mail: &Mail) -> wasmtime::Result<u32> {
         // ADR-0042: carry the incoming correlation through to the
         // ReplyEntry so a subsequent `reply_mail` echoes it on the
@@ -167,15 +169,10 @@ impl Component {
                 },
                 correlation,
             )),
-            // Component-variant reply_to reaches a real component's
-            // `deliver` only via the mailer-routed reply path (the
-            // sink replied to a local component): the reply itself
-            // has no one to reply back to, so the guest sees no
-            // `reply_to`. Falls through to the `from_component`
-            // check, matching the None path.
-            ReplyTarget::None | ReplyTarget::Component(_) => mail
-                .from_component
-                .map(|m| ReplyEntry::new(ReplyTarget::Component(m), correlation)),
+            ReplyTarget::Component(m) => {
+                Some(ReplyEntry::new(ReplyTarget::Component(*m), correlation))
+            }
+            ReplyTarget::None => None,
         };
         let handle = match entry {
             Some(e) => self.store.data_mut().reply_table.allocate(e),
@@ -594,14 +591,16 @@ mod tests {
     }
 
     #[test]
-    fn deliver_with_from_component_allocates_component_handle() {
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M};
+    fn deliver_with_component_reply_target_allocates_component_handle() {
+        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
         use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
 
         let mut component = instantiate(WAT_STORES_SENDER);
-        // ADR-0017: component-origin mail (no session token, but a
-        // populated `from_component`) gets a Component-variant handle.
-        let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1).with_origin(M(7));
+        // ADR-0017 / issue #644: component-origin mail (peer-to-peer
+        // send sets `reply_to.target = Component(sender)`) gets a
+        // Component-variant handle.
+        let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
+            .with_reply_to(ReplyTo::to(ReplyTarget::Component(M(7))));
         component.deliver(&mail).expect("deliver");
         let observed = component.read_u32(500);
         assert_ne!(observed, NO_REPLY_HANDLE);
@@ -609,32 +608,6 @@ mod tests {
             component.store.data().reply_table.resolve(observed),
             Some(ReplyEntry::component(M(7))),
         );
-    }
-
-    #[test]
-    fn deliver_session_takes_priority_over_component_origin() {
-        // If both a session token and a from_component are set (which
-        // can happen if hub-originated mail somehow gets re-routed
-        // through SubstrateCtx::send), the Session variant wins. The
-        // session is the more specific reply target.
-        use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
-        use crate::reply_table::ReplyEntry;
-        use aether_data::{SessionToken, Uuid};
-
-        let mut component = instantiate(WAT_STORES_SENDER);
-        let token = SessionToken(Uuid::from_u128(0xbbbb));
-        let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
-            .with_reply_to(ReplyTo::to(ReplyTarget::Session(token)))
-            .with_origin(M(99));
-        component.deliver(&mail).expect("deliver");
-        let observed = component.read_u32(500);
-        match component.store.data().reply_table.resolve(observed) {
-            Some(ReplyEntry {
-                target: ReplyTarget::Session(t),
-                ..
-            }) => assert_eq!(t, token),
-            other => panic!("expected Session, got {other:?}"),
-        }
     }
 
     fn plane_ctx_for_reply() -> (

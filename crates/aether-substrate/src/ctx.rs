@@ -213,17 +213,16 @@ impl SubstrateCtx {
 
         // Component / dropped / unknown all funnel through `Mailer::push`:
         // - Component (ADR-0017): mail enters the recipient's inbox with
-        //   `from_component = self.sender` so `Component::deliver` can
-        //   allocate a Component-variant `ReplyEntry`.
+        //   `reply_to.target = Component(self.sender)` so
+        //   `Component::deliver` can allocate a Component-variant
+        //   `ReplyEntry`.
         // - Dropped: warn-drops in `route_mail`.
         // - Unknown (ADR-0037): bubbles up to the hub-substrate via
-        //   `MailToHubSubstrate` with `source_mailbox_id = self.sender`
-        //   when a `HubOutbound` is connected; warn-drops otherwise.
-        self.queue.push(
-            Mail::new(recipient, kind, payload, count)
-                .with_reply_to(reply_to)
-                .with_origin(self.sender),
-        );
+        //   `MailToHubSubstrate`; the `source_mailbox_id` it carries is
+        //   recovered from `reply_to.target` when it's a Component
+        //   variant (warn-drops otherwise).
+        self.queue
+            .push(Mail::new(recipient, kind, payload, count).with_reply_to(reply_to));
     }
 }
 
