@@ -221,10 +221,11 @@ fn run_frame(
             queue.push(Mail::new(mbox, kind_tick, encode_empty::<Tick>(), 1));
         }
     }
-    frame_loop::drain_or_abort(queue, outbound);
     // ADR-0074 §Decision 5: render's inbox must quiesce before
     // submit so any DrawTriangle / aether.camera mail this frame is
-    // integrated into the recorded pass.
+    // integrated into the recorded pass. (The pre-Phase-4 component
+    // drain barrier is retired; trampoline traps fail-fast directly
+    // via `NativeTransport::fatal_abort`.)
     frame_loop::drain_frame_bound_or_abort(frame_bound_pending, outbound);
 
     match capture_queue.take() {

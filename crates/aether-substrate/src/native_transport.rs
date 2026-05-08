@@ -250,6 +250,18 @@ impl NativeTransport {
         self.shutdown_flag.store(true, Ordering::Release);
     }
 
+    /// ADR-0063 fail-fast: bring the substrate down with `reason`.
+    /// Diverging — does not return. Production substrates exit via
+    /// [`crate::lifecycle::fatal_abort`] (broadcasts `SubstrateDying`
+    /// then calls `process::exit(2)`); test substrates panic instead.
+    /// The trampoline calls this when the wasm guest traps, so a
+    /// faulty component takes down the substrate cleanly with a useful
+    /// log message rather than leaving a tombstoned trampoline whose
+    /// failure mode is invisible to callers.
+    pub fn fatal_abort(&self, reason: String) -> ! {
+        self.aborter.abort(reason);
+    }
+
     /// Read the self-shutdown flag. Polled by the dispatcher trampoline
     /// after each handler dispatch — substrate-shutdown
     /// (channel-disconnect) flows through the same drain path without

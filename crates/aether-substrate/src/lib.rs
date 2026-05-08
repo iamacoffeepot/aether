@@ -12,11 +12,10 @@
 //! `aether-capabilities`; the substrate-side
 //! `ComponentHostCapability` shrinks to a `LoadComponent` handler
 //! that spawns the trampoline (and forwarders for `DropComponent` /
-//! `ReplaceComponent`). The substrate exposes only the
-//! [`supervisor::DrainSummary`] / [`supervisor::DrainDeath`] types
-//! the chassis frame loop's fail-fast format strings still match
-//! against — Phase 4 PR 2 reframes the drain barrier and retires
-//! these.
+//! `ReplaceComponent`). Phase 4 PR 2 retired the per-frame drain
+//! barrier and the `DrainSummary` / `DrainDeath` / `DrainOutcome`
+//! aggregate types: trampoline traps now fail-fast directly via
+//! `NativeTransport::fatal_abort` at the trap site (ADR-0063).
 //!
 //! The `Chassis` trait (ADR-0035, redefined by ADR-0071) is universal
 //! but intentionally narrow: `const PROFILE` (the chassis's stable
@@ -66,7 +65,6 @@ pub mod registry;
 pub mod render;
 pub mod reply_table;
 pub mod spawn;
-pub mod supervisor;
 
 pub use actor_registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
 pub use aether_actor::Actor;
@@ -95,7 +93,6 @@ pub use outbound::{
 pub use panic_hook::init_panic_hook;
 pub use registry::{MailboxEntry, MailboxHandler, Registry};
 pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
-pub use supervisor::{DrainDeath, DrainOutcome, DrainSummary};
 
 /// Well-known mailbox name for substrate-level diagnostic events
 /// delivered back to this engine. Today the only kind delivered here

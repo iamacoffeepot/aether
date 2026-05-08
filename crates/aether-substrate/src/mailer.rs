@@ -8,23 +8,21 @@
 // entirely: every loaded wasm component is now a `WasmTrampoline`
 // `NativeActor` registered as a `MailboxEntry::Closure` like every
 // other actor, so the dedicated `ComponentRouter` slot + `route()`
-// method + `MailboxEntry::Component` variant are gone.
-// `drain_all_with_budget` remains as a stub returning an empty
-// `DrainSummary` until Phase 4 PR 2 reframes the drain barrier
-// against the `ActorRegistry`.
+// method + `MailboxEntry::Component` variant are gone. PR 2 retired
+// the `drain_all_with_budget` polling barrier in favour of direct
+// trap-abort at the trampoline (the trampoline holds a
+// `FatalAborter` and aborts on `Component::deliver` Err).
 //
 // `push(mail)` still resolves the recipient inline on the caller's
 // thread.
 
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use crate::outbound::HubOutbound;
 use crate::registry::{MailboxEntry, Registry};
-use crate::supervisor::DrainSummary;
 use aether_data::{HandleId, KindId};
 
 pub struct Mailer {
@@ -211,17 +209,6 @@ impl Mailer {
                 true
             }
         }
-    }
-
-    /// Issue 634 Phase 4 PR 1 stub: pre-Phase-4 the mailer iterated
-    /// the wasm-component dispatcher's per-entry drain counters via
-    /// the installed `ComponentRouter`. Trampolines are now
-    /// free-running `NativeActor`s; the framework dispatcher tracks
-    /// nothing fail-fast-able yet. Phase 4 PR 2 reframes the drain
-    /// barrier against the `ActorRegistry`; until then this returns
-    /// an empty summary.
-    pub fn drain_all_with_budget(&self, _budget: Duration) -> DrainSummary {
-        DrainSummary::default()
     }
 }
 

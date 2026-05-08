@@ -566,11 +566,10 @@ impl TestBench {
 
         let mut quiet_iterations = 0u32;
         for iteration in 0..MAX_ITERATIONS {
-            // Settle the queue. The control mail we pushed flows
-            // through the dispatcher → control plane → chassis
-            // handler, which produces an event on `events_rx` for
-            // Advance/CaptureRequested kinds.
-            self.queue.drain_all_with_budget(frame_loop::DRAIN_BUDGET);
+            // The control mail we pushed flows through the dispatcher
+            // → control plane → chassis handler synchronously on push,
+            // which produces an event on `events_rx` for Advance /
+            // CaptureRequested kinds before this loop body runs.
 
             // Drain any pending chassis events. Each invocation
             // potentially produces a reply on `outbound`.
@@ -668,10 +667,11 @@ impl TestBench {
                     .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
             }
         }
-        frame_loop::drain_or_abort(&self.queue, &self.outbound);
         // ADR-0074 §Decision 5: render's inbox must quiesce before
         // submit so any DrawTriangle / aether.camera mail this frame
-        // is integrated into the recorded pass.
+        // is integrated into the recorded pass. (The pre-Phase-4
+        // component drain barrier is retired; trampoline traps
+        // fail-fast directly via `NativeTransport::fatal_abort`.)
         frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
 
         match self.capture_queue.take() {
@@ -702,10 +702,6 @@ impl TestBench {
             // `AdvanceResult` first and return before the broadcast
             // dispatcher's `egress_broadcast` reached outbound, dropping
             // `aether.observation.frame_stats` from `observed_kinds`.
-            // `drain_frame_bound_or_abort` waits on the broadcast cap's
-            // pending counter directly — caps register as sinks, not
-            // components, so `drain_or_abort` (which only drains
-            // `MailboxEntry::Component` entries) wouldn't help.
             frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
             let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             tracing::info!(
