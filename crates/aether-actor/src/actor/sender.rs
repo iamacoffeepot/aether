@@ -9,7 +9,7 @@
 //!
 //! [`Sender`] is the addressing minimum every per-handler ctx and
 //! every init-time ctx exposes — single-payload `send`, batched
-//! `send_many` (cast-only, see [`crate::mailbox::Mailbox::send_many`]
+//! `send_many` (cast-only, see [`crate::mail::mailbox::Mailbox::send_many`]
 //! for the wire-shape rationale), plus `send_to_named` as the
 //! string-keyed escape hatch for cases where the caller genuinely
 //! has no Rust type at compile site.

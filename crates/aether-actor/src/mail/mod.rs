@@ -1,13 +1,20 @@
-//! Inbound mail and prior-state bundles. Pure decoders — no transport
-//! coupling, so these types live as non-generic structs in the SDK.
-//! The transport-coupled send / reply / save lives on `Ctx`,
-//! `DropCtx`, and `Sink`.
+//! Mail layer of the actor SDK: the inbound `Mail` envelope,
+//! `PriorState` bundle, and `ReplyTo` opaque handle live here in
+//! `mod.rs` (pure decoders, no transport coupling). The `Mailbox<K, T>`
+//! send-side type lives in [`mailbox`](crate::mail::mailbox); the
+//! `MailTransport` trait every transport impl provides lives in
+//! [`transport`](crate::mail::transport); the ADR-0042 sync round-trip
+//! helper lives in [`sync`](crate::mail::sync).
+
+pub mod mailbox;
+pub mod sync;
+pub mod transport;
 
 use core::marker::PhantomData;
 
 use aether_data::{Kind, Schema};
 
-use crate::mailbox::KindId;
+use crate::mail::mailbox::KindId;
 
 /// Sentinel the substrate passes as the reply-handle parameter on
 /// the `receive` shim when there is no reply target — for
@@ -340,7 +347,7 @@ impl<'a> PriorState<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mailbox::KindId;
+    use crate::mail::mailbox::KindId;
     use alloc::vec::Vec;
     use serde::{Deserialize, Serialize};
 

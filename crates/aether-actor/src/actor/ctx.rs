@@ -18,11 +18,11 @@ use core::marker::PhantomData;
 
 use aether_data::{Kind, Schema, mailbox_id_from_name};
 
+use crate::actor::sender::{MailCtx, Sender};
 use crate::actor::{Actor, HandlesKind, Singleton};
 use crate::mail::ReplyTo;
-use crate::mailbox::{ActorMailbox, KindId, Mailbox, resolve, resolve_mailbox};
-use crate::sender::{MailCtx, Sender};
-use crate::transport::MailTransport;
+use crate::mail::mailbox::{ActorMailbox, KindId, Mailbox, resolve, resolve_mailbox};
+use crate::mail::transport::MailTransport;
 
 /// Init-only capability handle. The type split between `InitCtx` and
 /// `Ctx` fences "when can I resolve?" (init only) and "when can I
@@ -392,7 +392,7 @@ impl<'a, T: MailTransport> Sender for InitCtx<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::MailTransport;
+    use crate::mail::transport::MailTransport;
 
     /// Stub transport — `DropCtx::__new()` doesn't dispatch through
     /// `T`, but the type bound forces something concrete. Lives next

@@ -55,35 +55,29 @@ extern crate alloc;
 // Outside callers don't need this; it's a no-op for them.
 extern crate self as aether_actor;
 
-mod actor;
-mod ctx;
+pub mod actor;
 pub mod local;
 pub mod log;
-mod mail;
-mod mailbox;
-mod sender;
-mod slot;
-mod sync;
-mod transport;
+pub mod mail;
 pub mod wasm;
 
+pub use actor::ctx::{Ctx, DropCtx, InitCtx};
+pub use actor::sender::{MailCtx, Sender};
+pub use actor::slot::Slot;
 pub use actor::{
     Actor, Dispatch, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, Singleton,
     validate_namespace_segment,
 };
-pub use ctx::{Ctx, DropCtx, InitCtx};
 pub use local::Local;
-pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
-pub use sender::{MailCtx, Sender};
 // Generic 2-arg `Mailbox<K, T>` stays accessible as
-// `aether_actor::sink::Mailbox`. At the crate root we re-export the
-// 1-arg wasm alias (defined in `wasm`) under the same `Mailbox` name
-// so existing `aether_component::Mailbox<K>` consumers keep their
-// call shape when migrating to `aether_actor::*`.
-pub use mailbox::{ActorMailbox, KindId, resolve, resolve_mailbox};
-pub use slot::Slot;
-pub use sync::{WaitError, decode_wait_reply, wait_reply};
-pub use transport::MailTransport;
+// `aether_actor::mail::mailbox::Mailbox`. At the crate root we
+// re-export the 1-arg wasm alias (defined in `wasm`) under the same
+// `Mailbox` name so existing `aether_component::Mailbox<K>` consumers
+// keep their call shape when migrating to `aether_actor::*`.
+pub use mail::mailbox::{ActorMailbox, KindId, resolve, resolve_mailbox};
+pub use mail::sync::{WaitError, decode_wait_reply, wait_reply};
+pub use mail::transport::MailTransport;
+pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyTo};
 
 // Wasm-guest surface promoted to the crate root so consumers see
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc.
@@ -112,7 +106,7 @@ pub use wasm::{
 // separate from the [`MailTransport`] re-export above for code that
 // wrote `aether_component::MailTransportTrait` against the prior
 // alias.
-pub use transport::MailTransport as MailTransportTrait;
+pub use mail::transport::MailTransport as MailTransportTrait;
 
 /// Return code the `#[actor]`-synthesized dispatcher sends back up
 /// through `receive_p32` when a `#[handler]` arm matched (or the

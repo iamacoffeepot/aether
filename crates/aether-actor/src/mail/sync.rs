@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 
 use aether_data::Kind;
 
-use crate::transport::MailTransport;
+use crate::mail::transport::MailTransport;
 
 /// Error contract every sync wrapper's error enum needs to implement
 /// so [`wait_reply`] can construct the four post-FFI failure modes
