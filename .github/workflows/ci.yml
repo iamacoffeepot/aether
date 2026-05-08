@@ -129,25 +129,15 @@ jobs:
             [ -z "$pkg" ] && continue
             cargo build --target wasm32-unknown-unknown -p "$pkg"
           done <<< "$pkgs"
-      # Filter to just the files changed in this PR / push and run
-      # tests only for crates whose files appear. Git history fetched
-      # by the initial checkout above (fetch-depth 2 / 0).
+      # Run the full workspace test suite under nextest. The
+      # changed-crate filter the prior step had is gone — nextest's
+      # process-per-test isolation surfaces cross-test contamination
+      # that the per-crate filter could mask, and the CI profile's
+      # `slow-timeout` bounds runaway tests cleanly.
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
       - name: Run tests
-        run: |
-          if ${{ github.event_name == 'pull_request' }}; then
-              changed_files=$(git diff --name-only -r HEAD^1 HEAD)
-          else
-              changed_files=$(git diff --name-only ${{ github.event.before }} ${{ github.event.after }})
-          fi
-          echo "Changed files: ${changed_files}"
-          TESTABLE_CRATES=$(echo "${changed_files}" | grep -E '^(crates)' || true)
-          echo "Testable crates paths: ${TESTABLE_CRATES}"
-          CRATE_NAMES=$(echo "${TESTABLE_CRATES}" | cut -d/ -f2 | sort -u)
-          echo "Unique crate names: ${CRATE_NAMES}"
-          for crate in $CRATE_NAMES; do
-            echo "Found changes in crate: $crate"
-            cargo test -p ${crate}
-          done
+        run: cargo nextest run --all-features --profile ci
         env:
           AETHER_REQUIRE_RUNTIME: "1"
 
