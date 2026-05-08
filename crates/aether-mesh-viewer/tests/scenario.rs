@@ -35,6 +35,16 @@ use aether_substrate_bundle::test_bench::TestBench;
 // "unknown kind".
 use aether_mesh_viewer as _;
 
+/// User-facing component name passed to `LoadComponent`.
+const COMPONENT_NAME: &str = "mv";
+
+/// Full mailbox address the substrate registers for the loaded
+/// component (issue 634 Phase 4 PR 1). Mail to the bare
+/// `COMPONENT_NAME` warn-drops as unknown — agents address the
+/// trampoline by its full `aether.component.trampoline:NAME` form,
+/// which is what `LoadResult.name` returns.
+const COMPONENT_ADDRESS: &str = "aether.component.trampoline:mv";
+
 const BOX_DSL: &[u8] = b"(box 1 1 1 :color 0)\n";
 const QUAD_OBJ: &[u8] = b"\
 v -0.5 -0.5 0
@@ -63,20 +73,20 @@ fn dsl_box_loads_and_renders() {
         steps: vec![
             Step::LoadComponent {
                 path: wasm_path.to_string_lossy().into_owned(),
-                name: Some("mv".to_owned()),
+                name: Some(COMPONENT_NAME.to_owned()),
             },
             // First tick triggers the load; the read reply lands on
             // a later tick. A handful of ticks ensures the cache is
             // populated and several render-sink emissions land.
             Step::Advance { ticks: 1 },
             Step::SendMail {
-                recipient: "mv".to_owned(),
+                recipient: COMPONENT_ADDRESS.to_owned(),
                 kind: "aether.mesh.load".to_owned(),
                 params: serde_yml::from_str(&format!("namespace: save\npath: {path}"))
                     .expect("dsl load params parse"),
             },
             Step::Advance { ticks: 5 },
-            tick_to("mv"),
+            tick_to(COMPONENT_ADDRESS),
             Step::Capture,
             Step::Assert {
                 check: Check::MailObserved {
@@ -115,17 +125,17 @@ fn obj_quad_loads_and_renders() {
         steps: vec![
             Step::LoadComponent {
                 path: wasm_path.to_string_lossy().into_owned(),
-                name: Some("mv".to_owned()),
+                name: Some(COMPONENT_NAME.to_owned()),
             },
             Step::Advance { ticks: 1 },
             Step::SendMail {
-                recipient: "mv".to_owned(),
+                recipient: COMPONENT_ADDRESS.to_owned(),
                 kind: "aether.mesh.load".to_owned(),
                 params: serde_yml::from_str(&format!("namespace: save\npath: {path}"))
                     .expect("obj load params parse"),
             },
             Step::Advance { ticks: 5 },
-            tick_to("mv"),
+            tick_to(COMPONENT_ADDRESS),
             Step::Capture,
             Step::Assert {
                 check: Check::MailObserved {
@@ -167,11 +177,11 @@ fn parse_failure_keeps_prior_mesh() {
         steps: vec![
             Step::LoadComponent {
                 path: wasm_path.to_string_lossy().into_owned(),
-                name: Some("mv".to_owned()),
+                name: Some(COMPONENT_NAME.to_owned()),
             },
             Step::Advance { ticks: 1 },
             Step::SendMail {
-                recipient: "mv".to_owned(),
+                recipient: COMPONENT_ADDRESS.to_owned(),
                 kind: "aether.mesh.load".to_owned(),
                 params: serde_yml::from_str(&format!("namespace: save\npath: {good}"))
                     .expect("good load params parse"),
@@ -186,13 +196,13 @@ fn parse_failure_keeps_prior_mesh() {
             },
             // Now hand the viewer something it can't parse.
             Step::SendMail {
-                recipient: "mv".to_owned(),
+                recipient: COMPONENT_ADDRESS.to_owned(),
                 kind: "aether.mesh.load".to_owned(),
                 params: serde_yml::from_str(&format!("namespace: save\npath: {bad}"))
                     .expect("bad load params parse"),
             },
             Step::Advance { ticks: 5 },
-            tick_to("mv"),
+            tick_to(COMPONENT_ADDRESS),
             Step::Capture,
             // The cached triangle list should be intact — the
             // captured frame still has non-clear-color geometry.
