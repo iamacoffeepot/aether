@@ -13,9 +13,6 @@
 //! # Phase 2A scope
 //!
 //! - Trait family + builder + ctx wiring.
-//! - The existing [`crate::chassis::ctx::ChassisBuilder`] is unchanged
-//!   and remains the construction site for current chassis. Phases
-//!   3-7 (per ADR-0071) migrate each chassis to the new builder.
 //! - [`Chassis::Driver`] / [`Chassis::Env`] / [`Chassis::build`] are
 //!   not yet on the [`crate::chassis::Chassis`] trait — they land
 //!   alongside the first real driver extraction (phase 3) so every
@@ -663,12 +660,10 @@ impl<C: Chassis> Builder<C, NoDriver> {
     }
 
     /// Override the default [`PanicAborter`] with a chassis-supplied
-    /// [`FatalAborter`]. Mirrors
-    /// [`crate::ChassisBuilder::with_aborter`]; production drivers
-    /// (desktop, headless) call this before `build()` so a cross-class
-    /// `wait_reply` violation broadcasts `SubstrateDying` before
-    /// process exit. Single-call: a second invocation overwrites the
-    /// prior aborter.
+    /// [`FatalAborter`]. Production drivers (desktop, headless) call
+    /// this before `build()` so a cross-class `wait_reply` violation
+    /// broadcasts `SubstrateDying` before process exit. Single-call: a
+    /// second invocation overwrites the prior aborter.
     pub fn with_aborter(mut self, aborter: Arc<dyn FatalAborter>) -> Self {
         self.aborter = aborter;
         self

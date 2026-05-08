@@ -116,10 +116,11 @@ pub struct TestBenchEnv {
 /// queue, outbound, kind ids, render accumulator handles, the hub
 /// client.
 ///
-/// `boot` is exposed so the embedder can call
-/// `boot.add_capability(...)` for io / etc. with whatever failure
-/// semantics it wants (binary uses `?`; in-process API silent-skips
-/// io on systems without writable default roots).
+/// `boot` is exposed so the embedder can attach a hub-outbound
+/// loopback (the in-process `TestBench` does this for reply
+/// correlation), read substrate-level handles (`registry`, `queue`,
+/// `outbound`, `input_subscribers`), and own the lifetime guard the
+/// scheduler joins against on shutdown.
 ///
 /// The embedder owns the matching `EventReceiver` for whichever
 /// `EventSender` it passed into [`TestBenchEnv`]; the build does

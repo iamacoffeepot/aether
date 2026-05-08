@@ -742,12 +742,11 @@ impl DriverCapability for DesktopDriverCapability {
             event_loop,
             triangles_rendered,
             // `boot` stays alive on the running so its scheduler joins
-            // workers on drop and its `BootedChassis` (legacy
-            // capabilities added via `boot.add_capability`) shut down
-            // in reverse boot order. Drop ordering on
+            // workers on drop. Drop ordering on
             // `DesktopDriverRunning::run` exit: app → event_loop →
             // triangles_rendered → _boot → _hub, which means
-            // capabilities tear down before the hub disconnects.
+            // capabilities (held by `app`) tear down before the hub
+            // disconnects.
             _boot: boot,
             _hub: hub,
         })
