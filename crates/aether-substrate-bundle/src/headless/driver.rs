@@ -77,9 +77,7 @@ pub struct HeadlessTimerRunning {
     kind_frame_stats: KindId,
     tick_period: Duration,
     /// `SubstrateBoot` drops at the end of `run()` so its scheduler
-    /// joins workers and its `BootedChassis` (legacy ADR-0070
-    /// capabilities — io, net, log) tear down in reverse boot order
-    /// before the hub disconnects.
+    /// joins workers before the hub disconnects.
     _boot: SubstrateBoot,
     _hub: Option<HubClient>,
 }

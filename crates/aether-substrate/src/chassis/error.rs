@@ -72,11 +72,11 @@ impl From<wasmtime::Error> for BootError {
     }
 }
 
-/// Diagnostic returned from `BootedChassis::drain_frame_bound` when
-/// a frame-bound capability's inbox didn't drain within the budget.
-/// The chassis frame loop routes this through `lifecycle::fatal_abort`
-/// the same way component-side wedges do — see
-/// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`].
+/// Diagnostic returned from
+/// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`] when a
+/// frame-bound capability's inbox didn't drain within the budget. The
+/// chassis frame loop routes this through `lifecycle::fatal_abort`
+/// the same way component-side wedges do.
 #[derive(Debug, Clone, Copy)]
 pub struct WedgedFrameBound {
     pub mailbox: MailboxId,

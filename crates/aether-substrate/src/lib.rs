@@ -62,8 +62,8 @@ pub use chassis::builder::{
     NeverDriver, NeverDriverRunning, NoDriver, PassiveChassis, RunError,
 };
 pub use chassis::ctx::{
-    ActorErased, BootedChassis, ChassisBuilder, ChassisCtx, DropOnShutdownClaim, FallbackRouter,
-    FrameBoundClaim, MailboxClaim, MailboxSender,
+    ActorErased, ChassisCtx, DropOnShutdownClaim, FallbackRouter, FrameBoundClaim, MailboxClaim,
+    MailboxSender,
 };
 pub use chassis::error::{BootError, WedgedFrameBound};
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};

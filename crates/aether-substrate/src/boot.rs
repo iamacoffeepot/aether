@@ -33,7 +33,7 @@
 //! directly, never touch env. Stage 2e (issue 552) extracted every
 //! cap to `aether-capabilities`; the cap-specific config readers
 //! (e.g. `NamespaceRoots::from_env`) live there now and chassis
-//! mains reach for them when calling [`SubstrateBoot::add_actor`].
+//! mains reach for them when composing the `Builder` chain.
 
 use std::sync::Arc;
 
@@ -41,8 +41,8 @@ use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::{
-    AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ComponentCtx, HubOutbound, InputSubscribers,
-    Mailer, Registry, actor::wasm::host_fns, handle_store::HandleStore, input::new_subscribers,
+    AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, InputSubscribers, Mailer, Registry,
+    actor::wasm::host_fns, handle_store::HandleStore, input::new_subscribers,
 };
 
 /// Everything a chassis needs after shared boot setup. Fields are
@@ -74,16 +74,6 @@ pub struct SubstrateBoot {
     /// log the count, etc. Same `Vec` that was registered with the
     /// `Registry`.
     pub boot_descriptors: Vec<KindDescriptor>,
-    /// ADR-0070 native capabilities booted during shared bring-up.
-    /// Stage 2e (issue 552) extracted every cap to `aether-capabilities`,
-    /// so the substrate boot no longer pre-installs any cap — chassis
-    /// mains call [`Self::add_actor`] for each one
-    /// (`HandleCapability` is universal and goes first;
-    /// chassis-conditional `Audio` / `Render` / `Log` / `Net` / `Io` /
-    /// `ControlPlane` follow). Exposed publicly so chassis binaries
-    /// that want explicit control can `take()` and call
-    /// [`BootedChassis::shutdown`] themselves.
-    pub chassis: Option<BootedChassis>,
     /// Substrate identity passed to the boot builder. Chassis crates
     /// thread these through to `aether_hub::HubClientCapability` (via
     /// the `Hello` handshake) without re-reading their own config.
@@ -103,72 +93,6 @@ impl SubstrateBoot {
     /// `env!("CARGO_PKG_VERSION")`.
     pub fn builder<'a>(name: &'a str, version: &'a str) -> SubstrateBootBuilder<'a> {
         SubstrateBootBuilder { name, version }
-    }
-
-    /// Dial `url` and start the hub reader + heartbeat threads.
-    /// Returns `Ok(Some(client))` on success — the chassis MUST keep
-    /// the client alive (typically by stashing it in its own struct)
-    /// for those threads to stay running. `Ok(None)` if `url` is
-    /// `None` (substrate runs locally, no hub). `Err` propagates a
-    /// hub-connect failure (TCP refused, handshake timeout, etc.) so
-    /// the chassis can decide whether to fail the boot or run
-    /// hub-disconnected.
-    ///
-    /// Call this **after** every chassis sink is registered (and any
-    /// other state that should exist before the hub knows about the
-    /// engine). Before this returns, no hub-driven `load_component`
-    /// can race the chassis's setup. See issue #262.
-    ///
-    /// Per issue 464, this is the substrate-core entry point — the
-    /// chassis main reads `AETHER_HUB_URL` from env and passes it
-    /// through. `connect_hub_from_env` is a thin wrapper for callers
-    /// that still want the env-driven behaviour inline.
-    /// Boot one more capability into the chassis the shared boot
-    /// already started. Wrapper around [`BootedChassis::add`] that
-    /// supplies the substrate's own registry + mailer handles, so
-    /// chassis mains compose chassis-conditional capabilities with
-    /// one line per capability:
-    ///
-    /// ```ignore
-    /// // Stage 2e: caps live in `aether-capabilities`; chassis mains
-    /// // reach in there for the type and call `add_actor` per-cap.
-    /// boot.add_actor::<aether_capabilities::HandleCapability>(())?;
-    /// boot.add_actor::<aether_capabilities::LogCapability>(())?;
-    /// ```
-    ///
-    /// Boot order is call order; shutdown order is the reverse, the
-    /// same as build-time capabilities. The fallback-router slot is
-    /// shared across build-time and post-build capabilities, so the
-    /// single-claim invariant holds.
-    ///
-    /// Pre-PR-E3 there was a separate `add_facade` for actor caps
-    /// alongside `add_capability` for legacy `Capability` caps; the
-    /// legacy path retired alongside `Capability` itself.
-    pub fn add_capability<C>(&mut self, cap: C) -> Result<(), crate::chassis::error::BootError>
-    where
-        C: aether_actor::Actor + aether_actor::Dispatch + Send + 'static,
-    {
-        let chassis = self
-            .chassis
-            .as_mut()
-            .expect("SubstrateBoot::build always installs a BootedChassis");
-        chassis.add(&self.registry, &self.queue, cap)
-    }
-
-    /// Issue 552 stage 2: post-build entry for a `NativeActor`.
-    /// Mirror of [`Self::add_capability`] for the new cap shape.
-    pub fn add_actor<A>(
-        &mut self,
-        config: A::Config,
-    ) -> Result<(), crate::chassis::error::BootError>
-    where
-        A: crate::NativeActor + crate::NativeDispatch,
-    {
-        let chassis = self
-            .chassis
-            .as_mut()
-            .expect("SubstrateBoot::build always installs a BootedChassis");
-        chassis.add_actor::<A>(&self.registry, &self.queue, config)
     }
 }
 
@@ -248,9 +172,6 @@ impl<'a> SubstrateBootBuilder<'a> {
             Mailer::new(Arc::clone(&registry), Arc::clone(&handle_store))
                 .with_outbound(Arc::clone(&outbound)),
         );
-        let chassis = ChassisBuilder::new(Arc::clone(&registry), Arc::clone(&queue))
-            .build()
-            .map_err(|e| wasmtime::Error::msg(format!("chassis capability boot: {e}")))?;
 
         let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
         host_fns::register(&mut linker)?;
@@ -267,7 +188,6 @@ impl<'a> SubstrateBootBuilder<'a> {
             input_subscribers,
             handle_store,
             boot_descriptors,
-            chassis: Some(chassis),
             name: self.name.to_owned(),
             version: self.version.to_owned(),
         })
