@@ -15,7 +15,7 @@
 //!
 //! [`FatalAborter`] is the indirection that lets call sites that
 //! don't naturally hold a [`HubOutbound`] (the cross-class wait_reply
-//! guard in [`crate::native_transport`], future ADR-0074 §Decision-7
+//! guard in [`crate::actor::native::transport`], future ADR-0074 §Decision-7
 //! checks) request an abort without plumbing outbound through every
 //! layer. Production chassis construct an [`OutboundFatalAborter`];
 //! tests use [`PanicAborter`] so a misuse panics the test thread
@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use aether_kinds::SubstrateDying;
 
-use crate::outbound::HubOutbound;
+use crate::mail::outbound::HubOutbound;
 
 /// Process exit code on fatal abort. Distinct from `0` (clean exit)
 /// and `1` (which Rust uses for panics from `main`).

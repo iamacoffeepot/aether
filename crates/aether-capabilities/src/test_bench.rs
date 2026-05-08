@@ -23,9 +23,9 @@ mod native {
 
     use aether_actor::actor;
     use aether_kinds::AdvanceResult;
-    use aether_substrate::capability::BootError;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::outbound::HubOutbound;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::outbound::HubOutbound;
 
     use super::Advance;
 

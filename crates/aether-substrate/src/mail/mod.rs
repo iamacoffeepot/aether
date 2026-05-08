@@ -1,5 +1,22 @@
-// Mail envelope types. Owned by value because mails cross thread
-// boundaries through the scheduler's queue.
+//! Mail-routing primitives: the `Mail` envelope shape, the routing
+//! [`Registry`], the [`Mailer`] that owns dispatch, and the
+//! [`HubOutbound`] facade for cross-substrate egress.
+//!
+//! The mail layer is byte-transparent — all of these primitives operate
+//! on raw payloads keyed by [`MailboxId`] and [`KindId`]. Typed
+//! interaction lives in the actor SDK (`aether_actor::Mailbox<K>`) and
+//! per-cap dispatchers.
+
+pub mod helpers;
+pub mod mailer;
+pub mod outbound;
+pub mod registry;
+
+pub use mailer::Mailer;
+pub use outbound::{
+    DroppingBackend, EgressBackend, EgressEvent, HubOutbound, LogEntry, LogLevel, RecordingBackend,
+};
+pub use registry::{MailboxEntry, MailboxHandler, Registry};
 
 /// Addressing token for any mailbox — component or substrate-owned sink.
 /// ADR-0065 hoisted the canonical home into `aether_data` (per ADR-0069);

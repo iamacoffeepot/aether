@@ -24,10 +24,11 @@ use std::time::{Duration, Instant};
 
 use aether_actor::MailTransport;
 
-use crate::capability::{ChassisCtx, Envelope};
-use crate::lifecycle::{FatalAborter, PanicAborter};
+use crate::actor::native::envelope::Envelope;
+use crate::chassis::ctx::ChassisCtx;
+use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId, ReplyTarget, ReplyTo};
-use crate::mailer::Mailer;
+use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 
 /// Owned `MailTransport` impl for a native actor. Each capability
 /// constructs one at boot via [`NativeTransport::new`] and holds it
@@ -85,7 +86,7 @@ pub struct NativeTransport {
     /// entries as additional frame-bound capabilities boot, so this
     /// view stays current across the chassis lifetime.
     frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
-    /// Indirection over [`crate::lifecycle::fatal_abort`] — invoked
+    /// Indirection over [`crate::runtime::lifecycle::fatal_abort`] — invoked
     /// by [`Self::wait_reply`] on cross-class violation. Cloned from
     /// [`ChassisCtx::fatal_aborter`] at boot.
     aborter: Arc<dyn FatalAborter>,
@@ -252,7 +253,7 @@ impl NativeTransport {
 
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.
     /// Diverging — does not return. Production substrates exit via
-    /// [`crate::lifecycle::fatal_abort`] (broadcasts `SubstrateDying`
+    /// [`crate::runtime::lifecycle::fatal_abort`] (broadcasts `SubstrateDying`
     /// then calls `process::exit(2)`); test substrates panic instead.
     /// The trampoline calls this when the wasm guest traps, so a
     /// faulty component takes down the substrate cleanly with a useful
@@ -274,7 +275,7 @@ impl NativeTransport {
     /// Block until the next envelope arrives on this actor's inbox.
     /// Returns `None` when the channel disconnects (the channel-drop
     /// shutdown signal — capability's `RunningCapability::shutdown`
-    /// dropped its [`crate::capability::MailboxSender`], the registry
+    /// dropped its [`crate::chassis::ctx::MailboxSender`], the registry
     /// handler can no longer upgrade its [`std::sync::Weak`], the
     /// inbox's last sender is gone) or when no inbox is installed.
     ///
@@ -525,7 +526,7 @@ fn write_payload(env: &Envelope, out: &mut [u8]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::Registry;
+    use crate::mail::registry::Registry;
     use std::sync::mpsc;
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {

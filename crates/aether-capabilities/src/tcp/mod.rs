@@ -77,9 +77,10 @@ mod cap_native {
         TcpListenerConfig, UnbindListenerResult,
     };
     use aether_actor::{MailCtx, actor};
-    use aether_substrate::capability::BootError;
-    use aether_substrate::native_actor::{MonitorHandle, NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::spawn::Subname;
+    use aether_substrate::actor::monitor::MonitorHandle;
+    use aether_substrate::actor::native::spawn::Subname;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
     use std::collections::HashMap;
     use std::net::TcpListener;
 
@@ -336,11 +337,11 @@ mod cap_native {
         };
         use aether_actor::Actor;
         use aether_data::{Kind, SessionToken, Uuid};
-        use aether_substrate::capability::ChassisBuilder;
+        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::mail::mailer::Mailer;
+        use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
+        use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{ReplyTarget, ReplyTo};
-        use aether_substrate::mailer::Mailer;
-        use aether_substrate::outbound::{EgressEvent, HubOutbound};
-        use aether_substrate::registry::{MailboxEntry, Registry};
 
         fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
             let registry = Arc::new(Registry::new());

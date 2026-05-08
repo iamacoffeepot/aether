@@ -24,8 +24,8 @@ use aether_capabilities::{
 };
 use aether_data::{Kind, KindId};
 use aether_kinds::{FrameStats, SetMasterGain, SetMasterGainResult, Tick};
-use aether_substrate::capability::BootError;
-use aether_substrate::chassis_builder::{Builder, BuiltChassis};
+use aether_substrate::chassis::builder::{Builder, BuiltChassis};
+use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
 use super::driver::{HeadlessTimerCapability, WORKERS, parse_tick_hz_env};
@@ -157,8 +157,10 @@ impl HeadlessChassis {
         // ADR-0074 §Decision 5: production chassis configures the
         // cross-class `wait_reply` aborter to broadcast
         // `SubstrateDying` before exit.
-        let aborter: Arc<dyn aether_substrate::lifecycle::FatalAborter> = Arc::new(
-            aether_substrate::lifecycle::OutboundFatalAborter::new(Arc::clone(&boot.outbound)),
+        let aborter: Arc<dyn aether_substrate::runtime::lifecycle::FatalAborter> = Arc::new(
+            aether_substrate::runtime::lifecycle::OutboundFatalAborter::new(Arc::clone(
+                &boot.outbound,
+            )),
         );
 
         let driver = HeadlessTimerCapability {

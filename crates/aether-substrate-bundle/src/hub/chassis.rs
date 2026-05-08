@@ -28,10 +28,10 @@ use std::time::Duration;
 
 use aether_capabilities::BroadcastCapability;
 use aether_substrate::Chassis;
-use aether_substrate::capability::BootError;
-use aether_substrate::chassis_builder::{
+use aether_substrate::chassis::builder::{
     Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError,
 };
+use aether_substrate::chassis::error::BootError;
 use tokio::runtime::Runtime;
 
 use crate::hub::process_capability::{ProcessCapability, ProcessCapabilityConfig};

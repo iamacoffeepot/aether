@@ -25,8 +25,6 @@
 //! `fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError>`.
 //! The chassis instance you `run()` is the [`BuiltChassis<Self>`] the
 //! trait method returns, not a value of `Self` itself.
-//!
-//! [cp]: https://docs.rs/aether-capabilities/latest/aether_capabilities/struct.ComponentHostCapability.html
 
 // Issue 552 stage 2: the `#[actor] impl NativeActor for X` macro
 // emits `impl ::aether_substrate::NativeDispatch for X` so external
@@ -38,59 +36,45 @@
 // macro arm.
 extern crate self as aether_substrate;
 
-pub mod actor_registry;
+pub mod actor;
 pub mod boot;
-pub mod capability;
 pub mod capture;
 pub mod chassis;
-pub mod chassis_builder;
-pub mod component;
-pub mod control_helpers;
-pub mod frame_loop;
 pub mod handle_store;
-pub mod host_fns;
 pub mod input;
-pub mod kind_manifest;
-pub mod lifecycle;
-pub mod log_install;
 pub mod mail;
-pub mod mailer;
-pub mod native_actor;
-pub mod native_transport;
-pub mod outbound;
-pub mod panic_hook;
-pub mod registry;
 #[cfg(feature = "render")]
 pub mod render;
-pub mod reply_table;
-pub mod spawn;
+pub mod runtime;
 
-pub use actor_registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
+pub use actor::monitor::MonitorHandle;
+pub use actor::native::ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
+pub use actor::native::envelope::Envelope;
+pub use actor::native::spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
+pub use actor::native::transport::NativeTransport;
+pub use actor::native::{NativeActor, NativeDispatch};
+pub use actor::registry::{ActorEntry, ActorRegistry, MonitorEntry, MonitorError};
+pub use actor::wasm::component::{Component, ComponentCtx};
 pub use aether_actor::Actor;
 pub use boot::{SubstrateBoot, SubstrateBootBuilder};
-pub use capability::{
-    ActorErased, BootError, BootedChassis, ChassisBuilder, ChassisCtx, DropOnShutdownClaim,
-    Envelope, FallbackRouter, FrameBoundClaim, MailboxClaim, MailboxSender, WedgedFrameBound,
-};
 pub use chassis::Chassis;
-pub use chassis_builder::{
+pub use chassis::builder::{
     Builder, BuilderState, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, HasDriver,
     NeverDriver, NeverDriverRunning, NoDriver, PassiveChassis, RunError,
 };
-pub use component::{Component, ComponentCtx};
-pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
-pub use mail::{KindId, Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
-pub use mailer::Mailer;
-pub use native_actor::{
-    ExportedHandles, MonitorHandle, NativeActor, NativeCtx, NativeDispatch, NativeInitCtx,
+pub use chassis::ctx::{
+    ActorErased, BootedChassis, ChassisBuilder, ChassisCtx, DropOnShutdownClaim, FallbackRouter,
+    FrameBoundClaim, MailboxClaim, MailboxSender,
 };
-pub use native_transport::NativeTransport;
-pub use outbound::{
+pub use chassis::error::{BootError, WedgedFrameBound};
+pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
+pub use mail::mailer::Mailer;
+pub use mail::outbound::{
     DroppingBackend, EgressBackend, EgressEvent, HubOutbound, LogEntry, LogLevel, RecordingBackend,
 };
-pub use panic_hook::init_panic_hook;
-pub use registry::{MailboxEntry, MailboxHandler, Registry};
-pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
+pub use mail::registry::{MailboxEntry, MailboxHandler, Registry};
+pub use mail::{KindId, Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
+pub use runtime::panic_hook::init_panic_hook;
 
 /// Well-known mailbox name for substrate-level diagnostic events
 /// delivered back to this engine. Today the only kind delivered here

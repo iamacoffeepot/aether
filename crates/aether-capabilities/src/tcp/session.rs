@@ -36,8 +36,8 @@ mod session_native {
     use aether_actor::{Sender, actor};
     use aether_data::Kind;
     use aether_kinds::{HUB_BROADCAST_MAILBOX_NAME, SessionClosed, SessionData};
-    use aether_substrate::capability::BootError;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
     use aether_substrate::{KindId, Mail, Mailer};
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpStream};

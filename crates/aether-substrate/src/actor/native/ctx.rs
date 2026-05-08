@@ -1,66 +1,7 @@
-//! Issue 552 stage 1: native chassis-cap actor surface.
-//!
-//! The native counterpart of `aether_actor::WasmActor`. Stage 1
-//! introduces the type-level vocabulary; Stage 2 migrates the
-//! existing capabilities (Log, Handle, Io, Net, Audio, Render) onto
-//! it. Stage 1's deliverable is the trait + ctx + dispatch
-//! infrastructure plus a working boot path through
-//! [`crate::chassis_builder::Builder::with_actor`]. No existing cap
-//! changes shape during stage 1 — the legacy `with(cap)` path that
-//! takes `Actor + Dispatch` continues to work alongside.
-//!
-//! ## Shape
-//!
-//! ```ignore
-//! #[capability]
-//! #[derive(Singleton)]
-//! pub struct ExampleCap { /* plain fields — single-threaded ownership */ }
-//!
-//! #[actor]
-//! impl NativeActor for ExampleCap {
-//!     type Config = ();
-//!     const NAMESPACE: &'static str = "aether.example";
-//!
-//!     fn init(_: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> { … }
-//!
-//!     #[handler] fn on_hello(&self, ctx: &mut NativeCtx<'_>, mail: Hello) { … }
-//! }
-//! ```
-//!
-//! Issue 629 / Phase A: actors are owned by their dispatcher thread
-//! as `Box<A>` — the cross-thread `Arc<dyn Any + Send + Sync>` storage
-//! is retired. [`NativeDispatch`] takes `&mut self`; `#[handler]`
-//! methods can take either `&self` or `&mut self` (Phase B sweeps caps
-//! to `&mut self` cap by cap as state migrates off interior mutability).
-//!
-//! Cross-thread access from drivers / embedders flows through
-//! cap-exported sub-handles published in `init` via
-//! [`NativeInitCtx::publish_handle`] and retrieved via
-//! [`crate::DriverCtx::handle`]. The actor itself never escapes its
-//! dispatcher thread.
-//!
-//! ## What does NOT live here
-//!
-//! - `actor::<A>()` lookups on per-handler ctx. Once dispatchers are
-//!   running, caps and components communicate via mail — peering at
-//!   sibling state recreates the shared-state coupling the actor
-//!   model is designed to eliminate. The chassis-level
-//!   `chassis.actor::<X>() -> Arc<X>` retired with issue 629 / Phase A;
-//!   external runtimes (drivers, TestBench, MCP) reach for
-//!   cap-exported handles instead.
-//!
-//! ## Catch-all caps (issue 576)
-//!
-//! Caps that fan-out every kind they're addressed at — broadcast
-//! today, hub-as-actor in the future — author with a `#[fallback]`
-//! method instead of `#[handler]`s. The macro emits a blanket
-//! `impl<K: Kind> HandlesKind<K> for X {}` so typed sends like
-//! `ctx.actor::<BroadcastCapability>().send(&payload)` compile for every K,
-//! and overrides [`NativeDispatch::__aether_dispatch_fallback`] to
-//! route every envelope through the user's fallback method. Hybrid
-//! shape (typed handlers + fallback as a runtime safety net) is
-//! rejected by the macro: strict receivers shouldn't silently swallow
-//! unknown kinds.
+//! Per-handler and per-init contexts native actors receive when their
+//! dispatcher trampoline fires. The trait + dispatch surface live in
+//! the parent module (`super`); the cross-flavour `MonitorHandle` lives
+//! in `crate::actor::monitor`.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -69,98 +10,13 @@ use std::sync::Arc;
 use aether_actor::{Actor, ActorMailbox, HandlesKind, MailCtx, Sender, Singleton};
 use aether_data::{Kind, mailbox_id_from_name};
 
-use crate::mail::KindId;
-
-use crate::capability::{BootError, Envelope};
+use crate::actor::monitor::MonitorHandle;
+use crate::actor::native::transport::NativeTransport;
+use crate::actor::registry::MonitorError;
 use crate::mail::ReplyTo;
-use crate::mailer::Mailer;
-use crate::native_transport::NativeTransport;
+use crate::mail::mailer::Mailer;
 
-/// Native chassis-cap actor trait. Per-cap shape: one struct, one
-/// `#[actor] impl NativeActor for X` block. The `Config` associated
-/// type is moved into [`Self::init`] by the chassis builder; pass
-/// `()` for caps with no configuration.
-///
-/// Issue 629 / Phase A: bound is `: Actor` only (which gives
-/// `Send + 'static`). The dispatcher thread owns the cap as `Box<Self>`
-/// for its lifetime — no cross-thread `Arc` share, no `Sync` bound.
-/// Cap state can be plain fields without interior-mutability gymnastics
-/// once Phase B sweeps each cap.
-pub trait NativeActor: Actor {
-    /// Configuration the chassis builder threads through to
-    /// [`Self::init`]. `()` for caps without configuration; the
-    /// actual config struct (e.g. `AudioConfig`) for caps that
-    /// take one.
-    type Config: Send + 'static;
-
-    /// Boot the cap. The chassis has already claimed the cap's
-    /// mailbox under `Actor::NAMESPACE` and built a fresh
-    /// `NativeTransport` whose self-mailbox is that claim — the
-    /// `ctx` exposes those (and the actors-so-far map for boot-time
-    /// peer lookups) plus the universal handle-store for caps that
-    /// hold typed handles.
-    fn init(config: Self::Config, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError>
-    where
-        Self: Sized;
-
-    /// Issue 607 Phase 4a (ADR-0079): last-chance close hook. Runs
-    /// after the dispatcher's inbox drain, before the actor value
-    /// drops. Triggers:
-    ///
-    /// - Self-shutdown — actor's handler called `ctx.shutdown()`;
-    ///   dispatcher saw the flag set after the handler returned.
-    /// - Substrate shutdown — chassis dropped its registry, the sink
-    ///   handler's `Weak<Sender>` upgrade fails, the inbox channel
-    ///   disconnects, and `recv_blocking` returns `None`.
-    /// - Cooperative external — a peer mailed the actor a "please
-    ///   close" kind; the actor's handler did its cleanup and called
-    ///   `ctx.shutdown()`. From the dispatcher's perspective this is
-    ///   identical to self-shutdown.
-    ///
-    /// Issue 629 / Phase A: `&mut self` since the dispatcher thread
-    /// owns the cap exclusively. Default empty — opt-in for caps that
-    /// need to publish a final broadcast or flush state.
-    fn on_close(&mut self, _ctx: &mut NativeCtx<'_>) {}
-}
-
-/// Sum dispatch entry-point — emitted once per `#[actor] impl
-/// NativeActor for X` block. Takes the inbound mail's `(kind, payload)`
-/// pair, routes by kind id to the right `#[handler]` method, and
-/// returns `Some(())` on match + decode success or `None` on unknown
-/// kind / decode failure.
-///
-/// Issue 629 / Phase A: `&mut self` since the dispatcher thread owns
-/// the cap as `Box<Self>` and is the sole entry-point. `: Send +
-/// 'static` (no `Sync`) — the cap is not shared across threads.
-///
-/// Per-handler-kind compile checks come from
-/// [`aether_actor::HandlesKind`] (one impl per handler the macro
-/// emits); a future per-K `NativeDispatch<K>` may layer on top if a
-/// caller wants a typed `dispatch_kind::<K>` entry, but Phase A
-/// doesn't need it.
-pub trait NativeDispatch: Send + 'static {
-    fn __aether_dispatch_envelope(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        kind: KindId,
-        payload: &[u8],
-    ) -> Option<()>;
-
-    /// Catch-all fallback for envelopes whose kind doesn't match any
-    /// `#[handler]` (issue 576). Default returns `false` — the
-    /// chassis trampoline warn-logs the unknown-kind miss as today.
-    /// The `#[actor]` macro overrides this when the impl carries a
-    /// `#[fallback]` method, returning `true` after the user's
-    /// fallback runs so the trampoline knows to suppress the warn
-    /// log.
-    fn __aether_dispatch_fallback(
-        &mut self,
-        _ctx: &mut NativeCtx<'_>,
-        _envelope: &Envelope,
-    ) -> bool {
-        false
-    }
-}
+use super::{NativeActor, NativeDispatch};
 
 /// Per-mail context for a [`NativeActor`] handler. Borrows the
 /// actor's [`NativeTransport`] for outbound mail and carries the
@@ -179,7 +35,7 @@ pub struct NativeCtx<'a> {
 
 impl<'a> NativeCtx<'a> {
     /// Internal constructor — the chassis dispatcher trampoline (in
-    /// `chassis_builder`) builds these. Cap-side test fixtures in
+    /// `chassis::builder`) builds these. Cap-side test fixtures in
     /// `aether-capabilities` also reach for it directly so they can
     /// drive a handler without spinning up a full chassis; that's why
     /// it's `pub` rather than `pub(crate)`.
@@ -261,7 +117,7 @@ impl<'a> NativeCtx<'a> {
     ///
     /// Validation: `target` must currently be `Live` in the
     /// [`crate::ActorRegistry`]; tombstoned (closed) and unknown ids
-    /// surface as [`crate::MonitorError`]. Singletons today don't sit
+    /// surface as [`MonitorError`]. Singletons today don't sit
     /// in the actor registry as `Live` entries (their entries live in
     /// the routing [`crate::Registry`] only); a future lift inserts
     /// them so monitoring a singleton works the same way. Until then,
@@ -270,10 +126,7 @@ impl<'a> NativeCtx<'a> {
     /// Panics if the transport was constructed via
     /// [`NativeTransport::new_for_test`] (no spawner / actor registry
     /// wired). Production transports always carry both.
-    pub fn monitor(
-        &self,
-        target: aether_data::MailboxId,
-    ) -> Result<MonitorHandle, crate::actor_registry::MonitorError> {
+    pub fn monitor(&self, target: aether_data::MailboxId) -> Result<MonitorHandle, MonitorError> {
         let spawner = self
             .transport
             .spawner()
@@ -300,11 +153,11 @@ impl<'a> NativeCtx<'a> {
     /// code never reaches the panic.
     pub fn spawn_child<'b, A>(
         &'b self,
-        subname: crate::spawn::Subname<'b>,
+        subname: super::spawn::Subname<'b>,
         config: A::Config,
-    ) -> crate::SpawnBuilder<'b, A>
+    ) -> super::spawn::SpawnBuilder<'b, A>
     where
-        A: aether_actor::Instanced + NativeActor + crate::NativeDispatch,
+        A: aether_actor::Instanced + NativeActor + NativeDispatch,
     {
         let spawner = self
             .transport
@@ -314,7 +167,7 @@ impl<'a> NativeCtx<'a> {
             target: crate::mail::ReplyTarget::Component(self.transport.self_mailbox()),
             correlation_id: ReplyTo::NO_CORRELATION,
         };
-        crate::SpawnBuilder::new(Arc::clone(spawner), subname, config, sender)
+        super::spawn::SpawnBuilder::new(Arc::clone(spawner), subname, config, sender)
     }
 }
 
@@ -369,7 +222,6 @@ impl<'a> MailCtx for NativeCtx<'a> {
 
 /// Boot-time context for [`NativeActor::init`]. Carries a borrow of
 /// the actor's transport (for init-time mail), a borrow of the
-/// actors-so-far [`Actors`] map (so init can peer at caps booted
 /// chassis's [`ExportedHandles`] map (so the cap can publish a
 /// driver-facing sub-handle via [`Self::publish_handle`]), and a
 /// clone of the substrate's mailer for caps that need to register an
@@ -389,7 +241,7 @@ pub struct NativeInitCtx<'a> {
 }
 
 impl<'a> NativeInitCtx<'a> {
-    /// Internal constructor — only [`crate::chassis_builder::Builder::with_actor`]
+    /// Internal constructor — only [`crate::chassis::builder::Builder::with_actor`]
     /// builds these.
     pub(crate) fn new(
         transport: &'a Arc<NativeTransport>,
@@ -405,8 +257,8 @@ impl<'a> NativeInitCtx<'a> {
 
     /// Borrow the Arc'd cap-bound transport. Used by the wasm
     /// trampoline at init to install itself on the
-    /// [`crate::component::ComponentCtx`] so the `wait_reply_p32` host fn
-    /// can route through this transport.
+    /// [`crate::actor::wasm::component::ComponentCtx`] so the
+    /// `wait_reply_p32` host fn can route through this transport.
     pub fn transport_arc(&self) -> &Arc<NativeTransport> {
         self.transport
     }
@@ -550,60 +402,10 @@ impl ExportedHandles {
     }
 }
 
-/// Issue 607 Phase 4b (ADR-0079): RAII handle returned by
-/// [`NativeCtx::monitor`]. Holds the registered `(watcher, target)`
-/// pair plus an `Arc` to the chassis's [`crate::ActorRegistry`] so
-/// `Drop` can deregister without rethreading the registry through the
-/// caller.
-///
-/// The framework also prunes the monitor entry on either party's
-/// close (the target's close drains `monitors_of[target]` after firing
-/// `MonitorNotice`; the watcher's close walks `monitoring[watcher]` to
-/// remove `watcher` from each target's forward list). `Drop` calls
-/// [`crate::ActorRegistry::deregister_monitor`] which is idempotent —
-/// dropping a handle whose entry the close path already removed is a
-/// no-op.
-///
-/// Not `Clone` — a monitor is a unique (watcher, target) registration;
-/// duplicating the handle would duplicate the deregistration on Drop
-/// (still benign because deregister is idempotent, but cloneable
-/// handles encourage holding multiple references whose semantics
-/// surface as silent multi-prune).
-pub struct MonitorHandle {
-    registry: Arc<crate::actor_registry::ActorRegistry>,
-    watcher: aether_data::MailboxId,
-    target: aether_data::MailboxId,
-}
-
-impl MonitorHandle {
-    pub(crate) fn new(
-        registry: Arc<crate::actor_registry::ActorRegistry>,
-        watcher: aether_data::MailboxId,
-        target: aether_data::MailboxId,
-    ) -> Self {
-        Self {
-            registry,
-            watcher,
-            target,
-        }
-    }
-
-    /// The target this handle is monitoring. Useful for handlers that
-    /// hold many handles and need to identify which one fired a notice.
-    pub fn target(&self) -> aether_data::MailboxId {
-        self.target
-    }
-}
-
-impl Drop for MonitorHandle {
-    fn drop(&mut self) {
-        self.registry.deregister_monitor(self.watcher, self.target);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chassis::error::BootError;
     use aether_data::KindId as DataKindId;
     use std::sync::atomic::{AtomicU32, Ordering};
 

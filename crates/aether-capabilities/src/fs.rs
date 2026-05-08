@@ -244,8 +244,8 @@ mod native {
     };
     use aether_actor::{MailCtx, actor};
     use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
-    use aether_substrate::capability::BootError;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
 
     impl NamespaceRoots {
         /// Resolve each root from its env-var override, falling back to
@@ -479,12 +479,13 @@ mod native {
         use aether_actor::Actor;
         use aether_data::MailboxId;
         use aether_kinds::{DeleteResult, ListResult, ReadResult, WriteResult};
-        use aether_substrate::capability::{BootError, ChassisBuilder};
+        use aether_substrate::actor::native::ctx::NativeCtx;
+        use aether_substrate::actor::native::transport::NativeTransport;
+        use aether_substrate::chassis::ctx::ChassisBuilder;
+        use aether_substrate::chassis::error::BootError;
         use aether_substrate::mail::ReplyTo;
-        use aether_substrate::mailer::Mailer;
-        use aether_substrate::native_actor::NativeCtx;
-        use aether_substrate::native_transport::NativeTransport;
-        use aether_substrate::registry::Registry;
+        use aether_substrate::mail::mailer::Mailer;
+        use aether_substrate::mail::registry::Registry;
 
         /// Test fixture that bundles the cap, a fully-wired test mailer,
         /// and a `NativeTransport` long enough for handlers to borrow.
@@ -711,7 +712,7 @@ mod native {
         }
 
         use aether_data::{SessionToken, Uuid};
-        use aether_substrate::outbound::EgressEvent;
+        use aether_substrate::mail::outbound::EgressEvent;
 
         fn build_save_only_registry(root: &Path, writable: bool) -> Arc<AdapterRegistry> {
             let adapter: Arc<dyn FileAdapter> =
@@ -730,7 +731,7 @@ mod native {
         /// Build a fully-wired `Mailer` connected to a fresh test
         /// outbound channel.
         fn test_mailer_and_rx() -> (Arc<Mailer>, std::sync::mpsc::Receiver<EgressEvent>) {
-            let (outbound, rx) = aether_substrate::outbound::HubOutbound::attached_loopback();
+            let (outbound, rx) = aether_substrate::mail::outbound::HubOutbound::attached_loopback();
             let mailer = Arc::new(Mailer::new());
             mailer.wire(Arc::new(Registry::new()));
             mailer.wire_outbound(outbound);

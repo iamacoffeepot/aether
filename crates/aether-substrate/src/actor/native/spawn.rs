@@ -1,6 +1,6 @@
 //! Spawn primitive for instanced actors (ADR-0079, issue 607 Phase 3).
 //!
-//! Builds on [`crate::actor_registry::ActorRegistry`] (Phase 2) to add
+//! Builds on [`crate::actor::registry::ActorRegistry`] (Phase 2) to add
 //! the atomic register-and-spawn dance: validate subname → check
 //! tombstones + name-owner uniqueness → call `A::init` on the caller's
 //! thread → register the mailbox sink + insert `Live` entry under one
@@ -25,14 +25,15 @@ use std::sync::{Arc, RwLock};
 use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
 use aether_data::{Kind, mailbox_id_from_name};
 
-use crate::actor_registry::ActorRegistry;
-use crate::capability::{BootError, Envelope};
-use crate::lifecycle::FatalAborter;
+use crate::actor::native::envelope::Envelope;
+use crate::actor::native::transport::NativeTransport;
+use crate::actor::native::{NativeActor, NativeDispatch, NativeInitCtx};
+use crate::actor::registry::ActorRegistry;
+use crate::chassis::error::BootError;
+use crate::mail::mailer::Mailer;
+use crate::mail::registry::{NameConflict, Registry};
 use crate::mail::{KindId, MailboxId, ReplyTo};
-use crate::mailer::Mailer;
-use crate::native_actor::{NativeActor, NativeDispatch, NativeInitCtx};
-use crate::native_transport::NativeTransport;
-use crate::registry::{NameConflict, Registry};
+use crate::runtime::lifecycle::FatalAborter;
 
 /// How to derive the subname for a [`Spawner::spawn_actor`] call. The
 /// full mailbox name is `"{A::NAMESPACE}:{subname}"`; the substrate
@@ -411,7 +412,7 @@ impl Spawner {
                         None => break,
                     };
                     let mut native_ctx =
-                        crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
+                        crate::actor::native::ctx::NativeCtx::new(&transport_for_thread, env.sender);
                     // Issue 634 Phase 4: trampolines are instanced
                     // actors that route every un-typed kind through
                     // `#[fallback]` to the wasm guest. Mirror the
@@ -440,7 +441,7 @@ impl Spawner {
                 // observes the full inbox.
                 while let Some(env) = transport_for_thread.try_recv() {
                     let mut native_ctx =
-                        crate::native_actor::NativeCtx::new(&transport_for_thread, env.sender);
+                        crate::actor::native::ctx::NativeCtx::new(&transport_for_thread, env.sender);
                     if actor
                         .__aether_dispatch_envelope(&mut native_ctx, env.kind, &env.payload)
                         .is_none()
@@ -458,7 +459,7 @@ impl Spawner {
 
                 // Last-chance close hook. ReplyTo is None because no
                 // inbound envelope produced this call.
-                let mut close_ctx = crate::native_actor::NativeCtx::new(
+                let mut close_ctx = crate::actor::native::ctx::NativeCtx::new(
                     &transport_for_thread,
                     crate::mail::ReplyTo::NONE,
                 );

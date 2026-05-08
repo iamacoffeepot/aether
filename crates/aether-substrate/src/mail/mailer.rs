@@ -20,9 +20,9 @@ use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
+use crate::mail::outbound::HubOutbound;
+use crate::mail::registry::{MailboxEntry, Registry};
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
-use crate::outbound::HubOutbound;
-use crate::registry::{MailboxEntry, Registry};
 use aether_data::{HandleId, KindId};
 
 pub struct Mailer {
@@ -352,8 +352,8 @@ mod tests {
     use super::*;
     use crate::handle_store::HandleStore;
     use crate::mail::MailboxId;
-    use crate::outbound::EgressEvent;
-    use crate::registry::MailboxHandler;
+    use crate::mail::outbound::EgressEvent;
+    use crate::mail::registry::MailboxHandler;
     use aether_data::{Kind, Ref};
     use aether_data::{KindDescriptor, NamedField, Primitive, SchemaCell, SchemaType};
 
@@ -363,7 +363,7 @@ mod tests {
     /// mailbox id / kind / payload / count the caller pushed.
     #[test]
     fn unknown_mailbox_with_connected_outbound_bubbles_up() {
-        let (outbound, outbound_rx) = crate::outbound::HubOutbound::attached_loopback();
+        let (outbound, outbound_rx) = crate::mail::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
 
         let mailer = Mailer::new();

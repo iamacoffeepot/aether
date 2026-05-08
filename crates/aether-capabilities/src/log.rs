@@ -23,9 +23,9 @@ use aether_kinds::LogBatch;
 mod native {
     use super::LogBatch;
     use aether_actor::actor;
-    use aether_substrate::capability::BootError;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::outbound::{HubOutbound, LogEntry, LogLevel};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::outbound::{HubOutbound, LogEntry, LogLevel};
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -122,9 +122,9 @@ mod native {
         use aether_data::Kind;
         use aether_kinds::LogEvent;
         use aether_substrate::chassis::Chassis;
-        use aether_substrate::chassis_builder::{Builder, BuiltChassis, NeverDriver};
-        use aether_substrate::mailer::Mailer;
-        use aether_substrate::registry::{MailboxEntry, Registry};
+        use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
+        use aether_substrate::mail::mailer::Mailer;
+        use aether_substrate::mail::registry::{MailboxEntry, Registry};
 
         struct TestChassis;
         impl Chassis for TestChassis {

@@ -41,17 +41,17 @@ mod native {
     use super::{DropComponent, LoadComponent, ReplaceComponent};
 
     use crate::wasm_trampoline::{self, WasmTrampoline, WasmTrampolineConfig};
-    use aether_substrate::capability::BootError;
-    use aether_substrate::component::ComponentCtx;
-    use aether_substrate::control_helpers::register_or_match_all;
+    use aether_substrate::actor::native::spawn::Subname;
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::actor::wasm::component::ComponentCtx;
+    use aether_substrate::actor::wasm::kind_manifest;
+    use aether_substrate::chassis::error::BootError;
     use aether_substrate::input::{self, InputSubscribers};
-    use aether_substrate::kind_manifest;
+    use aether_substrate::mail::helpers::register_or_match_all;
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::outbound::HubOutbound;
+    use aether_substrate::mail::registry::Registry;
     use aether_substrate::mail::{KindId, Mail, MailboxId};
-    use aether_substrate::mailer::Mailer;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::outbound::HubOutbound;
-    use aether_substrate::registry::Registry;
-    use aether_substrate::spawn::Subname;
 
     /// Configuration for [`ComponentHostCapability`]. `engine` and
     /// `linker` are the wasmtime instances every load instantiates

@@ -14,13 +14,13 @@ use std::sync::Arc;
 
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
+use crate::actor::native::transport::NativeTransport;
+use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry, ReplyTable};
 use crate::input::InputSubscribers;
+use crate::mail::mailer::Mailer;
+use crate::mail::outbound::HubOutbound;
+use crate::mail::registry::{MailboxEntry, Registry};
 use crate::mail::{Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
-use crate::mailer::Mailer;
-use crate::native_transport::NativeTransport;
-use crate::outbound::HubOutbound;
-use crate::registry::{MailboxEntry, Registry};
-use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry, ReplyTable};
 
 const MAIL_OFFSET: u32 = 1024;
 
@@ -94,13 +94,13 @@ pub struct ComponentCtx {
     /// instantiation error. None on the success path.
     pub init_failure: Option<String>,
     /// Trampoline transport whose `wait_reply` the
-    /// [`crate::host_fns::wait_reply_p32`] host fn delegates to.
+    /// [`crate::actor::wasm::host_fns::wait_reply_p32`] host fn delegates to.
     /// `Some` for ctx instances built by [`WasmTrampoline::init`]
     /// (issue 634 Phase 4 PR 3 — `transport.wait_reply` is now the
     /// single source of inbox / overflow / correlation-filter
     /// truth); `None` for the test paths that build `ComponentCtx`
     /// without a real trampoline (the host fn returns
-    /// [`crate::host_fns::WAIT_CANCELLED`] in that case, matching
+    /// [`crate::actor::wasm::host_fns::WAIT_CANCELLED`] in that case, matching
     /// the pre-Phase-4 "no inbox installed" disposition).
     pub transport: Option<Arc<NativeTransport>>,
     /// ADR-0042 correlation counter. Per-component (one
@@ -145,7 +145,7 @@ impl ComponentCtx {
     }
 
     /// Wire the trampoline's `NativeTransport` into the ctx so the
-    /// [`crate::host_fns::wait_reply_p32`] host fn can route through
+    /// [`crate::actor::wasm::host_fns::wait_reply_p32`] host fn can route through
     /// it. Called by [`WasmTrampoline::init`] right after constructing
     /// the ctx (and before `Component::instantiate`, since the host
     /// fn closure captures the ctx via the wasmtime `Store` data
@@ -498,9 +498,9 @@ mod tests {
 
     use super::*;
     use crate::mail::MailboxId;
-    use crate::mailer::Mailer;
-    use crate::outbound::HubOutbound;
-    use crate::registry::Registry;
+    use crate::mail::mailer::Mailer;
+    use crate::mail::outbound::HubOutbound;
+    use crate::mail::registry::Registry;
 
     fn ctx() -> ComponentCtx {
         ComponentCtx::new(
@@ -515,7 +515,7 @@ mod tests {
     fn instantiate(wat: &str) -> Component {
         let engine = Engine::default();
         let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
-        crate::host_fns::register(&mut linker).expect("register host fns");
+        crate::actor::wasm::host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).expect("compile WAT");
         let module = Module::new(&engine, &wasm).expect("compile module");
         Component::instantiate(&engine, &linker, &module, ctx()).expect("instantiate")
@@ -743,8 +743,8 @@ mod tests {
 
     #[test]
     fn deliver_with_nil_sender_passes_sender_none() {
+        use crate::actor::wasm::reply_table::NO_REPLY_HANDLE;
         use crate::mail::{Mail as SubstrateMail, MailboxId as M};
-        use crate::reply_table::NO_REPLY_HANDLE;
 
         let mut component = instantiate(WAT_STORES_SENDER);
         // Mail::new defaults sender to SessionToken::NIL.
@@ -755,8 +755,8 @@ mod tests {
 
     #[test]
     fn deliver_with_real_token_allocates_session_handle() {
+        use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
-        use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
         use aether_data::{SessionToken, Uuid};
 
         let mut component = instantiate(WAT_STORES_SENDER);
@@ -774,8 +774,8 @@ mod tests {
 
     #[test]
     fn deliver_with_component_reply_target_allocates_component_handle() {
+        use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
-        use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
 
         let mut component = instantiate(WAT_STORES_SENDER);
         // ADR-0017 / issue #644: component-origin mail (peer-to-peer
@@ -794,13 +794,13 @@ mod tests {
 
     fn plane_ctx_for_reply() -> (
         ComponentCtx,
-        std::sync::mpsc::Receiver<crate::outbound::EgressEvent>,
+        std::sync::mpsc::Receiver<crate::mail::outbound::EgressEvent>,
         aether_data::KindId,
     ) {
         use crate::mail::MailboxId as M;
         use aether_data::{KindDescriptor, SchemaType};
 
-        let (outbound, rx) = crate::outbound::HubOutbound::attached_loopback();
+        let (outbound, rx) = crate::mail::outbound::HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let pong_id = registry
             .register_kind_with_descriptor(KindDescriptor {
@@ -822,7 +822,7 @@ mod tests {
     fn instantiate_with_ctx(wat: &str, ctx: ComponentCtx) -> Component {
         let engine = Engine::default();
         let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
-        crate::host_fns::register(&mut linker).expect("register host fns");
+        crate::actor::wasm::host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).unwrap();
         let module = Module::new(&engine, &wasm).unwrap();
         Component::instantiate(&engine, &linker, &module, ctx).unwrap()
@@ -830,8 +830,8 @@ mod tests {
 
     #[test]
     fn reply_mail_emits_session_addressed_frame() {
+        use crate::mail::outbound::EgressEvent;
         use crate::mail::{Mail as SubstrateMail, MailboxId as M, ReplyTarget, ReplyTo};
-        use crate::outbound::EgressEvent;
         use aether_data::{SessionToken, Uuid};
 
         let (ctx, rx, pong_id) = plane_ctx_for_reply();
@@ -874,7 +874,7 @@ mod tests {
     /// `ReplyTo::EngineMailbox` for the receiving component.
     #[test]
     fn unknown_recipient_bubbles_up_with_sender_mailbox() {
-        use crate::outbound::EgressEvent;
+        use crate::mail::outbound::EgressEvent;
 
         let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());

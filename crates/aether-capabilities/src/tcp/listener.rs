@@ -28,8 +28,8 @@ mod listener_native {
     use super::{Close, ConnectionReady};
     use aether_actor::actor;
     use aether_data::Kind;
-    use aether_substrate::capability::BootError;
-    use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
     use aether_substrate::{KindId, Mail, Mailer};
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::sync::Arc;

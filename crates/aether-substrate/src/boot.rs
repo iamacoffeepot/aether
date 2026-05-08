@@ -42,7 +42,7 @@ use wasmtime::{Engine, Linker};
 
 use crate::{
     AETHER_DIAGNOSTICS, BootedChassis, ChassisBuilder, ComponentCtx, HubOutbound, InputSubscribers,
-    Mailer, Registry, handle_store::HandleStore, host_fns, input::new_subscribers,
+    Mailer, Registry, actor::wasm::host_fns, handle_store::HandleStore, input::new_subscribers,
 };
 
 /// Everything a chassis needs after shared boot setup. Fields are
@@ -144,7 +144,7 @@ impl SubstrateBoot {
     /// Pre-PR-E3 there was a separate `add_facade` for actor caps
     /// alongside `add_capability` for legacy `Capability` caps; the
     /// legacy path retired alongside `Capability` itself.
-    pub fn add_capability<C>(&mut self, cap: C) -> Result<(), crate::capability::BootError>
+    pub fn add_capability<C>(&mut self, cap: C) -> Result<(), crate::chassis::error::BootError>
     where
         C: aether_actor::Actor + aether_actor::Dispatch + Send + 'static,
     {
@@ -157,7 +157,10 @@ impl SubstrateBoot {
 
     /// Issue 552 stage 2: post-build entry for a `NativeActor`.
     /// Mirror of [`Self::add_capability`] for the new cap shape.
-    pub fn add_actor<A>(&mut self, config: A::Config) -> Result<(), crate::capability::BootError>
+    pub fn add_actor<A>(
+        &mut self,
+        config: A::Config,
+    ) -> Result<(), crate::chassis::error::BootError>
     where
         A: crate::NativeActor + crate::NativeDispatch,
     {
@@ -185,11 +188,11 @@ impl<'a> SubstrateBootBuilder<'a> {
         // crashes surface in `engine_logs` instead of vanishing to
         // stderr. Idempotent — chassis re-entries / repeated builds in
         // tests are safe.
-        crate::panic_hook::init_panic_hook();
+        crate::runtime::panic_hook::init_panic_hook();
 
         let outbound = HubOutbound::disconnected();
         // Issue #581: install the actor-aware tracing subscriber stack.
-        crate::log_install::init_subscriber();
+        crate::runtime::log_install::init_subscriber();
 
         let engine = Arc::new(Engine::default());
         let registry = Arc::new(Registry::new());

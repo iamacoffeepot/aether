@@ -2080,7 +2080,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
             fn __aether_dispatch_fallback(
                 &mut self,
                 __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
-                __aether_env: &::aether_substrate::capability::Envelope,
+                __aether_env: &::aether_substrate::actor::native::envelope::Envelope,
             ) -> bool {
                 self.#method_ident(__aether_ctx, __aether_env);
                 true
@@ -2156,7 +2156,7 @@ struct NativeActorHandlerFn {
 /// hub-as-actor) can lift the whole envelope into a downstream call
 /// without rebuilding fields the trampoline already has.
 ///
-/// [`Envelope`]: aether_substrate::capability::Envelope
+/// [`Envelope`]: aether_substrate::actor::native::envelope::Envelope
 struct NativeFallbackFn {
     method: syn::ImplItemFn,
 }

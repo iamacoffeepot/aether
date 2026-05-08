@@ -48,14 +48,15 @@ use aether_actor::actor;
 use aether_kinds::{
     ComponentCapabilities, DropComponent, DropResult, ReplaceComponent, ReplaceResult,
 };
-use aether_substrate::capability::{BootError, Envelope};
-use aether_substrate::component::{Component, ComponentCtx};
+use aether_substrate::actor::native::envelope::Envelope;
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
+use aether_substrate::chassis::error::BootError;
 use aether_substrate::input::InputSubscribers;
+use aether_substrate::mail::mailer::Mailer;
+use aether_substrate::mail::outbound::HubOutbound;
+use aether_substrate::mail::registry::Registry;
 use aether_substrate::mail::{Mail, MailboxId};
-use aether_substrate::mailer::Mailer;
-use aether_substrate::native_actor::{NativeActor, NativeCtx, NativeInitCtx};
-use aether_substrate::outbound::HubOutbound;
-use aether_substrate::registry::Registry;
 use wasmtime::{Engine, Linker, Module};
 
 /// Mailbox-name prefix every trampoline lives under. The full address
@@ -260,7 +261,9 @@ impl WasmTrampoline {
         // ADR-0033: parse capabilities from the new wasm so the
         // reply carries the post-replace handler vocabulary.
         let capabilities =
-            match aether_substrate::kind_manifest::read_inputs_from_bytes(&payload.wasm) {
+            match aether_substrate::actor::wasm::kind_manifest::read_inputs_from_bytes(
+                &payload.wasm,
+            ) {
                 Ok(c) => c,
                 Err(error) => return ReplaceResult::Err { error },
             };

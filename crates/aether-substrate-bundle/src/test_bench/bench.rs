@@ -35,7 +35,7 @@ use aether_capabilities::{IoCapability, RenderCapability, fs::NamespaceRoots};
 use aether_substrate::{
     HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
     capture::CaptureQueue,
-    frame_loop,
+    chassis::frame_loop,
     mail::{Mail, MailboxId},
     subscribers_for,
 };
