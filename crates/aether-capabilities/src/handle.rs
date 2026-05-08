@@ -37,6 +37,7 @@ mod native {
         /// ADR-0045 + ADR-0074 Phase 5: chassis-owned mailbox under the
         /// `aether.<name>` namespace.
         const NAMESPACE: &'static str = "aether.handle";
+        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         /// Pull the shared [`HandleStore`] off the substrate's
         /// [`aether_substrate::Mailer`]. The store is supplied at

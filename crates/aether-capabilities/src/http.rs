@@ -390,6 +390,7 @@ mod native {
 
         /// ADR-0043 + ADR-0074 Phase 5 chassis-owned mailbox.
         const NAMESPACE: &'static str = "aether.http";
+        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         /// Build the HTTP adapter from the resolved config. The adapter is
         /// built immediately so configuration errors surface at chassis-

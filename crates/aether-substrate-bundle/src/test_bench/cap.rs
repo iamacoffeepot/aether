@@ -57,6 +57,7 @@ mod native {
         type Config = TestBenchCapConfig;
 
         const NAMESPACE: &'static str = "aether.test_bench";
+        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         fn init(
             config: TestBenchCapConfig,

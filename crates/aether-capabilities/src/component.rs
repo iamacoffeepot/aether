@@ -89,6 +89,7 @@ mod native {
     impl NativeActor for ComponentHostCapability {
         type Config = ComponentHostConfig;
         const NAMESPACE: &'static str = "aether.component";
+        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         fn init(
             config: ComponentHostConfig,
