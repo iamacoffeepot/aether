@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn io_results_are_enum_schemas() {
-        // Each reply kind is an Ok/Err enum; `Err` wraps `IoError`,
+        // Each reply kind is an Ok/Err enum; `Err` wraps `FsError`,
         // `Ok` shape varies per operation.
         let descs = all();
         for name in [

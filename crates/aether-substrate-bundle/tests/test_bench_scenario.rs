@@ -26,7 +26,7 @@ use std::path::Path;
 
 use aether_data::{Kind, mailbox_id_from_name};
 use aether_kinds::{
-    Delete, DeleteResult, DropComponent, IoError, List, ListResult, LoadComponent, MailEnvelope,
+    Delete, DeleteResult, DropComponent, FsError, List, ListResult, LoadComponent, MailEnvelope,
     Read, ReadResult, ReplaceComponent, Write, WriteResult,
 };
 use aether_scenario::test_helpers::{
@@ -426,7 +426,7 @@ fn io_delete_removes_written_file() {
     match read_after_delete {
         ReadResult::Ok { .. } => panic!("read should not have found a deleted file"),
         ReadResult::Err {
-            error: IoError::NotFound,
+            error: FsError::NotFound,
             ..
         } => {}
         ReadResult::Err { error, .. } => panic!("expected NotFound, got {error:?}"),
@@ -506,7 +506,7 @@ fn io_read_unknown_path_returns_not_found() {
     match read_reply {
         ReadResult::Ok { .. } => panic!("read should not have found a never-written file"),
         ReadResult::Err {
-            error: IoError::NotFound,
+            error: FsError::NotFound,
             ..
         } => {}
         ReadResult::Err { error, .. } => panic!("expected NotFound, got {error:?}"),
