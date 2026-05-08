@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use aether_capabilities::{
     AudioCapability, BroadcastCapability, CaptureBackend, ComponentHostCapability,
-    ComponentHostConfig, HandleCapability, HttpCapability, InputCapability, InputConfig,
-    IoCapability, LogCapability, RenderCapability, RenderConfig, TcpCapability,
+    ComponentHostConfig, FsCapability, HandleCapability, HttpCapability, InputCapability,
+    InputConfig, LogCapability, RenderCapability, RenderConfig, TcpCapability,
     UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf, fs::NamespaceRoots,
     http::HttpConfig as HttpConf,
 };
@@ -234,7 +234,7 @@ impl DesktopChassis {
             .with_actor::<LogCapability>(())
             .with_actor::<InputCapability>(input_config)
             .with_actor::<ComponentHostCapability>(component_host_config)
-            .with_actor::<IoCapability>(namespace_roots)
+            .with_actor::<FsCapability>(namespace_roots)
             .with_actor::<HttpCapability>(http)
             .with_actor::<TcpCapability>(())
             .with_actor::<AudioCapability>(audio)

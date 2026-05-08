@@ -3,7 +3,7 @@
 //! subscription, drop, capture_frame round-trip, replace_component
 //! (all via `aether-test-fixture-probe`), or the IO sink's
 //! read/write/delete/list round trips (which talk directly to the
-//! chassis `aether.io` via `TestBench::send_and_await_reply`).
+//! chassis `aether.fs` via `TestBench::send_and_await_reply`).
 //!
 //! Skipped when:
 //! - No wgpu adapter is available (driverless Linux runners without
