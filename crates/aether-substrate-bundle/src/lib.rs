@@ -35,7 +35,7 @@ pub use aether_substrate::{
     Chassis, Component, ComponentCtx, HubOutbound, InputSubscribers, KindId, Mail, MailKind,
     MailboxEntry, MailboxHandler, MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,
     capture::{CaptureQueue, PendingCapture},
-    component, ctx, frame_loop, host_fns, input, kind_manifest, log_install, mail, mailer,
+    component, frame_loop, host_fns, input, kind_manifest, log_install, mail, mailer,
     new_subscribers, registry, remove_from_all, reply_table, subscribers_for,
 };
 pub use hub::{HubClient, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail};

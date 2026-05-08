@@ -46,7 +46,6 @@ pub mod chassis;
 pub mod chassis_builder;
 pub mod component;
 pub mod control_helpers;
-pub mod ctx;
 pub mod frame_loop;
 pub mod handle_store;
 pub mod host_fns;
@@ -78,8 +77,7 @@ pub use chassis_builder::{
     Builder, BuilderState, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, HasDriver,
     NeverDriver, NeverDriverRunning, NoDriver, PassiveChassis, RunError,
 };
-pub use component::Component;
-pub use ctx::ComponentCtx;
+pub use component::{Component, ComponentCtx};
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
 pub use mail::{KindId, Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 pub use mailer::Mailer;

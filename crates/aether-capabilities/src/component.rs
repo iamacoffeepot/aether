@@ -42,8 +42,8 @@ mod native {
 
     use crate::wasm_trampoline::{self, WasmTrampoline, WasmTrampolineConfig};
     use aether_substrate::capability::BootError;
+    use aether_substrate::component::ComponentCtx;
     use aether_substrate::control_helpers::register_or_match_all;
-    use aether_substrate::ctx::ComponentCtx;
     use aether_substrate::input::{self, InputSubscribers};
     use aether_substrate::kind_manifest;
     use aether_substrate::mail::{KindId, Mail, MailboxId};

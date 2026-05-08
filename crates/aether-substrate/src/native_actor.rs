@@ -405,7 +405,7 @@ impl<'a> NativeInitCtx<'a> {
 
     /// Borrow the Arc'd cap-bound transport. Used by the wasm
     /// trampoline at init to install itself on the
-    /// [`crate::ctx::ComponentCtx`] so the `wait_reply_p32` host fn
+    /// [`crate::component::ComponentCtx`] so the `wait_reply_p32` host fn
     /// can route through this transport.
     pub fn transport_arc(&self) -> &Arc<NativeTransport> {
         self.transport
