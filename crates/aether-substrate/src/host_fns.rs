@@ -4,12 +4,10 @@
 // surface. Growth of this surface should be reviewed as deliberately
 // as any other architectural change.
 
-use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
-use std::time::{Duration, Instant};
-
+use aether_actor::MailTransport;
 use wasmtime::{Caller, Linker};
 
-use crate::ctx::{StateBundle, SubstrateCtx};
+use crate::ctx::{ComponentCtx, StateBundle};
 use crate::mail::{KindId, MailboxId, ReplyTarget};
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
@@ -57,11 +55,11 @@ pub const MAX_WAIT_TIMEOUT_MS: u32 = 30_000;
 /// Register the substrate host functions on `linker`. Components that
 /// want these capabilities must be instantiated via a linker that this
 /// function has been called on.
-pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
+pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     linker.func_wrap(
         "aether",
         "send_mail_p32",
-        |mut caller: Caller<'_, SubstrateCtx>,
+        |mut caller: Caller<'_, ComponentCtx>,
          recipient: u64,
          kind: u64,
          ptr: u32,
@@ -114,7 +112,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     linker.func_wrap(
         "aether",
         "save_state_p32",
-        |mut caller: Caller<'_, SubstrateCtx>, version: u32, ptr: u32, len: u32| -> u32 {
+        |mut caller: Caller<'_, ComponentCtx>, version: u32, ptr: u32, len: u32| -> u32 {
             if len as usize > MAX_STATE_BUNDLE_BYTES {
                 caller.data_mut().save_state_error = Some(format!(
                     "save_state: bundle size {} exceeds {} byte cap",
@@ -145,14 +143,14 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     //   - Session: ship as a `ClaudeAddress::Session` frame through
     //     `HubOutbound` (same route as ADR-0013's original design).
     //   - Component: enqueue on the local `Mailer` via
-    //     `SubstrateCtx::send`. Dropped-mailbox discard is handled
+    //     `ComponentCtx::send`. Dropped-mailbox discard is handled
     //     there already, so a component that vanished between the
     //     request and the reply silently drops — the same contract
     //     as any other send to a dropped mailbox.
     linker.func_wrap(
         "aether",
         "reply_mail_p32",
-        |mut caller: Caller<'_, SubstrateCtx>,
+        |mut caller: Caller<'_, ComponentCtx>,
          sender: u32,
          kind: u64,
          ptr: u32,
@@ -237,168 +235,68 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     // now a deterministic hash of the mailbox name, computed on the
     // guest side. The corresponding host fn is gone.
 
-    // ADR-0042: synchronous mail wait via drain + buffer. The host
-    // fn drains the component's own mpsc inbox in a loop (the same
-    // `Receiver<Mail>` the dispatcher reads from — moved onto
-    // `SubstrateCtx` at spawn so both sides can reach it). Matching
-    // mail is copied into the guest's `out` buffer and returned as
-    // a byte count; non-matching mail is pushed onto the component's
-    // overflow buffer, where the dispatcher drains it FIFO-ahead of
-    // the mpsc on its next pass. Timeout → `-1`. Reply too big →
-    // `-2`. Inbox disconnected (teardown) → `-3`.
+    // ADR-0042: synchronous mail wait, delegating to the trampoline's
+    // `NativeTransport::wait_reply` (issue 634 Phase 4 PR 3). The
+    // transport already owns inbox + overflow + correlation-filter;
+    // the host fn just bridges between wasm linear memory and the
+    // transport's `&mut [u8]` buffer.
     //
     // The drain runs on the dispatcher thread because the guest's
     // host call IS the dispatcher (ADR-0038 actor-per-component).
-    // Other senders keep pushing into the mpsc during the wait;
-    // non-match accumulates in overflow until drain returns.
+    // Other senders keep pushing into the transport's mpsc during
+    // the wait; non-match accumulates in the transport's overflow
+    // until drain returns.
+    //
+    // Sentinel codes: timeout → `-1`, reply too big for `out_cap` →
+    // `-2` (envelope is parked back on overflow so a retry with a
+    // larger buffer can pick it up), inbox disconnected → `-3`,
+    // ctx without a wired transport → `-3` (test-path
+    // pathological — production trampolines always wire one).
     linker.func_wrap(
         "aether",
         "wait_reply_p32",
-        |mut caller: Caller<'_, SubstrateCtx>,
+        |mut caller: Caller<'_, ComponentCtx>,
          expected_kind: u64,
          out_ptr: u32,
          out_cap: u32,
          timeout_ms: u32,
          expected_correlation: u64|
          -> i32 {
-            let expected_kind = KindId(expected_kind);
             let clamped = timeout_ms.min(MAX_WAIT_TIMEOUT_MS);
-            let deadline = Instant::now() + Duration::from_millis(clamped as u64);
-
-            // Drain loop. The inbox receiver lives on the ctx
-            // (`inbox_rx`); we lock it for the duration of this
-            // call. The same thread that owns the dispatcher is
-            // the thread running this host fn, so nobody else is
-            // contending for the lock — it's structural, not
-            // performance-critical.
-            //
-            // ADR-0042: scan the overflow buffer FIRST. A prior
-            // `wait_reply_p32` may have parked the matching reply
-            // (e.g. `WAIT_BUFFER_TOO_SMALL` push_front), or the
-            // dispatcher may have left non-matching mail behind for
-            // us to skip past. The dispatcher's `next_mail` already
-            // drains overflow ahead of `inbox_rx`; reading from
-            // `inbox_rx` here without first consulting overflow
-            // would let parked replies leak into normal dispatch.
-            let mail = {
-                let ctx = caller.data();
-                // Pop a matching entry out of overflow if there is
-                // one, preserving the relative FIFO order of the
-                // entries we leave behind.
-                let matched_from_overflow = {
-                    let mut overflow = ctx.inbox_overflow.lock().unwrap();
-                    let mut idx = None;
-                    for (i, m) in overflow.iter().enumerate() {
-                        if m.kind == expected_kind
-                            && (expected_correlation == 0
-                                || m.reply_to.correlation_id == expected_correlation)
-                        {
-                            idx = Some(i);
-                            break;
-                        }
-                    }
-                    idx.and_then(|i| overflow.remove(i))
-                };
-                if let Some(m) = matched_from_overflow {
-                    m
-                } else {
-                    let rx_guard = ctx.inbox_rx.lock().unwrap();
-                    let Some(rx) = rx_guard.as_ref() else {
-                        // No inbox installed — pathological. Treat
-                        // as disconnect so the guest aborts rather
-                        // than spins.
-                        return WAIT_CANCELLED;
-                    };
-                    loop {
-                        let recv = if clamped == 0 {
-                            // `timeout_ms == 0`: try_recv only — drain
-                            // whatever's already queued, stop without
-                            // parking.
-                            match rx.try_recv() {
-                                Ok(m) => Ok(m),
-                                Err(TryRecvError::Empty) => Err(RecvTimeoutError::Timeout),
-                                Err(TryRecvError::Disconnected) => {
-                                    Err(RecvTimeoutError::Disconnected)
-                                }
-                            }
-                        } else {
-                            let remaining = deadline.saturating_duration_since(Instant::now());
-                            if remaining.is_zero() {
-                                Err(RecvTimeoutError::Timeout)
-                            } else {
-                                rx.recv_timeout(remaining)
-                            }
-                        };
-                        match recv {
-                            Ok(m)
-                                if m.kind == expected_kind
-                                    && (expected_correlation == 0
-                                        || m.reply_to.correlation_id == expected_correlation) =>
-                            {
-                                break m;
-                            }
-                            Ok(m) => {
-                                // Non-match (wrong kind, or right kind but
-                                // not our correlation): park on overflow
-                                // so the dispatcher picks it up after we
-                                // unwind. ADR-0042 correlation filter.
-                                ctx.inbox_overflow.lock().unwrap().push_back(m);
-                            }
-                            Err(RecvTimeoutError::Timeout) => return WAIT_TIMEOUT,
-                            Err(RecvTimeoutError::Disconnected) => return WAIT_CANCELLED,
-                        }
-                    }
-                }
+            let Some(transport) = caller.data().transport.clone() else {
+                // No trampoline transport wired — the ctx was built by
+                // a test path that doesn't exercise wait_reply.
+                // Surface as cancelled so the guest doesn't spin.
+                tracing::error!(
+                    target: "aether_substrate::host_fns",
+                    "wait_reply_p32 called on a ComponentCtx with no transport wired",
+                );
+                return WAIT_CANCELLED;
             };
 
-            if mail.payload.len() > out_cap as usize {
-                // ADR-0042: oversized payload preserves the caller's
-                // right to retry with a larger buffer. Park the mail
-                // back on overflow so a follow-up `wait_reply_p32`
-                // with a bigger `out_cap` can pick it up via the
-                // same drain (overflow is FIFO-first, so the retry
-                // sees the saved mail before anything newer).
-                caller
-                    .data()
-                    .inbox_overflow
-                    .lock()
-                    .unwrap()
-                    .push_front(mail);
-                return WAIT_BUFFER_TOO_SMALL;
-            }
-
+            // Resolve wasm linear memory and bounds-check `out_ptr +
+            // out_cap` *before* calling into the transport so a bad
+            // pointer doesn't burn a real envelope. After this point,
+            // a `-2` from the transport means the payload exceeded
+            // `out_cap` and the transport already parked the envelope
+            // on its overflow for a retry.
             let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
-                // Guest exports no memory; treat as buffer-unusable.
-                // Put the mail back on overflow so it isn't lost.
-                caller
-                    .data()
-                    .inbox_overflow
-                    .lock()
-                    .unwrap()
-                    .push_front(mail);
                 return WAIT_BUFFER_TOO_SMALL;
             };
             let start = out_ptr as usize;
-            let Some(end) = start.checked_add(mail.payload.len()) else {
-                caller
-                    .data()
-                    .inbox_overflow
-                    .lock()
-                    .unwrap()
-                    .push_front(mail);
+            let Some(end) = start.checked_add(out_cap as usize) else {
                 return WAIT_BUFFER_TOO_SMALL;
             };
             let data = memory.data_mut(&mut caller);
             if end > data.len() {
-                // Can't restore mail here — we've already moved past
-                // the ctx borrow by grabbing `data_mut`. The mail is
-                // dropped. Callers hitting this are misusing out_ptr;
-                // the loss is on them.
                 return WAIT_BUFFER_TOO_SMALL;
             }
-            data[start..end].copy_from_slice(&mail.payload);
-
-            mail.payload.len() as i32
+            transport.wait_reply(
+                expected_kind,
+                &mut data[start..end],
+                clamped,
+                expected_correlation,
+            )
         },
     )?;
 
@@ -413,7 +311,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     linker.func_wrap(
         "aether",
         "prev_correlation_p32",
-        |caller: Caller<'_, SubstrateCtx>| -> u64 { caller.data().prev_correlation() },
+        |caller: Caller<'_, ComponentCtx>| -> u64 { caller.data().prev_correlation() },
     )?;
 
     // HOST_FN_OK: ADR-0002 / issue 531. The BootError plumbing
@@ -435,7 +333,7 @@ pub fn register(linker: &mut Linker<SubstrateCtx>) -> wasmtime::Result<()> {
     linker.func_wrap(
         "aether",
         "init_failed_p32",
-        |mut caller: Caller<'_, SubstrateCtx>, ptr: u32, len: u32| {
+        |mut caller: Caller<'_, ComponentCtx>, ptr: u32, len: u32| {
             let Some(memory) = caller.get_export("memory").and_then(|e| e.into_memory()) else {
                 return;
             };

@@ -79,7 +79,7 @@ pub use chassis_builder::{
     NeverDriver, NeverDriverRunning, NoDriver, PassiveChassis, RunError,
 };
 pub use component::Component;
-pub use ctx::SubstrateCtx;
+pub use ctx::ComponentCtx;
 pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
 pub use mail::{KindId, Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 pub use mailer::Mailer;

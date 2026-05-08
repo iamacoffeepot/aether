@@ -1,13 +1,11 @@
-// A loaded WASM component: its wasmtime `Store<SubstrateCtx>`, instance,
+// A loaded WASM component: its wasmtime `Store<ComponentCtx>`, instance,
 // and the cached handles needed to deliver mail. Mail payloads are
 // written to the guest at a static `MAIL_OFFSET`; a guest-side
 // allocator is parked until an actual use case forces the question.
 
-use std::sync::mpsc::Receiver;
-
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
-use crate::ctx::{StateBundle, SubstrateCtx};
+use crate::ctx::{ComponentCtx, StateBundle};
 use crate::mail::{Mail, ReplyTarget};
 use crate::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
 
@@ -48,7 +46,7 @@ const STATE_OFFSET: u32 = 8192;
 /// (no-op trait defaults compile down to no symbol under LTO, so
 /// components that don't override stay backwards-compat).
 pub struct Component {
-    store: Store<SubstrateCtx>,
+    store: Store<ComponentCtx>,
     memory: Memory,
     receive: TypedFunc<(u64, u32, u32, u32, u32), u32>,
     on_replace: Option<TypedFunc<(), u32>>,
@@ -62,9 +60,9 @@ impl Component {
     /// component will see.
     pub fn instantiate(
         engine: &Engine,
-        linker: &Linker<SubstrateCtx>,
+        linker: &Linker<ComponentCtx>,
         module: &Module,
-        ctx: SubstrateCtx,
+        ctx: ComponentCtx,
     ) -> wasmtime::Result<Self> {
         let mut store = Store::new(engine, ctx);
         let instance = linker.instantiate(&mut store, module)?;
@@ -145,7 +143,7 @@ impl Component {
     /// meaningful reply target — a Claude session (non-NIL
     /// `SessionToken`), a remote engine mailbox, or a peer component
     /// (`reply_to.target = ReplyTarget::Component(_)` populated by
-    /// `SubstrateCtx::send` / `NativeTransport::send_mail`).
+    /// `ComponentCtx::send` / `NativeTransport::send_mail`).
     /// Broadcast-origin and system-generated mail pass
     /// `NO_REPLY_HANDLE` so the guest's `mail.reply_to()` accessor
     /// returns `None`.
@@ -250,38 +248,6 @@ impl Component {
         Ok(())
     }
 
-    /// Install the mpsc `Receiver` the dispatcher will read from
-    /// (ADR-0042). Called by `ComponentEntry::spawn` right after the
-    /// mpsc pair is built; the host fn for `wait_reply_p32` later
-    /// drains the same receiver when a guest parks on a reply.
-    pub fn install_inbox_rx(&mut self, rx: Receiver<Mail>) {
-        self.store.data().install_inbox_rx(rx);
-    }
-
-    /// Pop the next mail for the dispatcher. Drains the overflow
-    /// buffer first (FIFO-preserved mail that a completed
-    /// `wait_reply_p32` set aside), then reads from the mpsc
-    /// receiver installed via `install_inbox_rx`. `None` means both
-    /// are empty and the inbox has been disconnected — the
-    /// dispatcher takes that as its exit signal.
-    pub fn next_mail(&mut self) -> Option<Mail> {
-        self.store.data().next_mail()
-    }
-
-    /// Push a mail onto this component's overflow buffer directly.
-    /// Test-only: lets unit tests seed the overflow and observe that
-    /// `next_mail` drains it before the mpsc. Production code only
-    /// feeds the overflow through `wait_reply_p32`'s drain path.
-    #[cfg(test)]
-    pub fn push_overflow_for_test(&mut self, mail: Mail) {
-        self.store
-            .data()
-            .inbox_overflow
-            .lock()
-            .unwrap()
-            .push_back(mail);
-    }
-
     /// Read a `u32` from guest linear memory at `offset`. Test-only
     /// accessor: the production mail path writes at `MAIL_OFFSET`
     /// and the guest interprets the bytes — nothing in non-test
@@ -320,8 +286,8 @@ mod tests {
     use crate::outbound::HubOutbound;
     use crate::registry::Registry;
 
-    fn ctx() -> SubstrateCtx {
-        SubstrateCtx::new(
+    fn ctx() -> ComponentCtx {
+        ComponentCtx::new(
             MailboxId(0),
             Arc::new(Registry::new()),
             Arc::new(Mailer::new()),
@@ -332,7 +298,7 @@ mod tests {
 
     fn instantiate(wat: &str) -> Component {
         let engine = Engine::default();
-        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
         crate::host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).expect("compile WAT");
         let module = Module::new(&engine, &wasm).expect("compile module");
@@ -611,7 +577,7 @@ mod tests {
     }
 
     fn plane_ctx_for_reply() -> (
-        SubstrateCtx,
+        ComponentCtx,
         std::sync::mpsc::Receiver<crate::outbound::EgressEvent>,
         aether_data::KindId,
     ) {
@@ -627,7 +593,7 @@ mod tests {
                 is_stream: false,
             })
             .expect("register kind");
-        let ctx = SubstrateCtx::new(
+        let ctx = ComponentCtx::new(
             M(0),
             registry,
             Arc::new(Mailer::new()),
@@ -637,9 +603,9 @@ mod tests {
         (ctx, rx, pong_id)
     }
 
-    fn instantiate_with_ctx(wat: &str, ctx: SubstrateCtx) -> Component {
+    fn instantiate_with_ctx(wat: &str, ctx: ComponentCtx) -> Component {
         let engine = Engine::default();
-        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
+        let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
         crate::host_fns::register(&mut linker).expect("register host fns");
         let wasm = wat::parse_str(wat).unwrap();
         let module = Module::new(&engine, &wasm).unwrap();
@@ -683,486 +649,5 @@ mod tests {
         let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1);
         component.deliver(&mail).expect("deliver");
         assert!(rx.try_recv().is_err(), "no frame should have been sent");
-    }
-
-    /// ADR-0042 `wait_reply_p32` host fn. The guest expects a reply
-    /// of kind `0xAAAA_AAAA_AAAA_AAAA`, writes a maximum of 64 bytes
-    /// starting at offset 600, and uses the mail's `count` field as
-    /// the `timeout_ms` argument so tests can vary it per invocation.
-    /// The host fn's return value (bytes written, or a negative
-    /// sentinel) lands at offset 700.
-    const WAT_SYNC_WAIT: &str = r#"
-        (module
-            (import "aether" "wait_reply_p32"
-                (func $wait (param i64 i32 i32 i32 i64) (result i32)))
-            (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
-                i32.const 700
-                (call $wait
-                    (i64.const -6148914691236517206) ;; 0xAAAA_AAAA_AAAA_AAAA reinterpreted as i64
-                    (i32.const 600)                  ;; out_ptr
-                    (i32.const 64)                   ;; out_cap
-                    (local.get 3)                    ;; timeout_ms = count (param 3 after byte_len shifted in at 2)
-                    (i64.const 0))                   ;; expected_correlation = 0 (kind-only filter)
-                i32.store
-                i32.const 0))
-    "#;
-
-    const SYNC_WAIT_EXPECTED_KIND: aether_data::KindId = aether_data::KindId(0xAAAA_AAAA_AAAA_AAAA);
-
-    /// Helper: build a trigger mail whose `count` field carries the
-    /// timeout_ms argument into the WAT. The `kind` is irrelevant —
-    /// the guest ignores it and passes a hardcoded `expected_kind` to
-    /// the host fn.
-    fn trigger_wait(timeout_ms: u32) -> Mail {
-        use crate::mail::MailboxId;
-        Mail::new(
-            MailboxId(0),
-            aether_data::KindId(0xBEEF),
-            vec![],
-            timeout_ms,
-        )
-    }
-
-    /// Build a sync-wait component with an installed inbox so
-    /// `wait_reply_p32` has something to drain. Returns the
-    /// component + the `Sender<Mail>` the test can push matching /
-    /// non-matching mail through; drop the Sender to trigger
-    /// disconnect.
-    fn instantiate_sync_wait_with_inbox() -> (Component, std::sync::mpsc::Sender<Mail>) {
-        use std::sync::mpsc;
-
-        use wasmtime::{Engine, Linker, Module};
-
-        let engine = Engine::default();
-        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
-        crate::host_fns::register(&mut linker).expect("register host fns");
-        let wasm = wat::parse_str(WAT_SYNC_WAIT).expect("compile WAT");
-        let module = Module::new(&engine, &wasm).expect("compile module");
-        let mut component =
-            Component::instantiate(&engine, &linker, &module, ctx()).expect("instantiate");
-        let (tx, rx) = mpsc::channel::<Mail>();
-        component.install_inbox_rx(rx);
-        (component, tx)
-    }
-
-    #[test]
-    fn wait_reply_returns_timeout_when_no_match_arrives() {
-        let (mut component, _tx) = instantiate_sync_wait_with_inbox();
-        component.deliver(&trigger_wait(10)).expect("deliver");
-
-        let result = component.read_u32(700) as i32;
-        assert_eq!(
-            result,
-            crate::host_fns::WAIT_TIMEOUT,
-            "no matching mail pushed — expected WAIT_TIMEOUT",
-        );
-    }
-
-    #[test]
-    fn wait_reply_poll_mode_returns_timeout_immediately() {
-        // timeout_ms = 0 → try_recv path; no pre-queued mail → -1.
-        let (mut component, _tx) = instantiate_sync_wait_with_inbox();
-        component.deliver(&trigger_wait(0)).expect("deliver");
-
-        let result = component.read_u32(700) as i32;
-        assert_eq!(result, crate::host_fns::WAIT_TIMEOUT);
-    }
-
-    #[test]
-    fn wait_reply_writes_payload_and_returns_byte_count_on_match() {
-        use std::thread;
-        use std::time::Duration;
-
-        use crate::host_fns;
-        use crate::mail::MailboxId as M;
-
-        let (component, tx) = instantiate_sync_wait_with_inbox();
-
-        // Deliver on a worker so we can push matching mail from
-        // this thread while the guest is parked inside the host
-        // fn's drain loop.
-        let handle = thread::spawn(move || {
-            let mut component = component;
-            component.deliver(&trigger_wait(1000)).expect("deliver");
-            component
-        });
-
-        // Nudge past the host fn's entry so the drain is already
-        // parked on recv_timeout before our mail hits the mpsc.
-        thread::sleep(Duration::from_millis(50));
-
-        let payload = vec![1, 2, 3, 4, 5];
-        tx.send(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload.clone(), 1))
-            .expect("send matching mail");
-
-        let mut component = handle.join().expect("worker panicked");
-        let result = component.read_u32(700) as i32;
-        assert_eq!(result, payload.len() as i32, "byte count returned");
-        assert_eq!(
-            component.read_bytes(600, payload.len()),
-            payload,
-            "payload copied into guest memory at out_ptr",
-        );
-        let _ = host_fns::WAIT_TIMEOUT; // keep import live without warning
-    }
-
-    #[test]
-    fn wait_reply_buffers_non_matching_mail_into_overflow() {
-        // ADR-0042 drain loop: a non-matching mail arriving during
-        // the wait must end up on the overflow buffer so the
-        // dispatcher serves it ahead of new mpsc mail afterwards.
-        use std::thread;
-        use std::time::Duration;
-
-        use crate::mail::MailboxId as M;
-
-        let (component, tx) = instantiate_sync_wait_with_inbox();
-        let handle = thread::spawn(move || {
-            let mut component = component;
-            component.deliver(&trigger_wait(1000)).expect("deliver");
-            component
-        });
-
-        thread::sleep(Duration::from_millis(50));
-
-        // Non-match first; then the real reply.
-        tx.send(Mail::new(
-            M(0),
-            aether_data::KindId(0xDEAD_BEEF),
-            vec![42],
-            1,
-        ))
-        .expect("send non-match");
-        tx.send(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, vec![7], 1))
-            .expect("send match");
-
-        let component = handle.join().expect("worker panicked");
-        // Match drained cleanly; the non-match should now be sitting
-        // in overflow, waiting for the dispatcher to pick it up.
-        let overflow_len = component.store.data().inbox_overflow.lock().unwrap().len();
-        assert_eq!(overflow_len, 1, "non-match mail should be buffered");
-    }
-
-    #[test]
-    fn wait_reply_returns_buffer_too_small_when_payload_exceeds_cap() {
-        use std::thread;
-        use std::time::Duration;
-
-        use crate::host_fns;
-        use crate::mail::MailboxId as M;
-
-        let (component, tx) = instantiate_sync_wait_with_inbox();
-        let handle = thread::spawn(move || {
-            let mut component = component;
-            component.deliver(&trigger_wait(1000)).expect("deliver");
-            component
-        });
-
-        thread::sleep(Duration::from_millis(50));
-
-        // WAT's out_cap is 64; push a 128-byte payload.
-        let payload = vec![0x7Fu8; 128];
-        tx.send(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload, 1))
-            .expect("send matching-but-too-big mail");
-
-        let mut component = handle.join().expect("worker panicked");
-        let result = component.read_u32(700) as i32;
-        assert_eq!(result, host_fns::WAIT_BUFFER_TOO_SMALL);
-    }
-
-    /// ADR-0042 correlation: a sync wait filters on
-    /// `expected_correlation` so it picks *its own* reply out of
-    /// the inbox rather than the first `ReadResult`-kind mail that
-    /// happens to be queued. Regression guard — without the
-    /// correlation filter, a stale prior reply of the same kind
-    /// would be consumed as if it were the one we're waiting on.
-    #[test]
-    fn wait_reply_filters_by_correlation_not_just_kind() {
-        use std::sync::mpsc;
-
-        use wasmtime::{Engine, Linker, Module};
-
-        use crate::mail::{MailboxId as M, ReplyTarget, ReplyTo};
-
-        // WAT that waits on kind `SYNC_WAIT_EXPECTED_KIND` with
-        // expected_correlation = 42, timeout = 1s. Stores payload
-        // byte count at offset 700.
-        const WAT: &str = r#"
-            (module
-                (import "aether" "wait_reply_p32"
-                    (func $wait (param i64 i32 i32 i32 i64) (result i32)))
-                (memory (export "memory") 1)
-                (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
-                    i32.const 700
-                    (call $wait
-                        (i64.const -6148914691236517206) ;; expected_kind = 0xAAAA...
-                        (i32.const 600)                  ;; out_ptr
-                        (i32.const 64)                   ;; out_cap
-                        (i32.const 1000)                 ;; timeout_ms
-                        (i64.const 42))                  ;; expected_correlation
-                    i32.store
-                    i32.const 0))
-        "#;
-
-        let engine = Engine::default();
-        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
-        crate::host_fns::register(&mut linker).expect("register host fns");
-        let wasm = wat::parse_str(WAT).expect("compile WAT");
-        let module = Module::new(&engine, &wasm).expect("compile module");
-        let mut component =
-            Component::instantiate(&engine, &linker, &module, ctx()).expect("instantiate");
-        let (tx, rx) = mpsc::channel::<Mail>();
-        component.install_inbox_rx(rx);
-
-        // Pre-queue a decoy reply: same kind, different correlation.
-        // Without the correlation filter the sync wait would consume
-        // THIS one (first-in) as if it were the one we're waiting on.
-        let decoy_payload = vec![0xDE, 0xAD];
-        tx.send(
-            Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, decoy_payload, 1)
-                .with_reply_to(ReplyTo::with_correlation(ReplyTarget::None, 10)),
-        )
-        .expect("send decoy");
-
-        // Now the reply we're actually waiting on: correlation = 42.
-        let real_payload = vec![1, 2, 3, 4, 5];
-        tx.send(
-            Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, real_payload.clone(), 1)
-                .with_reply_to(ReplyTo::with_correlation(ReplyTarget::None, 42)),
-        )
-        .expect("send real reply");
-
-        component.deliver(&trigger_wait(0)).expect("deliver");
-
-        let result = component.read_u32(700) as i32;
-        assert_eq!(
-            result,
-            real_payload.len() as i32,
-            "expected byte count for the correlation-42 reply"
-        );
-        assert_eq!(
-            component.read_bytes(600, real_payload.len()),
-            real_payload,
-            "host fn copied the wrong payload — decoy reply consumed instead of real one",
-        );
-        // Decoy should still be sitting in overflow — the dispatcher
-        // would deliver it on its next pass after the wait returned.
-        let overflow = component.store.data().inbox_overflow.lock().unwrap();
-        assert_eq!(overflow.len(), 1, "decoy mail should be in overflow");
-        assert_eq!(overflow[0].reply_to.correlation_id, 10);
-    }
-
-    #[test]
-    fn wait_reply_returns_cancelled_when_sender_drops() {
-        use std::thread;
-        use std::time::Duration;
-
-        use crate::host_fns;
-
-        let (component, tx) = instantiate_sync_wait_with_inbox();
-        let handle = thread::spawn(move || {
-            let mut component = component;
-            component.deliver(&trigger_wait(1000)).expect("deliver");
-            component
-        });
-
-        thread::sleep(Duration::from_millis(50));
-        // Teardown-style cancellation under the drain+buffer design
-        // is "drop the mpsc Sender" — the host fn's recv_timeout
-        // wakes with Disconnected.
-        drop(tx);
-
-        let mut component = handle.join().expect("worker panicked");
-        let result = component.read_u32(700) as i32;
-        assert_eq!(result, host_fns::WAIT_CANCELLED);
-    }
-
-    /// Issue 357: `wait_reply_p32` must scan `inbox_overflow` before
-    /// reading the mpsc. A non-matching mail parked on overflow must
-    /// stay there while the wait reads the matching mail off the rx;
-    /// reversing the order would let the parked mail leak out the
-    /// front of the wait path.
-    #[test]
-    fn wait_reply_drains_overflow_before_rx_with_no_match_in_overflow() {
-        use crate::mail::MailboxId as M;
-
-        let (mut component, tx) = instantiate_sync_wait_with_inbox();
-
-        // Park a non-matching mail on overflow (different kind).
-        component.push_overflow_for_test(Mail::new(
-            M(0),
-            aether_data::KindId(0xDEAD_BEEF),
-            vec![9, 9, 9],
-            1,
-        ));
-
-        // Push the matching mail on the rx.
-        let payload = vec![1, 2, 3];
-        tx.send(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload.clone(), 1))
-            .expect("send matching mail");
-
-        component.deliver(&trigger_wait(1000)).expect("deliver");
-
-        let result = component.read_u32(700) as i32;
-        assert_eq!(result, payload.len() as i32, "matching reply consumed");
-        assert_eq!(component.read_bytes(600, payload.len()), payload);
-
-        // Overflow should still hold exactly the parked non-match —
-        // the wait scanned past it without consuming it.
-        let overflow = component.store.data().inbox_overflow.lock().unwrap();
-        assert_eq!(overflow.len(), 1, "non-match must stay parked on overflow");
-        assert_eq!(overflow[0].kind, aether_data::KindId(0xDEAD_BEEF));
-    }
-
-    /// Issue 357: a matching mail already on overflow short-circuits
-    /// the rx. The wait pulls it from overflow and never touches the
-    /// channel, so unrelated mail still queued on rx is preserved for
-    /// the dispatcher.
-    #[test]
-    fn wait_reply_pulls_match_from_overflow_without_touching_rx() {
-        use crate::mail::MailboxId as M;
-
-        let (mut component, tx) = instantiate_sync_wait_with_inbox();
-
-        // Park a matching mail on overflow.
-        let payload = vec![7, 7, 7, 7];
-        component.push_overflow_for_test(Mail::new(
-            M(0),
-            SYNC_WAIT_EXPECTED_KIND,
-            payload.clone(),
-            1,
-        ));
-
-        // Pre-queue an unrelated mail on the rx — the wait must NOT
-        // consume this; the dispatcher should see it on its next pass.
-        tx.send(Mail::new(
-            M(0),
-            aether_data::KindId(0xCAFE_BABE),
-            vec![0xFF],
-            1,
-        ))
-        .expect("send rx-side filler");
-
-        // Use poll mode (timeout = 0) so the test fails loudly if the
-        // host fn falls into the rx-blocking path despite a hit on
-        // overflow.
-        component.deliver(&trigger_wait(0)).expect("deliver");
-
-        let result = component.read_u32(700) as i32;
-        assert_eq!(result, payload.len() as i32, "overflow match consumed");
-        assert_eq!(component.read_bytes(600, payload.len()), payload);
-
-        // Overflow drained empty; the unrelated rx mail should reach
-        // the dispatcher next pass.
-        let overflow_len = component.store.data().inbox_overflow.lock().unwrap().len();
-        assert_eq!(overflow_len, 0, "matching overflow entry was removed");
-        let next = component.next_mail().expect("rx mail still queued");
-        assert_eq!(next.kind, aether_data::KindId(0xCAFE_BABE));
-    }
-
-    /// Issue 357: simulate a `WAIT_BUFFER_TOO_SMALL` retry. A wait
-    /// that hits an oversized payload pushes the mail back on
-    /// overflow with `push_front`. A second wait with a bigger
-    /// buffer must rediscover that parked mail via the overflow
-    /// scan — without contributions from the rx.
-    #[test]
-    fn wait_reply_retries_after_buffer_too_small_via_overflow() {
-        use std::sync::mpsc;
-
-        use wasmtime::{Engine, Linker, Module};
-
-        use crate::host_fns;
-        use crate::mail::MailboxId as M;
-
-        // First WAT: 64-byte cap (the standard sync-wait shape) —
-        // returns WAIT_BUFFER_TOO_SMALL when the payload exceeds that
-        // and pushes the mail back on overflow.
-        // Second WAT: 256-byte cap. The 128-byte payload writes into
-        // 800..928; the result code stores at offset 1100 to leave a
-        // clear gap past the payload window so the assert can read
-        // both without aliasing.
-        const WAT_BIG_BUF: &str = r#"
-            (module
-                (import "aether" "wait_reply_p32"
-                    (func $wait (param i64 i32 i32 i32 i64) (result i32)))
-                (memory (export "memory") 1)
-                (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
-                    i32.const 1100
-                    (call $wait
-                        (i64.const -6148914691236517206) ;; expected_kind
-                        (i32.const 800)                  ;; out_ptr
-                        (i32.const 256)                  ;; out_cap (bigger)
-                        (i32.const 0)                    ;; timeout_ms = poll
-                        (i64.const 0))                   ;; expected_correlation
-                    i32.store
-                    i32.const 0))
-        "#;
-
-        // Run #1: small buffer, oversized payload — parks mail on
-        // overflow via push_front and returns WAIT_BUFFER_TOO_SMALL.
-        let (mut component_small, tx_small) = instantiate_sync_wait_with_inbox();
-        let payload = vec![0x42u8; 128];
-        tx_small
-            .send(Mail::new(M(0), SYNC_WAIT_EXPECTED_KIND, payload.clone(), 1))
-            .expect("send oversized matching mail");
-        component_small
-            .deliver(&trigger_wait(0))
-            .expect("first deliver");
-        assert_eq!(
-            component_small.read_u32(700) as i32,
-            host_fns::WAIT_BUFFER_TOO_SMALL,
-            "small-buffer wait should return WAIT_BUFFER_TOO_SMALL",
-        );
-
-        // Sanity: the parked mail is in overflow now.
-        {
-            let overflow = component_small.store.data().inbox_overflow.lock().unwrap();
-            assert_eq!(overflow.len(), 1, "oversized mail parked on overflow");
-        }
-
-        // Run #2 simulates the retry. Build a second component with
-        // a bigger out_cap. We can't reuse `component_small` because
-        // the WAT is hardwired to a 64-byte cap; instead, move the
-        // parked mail across by popping it out of `component_small`'s
-        // overflow and pushing it onto `component_big`'s overflow,
-        // which is exactly the state the SDK leaves behind for the
-        // retry inside one component.
-        let parked = component_small
-            .store
-            .data()
-            .inbox_overflow
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("parked mail present");
-
-        let engine = Engine::default();
-        let mut linker: Linker<SubstrateCtx> = Linker::new(&engine);
-        crate::host_fns::register(&mut linker).expect("register host fns");
-        let wasm = wat::parse_str(WAT_BIG_BUF).expect("compile WAT");
-        let module = Module::new(&engine, &wasm).expect("compile module");
-        let mut component_big =
-            Component::instantiate(&engine, &linker, &module, ctx()).expect("instantiate");
-        // Install an empty inbox; the retry must NOT need rx.
-        let (_tx_big, rx_big) = mpsc::channel::<Mail>();
-        component_big.install_inbox_rx(rx_big);
-        component_big.push_overflow_for_test(parked);
-
-        component_big
-            .deliver(&trigger_wait(0))
-            .expect("retry deliver");
-
-        let result = component_big.read_u32(1100) as i32;
-        assert_eq!(result, payload.len() as i32, "retry consumed parked mail");
-        assert_eq!(component_big.read_bytes(800, payload.len()), payload);
-        let overflow_len = component_big
-            .store
-            .data()
-            .inbox_overflow
-            .lock()
-            .unwrap()
-            .len();
-        assert_eq!(overflow_len, 0, "retry drained the parked mail");
     }
 }

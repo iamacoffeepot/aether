@@ -5,18 +5,17 @@
 //
 // Deliberately does NOT hold the scheduler's full shared state — doing
 // so would create an Arc cycle through `Scheduler owns Actor, Actor
-// owns Store<SubstrateCtx>, SubstrateCtx back to Scheduler`. By holding
+// owns Store<ComponentCtx>, ComponentCtx back to Scheduler`. By holding
 // only `Arc<Registry>` and `Arc<Mailer>` the cycle is broken: neither
 // of those owns any actor.
 
 use std::cell::Cell;
-use std::collections::VecDeque;
-use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::input::InputSubscribers;
 use crate::mail::{Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
 use crate::mailer::Mailer;
+use crate::native_transport::NativeTransport;
 use crate::outbound::HubOutbound;
 use crate::registry::{MailboxEntry, Registry};
 use crate::reply_table::ReplyTable;
@@ -32,7 +31,7 @@ pub struct StateBundle {
     pub bytes: Vec<u8>,
 }
 
-pub struct SubstrateCtx {
+pub struct ComponentCtx {
     pub sender: MailboxId,
     pub registry: Arc<Registry>,
     pub queue: Arc<Mailer>,
@@ -80,18 +79,18 @@ pub struct SubstrateCtx {
     /// `dispatch_load_component` reports it like any other
     /// instantiation error. None on the success path.
     pub init_failure: Option<String>,
-    /// ADR-0042 inbox machinery: the component's mpsc `Receiver`
-    /// lives here (not on the dispatcher's stack) so the
-    /// `wait_reply_p32` host fn can drain it directly, and a FIFO
-    /// overflow holds non-matching mail pulled during a wait until
-    /// the dispatcher drains it ahead of the mpsc on its next pass.
-    /// Both slots are populated by `ComponentEntry::spawn` after the
-    /// mpsc pair is built; `Component::instantiate` leaves the
-    /// `Mutex`es empty / default because it has no scheduler.
-    pub inbox_rx: Mutex<Option<Receiver<Mail>>>,
-    pub inbox_overflow: Mutex<VecDeque<Mail>>,
+    /// Trampoline transport whose `wait_reply` the
+    /// [`crate::host_fns::wait_reply_p32`] host fn delegates to.
+    /// `Some` for ctx instances built by [`WasmTrampoline::init`]
+    /// (issue 634 Phase 4 PR 3 — `transport.wait_reply` is now the
+    /// single source of inbox / overflow / correlation-filter
+    /// truth); `None` for the test paths that build `ComponentCtx`
+    /// without a real trampoline (the host fn returns
+    /// [`crate::host_fns::WAIT_CANCELLED`] in that case, matching
+    /// the pre-Phase-4 "no inbox installed" disposition).
+    pub transport: Option<Arc<NativeTransport>>,
     /// ADR-0042 correlation counter. Per-component (one
-    /// `SubstrateCtx` per component instance). Holds the *next* id
+    /// `ComponentCtx` per component instance). Holds the *next* id
     /// to mint; `prev_correlation()` reads `counter - 1` to return
     /// the last one minted. Starts at `1` so that `0` always means
     /// "no correlation" (backward-compat sentinel for waits that
@@ -103,7 +102,7 @@ pub struct SubstrateCtx {
     correlation_counter: Cell<u64>,
 }
 
-impl SubstrateCtx {
+impl ComponentCtx {
     /// Build a fresh ctx with empty state-migration slots and an
     /// empty sender table. Using this over the struct literal keeps
     /// the private fields (reply_table, saved_state,
@@ -116,7 +115,7 @@ impl SubstrateCtx {
         outbound: Arc<HubOutbound>,
         input_subscribers: InputSubscribers,
     ) -> Self {
-        SubstrateCtx {
+        ComponentCtx {
             sender,
             registry,
             queue,
@@ -126,14 +125,24 @@ impl SubstrateCtx {
             saved_state: None,
             save_state_error: None,
             init_failure: None,
-            inbox_rx: Mutex::new(None),
-            inbox_overflow: Mutex::new(VecDeque::new()),
+            transport: None,
             correlation_counter: Cell::new(1),
         }
     }
 
+    /// Wire the trampoline's `NativeTransport` into the ctx so the
+    /// [`crate::host_fns::wait_reply_p32`] host fn can route through
+    /// it. Called by [`WasmTrampoline::init`] right after constructing
+    /// the ctx (and before `Component::instantiate`, since the host
+    /// fn closure captures the ctx via the wasmtime `Store` data
+    /// pointer at instantiation time, not at host-fn call time, so
+    /// installing later than that is fine).
+    pub fn install_transport(&mut self, transport: Arc<NativeTransport>) {
+        self.transport = Some(transport);
+    }
+
     /// Mint the next correlation id and bump the counter. Private —
-    /// callers that want a correlation use `SubstrateCtx::send`,
+    /// callers that want a correlation use `ComponentCtx::send`,
     /// which mints internally and tags the outgoing mail.
     fn mint_correlation(&self) -> u64 {
         let id = self.correlation_counter.get();
@@ -142,7 +151,7 @@ impl SubstrateCtx {
     }
 
     /// Return the correlation id used by the most recent
-    /// `SubstrateCtx::send` call. The `prev_correlation_p32` host fn
+    /// `ComponentCtx::send` call. The `prev_correlation_p32` host fn
     /// surfaces this to the guest so sync wrappers know what to
     /// filter on in `wait_reply_p32`. Returns `0` (the "no
     /// correlation" sentinel) before any send has been made.
@@ -151,28 +160,6 @@ impl SubstrateCtx {
         // last one. `.saturating_sub(1)` covers the pre-send case
         // where counter is still `1` (initial) → returns `0`.
         self.correlation_counter.get().saturating_sub(1)
-    }
-
-    /// Install the mpsc `Receiver` the dispatcher will read from.
-    /// Called once by `ComponentEntry::spawn` right after the mpsc
-    /// pair is built; `wait_reply_p32` later drains the same
-    /// receiver when a guest parks on a reply.
-    pub fn install_inbox_rx(&self, rx: Receiver<Mail>) {
-        *self.inbox_rx.lock().unwrap() = Some(rx);
-    }
-
-    /// Pop one mail for the dispatcher. Drains the overflow buffer
-    /// first (FIFO-preserves mail that `wait_reply_p32` set aside
-    /// while it was parked), then blocks on the mpsc. `None` when
-    /// both are empty and the inbox has been disconnected —
-    /// dispatcher_loop treats that as its exit signal.
-    pub fn next_mail(&self) -> Option<Mail> {
-        if let Some(mail) = self.inbox_overflow.lock().unwrap().pop_front() {
-            return Some(mail);
-        }
-        let rx_guard = self.inbox_rx.lock().unwrap();
-        let rx = rx_guard.as_ref()?;
-        rx.recv().ok()
     }
 
     /// Dispatch mail. If the recipient is a sink, the handler runs inline
@@ -249,7 +236,7 @@ mod tests {
         mailer.wire(Arc::clone(&registry));
         mailer.wire_outbound(Arc::clone(&outbound));
 
-        let ctx = SubstrateCtx::new(
+        let ctx = ComponentCtx::new(
             sender,
             Arc::clone(&registry),
             Arc::clone(&mailer),
@@ -296,7 +283,7 @@ mod tests {
         mailer.wire(Arc::clone(&registry));
         // Deliberately no `wire_outbound`.
 
-        let ctx = SubstrateCtx::new(
+        let ctx = ComponentCtx::new(
             sender,
             Arc::clone(&registry),
             Arc::clone(&mailer),

@@ -22,7 +22,7 @@
 //! loop can't accommodate that. That was wrong:
 //! [`NativeTransport::wait_reply`] already supports synchronous
 //! pulls from inside a handler — same `Mutex<Receiver>` + overflow
-//! buffer shape `SubstrateCtx::wait_reply` had. Unifying on the
+//! buffer shape `ComponentCtx::wait_reply` had. Unifying on the
 //! framework drops the parallel implementation.
 //!
 //! ## Lifecycle
@@ -50,7 +50,7 @@ use aether_kinds::{
 };
 use aether_substrate::capability::{BootError, Envelope};
 use aether_substrate::component::Component;
-use aether_substrate::ctx::SubstrateCtx;
+use aether_substrate::ctx::ComponentCtx;
 use aether_substrate::input::InputSubscribers;
 use aether_substrate::mail::{Mail, MailboxId};
 use aether_substrate::mailer::Mailer;
@@ -87,7 +87,7 @@ impl aether_actor::Instanced for WasmTrampoline {}
 /// trampoline's transport.
 pub struct WasmTrampolineConfig {
     pub engine: Arc<Engine>,
-    pub linker: Arc<Linker<SubstrateCtx>>,
+    pub linker: Arc<Linker<ComponentCtx>>,
     pub module: Module,
     pub registry: Arc<Registry>,
     pub outbound: Arc<HubOutbound>,
@@ -117,7 +117,7 @@ pub struct WasmTrampoline {
     /// `Component::instantiate` against the same engine + linker
     /// is reachable from the handler.
     engine: Arc<Engine>,
-    linker: Arc<Linker<SubstrateCtx>>,
+    linker: Arc<Linker<ComponentCtx>>,
     registry: Arc<Registry>,
     mailer: Arc<Mailer>,
     outbound: Arc<HubOutbound>,
@@ -137,13 +137,18 @@ impl NativeActor for WasmTrampoline {
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         let mailbox = ctx.self_id();
         let mailer = ctx.mailer();
-        let substrate_ctx = SubstrateCtx::new(
+        let mut substrate_ctx = ComponentCtx::new(
             mailbox,
             Arc::clone(&config.registry),
             Arc::clone(&mailer),
             Arc::clone(&config.outbound),
             Arc::clone(&config.input_subscribers),
         );
+        // Wire the trampoline's transport so `wait_reply_p32` host fn
+        // can drain *this* trampoline's inbox + overflow (issue 634
+        // Phase 4 PR 3 — single source of inbox truth lives on
+        // `NativeTransport`, not on `ComponentCtx`).
+        substrate_ctx.install_transport(Arc::clone(ctx.transport_arc()));
         let component = Component::instantiate(
             &config.engine,
             &config.linker,
@@ -282,11 +287,11 @@ impl WasmTrampoline {
             None
         };
 
-        // Build a fresh `SubstrateCtx` for the new instance — same
+        // Build a fresh `ComponentCtx` for the new instance — same
         // mailer + registry/outbound/input references, new
         // ReplyTable since wasm-side state resets. Mailbox id is
         // preserved across replace per ADR-0022 §4.
-        let substrate_ctx = SubstrateCtx::new(
+        let substrate_ctx = ComponentCtx::new(
             self.mailbox,
             Arc::clone(&self.registry),
             Arc::clone(&self.mailer),

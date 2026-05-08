@@ -166,7 +166,7 @@ pub struct EngineMailToHubSubstrateFrame {
     pub count: u32,
     pub source_mailbox_id: Option<MailboxId>,
     /// ADR-0042 correlation id the originating component's
-    /// `SubstrateCtx::send` minted. Carried across the hub so a
+    /// `ComponentCtx::send` minted. Carried across the hub so a
     /// bubbled-up mail's reply (ADR-0037 Phase 2) can echo back
     /// through `MailByIdFrame` and reach a parked `wait_reply_p32`
     /// on the original sender.
