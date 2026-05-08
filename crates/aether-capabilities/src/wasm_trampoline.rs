@@ -49,8 +49,7 @@ use aether_kinds::{
     ComponentCapabilities, DropComponent, DropResult, ReplaceComponent, ReplaceResult,
 };
 use aether_substrate::capability::{BootError, Envelope};
-use aether_substrate::component::Component;
-use aether_substrate::ctx::ComponentCtx;
+use aether_substrate::component::{Component, ComponentCtx};
 use aether_substrate::input::InputSubscribers;
 use aether_substrate::mail::{Mail, MailboxId};
 use aether_substrate::mailer::Mailer;
