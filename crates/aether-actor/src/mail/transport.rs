@@ -1,9 +1,12 @@
 //! ADR-0074 §Decision: the actor SDK's split point. Every byte
 //! crossing the actor↔chassis boundary is funnelled through one
-//! `MailTransport` impl chosen at compile time by the consumer crate
-//! — `aether-component`'s `FfiTransport` (delegates to `_p32` host
-//! fns) for WASM guests, `aether-substrate`'s `NativeTransport`
-//! (owned by each native capability) for native actors.
+//! `MailTransport` impl chosen at compile time by the consumer
+//! crate — `aether_actor::ffi::FfiTransport` (delegates to `_p32`
+//! host fns) for FFI guests, `aether_substrate::actor::native::transport::NativeTransport`
+//! (owned by each native capability) for native actors. Issue 663
+//! renamed the FFI binding layer from `wasm` to `ffi` to reflect
+//! that any host satisfying the `_p32` contract can ride this
+//! transport — wasm is one host.
 //!
 //! Trait methods take `&self`, not associated functions. FfiTransport
 //! is a ZST, so its `&self` is unused and the dispatch lowers to a
@@ -12,11 +15,12 @@
 //! state (mailer + self mailbox + inbox + correlation counter +
 //! overflow queue) directly as fields. No thread-locals, no
 //! install/uninstall ceremony — the type system carries the actor
-//! binding through the `&T` references threaded into `Sink::send`,
-//! `Ctx<'a, T>`, and the `wait_reply` / handle helpers.
+//! binding through the `&T` references threaded into `Mailbox::send`,
+//! per-stage ctx structs (`FfiCtx<'_>` / `NativeCtx<'_>`), and the
+//! `wait_reply` / handle helpers.
 
 /// The five operations every transport must provide. Signatures
-/// mirror the `_p32` FFI in `aether-component::raw` byte-for-byte —
+/// mirror the `_p32` FFI in `aether_actor::ffi::raw` byte-for-byte —
 /// pointer/length pairs become `&[u8]` / `&mut [u8]` slices but the
 /// integer parameters and return codes are untouched, so a transport
 /// impl can forward verbatim and the SDK can read return codes

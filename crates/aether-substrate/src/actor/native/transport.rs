@@ -12,7 +12,7 @@
 //! Capabilities build their `NativeTransport` at boot and pass
 //! `&self.transport` (or thread it through to a worker) wherever an
 //! `&T` is needed. The wasm-guest path uses
-//! `aether_component::FfiTransport` (a ZST) the same way; both
+//! `aether_actor::ffi::FfiTransport` (a ZST) the same way; both
 //! impls share the SDK in `aether-actor`.
 
 use std::collections::{HashMap, HashSet, VecDeque};

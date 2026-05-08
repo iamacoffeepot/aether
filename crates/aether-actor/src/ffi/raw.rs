@@ -63,7 +63,7 @@ unsafe extern "C" {
 /// panics — callers on non-wasm targets are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn send_mail(_recipient: u64, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
-    panic!("aether-component: send_mail called on non-wasm target");
+    panic!("aether-actor: send_mail called on non-wasm target");
 }
 
 /// # Safety
@@ -71,7 +71,7 @@ pub unsafe fn send_mail(_recipient: u64, _kind: u64, _ptr: u32, _len: u32, _coun
 /// panics — callers on non-wasm targets are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count: u32) -> u32 {
-    panic!("aether-component: reply_mail called on non-wasm target");
+    panic!("aether-actor: reply_mail called on non-wasm target");
 }
 
 /// # Safety
@@ -79,7 +79,7 @@ pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count:
 /// panics — callers on non-wasm targets are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn save_state(_version: u32, _ptr: u32, _len: u32) -> u32 {
-    panic!("aether-component: save_state called on non-wasm target");
+    panic!("aether-actor: save_state called on non-wasm target");
 }
 
 /// # Safety
@@ -93,7 +93,7 @@ pub unsafe fn wait_reply(
     _timeout_ms: u32,
     _expected_correlation: u64,
 ) -> i32 {
-    panic!("aether-component: wait_reply called on non-wasm target");
+    panic!("aether-actor: wait_reply called on non-wasm target");
 }
 
 /// # Safety
@@ -101,7 +101,7 @@ pub unsafe fn wait_reply(
 /// Always panics — callers on non-wasm targets are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn prev_correlation() -> u64 {
-    panic!("aether-component: prev_correlation called on non-wasm target");
+    panic!("aether-actor: prev_correlation called on non-wasm target");
 }
 
 /// # Safety
@@ -109,5 +109,5 @@ pub unsafe fn prev_correlation() -> u64 {
 /// Always panics — callers on non-wasm targets are misusing the SDK.
 #[cfg(not(target_arch = "wasm32"))]
 pub unsafe fn init_failed(_ptr: u32, _len: u32) {
-    panic!("aether-component: init_failed called on non-wasm target");
+    panic!("aether-actor: init_failed called on non-wasm target");
 }

@@ -2,6 +2,20 @@
 //! dispatcher trampoline fires. The trait + dispatch surface live in
 //! the parent module (`super`); the cross-flavour `MonitorHandle` lives
 //! in `crate::actor::monitor`.
+//!
+//! Issue 663 phase B added per-stage capability-trait impls
+//! ([`MailSender`], [`OutboundReply`], [`LifecycleControl`]) on
+//! [`NativeCtx`] / [`NativeInitCtx`] alongside the existing inherent
+//! methods, so user-facing handler bodies are now spelled in the same
+//! cross-transport vocabulary FFI guests use. Substrate-internal
+//! accessors (`mailer`, `publish_handle`, `transport_arc`, `self_id`,
+//! plus the `spawn_child` builder) stay inherent — they expose
+//! types that don't belong on a cross-transport trait
+//! (`Arc<Mailer>`, `Arc<Spawner>`, the chassis `ExportedHandles` map,
+//! the substrate-only `SpawnBuilder<'_, A>` whose
+//! `A: NativeActor + NativeDispatch` bound can't sit on a trait
+//! method declared in `aether-actor`). The inherent + trait surface
+//! coexist; cap authors reach for whichever is in scope.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -403,10 +417,7 @@ impl<'a> LifecycleControl for NativeCtx<'a> {
         self.transport.signal_shutdown();
     }
 
-    fn monitor(
-        &self,
-        target: aether_data::MailboxId,
-    ) -> Result<MonitorHandle, MonitorError> {
+    fn monitor(&self, target: aether_data::MailboxId) -> Result<MonitorHandle, MonitorError> {
         let spawner = self.transport.spawner().expect(
             "NativeCtx::monitor requires a chassis-built transport (no spawner installed — likely a `new_for_test` transport)",
         );
