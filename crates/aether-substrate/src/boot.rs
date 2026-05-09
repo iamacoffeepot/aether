@@ -21,7 +21,7 @@
 //! `AETHER_HUB_URL`. The chassis registers its own sinks and any
 //! other state that should exist before the hub knows the engine is
 //! alive, then dials by composing `aether_hub::HubClientCapability`
-//! through `Builder::with()`. Without this separation, a hub-driven
+//! through `Builder::with_actor()`. Without this separation, a hub-driven
 //! `load_component` could race ahead of the chassis's main thread
 //! and bind a chassis sink name to a freshly-loaded component before
 //! the chassis's later `register_closure` call, panicking the substrate
@@ -205,7 +205,7 @@ mod tests {
     /// tries to install the real sink handler. ADR-0070 phase 4 /
     /// ADR-0071 phase 7 retired `boot.connect_hub` entirely — the
     /// chassis composes `aether_hub::HubClientCapability` via the
-    /// `Builder::with()` path instead, so `build()` is structurally
+    /// `Builder::with_actor()` path instead, so `build()` is structurally
     /// incapable of reaching the hub. This test asserts the
     /// substrate-core invariant: `build()` returns a fully-wired
     /// boot whose `outbound` is disconnected.

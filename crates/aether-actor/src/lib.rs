@@ -67,7 +67,7 @@ pub use actor::ctx::{LifecycleControl, MailSender, OutboundReply, Persistence, R
 pub use actor::sender::{MailCtx, Sender};
 pub use actor::slot::Slot;
 pub use actor::{
-    Actor, Dispatch, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, Scheduling,
+    Actor, HandlesKind, Instanced, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, Scheduling,
     Singleton, validate_namespace_segment,
 };
 pub use local::Local;

@@ -1431,18 +1431,17 @@ fn expand_handlers(item: ItemImpl, opts: ActorOpts) -> syn::Result<TokenStream2>
             )),
         }
     } else {
-        if opts.skip_markers {
-            return Err(syn::Error::new_spanned(
-                &item.self_ty,
-                "#[actor(skip_markers)] is only meaningful on \
-                 `impl NativeActor for X` blocks wrapped by `#[bridge]`",
-            ));
-        }
-        // Inherent `impl X { … }` is the legacy native-cap shape used
-        // by post-545 capabilities (LogCapability et al.). Stays
-        // available through stage 1; stage 2 migrates caps onto the
-        // `impl NativeActor for X` shape so this arm retires.
-        expand_native_actor(item)
+        // Inherent `impl X { … }` is rejected — every native chassis cap
+        // now goes through `#[actor] impl NativeActor for X`. Pre-issue-688
+        // this arm emitted `impl Dispatch for X` for the legacy
+        // `Builder::with(cap)` facade path; that path retired alongside
+        // the `Dispatch` trait itself.
+        Err(syn::Error::new_spanned(
+            &item.self_ty,
+            "#[actor] expects `impl FfiActor for X`, `impl NativeActor for X`, or \
+             `impl Component for X` (back-compat alias) — inherent `impl X { … }` \
+             is no longer supported",
+        ))
     }
 }
 
@@ -1658,175 +1657,6 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
         }
 
         #kind_retention_statics
-    })
-}
-
-/// Native-actor expansion — `#[actor] impl X` (inherent impl).
-/// Used for chassis cap facades in `aether-kinds` whose `NativeActor`
-/// impl lives in `aether-substrate` but whose marker / handler list
-/// must stay wasm-importable.
-///
-/// Emits:
-///   - `impl HandlesKind<K> for X` per `#[handler]` method.
-///   - A `__dispatch(&mut self, kind: u64, payload: &[u8]) -> Option<()>`
-///     fn that decodes payload and calls the matching handler.
-///     Substrate's `NativeActor::boot` calls this from the dispatcher
-///     thread loop.
-///   - The original handler methods, attribute-stripped, as inherent
-///     methods (so they're callable from `__dispatch` and from the
-///     backend trait impl that delegates to them).
-///
-/// Native handlers take `(&mut self, kind: K)` — no ctx parameter.
-/// Chassis caps that need to send mail or hold runtime state do so
-/// through the backend trait impl; the cap's handler body is just
-/// `self.backend.on_X(kind)` delegation.
-fn expand_native_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
-    let self_ty = &item.self_ty;
-    let generics = &item.generics;
-    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
-
-    let mut handlers: Vec<NativeHandlerFn> = Vec::new();
-    let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
-
-    for impl_item in item.items {
-        match impl_item {
-            ImplItem::Fn(mut f) => {
-                let handler_attr_idx = f.attrs.iter().position(attr_is_handler);
-                if f.attrs.iter().any(attr_is_fallback) {
-                    return Err(syn::Error::new_spanned(
-                        &f,
-                        "#[fallback] is not supported on native chassis-cap impls (#[actor] on inherent impl) — \
-                         every kind a chassis cap accepts is declared via #[handler]",
-                    ));
-                }
-                if let Some(idx) = handler_attr_idx {
-                    let (kind_ty, takes_sender, is_slice) =
-                        extract_native_handler_kind_type(&f.sig)?;
-                    f.attrs.remove(idx);
-                    handlers.push(NativeHandlerFn {
-                        method: f,
-                        kind_ty,
-                        takes_sender,
-                        is_slice,
-                    });
-                } else {
-                    helpers.push(f);
-                }
-            }
-            ImplItem::Const(_) => {
-                helpers.push(syn::ImplItemFn {
-                    attrs: Vec::new(),
-                    vis: syn::Visibility::Inherited,
-                    defaultness: None,
-                    sig: syn::parse_quote!(fn __unused_native_const_marker()),
-                    block: syn::parse_quote!({}),
-                });
-                // We don't actually keep the const — unsupported on native impls
-                return Err(syn::Error::new_spanned(
-                    self_ty,
-                    "associated consts are not supported on native chassis-cap impls (#[actor] on inherent impl); \
-                     declare them on the standalone `Actor` impl instead",
-                ));
-            }
-            other => {
-                return Err(syn::Error::new_spanned(
-                    other,
-                    "unexpected item in #[actor] inherent impl (only fns are allowed)",
-                ));
-            }
-        }
-    }
-
-    if handlers.is_empty() {
-        return Err(syn::Error::new_spanned(
-            self_ty,
-            "#[actor] inherent impl requires at least one #[handler] method",
-        ));
-    }
-
-    let handles_kind_impls = handlers.iter().map(|h| {
-        let kind_ty = &h.kind_ty;
-        quote! {
-            impl #impl_generics ::aether_actor::HandlesKind<#kind_ty>
-                for #self_ty #where_clause {}
-        }
-    });
-
-    // Dispatch body: one if-arm per handler. Each arm decodes the
-    // payload (returning early on decode failure for the matched kind
-    // — substrate-side dispatcher logs the miss separately) and calls
-    // the inherent handler method by its original ident.
-    //
-    // Two call shapes:
-    //   - `takes_sender = true` → forward the dispatcher's `sender`
-    //     argument as the second arg. Used by reply-bearing caps
-    //     (Handle, Audio, Io, Net, ...) — issue 533 PR D1.
-    //   - `takes_sender = false` → drop sender on the floor.
-    //     Fire-and-forget caps (Log) keep the 2-arg signature.
-    let dispatch_arms = handlers.iter().map(|h| {
-        let kind_ty = &h.kind_ty;
-        let method_ident = &h.method.sig.ident;
-        let call = if h.takes_sender {
-            quote! { self.#method_ident(__sender, __decoded); }
-        } else {
-            quote! { self.#method_ident(__decoded); }
-        };
-        if h.is_slice {
-            // Slice handler — payload is `count * size_of::<K>()`
-            // contiguous bytes (ADR-0019 batch wire). Cast to
-            // `&[K]` for the handler. Only meaningful for cast-shape
-            // kinds; postcard kinds reject `&[K]` at the macro
-            // boundary because there's no batched postcard wire.
-            quote! {
-                if kind == <#kind_ty as ::aether_data::Kind>::ID.0 {
-                    if let Some(__decoded) =
-                        ::aether_data::__derive_runtime::decode_cast_slice::<#kind_ty>(payload)
-                    {
-                        #call
-                        return Some(());
-                    }
-                    return None;
-                }
-            }
-        } else {
-            quote! {
-                if kind == <#kind_ty as ::aether_data::Kind>::ID.0 {
-                    if let Some(__decoded) = <#kind_ty as ::aether_data::Kind>::decode_from_bytes(payload) {
-                        #call
-                        return Some(());
-                    }
-                    return None;
-                }
-            }
-        }
-    });
-
-    let handler_methods_tokens = handlers.iter().map(|h| &h.method);
-    let helper_methods_tokens = helpers.iter();
-
-    Ok(quote! {
-        #(#handles_kind_impls)*
-
-        impl #impl_generics ::aether_actor::Dispatch for #self_ty #where_clause {
-            fn __dispatch(
-                &mut self,
-                __sender: ::aether_data::ReplyTo,
-                kind: u64,
-                payload: &[u8],
-            ) -> Option<()> {
-                // `__sender` is shadowed-bind so dispatch arms that
-                // forward it stay readable. Underscore prefix avoids
-                // shadowing user identifiers when no handler takes it.
-                let _ = &__sender;
-                #(#dispatch_arms)*
-                None
-            }
-        }
-
-        impl #impl_generics #self_ty #where_clause {
-            #(#handler_methods_tokens)*
-            #(#helper_methods_tokens)*
-        }
     })
 }
 
@@ -2288,75 +2118,6 @@ fn extract_native_actor_handler_kind(sig: &Signature) -> syn::Result<(Type, bool
         return Ok(((*slice.elem).clone(), true));
     }
     Ok(((*pt.ty).clone(), false))
-}
-
-struct NativeHandlerFn {
-    method: syn::ImplItemFn,
-    /// The kind's inner type. For `mail: K` this is `K`; for slice
-    /// handlers `mail: &[K]` it's also `K` — the slice form just
-    /// changes how the dispatcher decodes from `payload` bytes.
-    kind_ty: Type,
-    /// `true` for 3-arg `(&mut self, sender: ReplyTo, mail: …)` — the
-    /// dispatcher forwards the envelope's `sender` through to the
-    /// handler. `false` for 2-arg `(&mut self, mail: …)` — sender is
-    /// ignored (fire-and-forget caps like Log).
-    takes_sender: bool,
-    /// `true` when the `mail` parameter is `&[K]` rather than `K`.
-    /// The dispatch arm decodes the whole payload as a contiguous
-    /// slice via `bytemuck::cast_slice` so a single envelope with
-    /// `count > 1` (`Mailbox::send_many`, ADR-0019) reaches the
-    /// handler intact. Only valid for cast-shape kinds — postcard
-    /// has no batch wire (postcard slices would need length-prefix
-    /// framing per element).
-    is_slice: bool,
-}
-
-/// Extract `K` from a native handler's signature. Accepts two shapes:
-///   - 2-arg `(&mut self, mail: K)` — fire-and-forget handler, sender
-///     is ignored when the dispatcher invokes it.
-///   - 3-arg `(&mut self, sender: ReplyTo, mail: K)` — reply-bearing
-///     handler, sender is the envelope's reply target. The macro
-///     trusts the second arg's name/type and forwards the dispatcher's
-///     `sender` through to it.
-///
-/// Returns the kind's inner type plus the `takes_sender` and
-/// `is_slice` flags the caller uses to pick the right dispatch-arm
-/// shape. `is_slice = true` when the parameter is `&[K]` (batched
-/// cast-shape decode); the inner `K` is what `HandlesKind` /
-/// `Kind::ID` reference.
-fn extract_native_handler_kind_type(sig: &Signature) -> syn::Result<(Type, bool, bool)> {
-    if sig.inputs.len() != 2 && sig.inputs.len() != 3 {
-        return Err(syn::Error::new_spanned(
-            sig,
-            "native #[handler] method must have signature `(&mut self, arg: K)` \
-             or `(&mut self, sender: ::aether_data::ReplyTo, arg: K)` \
-             (where K may also be `&[K]` for batched cast-shape kinds)",
-        ));
-    }
-    let first = &sig.inputs[0];
-    if !matches!(first, FnArg::Receiver(_)) {
-        return Err(syn::Error::new_spanned(
-            first,
-            "native #[handler] first parameter must be `&mut self`",
-        ));
-    }
-    let takes_sender = sig.inputs.len() == 3;
-    let kind_arg_idx = if takes_sender { 2 } else { 1 };
-    let FnArg::Typed(pat_ty) = &sig.inputs[kind_arg_idx] else {
-        return Err(syn::Error::new_spanned(
-            &sig.inputs[kind_arg_idx],
-            "native #[handler] kind parameter must be a typed `arg: K`",
-        ));
-    };
-    // Detect `&[K]` slice handlers (any reference to a slice). Inner
-    // `K` is what `HandlesKind` / `Kind::ID` reference; the slice
-    // form just picks a different decode path in the dispatch arm.
-    if let Type::Reference(type_ref) = &*pat_ty.ty
-        && let Type::Slice(slice) = &*type_ref.elem
-    {
-        return Ok(((*slice.elem).clone(), takes_sender, true));
-    }
-    Ok(((*pat_ty.ty).clone(), takes_sender, false))
 }
 
 /// Extract `K` from a handler method's third parameter (`arg: K`).

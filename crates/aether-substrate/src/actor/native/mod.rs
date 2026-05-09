@@ -1,13 +1,13 @@
 //! Issue 552 stage 1: native chassis-cap actor surface.
 //!
 //! The native counterpart of `aether_actor::FfiActor`. Stage 1
-//! introduces the type-level vocabulary; Stage 2 migrates the
+//! introduces the type-level vocabulary; Stage 2 migrated the
 //! existing capabilities (Log, Handle, Io, Net, Audio, Render) onto
-//! it. Stage 1's deliverable is the trait + ctx + dispatch
+//! it. Stage 1's deliverable was the trait + ctx + dispatch
 //! infrastructure plus a working boot path through
-//! [`crate::chassis::builder::Builder::with_actor`]. No existing cap
-//! changes shape during stage 1 — the legacy `with(cap)` path that
-//! takes `Actor + Dispatch` continues to work alongside.
+//! [`crate::chassis::builder::Builder::with_actor`]. The legacy
+//! `with(cap)` / `Actor + Dispatch` facade path retired in issue 688
+//! once every cap migrated to `with_actor`.
 //!
 //! ## Shape
 //!
