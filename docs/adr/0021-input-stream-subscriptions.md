@@ -3,6 +3,16 @@
 - **Status:** Accepted
 - **Date:** 2026-04-17
 - **Accepted:** 2026-04-19
+- **Updated 2026-05-09 (issue 640):** Wire shape unchanged; implementation
+  collapsed. The cross-thread `Arc<RwLock<HashMap<...>>>` retired —
+  `InputCapability` is the sole owner of the subscriber table.
+  Drivers push platform events as a single mail to `aether.input` and
+  the cap fans out per subscriber. Components subscribe explicitly
+  from `wire` by mailing `aether.input.subscribe { kind, mailbox }`
+  to the cap; the macro's auto-subscribe walker (issue #403) and the
+  cap-side manifest pass both retired. Kind names also rehomed from
+  `aether.control.subscribe_input` to `aether.input.subscribe` per
+  issue 638 Phase 2.
 
 ## Context
 

@@ -23,9 +23,9 @@
 //! ADR-0078 — the cap is single-threaded, every handler runs on the
 //! cap's dispatcher thread.
 
-use aether_kinds::{DropComponent, LoadComponent, ReplaceComponent};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::UnsubscribeAll;
+use aether_kinds::{DropComponent, LoadComponent, ReplaceComponent};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::ComponentHostConfig;
