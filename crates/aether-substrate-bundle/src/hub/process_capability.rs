@@ -114,6 +114,12 @@ mod native {
     impl NativeActor for ProcessCapability {
         type Config = ProcessCapabilityConfig;
         const NAMESPACE: &'static str = "aether.process";
+        // Issue 635 Phase 3: opts back into Dedicated. Every spawn /
+        // signal handler drives the tokio runtime via
+        // `runtime.block_on(...)`, parking the dispatcher thread for
+        // up to the SIGTERM-grace window. Under a worker pool that
+        // would proportionally reduce capacity for every other Pooled
+        // actor; on its own thread the parking is local.
         const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         fn init(

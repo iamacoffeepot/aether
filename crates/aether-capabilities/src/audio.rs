@@ -710,7 +710,6 @@ mod native {
 
         /// ADR-0039 + ADR-0074 Phase 5 chassis-owned mailbox.
         const NAMESPACE: &'static str = "aether.audio";
-        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         /// Boot the cap. Always succeeds — cpal init failure logs a
         /// warning and falls back to nop mode (per ADR-0039: audio is a

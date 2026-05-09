@@ -49,22 +49,25 @@ pub trait Actor: Sized + Send + 'static {
     /// per-frame coupling will too.
     const FRAME_BARRIER: bool = false;
 
-    /// Issue 635 dispatch placement. `Dedicated` (today's default)
-    /// keeps the actor on its own OS thread — the legacy
-    /// `thread::spawn` path. `Pooled` registers a dispatcher slot with
-    /// the chassis worker pool so many actors share a small thread set.
+    /// Issue 635 dispatch placement. `Pooled` (the default) registers
+    /// a dispatcher slot with the chassis worker pool so many actors
+    /// share a small thread set. `Dedicated` is the opt-in escape
+    /// hatch: it keeps the actor on its own OS thread for actors
+    /// whose handlers can park the dispatcher (today: `wait_reply`,
+    /// `ureq.fetch`, sync disk I/O, blocking external sources the
+    /// chassis can't reify as mail — see `Scheduling::Dedicated`).
     ///
-    /// Phase 1 ships every existing actor with `SCHEDULING = Dedicated`
-    /// (the default), so the runtime takes the today path everywhere.
-    /// Phase 3 flips this default to `Scheduling::Pooled` after every
-    /// actor that genuinely needs its own thread is explicitly
-    /// annotated `Dedicated`.
+    /// Phase 3 flipped this default from `Dedicated` (Phase 1's
+    /// behavior-preserving choice) to `Pooled` after the entire cap
+    /// set was audited. Today only `ProcessCapability` (which uses
+    /// `tokio::Runtime::block_on` to coordinate child-process
+    /// lifecycle) opts back into `Dedicated`.
     ///
     /// `FRAME_BARRIER` and `SCHEDULING` are orthogonal: a frame-bound
     /// actor can be either `Pooled` or `Dedicated`; the per-actor
     /// `pending` counter is read by the chassis frame loop regardless
     /// of where the dispatch happens.
-    const SCHEDULING: Scheduling = Scheduling::Dedicated;
+    const SCHEDULING: Scheduling = Scheduling::Pooled;
 }
 
 /// Issue 635 dispatch placement (see [`Actor::SCHEDULING`]). Equality

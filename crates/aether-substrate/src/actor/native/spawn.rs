@@ -16,11 +16,11 @@
 //! primitive + tombstone population.
 
 use std::any::TypeId;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use aether_actor::{HandlesKind, Instanced, NamespaceError, validate_namespace_segment};
 use aether_data::{Kind, mailbox_id_from_name};
@@ -104,9 +104,17 @@ pub struct Spawner {
     instanced_pending: RwLock<Vec<(MailboxId, Arc<AtomicU64>)>>,
     /// Issue 635 PR C: chassis worker pool's ready-queue sender.
     /// Cloned into [`crate::scheduler::WakeHandle`]s when the
-    /// Pooled spawn branch lands a slot. Today every actor is
-    /// Dedicated so this clone is unused; PR D flips that.
+    /// Pooled spawn branch lands a slot.
     pool_ready_tx: crossbeam_channel::Sender<Arc<dyn crate::scheduler::Drainable>>,
+    /// Issue 635 Phase 3: strong-Arc store for instanced
+    /// [`crate::scheduler::Drainable`] slots spawned via the Pooled
+    /// branch. Without this the slot dropped at end of `spawn_actor`
+    /// and the [`crate::scheduler::WakeHandle`]'s `Weak` failed to
+    /// upgrade — every wake after spawn would silently no-op.
+    /// Slots live until the Spawner itself drops (chassis teardown);
+    /// self-closing actors leave their slot Arc here as a small
+    /// metadata leak (~80 B) that's reclaimed at teardown.
+    instanced_slots: Mutex<HashMap<MailboxId, Arc<dyn crate::scheduler::Drainable>>>,
 }
 
 impl Spawner {
@@ -127,6 +135,7 @@ impl Spawner {
             counter: AtomicU64::new(0),
             instanced_pending: RwLock::new(Vec::new()),
             pool_ready_tx,
+            instanced_slots: Mutex::new(HashMap::new()),
         }
     }
 
@@ -456,12 +465,10 @@ impl Spawner {
                     .expect("dispatcher thread spawn must succeed");
             }
             aether_actor::Scheduling::Pooled => {
-                // Issue 635 PR C: register a `DispatcherSlot` with the
-                // chassis worker pool. No per-actor thread. The wake
-                // hook on the closure pushes the slot to the ready
-                // queue when an envelope lands. Today no
-                // `Instanced + Pooled` actors ship; this branch is
-                // reachable but unused at runtime.
+                // Issue 635 PR C + Phase 3: register a `DispatcherSlot`
+                // with the chassis worker pool. No per-actor thread.
+                // The wake hook on the closure pushes the slot to the
+                // ready queue when an envelope lands.
                 let slot = crate::actor::native::dispatcher_slot::DispatcherSlot::<A>::new(
                     actor,
                     Arc::clone(&transport),
@@ -474,22 +481,30 @@ impl Spawner {
                 let slot_dyn: Arc<dyn crate::scheduler::Drainable> = slot.clone();
                 let weak: std::sync::Weak<dyn crate::scheduler::Drainable> =
                     Arc::downgrade(&slot_dyn);
-                drop(slot_dyn);
                 let wake = crate::scheduler::WakeHandle::new(
                     Arc::clone(slot.state()),
                     weak,
                     self.pool_ready_tx.clone(),
                 );
+                // Stash the slot's strong Arc so wakes can upgrade their
+                // `Weak`. PR C dropped it here, which broke every wake
+                // after spawn (the registry only holds the inbox
+                // sender, not the slot — the comment claiming
+                // otherwise was wrong). Slots live until the Spawner
+                // itself drops at chassis teardown.
+                drop(slot);
+                self.instanced_slots.lock().unwrap().insert(id, slot_dyn);
+                // Pre-loaded `after_init` mail (lines above) was sent
+                // straight to the inbox via `tx.send`, which bypasses
+                // the closure's wake hook. Fire one wake now so the
+                // slot enters the ready queue and the worker drains
+                // those envelopes; subsequent peer sends route through
+                // the closure and wake on their own.
+                let manual_wake = wake.clone();
                 wake_slot.set(Arc::new(move || {
                     wake.wake();
                 }));
-                // Drop the held strong ref. The actor_registry
-                // holds the slot indirectly through the registered
-                // sender + sink handler; the pool's queue holds an
-                // Arc when the slot is woken. On chassis shutdown,
-                // dropping the registry entries + pool joins the
-                // workers; the slot drops at end of its last cycle.
-                drop(slot);
+                manual_wake.wake();
             }
         }
 
