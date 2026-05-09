@@ -45,6 +45,7 @@ pub mod mail;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod runtime;
+pub mod scheduler;
 
 pub use actor::monitor::MonitorHandle;
 pub use actor::native::binding::NativeBinding;
