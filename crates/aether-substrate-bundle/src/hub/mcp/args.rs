@@ -338,9 +338,20 @@ pub struct ComponentCapabilitiesWire {
 }
 
 /// One `#[handler]` method's capability entry — see `aether-kinds::HandlerCapability`.
+///
+/// `id` is the typed `KindId`. ADR-0064 / ADR-0065: `KindId`'s serde
+/// impl emits the tagged-string form (`knd-XXXX-XXXX-XXXX`) for
+/// human-readable serializers (JSON) and the raw `u64` for binary
+/// (postcard), so the same field deserializes from the substrate's
+/// postcard frame and serializes out to the MCP JSON response without
+/// any manual conversion. The `#[schemars(with = "String")]` attribute
+/// is required because `aether-data` is `no_std + alloc` and doesn't
+/// depend on schemars; the attribute publishes a `String` schema for
+/// the JSON wire form while leaving serde untouched.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct HandlerCapabilityWire {
-    pub id: u64,
+    #[schemars(with = "String")]
+    pub id: aether_data::KindId,
     pub name: String,
     pub doc: Option<String>,
 }

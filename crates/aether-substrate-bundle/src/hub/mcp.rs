@@ -429,15 +429,17 @@ mod tests {
     // the lookup path from the full load flow.
 
     fn stub_capabilities() -> args::ComponentCapabilitiesWire {
+        use aether_data::tagged_id::Tag;
+        use aether_data::with_tag;
         args::ComponentCapabilitiesWire {
             handlers: vec![
                 args::HandlerCapabilityWire {
-                    id: 42,
+                    id: aether_data::KindId(with_tag(Tag::Kind, 42)),
                     name: "aether.tick".into(),
                     doc: Some("heartbeat".into()),
                 },
                 args::HandlerCapabilityWire {
-                    id: 0xff,
+                    id: aether_data::KindId(with_tag(Tag::Kind, 0xff)),
                     name: "aether.ping".into(),
                     doc: None,
                 },
@@ -488,6 +490,13 @@ mod tests {
         assert_eq!(receives[1]["name"], "aether.ping");
         assert!(receives[1]["doc"].is_null());
         assert!(response["fallback"].is_null());
+        // Issue 690: handler ids surface as ADR-0064 tagged strings,
+        // not raw u64 numbers — JSON's f64 rounds 64-bit ids past 2^53
+        // so the wire form must be `knd-XXXX-XXXX-XXXX`.
+        let id0 = receives[0]["id"].as_str().expect("id must be a string");
+        assert!(id0.starts_with("knd-"), "id should be tagged: {id0}");
+        let id1 = receives[1]["id"].as_str().expect("id must be a string");
+        assert!(id1.starts_with("knd-"), "id should be tagged: {id1}");
     }
 
     #[tokio::test]
