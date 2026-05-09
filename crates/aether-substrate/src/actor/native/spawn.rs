@@ -102,6 +102,11 @@ pub struct Spawner {
     /// future epoch-deadline ADR; this counter is for synchronization,
     /// not fail-fast.
     instanced_pending: RwLock<Vec<(MailboxId, Arc<AtomicU64>)>>,
+    /// Issue 635 PR C: chassis worker pool's ready-queue sender.
+    /// Cloned into [`crate::scheduler::WakeHandle`]s when the
+    /// Pooled spawn branch lands a slot. Today every actor is
+    /// Dedicated so this clone is unused; PR D flips that.
+    pool_ready_tx: crossbeam_channel::Sender<Arc<dyn crate::scheduler::Drainable>>,
 }
 
 impl Spawner {
@@ -111,6 +116,7 @@ impl Spawner {
         mailer: Arc<Mailer>,
         frame_bound_set: Arc<RwLock<HashSet<MailboxId>>>,
         aborter: Arc<dyn FatalAborter>,
+        pool_ready_tx: crossbeam_channel::Sender<Arc<dyn crate::scheduler::Drainable>>,
     ) -> Self {
         Self {
             registry,
@@ -120,7 +126,17 @@ impl Spawner {
             aborter,
             counter: AtomicU64::new(0),
             instanced_pending: RwLock::new(Vec::new()),
+            pool_ready_tx,
         }
+    }
+
+    /// Borrow the chassis worker pool's ready-queue sender. PR D
+    /// reaches for this when a Pooled instanced actor spawns.
+    #[allow(dead_code)] // wired in PR D
+    pub(crate) fn pool_ready_tx(
+        &self,
+    ) -> &crossbeam_channel::Sender<Arc<dyn crate::scheduler::Drainable>> {
+        &self.pool_ready_tx
     }
 
     /// Wait for every spawned instanced actor's inbox to quiesce
@@ -295,6 +311,13 @@ impl Spawner {
         // between ticks. Production drivers don't read this.
         let pending = Arc::new(AtomicU64::new(0));
         let pending_for_handler = Arc::clone(&pending);
+        // Issue 635 PR C: optional pool wake hook for `Pooled` actors.
+        // Populated post-init by the `Pooled` branch below; left empty
+        // for `Dedicated` (today's only path) so the closure's `get()`
+        // is a single relaxed atomic load.
+        let wake_slot: Arc<crate::chassis::ctx::MailboxWakeSlot> =
+            Arc::new(crate::chassis::ctx::MailboxWakeSlot::default());
+        let wake_for_handler = Arc::clone(&wake_slot);
         let registered = self.registry.try_register_closure(
             full_name.clone(),
             Arc::new(
@@ -332,6 +355,10 @@ impl Spawner {
                             kind = kind_name,
                             "instanced actor receiver dropped — mail discarded"
                         );
+                        return;
+                    }
+                    if let Some(wake) = wake_for_handler.get() {
+                        wake();
                     }
                 },
             ),
@@ -400,37 +427,71 @@ impl Spawner {
             .unwrap()
             .push((id, Arc::clone(&pending)));
 
-        // 8. Spawn dispatcher thread, move actor + slots in.
-        // Issue 672: delegates to the shared `dispatch_loop_run`
-        // helper — same loop body the singleton path uses, with
-        // `local::with_stamped` + `log_install::with_actor_dispatch`
-        // wrapping every dispatch, drain, and `on_close`. Issue 629 /
-        // Phase A: the dispatcher takes the Box<A> by move — the
-        // actor is owned exclusively by this thread for its lifetime;
-        // no Arc share with the chassis or registry.
-        let transport_for_thread = Arc::clone(&transport);
-        let actor_registry_for_thread = Arc::clone(&self.actor_registry);
-        let mailer_for_thread = Arc::clone(&self.mailer);
-        let pending_for_thread = Arc::clone(&pending);
-        let thread_name = alloc_instanced_thread_name(&full_name);
+        // 8. Spawn dispatcher (or pool-register) per `A::SCHEDULING`.
         // The local strong Arc was the populator for the Weak handler
         // ref; the actor_registry now holds an `Arc::clone` of the
         // same Arc, so dropping the local doesn't break the weak.
         drop(strong_sender);
-        let _ = std::thread::Builder::new()
-            .name(thread_name)
-            .spawn(move || {
-                crate::actor::native::dispatch::dispatch_loop_run::<A>(
-                    &transport_for_thread,
-                    &mut actor,
-                    &slots,
-                    Some(&pending_for_thread),
-                    &actor_registry_for_thread,
-                    &mailer_for_thread,
+        match A::SCHEDULING {
+            aether_actor::Scheduling::Dedicated => {
+                // Today's path: one OS thread per instanced actor.
+                let transport_for_thread = Arc::clone(&transport);
+                let actor_registry_for_thread = Arc::clone(&self.actor_registry);
+                let mailer_for_thread = Arc::clone(&self.mailer);
+                let pending_for_thread = Arc::clone(&pending);
+                let thread_name = alloc_instanced_thread_name(&full_name);
+                let _ = std::thread::Builder::new()
+                    .name(thread_name)
+                    .spawn(move || {
+                        crate::actor::native::dispatch::dispatch_loop_run::<A>(
+                            &transport_for_thread,
+                            &mut actor,
+                            &slots,
+                            Some(&pending_for_thread),
+                            &actor_registry_for_thread,
+                            &mailer_for_thread,
+                            id,
+                        );
+                    })
+                    .expect("dispatcher thread spawn must succeed");
+            }
+            aether_actor::Scheduling::Pooled => {
+                // Issue 635 PR C: register a `DispatcherSlot` with the
+                // chassis worker pool. No per-actor thread. The wake
+                // hook on the closure pushes the slot to the ready
+                // queue when an envelope lands. Today no
+                // `Instanced + Pooled` actors ship; this branch is
+                // reachable but unused at runtime.
+                let slot = crate::actor::native::dispatcher_slot::DispatcherSlot::<A>::new(
+                    actor,
+                    Arc::clone(&transport),
+                    slots,
+                    Some(Arc::clone(&pending)),
+                    Arc::clone(&self.actor_registry),
+                    Arc::clone(&self.mailer),
                     id,
                 );
-            })
-            .expect("dispatcher thread spawn must succeed");
+                let slot_dyn: Arc<dyn crate::scheduler::Drainable> = slot.clone();
+                let weak: std::sync::Weak<dyn crate::scheduler::Drainable> =
+                    Arc::downgrade(&slot_dyn);
+                drop(slot_dyn);
+                let wake = crate::scheduler::WakeHandle::new(
+                    Arc::clone(slot.state()),
+                    weak,
+                    self.pool_ready_tx.clone(),
+                );
+                wake_slot.set(Arc::new(move || {
+                    wake.wake();
+                }));
+                // Drop the held strong ref. The actor_registry
+                // holds the slot indirectly through the registered
+                // sender + sink handler; the pool's queue holds an
+                // Arc when the slot is woken. On chassis shutdown,
+                // dropping the registry entries + pool joins the
+                // workers; the slot drops at end of its last cycle.
+                drop(slot);
+            }
+        }
 
         Ok(id)
     }

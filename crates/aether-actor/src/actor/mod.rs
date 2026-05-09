@@ -49,22 +49,22 @@ pub trait Actor: Sized + Send + 'static {
     /// per-frame coupling will too.
     const FRAME_BARRIER: bool = false;
 
-    /// Issue 635 dispatch placement. `Pooled` (the default) routes the
-    /// actor onto the chassis-owned worker pool — many actors drained
-    /// over a small thread set. `Dedicated` opts the actor out of pool
-    /// scheduling and back onto its own OS thread (today's behavior),
-    /// for actors that own a long-running blocking primitive their
-    /// handler must not yield from (TCP `accept`, file watch reads,
-    /// `wait_reply` parking).
+    /// Issue 635 dispatch placement. `Dedicated` (today's default)
+    /// keeps the actor on its own OS thread — the legacy
+    /// `thread::spawn` path. `Pooled` registers a dispatcher slot with
+    /// the chassis worker pool so many actors share a small thread set.
     ///
     /// Phase 1 ships every existing actor with `SCHEDULING = Dedicated`
-    /// so the default flip in later phases is bit-identical. The
-    /// runtime branches on this const at boot — `Dedicated` actors take
-    /// the legacy `thread::spawn` path; `Pooled` actors register a
-    /// dispatcher slot with the pool. The `FRAME_BARRIER` const is
-    /// orthogonal: a frame-bound actor can be either `Pooled` or
-    /// `Dedicated`.
-    const SCHEDULING: Scheduling = Scheduling::Pooled;
+    /// (the default), so the runtime takes the today path everywhere.
+    /// Phase 3 flips this default to `Scheduling::Pooled` after every
+    /// actor that genuinely needs its own thread is explicitly
+    /// annotated `Dedicated`.
+    ///
+    /// `FRAME_BARRIER` and `SCHEDULING` are orthogonal: a frame-bound
+    /// actor can be either `Pooled` or `Dedicated`; the per-actor
+    /// `pending` counter is read by the chassis frame loop regardless
+    /// of where the dispatch happens.
+    const SCHEDULING: Scheduling = Scheduling::Dedicated;
 }
 
 /// Issue 635 dispatch placement (see [`Actor::SCHEDULING`]). Equality
