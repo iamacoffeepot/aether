@@ -265,9 +265,18 @@ pub struct Component {
     store: Store<ComponentCtx>,
     memory: Memory,
     receive: TypedFunc<(u64, u32, u32, u32, u32), u32>,
+    /// Issue 584 Phase 2b: pre-shutdown mail-allowed hook. Called by
+    /// the trampoline (via [`Self::unwire`]) before `on_drop` /
+    /// `on_replace` on the dying instance. The post-init `wire` hook
+    /// (its sibling) fires inside [`Self::instantiate`] and isn't
+    /// stored — wire is one-shot.
+    unwire: Option<TypedFunc<u64, u32>>,
     on_replace: Option<TypedFunc<(), u32>>,
     on_drop: Option<TypedFunc<(), u32>>,
     on_rehydrate: Option<TypedFunc<(u32, u32, u32), u32>>,
+    /// Mailbox id stamped at instantiate-time, replayed into `unwire`
+    /// calls. Same value the guest's `init` and `wire` shims received.
+    self_mailbox_id: u64,
 }
 
 impl Component {
@@ -338,14 +347,42 @@ impl Component {
         let on_rehydrate = instance
             .get_typed_func::<(u32, u32, u32), u32>(&mut store, "on_rehydrate_p32")
             .ok();
+        // Issue 584 Phase 2b: optional wire/unwire exports. Both take
+        // the component's own mailbox id (same as `init`) so the guest
+        // ctx can self-address. Raw-FFI guests without the macro won't
+        // emit them; macro-using guests with default no-op trait
+        // bodies still emit the symbol (the shim just calls into the
+        // default body).
+        let unwire = instance
+            .get_typed_func::<u64, u32>(&mut store, "unwire")
+            .ok();
+
+        // Issue 584 Phase 2b: invoke the guest's `wire` hook
+        // immediately after `init` succeeds. Same mailbox id the
+        // guest's `init` shim received. The trampoline isn't
+        // forwarding inbound mail yet (LoadComponent reply hasn't
+        // fired), so a wire-time send to a peer queues in the peer's
+        // inbox without racing this instance's first envelope. wire
+        // is one-shot — not stored on `Self` because there's no later
+        // re-fire path.
+        if let Ok(wire_fn) = instance.get_typed_func::<u64, u32>(&mut store, "wire") {
+            let rc = wire_fn.call(&mut store, mailbox_id)?;
+            if rc != 0 {
+                return Err(wasmtime::Error::msg(format!(
+                    "guest wire returned non-zero rc {rc}"
+                )));
+            }
+        }
 
         Ok(Self {
             store,
             memory,
             receive,
+            unwire,
             on_replace,
             on_drop,
             on_rehydrate,
+            self_mailbox_id: mailbox_id,
         })
     }
 
@@ -399,6 +436,18 @@ impl Component {
             &mut self.store,
             (mail.kind.0, MAIL_OFFSET, byte_len, mail.count, handle),
         )
+    }
+
+    /// Issue 584 Phase 2b (ADR-0079 amended): pre-shutdown mail-allowed
+    /// hook. Invoked by the trampoline before `on_drop` / `on_replace`
+    /// on the dying instance. Same trap containment as the other
+    /// hooks — a guest panic doesn't stall teardown.
+    pub fn unwire(&mut self) {
+        if let Some(f) = self.unwire.clone()
+            && let Err(e) = f.call(&mut self.store, self.self_mailbox_id)
+        {
+            tracing::error!(target: "aether_substrate::component", error = %e, "unwire hook trapped");
+        }
     }
 
     /// Invoke the guest's `on_replace` hook if it exports one.
@@ -550,6 +599,59 @@ mod tests {
                 i32.const 0))
     "#;
 
+    /// WAT exercising the issue 584 Phase 2b lifecycle hooks. `wire`
+    /// writes 0x77 to offset 100; `unwire` writes 0x88 to offset 104.
+    /// Mailbox id arrives in the i64 param; we store its low 32 bits
+    /// at offset 108 (wire) / 112 (unwire) so tests can verify the
+    /// host passed the right value.
+    const WAT_WIRE_UNWIRE: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                i32.const 0)
+            (func (export "wire") (param i64) (result i32)
+                i32.const 100
+                i32.const 0x77
+                i32.store
+                i32.const 108
+                local.get 0
+                i32.wrap_i64
+                i32.store
+                i32.const 0)
+            (func (export "unwire") (param i64) (result i32)
+                i32.const 104
+                i32.const 0x88
+                i32.store
+                i32.const 112
+                local.get 0
+                i32.wrap_i64
+                i32.store
+                i32.const 0))
+    "#;
+
+    /// WAT whose `wire` traps. Tests that `Component::instantiate`
+    /// surfaces the trap as a wasmtime error rather than swallowing.
+    const WAT_WIRE_TRAPS: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                i32.const 0)
+            (func (export "wire") (param i64) (result i32)
+                unreachable))
+    "#;
+
+    /// WAT whose `unwire` traps. Tests that `Component::unwire`
+    /// contains the trap (logs but doesn't propagate), same pattern
+    /// as `on_drop_trap_is_contained`.
+    const WAT_UNWIRE_TRAPS: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
+                i32.const 0)
+            (func (export "unwire") (param i64) (result i32)
+                unreachable))
+    "#;
+
     const WAT_TRAP_ON_DROP: &str = r#"
         (module
             (memory (export "memory") 1)
@@ -697,6 +799,69 @@ mod tests {
         assert_eq!(bundle.bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
         // take_saved_state is destructive.
         assert!(component.take_saved_state().is_none());
+    }
+
+    /// Issue 584 Phase 2b: `Component::instantiate` invokes the
+    /// guest's `wire` export immediately after `init`. The fixture
+    /// writes 0x77 to offset 100; reading it back proves wire ran.
+    #[test]
+    fn instantiate_invokes_wire_after_init() {
+        let mut component = instantiate(WAT_WIRE_UNWIRE);
+        assert_eq!(
+            component.read_u32(100),
+            0x77,
+            "wire must run during instantiate, before instantiate returns",
+        );
+        // Mailbox id stamped into offset 108 by the WAT — test ctx
+        // uses MailboxId(0), so the low 32 bits are 0.
+        assert_eq!(component.read_u32(108), 0);
+    }
+
+    /// Issue 584 Phase 2b: `Component::unwire` invokes the guest's
+    /// `unwire` export. Trampoline calls this before `on_drop` /
+    /// `on_replace` on the dying instance.
+    #[test]
+    fn unwire_invokes_export_and_writes_marker() {
+        let mut component = instantiate(WAT_WIRE_UNWIRE);
+        assert_eq!(component.read_u32(104), 0);
+        component.unwire();
+        assert_eq!(component.read_u32(104), 0x88);
+    }
+
+    /// Issue 584 Phase 2b: a wire trap is fatal — `instantiate`
+    /// returns the wasmtime error so the load path surfaces it via
+    /// `LoadResult::Err`. Symmetric with init failure handling.
+    #[test]
+    fn wire_trap_aborts_instantiate() {
+        let engine = Engine::default();
+        let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
+        crate::actor::wasm::host_fns::register(&mut linker).expect("register host fns");
+        let wasm = wat::parse_str(WAT_WIRE_TRAPS).expect("compile WAT");
+        let module = Module::new(&engine, &wasm).expect("compile module");
+        let result = Component::instantiate(&engine, &linker, &module, ctx());
+        assert!(
+            result.is_err(),
+            "instantiate must propagate wire trap as wasmtime::Error",
+        );
+    }
+
+    /// Issue 584 Phase 2b: `unwire` traps are contained the same way
+    /// `on_drop` / `on_replace` traps are — logged but not propagated
+    /// (per ADR-0015, panicking hooks must not stall teardown).
+    #[test]
+    fn unwire_trap_is_contained() {
+        let mut component = instantiate(WAT_UNWIRE_TRAPS);
+        // `unreachable` traps; substrate logs and continues. Reaching
+        // the line after the call is the whole assertion.
+        component.unwire();
+    }
+
+    /// Issue 584 Phase 2b: a component without a `wire` / `unwire`
+    /// export is a no-op (matches the on_replace / on_drop pattern).
+    #[test]
+    fn unwire_on_component_without_export_is_noop() {
+        let mut component = instantiate(WAT_NO_HOOKS);
+        component.unwire();
     }
 
     #[test]

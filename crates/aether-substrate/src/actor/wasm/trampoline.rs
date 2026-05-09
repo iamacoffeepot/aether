@@ -192,6 +192,11 @@ impl NativeActor for WasmTrampoline {
     #[handler]
     fn on_drop_component(&mut self, ctx: &mut NativeCtx<'_>, _payload: DropComponent) {
         if let Some(mut component) = self.component.take() {
+            // Issue 584 Phase 2b: unwire fires first (mail-allowed
+            // pre-shutdown hook), then on_drop (final cleanup before
+            // linear memory tears down). Phase 3 retires on_drop in
+            // favour of unwire alone.
+            component.unwire();
             component.on_drop();
         }
         ctx.reply(&DropResult::Ok);
@@ -269,11 +274,14 @@ impl WasmTrampoline {
             Err(error) => return ReplaceResult::Err { error },
         };
 
-        // Run on_replace on the old instance and lift any saved-
-        // state bundle. If the trampoline is currently empty
-        // (post-DropComponent — load-after-drop refill), there's no
-        // prior wasm to drain; the new instance starts from scratch.
+        // Run unwire then on_replace on the old instance and lift
+        // any saved-state bundle. If the trampoline is currently
+        // empty (post-DropComponent — load-after-drop refill),
+        // there's no prior wasm to drain; the new instance starts
+        // from scratch. Issue 584 Phase 2b: unwire fires first so the
+        // old instance can announce its retirement before the swap.
         let saved = if let Some(mut old) = self.component.take() {
+            old.unwire();
             old.on_replace();
             if let Some(err) = old.take_save_error() {
                 // Restore the old component so the trampoline isn't
