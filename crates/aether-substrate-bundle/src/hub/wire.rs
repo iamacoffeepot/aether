@@ -377,12 +377,10 @@ mod tests {
             KindDescriptor {
                 name: "aether.tick".into(),
                 schema: SchemaType::Unit,
-                is_stream: false,
             },
             KindDescriptor {
                 name: "physics.contact".into(),
                 schema: SchemaType::Bytes,
-                is_stream: false,
             },
         ]);
         let mut buf = Vec::new();

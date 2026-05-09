@@ -489,7 +489,6 @@ mod tests {
             .register_kind_with_descriptor(KindDescriptor {
                 name: Note::NAME.into(),
                 schema: note_schema(),
-                is_stream: false,
             })
             .unwrap();
         let sink = CapturingSink::new();
@@ -517,14 +516,12 @@ mod tests {
             .register_kind_with_descriptor(KindDescriptor {
                 name: HeldNote::NAME.into(),
                 schema: held_note_schema(),
-                is_stream: false,
             })
             .unwrap();
         let inner_kind_id = registry
             .register_kind_with_descriptor(KindDescriptor {
                 name: Note::NAME.into(),
                 schema: note_schema(),
-                is_stream: false,
             })
             .unwrap();
 
@@ -589,7 +586,6 @@ mod tests {
             .register_kind_with_descriptor(KindDescriptor {
                 name: HeldNote::NAME.into(),
                 schema: held_note_schema(),
-                is_stream: false,
             })
             .unwrap();
 

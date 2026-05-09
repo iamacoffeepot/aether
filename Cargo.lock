@@ -156,6 +156,7 @@ version = "0.2.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-capabilities",
+ "aether-data",
  "aether-demo-tic-tac-toe",
  "aether-kinds",
  "aether-scenario",

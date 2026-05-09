@@ -256,17 +256,25 @@ pub struct Component {
     store: Store<ComponentCtx>,
     memory: Memory,
     receive: TypedFunc<(u64, u32, u32, u32, u32), u32>,
+    /// Issue 584 Phase 2b: post-init mail-allowed hook. Stored (rather
+    /// than called inside [`Self::instantiate`]) so the trampoline
+    /// can fire it AFTER its mailbox is registered — issue 640
+    /// Phase 2 surfaced a race where `wire`-time `subscribe_input`
+    /// mail was rejected by the input cap's
+    /// `validate_subscriber_mailbox` because the trampoline mailbox
+    /// hadn't been registered yet (init runs in
+    /// `spawn_actor` step 4, registration is step 5–7).
+    /// `WasmTrampoline::wire` invokes [`Self::wire`] post-registration.
+    wire: Option<TypedFunc<u64, u32>>,
     /// Issue 584 Phase 2b: pre-shutdown mail-allowed hook. Called by
     /// the trampoline (via [`Self::unwire`]) before `on_replace` on
     /// the dying instance, or before the `Component` value drops on a
-    /// `DropComponent`. The post-init `wire` hook (its sibling) fires
-    /// inside [`Self::instantiate`] and isn't stored — wire is
-    /// one-shot.
+    /// `DropComponent`.
     unwire: Option<TypedFunc<u64, u32>>,
     on_replace: Option<TypedFunc<(), u32>>,
     on_rehydrate: Option<TypedFunc<(u32, u32, u32), u32>>,
-    /// Mailbox id stamped at instantiate-time, replayed into `unwire`
-    /// calls. Same value the guest's `init` and `wire` shims received.
+    /// Mailbox id stamped at instantiate-time, replayed into `wire`
+    /// and `unwire` calls. Same value the guest's `init` shim received.
     self_mailbox_id: u64,
 }
 
@@ -346,32 +354,49 @@ impl Component {
             .get_typed_func::<u64, u32>(&mut store, "unwire")
             .ok();
 
-        // Issue 584 Phase 2b: invoke the guest's `wire` hook
-        // immediately after `init` succeeds. Same mailbox id the
-        // guest's `init` shim received. The trampoline isn't
-        // forwarding inbound mail yet (LoadComponent reply hasn't
-        // fired), so a wire-time send to a peer queues in the peer's
-        // inbox without racing this instance's first envelope. wire
-        // is one-shot — not stored on `Self` because there's no later
-        // re-fire path.
-        if let Ok(wire_fn) = instance.get_typed_func::<u64, u32>(&mut store, "wire") {
-            let rc = wire_fn.call(&mut store, mailbox_id)?;
-            if rc != 0 {
-                return Err(wasmtime::Error::msg(format!(
-                    "guest wire returned non-zero rc {rc}"
-                )));
-            }
-        }
+        // Issue 584 Phase 2b / Issue 640 Phase 2: store the `wire`
+        // export rather than calling it here. `instantiate` runs
+        // inside `spawn_actor` step 4 — BEFORE the trampoline mailbox
+        // is registered (step 5–7). A wire-time send like
+        // `aether.input.subscribe { mailbox: self.mailbox_id() }`
+        // would race the input cap's `validate_subscriber_mailbox`
+        // and warn-drop. `WasmTrampoline::wire` fires this hook
+        // post-registration via the `NativeActor::wire` lifecycle
+        // method. wire stays one-shot — the trampoline drops the
+        // typed-func handle after the call.
+        let wire = instance.get_typed_func::<u64, u32>(&mut store, "wire").ok();
 
         Ok(Self {
             store,
             memory,
             receive,
+            wire,
             unwire,
             on_replace,
             on_rehydrate,
             self_mailbox_id: mailbox_id,
         })
+    }
+
+    /// Invoke the guest's `wire` hook one-shot. The trampoline calls
+    /// this from its `NativeActor::wire` body — i.e. after the
+    /// trampoline's mailbox has been registered, so a wire-time
+    /// `subscribe_input` mail is validated against a live closure
+    /// entry rather than being warn-dropped. Idempotent across the
+    /// `Option::take()` — calling twice is a guest-side bug, but a
+    /// repeat call no-ops cleanly.
+    pub fn wire(&mut self) -> wasmtime::Result<()> {
+        let Some(wire_fn) = self.wire.take() else {
+            return Ok(());
+        };
+        let mailbox_id = self.self_mailbox_id;
+        let rc = wire_fn.call(&mut self.store, mailbox_id)?;
+        if rc != 0 {
+            return Err(wasmtime::Error::msg(format!(
+                "guest wire returned non-zero rc {rc}"
+            )));
+        }
+        Ok(())
     }
 
     /// Deliver a mail into the component's linear memory and invoke
@@ -748,16 +773,26 @@ mod tests {
         assert!(component.take_saved_state().is_none());
     }
 
-    /// Issue 584 Phase 2b: `Component::instantiate` invokes the
-    /// guest's `wire` export immediately after `init`. The fixture
-    /// writes 0x77 to offset 100; reading it back proves wire ran.
+    /// Issue 584 Phase 2b: `Component::wire` invokes the guest's
+    /// `wire` export. Issue 640 Phase 2 moved the call out of
+    /// `instantiate` (which runs in `spawn_actor` step 4 — before
+    /// the trampoline mailbox is registered) into the trampoline's
+    /// `NativeActor::wire` body (post-registration), so wire-time
+    /// `subscribe_input` mail validates against a live closure
+    /// entry rather than racing the input cap's
+    /// `validate_subscriber_mailbox`. The fixture writes 0x77 to
+    /// offset 100 from inside its `wire` export; reading it back
+    /// after `Component::wire()` proves the call dispatched.
     #[test]
-    fn instantiate_invokes_wire_after_init() {
+    fn wire_invokes_export_and_writes_marker() {
         let mut component = instantiate(WAT_WIRE_UNWIRE);
+        // wire hasn't been invoked yet — `instantiate` no longer fires it.
+        assert_eq!(component.read_u32(100), 0);
+        component.wire().expect("wire ok");
         assert_eq!(
             component.read_u32(100),
             0x77,
-            "wire must run during instantiate, before instantiate returns",
+            "wire must run when Component::wire is invoked",
         );
         // Mailbox id stamped into offset 108 by the WAT — test ctx
         // uses MailboxId(0), so the low 32 bits are 0.
@@ -776,20 +811,21 @@ mod tests {
         assert_eq!(component.read_u32(104), 0x88);
     }
 
-    /// Issue 584 Phase 2b: a wire trap is fatal — `instantiate`
-    /// returns the wasmtime error so the load path surfaces it via
-    /// `LoadResult::Err`. Symmetric with init failure handling.
+    /// Issue 584 Phase 2b / Issue 640 Phase 2: a wire trap is
+    /// fatal — `Component::wire` returns the wasmtime error so the
+    /// trampoline can log it. Pre-issue-640 the wire call lived
+    /// inside `Component::instantiate`, so a wire trap aborted load
+    /// directly; post-issue-640 it lives on the trampoline's
+    /// `NativeActor::wire` lifecycle hook, so the trap surfaces
+    /// after instantiation succeeds and the trampoline logs +
+    /// continues (matching `unwire`'s contained-trap policy).
     #[test]
-    fn wire_trap_aborts_instantiate() {
-        let engine = Engine::default();
-        let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
-        crate::actor::wasm::host_fns::register(&mut linker).expect("register host fns");
-        let wasm = wat::parse_str(WAT_WIRE_TRAPS).expect("compile WAT");
-        let module = Module::new(&engine, &wasm).expect("compile module");
-        let result = Component::instantiate(&engine, &linker, &module, ctx());
+    fn wire_trap_propagates_via_component_wire() {
+        let mut component = instantiate(WAT_WIRE_TRAPS);
+        let result = component.wire();
         assert!(
             result.is_err(),
-            "instantiate must propagate wire trap as wasmtime::Error",
+            "Component::wire must propagate the guest trap as wasmtime::Error",
         );
     }
 
@@ -921,7 +957,6 @@ mod tests {
             .register_kind_with_descriptor(KindDescriptor {
                 name: "test.pong".into(),
                 schema: SchemaType::Unit,
-                is_stream: false,
             })
             .expect("register kind");
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));

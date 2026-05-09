@@ -3,6 +3,16 @@
 - **Status:** Accepted (phases 1–3 shipped)
 - **Date:** 2026-04-20
 - **Accepted:** 2026-04-20
+- **Updated 2026-05-09 (issue 640):** The auto-subscribe behaviors
+  documented in §190 / §226 retired. The macro-emitted SDK init
+  walker (`#[handlers]` prepending `ctx.subscribe_input::<K>()` calls)
+  retired in issue #403. The cap-side mass-subscribe pass that walked
+  the inputs manifest at load time (`ComponentHostCapability::auto_subscribe_inputs`)
+  retired in issue 640 Phase 2 along with the `is_stream` descriptor
+  flag and the `Kind::IS_STREAM` const. The `aether.kinds.inputs`
+  manifest itself stays — it still drives `describe_component` over
+  MCP and the trampoline's wire path. Components subscribe explicitly
+  from `wire` by mailing `aether.input.subscribe` to `InputCapability`.
 
 ## Context
 

@@ -174,10 +174,11 @@ pub trait FfiActor: crate::Actor {
     /// first envelope. The actor may send mail here — peers are
     /// addressable. Default no-op; override to register subscriptions,
     /// announce the actor, or kick off a poll loop via self-mail.
-    fn wire<C>(&mut self, ctx: &mut C)
-    where
-        C: Resolver + MailSender,
-    {
+    ///
+    /// Concrete `&mut FfiCtx<'_>` (mirrors native's
+    /// `NativeActor::wire(&mut NativeCtx<'_>)`) so overrides reach for
+    /// the inherent `ctx.actor::<R>().send(&payload)` shape directly.
+    fn wire(&mut self, ctx: &mut crate::ffi::ctx::FfiCtx<'_>) {
         let _ = ctx;
     }
 
@@ -187,10 +188,7 @@ pub trait FfiActor: crate::Actor {
     /// mailboxes; sends to a dead peer warn-drop. Default no-op;
     /// override to publish a final broadcast, signal monitors, or
     /// flush state.
-    fn unwire<C>(&mut self, ctx: &mut C)
-    where
-        C: Resolver + MailSender,
-    {
+    fn unwire(&mut self, ctx: &mut crate::ffi::ctx::FfiCtx<'_>) {
         let _ = ctx;
     }
 }

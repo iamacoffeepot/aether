@@ -4,7 +4,7 @@
 // sidecar: type paths, field names, variant names).
 //
 // Record formats:
-//   `aether.kinds`         — [0x03] [postcard(KindShape)] [is_stream_byte]
+//   `aether.kinds`         — [0x04] [postcard(KindShape)]
 //   `aether.kinds.labels`  — [0x03] [postcard(KindLabels)]
 //
 // `aether.kinds` records are identified by computing
@@ -69,14 +69,15 @@ pub const NAMESPACE_SECTION: &str = "aether.namespace";
 
 /// Wire versions accepted in `aether.kinds`. The shape record's bytes
 /// are `Kind::ID` hash input, so the format is pinned indefinitely at
-/// 0x03's canonical-bytes layout — any change there would shift every
-/// id. v0x03 added a trailing `is_stream` byte AFTER the canonical
-/// bytes (ADR-0068); the canonical bytes themselves are unchanged
-/// from v0x02 so the hash is stable, but the v-byte signals "this
-/// record carries the stream metadata flag." v0x02 is no longer
-/// accepted — a loud rebuild-required boundary, same as the v0x02→
-/// v0x03 bump on `aether.kinds.labels`.
-const KINDS_VERSION: u8 = 0x03;
+/// the canonical-bytes layout — any change there would shift every id.
+/// v0x04 (issue 640) shrunk the per-record framing back to just
+/// `[version_byte][canonical_bytes]` after the v0x03 trailing
+/// `is_stream` byte retired with the auto-subscribe path. The
+/// canonical bytes themselves are unchanged from v0x02 / v0x03 so
+/// `Kind::ID` is stable; only the framing shrunk by one byte. v0x02 /
+/// v0x03 are no longer accepted — a loud rebuild-required boundary,
+/// same as the v0x02→v0x03 bump on `aether.kinds.labels`.
+const KINDS_VERSION: u8 = 0x04;
 
 /// Wire versions accepted in `aether.kinds.labels`. v0x03 added
 /// `kind_id` to `KindLabels`, making records self-identifying so the
@@ -96,7 +97,7 @@ const LABELS_SUPPORTED_VERSIONS: &[u8] = &[0x03];
 /// silently ignored so third-party emitters can add labels for kinds
 /// not present in this particular binary without breaking loads.
 pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
-    let mut kinds: Vec<(KindShape, bool)> = Vec::new();
+    let mut kinds: Vec<KindShape> = Vec::new();
     let mut labels_list: Vec<KindLabels> = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm) {
@@ -120,20 +121,19 @@ pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
         labels_list.into_iter().map(|l| (l.kind_id, l)).collect();
 
     let mut descriptors = Vec::with_capacity(kinds.len());
-    for (shape, is_stream) in kinds {
+    for shape in kinds {
         let id = aether_data::KindId(kind_id_from_shape(&shape));
         let label = labels_by_id.get(&id);
-        descriptors.push(merge(shape, label, is_stream));
+        descriptors.push(merge(shape, label));
     }
     Ok(descriptors)
 }
 
-/// Walk the `aether.kinds` v0x03 section: each record is
-/// `[0x03][postcard(KindShape)][is_stream_byte]`. Postcard stops
-/// decoding exactly at the shape record's end, so the next byte is
-/// the trailing `is_stream` flag, and the byte after that is the
-/// next record's version tag.
-fn decode_kinds_records(data: &[u8], out: &mut Vec<(KindShape, bool)>) -> Result<(), String> {
+/// Walk the `aether.kinds` v0x04 section: each record is
+/// `[0x04][postcard(KindShape)]`. Postcard stops decoding exactly at
+/// the shape record's end, so the next byte is the next record's
+/// version tag.
+fn decode_kinds_records(data: &[u8], out: &mut Vec<KindShape>) -> Result<(), String> {
     let mut cursor = data;
     while !cursor.is_empty() {
         let version = cursor[0];
@@ -145,15 +145,8 @@ fn decode_kinds_records(data: &[u8], out: &mut Vec<(KindShape, bool)>) -> Result
         let body = &cursor[1..];
         match postcard::take_from_bytes::<KindShape>(body) {
             Ok((shape, rest)) => {
-                if rest.is_empty() {
-                    return Err(format!(
-                        "{MANIFEST_SECTION}: record {} truncated — missing trailing is_stream byte",
-                        out.len() + 1
-                    ));
-                }
-                let is_stream = rest[0] != 0;
-                out.push((shape, is_stream));
-                cursor = &rest[1..];
+                out.push(shape);
+                cursor = rest;
             }
             Err(e) => {
                 return Err(format!(
@@ -317,14 +310,10 @@ fn decode_records<T: serde::de::DeserializeOwned>(
 /// `Struct` and the other's an `Enum`) fall back to anonymous —
 /// structural decisions follow the schema side since that's what
 /// the canonical bytes (and `K::ID`) agreed on.
-fn merge(shape: KindShape, labels: Option<&KindLabels>, is_stream: bool) -> KindDescriptor {
+fn merge(shape: KindShape, labels: Option<&KindLabels>) -> KindDescriptor {
     let name = shape.name.into_owned();
     let schema = merge_schema(&shape.schema, labels.map(|l| &l.root));
-    KindDescriptor {
-        name,
-        schema,
-        is_stream,
-    }
+    KindDescriptor { name, schema }
 }
 
 fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>) -> SchemaType {
@@ -519,17 +508,11 @@ mod tests {
 
     /// Append `[0x03][postcard(shape)][is_stream_byte]` to `canonical`.
     /// Matches what the Kind derive emits into the `aether.kinds`
-    /// section after ADR-0068 bumped the version. Tests pass `false`
-    /// for `is_stream` since the synthetic `KindShape`s here are
-    /// non-stream demo kinds.
+    /// section. Issue 640 retired the v0x03 trailing `is_stream`
+    /// byte; v0x04 is `[version_byte][postcard(KindShape)]`.
     fn push_shape(canonical: &mut Vec<u8>, shape: &KindShape) {
-        push_shape_with_stream(canonical, shape, false);
-    }
-
-    fn push_shape_with_stream(canonical: &mut Vec<u8>, shape: &KindShape, is_stream: bool) {
-        canonical.push(0x03);
+        canonical.push(0x04);
         canonical.extend(postcard::to_allocvec(shape).unwrap());
-        canonical.push(if is_stream { 1 } else { 0 });
     }
 
     /// Append `[0x03][postcard(labels)]` to `labels_bytes`, and stamp
@@ -637,9 +620,8 @@ mod tests {
                 repr_c: false,
             },
         };
-        let mut canonical = vec![0x03u8];
+        let mut canonical = vec![0x04u8];
         canonical.extend(postcard::to_allocvec(&shape).unwrap());
-        canonical.push(0u8); // is_stream=false trailing byte (ADR-0068)
         let wasm = wasm_with_section(MANIFEST_SECTION, &canonical);
         let descs = read_from_bytes(&wasm).unwrap();
         assert_eq!(descs.len(), 1);

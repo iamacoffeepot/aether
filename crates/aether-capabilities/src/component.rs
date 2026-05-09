@@ -23,9 +23,9 @@
 //! ADR-0078 — the cap is single-threaded, every handler runs on the
 //! cap's dispatcher thread.
 
-use aether_kinds::{DropComponent, LoadComponent, ReplaceComponent};
 #[cfg(not(target_arch = "wasm32"))]
-use aether_kinds::{SubscribeInput, UnsubscribeAll};
+use aether_kinds::UnsubscribeAll;
+use aether_kinds::{DropComponent, LoadComponent, ReplaceComponent};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::ComponentHostConfig;
@@ -41,7 +41,7 @@ mod native {
     use aether_kinds::LoadResult;
     use wasmtime::{Engine, Linker, Module};
 
-    use super::{DropComponent, LoadComponent, ReplaceComponent, SubscribeInput, UnsubscribeAll};
+    use super::{DropComponent, LoadComponent, ReplaceComponent, UnsubscribeAll};
 
     use aether_substrate::actor::native::spawn::Subname;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -249,14 +249,7 @@ mod native {
                     .push(Mail::new(mailbox_id, kind, cfg_payload, 1));
             }
 
-            // 7. Auto-subscribe stream-shaped handlers to their input
-            // streams (ADR-0021 + ADR-0033). Mail the input cap one
-            // `SubscribeInput` per stream-shaped handler the wasm
-            // declares; the cap is the sole owner of the subscriber
-            // table post-issue-640.
-            self.auto_subscribe_inputs(ctx, mailbox_id, &capabilities);
-
-            // 8. Announce the new kind vocabulary upstream so the hub
+            // 7. Announce the new kind vocabulary upstream so the hub
             // (and attached MCP sessions) see the post-load surface.
             self.outbound
                 .egress_kinds_changed(self.registry.list_kind_descriptors());
@@ -294,32 +287,6 @@ mod native {
             };
             let mail = Mail::new(recipient, kind, bytes, 1).with_reply_to(ctx.reply_target());
             self.mailer.push(mail);
-        }
-
-        /// Mail the input cap one `SubscribeInput` per stream-shaped
-        /// handler the freshly-loaded component declares (ADR-0021 +
-        /// ADR-0033). Lives at the cap because the cap parses the
-        /// capabilities manifest and knows which kinds are streams;
-        /// the trampoline itself doesn't need to inspect this map.
-        fn auto_subscribe_inputs(
-            &self,
-            ctx: &mut NativeCtx<'_>,
-            mailbox: MailboxId,
-            capabilities: &aether_kinds::ComponentCapabilities,
-        ) {
-            let input = ctx.actor::<crate::input::InputCapability>();
-            for handler in &capabilities.handlers {
-                if self
-                    .registry
-                    .kind_descriptor(handler.id)
-                    .is_some_and(|d| d.is_stream)
-                {
-                    input.send(&SubscribeInput {
-                        kind: handler.id,
-                        mailbox,
-                    });
-                }
-            }
         }
     }
 }

@@ -55,7 +55,7 @@ pub const HUB_BROADCAST_MAILBOX_NAME: &str = "hub.claude.broadcast";
     aether_data::Kind,
     aether_data::Schema,
 )]
-#[kind(name = "aether.tick", stream)]
+#[kind(name = "aether.tick")]
 pub struct Tick;
 
 /// A single keyboard keypress, identified by the stable codes in
@@ -75,7 +75,7 @@ pub struct Tick;
     aether_data::Kind,
     aether_data::Schema,
 )]
-#[kind(name = "aether.key", stream)]
+#[kind(name = "aether.key")]
 pub struct Key {
     pub code: u32,
 }
@@ -97,7 +97,7 @@ pub struct Key {
     aether_data::Kind,
     aether_data::Schema,
 )]
-#[kind(name = "aether.key_release", stream)]
+#[kind(name = "aether.key_release")]
 pub struct KeyRelease {
     pub code: u32,
 }
@@ -118,7 +118,7 @@ pub struct KeyRelease {
     aether_data::Kind,
     aether_data::Schema,
 )]
-#[kind(name = "aether.mouse_button", stream)]
+#[kind(name = "aether.mouse_button")]
 pub struct MouseButton;
 
 /// Cursor position in window coordinates, as logical pixels cast to f32.
@@ -126,7 +126,7 @@ pub struct MouseButton;
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
 )]
-#[kind(name = "aether.mouse_move", stream)]
+#[kind(name = "aether.mouse_move")]
 pub struct MouseMove {
     pub x: f32,
     pub y: f32,
@@ -153,7 +153,7 @@ pub struct MouseMove {
     aether_data::Kind,
     aether_data::Schema,
 )]
-#[kind(name = "aether.window_size", stream)]
+#[kind(name = "aether.window_size")]
 pub struct WindowSize {
     pub width: u32,
     pub height: u32,

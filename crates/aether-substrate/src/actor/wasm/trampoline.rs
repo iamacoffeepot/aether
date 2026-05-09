@@ -173,6 +173,26 @@ impl NativeActor for WasmTrampoline {
         })
     }
 
+    /// Issue 640 Phase 2: fire the wasm guest's `wire` hook
+    /// post-registration. The cap-side spawn flow registers the
+    /// trampoline mailbox in step 5–7; this hook runs after that as
+    /// part of the dispatcher's lifecycle, so a wire-time
+    /// `subscribe_input` mail validates against a live closure entry.
+    /// Pre-issue-640 the call lived inside [`Component::instantiate`]
+    /// (step 4, before registration) and races the input cap's
+    /// `validate_subscriber_mailbox`, silently dropping subscribes.
+    fn wire(&mut self, _ctx: &mut NativeCtx<'_>) {
+        if let Some(component) = self.component.as_mut()
+            && let Err(e) = component.wire()
+        {
+            tracing::error!(
+                target: "aether_substrate::wasm::trampoline",
+                error = %e,
+                "wasm guest `wire` hook returned error",
+            );
+        }
+    }
+
     /// Drop the **wasm component**. Runs the guest's `on_drop`
     /// hook, then drops the [`Component`]. The trampoline itself
     /// stays alive — the mailbox `aether.component.trampoline:NAME`
