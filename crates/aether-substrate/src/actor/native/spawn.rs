@@ -114,7 +114,22 @@ pub struct Spawner {
     /// Slots live until the Spawner itself drops (chassis teardown);
     /// self-closing actors leave their slot Arc here as a small
     /// metadata leak (~80 B) that's reclaimed at teardown.
-    instanced_slots: Mutex<HashMap<MailboxId, Arc<dyn crate::scheduler::Drainable>>>,
+    ///
+    /// Issue 685: each entry now also carries a [`WakeHandle`] clone
+    /// so [`Self::shutdown_instanced`] can fire one wake per slot at
+    /// chassis teardown — without it, a freshly-`signal_shutdown`-ed
+    /// slot whose inbox is empty would never enter `run_cycle` to
+    /// observe the flag.
+    instanced_slots: Mutex<HashMap<MailboxId, InstancedSlotEntry>>,
+}
+
+/// One entry in [`Spawner::instanced_slots`]. Holds both the strong
+/// `Arc<dyn Drainable>` (so the wake handle's `Weak` upgrades) and a
+/// [`crate::scheduler::WakeHandle`] clone (so the chassis-teardown
+/// path can wake the slot after signaling shutdown). Issue 685.
+struct InstancedSlotEntry {
+    slot: Arc<dyn crate::scheduler::Drainable>,
+    wake: crate::scheduler::WakeHandle,
 }
 
 impl Spawner {
@@ -146,6 +161,57 @@ impl Spawner {
         &self,
     ) -> &crossbeam_channel::Sender<Arc<dyn crate::scheduler::Drainable>> {
         &self.pool_ready_tx
+    }
+
+    /// Issue 685: walk every spawned instanced slot, signal shutdown
+    /// on its binding, fire one wake so a pool worker picks it up and
+    /// runs the close path (drain residual → `on_close` → registry
+    /// close + monitor fan-out), then poll [`crate::scheduler::Drainable::is_closed`]
+    /// until every slot has finished or `timeout` elapses.
+    ///
+    /// Called from [`crate::chassis::builder::BootedPassives::shutdown_in_place`]
+    /// before the singleton shutdowns walk. The ordering matters:
+    /// spawned actors close *first* so their `MonitorNotice` mail
+    /// reaches singleton watchers while they're still alive. The
+    /// pool stays alive through this method (it drops via the
+    /// `_pool: PoolHandle` field on `BootedPassives` which has a later
+    /// drop order than the explicit `shutdown_in_place` call), so
+    /// workers can drain the close cycles we just queued.
+    ///
+    /// On timeout: logs at warn level and returns. The slot Arcs we
+    /// drained out of `instanced_slots` will then drop, and any actor
+    /// whose close cycle didn't run misses its `on_close` (matches
+    /// the today behavior pre-685).
+    pub(crate) fn shutdown_instanced(&self, timeout: std::time::Duration) {
+        let entries: Vec<InstancedSlotEntry> = {
+            let mut guard = self.instanced_slots.lock().unwrap();
+            guard.drain().map(|(_id, entry)| entry).collect()
+        };
+        if entries.is_empty() {
+            return;
+        }
+        for entry in &entries {
+            entry.slot.signal_shutdown();
+            entry.wake.wake();
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let all_closed = entries.iter().all(|e| e.slot.is_closed());
+            if all_closed {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let stuck = entries.iter().filter(|e| !e.slot.is_closed()).count();
+                tracing::warn!(
+                    target: "aether_substrate::spawner",
+                    stuck_count = stuck,
+                    total = entries.len(),
+                    "shutdown_instanced timed out waiting for spawned actors to run close path",
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 
     /// Wait for every spawned instanced actor's inbox to quiesce
@@ -491,9 +557,18 @@ impl Spawner {
                 // after spawn (the registry only holds the inbox
                 // sender, not the slot — the comment claiming
                 // otherwise was wrong). Slots live until the Spawner
-                // itself drops at chassis teardown.
+                // itself drops at chassis teardown. Issue 685 also
+                // stashes a wake clone so chassis teardown can fire
+                // one wake per slot after signaling shutdown.
                 drop(slot);
-                self.instanced_slots.lock().unwrap().insert(id, slot_dyn);
+                let teardown_wake = wake.clone();
+                self.instanced_slots.lock().unwrap().insert(
+                    id,
+                    InstancedSlotEntry {
+                        slot: slot_dyn,
+                        wake: teardown_wake,
+                    },
+                );
                 // Pre-loaded `after_init` mail (lines above) was sent
                 // straight to the inbox via `tx.send`, which bypasses
                 // the closure's wake hook. Fire one wake now so the

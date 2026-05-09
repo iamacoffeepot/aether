@@ -242,6 +242,25 @@ pub trait Drainable: Send + Sync + 'static {
         "<unnamed>"
     }
 
+    /// Issue 685: chassis-teardown signal for `Pooled` instanced
+    /// actors. The chassis calls this on every spawned slot before the
+    /// pool drops; a real slot forwards to its
+    /// [`crate::actor::native::NativeBinding::signal_shutdown`] so the
+    /// next [`Self::run_cycle`] observes `should_shutdown` and runs
+    /// the close path (drain residual → `on_close` → registry close +
+    /// monitor fan-out). Default no-op so mock fixtures don't have to
+    /// care.
+    fn signal_shutdown(&self) {}
+
+    /// Issue 685: chassis-teardown wait predicate. Returns `true` once
+    /// the slot has finished its `CycleResult::Closed` cycle and the
+    /// actor's `on_close` + registry close have run. Default `true`
+    /// (mock fixtures are trivially "closed" — they don't have a
+    /// real lifecycle).
+    fn is_closed(&self) -> bool {
+        true
+    }
+
     /// Upcast helper for downcasting in tests. Production code doesn't
     /// reach for this.
     fn as_any(&self) -> &dyn Any;
