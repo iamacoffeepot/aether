@@ -921,7 +921,6 @@ mod tests {
             .register_kind_with_descriptor(KindDescriptor {
                 name: "test.pong".into(),
                 schema: SchemaType::Unit,
-                is_stream: false,
             })
             .expect("register kind");
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));

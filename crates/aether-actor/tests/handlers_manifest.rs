@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_data::Kind;
 use aether_data::{INPUTS_SECTION_VERSION, InputsRecord};
 use bytemuck::{Pod, Zeroable};
@@ -67,11 +67,7 @@ impl FfiActor for ManifestProbe {
     #[fallback]
     fn on_other(&mut self, _ctx: &mut FfiCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 
-    fn unwire<C>(&mut self, _ctx: &mut C)
-    where
-        C: Resolver + MailSender,
-    {
-    }
+    fn unwire(&mut self, _ctx: &mut FfiCtx<'_>) {}
 }
 
 fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {

@@ -13,9 +13,9 @@
 
 use aether_actor::{BootError, FfiActor, FfiCtx, KindId, MailSender, Resolver, actor};
 use aether_camera::{CameraTopdownSet, TopdownParams};
-use aether_capabilities::RenderCapability;
-use aether_data::{Kind, Schema};
-use aether_kinds::{DrawTriangle, Key, Tick, Vertex, keycode};
+use aether_capabilities::{InputCapability, RenderCapability};
+use aether_data::{Kind, MailboxId, Schema};
+use aether_kinds::{DrawTriangle, Key, SubscribeInput, Tick, Vertex, keycode};
 use bytemuck::{Pod, Zeroable};
 
 const PLAYER_HALF: f32 = 0.25;
@@ -157,6 +157,22 @@ impl FfiActor for Sokoban {
         };
         me.load_level(0);
         Ok(me)
+    }
+
+    /// Issue 640: subscribe to the streams sokoban handles. `wire`
+    /// (post-init, mail-allowed) is the placement — `init`'s ctx is
+    /// `Resolver`-only.
+    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+        let me = MailboxId(ctx.mailbox_id());
+        let input = ctx.actor::<InputCapability>();
+        input.send(&SubscribeInput {
+            kind: Tick::ID,
+            mailbox: me,
+        });
+        input.send(&SubscribeInput {
+            kind: Key::ID,
+            mailbox: me,
+        });
     }
 
     #[handler]

@@ -9,15 +9,15 @@
 //! MouseMove, and `0` for the empty-payload kinds (Tick and
 //! MouseButton).
 //!
-//! ADR-0033 phase 3: each input kind has its own `#[handler]`
-//! method. `#[actor]` auto-subscribes every `K::IS_INPUT` handler
-//! kind at init, so the test harness just loads the component and
-//! starts driving input — no manual `subscribe_input` needed.
+//! Each input kind has its own `#[handler]` method. Issue 640 retired
+//! the cap-side manifest auto-subscribe walker (and the macro-side
+//! walker retired earlier in #403); components subscribe explicitly
+//! via `ctx.subscribe_input::<K>()` in `init`.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
-use aether_capabilities::BroadcastCapability;
-use aether_data::{Kind, Schema};
-use aether_kinds::{Key, MouseButton, MouseMove, Tick};
+use aether_capabilities::{BroadcastCapability, InputCapability};
+use aether_data::{Kind, MailboxId, Schema};
+use aether_kinds::{Key, MouseButton, MouseMove, SubscribeInput, Tick};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
@@ -39,6 +39,14 @@ impl FfiActor for InputLogger {
         C: Resolver,
     {
         Ok(InputLogger)
+    }
+
+    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+        let me = MailboxId(ctx.mailbox_id());
+        let input = ctx.actor::<InputCapability>();
+        for kind in [Tick::ID, Key::ID, MouseMove::ID, MouseButton::ID] {
+            input.send(&SubscribeInput { kind, mailbox: me });
+        }
     }
 
     #[handler]

@@ -12,16 +12,26 @@
 //! constructor and mailing belongs in `wire`. Stripping the supertrait
 //! makes that boundary structural rather than convention.
 //!
+//! Subscribing to input streams is just a regular mail send to
+//! `aether.input` (the [`InputCapability`] cap), not a special trait
+//! method — the receiver-side handler decoded the [`SubscribeInput`]
+//! payload and inserted into its subscriber table. Components write
+//! `ctx.send::<InputCapability, _>(&SubscribeInput { kind, mailbox })`
+//! from `wire` directly.
+//!
 //! [`MailSender`]: crate::actor::ctx::MailSender
+//! [`InputCapability`]: aether_capabilities::InputCapability
+//! [`SubscribeInput`]: aether_kinds::SubscribeInput
 
 use aether_data::Kind;
 
 use crate::mail::mailbox::{KindId, Mailbox};
 
-/// Init-time resolution surface. Pure addressing — no mail sends. Use
-/// [`crate::actor::ctx::Subscriber::subscribe_input`] from `wire`
-/// (where the ctx impls both `Resolver` and
-/// [`crate::actor::ctx::MailSender`]) to register input subscriptions.
+/// Init-time resolution surface. Pure addressing — no mail sends.
+/// Components subscribe to input streams from `wire` (where the ctx
+/// impls both `Resolver` and [`crate::actor::ctx::MailSender`]) by
+/// sending [`SubscribeInput`](aether_kinds::SubscribeInput) directly
+/// to the [`InputCapability`](aether_capabilities::InputCapability).
 pub trait Resolver {
     /// The component's own mailbox id — the value the substrate uses
     /// to address `receive` calls to this instance.

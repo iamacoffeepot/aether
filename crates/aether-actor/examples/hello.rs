@@ -17,8 +17,9 @@
 //! plus author-written intent for each inbox.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, KindId, Resolver, actor};
-use aether_capabilities::RenderCapability;
-use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
+use aether_capabilities::{InputCapability, RenderCapability};
+use aether_data::{Kind, MailboxId};
+use aether_kinds::{DrawTriangle, Ping, Pong, SubscribeInput, Tick, Vertex};
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
     verts: [
@@ -73,6 +74,13 @@ impl FfiActor for Hello {
         Ok(Hello {
             pong: ctx.resolve::<Pong>(),
         })
+    }
+
+    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+        ctx.actor::<InputCapability>().send(&SubscribeInput {
+            kind: Tick::ID,
+            mailbox: MailboxId(ctx.mailbox_id()),
+        });
     }
 
     /// Emits the configured triangle to the render sink every tick.

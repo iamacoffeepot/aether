@@ -16,9 +16,9 @@
 //! exports.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
-use aether_capabilities::BroadcastCapability;
-use aether_data::{Kind, Schema};
-use aether_kinds::Tick;
+use aether_capabilities::{BroadcastCapability, InputCapability};
+use aether_data::{Kind, MailboxId, Schema};
+use aether_kinds::{SubscribeInput, Tick};
 use bytemuck::{Pod, Zeroable};
 
 #[repr(C)]
@@ -55,6 +55,13 @@ impl FfiActor for Caller {
         C: Resolver,
     {
         Ok(Caller { next_seq: 0 })
+    }
+
+    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+        ctx.actor::<InputCapability>().send(&SubscribeInput {
+            kind: Tick::ID,
+            mailbox: MailboxId(ctx.mailbox_id()),
+        });
     }
 
     #[handler]

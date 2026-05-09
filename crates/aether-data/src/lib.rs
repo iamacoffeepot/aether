@@ -81,25 +81,9 @@ pub use aether_actor_derive::{
 /// ADR-0032). Both sides of the FFI compute the id the same way — the
 /// substrate from the deserialized schema, the guest from the compile-
 /// time const — so routing stays in lockstep without a host-fn resolve.
-///
-/// `IS_STREAM` marks the kind as a substrate-published input stream
-/// (`Tick`, `Key`, `MouseMove`, `MouseButton` — ADR-0021). Defaults
-/// to `false`; `#[actor]` auto-subscribes a component's mailbox to
-/// every `K::IS_STREAM` handler kind before the user's `init` body
-/// runs (ADR-0033 phase 3), so components writing
-/// `#[handler] fn on_tick(..., tick: Tick)` don't need to send
-/// `subscribe_input` themselves. Non-input kinds never touch this —
-/// leave the default alone.
 pub trait Kind {
     const NAME: &'static str;
     const ID: KindId;
-    /// `true` when the kind is a substrate-published event stream
-    /// (Tick, Key, MouseMove, etc.) that components subscribe to via
-    /// the per-kind subscriber set. Drives `auto_subscribe_inputs` on
-    /// the substrate side: handlers whose kind is a stream get wired
-    /// into the subscriber set the moment the component is loaded.
-    /// Set by `#[kind(name = "...", stream)]` on the type declaration.
-    const IS_STREAM: bool = false;
 
     /// Decode a single instance from substrate-supplied bytes. The
     /// `Kind` derive auto-implements this with the right body for the
@@ -462,17 +446,12 @@ pub mod __inventory {
     pub use ::inventory;
 
     /// Static-friendly mirror of `KindDescriptor`. Owns nothing —
-    /// every field is `'static` (or a `bool`) so the value is
-    /// const-constructible from `inventory::submit!`.
-    /// `descriptors::all()` materializes the owned `KindDescriptor`
-    /// form at iteration time. `is_stream` carries
-    /// `<K as Kind>::IS_STREAM` (ADR-0068) so the native descriptor
-    /// list agrees with the wasm `aether.kinds` v0x03 trailing byte
-    /// the substrate reads from guest binaries.
+    /// every field is `'static` so the value is const-constructible
+    /// from `inventory::submit!`. `descriptors::all()` materializes
+    /// the owned `KindDescriptor` form at iteration time.
     pub struct DescriptorEntry {
         pub name: &'static str,
         pub schema: &'static SchemaType,
-        pub is_stream: bool,
     }
 
     inventory::collect!(DescriptorEntry);

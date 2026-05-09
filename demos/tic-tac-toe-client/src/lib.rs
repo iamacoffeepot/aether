@@ -46,11 +46,14 @@
 //! are a rendering-polish pass for later.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
-use aether_capabilities::RenderCapability;
+use aether_capabilities::{InputCapability, RenderCapability};
+use aether_data::{Kind, MailboxId};
 use aether_demo_tic_tac_toe::{
     CELL_EMPTY, GameState, LAST_MOVE_NONE, MoveResult, PLAYER_X, PlayMove, SERVER,
 };
-use aether_kinds::{DrawTriangle, MouseButton, MouseMove, Tick, Vertex, WindowSize};
+use aether_kinds::{
+    DrawTriangle, MouseButton, MouseMove, SubscribeInput, Tick, Vertex, WindowSize,
+};
 
 /// Clip-space half-extent the board uses. Board lives inside
 /// `[-BOARD_EXTENT, BOARD_EXTENT]²`; the rest of the viewport is the
@@ -131,6 +134,17 @@ impl FfiActor for TicTacToeClient {
         C: Resolver,
     {
         Ok(TicTacToeClient::default())
+    }
+
+    /// Issue 640: subscribe to input streams. `wire` (post-init,
+    /// mail-allowed) is the placement; `init` is `Resolver`-only and
+    /// can't mail.
+    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+        let me = MailboxId(ctx.mailbox_id());
+        let input = ctx.actor::<InputCapability>();
+        for kind in [Tick::ID, MouseMove::ID, MouseButton::ID, WindowSize::ID] {
+            input.send(&SubscribeInput { kind, mailbox: me });
+        }
     }
 
     /// Cached copy of the latest authoritative state. Overwrites

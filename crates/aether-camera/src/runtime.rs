@@ -36,8 +36,9 @@
 use std::collections::HashMap;
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
-use aether_capabilities::RenderCapability;
-use aether_kinds::{Camera, Tick, WindowSize};
+use aether_capabilities::{InputCapability, RenderCapability};
+use aether_data::{Kind, MailboxId};
+use aether_kinds::{Camera, SubscribeInput, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, Vec2, Vec3};
 
 use crate::{
@@ -265,6 +266,22 @@ impl FfiActor for CameraComponent {
             active: Some("main".to_owned()),
             aspect: DEFAULT_ASPECT,
         })
+    }
+
+    /// Issue 640: subscribe to the input streams the camera advances
+    /// against. `wire` (post-init, mail-allowed) is the placement —
+    /// `init`'s ctx is `Resolver`-only and can't mail.
+    fn wire(&mut self, ctx: &mut FfiCtx<'_>) {
+        let me = MailboxId(ctx.mailbox_id());
+        let input = ctx.actor::<InputCapability>();
+        input.send(&SubscribeInput {
+            kind: Tick::ID,
+            mailbox: me,
+        });
+        input.send(&SubscribeInput {
+            kind: WindowSize::ID,
+            mailbox: me,
+        });
     }
 
     /// Advance every camera's per-mode state, then publish the active
