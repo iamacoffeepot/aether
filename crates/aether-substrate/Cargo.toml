@@ -61,6 +61,9 @@ png = { version = "0.17", optional = true }
 # headless and hub do not.
 cpal = { version = "0.15", optional = true }
 crossbeam-queue = { version = "0.3", optional = true }
+# Issue 635 PR B worker-pool ready queue. MPMC channel — std mpsc is
+# single-consumer so it can't load-balance across pool workers.
+crossbeam-channel = "0.5"
 # Wasmtime 30 doesn't expose `custom_sections` on `Module`; use
 # wasmparser directly to walk the raw wasm bytes for the ADR-0028
 # `aether.kinds` section. Pin to the version wasmtime re-exports
