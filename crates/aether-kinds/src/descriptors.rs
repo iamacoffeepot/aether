@@ -54,7 +54,7 @@ mod tests {
         FrameStats, Key, List, ListResult, LoadComponent, LoadResult, MouseButton, MouseMove,
         NoteOff, NoteOn, Ping, Pong, ProcessExited, Read, ReadResult, ReplaceComponent,
         ReplaceResult, SetMasterGain, Spawn, SpawnResult, SubscribeInput, SubscribeInputResult,
-        Terminate, TerminateResult, Tick, UnsubscribeInput, Write, WriteResult,
+        Terminate, TerminateResult, Tick, UnsubscribeAll, UnsubscribeInput, Write, WriteResult,
     };
 
     #[test]
@@ -106,6 +106,7 @@ mod tests {
         assert!(names.contains(&ReplaceResult::NAME));
         assert!(names.contains(&SubscribeInput::NAME));
         assert!(names.contains(&UnsubscribeInput::NAME));
+        assert!(names.contains(&UnsubscribeAll::NAME));
         assert!(names.contains(&SubscribeInputResult::NAME));
         assert!(names.contains(&NoteOn::NAME));
         assert!(names.contains(&NoteOff::NAME));

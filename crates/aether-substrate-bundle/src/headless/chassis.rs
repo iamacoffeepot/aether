@@ -98,11 +98,8 @@ impl HeadlessChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
-            input_subscribers: Arc::clone(&boot.input_subscribers),
         };
-        let input_config = InputConfig {
-            input_subscribers: Arc::clone(&boot.input_subscribers),
-        };
+        let input_config = InputConfig::default();
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_frame_stats = boot

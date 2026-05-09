@@ -33,11 +33,10 @@ use crate::hub::HubProtocolBackend;
 use aether_actor::Actor;
 use aether_capabilities::{RenderCapability, fs::NamespaceRoots};
 use aether_substrate::{
-    HubOutbound, InputSubscribers, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
+    HubOutbound, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
     capture::CaptureQueue,
     chassis::frame_loop,
     mail::{Mail, MailboxId},
-    subscribers_for,
 };
 
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
@@ -116,7 +115,10 @@ pub struct TestBench {
     /// them internally.
     triangles_rendered: Arc<AtomicU64>,
 
-    input_subscribers: InputSubscribers,
+    /// `aether.input` mailbox id, cached at boot. `advance()` ticks
+    /// fan through this single push and the input cap re-fans per
+    /// subscriber (issue 640).
+    input_mailbox: MailboxId,
     kind_tick: KindId,
     kind_frame_stats: KindId,
     /// Snapshot of every frame-bound capability's pending counter
@@ -292,7 +294,9 @@ impl TestBench {
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
         let registry = Arc::clone(&boot.registry);
-        let input_subscribers = boot.input_subscribers.clone();
+        let input_mailbox = aether_data::mailbox_id_from_name(
+            <aether_capabilities::InputCapability as aether_actor::Actor>::NAMESPACE,
+        );
         let frame_bound_pending = passive.frame_bound_pending();
 
         Ok(Self {
@@ -304,7 +308,7 @@ impl TestBench {
             events_rx,
             gpu,
             triangles_rendered: render_handles.triangles_rendered,
-            input_subscribers,
+            input_mailbox,
             kind_tick,
             kind_frame_stats,
             frame_bound_pending,
@@ -649,11 +653,12 @@ impl TestBench {
 
     fn run_frame(&mut self, dispatch_tick: bool) {
         if dispatch_tick {
-            let subs = subscribers_for(&self.input_subscribers, Tick::ID);
-            for mbox in subs {
-                self.queue
-                    .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
-            }
+            self.queue.push(Mail::new(
+                self.input_mailbox,
+                self.kind_tick,
+                encode_empty::<Tick>(),
+                1,
+            ));
         }
         // Wait for instanced actors (today: wasm trampolines) to
         // process the just-pushed Tick before draining frame-bound

@@ -59,7 +59,6 @@ use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use crate::actor::wasm::component::{Component, ComponentCtx};
 use crate::actor::wasm::kind_manifest;
 use crate::chassis::error::BootError;
-use crate::input::InputSubscribers;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::Registry;
@@ -97,7 +96,6 @@ pub struct WasmTrampolineConfig {
     pub module: Module,
     pub registry: Arc<Registry>,
     pub outbound: Arc<HubOutbound>,
-    pub input_subscribers: InputSubscribers,
     /// Component capabilities parsed from the wasm's
     /// `aether.kinds.inputs` custom section, surfaced through
     /// `LoadResult::Ok.capabilities` at the cap. The trampoline
@@ -127,7 +125,6 @@ pub struct WasmTrampoline {
     registry: Arc<Registry>,
     mailer: Arc<Mailer>,
     outbound: Arc<HubOutbound>,
-    input_subscribers: InputSubscribers,
     /// The trampoline's own mailbox id (== `MailboxId::from_name(full_name)`).
     /// Cached because `NativeCtx` only exposes `self_id()` via the
     /// `NativeInitCtx` flavour today; storing it here avoids reaching
@@ -148,7 +145,6 @@ impl NativeActor for WasmTrampoline {
             Arc::clone(&config.registry),
             Arc::clone(&mailer),
             Arc::clone(&config.outbound),
-            Arc::clone(&config.input_subscribers),
         );
         // Wire the trampoline's binding so `wait_reply_p32` host fn
         // can drain *this* trampoline's inbox + overflow (issue 634
@@ -173,7 +169,6 @@ impl NativeActor for WasmTrampoline {
             registry: config.registry,
             mailer,
             outbound: config.outbound,
-            input_subscribers: config.input_subscribers,
             mailbox,
         })
     }
@@ -306,7 +301,6 @@ impl WasmTrampoline {
             Arc::clone(&self.registry),
             Arc::clone(&self.mailer),
             Arc::clone(&self.outbound),
-            Arc::clone(&self.input_subscribers),
         );
 
         let mut new_component =

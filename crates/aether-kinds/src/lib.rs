@@ -824,14 +824,38 @@ mod control_plane {
         pub mailbox: aether_data::MailboxId,
     }
 
-    /// Reply to both subscribe and unsubscribe (ADR-0021 §2). Only
-    /// failure mode: the target mailbox id doesn't name a live
+    /// Reply to subscribe / unsubscribe / unsubscribe_all (ADR-0021 §2).
+    /// Only failure mode: the target mailbox id doesn't name a live
     /// component (unknown, a sink, or already dropped).
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.input.subscribe_result")]
     pub enum SubscribeInputResult {
         Ok,
         Err { error: String },
+    }
+
+    /// `aether.input.unsubscribe_all` — remove `mailbox` from every
+    /// input stream's subscriber set. Issued by
+    /// `ComponentHostCapability` on `DropComponent` so the cap's
+    /// fan-out tables don't keep firing at a dropped trampoline.
+    /// Idempotent: a mailbox with no subscriptions is still a no-op.
+    /// Fire-and-forget; no reply. Cast-shape (Pod) — one
+    /// `MailboxId`, fixed size.
+    #[repr(C)]
+    #[derive(
+        Copy,
+        Clone,
+        Debug,
+        PartialEq,
+        Eq,
+        bytemuck::Pod,
+        bytemuck::Zeroable,
+        aether_data::Kind,
+        aether_data::Schema,
+    )]
+    #[kind(name = "aether.input.unsubscribe_all")]
+    pub struct UnsubscribeAll {
+        pub mailbox: aether_data::MailboxId,
     }
 
     /// `aether.log.configure_drain` — chassis-pushed mail every actor

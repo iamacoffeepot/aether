@@ -21,9 +21,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::hub::HubClient;
+use aether_actor::Actor;
+use aether_capabilities::InputCapability;
 use aether_capabilities::RenderHandles;
 use aether_data::Kind;
-use aether_data::{encode, encode_empty};
+use aether_data::{encode, encode_empty, mailbox_id_from_name};
 use aether_kinds::{
     CaptureFrameResult, FrameStats, Key, KeyRelease, MouseButton, MouseMove, SetWindowMode,
     SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, Tick, WindowMode, WindowSize,
@@ -33,10 +35,9 @@ use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    HubOutbound, InputSubscribers, Mailer, SubstrateBoot,
+    HubOutbound, Mailer, SubstrateBoot,
     chassis::frame_loop,
     mail::{Mail, MailboxId},
-    subscribers_for,
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -58,11 +59,11 @@ pub const WORKERS: usize = 2;
 
 pub struct App {
     queue: Arc<Mailer>,
-    /// ADR-0021 per-stream subscribers. Shared with the control plane
-    /// so subscribe / unsubscribe / drop write through the same table
-    /// the platform thread reads on each event. Empty sets — the
-    /// boot state — mean the event is dropped at the source.
-    input_subscribers: InputSubscribers,
+    /// `aether.input` mailbox id, cached at driver boot. Each platform
+    /// event fans through a single mail push to this mailbox; the
+    /// `InputCapability` actor owns the subscriber table and fans
+    /// out per-subscriber on its own dispatcher (issue 640).
+    input_mailbox: MailboxId,
     kind_tick: aether_data::KindId,
     kind_key: aether_data::KindId,
     kind_key_release: aether_data::KindId,
@@ -384,15 +385,13 @@ impl App {
     }
 
     fn publish_window_size(&self, width: u32, height: u32) {
-        let subs = subscribers_for(&self.input_subscribers, WindowSize::ID);
-        if subs.is_empty() {
-            return;
-        }
         let payload = encode(&WindowSize { width, height });
-        for mbox in subs {
-            self.queue
-                .push(Mail::new(mbox, self.kind_window_size, payload.clone(), 1));
-        }
+        self.queue.push(Mail::new(
+            self.input_mailbox,
+            self.kind_window_size,
+            payload,
+            1,
+        ));
     }
 
     fn set_occluded(&mut self, occluded: bool, event_loop: &ActiveEventLoop) {
@@ -479,11 +478,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.occluded && pending_capture.is_none() {
                     return;
                 }
-                let tick_subs = subscribers_for(&self.input_subscribers, Tick::ID);
-                for mbox in tick_subs {
-                    self.queue
-                        .push(Mail::new(mbox, self.kind_tick, encode_empty::<Tick>(), 1));
-                }
+                self.queue.push(Mail::new(
+                    self.input_mailbox,
+                    self.kind_tick,
+                    encode_empty::<Tick>(),
+                    1,
+                ));
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
                     if size.width != 0 && size.height != 0 {
@@ -554,26 +554,20 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 match key_event.state {
                     ElementState::Pressed => {
-                        let subs = subscribers_for(&self.input_subscribers, Key::ID);
-                        for mbox in subs {
-                            self.queue.push(Mail::new(
-                                mbox,
-                                self.kind_key,
-                                encode(&Key { code }),
-                                1,
-                            ));
-                        }
+                        self.queue.push(Mail::new(
+                            self.input_mailbox,
+                            self.kind_key,
+                            encode(&Key { code }),
+                            1,
+                        ));
                     }
                     ElementState::Released => {
-                        let subs = subscribers_for(&self.input_subscribers, KeyRelease::ID);
-                        for mbox in subs {
-                            self.queue.push(Mail::new(
-                                mbox,
-                                self.kind_key_release,
-                                encode(&KeyRelease { code }),
-                                1,
-                            ));
-                        }
+                        self.queue.push(Mail::new(
+                            self.input_mailbox,
+                            self.kind_key_release,
+                            encode(&KeyRelease { code }),
+                            1,
+                        ));
                     }
                 }
             }
@@ -581,28 +575,24 @@ impl ApplicationHandler<UserEvent> for App {
                 state: ElementState::Pressed,
                 ..
             } => {
-                let subs = subscribers_for(&self.input_subscribers, MouseButton::ID);
-                for mbox in subs {
-                    self.queue.push(Mail::new(
-                        mbox,
-                        self.kind_mouse_button,
-                        encode_empty::<MouseButton>(),
-                        1,
-                    ));
-                }
+                self.queue.push(Mail::new(
+                    self.input_mailbox,
+                    self.kind_mouse_button,
+                    encode_empty::<MouseButton>(),
+                    1,
+                ));
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let subs = subscribers_for(&self.input_subscribers, MouseMove::ID);
-                if !subs.is_empty() {
-                    let payload = encode(&MouseMove {
-                        x: position.x as f32,
-                        y: position.y as f32,
-                    });
-                    for mbox in subs {
-                        self.queue
-                            .push(Mail::new(mbox, self.kind_mouse_move, payload.clone(), 1));
-                    }
-                }
+                let payload = encode(&MouseMove {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                });
+                self.queue.push(Mail::new(
+                    self.input_mailbox,
+                    self.kind_mouse_move,
+                    payload,
+                    1,
+                ));
             }
             _ => {}
         }
@@ -710,7 +700,7 @@ impl DriverCapability for DesktopDriverCapability {
 
         let app = App {
             queue: Arc::clone(&boot.queue),
-            input_subscribers: Arc::clone(&boot.input_subscribers),
+            input_mailbox: mailbox_id_from_name(InputCapability::NAMESPACE),
             kind_tick,
             kind_key,
             kind_key_release,

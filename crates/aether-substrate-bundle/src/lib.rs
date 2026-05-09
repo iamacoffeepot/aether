@@ -32,16 +32,14 @@ pub mod test_bench;
 pub use aether_capabilities as capabilities;
 pub use aether_capabilities::{BroadcastCapability, ComponentHostCapability, ComponentHostConfig};
 pub use aether_substrate::{
-    Chassis, Component, ComponentCtx, HubOutbound, InputSubscribers, KindId, Mail, MailKind,
-    MailboxEntry, MailboxHandler, MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,
+    Chassis, Component, ComponentCtx, HubOutbound, KindId, Mail, MailKind, MailboxEntry,
+    MailboxHandler, MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,
     actor::wasm::{component, host_fns, kind_manifest, reply_table},
     capture::{CaptureQueue, PendingCapture},
     chassis::frame_loop,
-    input, mail,
+    mail,
     mail::mailer,
     mail::registry,
-    new_subscribers, remove_from_all,
     runtime::log_install,
-    subscribers_for,
 };
 pub use hub::{HubClient, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail};
