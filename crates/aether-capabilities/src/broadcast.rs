@@ -63,7 +63,6 @@ mod native {
         /// quiesced before the next observation is read off the
         /// outbound channel.
         const FRAME_BARRIER: bool = true;
-        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         fn init(_: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             // The substrate boot wires `HubOutbound` into the mailer

@@ -340,7 +340,6 @@ mod native {
 
         /// ADR-0041 + ADR-0074 Phase 5 chassis-owned mailbox.
         const NAMESPACE: &'static str = "aether.fs";
-        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         /// Build the adapter registry from the resolved roots. Adapter
         /// init failure surfaces as `BootError::Other(io::Error)` so

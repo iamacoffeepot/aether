@@ -139,7 +139,6 @@ pub struct WasmTrampoline {
 impl NativeActor for WasmTrampoline {
     type Config = WasmTrampolineConfig;
     const NAMESPACE: &'static str = NAMESPACE;
-    const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         let mailbox = ctx.self_id();

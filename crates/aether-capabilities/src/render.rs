@@ -169,7 +169,6 @@ mod native {
         /// through the frame-bound path so the cap's `pending` counter
         /// registers in the chassis's `frame_bound_pending` Vec.
         const FRAME_BARRIER: bool = true;
-        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         /// Allocate the accumulator state up front. Idempotent on the
         /// driver-facing side: every chassis main passes a fresh
@@ -727,7 +726,6 @@ mod native_headless {
         type Config = ();
 
         const NAMESPACE: &'static str = "aether.render";
-        const SCHEDULING: Scheduling = Scheduling::Dedicated;
 
         fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
