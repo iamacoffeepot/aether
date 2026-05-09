@@ -362,6 +362,41 @@ macro_rules! __export_internal {
         }
 
         /// # Safety
+        /// Called by the substrate exactly once after `init` returns
+        /// Ok and the component's mailbox is published, before the
+        /// first `receive` (issue 584 Phase 2b, ADR-0079 amended).
+        /// Mail-allowed — peer mailboxes are addressable. Receives the
+        /// component's own mailbox id so the SDK ctx can self-address.
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn wire(mailbox_id: u64) -> u32 {
+            let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
+                return 1;
+            };
+            let mut ctx: $crate::FfiInitCtx<'_> = $crate::FfiInitCtx::__new(mailbox_id);
+            <$component as $crate::FfiActor>::wire(instance, &mut ctx);
+            $crate::log::drain_buffer();
+            0
+        }
+
+        /// # Safety
+        /// Called by the substrate exactly once before `on_drop` /
+        /// `on_replace` on the dying instance (issue 584 Phase 2b,
+        /// ADR-0079 amended). Mail-allowed — live peers are still
+        /// addressable; sends to a dead peer warn-drop.
+        #[cfg(target_arch = "wasm32")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn unwire(mailbox_id: u64) -> u32 {
+            let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
+                return 1;
+            };
+            let mut ctx: $crate::FfiInitCtx<'_> = $crate::FfiInitCtx::__new(mailbox_id);
+            <$component as $crate::FfiActor>::unwire(instance, &mut ctx);
+            $crate::log::drain_buffer();
+            0
+        }
+
+        /// # Safety
         /// Called by the substrate with `(kind, ptr, byte_len, count,
         /// sender)` matching the FFI contract. Exported under the
         /// `_p32` suffix per ADR-0024 Phase 1.
