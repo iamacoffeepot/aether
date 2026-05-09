@@ -48,7 +48,7 @@ mod native {
     impl NativeActor for LogCapability {
         type Config = ();
         const NAMESPACE: &'static str = "aether.log";
-        const SCHEDULING: Scheduling = Scheduling::Dedicated;
+        const SCHEDULING: Scheduling = Scheduling::Pooled;
 
         fn init(_: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let outbound = ctx.mailer().outbound().cloned();
