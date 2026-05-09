@@ -1,0 +1,75 @@
+name: Issue labels
+
+on:
+  issues:
+    types: [opened, edited, labeled, unlabeled, reopened]
+
+permissions:
+  issues: write
+
+jobs:
+  enforce:
+    name: Require type and crate (or design)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const labels = issue.labels.map(l => l.name);
+
+            const hasType = labels.some(n => n.startsWith('type:'));
+            const hasCrate = labels.some(n => n.startsWith('crate:'));
+            const hasDesign = labels.includes('design');
+
+            const missing = [];
+            if (!hasType) {
+              missing.push('a `type:*` label (`type:fix`, `type:feat`, `type:refactor`, `type:chore`, `type:docs`, `type:perf`)');
+            }
+            if (!hasCrate && !hasDesign) {
+              missing.push('a `crate:*` label (or `design` for cross-cutting / architectural issues)');
+            }
+
+            const marker = '<!-- issue-label-bot -->';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+
+            if (missing.length === 0) {
+              if (existing) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                });
+              }
+              return;
+            }
+
+            const body = [
+              marker,
+              'This issue is missing ' + missing.join(' and ') + '.',
+              '',
+              'Add via the labels sidebar — this comment auto-resolves once the labels are present.',
+            ].join('\n');
+
+            if (existing) {
+              if (existing.body !== body) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              }
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body,
+              });
+            }
