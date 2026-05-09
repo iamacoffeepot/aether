@@ -1543,7 +1543,7 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
                     init_method = Some(f);
                 } else if matches!(
                     name.as_str(),
-                    "wire" | "unwire" | "on_replace" | "on_drop" | "on_rehydrate"
+                    "wire" | "unwire" | "on_replace" | "on_rehydrate"
                 ) {
                     lifecycle_methods.push(f);
                 } else if name == "receive" {

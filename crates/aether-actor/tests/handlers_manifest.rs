@@ -17,7 +17,7 @@
 
 #![allow(dead_code)]
 
-use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Persistence, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
 use aether_data::Kind;
 use aether_data::{INPUTS_SECTION_VERSION, InputsRecord};
 use bytemuck::{Pod, Zeroable};
@@ -67,9 +67,9 @@ impl FfiActor for ManifestProbe {
     #[fallback]
     fn on_other(&mut self, _ctx: &mut FfiCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 
-    fn on_drop<C>(&mut self, _ctx: &mut C)
+    fn unwire<C>(&mut self, _ctx: &mut C)
     where
-        C: MailSender + Persistence,
+        C: Resolver + MailSender,
     {
     }
 }
