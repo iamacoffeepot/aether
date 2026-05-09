@@ -17,12 +17,12 @@
 //! domain so the chassis-internal component-host cap (`aether.component`,
 //! formerly `aether.control`) only carries component-lifecycle concerns.
 
+#[cfg(not(target_arch = "wasm32"))]
+use aether_kinds::SubscribeInputResult;
 use aether_kinds::{
     Key, KeyRelease, MouseButton, MouseMove, SubscribeInput, Tick, UnsubscribeAll,
     UnsubscribeInput, WindowSize,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use aether_kinds::SubscribeInputResult;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::InputConfig;
