@@ -1541,7 +1541,10 @@ fn expand_wasm_actor(item: ItemImpl) -> syn::Result<TokenStream2> {
                     });
                 } else if name == "init" {
                     init_method = Some(f);
-                } else if matches!(name.as_str(), "on_replace" | "on_drop" | "on_rehydrate") {
+                } else if matches!(
+                    name.as_str(),
+                    "wire" | "unwire" | "on_replace" | "on_drop" | "on_rehydrate"
+                ) {
                     lifecycle_methods.push(f);
                 } else if name == "receive" {
                     return Err(syn::Error::new_spanned(
@@ -1698,14 +1701,15 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
     let mut fallback: Option<NativeFallbackFn> = None;
     let mut helpers: Vec<syn::ImplItemFn> = Vec::new();
     let mut consts: Vec<syn::ImplItemConst> = Vec::new();
-    // Issue 607 Phase 4a (ADR-0079): `on_close` is a `NativeActor` trait
-    // method with a default empty body. When a cap overrides it, the
-    // override must land inside the trait impl block (so the
-    // dispatcher trampoline's `actor.on_close(...)` resolves to the
-    // override via trait dispatch). Pre-issue-625 the macro routed
-    // every non-handler / non-init fn into the inherent impl, so
-    // `on_close` overrides triggered a dead_code warning and (worse)
-    // didn't override the trait method at all.
+    // Issue 584 (ADR-0079 amended): `wire` and `unwire` are
+    // `NativeActor` trait methods with default empty bodies. When a
+    // cap overrides them, the override must land inside the trait
+    // impl block (so the dispatcher trampoline's `actor.wire(...)` /
+    // `actor.unwire(...)` resolves to the override via trait
+    // dispatch). Pre-issue-625 the macro routed every non-handler /
+    // non-init fn into the inherent impl, so lifecycle overrides
+    // triggered a dead_code warning and (worse) didn't override the
+    // trait method at all.
     let mut lifecycle_methods: Vec<syn::ImplItemFn> = Vec::new();
 
     for impl_item in item.items {
@@ -1752,7 +1756,7 @@ fn expand_native_actor_trait(item: ItemImpl, opts: ActorOpts) -> syn::Result<Tok
                     fallback = Some(NativeFallbackFn { method: f });
                 } else if f.sig.ident == "init" {
                     init_method = Some(f);
-                } else if f.sig.ident == "on_close" {
+                } else if f.sig.ident == "wire" || f.sig.ident == "unwire" {
                     lifecycle_methods.push(f);
                 } else {
                     helpers.push(f);

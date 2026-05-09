@@ -163,6 +163,32 @@ pub trait FfiActor: crate::Actor {
     where
         C: Resolver + MailSender;
 
+    /// Post-init mail-allowed hook (issue 584, ADR-0079 amended
+    /// 2026-05-09). Runs after `init` returned `Ok` and the actor's
+    /// mailbox is published, but before the dispatcher pulls the
+    /// first envelope. The actor may send mail here — peers are
+    /// addressable. Default no-op; override to register subscriptions,
+    /// announce the actor, or kick off a poll loop via self-mail.
+    fn wire<C>(&mut self, ctx: &mut C)
+    where
+        C: Resolver + MailSender,
+    {
+        let _ = ctx;
+    }
+
+    /// Pre-shutdown mail-allowed hook (issue 584, ADR-0079 amended
+    /// 2026-05-09). Runs after the dispatcher's inbox drain, before
+    /// the actor value drops. Mail to live peers lands in their
+    /// mailboxes; sends to a dead peer warn-drop. Default no-op;
+    /// override to publish a final broadcast, signal monitors, or
+    /// flush state.
+    fn unwire<C>(&mut self, ctx: &mut C)
+    where
+        C: Resolver + MailSender,
+    {
+        let _ = ctx;
+    }
+
     /// Called once on the instance being dropped — both for
     /// `drop_component` and for the old instance of
     /// `replace_component` — immediately before the substrate tears

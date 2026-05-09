@@ -14,7 +14,7 @@
 //! caller initiates writes synchronously and they're typically
 //! fast.
 //!
-//! Shutdown: `on_close` flips the read thread's shutdown flag and
+//! Shutdown: `unwire` flips the read thread's shutdown flag and
 //! calls `stream.shutdown(Both)` on the write half. The kernel
 //! aborts any blocked `read()` on the read half, the read thread
 //! sees the error / EOF, exits. The dispatcher joins the thread
@@ -79,7 +79,7 @@ mod session_native {
         mailer: Arc<Mailer>,
         // Sticks to true once a `SessionClosed` broadcast has fired
         // so duplicate broadcasts don't pile up if both the read
-        // path and `on_close` see the close.
+        // path and `unwire` see the close.
         closed_emitted: bool,
     }
 
@@ -190,7 +190,7 @@ mod session_native {
             })
         }
 
-        fn on_close(&mut self, _ctx: &mut NativeCtx<'_>) {
+        fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
             self.shutdown.store(true, Ordering::Release);
             // Aborting the socket from the write half wakes any
             // blocked `read()` on the read half (same underlying fd).
@@ -286,7 +286,7 @@ mod session_native {
 
         /// Cooperative external close. Same shape as the listener
         /// pattern: peer mails this, we call `ctx.shutdown()`, the
-        /// dispatcher drains remaining inbox mail, runs `on_close`
+        /// dispatcher drains remaining inbox mail, runs `unwire`
         /// (which joins the read thread and emits `SessionClosed`).
         #[handler]
         fn on_close_request(&mut self, ctx: &mut NativeCtx<'_>, _mail: SessionClose) {
@@ -300,7 +300,7 @@ mod session_native {
         ctx.send_to_named::<K>(HUB_BROADCAST_MAILBOX_NAME, payload);
     }
 
-    /// Broadcast variant for `on_close` where we want to use the
+    /// Broadcast variant for `unwire` where we want to use the
     /// stored `mailer` reference directly (still inside the
     /// dispatcher thread). Functionally equivalent — the
     /// `send_to_named` path also goes through `Mailer::push` —

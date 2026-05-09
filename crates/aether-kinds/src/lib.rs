@@ -436,7 +436,7 @@ pub struct UnresolvedMail {
 /// Issue 607 Phase 4b (ADR-0079): framework-emitted close
 /// notification. Sent to every monitor a closing actor accumulated via
 /// `NativeCtx::monitor` — the substrate drains `monitors_of[target]`
-/// after the target's `on_close` runs, fires one `MonitorNotice` per
+/// after the target's `unwire` runs, fires one `MonitorNotice` per
 /// watcher, and only then flips the target's slot from `Live` to
 /// `Dead`.
 ///

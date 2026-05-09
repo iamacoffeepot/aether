@@ -116,7 +116,7 @@ pub struct NativeBinding {
     /// Issue 607 Phase 4a (ADR-0079): self-shutdown flag. The actor's
     /// dispatcher polls this between handler dispatches; flipping it
     /// (via [`Self::signal_shutdown`] / `NativeCtx::shutdown`) tells
-    /// the dispatcher to drain the inbox, run `on_close`, and exit.
+    /// the dispatcher to drain the inbox, run `unwire`, and exit.
     /// Substrate-shutdown (channel disconnect) flows through the same
     /// drain → close → exit path without setting the flag.
     shutdown_flag: Arc<AtomicBool>,
@@ -251,7 +251,7 @@ impl NativeBinding {
     /// actor's dispatcher polls between handler dispatches. Subsequent
     /// `recv_blocking` calls still process incoming mail, but
     /// `should_shutdown` reports `true` so the trampoline can drain
-    /// the inbox synchronously, run `on_close`, and exit. Idempotent.
+    /// the inbox synchronously, run `unwire`, and exit. Idempotent.
     pub fn signal_shutdown(&self) {
         self.shutdown_flag.store(true, Ordering::Release);
     }

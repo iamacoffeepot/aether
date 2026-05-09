@@ -34,7 +34,7 @@
 //!
 //! Each listener owns one sidecar OS thread that holds the
 //! `std::net::TcpListener` and runs a blocking accept loop. On
-//! `on_close` the listener flips a shutdown flag and self-connects
+//! `unwire` the listener flips a shutdown flag and self-connects
 //! to its bound port to wake the blocked accept; the accept returns,
 //! sees the flag, breaks; the dispatcher thread joins.
 

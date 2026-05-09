@@ -35,7 +35,7 @@
 //! - **Drop**: [`DropComponent`] mail addressed to the trampoline's
 //!   mailbox lands on [`Self::on_drop_component`], which calls
 //!   `ctx.shutdown()`. The framework drains the inbox, runs
-//!   `on_close`, and the dispatcher exits.
+//!   `unwire`, and the dispatcher exits.
 //! - **Replace**: [`ReplaceComponent`] mail lands on
 //!   [`Self::on_replace_component`], which instantiates a new
 //!   [`Component`] against the same binding and swaps `self.component`.

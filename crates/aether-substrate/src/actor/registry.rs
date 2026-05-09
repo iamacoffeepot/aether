@@ -301,7 +301,7 @@ impl ActorRegistry {
 
     /// Issue 607 Phase 4a (ADR-0079): flip the slot at `id` from
     /// `Live` to `Dead` and insert the id into `tombstones`. Called
-    /// by the instanced-actor dispatcher after `on_close` runs so
+    /// by the instanced-actor dispatcher after `unwire` runs so
     /// future `spawn_child` calls reject reuse of the retired name
     /// with `SpawnError::SubnameRetired`. Idempotent — re-running on
     /// an already-`Dead` slot leaves it `Dead` and doesn't double-

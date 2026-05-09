@@ -12,7 +12,7 @@
 //! Termination not implemented yet — instanced actors live for the
 //! chassis's lifetime; their dispatcher thread exits when the
 //! `Registry` drops (the sink handler's `Weak<Sender>` upgrade fails,
-//! the mpsc disconnects). Phase 4 wires `on_close` + the monitor
+//! the mpsc disconnects). Phase 4 wires `unwire` + the monitor
 //! primitive + tombstone population.
 
 use std::any::TypeId;
@@ -165,7 +165,7 @@ impl Spawner {
 
     /// Issue 685: walk every spawned instanced slot, signal shutdown
     /// on its binding, fire one wake so a pool worker picks it up and
-    /// runs the close path (drain residual → `on_close` → registry
+    /// runs the close path (drain residual → `unwire` → registry
     /// close + monitor fan-out), then poll [`crate::scheduler::Drainable::is_closed`]
     /// until every slot has finished or `timeout` elapses.
     ///
@@ -180,7 +180,7 @@ impl Spawner {
     ///
     /// On timeout: logs at warn level and returns. The slot Arcs we
     /// drained out of `instanced_slots` will then drop, and any actor
-    /// whose close cycle didn't run misses its `on_close` (matches
+    /// whose close cycle didn't run misses its `unwire` (matches
     /// the today behavior pre-685).
     pub(crate) fn shutdown_instanced(&self, timeout: std::time::Duration) {
         let entries: Vec<InstancedSlotEntry> = {
