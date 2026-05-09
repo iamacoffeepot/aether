@@ -5,8 +5,7 @@
 //! backing store ([`slot`](crate::actor::slot)). Marker traits are
 //! pure compile-time markers — no transport machinery, no lifecycle
 //! methods, just identity (`Actor`), singleton-ness (`Singleton`),
-//! per-handler-kind gating (`HandlesKind`), and the native dispatch
-//! entry-point (`Dispatch`).
+//! and per-handler-kind gating (`HandlesKind`).
 //!
 //! Pre-PR-C of issue 533 these lived here. Issue 533's facade pattern
 //! (ADR-0075) put chassis cap structs in `aether-kinds`, which meant
@@ -26,7 +25,7 @@ pub mod ctx;
 pub mod sender;
 pub mod slot;
 
-use aether_data::{Kind, ReplyTo};
+use aether_data::Kind;
 
 /// The symmetric trait every actor implements: name + scheduling class.
 /// Lifecycle methods (`boot` for native chassis caps, `init` for wasm
@@ -193,31 +192,6 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 /// wants them; the default macro emission is strict so wire bytes stay
 /// obvious.
 pub trait HandlesKind<K: Kind>: Actor {}
-
-/// Runtime dispatch entry-point. Auto-emitted by `#[actor]` on
-/// native chassis-cap inherent impls. Routes a single mail (matched
-/// by kind id) to the corresponding `#[handler]` method.
-///
-/// `sender` carries the envelope's reply target and correlation id
-/// (issue 533 PR D1). `#[handler]` methods that need to reply declare
-/// a 3-arg signature `(&mut self, sender: ReplyTo, mail: K)`; the
-/// macro routes `sender` through to those handlers and ignores it
-/// for 2-arg `(&mut self, mail: K)` handlers (fire-and-forget caps
-/// like Log).
-///
-/// Returns `Some(())` on match + decode success, `None` on unknown
-/// kind or decode failure. The chassis-side dispatcher logs misses
-/// separately (kind-id + cap-namespace) so the strict-receiver
-/// surface stays observable.
-///
-/// `sender` is `aether_data::ReplyTo` — the substrate-side dispatch
-/// type. It's distinct from `aether_actor::ReplyTo`, the wasm-guest-
-/// side opaque u32 handle in `mail.rs`. Both live next to where they
-/// route mail, share a name because callers always reach for the one
-/// matching their transport, and never appear in the same scope.
-pub trait Dispatch {
-    fn __dispatch(&mut self, sender: ReplyTo, kind: u64, payload: &[u8]) -> Option<()>;
-}
 
 #[cfg(test)]
 mod tests {

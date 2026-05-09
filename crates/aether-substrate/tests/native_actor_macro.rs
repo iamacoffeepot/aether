@@ -200,3 +200,56 @@ fn macro_emits_handles_kind_per_handler() {
     assert_handles::<MacroProbeCap, Greet>();
     assert_handles::<MacroProbeCap, Ping>();
 }
+
+/// Cast-shape kind the cap doesn't handle. Used to verify the
+/// macro's `__aether_dispatch_envelope` returns `None` for unknown
+/// kind ids — chassis-side dispatcher logs `dispatch missed` rather
+/// than crashing. Issue 688 follow-up: parity with the
+/// `dispatch_returns_none_for_unhandled_kind` test that retired
+/// alongside the legacy facade.
+#[repr(C)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    ::aether_data::Kind,
+    ::aether_data::Schema,
+)]
+#[kind(name = "test.macro_native_actor.unknown")]
+struct Unknown {
+    payload: u32,
+}
+
+#[test]
+fn macro_emitted_cap_drops_unknown_kind_via_dispatch() {
+    let (registry, mailer) = fresh_substrate();
+    let greet_total = Arc::new(AtomicU32::new(0));
+    let ping_total = Arc::new(AtomicU32::new(0));
+
+    let chassis: PassiveChassis<TestChassis> =
+        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<MacroProbeCap>(ProbeConfig {
+                greet_total: Arc::clone(&greet_total),
+                ping_total: Arc::clone(&ping_total),
+            })
+            .build_passive()
+            .expect("macro-emitted cap boots");
+
+    push_envelope(
+        &registry,
+        MacroProbeCap::NAMESPACE,
+        &Unknown { payload: 99 },
+    );
+
+    // Settle: give the dispatcher time to observe + drop the envelope.
+    // The macro-emitted dispatch returns None; the chassis-side
+    // dispatcher logs a warn but doesn't increment any handler counter.
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(greet_total.load(AtomicOrdering::SeqCst), 0);
+    assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
+
+    drop(chassis);
+}

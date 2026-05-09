@@ -36,7 +36,8 @@
 //! Cap lifecycle: dropping the cap drops the shutdown sender, the
 //! worker's `recv()` returns, the worker exits dropping
 //! `cpal::Stream`. The chassis dispatcher's drop sequence
-//! (`FacadeHandle` → cap → worker thread) handles this transparently.
+//! (cap shutdown → cap drop → worker thread) handles this
+//! transparently.
 //!
 //! ## Boot error policy
 //!

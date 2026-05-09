@@ -28,7 +28,7 @@ use std::sync::{Arc, RwLock};
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeDispatch, NativeInitCtx};
 use crate::chassis::Chassis;
-use crate::chassis::ctx::{ChassisCtx, FacadeHandle, FallbackRouter, MailboxClaim};
+use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
@@ -36,7 +36,6 @@ use crate::mail::registry::Registry;
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
 use aether_actor::Actor;
-use aether_actor::Dispatch;
 use aether_actor::HandlesKind;
 use aether_data::mailbox_id_from_name;
 use aether_kinds::{ConfigureLogDrain, LogBatch};
@@ -126,27 +125,6 @@ trait DynShutdown {
     fn shutdown_dyn(self: Box<Self>);
 }
 
-/// Concrete adapter for a chassis cap. The chassis owns the
-/// [`FacadeHandle`]; the cap itself lives in the dispatcher thread.
-/// On shutdown the handle drops, severing the channel and joining
-/// the thread; the captured cap drops there. Drivers that need to
-/// talk to the cap reach for it through mail or — for caps that
-/// expose driver-facing state, like render — through the cap's own
-/// pre-build accessor (e.g. `RenderCapability::handles`).
-struct FacadeShutdown<C: 'static> {
-    handle: Option<FacadeHandle<C>>,
-}
-
-impl<C: 'static> DynShutdown for FacadeShutdown<C> {
-    fn shutdown_dyn(mut self: Box<Self>) {
-        // Drop the handle eagerly: drops MailboxSender, channel
-        // disconnects, dispatcher thread exits, cap drops. Equivalent
-        // to letting `Box<Self>` drop, but explicit so the order is
-        // documented.
-        self.handle.take();
-    }
-}
-
 /// Concrete adapter for the fallback-router slot. The handler itself
 /// is owned by the chassis's `fallback` slot (claimed via
 /// `ctx.claim_fallback_router`); this entry exists purely to keep
@@ -231,12 +209,13 @@ mod sealed {
 /// Sealed: only [`NoDriver`] and [`HasDriver`] are valid.
 pub trait BuilderState: sealed::Sealed {}
 
-/// Builder state: no driver supplied yet. Accepts both `.with(_)`
-/// and `.driver(_)` (which transitions to [`HasDriver`]); also
-/// supports `.build_passive()` for the embedder-driven path.
+/// Builder state: no driver supplied yet. Accepts `.with_actor(_)`
+/// / `.with_fallback_router(_)` and `.driver(_)` (which transitions
+/// to [`HasDriver`]); also supports `.build_passive()` for the
+/// embedder-driven path.
 pub struct NoDriver;
 
-/// Builder state: driver supplied. Accepts `.with(_)` (passives
+/// Builder state: driver supplied. Accepts `.with_actor(_)` (passives
 /// declared after the driver still boot before the driver per the
 /// builder's invariant) and `.build()`.
 pub struct HasDriver;
@@ -251,9 +230,8 @@ impl BuilderState for HasDriver {}
 /// view. Issue 629 / Phase A: the second arg is the chassis's
 /// handle-export map — caps publish driver-facing sub-handle bundles
 /// during their `init` (via [`NativeInitCtx::publish_handle`]).
-/// Closures from [`make_passive_boot`] / [`make_fallback_router_boot`]
-/// ignore it; [`make_native_actor_boot`] threads it through to the
-/// init ctx.
+/// The closure from [`make_fallback_router_boot`] ignores it;
+/// [`make_native_actor_boot`] threads it through to the init ctx.
 type PassiveBoot = Box<
     dyn FnOnce(
         &mut ChassisCtx<'_>,
@@ -261,18 +239,6 @@ type PassiveBoot = Box<
     ) -> Result<Box<dyn DynShutdown>, BootError>,
 >;
 type DriverBoot = Box<dyn FnOnce(&mut DriverCtx<'_>) -> Result<Box<dyn DriverRunning>, BootError>>;
-
-fn make_passive_boot<C>(cap: C) -> PassiveBoot
-where
-    C: Actor + Dispatch + Send + 'static,
-{
-    Box::new(move |ctx, _handles| {
-        let handle = ctx.spawn_actor_dispatcher(cap)?;
-        Ok(Box::new(FacadeShutdown {
-            handle: Some(handle),
-        }) as Box<dyn DynShutdown>)
-    })
-}
 
 fn make_fallback_router_boot(handler: FallbackRouter) -> PassiveBoot {
     Box::new(move |ctx, _handles| {
@@ -546,8 +512,7 @@ fn alloc_native_actor_thread_name<A: Actor>() -> String {
 /// Shutdown adapter for a [`NativeActor`] booted through
 /// [`Builder::with_actor`]. Drops the [`crate::chassis::ctx::MailboxSender`]
 /// to disconnect the channel (the dispatcher's `recv_blocking` returns
-/// `None` and the thread exits), then joins the thread. Mirrors
-/// [`FacadeShutdown`] for the legacy facade path.
+/// `None` and the thread exits), then joins the thread.
 struct NativeActorShutdown {
     thread: Option<std::thread::JoinHandle<()>>,
     mailbox_sender: Option<crate::chassis::ctx::MailboxSender>,
@@ -574,10 +539,11 @@ fn make_driver_boot<D: DriverCapability>(driver: D) -> DriverBoot {
 
 /// Declarative chassis builder, parametric over the chassis kind `C`
 /// and a type-state `S` tracking whether a driver has been supplied.
-/// `Builder<C, NoDriver>` accepts both [`Self::with`] and either
-/// [`Self::driver`] or [`Self::build_passive`]; once `.driver(d)`
-/// runs the builder transitions to `Builder<C, HasDriver>` which
-/// only accepts further [`Self::with`] calls and [`Self::build`].
+/// `Builder<C, NoDriver>` accepts [`Self::with_actor`] /
+/// [`Self::with_fallback_router`] and either [`Self::driver`] or
+/// [`Self::build_passive`]; once `.driver(d)` runs the builder
+/// transitions to `Builder<C, HasDriver>` which only accepts further
+/// passives and [`Self::build`].
 pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     registry: Arc<Registry>,
     mailer: Arc<Mailer>,
@@ -629,23 +595,6 @@ impl<C: Chassis> Builder<C, NoDriver> {
         self
     }
 
-    /// Append a chassis cap. The chassis claims its mailbox and runs
-    /// the dispatcher; the cap is an `Actor + Dispatch` value
-    /// (typically built by `#[actor]` on an inherent impl). Boot
-    /// order is declaration order; `.with` calls before and after
-    /// `.driver(_)` boot together before the driver.
-    ///
-    /// Pre-PR-E3 this method was named `with_facade`; the legacy
-    /// `with`-takes-Capability variant retired alongside `Capability`
-    /// itself.
-    pub fn with<P>(mut self, cap: P) -> Self
-    where
-        P: Actor + Dispatch + Send + 'static,
-    {
-        self.passives.push(make_passive_boot::<P>(cap));
-        self
-    }
-
     /// Register a fallback router — a single-shot handler the
     /// substrate consults for envelopes whose mailbox name doesn't
     /// resolve. Multiple calls collapse to a `BootError` at
@@ -665,10 +614,6 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// and after `.driver(_)` boot together before the driver runs.
     /// Init-time peer lookups via `ctx.actor::<EarlierCap>()` see
     /// every cap inserted earlier in the chain.
-    ///
-    /// FRAME_BARRIER caps aren't supported on this entry yet — see
-    /// [`make_native_actor_boot`] for the fast-fail rationale. The
-    /// legacy `with(cap)` path stays available for them.
     pub fn with_actor<A>(mut self, config: A::Config) -> Self
     where
         A: NativeActor + NativeDispatch,
@@ -741,16 +686,6 @@ impl<C: Chassis> Builder<C, NoDriver> {
 }
 
 impl<C: Chassis> Builder<C, HasDriver> {
-    /// Append a chassis cap after the driver was supplied. Booted
-    /// before the driver in declaration order.
-    pub fn with<P>(mut self, cap: P) -> Self
-    where
-        P: Actor + Dispatch + Send + 'static,
-    {
-        self.passives.push(make_passive_boot::<P>(cap));
-        self
-    }
-
     /// Register a fallback router after the driver was supplied.
     /// Booted before the driver in declaration order.
     pub fn with_fallback_router(mut self, handler: FallbackRouter) -> Self {

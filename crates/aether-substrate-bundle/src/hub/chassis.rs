@@ -102,7 +102,7 @@ impl HubChassis {
     /// driver, and assemble a [`BuiltChassis<HubChassis>`] via the
     /// chassis_builder [`Builder`]. The hub chassis has no passive
     /// capabilities of its own today; future passives (an in-process
-    /// log capability, etc.) compose via `Builder::with` between
+    /// log capability, etc.) compose via `Builder::with_actor` between
     /// `new()` and `driver()`. The trait method [`Chassis::build`]
     /// forwards here.
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<HubChassis>, BootError> {

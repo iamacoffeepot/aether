@@ -7,7 +7,7 @@
 //! [`DesktopDriverCapability`] so [`crate::chassis::DesktopChassis`]
 //! composes one driver alongside its passive capabilities
 //! (LogCapability, FsCapability, HttpCapability, AudioCapability,
-//! RenderCapability — composed via `chassis_builder::Builder::with`
+//! RenderCapability — composed via `chassis_builder::Builder::with_actor`
 //! per ADR-0071 phase B).
 //!
 //! `DesktopDriverRunning::run` blocks on `event_loop.run_app(&mut app)`
