@@ -465,7 +465,7 @@ where
 /// On chassis shutdown:
 /// 1. Sets the binding's `should_shutdown` flag so the next
 ///    [`crate::scheduler::DispatcherSlot::run_cycle`] observes the
-///    signal and runs `on_close` + registry finalize.
+///    signal and runs `unwire` + registry finalize.
 /// 2. Drops the [`crate::chassis::ctx::MailboxSender`] so subsequent
 ///    sends warn-and-discard.
 /// 3. Drops the slot Arc — the chassis-held strong ref. The pool
@@ -1852,12 +1852,12 @@ mod tests {
     }
 
     /// Issue 607 Phase 4a verify: `ctx.shutdown()` from inside an
-    /// instanced actor's handler triggers the drain → on_close → exit
+    /// instanced actor's handler triggers the drain → unwire → exit
     /// path, flips the actor_registry slot to `Dead`, and inserts the
     /// id into `tombstones`. A reused subname after retirement returns
     /// `SpawnError::SubnameRetired`.
     #[test]
-    fn ctx_shutdown_marks_dead_runs_on_close_tombstones_id() {
+    fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
         use crate::actor::native::spawn::{SpawnError, Subname};
         use crate::mail::registry::MailboxEntry;
         use aether_actor::{HandlesKind, Instanced};
@@ -1901,7 +1901,7 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn on_close(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+            fn unwire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
@@ -1935,7 +1935,7 @@ mod tests {
         // Push a Quit envelope at the spawned mailbox via the
         // registered sink handler. The handler's `ctx.shutdown()`
         // flips the dispatcher's flag; after the handler returns the
-        // trampoline drains, runs `on_close`, marks Dead, tombstones.
+        // trampoline drains, runs `unwire`, marks Dead, tombstones.
         let MailboxEntry::Closure(handler) = registry.entry(id).expect("sink registered") else {
             panic!("expected mailbox entry for instanced actor");
         };
@@ -1949,7 +1949,7 @@ mod tests {
             1,
         );
 
-        // Wait for on_close to run + the registry slot to flip Dead.
+        // Wait for unwire to run + the registry slot to flip Dead.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         while close_observed.load(AtomicOrdering::SeqCst) == 0
             && std::time::Instant::now() < deadline
@@ -1959,10 +1959,10 @@ mod tests {
         assert_eq!(
             close_observed.load(AtomicOrdering::SeqCst),
             1,
-            "on_close fired exactly once after the dispatcher drained"
+            "unwire fired exactly once after the dispatcher drained"
         );
         // Spin until the slot transitions Dead — the dispatcher
-        // thread runs `mark_dead` after `on_close`, so there's a
+        // thread runs `mark_dead` after `unwire`, so there's a
         // small window between the close-observed bump above and the
         // registry update.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -1971,7 +1971,7 @@ mod tests {
         }
         assert!(
             !chassis.actor_registry().is_live(id),
-            "registry slot should transition Live → Dead after on_close runs"
+            "registry slot should transition Live → Dead after unwire runs"
         );
         assert!(
             chassis.actor_registry().is_tombstoned(id),
@@ -1994,7 +1994,7 @@ mod tests {
         drop(chassis);
     }
 
-    /// Issue 685: chassis teardown drives `on_close` on every spawned
+    /// Issue 685: chassis teardown drives `unwire` on every spawned
     /// instanced actor, even those that never received a self-shutdown
     /// trigger. Pre-685 the Pooled spawn path's slot was reachable
     /// from the chassis only through the wake's `Weak`, and nothing
@@ -2003,7 +2003,7 @@ mod tests {
     /// step now signals + wakes every spawned slot before the pool
     /// drops, and the chassis waits for each `Drainable::is_closed`.
     #[test]
-    fn chassis_teardown_runs_on_close_for_pooled_spawned_actors() {
+    fn chassis_teardown_runs_unwire_for_pooled_spawned_actors() {
         use crate::actor::native::spawn::Subname;
         use aether_actor::Instanced;
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -2025,7 +2025,7 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn on_close(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+            fn unwire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
@@ -2062,7 +2062,7 @@ mod tests {
         assert_eq!(
             close_observed.load(AtomicOrdering::SeqCst),
             1,
-            "chassis teardown must drive on_close exactly once for a quiet spawned actor",
+            "chassis teardown must drive unwire exactly once for a quiet spawned actor",
         );
         // Drop the unused id binding so clippy stays quiet — its
         // referent (the actor_registry's Live entry) drops with the
@@ -2432,7 +2432,7 @@ mod tests {
                     close_observed: config,
                 })
             }
-            fn on_close(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+            fn unwire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
                 self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
@@ -2521,7 +2521,7 @@ mod tests {
         assert_eq!(
             close_observed.load(AtomicOrdering::SeqCst),
             1,
-            "watcher's on_close fired exactly once",
+            "watcher's unwire fired exactly once",
         );
 
         // Watcher slot tombstones; target slot still Live; target's

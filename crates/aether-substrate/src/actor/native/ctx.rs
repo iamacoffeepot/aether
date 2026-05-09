@@ -98,7 +98,7 @@ impl<'a> NativeCtx<'a> {
     /// Issue 607 Phase 4a (ADR-0079): self-shutdown signal. Sets a
     /// flag the actor's dispatcher polls after each handler returns;
     /// when set, the trampoline drains any remaining inbox mail
-    /// synchronously, runs `NativeActor::on_close`, and exits the
+    /// synchronously, runs `NativeActor::unwire`, and exits the
     /// dispatch loop. After exit the actor's [`crate::MailboxId`]
     /// transitions from `Live` to `Dead` in the chassis's
     /// [`crate::ActorRegistry`] and is added to `tombstones` —

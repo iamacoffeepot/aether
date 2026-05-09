@@ -108,9 +108,18 @@ pub trait NativeActor: Actor {
     where
         Self: Sized;
 
-    /// Issue 607 Phase 4a (ADR-0079): last-chance close hook. Runs
-    /// after the dispatcher's inbox drain, before the actor value
-    /// drops. Triggers:
+    /// Post-init mail-allowed hook (issue 584, ADR-0079 amended
+    /// 2026-05-09). Runs after `init` returned `Ok` and the actor's
+    /// mailbox is published, but before the dispatcher pulls the
+    /// first envelope. The actor may send mail here — peers are
+    /// addressable and the chassis is past the boot barrier. Default
+    /// empty — opt-in for actors that need to register subscriptions,
+    /// announce themselves, or kick off a poll loop via self-mail.
+    fn wire(&mut self, _ctx: &mut NativeCtx<'_>) {}
+
+    /// Pre-shutdown mail-allowed hook (issue 584, ADR-0079 amended
+    /// 2026-05-09). Runs after the dispatcher's inbox drain, before
+    /// the actor value drops. Triggers:
     ///
     /// - Self-shutdown — actor's handler called `ctx.shutdown()`;
     ///   dispatcher saw the flag set after the handler returned.
@@ -122,10 +131,14 @@ pub trait NativeActor: Actor {
     ///   `ctx.shutdown()`. From the dispatcher's perspective this is
     ///   identical to self-shutdown.
     ///
+    /// Mail emitted from `unwire` lands in peer mailboxes if those
+    /// peers are still alive; sends to a dead peer warn-drop. Use this
+    /// to publish a final broadcast, flush state, or signal monitors.
+    /// Default empty — opt-in.
+    ///
     /// Issue 629 / Phase A: `&mut self` since the dispatcher thread
-    /// owns the cap exclusively. Default empty — opt-in for caps that
-    /// need to publish a final broadcast or flush state.
-    fn on_close(&mut self, _ctx: &mut NativeCtx<'_>) {}
+    /// owns the cap exclusively.
+    fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {}
 }
 
 /// Sum dispatch entry-point — emitted once per `#[actor] impl

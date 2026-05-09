@@ -6,7 +6,7 @@
 //! [`crate::actor::native::dispatch::dispatch_loop_run`] is the loop a
 //! `Dedicated` actor runs on its own thread. It owns the actor, blocks
 //! on `recv_blocking`, and runs the four-phase lifecycle
-//! (main loop → drain after shutdown → on_close → registry close).
+//! (main loop → drain after shutdown → unwire → registry close).
 //!
 //! `DispatcherSlot::run_cycle` is the *budget-bounded* version of the
 //! same logic for the `Pooled` path. Each call to `run_cycle` does:
@@ -25,7 +25,7 @@
 //!    - [`CycleResult::Requeue`] — budget hit (state `Ready`) or
 //!      post-empty recheck won the requeue CAS; worker re-pushes.
 //!    - [`CycleResult::Closed`] — shutdown observed; the slot ran the
-//!      post-shutdown drain + `on_close` hook + registry finalize
+//!      post-shutdown drain + `unwire` hook + registry finalize
 //!      sequence and is done forever.
 //!
 //! ## Today (PR C)
@@ -76,7 +76,7 @@ use crate::mail::{KindId, Mail, MailboxId, ReplyTo};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, SlotState};
 
 /// Worker-pool-side wrapper for a native actor. One instance per
-/// `Pooled` actor; held strongly by the chassis (so `on_close` and
+/// `Pooled` actor; held strongly by the chassis (so `unwire` and
 /// registry finalize run when the cap shuts down) and weakly by the
 /// pool's [`crate::scheduler::WakeHandle`] (so a wake after the cap
 /// is gone silently no-ops).
@@ -90,7 +90,7 @@ where
     /// is in `Running` at a time, so the `Mutex` is uncontested in
     /// production — used here over `UnsafeCell` only for the simpler
     /// safety story. `Option` so the `Closed` finalize path can take
-    /// the box and run `on_close` on the consumed actor.
+    /// the box and run `unwire` on the consumed actor.
     actor: Mutex<Option<Box<A>>>,
     /// Per-actor binding (inbox + shutdown flag + reply machinery).
     binding: Arc<NativeBinding>,
@@ -129,7 +129,7 @@ where
     /// Borrow this slot's [`NativeBinding`]. The chassis-cap shutdown
     /// path uses this to call [`NativeBinding::signal_shutdown`] when
     /// the cap is going down — the next call into [`Self::run_cycle`]
-    /// observes the flag and runs the `on_close` + registry finalize
+    /// observes the flag and runs the `unwire` + registry finalize
     /// sequence.
     pub(crate) fn binding(&self) -> &Arc<NativeBinding> {
         &self.binding
@@ -189,7 +189,7 @@ where
         }
     }
 
-    /// Phase 3 of the dispatch_loop_run lifecycle. Wraps `actor.on_close`
+    /// Phase 3 of the dispatch_loop_run lifecycle. Wraps `actor.unwire`
     /// in the same `with_stamped` + `with_actor_dispatch` envelope so a
     /// final tracing event from the close hook still routes to
     /// `LogCapability`.
@@ -199,7 +199,7 @@ where
                 &*self.binding as &dyn crate::runtime::log_install::MailDispatch,
                 || {
                     let mut close_ctx = NativeCtx::new(&self.binding, ReplyTo::NONE);
-                    actor.on_close(&mut close_ctx);
+                    actor.unwire(&mut close_ctx);
                     aether_actor::log::drain_buffer();
                 },
             );
@@ -285,7 +285,7 @@ where
             while let Some(env) = self.binding.try_recv() {
                 self.dispatch_one(actor, env);
             }
-            // Phase 3: on_close hook.
+            // Phase 3: unwire hook.
             self.run_close_hook(actor);
             // Phase 4: registry close + monitor fan-out.
             self.finalize_registry();

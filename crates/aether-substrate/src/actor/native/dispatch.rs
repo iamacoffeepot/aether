@@ -21,9 +21,9 @@
 //!    `LogBatch` to `LogCapability`. Two-step typed → fallback dispatch.
 //! 3. **Drain after shutdown.** Any envelope already in the inbox
 //!    when the shutdown signal fired is processed synchronously
-//!    before `on_close` runs (matches the existing singleton
+//!    before `unwire` runs (matches the existing singleton
 //!    semantics).
-//! 4. **`on_close`.** Last-chance hook with `ReplyTo::NONE`. Wrapped
+//! 4. **`unwire`.** Last-chance hook with `ReplyTo::NONE`. Wrapped
 //!    in the same `with_stamped` + `with_actor_dispatch` so any
 //!    final tracing or `Local<T>` access works.
 //! 5. **Registry close + monitor fan-out.** `actor_registry.close_actor(id)`
@@ -106,7 +106,7 @@ pub(crate) fn dispatch_loop_run<A>(
 
     // Phase 2: drain remaining inbox synchronously. The shutdown
     // flag / disconnect raced against any in-flight mail the sink
-    // handler already pushed; the actor sees it before `on_close`
+    // handler already pushed; the actor sees it before `unwire`
     // runs so a "please close" handler that flushes state observes
     // the full inbox.
     while let Some(env) = binding.try_recv() {
@@ -132,7 +132,7 @@ pub(crate) fn dispatch_loop_run<A>(
             &**binding as &dyn crate::runtime::log_install::MailDispatch,
             || {
                 let mut close_ctx = NativeCtx::new(binding, ReplyTo::NONE);
-                actor.on_close(&mut close_ctx);
+                actor.unwire(&mut close_ctx);
                 aether_actor::log::drain_buffer();
             },
         );

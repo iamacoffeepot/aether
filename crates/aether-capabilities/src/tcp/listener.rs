@@ -7,10 +7,10 @@
 //! actor's own mailbox. The wake handler drains the mpsc and does
 //! the spawn on the dispatcher thread.
 //!
-//! Shutdown: `on_close` flips the accept thread's shutdown flag, then
+//! Shutdown: `unwire` flips the accept thread's shutdown flag, then
 //! self-connects to the bound port to wake the blocked accept call.
 //! The accept returns, sees the flag, breaks; the dispatcher thread
-//! (in `on_close`) joins the accept thread.
+//! (in `unwire`) joins the accept thread.
 
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
@@ -81,7 +81,7 @@ mod listener_native {
             let addr = config.addr;
             let port = config.port;
             // Stay blocking — the accept loop wakes via self-connect
-            // on `on_close`. Nonblocking would require a poll loop +
+            // on `unwire`. Nonblocking would require a poll loop +
             // CPU burn for no win.
             listener
                 .set_nonblocking(false)
@@ -156,7 +156,7 @@ mod listener_native {
             })
         }
 
-        fn on_close(&mut self, _ctx: &mut NativeCtx<'_>) {
+        fn unwire(&mut self, _ctx: &mut NativeCtx<'_>) {
             self.shutdown.store(true, Ordering::Release);
             // Wake the blocked accept(). Self-connect to the bound
             // port; the accept returns, sees the flag, breaks. Short
@@ -178,7 +178,7 @@ mod listener_native {
 
         /// Cooperative external close. The unbind path on
         /// `TcpCapability` mails this; we shut down so the dispatcher
-        /// drains, runs `on_close`, and the close fan-out fires
+        /// drains, runs `unwire`, and the close fan-out fires
         /// `MonitorNotice` to the cap.
         #[handler]
         fn on_close_request(&mut self, ctx: &mut NativeCtx<'_>, _mail: Close) {
