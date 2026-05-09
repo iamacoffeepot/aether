@@ -225,50 +225,191 @@ impl sealed::Sealed for HasDriver {}
 impl BuilderState for NoDriver {}
 impl BuilderState for HasDriver {}
 
-/// Every `PassiveBoot` closure receives a [`ChassisCtx`] (registry /
-/// mailer / fallback / frame-bound state) and a `&mut ExportedHandles`
-/// view. Issue 629 / Phase A: the second arg is the chassis's
-/// handle-export map — caps publish driver-facing sub-handle bundles
-/// during their `init` (via [`NativeInitCtx::publish_handle`]).
-/// The closure from [`make_fallback_router_boot`] ignores it;
-/// [`make_native_actor_boot`] threads it through to the init ctx.
-type PassiveBoot = Box<
-    dyn FnOnce(
-        &mut ChassisCtx<'_>,
-        &mut ExportedHandles,
-    ) -> Result<Box<dyn DynShutdown>, BootError>,
->;
 type DriverBoot = Box<dyn FnOnce(&mut DriverCtx<'_>) -> Result<Box<dyn DriverRunning>, BootError>>;
 
-fn make_fallback_router_boot(handler: FallbackRouter) -> PassiveBoot {
-    Box::new(move |ctx, _handles| {
-        ctx.claim_fallback_router(handler)?;
-        Ok(Box::new(FallbackShutdown) as Box<dyn DynShutdown>)
-    })
+/// Issue 697: chassis boot is multi-pass. Every registered passive
+/// walks `claim → init → wire → spawn` synchronized across all
+/// passives — the chassis builder calls phase N on every passive
+/// before any passive enters phase N+1. The boot ordering means:
+///
+/// - At `init` time, every peer mailbox is already claimed (claim
+///   pass completed), so init's `Resolver::resolve_mailbox` reaches
+///   every peer.
+/// - At `wire` time, every actor has an `init`-built instance, so
+///   wire-time mail to a peer queues in that peer's inbox; the
+///   recipient's dispatcher hasn't started yet.
+/// - The `spawn` pass starts dispatchers; queued wire mail processes
+///   naturally as each comes up.
+///
+/// No drain barrier between spawn and steady state — issue 697 §"Why
+/// no barrier" rejects waiting for inboxes to drain (breaks for
+/// actors with async mail sources). Frame-bound actors that can't
+/// tolerate a one-frame race against a peer's wire-emitted mail keep
+/// load-bearing state in `init`, not `wire`.
+///
+/// Failure mode: any phase returning `Err` triggers
+/// [`Self::cleanup_after_failure`] in reverse boot order on every
+/// previously-advanced passive, then the error propagates. Already-
+/// spawned dispatchers (only on a spawn-pass failure for a later
+/// passive) shut down via the [`DynShutdown`] handles the spawn pass
+/// produced.
+trait PassiveBoot: Send {
+    /// Phase 1 — claim namespace + mailbox; build per-cap transport
+    /// + binding; stash claim resources for later phases.
+    fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError>;
+
+    /// Phase 2 — construct the actor instance via `A::init`. Default
+    /// no-op for non-actor passives (e.g., the fallback router).
+    fn init(
+        &mut self,
+        ctx: &mut ChassisCtx<'_>,
+        handles: &mut ExportedHandles,
+    ) -> Result<(), BootError> {
+        let _ = ctx;
+        let _ = handles;
+        Ok(())
+    }
+
+    /// Phase 3 — post-init mail-allowed lifecycle hook
+    /// ([`NativeActor::wire`], ADR-0079 amended). Default no-op.
+    fn wire(&mut self) -> Result<(), BootError> {
+        Ok(())
+    }
+
+    /// Phase 4 — spawn dispatcher; produce a shutdown handle.
+    /// Consumes the impl.
+    fn spawn(self: Box<Self>, ctx: &mut ChassisCtx<'_>) -> Result<Box<dyn DynShutdown>, BootError>;
+
+    /// Roll back any acquired resources after a phase returned `Err`
+    /// on this impl, or after a sibling passive's later phase failed
+    /// while this impl had already advanced. Idempotent across the
+    /// pre-spawn phases. Consumes the impl.
+    fn cleanup_after_failure(self: Box<Self>, ctx: &mut ChassisCtx<'_>);
 }
 
-/// Issue 552 stage 1: factory for the new [`NativeActor`] boot path.
-/// Claims the cap's mailbox under `A::NAMESPACE`, builds a fresh
+/// Single-phase passive: the fallback router lives entirely in the
+/// claim step (it stashes its handler into `ChassisCtx::fallback`).
+/// `init` / `wire` are no-ops; `spawn` returns the no-op
+/// [`FallbackShutdown`].
+struct FallbackRouterBoot {
+    handler: Option<FallbackRouter>,
+}
+
+impl FallbackRouterBoot {
+    fn new(handler: FallbackRouter) -> Self {
+        Self {
+            handler: Some(handler),
+        }
+    }
+}
+
+impl PassiveBoot for FallbackRouterBoot {
+    fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+        let handler = self
+            .handler
+            .take()
+            .expect("FallbackRouterBoot::claim called twice");
+        ctx.claim_fallback_router(handler)
+    }
+
+    fn spawn(
+        self: Box<Self>,
+        _ctx: &mut ChassisCtx<'_>,
+    ) -> Result<Box<dyn DynShutdown>, BootError> {
+        Ok(Box::new(FallbackShutdown))
+    }
+
+    fn cleanup_after_failure(self: Box<Self>, _ctx: &mut ChassisCtx<'_>) {
+        // The router, once claimed, sits in `ctx.fallback` (an
+        // `&mut Option<FallbackRouter>` borrowed from `BootedPassives`).
+        // Boot failure unwinds the entire `BootedPassives`, so the
+        // slot drops with it. Nothing to do here.
+    }
+}
+
+/// Resources stashed during the [`PassiveBoot::claim`] pass and
+/// threaded forward through `init` / `wire` / `spawn`. Composed into
+/// [`BootState`]'s post-claim variants so the type system tracks
+/// "what's been allocated" precisely.
+struct ClaimResources {
+    mailbox_id: MailboxId,
+    transport: Arc<NativeBinding>,
+    mailbox_sender: crate::chassis::ctx::MailboxSender,
+    pending: Option<Arc<AtomicU64>>,
+    wake_slot: Arc<crate::chassis::ctx::MailboxWakeSlot>,
+    slots: Box<aether_actor::local::ActorSlots>,
+}
+
+/// Phase state of a [`NativeActorBoot`] — variants carry exactly the
+/// resources that phase has acquired. Phase methods transition states
+/// via `mem::replace(&mut self.state, Transitioning)` plus a final
+/// state assignment, so each transition is atomic w.r.t. partial
+/// moves.
+enum BootState<A: NativeActor + NativeDispatch> {
+    /// Pre-claim — only the cap config is held.
+    Pending { config: A::Config },
+    /// Post-claim, pre-init — mailbox + transport + slots claimed,
+    /// config still pending consumption by `init`.
+    Claimed {
+        resources: ClaimResources,
+        config: A::Config,
+    },
+    /// Post-init, pre-wire — actor instance constructed.
+    Initialized {
+        resources: ClaimResources,
+        actor: Box<A>,
+    },
+    /// Post-wire, pre-spawn — wire ran. The dispatcher is next.
+    Wired {
+        resources: ClaimResources,
+        actor: Box<A>,
+    },
+    /// Sentinel held only inside a phase method's body between
+    /// `mem::replace` and the final state assignment. If the phase
+    /// returns Err, it either restores a prior variant (so
+    /// [`PassiveBoot::cleanup_after_failure`] sees the right state)
+    /// or leaves `Transitioning` when no chassis-side resources are
+    /// held (the failed body cleaned up inline).
+    Transitioning,
+}
+
+/// Issue 552 stage 1 (multi-passed for issue 697): the [`NativeActor`]
+/// boot. Claims the cap's mailbox under `A::NAMESPACE`, builds a fresh
 /// per-cap [`NativeBinding`], constructs a [`NativeInitCtx`], calls
-/// `A::init(config, &mut init_ctx)`, wraps the returned cap in an
-/// `Arc<A>`, inserts into the chassis-side [`Actors`] map, and spawns
-/// a dispatcher thread that pulls from the transport's inbox and
-/// routes through [`NativeDispatch::__aether_dispatch_envelope`] —
+/// `A::init(config, &mut init_ctx)`, runs `A::wire`, and finally
+/// spawns a dispatcher thread that pulls from the transport's inbox
+/// and routes through [`NativeDispatch::__aether_dispatch_envelope`] —
 /// the sum dispatch trait the `#[actor] impl NativeActor for A`
 /// macro emits.
 ///
-/// Stage 2d: FRAME_BARRIER caps now go through this path too. The
+/// Stage 2d: FRAME_BARRIER caps go through this path too. The
 /// frame-bound claim (`claim_frame_bound_mailbox_with_override`)
 /// registers the per-mailbox `pending` counter into the chassis's
 /// `frame_bound_pending` Vec; the dispatcher thread decrements after
-/// each successful handler dispatch so the chassis frame loop's
-/// `drain_frame_bound_or_abort` (ADR-0074 §Decision 5) sees the
-/// counter drop to zero alongside component drains.
-fn make_native_actor_boot<A>(config: A::Config) -> PassiveBoot
-where
-    A: NativeActor + NativeDispatch,
-{
-    Box::new(move |ctx, handles| {
+/// each successful handler dispatch so
+/// [`crate::chassis::frame_loop::drain_frame_bound_or_abort`]
+/// (ADR-0074 §Decision 5) sees the counter drop to zero alongside
+/// component drains.
+struct NativeActorBoot<A: NativeActor + NativeDispatch> {
+    state: BootState<A>,
+}
+
+impl<A: NativeActor + NativeDispatch> NativeActorBoot<A> {
+    fn new(config: A::Config) -> Self {
+        Self {
+            state: BootState::Pending { config },
+        }
+    }
+}
+
+impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
+    fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+        let BootState::Pending { config } =
+            std::mem::replace(&mut self.state, BootState::Transitioning)
+        else {
+            panic!("PassiveBoot::claim called in non-Pending state");
+        };
+
         // Issue 607 Phase 3b (ADR-0079): claim namespace ownership for
         // this singleton's `Actor::NAMESPACE`. The actor registry
         // tracks one TypeId per namespace across both cardinalities
@@ -276,15 +417,16 @@ where
         // `X::NAMESPACE` collides with this singleton's namespace
         // surfaces as `SpawnError::NamespaceOwnedByOtherType`. Same
         // TypeId re-claiming the same namespace is idempotent.
-        if let Err(_existing) = ctx
+        if ctx
             .spawner_arc()
             .actor_registry()
             .try_claim_namespace(A::NAMESPACE, std::any::TypeId::of::<A>())
+            .is_err()
         {
             // The other claim is on the same namespace by a different
-            // TypeId — a chassis-build collision. Surface as a typed
-            // BootError; the chassis builder unwinds the partially
-            // booted caps before propagating.
+            // TypeId — a chassis-build collision. State stays
+            // `Transitioning` (no resources held); cleanup_after_failure
+            // sees that and does nothing.
             return Err(BootError::Other(Box::new(std::io::Error::other(format!(
                 "namespace {:?} already owned by a different TypeId — fix the conflicting actor's NAMESPACE const",
                 A::NAMESPACE
@@ -296,12 +438,6 @@ where
         // frame loop. Free-running caps take the regular drop-on-
         // shutdown claim. Both share the same dispatcher trampoline
         // shape apart from the post-dispatch decrement.
-        //
-        // Issue 607 Phase 7: if the mailbox claim fails (name
-        // collision against a peer cap claiming the same mailbox
-        // through `register_closure`), release the namespace claim we
-        // just made — otherwise a later cap with a different TypeId
-        // legitimately claiming the same namespace can't.
         let claim_result = if A::FRAME_BARRIER {
             ctx.claim_frame_bound_mailbox::<A>().map(|claim| {
                 (
@@ -326,9 +462,14 @@ where
         let (mailbox_id, receiver, mailbox_sender, pending, wake_slot) = match claim_result {
             Ok(c) => c,
             Err(e) => {
+                // Release the namespace claim we just made — otherwise
+                // a later cap with a different TypeId legitimately
+                // claiming the same namespace can't (issue 607 Phase 7).
                 ctx.spawner_arc()
                     .actor_registry()
                     .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+                // State stays `Transitioning` — no further cleanup
+                // for the rollback loop to do.
                 return Err(e);
             }
         };
@@ -340,30 +481,47 @@ where
         transport.install_inbox(receiver);
 
         // Per-actor scratch storage (issue 582 / ADR-0074). Stamped
-        // into TLS via `local::with_stamped` for the duration
-        // of `init` and each handler dispatch so library code inside
-        // the actor (e.g., the issue-581 log buffer) can reach
+        // into TLS via `local::with_stamped` for the duration of
+        // `init`, `wire`, and each handler dispatch so library code
+        // inside the actor (e.g., the issue-581 log buffer) can reach
         // `Local::with_mut` without threading a ctx through.
         let slots = Box::new(aether_actor::local::ActorSlots::new());
 
-        // Boot the cap through `init`. The NativeInitCtx borrows the
-        // chassis's ExportedHandles (mutable, so the cap may publish
-        // a driver-facing handle bundle) plus the transport (read-only)
-        // plus a mailer clone for outbound hooks. Issue #581: also
-        // stamp the actor's transport as the in-actor `MailDispatch`
-        // around `init` so any `tracing::*` event the cap fires
-        // during boot drains to LogCapability when init returns.
-        //
-        // Issue 607 Phase 7: failed init releases the slot before any
-        // dispatcher thread is spawned — drop the transport
-        // (including its installed inbox), unclaim the mailbox, and
-        // release the namespace.
+        self.state = BootState::Claimed {
+            resources: ClaimResources {
+                mailbox_id,
+                transport,
+                mailbox_sender,
+                pending,
+                wake_slot,
+                slots,
+            },
+            config,
+        };
+        Ok(())
+    }
+
+    fn init(
+        &mut self,
+        ctx: &mut ChassisCtx<'_>,
+        handles: &mut ExportedHandles,
+    ) -> Result<(), BootError> {
+        let BootState::Claimed { resources, config } =
+            std::mem::replace(&mut self.state, BootState::Transitioning)
+        else {
+            panic!("PassiveBoot::init called in non-Claimed state");
+        };
+
+        // Issue #581: stamp the actor's transport as the in-actor
+        // `MailDispatch` around `init` so any `tracing::*` event the
+        // cap fires during boot drains to LogCapability when init
+        // returns.
         let init_result = {
             let mailer_clone = ctx.mail_send_handle();
-            let mut init_ctx = NativeInitCtx::new(&transport, handles, mailer_clone);
-            aether_actor::local::with_stamped(&slots, || {
+            let mut init_ctx = NativeInitCtx::new(&resources.transport, handles, mailer_clone);
+            aether_actor::local::with_stamped(&resources.slots, || {
                 crate::runtime::log_install::with_actor_dispatch(
-                    &*transport as &dyn crate::runtime::log_install::MailDispatch,
+                    &*resources.transport as &dyn crate::runtime::log_install::MailDispatch,
                     || {
                         let r = A::init(config, &mut init_ctx);
                         aether_actor::log::drain_buffer();
@@ -375,21 +533,77 @@ where
         let actor = match init_result {
             Ok(a) => a,
             Err(e) => {
-                drop(transport);
-                drop(mailbox_sender);
-                ctx.unclaim_mailbox(mailbox_id);
+                // A::init consumed `config`, so we can't restore the
+                // Claimed variant. Inline the same cleanup
+                // `cleanup_after_failure` would do for Claimed: release
+                // the mailbox + namespace claim, then let `resources`
+                // drop at end of scope (closing transport + sender).
+                ctx.unclaim_mailbox(resources.mailbox_id);
                 ctx.spawner_arc()
                     .actor_registry()
                     .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+                drop(resources);
+                // State stays `Transitioning` — no further work for
+                // the rollback loop to do.
                 return Err(e);
             }
         };
 
         // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
-        // The actor lives exclusively on the dispatcher thread (or,
-        // for `Pooled` actors, in the slot's mutex — accessed by one
-        // worker at a time per the SlotState machine).
-        let actor: Box<A> = Box::new(actor);
+        self.state = BootState::Initialized {
+            resources,
+            actor: Box::new(actor),
+        };
+        Ok(())
+    }
+
+    fn wire(&mut self) -> Result<(), BootError> {
+        let BootState::Initialized {
+            resources,
+            mut actor,
+        } = std::mem::replace(&mut self.state, BootState::Transitioning)
+        else {
+            panic!("PassiveBoot::wire called in non-Initialized state");
+        };
+
+        // Issue 584 Phase 2a (ADR-0079 amended): post-init mail-allowed
+        // hook. The wire pass runs after the chassis's claim + init
+        // passes, so every peer mailbox is published and addressable;
+        // wire-emitted mail queues in recipient inboxes (no dispatcher
+        // is running yet — spawn pass is next). Wrapped in the same
+        // `with_stamped` + `with_actor_dispatch` envelope as `init`
+        // and per-envelope dispatch so `Local<T>` and `tracing::*`
+        // route identically.
+        aether_actor::local::with_stamped(&resources.slots, || {
+            crate::runtime::log_install::with_actor_dispatch(
+                &*resources.transport as &dyn crate::runtime::log_install::MailDispatch,
+                || {
+                    let mut wire_ctx = crate::actor::native::NativeCtx::new(
+                        &resources.transport,
+                        aether_data::ReplyTo::NONE,
+                    );
+                    actor.wire(&mut wire_ctx);
+                    aether_actor::log::drain_buffer();
+                },
+            );
+        });
+
+        self.state = BootState::Wired { resources, actor };
+        Ok(())
+    }
+
+    fn spawn(self: Box<Self>, ctx: &mut ChassisCtx<'_>) -> Result<Box<dyn DynShutdown>, BootError> {
+        let BootState::Wired { resources, actor } = self.state else {
+            panic!("PassiveBoot::spawn called in non-Wired state");
+        };
+        let ClaimResources {
+            mailbox_id,
+            transport,
+            mailbox_sender,
+            pending,
+            wake_slot,
+            slots,
+        } = resources;
 
         match A::SCHEDULING {
             aether_actor::Scheduling::Dedicated => {
@@ -425,10 +639,6 @@ where
                 // with the chassis worker pool. No per-actor thread.
                 // The `wake_slot` in the mailbox closure fires the
                 // pool wake hook on every accepted send.
-                //
-                // Today no cap ships `SCHEDULING = Pooled`, so this
-                // branch is reachable but unused at runtime. Phase 2
-                // (PR D) flips a single cap to exercise it.
                 let actor_registry = Arc::clone(ctx.spawner_arc().actor_registry());
                 let mailer_clone = ctx.mail_send_handle();
                 let slot = crate::actor::native::dispatcher_slot::DispatcherSlot::<A>::new(
@@ -449,16 +659,46 @@ where
                     weak,
                     ctx.pool_ready_tx().clone(),
                 );
+                // Issue 697 multi-pass: mail addressed at this actor
+                // during the wire pass landed in its inbox before the
+                // wake hook was installed, so the closure-side wake
+                // fired against an empty `wake_slot`. Fire one wake
+                // here so a populated inbox enters the ready queue.
+                // Mirrors the same fix `Spawner::spawn_actor`'s
+                // Pooled branch carries (issue 635 Phase 3).
+                let manual_wake = wake.clone();
                 wake_slot.set(Arc::new(move || {
                     wake.wake();
                 }));
+                manual_wake.wake();
                 Ok(Box::new(PooledActorShutdown::<A> {
                     slot: Some(slot),
                     mailbox_sender: Some(mailbox_sender),
                 }) as Box<dyn DynShutdown>)
             }
         }
-    })
+    }
+
+    fn cleanup_after_failure(self: Box<Self>, ctx: &mut ChassisCtx<'_>) {
+        match self.state {
+            // Pre-claim or mid-method failure that already cleaned up
+            // inline — no chassis-side state to release.
+            BootState::Pending { .. } | BootState::Transitioning => {}
+            // Any past-claim variant: release the mailbox + namespace
+            // claims. `resources` (and any held actor) drop at the end
+            // of this match arm — dropping `transport` closes the
+            // installed receiver, dropping `mailbox_sender` closes the
+            // channel.
+            BootState::Claimed { resources, .. }
+            | BootState::Initialized { resources, .. }
+            | BootState::Wired { resources, .. } => {
+                ctx.unclaim_mailbox(resources.mailbox_id);
+                ctx.spawner_arc()
+                    .actor_registry()
+                    .release_namespace(A::NAMESPACE, std::any::TypeId::of::<A>());
+            }
+        }
+    }
 }
 
 /// Shutdown adapter for a `Pooled` [`NativeActor`] (issue 635 PR C).
@@ -547,7 +787,7 @@ fn make_driver_boot<D: DriverCapability>(driver: D) -> DriverBoot {
 pub struct Builder<C: Chassis, S: BuilderState = NoDriver> {
     registry: Arc<Registry>,
     mailer: Arc<Mailer>,
-    passives: Vec<PassiveBoot>,
+    passives: Vec<Box<dyn PassiveBoot>>,
     driver: Option<DriverBoot>,
     aborter: Arc<dyn FatalAborter>,
     /// Issue #601: chassis-declared log-drain target. `None` until the
@@ -600,7 +840,8 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// resolve. Multiple calls collapse to a `BootError` at
     /// `build()` (single-claim invariant).
     pub fn with_fallback_router(mut self, handler: FallbackRouter) -> Self {
-        self.passives.push(make_fallback_router_boot(handler));
+        self.passives
+            .push(Box::new(FallbackRouterBoot::new(handler)));
         self
     }
 
@@ -618,7 +859,8 @@ impl<C: Chassis> Builder<C, NoDriver> {
     where
         A: NativeActor + NativeDispatch,
     {
-        self.passives.push(make_native_actor_boot::<A>(config));
+        self.passives
+            .push(Box::new(NativeActorBoot::<A>::new(config)));
         self
     }
 
@@ -689,7 +931,8 @@ impl<C: Chassis> Builder<C, HasDriver> {
     /// Register a fallback router after the driver was supplied.
     /// Booted before the driver in declaration order.
     pub fn with_fallback_router(mut self, handler: FallbackRouter) -> Self {
-        self.passives.push(make_fallback_router_boot(handler));
+        self.passives
+            .push(Box::new(FallbackRouterBoot::new(handler)));
         self
     }
 
@@ -701,7 +944,8 @@ impl<C: Chassis> Builder<C, HasDriver> {
     where
         A: NativeActor + NativeDispatch,
     {
-        self.passives.push(make_native_actor_boot::<A>(config));
+        self.passives
+            .push(Box::new(NativeActorBoot::<A>::new(config)));
         self
     }
 
@@ -873,7 +1117,7 @@ fn boot_passives(
     registry: &Arc<Registry>,
     mailer: &Arc<Mailer>,
     aborter: &Arc<dyn FatalAborter>,
-    passives: Vec<PassiveBoot>,
+    passives: Vec<Box<dyn PassiveBoot>>,
 ) -> Result<BootedPassives, BootError> {
     let mut shutdowns: Vec<Box<dyn DynShutdown>> = Vec::with_capacity(passives.len());
     let mut fallback: Option<FallbackRouter> = None;
@@ -897,23 +1141,155 @@ fn boot_passives(
         Arc::clone(aborter),
         pool.ready_tx(),
     ));
-    for boot in passives {
-        let mut ctx = ChassisCtx::new(
-            registry,
-            mailer,
-            &mut fallback,
-            &mut frame_bound_pending,
-            &frame_bound_set,
-            aborter,
-            &mut claimed_actor_mailboxes,
-            &spawner,
-        );
-        match boot(&mut ctx, &mut handles) {
-            Ok(shutdown) => shutdowns.push(shutdown),
+    // Issue 697: multi-pass boot — claim → init → wire → spawn,
+    // synchronized across all passives. Each pass below walks every
+    // passive that advanced through the prior pass; on failure,
+    // `cleanup_after_failure` runs in reverse order on every advanced
+    // passive (and any already-spawned dispatchers shut down via
+    // their `DynShutdown` handles).
+
+    // Helper: build a fresh `ChassisCtx` borrowing from the locals.
+    // Each phase re-takes the borrow because methods may mutate the
+    // borrowed slots (e.g., claim pushes into `frame_bound_pending`).
+    macro_rules! build_ctx {
+        () => {
+            ChassisCtx::new(
+                registry,
+                mailer,
+                &mut fallback,
+                &mut frame_bound_pending,
+                &frame_bound_set,
+                aborter,
+                &mut claimed_actor_mailboxes,
+                &spawner,
+            )
+        };
+    }
+
+    // Helper: undo every advanced passive in `booted` in reverse,
+    // then propagate `err`. Spawn-pass failures additionally pass
+    // already-spawned shutdowns; this helper handles those too.
+    #[allow(clippy::too_many_arguments)]
+    fn rollback(
+        registry: &Arc<Registry>,
+        mailer: &Arc<Mailer>,
+        fallback: &mut Option<FallbackRouter>,
+        frame_bound_pending: &mut Vec<(MailboxId, Arc<AtomicU64>)>,
+        frame_bound_set: &Arc<RwLock<HashSet<MailboxId>>>,
+        aborter: &Arc<dyn FatalAborter>,
+        claimed_actor_mailboxes: &mut Vec<MailboxId>,
+        spawner: &Arc<crate::Spawner>,
+        booted: Vec<Box<dyn PassiveBoot>>,
+        already_spawned: Vec<Box<dyn DynShutdown>>,
+    ) {
+        for shutdown in already_spawned.into_iter().rev() {
+            shutdown.shutdown_dyn();
+        }
+        for boot in booted.into_iter().rev() {
+            let mut ctx = ChassisCtx::new(
+                registry,
+                mailer,
+                fallback,
+                frame_bound_pending,
+                frame_bound_set,
+                aborter,
+                claimed_actor_mailboxes,
+                spawner,
+            );
+            boot.cleanup_after_failure(&mut ctx);
+        }
+    }
+
+    let mut booted: Vec<Box<dyn PassiveBoot>> = Vec::with_capacity(passives.len());
+
+    // Pass 1 — claim.
+    for mut boot in passives {
+        let mut ctx = build_ctx!();
+        match boot.claim(&mut ctx) {
+            Ok(()) => booted.push(boot),
             Err(e) => {
-                while let Some(s) = shutdowns.pop() {
-                    s.shutdown_dyn();
-                }
+                drop(boot);
+                rollback(
+                    registry,
+                    mailer,
+                    &mut fallback,
+                    &mut frame_bound_pending,
+                    &frame_bound_set,
+                    aborter,
+                    &mut claimed_actor_mailboxes,
+                    &spawner,
+                    booted,
+                    Vec::new(),
+                );
+                return Err(e);
+            }
+        }
+    }
+
+    // Pass 2 — init.
+    for boot in booted.iter_mut() {
+        let mut ctx = build_ctx!();
+        if let Err(e) = boot.init(&mut ctx, &mut handles) {
+            rollback(
+                registry,
+                mailer,
+                &mut fallback,
+                &mut frame_bound_pending,
+                &frame_bound_set,
+                aborter,
+                &mut claimed_actor_mailboxes,
+                &spawner,
+                booted,
+                Vec::new(),
+            );
+            return Err(e);
+        }
+    }
+
+    // Pass 3 — wire.
+    for boot in booted.iter_mut() {
+        if let Err(e) = boot.wire() {
+            rollback(
+                registry,
+                mailer,
+                &mut fallback,
+                &mut frame_bound_pending,
+                &frame_bound_set,
+                aborter,
+                &mut claimed_actor_mailboxes,
+                &spawner,
+                booted,
+                Vec::new(),
+            );
+            return Err(e);
+        }
+    }
+
+    // Pass 4 — spawn. On failure, already-pushed shutdowns drain in
+    // reverse and any not-yet-spawned passives in `booted` (residing
+    // as `Some` in the slot) clean up in reverse via the rollback
+    // helper.
+    let mut booted_opt: Vec<Option<Box<dyn PassiveBoot>>> = booted.into_iter().map(Some).collect();
+    for slot in booted_opt.iter_mut() {
+        let boot = slot.take().expect("each slot drained exactly once");
+        let mut ctx = build_ctx!();
+        match boot.spawn(&mut ctx) {
+            Ok(s) => shutdowns.push(s),
+            Err(e) => {
+                let remaining: Vec<Box<dyn PassiveBoot>> =
+                    booted_opt.into_iter().flatten().collect();
+                rollback(
+                    registry,
+                    mailer,
+                    &mut fallback,
+                    &mut frame_bound_pending,
+                    &frame_bound_set,
+                    aborter,
+                    &mut claimed_actor_mailboxes,
+                    &spawner,
+                    remaining,
+                    shutdowns,
+                );
                 return Err(e);
             }
         }
@@ -3062,6 +3438,207 @@ mod tests {
         assert!(
             chassis.resolve_actor::<Grandchild>("only").is_some(),
             "grandchild remains resolvable after parent's death",
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 584 Phase 2a / 697 wire pass: `wire` runs exactly once
+    /// for a singleton actor at chassis boot, after `init` succeeds
+    /// and before the dispatcher pulls the first envelope.
+    #[test]
+    fn with_actor_runs_wire_once_at_chassis_boot() {
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        struct WireProbe {
+            wire_count: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for WireProbe {
+            const NAMESPACE: &'static str = "test.wire.singleton";
+        }
+        impl aether_actor::Singleton for WireProbe {}
+        impl crate::actor::native::NativeActor for WireProbe {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self { wire_count: config })
+            }
+            fn wire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+                self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        impl crate::actor::native::NativeDispatch for WireProbe {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let wire_count = Arc::new(AtomicU32::new(0));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<WireProbe>(Arc::clone(&wire_count))
+            .build_passive()
+            .expect("with_actor boot succeeds");
+
+        assert_eq!(
+            wire_count.load(AtomicOrdering::SeqCst),
+            1,
+            "wire must fire exactly once during builder.with_actor boot",
+        );
+
+        drop(chassis);
+    }
+
+    /// Issue 697 multi-pass model: wire-time mail crosses actors
+    /// regardless of declaration order. Pinger's `wire` mails Ponger;
+    /// Ponger's handler increments a counter. With Pinger declared
+    /// FIRST, a single-pass interleaved boot would have Pinger's wire
+    /// fire before Ponger's claim — the mail would warn-drop. The
+    /// multi-pass model (claim-all → init-all → wire-all → spawn-all)
+    /// claims both mailboxes before any wire runs, so the mail queues
+    /// in Ponger's inbox and processes once dispatchers come up.
+    #[test]
+    fn wire_pass_mail_crosses_actors_pinger_first() {
+        wire_pass_mail_crosses_actors(/* pinger_first */ true);
+    }
+
+    /// Mirror of [`wire_pass_mail_crosses_actors_pinger_first`] with
+    /// the registration order reversed. Multi-pass model means both
+    /// orderings are valid; this test pins the symmetry.
+    #[test]
+    fn wire_pass_mail_crosses_actors_ponger_first() {
+        wire_pass_mail_crosses_actors(/* pinger_first */ false);
+    }
+
+    fn wire_pass_mail_crosses_actors(pinger_first: bool) {
+        use aether_actor::Sender;
+        use aether_data::{Kind, KindId as DataKindId};
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        #[repr(C)]
+        #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+        struct WireBarrierPing {
+            tag: u32,
+        }
+        impl Kind for WireBarrierPing {
+            const NAME: &'static str = "test.barrier.wire_ping";
+            const ID: DataKindId = DataKindId(0xB0B1_B2B3_B4B5_B6B7);
+            fn encode_into_bytes(&self) -> Vec<u8> {
+                bytemuck::bytes_of(self).to_vec()
+            }
+            fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
+                if bytes.len() != core::mem::size_of::<Self>() {
+                    return None;
+                }
+                Some(bytemuck::pod_read_unaligned(bytes))
+            }
+        }
+
+        struct Pinger {
+            wire_ran: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for Pinger {
+            const NAMESPACE: &'static str = "test.barrier.pinger";
+        }
+        impl aether_actor::Singleton for Pinger {}
+        impl crate::actor::native::NativeActor for Pinger {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self { wire_ran: config })
+            }
+            fn wire(&mut self, ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+                ctx.send_to_named::<WireBarrierPing>(
+                    Ponger::NAMESPACE,
+                    &WireBarrierPing { tag: 1 },
+                );
+                self.wire_ran.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        impl crate::actor::native::NativeDispatch for Pinger {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        struct Ponger {
+            received: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for Ponger {
+            const NAMESPACE: &'static str = "test.barrier.ponger";
+        }
+        impl aether_actor::Singleton for Ponger {}
+        impl aether_actor::HandlesKind<WireBarrierPing> for Ponger {}
+        impl crate::actor::native::NativeActor for Ponger {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self { received: config })
+            }
+        }
+        impl crate::actor::native::NativeDispatch for Ponger {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
+                kind: crate::mail::KindId,
+                payload: &[u8],
+            ) -> Option<()> {
+                if kind.0 == WireBarrierPing::ID.0 {
+                    let _ = WireBarrierPing::decode_from_bytes(payload)?;
+                    self.received.fetch_add(1, AtomicOrdering::SeqCst);
+                    return Some(());
+                }
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let received = Arc::new(AtomicU32::new(0));
+        let wire_ran = Arc::new(AtomicU32::new(0));
+
+        let builder = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer));
+        let builder = if pinger_first {
+            builder
+                .with_actor::<Pinger>(Arc::clone(&wire_ran))
+                .with_actor::<Ponger>(Arc::clone(&received))
+        } else {
+            builder
+                .with_actor::<Ponger>(Arc::clone(&received))
+                .with_actor::<Pinger>(Arc::clone(&wire_ran))
+        };
+        let chassis = builder.build_passive().expect("multi-pass boot succeeds");
+
+        assert_eq!(
+            wire_ran.load(AtomicOrdering::SeqCst),
+            1,
+            "pinger's wire must have run during the wire pass",
+        );
+
+        // Wait for Ponger's dispatcher to drain the wire-emitted ping.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while received.load(AtomicOrdering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            received.load(AtomicOrdering::SeqCst),
+            1,
+            "ponger must observe pinger's wire-emitted ping (multi-pass barrier)",
         );
 
         drop(chassis);
