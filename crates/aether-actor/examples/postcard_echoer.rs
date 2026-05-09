@@ -13,7 +13,7 @@
 //! to wasm; load via `mcp__aether-hub__load_component` and send
 //! `demo.postcard_request` to verify the dispatch.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::BroadcastCapability;
 use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
@@ -48,7 +48,7 @@ impl FfiActor for PostcardEchoer {
 
     fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
     where
-        C: Resolver + MailSender,
+        C: Resolver,
     {
         Ok(PostcardEchoer)
     }

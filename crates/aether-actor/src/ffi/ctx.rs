@@ -63,12 +63,6 @@ impl<'a> FfiInitCtx<'a> {
         resolve_mailbox::<K>(name)
     }
 
-    /// Send `aether.input.subscribe` for kind `K`. Mirrors
-    /// [`Resolver::subscribe_input`].
-    pub fn subscribe_input<K: Kind + 'static>(&self) {
-        <Self as Resolver>::subscribe_input::<K>(self)
-    }
-
     /// Singleton sender shortcut. Returns a typed [`FfiActorMailbox`]
     /// addressing the unique instance of receiver actor `R`.
     pub fn actor<R: Singleton>(&self) -> FfiActorMailbox<R> {
@@ -79,40 +73,6 @@ impl<'a> FfiInitCtx<'a> {
     /// from a runtime instance name.
     pub fn resolve_actor<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
         FfiActorMailbox::__new(mailbox_id_from_name(name).0)
-    }
-}
-
-impl<'a> MailSender for FfiInitCtx<'a> {
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
-    }
-
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        MAIL_BRIDGE.send_mail(
-            mailbox_id_from_name(R::NAMESPACE).0,
-            K::ID.0,
-            bytes,
-            payloads.len() as u32,
-        );
-    }
-
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
-    }
-
-    fn prev_correlation(&self) -> u64 {
-        MAIL_BRIDGE.prev_correlation()
     }
 }
 
@@ -128,49 +88,16 @@ impl<'a> Resolver for FfiInitCtx<'a> {
     fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
         resolve_mailbox::<K>(name)
     }
-
-    fn subscribe_input<K: Kind + 'static>(&self) {
-        use aether_kinds::SubscribeInput;
-        let payload = SubscribeInput {
-            kind: <K as Kind>::ID,
-            mailbox: aether_data::MailboxId(self.mailbox),
-        };
-        let bytes = payload.encode_into_bytes();
-        MAIL_BRIDGE.send_mail(
-            mailbox_id_from_name("aether.input").0,
-            SubscribeInput::ID.0,
-            &bytes,
-            1,
-        );
-    }
 }
 
-impl<'a> Sender for FfiInitCtx<'a> {
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        <Self as MailSender>::send::<R, K>(self, payload);
-    }
-
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        <Self as MailSender>::send_many::<R, K>(self, payloads);
-    }
-
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        <Self as MailSender>::send_to_named::<K>(self, name, payload);
-    }
-}
-
-/// Per-receive capability handle for FFI guests. Exposes send and
-/// reply primitives; resolution is intentionally absent (resolution
-/// belongs at init).
+/// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
+/// capability handle for FFI guests. Exposes send, reply, and
+/// resolution primitives. Issue 703 added [`Resolver`] + a
+/// `mailbox_id` field so `wire`-stage explicit subscribes
+/// (`ctx.subscribe_input::<K>()`, gated by the [`crate::actor::ctx::Subscriber`]
+/// blanket) can self-address.
 pub struct FfiCtx<'a> {
+    mailbox: u64,
     sender: Option<u32>,
     _borrow: PhantomData<&'a ()>,
 }
@@ -178,8 +105,9 @@ pub struct FfiCtx<'a> {
 impl<'a> FfiCtx<'a> {
     /// Not part of the public API; called only by [`crate::export!`].
     #[doc(hidden)]
-    pub fn __new() -> Self {
+    pub fn __new(mailbox: u64) -> Self {
         Self {
+            mailbox,
             sender: None,
             _borrow: PhantomData,
         }
@@ -233,6 +161,20 @@ impl<'a> FfiCtx<'a> {
     /// trap-escalation reads the same on both sides.
     pub fn fatal_abort(&self, reason: alloc::string::String) -> ! {
         panic!("aether-actor: fatal_abort: {reason}")
+    }
+}
+
+impl<'a> Resolver for FfiCtx<'a> {
+    fn mailbox_id(&self) -> u64 {
+        self.mailbox
+    }
+
+    fn resolve<K: Kind>(&self) -> KindId<K> {
+        resolve::<K>()
+    }
+
+    fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
+        resolve_mailbox::<K>(name)
     }
 }
 

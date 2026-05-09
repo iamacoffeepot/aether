@@ -5,26 +5,26 @@
 //! belongs at boot — runtime resolution after init isn't a supported
 //! shape).
 //!
-//! Today the FFI side is the only consumer: wasm guests resolve their
-//! own mailbox id and subscribe to input streams via the trait.
-//! Substrate's `NativeInitCtx` skips this trait — native caps use the
-//! const paths (`mailbox_id_from_name`, `K::ID`) directly because they
-//! sit on the same side of the FFI boundary as the registry.
+//! Issue 703 narrowed the trait to pure addressing (no [`MailSender`]
+//! supertrait, no subscribe surface). The init stage genuinely needs
+//! to look up its own mailbox id and resolve kind / mailbox tokens,
+//! but it must NOT send mail — ADR-0079's `init` is the sync
+//! constructor and mailing belongs in `wire`. Stripping the supertrait
+//! makes that boundary structural rather than convention.
+//!
+//! [`MailSender`]: crate::actor::ctx::MailSender
 
 use aether_data::Kind;
 
-use crate::actor::ctx::mail_sender::MailSender;
 use crate::mail::mailbox::{KindId, Mailbox};
 
-/// Init-time resolution surface. Issue 665 dropped the
-/// `Self::Transport`-keyed mailbox return type — the trait now hands
-/// back a transport-free [`Mailbox<K>`] addressing token; per-side
-/// dispatch happens through each ctx's inherent send methods.
-pub trait Resolver: MailSender {
+/// Init-time resolution surface. Pure addressing — no mail sends. Use
+/// [`crate::actor::ctx::Subscriber::subscribe_input`] from `wire`
+/// (where the ctx impls both `Resolver` and
+/// [`crate::actor::ctx::MailSender`]) to register input subscriptions.
+pub trait Resolver {
     /// The component's own mailbox id — the value the substrate uses
-    /// to address `receive` calls to this instance. Useful for
-    /// hand-rolled subscribe / self-mailing at init time when the
-    /// SDK's higher-level wrappers don't fit.
+    /// to address `receive` calls to this instance.
     fn mailbox_id(&self) -> u64;
 
     /// Resolve a kind by its `const ID`. Pure compile-time construction
@@ -37,12 +37,4 @@ pub trait Resolver: MailSender {
     /// ctx's inherent / trait-provided `send` methods, not through
     /// the mailbox itself.
     fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K>;
-
-    /// Send `aether.input.subscribe` with this component's mailbox as
-    /// the subscriber for `K`. ADR-0068 keys subscriber sets by
-    /// `KindId` directly, so this collapses to a one-line send: any
-    /// `Kind` is sendable, the substrate's platform thread fans out
-    /// only for kinds it actually publishes, and a subscribe for a
-    /// non-stream kind is a harmless no-op.
-    fn subscribe_input<K: Kind + 'static>(&self);
 }

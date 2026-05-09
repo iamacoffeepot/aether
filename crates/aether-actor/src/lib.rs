@@ -116,7 +116,7 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 #[doc(hidden)]
 pub mod __macro_internals {
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
-    pub use aether_data::{Kind, Schema};
+    pub use aether_data::{Kind, Schema, mailbox_id_from_name};
     /// Issue #601: `#[actor]` / `#[handlers]` auto-emit a synthetic
     /// dispatch arm for `ConfigureLogDrain` so every actor accepts the
     /// chassis's log-drain push without user code declaring a handler.

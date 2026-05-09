@@ -62,7 +62,7 @@ impl FfiActor for TicTacToe {
 
     fn init<C>(ctx: &mut C) -> Result<Self, BootError>
     where
-        C: Resolver + MailSender,
+        C: Resolver,
     {
         Ok(TicTacToe {
             state: GameState::new_game(),

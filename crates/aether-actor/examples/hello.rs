@@ -16,7 +16,7 @@
 //! MCP via the same section so the harness sees typed capabilities
 //! plus author-written intent for each inbox.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, KindId, MailSender, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, KindId, Resolver, actor};
 use aether_capabilities::RenderCapability;
 use aether_kinds::{DrawTriangle, Ping, Pong, Tick, Vertex};
 
@@ -68,7 +68,7 @@ impl FfiActor for Hello {
 
     fn init<C>(ctx: &mut C) -> Result<Self, BootError>
     where
-        C: Resolver + MailSender,
+        C: Resolver,
     {
         Ok(Hello {
             pong: ctx.resolve::<Pong>(),

@@ -7,7 +7,7 @@
 //! inbound mail by `#[actor]`) so the handler body never touches
 //! `Mail<'_>` directly.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, KindId, MailSender, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, KindId, Resolver, actor};
 use aether_data::{Kind, Schema};
 use bytemuck::{Pod, Zeroable};
 
@@ -35,7 +35,7 @@ impl FfiActor for Echoer {
 
     fn init<C>(ctx: &mut C) -> Result<Self, BootError>
     where
-        C: Resolver + MailSender,
+        C: Resolver,
     {
         Ok(Echoer {
             response: ctx.resolve::<Response>(),
