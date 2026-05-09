@@ -481,6 +481,27 @@ impl Spawner {
             return Err(SpawnError::SubnameInUse { full_name });
         }
 
+        // Issue 584 Phase 2a (ADR-0079 amended): post-init mail-allowed
+        // hook. Sink + actor_registry insert_live above means the
+        // mailbox is fully published; peers are addressable and any
+        // wire-time self-mail lands in this binding's inbox before the
+        // dispatcher pulls. Runtime-spawn doesn't need the chassis-boot
+        // multi-pass barrier (issue 697) because the substrate is
+        // already steady-state when `Spawner::spawn_actor` runs — the
+        // child wire→dispatcher transition is sequential within this
+        // ctx, peers are running, all mailboxes claimed.
+        aether_actor::local::with_stamped(&slots, || {
+            crate::runtime::log_install::with_actor_dispatch(
+                &*transport as &dyn crate::runtime::log_install::MailDispatch,
+                || {
+                    let mut wire_ctx =
+                        crate::actor::native::NativeCtx::new(&transport, ReplyTo::NONE);
+                    actor.wire(&mut wire_ctx);
+                    aether_actor::log::drain_buffer();
+                },
+            );
+        });
+
         // Pre-load bootstrap mail. tx is alive (rx is held by the
         // transport; nobody's polling yet), so these sends always
         // succeed. Each pre-load increments the pending counter so

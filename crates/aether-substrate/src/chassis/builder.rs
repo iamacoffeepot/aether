@@ -3643,4 +3643,67 @@ mod tests {
 
         drop(chassis);
     }
+
+    /// Issue 584 Phase 2a runtime sibling: `Spawner::spawn_actor` runs
+    /// `wire` exactly once on a freshly-spawned instanced actor —
+    /// after `init` Ok and after the mailbox is published, before
+    /// pre-load mail or the dispatcher pull. Runtime spawn doesn't
+    /// need the chassis-boot multi-pass barrier (the substrate is
+    /// already steady-state).
+    #[test]
+    fn spawn_actor_runs_wire_once_after_init() {
+        use crate::actor::native::spawn::Subname;
+        use aether_actor::Instanced;
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        struct WireSpawnProbe {
+            wire_count: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for WireSpawnProbe {
+            const NAMESPACE: &'static str = "test.spawn_wire.probe";
+        }
+        impl Instanced for WireSpawnProbe {}
+        impl crate::actor::native::NativeActor for WireSpawnProbe {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self { wire_count: config })
+            }
+            fn wire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+                self.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        impl crate::actor::native::NativeDispatch for WireSpawnProbe {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let wire_count = Arc::new(AtomicU32::new(0));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let id = chassis
+            .spawn_actor::<WireSpawnProbe>(Subname::Counter, Arc::clone(&wire_count))
+            .finish()
+            .expect("spawn instanced actor");
+
+        assert_eq!(
+            wire_count.load(AtomicOrdering::SeqCst),
+            1,
+            "wire must fire exactly once on Spawner::spawn_actor",
+        );
+
+        drop(chassis);
+        let _ = id;
+    }
 }
