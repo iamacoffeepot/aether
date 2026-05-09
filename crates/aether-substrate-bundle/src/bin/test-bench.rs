@@ -16,10 +16,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use aether_data::{Kind, encode_empty};
+use aether_actor::Actor;
+use aether_capabilities::InputCapability;
+use aether_data::{encode_empty, mailbox_id_from_name};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
 use aether_substrate::{
-    Chassis, capture::CaptureQueue, chassis::frame_loop, mail::Mail, subscribers_for,
+    Chassis, capture::CaptureQueue, chassis::frame_loop, mail::Mail, mail::MailboxId,
 };
 use aether_substrate_bundle::test_bench::{
     TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
@@ -132,7 +134,7 @@ fn drive_events_loop(
 ) -> anyhow::Result<()> {
     let queue = Arc::clone(&boot.queue);
     let outbound = Arc::clone(&boot.outbound);
-    let input_subscribers = Arc::clone(&boot.input_subscribers);
+    let input_mailbox = mailbox_id_from_name(InputCapability::NAMESPACE);
     let frame_bound_pending = passive.frame_bound_pending();
     let started = Instant::now();
     let mut frame: u64 = 0;
@@ -148,7 +150,7 @@ fn drive_events_loop(
                         true,
                         &queue,
                         &outbound,
-                        &input_subscribers,
+                        input_mailbox,
                         kind_tick,
                         kind_frame_stats,
                         &capture_queue,
@@ -172,7 +174,7 @@ fn drive_events_loop(
                     false,
                     &queue,
                     &outbound,
-                    &input_subscribers,
+                    input_mailbox,
                     kind_tick,
                     kind_frame_stats,
                     &capture_queue,
@@ -201,7 +203,7 @@ fn run_frame(
     dispatch_tick: bool,
     queue: &Arc<aether_substrate::Mailer>,
     outbound: &Arc<aether_substrate::HubOutbound>,
-    input_subscribers: &aether_substrate::InputSubscribers,
+    input_mailbox: MailboxId,
     kind_tick: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
     capture_queue: &CaptureQueue,
@@ -213,10 +215,12 @@ fn run_frame(
     gpu: &mut Gpu,
 ) {
     if dispatch_tick {
-        let subs = subscribers_for(input_subscribers, Tick::ID);
-        for mbox in subs {
-            queue.push(Mail::new(mbox, kind_tick, encode_empty::<Tick>(), 1));
-        }
+        queue.push(Mail::new(
+            input_mailbox,
+            kind_tick,
+            encode_empty::<Tick>(),
+            1,
+        ));
     }
     // ADR-0074 §Decision 5: render's inbox must quiesce before
     // submit so any DrawTriangle / aether.camera mail this frame is

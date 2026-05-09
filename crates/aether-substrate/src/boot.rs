@@ -41,8 +41,8 @@ use aether_data::KindDescriptor;
 use wasmtime::{Engine, Linker};
 
 use crate::{
-    AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, InputSubscribers, Mailer, Registry,
-    actor::wasm::host_fns, handle_store::HandleStore, input::new_subscribers,
+    AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, Mailer, Registry, actor::wasm::host_fns,
+    handle_store::HandleStore,
 };
 
 /// Everything a chassis needs after shared boot setup. Fields are
@@ -50,19 +50,22 @@ use crate::{
 /// pieces it actually uses; anything unused stays on the struct and
 /// gets dropped when the chassis shuts down.
 ///
-/// Issue 603: `engine`, `linker`, `outbound`, `input_subscribers` are
-/// the inputs `ComponentHostCapability` consumes through
-/// `ComponentHostConfig` when the chassis main installs the
-/// supervisor via `Builder::with_actor::<ComponentHostCapability>(...)`.
-/// The substrate boot doesn't construct the cap itself — it just
-/// holds the dependencies the cap will need.
+/// Issue 603: `engine`, `linker`, `outbound` are the inputs
+/// `ComponentHostCapability` consumes through `ComponentHostConfig`
+/// when the chassis main installs the supervisor via
+/// `Builder::with_actor::<ComponentHostCapability>(...)`. The substrate
+/// boot doesn't construct the cap itself — it just holds the
+/// dependencies the cap will need.
+///
+/// Issue 640 collapsed the shared `InputSubscribers: Arc<RwLock<...>>`
+/// — `aether.input` is the sole owner of the subscriber table and
+/// drivers / `ComponentHostCapability` write to it via mail.
 pub struct SubstrateBoot {
     pub engine: Arc<Engine>,
     pub registry: Arc<Registry>,
     pub linker: Arc<Linker<ComponentCtx>>,
     pub queue: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
-    pub input_subscribers: InputSubscribers,
     /// ADR-0045 typed-handle store. Sized from
     /// `AETHER_HANDLE_STORE_MAX_BYTES` (default 256 MB). Wired into
     /// `Mailer` so dispatch resolves `Ref::Handle` payloads on the
@@ -177,15 +180,12 @@ impl<'a> SubstrateBootBuilder<'a> {
         host_fns::register(&mut linker)?;
         let linker = Arc::new(linker);
 
-        let input_subscribers = new_subscribers();
-
         Ok(SubstrateBoot {
             engine,
             registry,
             linker,
             queue,
             outbound,
-            input_subscribers,
             handle_store,
             boot_descriptors,
             name: self.name.to_owned(),

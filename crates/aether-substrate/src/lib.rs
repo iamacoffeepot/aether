@@ -40,7 +40,6 @@ pub mod boot;
 pub mod capture;
 pub mod chassis;
 pub mod handle_store;
-pub mod input;
 pub mod mail;
 #[cfg(feature = "render")]
 pub mod render;
@@ -67,7 +66,6 @@ pub use chassis::ctx::{
     MailboxSender,
 };
 pub use chassis::error::{BootError, WedgedFrameBound};
-pub use input::{InputSubscribers, new_subscribers, remove_from_all, subscribers_for};
 pub use mail::mailer::Mailer;
 pub use mail::outbound::{
     DroppingBackend, EgressBackend, EgressEvent, HubOutbound, LogEntry, LogLevel, RecordingBackend,

@@ -16,7 +16,6 @@ use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry, ReplyTable};
-use crate::input::InputSubscribers;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailboxEntry, Registry};
@@ -56,13 +55,6 @@ pub struct ComponentCtx {
     /// `HubOutbound::disconnected` when no hub is attached — sends
     /// silently drop, matching the broadcast semantics.
     pub outbound: Arc<HubOutbound>,
-    /// ADR-0021 subscriber sets, shared with the platform-event
-    /// publisher in `main.rs`. `#[actor]`-decorated components
-    /// auto-subscribe every `K::IS_INPUT` handler kind by mailing
-    /// `aether.input.subscribe` from the init prologue the macro
-    /// prepends (ADR-0033 phase 3); `InputCapability` processes the
-    /// mail and mutates this set.
-    pub input_subscribers: InputSubscribers,
     /// ADR-0013 + ADR-0017: handle→entry map populated by
     /// `Component::deliver` whenever an inbound mail has a meaningful
     /// reply target — a Claude session (`ReplyEntry::Session`) or
@@ -127,14 +119,12 @@ impl ComponentCtx {
         registry: Arc<Registry>,
         queue: Arc<Mailer>,
         outbound: Arc<HubOutbound>,
-        input_subscribers: InputSubscribers,
     ) -> Self {
         ComponentCtx {
             sender,
             registry,
             queue,
             outbound,
-            input_subscribers,
             reply_table: ReplyTable::new(),
             saved_state: None,
             save_state_error: None,
@@ -548,7 +538,6 @@ mod tests {
             Arc::clone(&registry),
             Arc::new(Mailer::new(registry, store)),
             HubOutbound::disconnected(),
-            crate::input::new_subscribers(),
         )
     }
 
@@ -937,13 +926,7 @@ mod tests {
             .expect("register kind");
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
-        let ctx = ComponentCtx::new(
-            M(0),
-            registry,
-            mailer,
-            outbound,
-            crate::input::new_subscribers(),
-        );
+        let ctx = ComponentCtx::new(M(0), registry, mailer, outbound);
         (ctx, rx, pong_id)
     }
 
@@ -1015,13 +998,7 @@ mod tests {
             Mailer::new(Arc::clone(&registry), store).with_outbound(Arc::clone(&outbound)),
         );
 
-        let ctx = ComponentCtx::new(
-            sender,
-            Arc::clone(&registry),
-            Arc::clone(&mailer),
-            outbound,
-            crate::input::new_subscribers(),
-        );
+        let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
 
         let unknown = MailboxId(0xDEADBEEF_u64);
         let kind = aether_data::KindId(0xABCD_u64);
@@ -1062,13 +1039,7 @@ mod tests {
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
         // Deliberately no `with_outbound` — exercises the local warn-drop path.
 
-        let ctx = ComponentCtx::new(
-            sender,
-            Arc::clone(&registry),
-            Arc::clone(&mailer),
-            outbound,
-            crate::input::new_subscribers(),
-        );
+        let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
 
         ctx.send(
             MailboxId(0xDEADBEEF_u64),

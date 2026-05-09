@@ -19,12 +19,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::hub::HubClient;
-use aether_data::{Kind, KindId, encode_empty};
+use aether_actor::Actor;
+use aether_capabilities::InputCapability;
+use aether_data::{KindId, encode_empty, mailbox_id_from_name};
 use aether_kinds::Tick;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    InputSubscribers, Mailer, SubstrateBoot, chassis::frame_loop, mail::Mail, subscribers_for,
+    Mailer, SubstrateBoot,
+    chassis::frame_loop,
+    mail::{Mail, MailboxId},
 };
 
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
@@ -72,7 +76,10 @@ pub struct HeadlessTimerCapability {
 
 pub struct HeadlessTimerRunning {
     queue: Arc<Mailer>,
-    input_subscribers: InputSubscribers,
+    /// `aether.input` mailbox id, cached at boot. Each generated tick
+    /// pushes one mail here and the input cap fans out per
+    /// subscriber (issue 640).
+    input_mailbox: MailboxId,
     kind_tick: KindId,
     kind_frame_stats: KindId,
     tick_period: Duration,
@@ -96,7 +103,7 @@ impl DriverCapability for HeadlessTimerCapability {
 
         Ok(HeadlessTimerRunning {
             queue: Arc::clone(&boot.queue),
-            input_subscribers: Arc::clone(&boot.input_subscribers),
+            input_mailbox: mailbox_id_from_name(InputCapability::NAMESPACE),
             kind_tick,
             kind_frame_stats,
             tick_period,
@@ -110,7 +117,7 @@ impl DriverRunning for HeadlessTimerRunning {
     fn run(self: Box<Self>) -> Result<(), RunError> {
         let HeadlessTimerRunning {
             queue,
-            input_subscribers,
+            input_mailbox,
             kind_tick,
             kind_frame_stats,
             tick_period,
@@ -134,10 +141,12 @@ impl DriverRunning for HeadlessTimerRunning {
             next_deadline = Instant::now() + tick_period;
 
             frame += 1;
-            let subs = subscribers_for(&input_subscribers, Tick::ID);
-            for mbox in subs {
-                queue.push(Mail::new(mbox, kind_tick, encode_empty::<Tick>(), 1));
-            }
+            queue.push(Mail::new(
+                input_mailbox,
+                kind_tick,
+                encode_empty::<Tick>(),
+                1,
+            ));
             if frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
                 frame_loop::emit_frame_stats(&queue, kind_frame_stats, frame, 0);
                 let elapsed = started.elapsed().as_secs_f64().max(0.001);

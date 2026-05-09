@@ -24,6 +24,8 @@
 //! cap's dispatcher thread.
 
 use aether_kinds::{DropComponent, LoadComponent, ReplaceComponent};
+#[cfg(not(target_arch = "wasm32"))]
+use aether_kinds::{SubscribeInput, UnsubscribeAll};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::ComponentHostConfig;
@@ -39,7 +41,7 @@ mod native {
     use aether_kinds::LoadResult;
     use wasmtime::{Engine, Linker, Module};
 
-    use super::{DropComponent, LoadComponent, ReplaceComponent};
+    use super::{DropComponent, LoadComponent, ReplaceComponent, SubscribeInput, UnsubscribeAll};
 
     use aether_substrate::actor::native::spawn::Subname;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -47,7 +49,6 @@ mod native {
     use aether_substrate::actor::wasm::kind_manifest;
     use aether_substrate::actor::wasm::trampoline::{self, WasmTrampoline, WasmTrampolineConfig};
     use aether_substrate::chassis::error::BootError;
-    use aether_substrate::input::{self, InputSubscribers};
     use aether_substrate::mail::helpers::register_or_match_all;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -59,24 +60,27 @@ mod native {
     /// against (handed through to the trampoline's
     /// [`Component::instantiate`] call); `hub_outbound` is the egress
     /// handle the cap uses for `aether.kinds.changed` announcements
-    /// after each load; `input_subscribers` is the ADR-0021 fan-out
-    /// table (shared with the platform thread + trampolines).
+    /// after each load. ADR-0021 fan-out is mail-driven post-issue-640
+    /// — the cap mails subscribe / unsubscribe to `aether.input`
+    /// rather than mutating shared state.
     pub struct ComponentHostConfig {
         pub engine: Arc<Engine>,
         pub linker: Arc<Linker<ComponentCtx>>,
         pub hub_outbound: Arc<HubOutbound>,
-        pub input_subscribers: InputSubscribers,
     }
 
     /// `aether.component` cap. Plain-fields shape — single-threaded
-    /// owner running on its dispatcher thread; no shared state.
+    /// owner running on its dispatcher thread; no shared state. Input
+    /// subscribe / unsubscribe go through `aether.input` via mail
+    /// (post-issue-640) — the cap doesn't carry an `input_mailbox`
+    /// field; `ctx.actor::<InputCapability>().send(...)` resolves it
+    /// inline at the call site.
     pub struct ComponentHostCapability {
         engine: Arc<Engine>,
         linker: Arc<Linker<ComponentCtx>>,
         registry: Arc<Registry>,
         mailer: Arc<Mailer>,
         outbound: Arc<HubOutbound>,
-        input_subscribers: InputSubscribers,
         /// Monotonic counter for `component_N` default names when an
         /// agent passes `name: None` and the wasm doesn't declare an
         /// `aether.namespace`. AtomicU64 because the bridge macro
@@ -102,7 +106,6 @@ mod native {
                 registry,
                 mailer,
                 outbound: config.hub_outbound,
-                input_subscribers: config.input_subscribers,
                 default_name_counter: AtomicU64::new(0),
             })
         }
@@ -137,11 +140,14 @@ mod native {
         /// trampoline's id from the `LoadResult.mailbox_id` field.
         #[handler]
         fn on_drop_component(&mut self, ctx: &mut NativeCtx<'_>, payload: DropComponent) {
-            // Cap-side cleanup: remove from input subscriber set so
-            // the platform thread stops fanning input events at the
-            // dying trampoline. The trampoline's own shutdown will
-            // release any other registry state it owns.
-            input::remove_from_all(&self.input_subscribers, payload.mailbox_id);
+            // Cap-side cleanup: ask the input cap to drop the dying
+            // trampoline from every fan-out set. Mail rather than
+            // direct mutation post-issue-640 — `aether.input` is the
+            // sole owner of the subscriber table.
+            ctx.actor::<crate::input::InputCapability>()
+                .send(&UnsubscribeAll {
+                    mailbox: payload.mailbox_id,
+                });
             self.forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
         }
 
@@ -217,7 +223,6 @@ mod native {
                 module,
                 registry: Arc::clone(&self.registry),
                 outbound: Arc::clone(&self.outbound),
-                input_subscribers: Arc::clone(&self.input_subscribers),
                 capabilities: capabilities.clone(),
             };
             let mailbox_id = match ctx
@@ -245,13 +250,11 @@ mod native {
             }
 
             // 7. Auto-subscribe stream-shaped handlers to their input
-            // streams (ADR-0021 + ADR-0033).
-            auto_subscribe_inputs(
-                &self.input_subscribers,
-                &self.registry,
-                mailbox_id,
-                &capabilities,
-            );
+            // streams (ADR-0021 + ADR-0033). Mail the input cap one
+            // `SubscribeInput` per stream-shaped handler the wasm
+            // declares; the cap is the sole owner of the subscriber
+            // table post-issue-640.
+            self.auto_subscribe_inputs(ctx, mailbox_id, &capabilities);
 
             // 8. Announce the new kind vocabulary upstream so the hub
             // (and attached MCP sessions) see the post-load surface.
@@ -292,27 +295,30 @@ mod native {
             let mail = Mail::new(recipient, kind, bytes, 1).with_reply_to(ctx.reply_target());
             self.mailer.push(mail);
         }
-    }
 
-    /// Wire the freshly-spawned trampoline's mailbox into the
-    /// subscriber set for every stream kind the component declares a
-    /// `#[handler]` for (ADR-0068, issue #403). Lives at the cap
-    /// because the cap parses the capabilities manifest and knows
-    /// which kinds are streams; the trampoline itself doesn't need
-    /// to inspect this map.
-    fn auto_subscribe_inputs(
-        input_subscribers: &InputSubscribers,
-        registry: &Registry,
-        mailbox: MailboxId,
-        capabilities: &aether_kinds::ComponentCapabilities,
-    ) {
-        let mut subs = input_subscribers.write().unwrap();
-        for handler in &capabilities.handlers {
-            if registry
-                .kind_descriptor(handler.id)
-                .is_some_and(|d| d.is_stream)
-            {
-                subs.entry(handler.id).or_default().insert(mailbox);
+        /// Mail the input cap one `SubscribeInput` per stream-shaped
+        /// handler the freshly-loaded component declares (ADR-0021 +
+        /// ADR-0033). Lives at the cap because the cap parses the
+        /// capabilities manifest and knows which kinds are streams;
+        /// the trampoline itself doesn't need to inspect this map.
+        fn auto_subscribe_inputs(
+            &self,
+            ctx: &mut NativeCtx<'_>,
+            mailbox: MailboxId,
+            capabilities: &aether_kinds::ComponentCapabilities,
+        ) {
+            let input = ctx.actor::<crate::input::InputCapability>();
+            for handler in &capabilities.handlers {
+                if self
+                    .registry
+                    .kind_descriptor(handler.id)
+                    .is_some_and(|d| d.is_stream)
+                {
+                    input.send(&SubscribeInput {
+                        kind: handler.id,
+                        mailbox,
+                    });
+                }
             }
         }
     }

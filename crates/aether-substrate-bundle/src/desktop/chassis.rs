@@ -159,11 +159,8 @@ impl DesktopChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
-            input_subscribers: Arc::clone(&boot.input_subscribers),
         };
-        let input_config = InputConfig {
-            input_subscribers: Arc::clone(&boot.input_subscribers),
-        };
+        let input_config = InputConfig::default();
         // Capture handoff lives on `RenderCapability` post-issue-603
         // Phase 2. The cap dispatcher runs `on_capture_frame`, parks
         // the request on `capture_queue`, and pokes `UserEvent::Capture`

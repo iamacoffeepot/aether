@@ -119,8 +119,8 @@ pub struct TestBenchEnv {
 /// `boot` is exposed so the embedder can attach a hub-outbound
 /// loopback (the in-process `TestBench` does this for reply
 /// correlation), read substrate-level handles (`registry`, `queue`,
-/// `outbound`, `input_subscribers`), and own the lifetime guard the
-/// scheduler joins against on shutdown.
+/// `outbound`), and own the lifetime guard the scheduler joins
+/// against on shutdown.
 ///
 /// The embedder owns the matching `EventReceiver` for whichever
 /// `EventSender` it passed into [`TestBenchEnv`]; the build does
@@ -166,7 +166,6 @@ impl TestBenchChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
-            input_subscribers: Arc::clone(&boot.input_subscribers),
         };
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
@@ -202,9 +201,7 @@ impl TestBenchChassis {
             events: events_tx.clone(),
         };
 
-        let input_config = InputConfig {
-            input_subscribers: Arc::clone(&boot.input_subscribers),
-        };
+        let input_config = InputConfig::default();
 
         // Pre-validate fs roots if supplied. Pre-validation
         // mirrors what `LocalFileAdapter::new` does inside
