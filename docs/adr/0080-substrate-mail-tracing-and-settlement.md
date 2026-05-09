@@ -30,14 +30,16 @@ pub enum TraceEvent {
         sender: MailboxId,
         recipient: MailboxId,
         kind: KindId,
-        t: Instant,
+        t: Nanos,
     },
-    Received { mail_id: MailId, t: Instant },
-    Finished { mail_id: MailId, t: Instant },
+    Received { mail_id: MailId, t: Nanos },
+    Finished { mail_id: MailId, t: Nanos },
 }
 ```
 
 `MailId` is a fresh u64 minted by the sender at send-mail time (the existing `correlation_id` allocator is reused — settlement adds tree linkage, not a new id space). `TreeId` is a u64 minted at root sites (§5). The chassis-wide MPSC is `crossbeam::queue::SegQueue<TraceEvent>` for v1 — unbounded, lock-free MPSC, per-producer FIFO.
+
+`Nanos` is a `u64` representing nanoseconds since a `SUBSTRATE_START: Instant` reference captured at boot. Producers compute `Instant::now().duration_since(SUBSTRATE_START).as_nanos() as u64` at each event push. The reference + subtraction lets timestamps be `Copy` / `Serialize` (raw `Instant` is platform-opaque) so events cross the mail boundary in `BatchedTraceEvents` without a wire-vs-in-memory split. A u64 of nanoseconds-since-boot accommodates ~584 years of substrate uptime — adequate.
 
 ### 2. Producer side: send and dispatch entry/exit emit to the queue
 
@@ -46,7 +48,7 @@ Three hook sites in `aether-substrate`:
 - **`Sender::send_to_named` (and the typed wrappers)**: after resolving the recipient mailbox and before enqueueing the mail to the recipient's mpsc, push a `Sent` event. `mail_id` is freshly allocated; `tree` is inherited from the sender's in-flight context (§5); `parent_mail` is the in-flight mail id at the sender (or `None` for chassis-root sends); `t = Instant::now()`.
 - **Native dispatcher loop (`actor::native::dispatcher_slot`) and the wasm trampoline (`WasmTrampoline`)**: at handler entry, push `Received { mail_id, t }`. At handler exit (including the panic / unwind path that already brackets `#321` panic legibility), push `Finished { mail_id, t }`.
 
-`Instant::now()` reads cost ~10–20 ns on Linux/macOS via VDSO. Per-mail overhead is three timestamp reads + three queue pushes ≈ 30–60 ns. At a busy-scene baseline of ~33 k mails/sec this is ~1 ms/sec of extra CPU per active actor — negligible.
+`std::time::Instant` is monotonic since Rust 1.59 (the stdlib clamps backward jumps internally) and reads cost ~10–20 ns on Linux/macOS via VDSO (`clock_gettime(CLOCK_MONOTONIC)` / `mach_absolute_time`); the `duration_since(SUBSTRATE_START)` subtraction adds ~1–2 ns. CLOCK_MONOTONIC is process-global on Linux and `mach_absolute_time` is system-wide on macOS, so different actor threads on the same substrate share a clock source — no inter-actor skew. Per-mail producer overhead is three timestamp reads + three queue pushes ≈ 30–60 ns. At a busy-scene baseline of ~33 k mails/sec this is ~1 ms/sec of extra CPU per active actor — negligible.
 
 ### 3. Chassis drainer thread batches events into mail
 
@@ -78,7 +80,7 @@ Lives in `aether-capabilities` next to `BroadcastCapability` / `LogCapability`, 
 The observer maintains:
 
 - `HashMap<TreeId, TreeState>` where `TreeState { counter: u32, in_flight: HashSet<MailId>, root: TreeRoot }` and `TreeRoot { lifecycle, originator: MailboxId }` labels the tree for query output.
-- `HashMap<MailId, MailNode>` where `MailNode { tree, parent, sender, recipient, kind, t_sent, t_received, t_finished }` for graph queries.
+- `HashMap<MailId, MailNode>` where `MailNode { tree, parent, sender, recipient, kind, t_sent: Nanos, t_received: Option<Nanos>, t_finished: Option<Nanos> }` for graph queries (`Option` on the latter two — a node is created at `Sent` arrival and patched as `Received` / `Finished` land later).
 - `HashMap<TreeId, Vec<ReplyTo>>` of pending settlement subscribers.
 
 ### 5. Tree roots originate at "no in-flight mail" sites; everything else inherits
@@ -124,6 +126,29 @@ Three landable PRs:
 
 Phases 2 and 3 don't change the substrate — they're pure additions to the observer cap and the hub.
 
+### 11. Eviction policy: in-memory only, time + count cap, discard on evict
+
+The observer's `TreeState` and `MailNode` maps grow with every observed mail. Without a bound, an hour at busy load is ~120 M nodes. Two-tier eviction caps the footprint:
+
+```
+RETENTION_MS  = 30_000     // env: AETHER_TRACE_RETENTION_MS
+MAX_TREES     = 10_000     // env: AETHER_TRACE_MAX_TREES
+```
+
+- A tree is **eligible for eviction** once `Settled` has fired and `now_nanos - tree.t_settled_nanos >= RETENTION_MS * 1_000_000`.
+- A tree is **forced for eviction** when the observer holds more than `MAX_TREES` total trees and this is the oldest-by-`t_settled_nanos`.
+- **In-flight trees are never evicted regardless of age** — they're load-bearing for gating.
+- Eviction runs at the tail of `on_batched_trace_events` (no separate timer thread, no separate scheduler tick). When a tree is evicted, drop its `TreeState` and every `MailNode` whose `tree == TreeId`.
+
+At baseline (33 k mails/sec, ~5 mails per tree → 6.6 k trees/sec, 30 s retention → ~200 k retained nodes ≈ 20 MB) this is bounded and small. Pathological-volume scenarios hit the count cap and discard the oldest history rather than going OOM.
+
+**Discard, not persist, in v1.** Disk persistence is real complexity (format choice, rotation, syscall cost on the drainer hot path, crash-recovery semantics) that the v1 consumers don't need. Settlement gating only cares about in-flight trees; `engine_logs` causal grouping captures the in-flight tree id *into the log entry* at emission time so the observer can drop the tree afterwards; MCP `describe_tree` and Chrome-trace export are for "show me what just happened," seconds-to-minutes window. Two future opt-ins if usage justifies:
+
+- **Aggregated histograms** (always-on, separate retention budget). Per-bucket counters for handler duration per kind, queue latency per recipient — tiny memory, retained indefinitely, survives tree eviction. Feeds the performance-tuning use case (#687, scheduler tuning).
+- **Operator-opt-in streaming export** via `AETHER_TRACE_OUT=/path/to/trace.jsonl`. Observer appends each settled tree as one Chrome-trace JSON line. Operator-opt-in (not default), no rotation in v1 — just append. Use case: long-running profiling sessions, crash forensics for non-panic-path failures.
+
+Neither is in scope for Phase 1 above.
+
 ## Consequences
 
 ### Positive
@@ -155,3 +180,14 @@ Phases 2 and 3 don't change the substrate — they're pure additions to the obse
 - **Function-call interface from chassis to observer (chassis is special, not an actor).** Chassis owns the observer struct, calls `mint_root` / `await_settled` directly; only actors emit observer events as mail. Rejected: carve-out for the dispatcher when the mail interface works fine. Mail round-trip latency is in the same order as a Tick fanout (sub-ms), which the chassis already does every frame. The "chassis isn't an actor but is a mail endpoint at a sentinel id" framing keeps the model uniform without making the chassis a `NativeActor`.
 - **Per-actor `LogBuffer`-style per-handler buffer flushed at handler exit (mirror ADR-0077).** Each actor accumulates trace events in a thread-local during dispatch, flushes at exit. Rejected: settlement correctness requires every `Sent` and `Finished` to reach the observer, including across actor panics. The flush-on-exit path is best-effort by construction; ADR-0077 tolerates dropped log events on panic, settlement does not. The shared-queue + drainer pattern decouples emission from delivery so panic-path bracketing alone is enough to ensure events ship.
 - **Producer-side "`Sent` before mail enqueue" FIFO invariant.** Eliminate spurious `Settled` fires by ordering the trace push before the mail enqueue at every send site. Considered: zero runtime cost. Rejected for v1: couples the trace push to the mail enqueue at every producer, including all the indirect send paths (cap handlers, trampoline forwards, drainer self-emissions). Pushing complexity to the consumer side (idempotent gates) keeps producer paths fully decoupled. The invariant remains a free optimization to add if spurious fires turn out to matter.
+
+### Clock alternatives
+
+`std::time::Instant` was picked over four alternatives. Recorded for future reconsideration if a measured bottleneck or platform requirement surfaces:
+
+- **`quanta` crate.** TSC-based with calibration against `Instant`, ~7–10 ns per read on x86_64. Saves ~5–10 ns per timestamp × 99 k events/sec ≈ 1 ms/sec of CPU per active substrate. Mature, used by other tracing crates. Rejected for v1: marginal win, added dep, and Linux's VDSO `CLOCK_MONOTONIC` already exposes a calibrated TSC on supported hardware so the gap narrows further. Drop-in swap if profiling shows reads as a measurable bottleneck.
+- **`minstant` crate.** Same shape as `quanta` (TSC + calibration), ~10 ns. Rejected for the same reason; `quanta` is the more conventional pick if we ever swap.
+- **`coarsetime` / `CLOCK_MONOTONIC_COARSE`.** ~1–2 ns per read but precision is jiffies (~1–10 ms typical). Rejected: handler durations are typically microseconds, so coarse precision destroys the queue-latency / handler-duration / critical-path consumers.
+- **Raw `rdtsc` (x86 / `cntvct_el0` ARM64).** Fastest possible (~10–25 cycles, ~3–7 ns) but raw TSC values aren't comparable across cores without invariant-TSC + calibration, and the platform-specific paths multiply. Rejected: `quanta` already wraps this with the necessary guards, so if we ever go this direction we go through `quanta`.
+
+`std::time::Instant`'s monotonicity guarantee (Rust 1.59+) plus VDSO-backed reads make it the simplest correct choice. The `Nanos` newtype around `u64 nanoseconds since SUBSTRATE_START` (§1) decouples the storage / wire representation from the clock source, so swapping `Instant::now()` for `quanta::Instant::now()` is a single-call-site change later if needed.
