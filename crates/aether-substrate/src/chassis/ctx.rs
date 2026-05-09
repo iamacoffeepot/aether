@@ -55,6 +55,53 @@ pub struct DropOnShutdownClaim {
     pub id: MailboxId,
     pub receiver: mpsc::Receiver<Envelope>,
     pub mailbox_sender: MailboxSender,
+    /// Issue 635 PR C: optional wake hook for `Pooled` actors. The
+    /// mailbox closure invokes this after a successful inbox push so
+    /// the chassis worker pool re-queues the actor's
+    /// [`crate::scheduler::DispatcherSlot`]. `Dedicated` actors
+    /// (today: every cap) leave this empty — the closure's `get()`
+    /// is a single atomic load, ~free.
+    ///
+    /// Populated post-claim by the `Pooled` branch of
+    /// `make_native_actor_boot` / `Spawner::spawn_actor` after the
+    /// slot exists.
+    pub wake_slot: Arc<MailboxWakeSlot>,
+}
+
+/// Cell holding the optional wake hook a `Pooled` mailbox fires after
+/// each accepted send. The mailbox closure captures `Arc<MailboxWakeSlot>`
+/// at registration time; the spawn path populates it once the
+/// [`crate::scheduler::DispatcherSlot`] exists.
+#[derive(Default)]
+pub struct MailboxWakeSlot {
+    inner: std::sync::OnceLock<MailboxWakeFn>,
+}
+
+impl std::fmt::Debug for MailboxWakeSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailboxWakeSlot")
+            .field("installed", &self.inner.get().is_some())
+            .finish()
+    }
+}
+
+/// Type-erased wake hook stamped into [`MailboxWakeSlot`].
+pub type MailboxWakeFn = Arc<dyn Fn() + Send + Sync + 'static>;
+
+impl MailboxWakeSlot {
+    /// Install the wake hook. Idempotent on re-call (silently ignores
+    /// the second set), but in production every claim is paired with
+    /// a single set.
+    pub fn set(&self, fn_: MailboxWakeFn) {
+        let _ = self.inner.set(fn_);
+    }
+
+    /// Borrow the installed hook. Returns `None` when the claim is
+    /// for a `Dedicated` actor (no hook ever installed). Hot path —
+    /// `OnceLock::get` is a single relaxed load.
+    pub(crate) fn get(&self) -> Option<&MailboxWakeFn> {
+        self.inner.get()
+    }
 }
 
 /// Strong handle to the inbound `Sender<Envelope>` for a mailbox
@@ -103,6 +150,8 @@ pub struct FrameBoundClaim {
     /// before pushing into the mpsc; the capability's dispatcher must
     /// decrement after each `dispatch()` returns.
     pub pending: Arc<AtomicU64>,
+    /// Issue 635 PR C: see [`DropOnShutdownClaim::wake_slot`].
+    pub wake_slot: Arc<MailboxWakeSlot>,
 }
 
 /// Generic fallback-router handler: invoked by substrate dispatch when a
@@ -302,6 +351,8 @@ impl<'a> ChassisCtx<'a> {
         // and the dispatcher's `recv()` returns `Err(Disconnected)`.
         let tx = Arc::new(tx);
         let weak = Arc::downgrade(&tx);
+        let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
+        let wake_for_handler = Arc::clone(&wake_slot);
         let id = self.registry.try_register_closure(
             name.to_owned(),
             Arc::new(
@@ -333,6 +384,14 @@ impl<'a> ChassisCtx<'a> {
                             kind = kind_name,
                             "capability mailbox receiver dropped — mail discarded"
                         );
+                        return;
+                    }
+                    // Issue 635 PR C: fire the `Pooled` wake hook (if
+                    // installed). `Dedicated` actors leave it empty,
+                    // so this is a single relaxed atomic load on the
+                    // hot path.
+                    if let Some(wake) = wake_for_handler.get() {
+                        wake();
                     }
                 },
             ),
@@ -342,6 +401,7 @@ impl<'a> ChassisCtx<'a> {
             id,
             receiver: rx,
             mailbox_sender: MailboxSender::new(tx),
+            wake_slot,
         })
     }
 
@@ -375,6 +435,8 @@ impl<'a> ChassisCtx<'a> {
         let weak = Arc::downgrade(&tx);
         let pending = Arc::new(AtomicU64::new(0));
         let pending_for_handler = Arc::clone(&pending);
+        let wake_slot: Arc<MailboxWakeSlot> = Arc::new(MailboxWakeSlot::default());
+        let wake_for_handler = Arc::clone(&wake_slot);
         let id = self.registry.try_register_closure(
             name.to_owned(),
             Arc::new(
@@ -414,6 +476,16 @@ impl<'a> ChassisCtx<'a> {
                             kind = kind_name,
                             "frame-bound capability receiver dropped — mail discarded"
                         );
+                        return;
+                    }
+                    // Issue 635 PR C: fire the `Pooled` wake hook (if
+                    // installed). Frame-bound + pool-scheduled is a
+                    // valid combination per the issue's section 5
+                    // ("FRAME_BARRIER and SCHEDULING are orthogonal");
+                    // the chassis frame loop reads `pending` regardless
+                    // of where the dispatch happens.
+                    if let Some(wake) = wake_for_handler.get() {
+                        wake();
                     }
                 },
             ),
@@ -431,6 +503,7 @@ impl<'a> ChassisCtx<'a> {
             receiver: rx,
             mailbox_sender: MailboxSender::new(tx),
             pending,
+            wake_slot,
         })
     }
 
@@ -511,6 +584,16 @@ impl<'a> ChassisCtx<'a> {
     /// `NativeCtx::spawn_child` can reach the spawn machinery.
     pub fn spawner_arc(&self) -> &Arc<crate::Spawner> {
         self.spawner
+    }
+
+    /// Issue 635 PR C: borrow the chassis worker pool's ready-queue
+    /// sender. The `Pooled` branch of `make_native_actor_boot` clones
+    /// this into the [`crate::scheduler::WakeHandle`] that fires when
+    /// the actor's mailbox accepts a send.
+    pub(crate) fn pool_ready_tx(
+        &self,
+    ) -> &crossbeam_channel::Sender<Arc<dyn crate::scheduler::Drainable>> {
+        self.spawner.pool_ready_tx()
     }
 
     /// Install the fallback-router handler. At most one capability
@@ -603,6 +686,9 @@ impl<'a> ChassisCtx<'a> {
                 receiver,
                 mailbox_sender,
                 pending,
+                // Legacy facade path is `Actor + Dispatch`, never
+                // pool-scheduled — wake hook stays empty.
+                wake_slot: _,
             } = claim;
             (receiver, mailbox_sender, Some(pending))
         } else {
@@ -611,6 +697,7 @@ impl<'a> ChassisCtx<'a> {
                 id: _,
                 receiver,
                 mailbox_sender,
+                wake_slot: _,
             } = claim;
             (receiver, mailbox_sender, None)
         };

@@ -97,35 +97,59 @@ impl BudgetTemplate {
 /// blocking `recv` would never see a disconnect. The shutdown channel
 /// is held only by the pool — dropping it is the unambiguous signal.
 pub struct PoolHandle {
-    ready_tx: Sender<Arc<dyn Drainable>>,
-    shutdown_tx: Sender<()>,
+    // `Option` so `Drop` and the consuming `shutdown` method can both
+    // take the senders without a clone. Production drops on `PoolHandle`
+    // drop, tests consume via `shutdown_with_results` to inspect any
+    // worker-thread panics.
+    ready_tx: Option<Sender<Arc<dyn Drainable>>>,
+    shutdown_tx: Option<Sender<()>>,
     workers: Vec<PoolWorkerJoin>,
 }
 
 impl PoolHandle {
     /// Hand out a clone of the ready-queue sender. PR C wires this
     /// into [`crate::scheduler::WakeHandle`]s when registering
-    /// dispatcher slots.
+    /// dispatcher slots. Panics if the pool has been shut down.
     pub fn ready_tx(&self) -> Sender<Arc<dyn Drainable>> {
-        self.ready_tx.clone()
+        self.ready_tx
+            .as_ref()
+            .expect("pool already shut down")
+            .clone()
     }
 
-    /// Shut down the pool: drop the shutdown sender (which fires
-    /// every worker's `select!` exit arm), drop the ready-queue
-    /// sender (so any wakers' subsequent sends silently fail), then
-    /// join every worker thread. Returns the joined handles so callers
-    /// can inspect any panics the worker threads themselves emitted
-    /// (distinct from handler-induced panics, which the aborter
-    /// consumed before returning to the worker loop).
-    pub fn shutdown(mut self) -> Vec<thread::Result<()>> {
-        drop(self.shutdown_tx);
-        drop(self.ready_tx);
-        self.workers.drain(..).map(|w| w.handle.join()).collect()
+    /// Shut down the pool, joining every worker, and return each
+    /// worker's join result so tests can inspect handler-induced
+    /// panics (production goes through `Drop`, which discards results).
+    pub fn shutdown_with_results(mut self) -> Vec<thread::Result<()>> {
+        self.shutdown_inner()
+    }
+
+    fn shutdown_inner(&mut self) -> Vec<thread::Result<()>> {
+        // Drop the shutdown sender — fires every worker's `select!`
+        // shutdown arm. Then drop the ready-queue sender (any future
+        // wake.wake() calls silently no-op via SendError). Finally
+        // join every worker thread. Idempotent — re-calling drains the
+        // (empty) workers Vec and returns an empty Vec.
+        self.shutdown_tx.take();
+        self.ready_tx.take();
+        std::mem::take(&mut self.workers)
+            .into_iter()
+            .map(|w| w.handle.join())
+            .collect()
     }
 
     /// Worker count. Exposed for tracing / introspection.
     pub fn worker_count(&self) -> usize {
         self.workers.len()
+    }
+}
+
+impl Drop for PoolHandle {
+    fn drop(&mut self) {
+        // Discard join results — `Drop` is the chassis-shutdown path
+        // where the process is on its way down anyway. Tests that care
+        // about worker panics use `shutdown_with_results` instead.
+        let _ = self.shutdown_inner();
     }
 }
 
@@ -167,8 +191,8 @@ impl Pool {
             workers.push(PoolWorkerJoin { handle, name });
         }
         PoolHandle {
-            ready_tx,
-            shutdown_tx,
+            ready_tx: Some(ready_tx),
+            shutdown_tx: Some(shutdown_tx),
             workers,
         }
     }
@@ -295,7 +319,7 @@ mod tests {
 
         // Bring down the pool cleanly.
         drop(wake);
-        let results = handle.shutdown();
+        let results = handle.shutdown_with_results();
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
     }
@@ -351,7 +375,7 @@ mod tests {
 
         drop(wake_a);
         drop(wake_b);
-        let _ = handle.shutdown();
+        let _ = handle.shutdown_with_results();
     }
 
     /// A handler panic escalates via the [`FatalAborter`]. The test
@@ -383,7 +407,7 @@ mod tests {
         assert!(wait_until(Duration::from_secs(2), || slot.dispatched() >= 1));
 
         drop(wake);
-        let results = handle.shutdown();
+        let results = handle.shutdown_with_results();
         assert_eq!(results.len(), 1);
         assert!(
             results[0].is_err(),
@@ -457,7 +481,7 @@ mod tests {
         }
 
         drop(wakes);
-        let _ = handle.shutdown();
+        let _ = handle.shutdown_with_results();
     }
 
     // Reuse the standard wallclock budget for fairness tests — 200µs
