@@ -331,6 +331,29 @@ where
         self.label
     }
 
+    /// Issue 685: chassis-teardown signal. Forwards to the binding's
+    /// `signal_shutdown` so the next [`Self::run_cycle`] observes
+    /// `should_shutdown` at the top of its drain loop and runs the
+    /// close path (phases 2-4 already implemented). Spawner walks
+    /// every instanced slot at chassis teardown and calls this before
+    /// firing a wake.
+    fn signal_shutdown(&self) {
+        self.binding.signal_shutdown();
+    }
+
+    /// Issue 685: chassis-teardown wait predicate. The Closed branch
+    /// of [`Self::run_cycle`] takes the actor out of the `Mutex<Option<Box<A>>>`
+    /// guard, so `actor_guard.is_none()` is equivalent to "close cycle
+    /// has run." Spawner polls this with a bounded timeout while
+    /// waiting for spawned actors to wind down before the pool drops.
+    fn is_closed(&self) -> bool {
+        let guard = self
+            .actor
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.is_none()
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

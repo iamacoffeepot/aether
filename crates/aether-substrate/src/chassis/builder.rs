@@ -913,6 +913,15 @@ fn dispatch_configure_log_drain(
 
 impl BootedPassives {
     fn shutdown_in_place(&mut self) {
+        // Issue 685: spawned-instanced actors close BEFORE the
+        // singleton shutdowns walk. Two reasons: (1) their close
+        // path's `MonitorNotice` fan-out targets singleton watchers
+        // that we want still alive, (2) the pool is still up at this
+        // point (drops via `_pool` field order after this method
+        // returns), so workers can drain the close cycles the
+        // `shutdown_instanced` wakes queue.
+        self.spawner
+            .shutdown_instanced(std::time::Duration::from_secs(2));
         while let Some(s) = self.shutdowns.pop() {
             s.shutdown_dyn();
         }
@@ -2048,6 +2057,82 @@ mod tests {
         );
 
         drop(chassis);
+    }
+
+    /// Issue 685: chassis teardown drives `on_close` on every spawned
+    /// instanced actor, even those that never received a self-shutdown
+    /// trigger. Pre-685 the Pooled spawn path's slot was reachable
+    /// from the chassis only through the wake's `Weak`, and nothing
+    /// signaled shutdown at chassis exit — so spawned actors silently
+    /// skipped their close path. The Spawner's `shutdown_instanced`
+    /// step now signals + wakes every spawned slot before the pool
+    /// drops, and the chassis waits for each `Drainable::is_closed`.
+    #[test]
+    fn chassis_teardown_runs_on_close_for_pooled_spawned_actors() {
+        use crate::actor::native::spawn::Subname;
+        use aether_actor::Instanced;
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        struct Quiet {
+            close_observed: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for Quiet {
+            const NAMESPACE: &'static str = "test.teardown.quiet";
+        }
+        impl Instanced for Quiet {}
+        impl crate::actor::native::NativeActor for Quiet {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self {
+                    close_observed: config,
+                })
+            }
+            fn on_close(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        impl crate::actor::native::NativeDispatch for Quiet {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        let (registry, mailer) = fresh_substrate();
+        let close_observed = Arc::new(AtomicU32::new(0));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let id = chassis
+            .spawn_actor::<Quiet>(Subname::Counter, Arc::clone(&close_observed))
+            .finish()
+            .expect("spawn instanced actor");
+
+        // No mail at all — the actor sits idle from the moment it
+        // spawns. Pre-685 chassis teardown skipped its close path
+        // entirely; post-685 the teardown step signals + wakes it and
+        // the worker runs the close cycle before the pool drops.
+        assert_eq!(close_observed.load(AtomicOrdering::SeqCst), 0);
+
+        drop(chassis);
+
+        assert_eq!(
+            close_observed.load(AtomicOrdering::SeqCst),
+            1,
+            "chassis teardown must drive on_close exactly once for a quiet spawned actor",
+        );
+        // Drop the unused id binding so clippy stays quiet — its
+        // referent (the actor_registry's Live entry) drops with the
+        // chassis above.
+        let _ = id;
     }
 
     /// Issue 607 Phase 4b verify: a `ctx.monitor(target)` registration
