@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-05-06
+- **Amended:** 2026-05-09 — Section 6 retired the `on_close` name in favour of `unwire`, added the symmetric `wire` hook, and recorded the rationale for moving away from `Drop`'s reserved Rust semantics.
 
 ## Context
 
@@ -152,22 +153,33 @@ This model is honest in two ways the prior strawman wasn't:
 
 Singleton init aligns to the same model as a separate cleanup pass — both cardinalities use caller's-thread init.
 
-### 6. Termination is self-initiated only
+### 6. Lifecycle hooks: wire, unwire, and self-initiated termination
 
-Actors are solely responsible for their own termination. The framework provides one self-init path; external triggering is a mail-level convention, not a primitive.
+Actors get three lifecycle hooks beyond `init`. Two are mail-allowed; one signals the dispatcher to terminate. Termination itself remains self-initiated only — external triggering is a mail-level convention, not a primitive.
 
 ```rust
-fn shutdown(&self);                                            // on NativeCtx
-fn on_close(&mut self, ctx: NativeCtx<'_>);                    // hook on the actor type
+fn wire(&mut self, ctx: NativeCtx<'_>);                        // post-init, mail-allowed (default no-op)
+fn unwire(&mut self, ctx: NativeCtx<'_>);                      // pre-shutdown, mail-allowed (default no-op)
+fn shutdown(&self);                                            // on NativeCtx — signals termination
 ```
 
-Three flows:
+Lifecycle order: `init` (sync constructor, no mail) → `wire` (mail-allowed; subscribe, register, hello peers) → handler dispatches → `unwire` (mail-allowed; unsubscribe, goodbye peers) → dispatcher exits → registry close.
 
-1. **Self-termination.** Actor decides it's done (e.g. socket EOF). Calls `ctx.shutdown()`. Dispatcher loop drains remaining inbox, runs `on_close`, exits.
+Three termination flows:
+
+1. **Self-termination.** Actor decides it's done (e.g. socket EOF). Calls `ctx.shutdown()`. Dispatcher loop drains remaining inbox, runs `unwire`, exits.
 2. **Cooperative external.** Listener (or anyone) mails the actor a "please close" kind. Actor's handler does cleanup and calls `ctx.shutdown()`. **No new framework primitive** — just a regular handler.
-3. **Substrate shutdown.** Runtime drops every actor's inbox sender; each `recv()` returns `Disconnected`; dispatchers drain, run `on_close`, exit. Symmetric with self-shutdown from the dispatcher's perspective.
+3. **Substrate shutdown.** Runtime drops every actor's inbox sender; each `recv()` returns `Disconnected`; dispatchers drain, run `unwire`, exit. Symmetric with self-shutdown from the dispatcher's perspective.
 
 No "force kill arbitrary actor" admin primitive. The misbehaving-actor leak (an actor with no shutdown path or that refuses to handle close mail) is application correctness — author responsibility, not framework gap. Stuck-actor recovery falls back to ADR-0063 deferred Phase 2 and ultimately `terminate_substrate` (process-level SIGTERM → SIGKILL).
+
+#### Naming: why not `on_drop`?
+
+`Drop` is a Rust language item with reserved semantics — it runs at value-drop time (deterministically when the value goes out of scope or the owner is freed), can't return errors, can't be explicitly invoked, and is automatic for every type. Reusing the name for an SDK trait method invited confusion: which one runs when? Does overriding `on_drop` shadow `Drop`? Does the language hook fire too?
+
+`unwire` names the hook for what it does (notify peers via mail before the actor disappears) rather than for the language feature it superficially resembled. The pair `wire` / `unwire` reads as a bracketed lifecycle phase: wire up to peers, do work, unwire from peers. Sync resource release continues to use Rust's `impl Drop` — the SDK trait surface stays out of `Drop`'s territory entirely.
+
+The same logic extends to the FFI side: `FfiActor::on_drop` retires (issue 584). Wasm guests get the symmetric `wire` / `unwire` exports; sync cleanup is the wasm runtime's responsibility, not surfaced to SDK authors.
 
 ### 7. Names are tombstoned on close, never reused
 
@@ -215,7 +227,7 @@ Replace semantics mesh cleanly with this: replace is "actor continues with new c
 
 - **Socket actors become a clean fit.** `NetCapability` (singleton) accepts connections and spawns `SessionActor` (instanced) per connection. The framework participates in lifecycle: monitors clean up in both directions, names are tombstoned, init failure is cheap, bootstrap mail closes the post-spawn race.
 - **Framework gets honest about cardinality.** "How many of this actor exist" was implicitly answered by every existing type (always one); now it's a typed property. Wrong API for the cardinality is a compile error.
-- **Monitor primitive eliminates a class of per-cap boilerplate.** Any cap that wants to learn about an actor's death uses `ctx.monitor(target)` and a `MonitorNotice` handler. No Vec<ReplyTo> bookkeeping in cap state, no fan-out logic in `on_close`, no demonitor registration to remember.
+- **Monitor primitive eliminates a class of per-cap boilerplate.** Any cap that wants to learn about an actor's death uses `ctx.monitor(target)` and a `MonitorNotice` handler. No Vec<ReplyTo> bookkeeping in cap state, no fan-out logic in `unwire`, no demonitor registration to remember.
 - **Init lifecycle aligns across both cardinalities.** Both singleton and instanced actors initialize on the caller's thread. Failed inits don't leak threads.
 - **Replaceable doesn't have to compose with Instanced for native.** Native instances that want "swap implementation" semantics handle a `Reset` mail kind in their own protocol — the mailbox is the trampoline, the inner state is the actor's business. Replaceable narrows to the wasm hot-reload domain.
 
@@ -235,7 +247,7 @@ Replace semantics mesh cleanly with this: replace is "actor continues with new c
 
 - **Marker trait rather than separate sub-traits.** A single `cardinality_is_instanced: bool` const on `Actor` could gate behavior at runtime. Rejected because the accessor APIs differ in *signature* (the instanced version takes a name argument); dispatching at runtime can't enforce wrong-API-doesn't-compile, which is the point of the type-level split.
 - **Wasm components as Instanced (the original 607 framing).** Reframe `WasmHostActor` as the single Instanced type, with each loaded component a runtime instance. Rejected because it conflated two different things: addressing path (singletons by type, instances by name) and singleton-ness (whether the type is structurally one-of-a-kind). A player or camera component is conceptually a singleton even if the loader gave it a name; multi-instance loads are a latent capability, not a model statement.
-- **Per-cap monitoring via convention.** Each cap manages a `Vec<ReplyTo>` of monitors and fans out in `on_close`. Rejected because of dead-monitor accumulation, ambiguous bidirectional semantics, fan-out-failure handling, and per-cap boilerplate that's easy to forget. Framework primitive gets the answer right once.
+- **Per-cap monitoring via convention.** Each cap manages a `Vec<ReplyTo>` of monitors and fans out in `unwire`. Rejected because of dead-monitor accumulation, ambiguous bidirectional semantics, fan-out-failure handling, and per-cap boilerplate that's easy to forget. Framework primitive gets the answer right once.
 - **Framework-level lifecycle kinds for both spawn and close.** A single global `ActorSpawned`/`ActorDropped` pair every actor emits. Rejected because cap-specific spawn metadata is what subscribers actually want (peer_addr for net, position for monsters); generic `mailbox_name` only is a weak event. Spawn naturally splits to per-cap; close splits to per-actor monitoring.
 - **Forced-kill admin primitive (`drop_actor`).** A framework path to terminate any actor by id. Rejected because actors are solely responsible for their own termination — a force-kill API just hides bad shutdown protocols rather than fixing them. Substrate-level recovery (ADR-0063 fail-fast, `terminate_substrate`) covers the genuinely-stuck case.
 - **Generational MailboxIds.** Encode a per-name generation counter so retired names can be safely reused without race. Rejected because it forces a wire change (`MailboxId` shape) for a cost that isn't yet measured. Tombstones-as-permanent + substrate restart is the v1 stance; compaction can be added later as a registry-internal concern.
@@ -251,3 +263,4 @@ Replace semantics mesh cleanly with this: replace is "actor continues with new c
 - ADR-0021 — Input-stream subscriber cleanup on actor drop. Sets the precedent the monitor primitive follows for bidirectional cleanup.
 - ADR-0022 + ADR-0038 — Replace_component splice. The existing Replaceable machinery, extended to instanced wasm via `replace_actor` when wasm-side spawn unparks.
 - Issue 607 — design conversation thread; this ADR is the load-bearing decision capture.
+- Issue 584 — `wire` / `unwire` lifecycle hooks; `FfiActor::on_drop` retirement. Implements the §6 surface this ADR amendment landed.
