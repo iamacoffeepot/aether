@@ -328,37 +328,10 @@ impl<'a> NativeInitCtx<'a> {
     }
 }
 
-impl<'a> Sender for NativeInitCtx<'a> {
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        let bytes = payload.encode_into_bytes();
-        self.binding
-            .send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
-    }
-
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        self.binding.send_mail(
-            mailbox_id_from_name(R::NAMESPACE).0,
-            K::ID.0,
-            bytes,
-            payloads.len() as u32,
-        );
-    }
-
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.binding
-            .send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
-    }
-}
+// Issue 703: NativeInitCtx no longer impls `Sender` / `MailSender`.
+// `init` is the sync constructor (ADR-0079) and must NOT mail —
+// subscriptions, peer hellos, and self-mail kickoffs all belong in
+// `wire`, where `NativeCtx` provides the full mail surface.
 
 // Issue 663 phase B layers the per-stage capability trait impls on top
 // of the existing `Sender` / `MailCtx` impls. Default-impl bodies on
@@ -472,42 +445,6 @@ impl<'a> LifecycleControl for NativeCtx<'a> {
         let watcher = self.binding.self_mailbox();
         registry.register_monitor(watcher, target)?;
         Ok(MonitorHandle::new(registry, watcher, target))
-    }
-}
-
-impl<'a> MailSender for NativeInitCtx<'a> {
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        let bytes = payload.encode_into_bytes();
-        self.binding
-            .send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
-    }
-
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
-    {
-        let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        self.binding.send_mail(
-            mailbox_id_from_name(R::NAMESPACE).0,
-            K::ID.0,
-            bytes,
-            payloads.len() as u32,
-        );
-    }
-
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.binding
-            .send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
-    }
-
-    fn prev_correlation(&self) -> u64 {
-        self.binding.prev_correlation()
     }
 }
 

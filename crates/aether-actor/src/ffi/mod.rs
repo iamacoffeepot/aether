@@ -160,9 +160,13 @@ pub trait FfiActor: crate::Actor {
     /// unrecoverable startup condition (config parse failure, required
     /// handle missing, malformed env var) can surface its own message
     /// in `LoadResult::Err { error }`.
+    ///
+    /// Issue 703: the bound is `C: Resolver` only — init is the sync
+    /// constructor (ADR-0079) and must NOT mail. Use [`Self::wire`]
+    /// for mail-driven setup (subscriptions, peer hellos, etc.).
     fn init<C>(ctx: &mut C) -> Result<Self, BootError>
     where
-        C: Resolver + MailSender;
+        C: Resolver;
 
     /// Post-init mail-allowed hook (issue 584, ADR-0079 amended
     /// 2026-05-09). Runs after `init` returned `Ok` and the actor's
@@ -355,13 +359,17 @@ macro_rules! __export_internal {
         /// first `receive` (issue 584 Phase 2b, ADR-0079 amended).
         /// Mail-allowed — peer mailboxes are addressable. Receives the
         /// component's own mailbox id so the SDK ctx can self-address.
+        ///
+        /// Issue 703: uses `FfiCtx` (Resolver + MailSender) so
+        /// `Subscriber::subscribe_input::<K>()` resolves; `FfiInitCtx`
+        /// is intentionally Resolver-only and can't mail.
         #[cfg(target_arch = "wasm32")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn wire(mailbox_id: u64) -> u32 {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiInitCtx<'_> = $crate::FfiInitCtx::__new(mailbox_id);
+            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
             <$component as $crate::FfiActor>::wire(instance, &mut ctx);
             $crate::log::drain_buffer();
             0
@@ -378,7 +386,7 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiInitCtx<'_> = $crate::FfiInitCtx::__new(mailbox_id);
+            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
             <$component as $crate::FfiActor>::unwire(instance, &mut ctx);
             $crate::log::drain_buffer();
             0
@@ -400,7 +408,13 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new();
+            // Issue 703: derive the actor's own mailbox id at the
+            // call site so `FfiCtx` can self-address (needed for
+            // `Subscriber::subscribe_input::<K>()` from a handler).
+            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
+                <$component as $crate::Actor>::NAMESPACE,
+            ).0;
+            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
             let mail = unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender) };
             let status = instance.__aether_dispatch(&mut ctx, mail);
             // Issue #598: ship buffered tracing events at handler exit.
@@ -434,7 +448,10 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new();
+            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
+                <$component as $crate::Actor>::NAMESPACE,
+            ).0;
+            let mut ctx: $crate::FfiCtx<'_> = $crate::FfiCtx::__new(mailbox_id);
             let prior = unsafe { $crate::PriorState::__from_raw(version, ptr, len) };
             $crate::__export_internal!(@on_rehydrate $replaceable, $component, instance, ctx, prior);
             $crate::log::drain_buffer();

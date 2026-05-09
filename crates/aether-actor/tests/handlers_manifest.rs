@@ -49,7 +49,7 @@ impl FfiActor for ManifestProbe {
 
     fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
     where
-        C: Resolver + MailSender,
+        C: Resolver,
     {
         Ok(Self)
     }

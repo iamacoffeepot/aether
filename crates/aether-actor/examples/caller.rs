@@ -52,7 +52,7 @@ impl FfiActor for Caller {
 
     fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
     where
-        C: Resolver + MailSender,
+        C: Resolver,
     {
         Ok(Caller { next_seq: 0 })
     }

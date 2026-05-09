@@ -142,7 +142,7 @@ impl FfiActor for Sokoban {
 
     fn init<C>(ctx: &mut C) -> Result<Self, BootError>
     where
-        C: Resolver + MailSender,
+        C: Resolver,
     {
         let mut me = Sokoban {
             state: SokobanState::default(),

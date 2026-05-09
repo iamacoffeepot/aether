@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 
-use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::RenderCapability;
 use aether_kinds::{Camera, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, Vec2, Vec3};
@@ -251,7 +251,7 @@ impl FfiActor for CameraComponent {
 
     fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
     where
-        C: Resolver + MailSender,
+        C: Resolver,
     {
         let mut cameras = HashMap::new();
         cameras.insert(

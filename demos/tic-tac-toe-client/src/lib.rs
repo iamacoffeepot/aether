@@ -128,7 +128,7 @@ impl FfiActor for TicTacToeClient {
 
     fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
     where
-        C: Resolver + MailSender,
+        C: Resolver,
     {
         Ok(TicTacToeClient::default())
     }

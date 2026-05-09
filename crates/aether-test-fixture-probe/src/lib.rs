@@ -22,7 +22,7 @@
 //!   `capture_frame` scenarios can observe pre-mail effects in the
 //!   captured PNG.
 
-use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
+use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
 use aether_capabilities::{BroadcastCapability, RenderCapability};
 use aether_kinds::{DrawTriangle, Tick, Vertex};
 use bytemuck::{Pod, Zeroable};
@@ -65,7 +65,7 @@ impl FfiActor for Probe {
 
     fn init<C>(_ctx: &mut C) -> Result<Self, BootError>
     where
-        C: Resolver + MailSender,
+        C: Resolver,
     {
         Ok(Probe {
             tick_count: 0,
