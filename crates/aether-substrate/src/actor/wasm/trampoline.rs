@@ -192,12 +192,11 @@ impl NativeActor for WasmTrampoline {
     #[handler]
     fn on_drop_component(&mut self, ctx: &mut NativeCtx<'_>, _payload: DropComponent) {
         if let Some(mut component) = self.component.take() {
-            // Issue 584 Phase 2b: unwire fires first (mail-allowed
-            // pre-shutdown hook), then on_drop (final cleanup before
-            // linear memory tears down). Phase 3 retires on_drop in
-            // favour of unwire alone.
+            // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
+            // single pre-shutdown hook — the legacy `on_drop` retired
+            // alongside `FfiActor::on_drop`. Component drops at end
+            // of scope, tearing down linear memory.
             component.unwire();
-            component.on_drop();
         }
         ctx.reply(&DropResult::Ok);
     }

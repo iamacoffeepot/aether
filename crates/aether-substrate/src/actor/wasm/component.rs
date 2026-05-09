@@ -256,23 +256,24 @@ const STATE_OFFSET: u32 = 8192;
 /// check it against `size_of::<K>() * count`; postcard decoders use
 /// it as the exact slice length so a parser bug or a corrupted frame
 /// can't read past the substrate-written bytes into adjacent linear
-/// memory. ADR-0015 adds optional `on_replace`, `on_drop`, and
-/// `on_rehydrate` exports; the substrate calls them at the right
-/// lifecycle moments when present and silently skips when absent
-/// (no-op trait defaults compile down to no symbol under LTO, so
-/// components that don't override stay backwards-compat).
+/// memory. ADR-0015 + issue 584 add optional `wire`, `unwire`,
+/// `on_replace`, and `on_rehydrate` exports; the substrate calls
+/// them at the right lifecycle moments when present and silently
+/// skips when absent (no-op trait defaults compile down to no symbol
+/// under LTO, so components that don't override stay
+/// backwards-compat).
 pub struct Component {
     store: Store<ComponentCtx>,
     memory: Memory,
     receive: TypedFunc<(u64, u32, u32, u32, u32), u32>,
     /// Issue 584 Phase 2b: pre-shutdown mail-allowed hook. Called by
-    /// the trampoline (via [`Self::unwire`]) before `on_drop` /
-    /// `on_replace` on the dying instance. The post-init `wire` hook
-    /// (its sibling) fires inside [`Self::instantiate`] and isn't
-    /// stored — wire is one-shot.
+    /// the trampoline (via [`Self::unwire`]) before `on_replace` on
+    /// the dying instance, or before the `Component` value drops on a
+    /// `DropComponent`. The post-init `wire` hook (its sibling) fires
+    /// inside [`Self::instantiate`] and isn't stored — wire is
+    /// one-shot.
     unwire: Option<TypedFunc<u64, u32>>,
     on_replace: Option<TypedFunc<(), u32>>,
-    on_drop: Option<TypedFunc<(), u32>>,
     on_rehydrate: Option<TypedFunc<(u32, u32, u32), u32>>,
     /// Mailbox id stamped at instantiate-time, replayed into `unwire`
     /// calls. Same value the guest's `init` and `wire` shims received.
@@ -330,15 +331,13 @@ impl Component {
         }
 
         // ADR-0015 hook exports are optional. A component whose
-        // `Component::on_replace` / `on_drop` are the default no-ops
-        // still emits the symbol via `export!`, but a raw-FFI guest
-        // without the macro won't. Either way: look it up, store
-        // `None` if missing.
+        // `Replaceable::on_replace` is the default no-op still emits
+        // the symbol via `export!`, but a raw-FFI guest without the
+        // macro won't. Either way: look it up, store `None` if
+        // missing. (Issue 584 Phase 3 retired `on_drop` — `unwire` is
+        // the pre-shutdown hook now.)
         let on_replace = instance
             .get_typed_func::<(), u32>(&mut store, "on_replace")
-            .ok();
-        let on_drop = instance
-            .get_typed_func::<(), u32>(&mut store, "on_drop")
             .ok();
         // ADR-0016: `on_rehydrate` takes `(version, ptr, len)` — the
         // substrate writes bytes into the new instance's memory at
@@ -380,7 +379,6 @@ impl Component {
             receive,
             unwire,
             on_replace,
-            on_drop,
             on_rehydrate,
             self_mailbox_id: mailbox_id,
         })
@@ -439,9 +437,10 @@ impl Component {
     }
 
     /// Issue 584 Phase 2b (ADR-0079 amended): pre-shutdown mail-allowed
-    /// hook. Invoked by the trampoline before `on_drop` / `on_replace`
-    /// on the dying instance. Same trap containment as the other
-    /// hooks — a guest panic doesn't stall teardown.
+    /// hook. Invoked by the trampoline before `on_replace` on the
+    /// dying instance, or before the `Component` value drops on a
+    /// `DropComponent`. Same trap containment as the other hooks —
+    /// a guest panic doesn't stall teardown.
     pub fn unwire(&mut self) {
         if let Some(f) = self.unwire.clone()
             && let Err(e) = f.call(&mut self.store, self.self_mailbox_id)
@@ -462,22 +461,12 @@ impl Component {
         }
     }
 
-    /// Invoke the guest's `on_drop` hook if it exports one. Same trap
-    /// containment as `on_replace`.
-    pub fn on_drop(&mut self) {
-        if let Some(f) = self.on_drop.clone()
-            && let Err(e) = f.call(&mut self.store, ())
-        {
-            tracing::error!(target: "aether_substrate::component", error = %e, "on_drop hook trapped");
-        }
-    }
-
     /// Extract the state bundle the guest deposited via `save_state`
     /// during `on_replace`. Returns `None` if `save_state` was never
     /// called (component doesn't implement migration, or the hook is
-    /// a no-op). Called by the control plane *after* `on_replace` /
-    /// `on_drop` run on the old instance — the bundle has to outlive
-    /// the store.
+    /// a no-op). Called by the control plane *after* `on_replace`
+    /// runs on the old instance — the bundle has to outlive the
+    /// store.
     pub fn take_saved_state(&mut self) -> Option<StateBundle> {
         self.store.data_mut().saved_state.take()
     }
@@ -498,7 +487,7 @@ impl Component {
     ///
     /// ADR-0016 §4 specifies that a trap here aborts the replace, so
     /// errors are propagated rather than contained (unlike
-    /// `on_replace` / `on_drop`). A memory write failure — the bundle
+    /// `on_replace` / `unwire`). A memory write failure — the bundle
     /// doesn't fit in the current pages — propagates too.
     pub fn call_on_rehydrate(&mut self, bundle: &StateBundle) -> wasmtime::Result<()> {
         let Some(f) = self.on_rehydrate.clone() else {
@@ -572,9 +561,11 @@ mod tests {
         Component::instantiate(&engine, &linker, &module, ctx()).expect("instantiate")
     }
 
-    /// WAT where `on_drop` writes 0x22 to offset 204 and `on_replace`
-    /// writes 0x11 to offset 200 — same pattern as `control.rs` test
-    /// shape but kept local so component tests stay standalone.
+    /// WAT where `on_replace` writes 0x11 to offset 200 — same pattern
+    /// as `control.rs` test shape but kept local so component tests
+    /// stay standalone. (Issue 584 Phase 3 retired the legacy
+    /// `on_drop` companion hook; pre-shutdown coverage rides
+    /// [`WAT_WIRE_UNWIRE`] now.)
     const WAT_HOOKS: &str = r#"
         (module
             (memory (export "memory") 1)
@@ -583,11 +574,6 @@ mod tests {
             (func (export "on_replace") (result i32)
                 i32.const 200
                 i32.const 0x11
-                i32.store
-                i32.const 0)
-            (func (export "on_drop") (result i32)
-                i32.const 204
-                i32.const 0x22
                 i32.store
                 i32.const 0))
     "#;
@@ -642,22 +628,13 @@ mod tests {
 
     /// WAT whose `unwire` traps. Tests that `Component::unwire`
     /// contains the trap (logs but doesn't propagate), same pattern
-    /// as `on_drop_trap_is_contained`.
+    /// as `on_replace`'s trap-is-contained behaviour.
     const WAT_UNWIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
             (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
                 i32.const 0)
             (func (export "unwire") (param i64) (result i32)
-                unreachable))
-    "#;
-
-    const WAT_TRAP_ON_DROP: &str = r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32) (result i32)
-                i32.const 0)
-            (func (export "on_drop") (result i32)
                 unreachable))
     "#;
 
@@ -756,15 +733,6 @@ mod tests {
     }
 
     #[test]
-    fn on_drop_invokes_export_and_writes_marker() {
-        let mut component = instantiate(WAT_HOOKS);
-        // Pre-condition: memory is zero-initialised.
-        assert_eq!(component.read_u32(204), 0);
-        component.on_drop();
-        assert_eq!(component.read_u32(204), 0x22);
-    }
-
-    #[test]
     fn on_replace_invokes_export_and_writes_marker() {
         let mut component = instantiate(WAT_HOOKS);
         assert_eq!(component.read_u32(200), 0);
@@ -773,20 +741,10 @@ mod tests {
     }
 
     #[test]
-    fn on_drop_on_component_without_export_is_noop() {
+    fn on_replace_on_component_without_export_is_noop() {
         let mut component = instantiate(WAT_NO_HOOKS);
         // Just needs to not panic. No marker to check.
-        component.on_drop();
         component.on_replace();
-    }
-
-    #[test]
-    fn on_drop_trap_is_contained() {
-        let mut component = instantiate(WAT_TRAP_ON_DROP);
-        // `unreachable` in WASM traps; substrate must log and
-        // continue rather than propagate. Reaching the line after
-        // the call is the whole assertion.
-        component.on_drop();
     }
 
     #[test]
@@ -818,8 +776,9 @@ mod tests {
     }
 
     /// Issue 584 Phase 2b: `Component::unwire` invokes the guest's
-    /// `unwire` export. Trampoline calls this before `on_drop` /
-    /// `on_replace` on the dying instance.
+    /// `unwire` export. Trampoline calls this before `on_replace`
+    /// on the dying instance, or before the `Component` value drops
+    /// on a `DropComponent`.
     #[test]
     fn unwire_invokes_export_and_writes_marker() {
         let mut component = instantiate(WAT_WIRE_UNWIRE);
@@ -846,8 +805,8 @@ mod tests {
     }
 
     /// Issue 584 Phase 2b: `unwire` traps are contained the same way
-    /// `on_drop` / `on_replace` traps are — logged but not propagated
-    /// (per ADR-0015, panicking hooks must not stall teardown).
+    /// `on_replace` traps are — logged but not propagated (per
+    /// ADR-0015, panicking hooks must not stall teardown).
     #[test]
     fn unwire_trap_is_contained() {
         let mut component = instantiate(WAT_UNWIRE_TRAPS);
@@ -857,7 +816,7 @@ mod tests {
     }
 
     /// Issue 584 Phase 2b: a component without a `wire` / `unwire`
-    /// export is a no-op (matches the on_replace / on_drop pattern).
+    /// export is a no-op (matches the on_replace pattern).
     #[test]
     fn unwire_on_component_without_export_is_noop() {
         let mut component = instantiate(WAT_NO_HOOKS);
