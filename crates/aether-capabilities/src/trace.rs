@@ -24,11 +24,15 @@ mod native {
     use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
+    use std::sync::Arc;
+
     use aether_actor::actor;
     use aether_data::{KindId, MailId, MailboxId};
-    use aether_kinds::trace::{Nanos, TraceEvent};
+    use aether_kinds::trace::{Nanos, Settled, TraceEvent};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::Mail;
+    use aether_substrate::mail::mailer::Mailer;
 
     /// ADR-0080 §11 retention defaults. Override via env vars.
     /// `AETHER_TRACE_RETENTION_MS` — drop roots older than this many
@@ -66,12 +70,25 @@ mod native {
     }
 
     /// `aether.trace` mailbox cap. Folds [`BatchedTraceEvents`] into
-    /// per-root counters and a parent → mail graph.
+    /// per-root counters and a parent → mail graph; emits `Settled`
+    /// to [`MailboxId::CHASSIS_MAILBOX_ID`] when a root's `in_flight`
+    /// count transitions to zero (ADR-0080 §6).
     pub struct TraceObserverCapability {
         roots: HashMap<MailId, RootState>,
         mails: HashMap<MailId, MailNode>,
         retention: Duration,
         max_roots: usize,
+        /// Mailer handle stashed at init so `Settled` mail can be
+        /// pushed bare via [`Mailer::push`] — bypassing
+        /// `NativeBinding::send_mail_with_lineage` so the outbound
+        /// doesn't generate a `TraceEvent::Sent` (which would mint
+        /// a fresh mail_id chain whose `Finished` never fires —
+        /// chassis-router-routed mail doesn't trip the dispatcher's
+        /// Received/Finished hooks).
+        mailer: Arc<Mailer>,
+        /// Cached `Settled` kind id; computed once at init to avoid
+        /// re-resolving for every settlement event.
+        settled_kind: KindId,
     }
 
     impl TraceObserverCapability {
@@ -138,13 +155,42 @@ mod native {
                         if let Some(state) = self.roots.get_mut(&root) {
                             state.in_flight = state.in_flight.saturating_sub(1);
                             state.last_event_at = Instant::now();
-                            // PR 3 fires `Settled { root }` here when
-                            // `state.in_flight` hits zero. PR 2 just
-                            // observes the transition.
+                            // ADR-0080 §6: settlement fires when the
+                            // chain's in-flight count transitions to
+                            // zero. We push `Settled { root }` to
+                            // `CHASSIS_MAILBOX_ID` via the bare mailer
+                            // so the outbound doesn't generate trace
+                            // events; the chassis-router decodes the
+                            // payload and signals every gate-site
+                            // subscriber waiting on this root.
+                            if state.in_flight == 0 {
+                                self.fire_settled(root);
+                            }
                         }
                     }
                 }
             }
+        }
+
+        fn fire_settled(&self, root: MailId) {
+            let payload = match postcard::to_allocvec(&Settled { root }) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(
+                        target: "aether_capabilities::trace",
+                        root = ?root,
+                        error = %e,
+                        "Settled encode failed; chassis subscribers not notified",
+                    );
+                    return;
+                }
+            };
+            self.mailer.push(Mail::new(
+                MailboxId::CHASSIS_MAILBOX_ID,
+                self.settled_kind,
+                payload,
+                1,
+            ));
         }
 
         fn evict(&mut self) {
@@ -196,7 +242,7 @@ mod native {
         // be a literal here for the `#[actor]` macro's expansion.
         const NAMESPACE: &'static str = "aether.trace";
 
-        fn init(_: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init(_: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             let retention_ms = parse_env_u64("AETHER_TRACE_RETENTION_MS", RETENTION_MS_DEFAULT);
             let max_roots = parse_env_usize("AETHER_TRACE_MAX_ROOTS", MAX_ROOTS_DEFAULT);
             Ok(Self {
@@ -204,6 +250,8 @@ mod native {
                 mails: HashMap::new(),
                 retention: Duration::from_millis(retention_ms),
                 max_roots,
+                mailer: ctx.mailer(),
+                settled_kind: <Settled as aether_data::Kind>::ID,
             })
         }
 
@@ -231,21 +279,32 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use aether_substrate::handle_store::HandleStore;
+        use aether_substrate::mail::registry::Registry;
 
+        /// Construct an observer for state-fold tests. Stash a fresh
+        /// `Mailer` so `fire_settled` has somewhere to push (the
+        /// chassis-router isn't installed, so the bare push warn-drops
+        /// at the route_mail switch — that's fine for state assertions).
         fn boot_observer() -> TraceObserverCapability {
-            // Use deterministic-friendly knobs so the eviction tests
-            // don't have to wait on real time.
             unsafe {
                 std::env::set_var("AETHER_TRACE_RETENTION_MS", "60000");
                 std::env::set_var("AETHER_TRACE_MAX_ROOTS", "1000");
             }
-            // Construct directly via init's logic (no chassis needed
-            // for these state-fold tests).
+            observer_with(Duration::from_millis(60_000), 1000)
+        }
+
+        fn observer_with(retention: Duration, max_roots: usize) -> TraceObserverCapability {
+            let registry = Arc::new(Registry::new());
+            let store = Arc::new(HandleStore::new(1024 * 1024));
+            let mailer = Arc::new(Mailer::new(registry, store));
             TraceObserverCapability {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
-                retention: Duration::from_millis(60_000),
-                max_roots: 1000,
+                retention,
+                max_roots,
+                mailer,
+                settled_kind: <Settled as aether_data::Kind>::ID,
             }
         }
 
@@ -344,12 +403,7 @@ mod native {
 
         #[test]
         fn max_roots_evicts_oldest() {
-            let mut obs = TraceObserverCapability {
-                roots: HashMap::new(),
-                mails: HashMap::new(),
-                retention: Duration::from_secs(3600),
-                max_roots: 3,
-            };
+            let mut obs = observer_with(Duration::from_secs(3600), 3);
             for cid in 1..=5 {
                 let m = mail(1, cid);
                 obs.apply_event(TraceEvent::Sent {
@@ -374,13 +428,60 @@ mod native {
         }
 
         #[test]
-        fn retention_evicts_stale() {
+        fn finished_to_zero_fires_settled() {
+            use std::sync::Mutex;
+
+            // Build a Mailer with a chassis-router that records every
+            // chassis-addressed mail. The observer's `fire_settled`
+            // pushes through the Mailer; the router intercepts.
+            let registry = Arc::new(Registry::new());
+            let store = Arc::new(HandleStore::new(1024 * 1024));
+            let mailer = Arc::new(Mailer::new(registry, store));
+            let captured: Arc<Mutex<Vec<Settled>>> = Arc::new(Mutex::new(Vec::new()));
+            let captured_for_router = Arc::clone(&captured);
+            let settled_kind = <Settled as aether_data::Kind>::ID;
+            mailer.install_chassis_router(Box::new(move |mail| {
+                if mail.kind == settled_kind
+                    && let Ok(notice) = postcard::from_bytes::<Settled>(&mail.payload)
+                {
+                    captured_for_router.lock().unwrap().push(notice);
+                }
+            }));
+
             let mut obs = TraceObserverCapability {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
-                retention: Duration::from_millis(50),
+                retention: Duration::from_secs(60),
                 max_roots: 1000,
+                mailer: Arc::clone(&mailer),
+                settled_kind,
             };
+
+            let root = mail(1, 1);
+            obs.apply_event(TraceEvent::Sent {
+                mail_id: root,
+                root,
+                parent_mail: None,
+                sender: MailboxId(1),
+                recipient: MailboxId(2),
+                kind: KindId(0xABCD),
+                t: Nanos(100),
+            });
+            // No Settled yet — in_flight is 1.
+            assert!(captured.lock().unwrap().is_empty());
+            obs.apply_event(TraceEvent::Finished {
+                mail_id: root,
+                t: Nanos(200),
+            });
+            // Settled fired; chassis-router decoded the mail.
+            let captured = captured.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].root, root);
+        }
+
+        #[test]
+        fn retention_evicts_stale() {
+            let mut obs = observer_with(Duration::from_millis(50), 1000);
             let m = mail(1, 1);
             obs.apply_event(TraceEvent::Sent {
                 mail_id: m,

@@ -152,6 +152,19 @@ impl MailboxId {
     /// real mailbox.
     pub const NONE: MailboxId = MailboxId(0);
 
+    /// ADR-0080 §5 chassis-as-sentinel mailbox id. Aliases
+    /// [`Self::NONE`] — the same reserved-zero id that "no origin"
+    /// already uses. Mail addressed to `CHASSIS_MAILBOX_ID` is
+    /// routed by `Mailer::route_mail` through a chassis-internal
+    /// switch ahead of the registry lookup; today that switch
+    /// handles `Settled { root }` and signals the gate-site
+    /// notification map.
+    ///
+    /// The symbolic name documents the intent at the call site;
+    /// addressing chassis-internal mail by the bare `MailboxId::NONE`
+    /// would read as a bug.
+    pub const CHASSIS_MAILBOX_ID: MailboxId = Self::NONE;
+
     /// Compute the deterministic id for a mailbox name. Same algorithm
     /// the guest SDK uses on the component side — ids round-trip
     /// verbatim across the FFI.

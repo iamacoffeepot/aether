@@ -24,6 +24,7 @@ use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailDispatch, MailboxEntry, Registry};
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use aether_data::{HandleId, KindId};
+use std::sync::OnceLock;
 
 pub struct Mailer {
     /// Registry handle for resolving recipients on `push`. Owned for
@@ -50,6 +51,19 @@ pub struct Mailer {
     /// post-construction via `wire_outbound`; the constructor +
     /// `with_outbound` pair below replaces that.
     outbound: Option<Arc<HubOutbound>>,
+    /// ADR-0080 §5 chassis-mail router. When mail is addressed to
+    /// [`MailboxId::CHASSIS_MAILBOX_ID`], `route_mail` short-circuits
+    /// the registry lookup and invokes this closure instead. Today
+    /// the chassis installs a router that decodes `Settled { root }`
+    /// and signals the [`crate::chassis::settlement::SettlementRegistry`]
+    /// — keeping the Mailer ignorant of trace kinds while still
+    /// providing the dispatch surface those kinds need.
+    ///
+    /// `OnceLock` so the chassis builder installs exactly once at
+    /// boot. `None` for tests / chassis that don't bring up the
+    /// trace pipeline — chassis-addressed mail is silently dropped
+    /// in that case.
+    chassis_router: OnceLock<Box<dyn Fn(Mail) + Send + Sync>>,
 }
 
 impl Mailer {
@@ -64,7 +78,16 @@ impl Mailer {
             registry,
             handle_store,
             outbound: None,
+            chassis_router: OnceLock::new(),
         }
+    }
+
+    /// ADR-0080 §5 chassis-mail router installation. Called once by
+    /// the chassis builder at boot to wire the closure that handles
+    /// mail addressed to [`MailboxId::CHASSIS_MAILBOX_ID`]. Subsequent
+    /// calls are no-ops — the router slot is single-claim.
+    pub fn install_chassis_router(&self, router: Box<dyn Fn(Mail) + Send + Sync>) {
+        let _ = self.chassis_router.set(router);
     }
 
     /// Attach a `HubOutbound` so mail to unknown mailbox ids bubbles
@@ -115,6 +138,7 @@ impl Mailer {
             &self.registry,
             self.outbound.as_ref(),
             &self.handle_store,
+            self.chassis_router.get().map(|b| &**b),
         );
     }
 
@@ -139,8 +163,15 @@ impl Mailer {
         self.handle_store.put(handle, kind, bytes)?;
         let parked = self.handle_store.take_parked(handle);
         let outbound = self.outbound.as_ref();
+        let chassis_router = self.chassis_router.get().map(|b| &**b);
         for mail in parked {
-            route_mail(mail, &self.registry, outbound, &self.handle_store);
+            route_mail(
+                mail,
+                &self.registry,
+                outbound,
+                &self.handle_store,
+                chassis_router,
+            );
         }
         Ok(())
     }
@@ -210,7 +241,27 @@ fn route_mail(
     registry: &Registry,
     outbound: Option<&Arc<HubOutbound>>,
     store: &Arc<HandleStore>,
+    chassis_router: Option<&(dyn Fn(Mail) + Send + Sync)>,
 ) {
+    // ADR-0080 §5 chassis-mail switch — routed ahead of the registry
+    // lookup so mail to `CHASSIS_MAILBOX_ID` reaches the chassis-
+    // installed router without bubbling up as `UnresolvedMail`. Today
+    // the router decodes `Settled { root }` and signals the
+    // `SettlementRegistry`; future chassis-internal kinds add
+    // matching arms inside the router closure.
+    if mail.recipient == aether_data::MailboxId::CHASSIS_MAILBOX_ID {
+        if let Some(router) = chassis_router {
+            router(mail);
+        } else {
+            tracing::warn!(
+                target: "aether_substrate::queue",
+                kind = %mail.kind,
+                "chassis-addressed mail dropped — no chassis router installed",
+            );
+        }
+        return;
+    }
+
     if let Some(descriptor) = registry.kind_descriptor(mail.kind)
         && handle_store::schema_contains_ref(&descriptor.schema)
     {

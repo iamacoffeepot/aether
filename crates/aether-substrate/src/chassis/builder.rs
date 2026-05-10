@@ -1067,6 +1067,13 @@ struct BootedPassives {
     /// `TraceObserver` mailbox — that's acceptable: the observer cap
     /// drained its inbox during its own dispatcher's phase-2 drain.
     _trace_drainer: crate::runtime::trace::TraceDrainerHandle,
+    /// ADR-0080 §6 settlement registry. Cloned into the Mailer's
+    /// chassis-router closure (which decodes `Settled { root }`
+    /// mail addressed to `CHASSIS_MAILBOX_ID` and signals
+    /// subscribers); reachable from `BootedPassives`-holders via
+    /// [`Self::settlement_registry`] for PR 4 gate-site
+    /// `subscribe_settlement` calls.
+    settlement_registry: Arc<crate::chassis::settlement::SettlementRegistry>,
 }
 
 /// Issue #601: dispatch a `ConfigureLogDrain { mailbox: drain }` mail
@@ -1100,6 +1107,14 @@ fn dispatch_configure_log_drain(
 }
 
 impl BootedPassives {
+    /// ADR-0080 §6: borrow the chassis-owned settlement registry.
+    /// PR 4 gate-site code (lifecycle drains, the per-frame Tick
+    /// barrier, `replace_component` drain) reaches for this to call
+    /// `subscribe_settlement(root)` and wait on the returned receiver.
+    pub fn settlement_registry(&self) -> &Arc<crate::chassis::settlement::SettlementRegistry> {
+        &self.settlement_registry
+    }
+
     fn shutdown_in_place(&mut self) {
         // Issue 685: spawned-instanced actors close BEFORE the
         // singleton shutdowns walk. Two reasons: (1) their close
@@ -1155,6 +1170,36 @@ fn boot_passives(
     crate::runtime::trace::install_trace_queue(Arc::clone(&trace_queue));
     let trace_drainer =
         crate::runtime::trace::start_drainer(Arc::clone(&trace_queue), Arc::clone(mailer));
+
+    // ADR-0080 §6 settlement registry + chassis-mail router. The
+    // registry owns the gate-site notification map; the router
+    // closure decodes `Settled { root }` mail addressed to
+    // `CHASSIS_MAILBOX_ID` and signals the matching subscribers.
+    // Other chassis-internal kinds (none today; future debugger /
+    // describe_tree replies could land here) add matching arms inside
+    // the router closure without touching the Mailer's surface.
+    let settlement_registry: Arc<crate::chassis::settlement::SettlementRegistry> =
+        Arc::new(crate::chassis::settlement::SettlementRegistry::new());
+    let registry_for_router = Arc::clone(&settlement_registry);
+    let settled_kind = <aether_kinds::trace::Settled as aether_data::Kind>::ID;
+    mailer.install_chassis_router(Box::new(move |mail| {
+        if mail.kind == settled_kind {
+            match postcard::from_bytes::<aether_kinds::trace::Settled>(&mail.payload) {
+                Ok(notice) => registry_for_router.fire_settled(notice.root),
+                Err(e) => tracing::warn!(
+                    target: "aether_substrate::chassis::settlement",
+                    error = %e,
+                    "Settled mail decode failed; subscribers not woken",
+                ),
+            }
+        } else {
+            tracing::warn!(
+                target: "aether_substrate::chassis",
+                kind = %mail.kind,
+                "unhandled chassis-addressed kind",
+            );
+        }
+    }));
     let spawner: Arc<crate::Spawner> = Arc::new(crate::Spawner::new(
         Arc::clone(registry),
         Arc::clone(&actor_registry),
@@ -1328,6 +1373,7 @@ fn boot_passives(
         spawner,
         _pool: pool,
         _trace_drainer: trace_drainer,
+        settlement_registry,
     })
 }
 
@@ -1485,6 +1531,15 @@ impl<C: Chassis> PassiveChassis<C> {
     /// type.
     pub fn handle<H: std::any::Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
         self.booted.handles.get::<H>()
+    }
+
+    /// ADR-0080 §6: borrow the chassis-owned settlement registry.
+    /// PR 4 lifecycle / frame / `replace_component` gate sites reach
+    /// for this to call `subscribe_settlement(root)`; PR 3 surfaces
+    /// the accessor for tests that pump synthetic events through the
+    /// trace pipeline and wait on the resulting `Settled` signal.
+    pub fn settlement_registry(&self) -> &Arc<crate::chassis::settlement::SettlementRegistry> {
+        self.booted.settlement_registry()
     }
 
     /// Snapshot of every frame-bound mailbox's pending counter
