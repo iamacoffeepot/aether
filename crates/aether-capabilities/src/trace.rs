@@ -62,7 +62,11 @@ mod native {
 
     /// Per-mail node in the parent → mail graph. `t_received` and
     /// `t_finished` patch as `Received`/`Finished` events arrive
-    /// after the originating `Sent`.
+    /// after the originating `Sent`. Issue 734: `thread_name` patches
+    /// from the `Received` event the same way `t_received` does — the
+    /// dispatcher captures `std::thread::current().name()` so the
+    /// chrome trace renderer can give each actor its own per-thread
+    /// row.
     #[derive(Debug, Clone)]
     pub struct MailNode {
         pub root: MailId,
@@ -73,6 +77,7 @@ mod native {
         pub t_sent: Nanos,
         pub t_received: Option<Nanos>,
         pub t_finished: Option<Nanos>,
+        pub thread_name: Option<String>,
     }
 
     /// `aether.trace` mailbox cap. Folds [`BatchedTraceEvents`] into
@@ -140,12 +145,18 @@ mod native {
                             t_sent: t,
                             t_received: None,
                             t_finished: None,
+                            thread_name: None,
                         },
                     );
                 }
-                TraceEvent::Received { mail_id, t } => {
+                TraceEvent::Received {
+                    mail_id,
+                    t,
+                    thread_name,
+                } => {
                     if let Some(node) = self.mails.get_mut(&mail_id) {
                         node.t_received = Some(t);
+                        node.thread_name = thread_name;
                         if let Some(state) = self.roots.get_mut(&node.root) {
                             state.last_event_at = Instant::now();
                         }
@@ -198,6 +209,7 @@ mod native {
                     t_sent: node.t_sent,
                     t_received: node.t_received,
                     t_finished: node.t_finished,
+                    thread_name: node.thread_name.clone(),
                 })
                 .collect();
             DescribeTreeResult::Ok {
@@ -477,6 +489,7 @@ mod native {
             obs.apply_event(TraceEvent::Received {
                 mail_id: m,
                 t: Nanos(200),
+                thread_name: Some("aether-root-test".to_owned()),
             });
             obs.apply_event(TraceEvent::Finished {
                 mail_id: m,
@@ -486,6 +499,7 @@ mod native {
             let node = obs.mails.get(&m).unwrap();
             assert_eq!(node.t_received, Some(Nanos(200)));
             assert_eq!(node.t_finished, Some(Nanos(300)));
+            assert_eq!(node.thread_name.as_deref(), Some("aether-root-test"));
         }
 
         #[test]
@@ -495,6 +509,7 @@ mod native {
             obs.apply_event(TraceEvent::Received {
                 mail_id: m,
                 t: Nanos(100),
+                thread_name: None,
             });
             assert!(obs.mails.is_empty());
             assert!(obs.roots.is_empty());

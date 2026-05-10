@@ -164,7 +164,13 @@ where
     /// actor's mailbox id and the per-handler `LogBatch` ships at exit.
     fn dispatch_one(&self, actor: &mut Box<A>, env: crate::actor::native::Envelope) {
         let inbound_mail_id = env.mail_id;
-        crate::runtime::trace::record_received(inbound_mail_id);
+        // Issue 734: capture the OS thread name at the dispatcher's
+        // receive hook so the chrome trace renderer can stamp each
+        // actor with a distinct per-thread tid + thread_name metadata
+        // event. Per ADR-0038 every dispatcher thread is named, so the
+        // value is stable for the actor's lifetime.
+        let thread_name = std::thread::current().name().map(str::to_owned);
+        crate::runtime::trace::record_received(inbound_mail_id, thread_name);
         aether_actor::local::with_stamped(&self.slots, || {
             crate::runtime::log_install::with_actor_dispatch(
                 &*self.binding as &dyn crate::runtime::log_install::MailDispatch,

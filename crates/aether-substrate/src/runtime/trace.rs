@@ -126,7 +126,15 @@ pub fn record_sent(
 /// default `MailId::NONE`. Suppressing `Received`/`Finished` for
 /// `NONE`-stamped mail prevents the observer's own dispatch from
 /// generating events that would re-feed the drainer.
-pub fn record_received(mail_id: MailId) {
+///
+/// Issue 734: dispatchers pass `std::thread::current().name()
+/// .map(str::to_owned)` as `thread_name` so the chrome trace renderer
+/// can give each actor a distinct per-thread row in Perfetto. The
+/// substrate names every dispatcher thread per ADR-0038
+/// (`aether-instanced-<full_name>`, `aether-root-<NAMESPACE>`), so the
+/// captured value is stable for the actor's lifetime; anonymous test
+/// threads pass `None`.
+pub fn record_received(mail_id: MailId, thread_name: Option<String>) {
     if mail_id == MailId::NONE {
         return;
     }
@@ -136,6 +144,7 @@ pub fn record_received(mail_id: MailId) {
     queue.push(TraceEvent::Received {
         mail_id,
         t: now_nanos(),
+        thread_name,
     });
 }
 

@@ -19,6 +19,18 @@
 //! `ph:"s"` / `ph:"f"` flow pair so chrome://tracing draws a causal
 //! arrow. Mails missing timestamps (orphan or in-flight at query
 //! time) are skipped — they remain inspectable via `describe_tree`.
+//!
+//! Issue iamacoffeepot/aether#734: pids and tids are emitted as
+//! integers, not strings — Perfetto's chrome-trace importer auto-
+//! hashes string pids (showing `<label> <hashed_pid>` decoration in
+//! lane headers); integers go through the `process_name` /
+//! `thread_name` metadata events as the only display-name binding.
+//! `process_name` events bind each integer pid to the resolved actor
+//! label; `thread_name` events bind each integer tid to the OS thread
+//! name captured at the dispatcher's receive hook (per ADR-0038
+//! every dispatcher thread is named `aether-instanced-<full_name>` /
+//! `aether-root-<NAMESPACE>`, so the per-actor row labels read
+//! directly).
 
 use std::collections::HashMap;
 
@@ -74,31 +86,101 @@ pub(super) fn render_chrome_trace(
         let b_ts = b.get("ts").and_then(Value::as_f64).unwrap_or(0.0);
         a_ts.partial_cmp(&b_ts).unwrap_or(std::cmp::Ordering::Equal)
     });
-    // Prepend one `process_name` metadata event per unique `pid`. The
-    // chrome trace format binds pid → display name through these
-    // metadata events; without them Perfetto treats each pid as an
-    // opaque process and may flag `process_name_unset` / similar
-    // unattributed warnings. Our `pid` strings are already the
-    // human-readable labels, so the metadata args.name just echoes
-    // the pid value.
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    // Issue 734: assign integer pids per unique label so Perfetto
+    // doesn't append a hashed-pid suffix to each lane. The first
+    // unique label seen in event order gets pid = 1, the second 2,
+    // etc. — stable within one render. The intermediate `pid` field
+    // produced by `build_events` is a string label; we rewrite it in
+    // place to the assigned integer below and emit one `process_name`
+    // M event per (pid, label) pair.
+    let mut pid_for_label: HashMap<String, u32> = HashMap::new();
+    let mut next_pid: u32 = 1;
     for e in &events {
-        if let Some(pid) = e.get("pid").and_then(Value::as_str) {
-            seen.insert(pid.to_owned());
+        if let Some(pid_label) = e.get("pid").and_then(Value::as_str)
+            && !pid_for_label.contains_key(pid_label)
+        {
+            pid_for_label.insert(pid_label.to_owned(), next_pid);
+            next_pid += 1;
         }
     }
-    let mut metadata: Vec<Value> = seen
-        .into_iter()
-        .map(|name| {
-            json!({
-                "ph": "M",
-                "name": "process_name",
-                "cat": "metadata",
-                "pid": name,
-                "args": { "name": name },
-            })
-        })
-        .collect();
+
+    // Issue 734: assign integer tids per unique thread name. Same
+    // counter shape as pids — first unique name in event order gets
+    // tid = 1, etc. Events with no `_thread_name` stash (anonymous
+    // threads, the `Err::not_found` metadata-only path) keep `tid`
+    // unset and Perfetto folds them under tid 0 by default.
+    let mut tid_for_thread: HashMap<String, u32> = HashMap::new();
+    let mut next_tid: u32 = 1;
+    for e in &events {
+        if let Some(tn) = e.get("_thread_name").and_then(Value::as_str)
+            && !tid_for_thread.contains_key(tn)
+        {
+            tid_for_thread.insert(tn.to_owned(), next_tid);
+            next_tid += 1;
+        }
+    }
+
+    // Track unique (pid, tid, thread_name) tuples so we emit one
+    // `thread_name` M event per actually-seen pair. A `Pooled`-style
+    // future scheduler that routes one actor across multiple threads
+    // would surface here as multiple tids per pid, all bound by their
+    // own M event.
+    let mut thread_name_pairs: std::collections::BTreeSet<(u32, u32, String)> =
+        std::collections::BTreeSet::new();
+
+    // Resolve string pid/tid to integers in place. Strip the
+    // `_thread_name` stash — it was an internal carrier between
+    // `build_events` and this resolution pass; chrome doesn't read
+    // unknown fields but they're noise in the dump.
+    for e in &mut events {
+        let pid_label = e.get("pid").and_then(Value::as_str).map(|s| s.to_owned());
+        let thread_name = e
+            .get("_thread_name")
+            .and_then(Value::as_str)
+            .map(|s| s.to_owned());
+        if let Some(label) = &pid_label
+            && let Some(&pid) = pid_for_label.get(label.as_str())
+        {
+            e["pid"] = Value::Number(pid.into());
+            if let Some(tn) = &thread_name
+                && let Some(&tid) = tid_for_thread.get(tn.as_str())
+            {
+                e["tid"] = Value::Number(tid.into());
+                thread_name_pairs.insert((pid, tid, tn.clone()));
+            }
+        }
+        if let Some(obj) = e.as_object_mut() {
+            obj.remove("_thread_name");
+        }
+    }
+
+    // Emit `process_name` M events sorted by pid for stable output.
+    let mut process_name_pairs: Vec<(&String, u32)> =
+        pid_for_label.iter().map(|(k, v)| (k, *v)).collect();
+    process_name_pairs.sort_by_key(|(_, pid)| *pid);
+    let mut metadata: Vec<Value> = Vec::with_capacity(process_name_pairs.len() + events.len());
+    for (label, pid) in process_name_pairs {
+        metadata.push(json!({
+            "ph": "M",
+            "name": "process_name",
+            "cat": "metadata",
+            "pid": pid,
+            "args": { "name": label },
+        }));
+    }
+    // `thread_name` M events follow — Perfetto reads them after the
+    // matching `process_name` for a clean lane / row binding.
+    for (pid, tid, name) in &thread_name_pairs {
+        metadata.push(json!({
+            "ph": "M",
+            "name": "thread_name",
+            "cat": "metadata",
+            "pid": *pid,
+            "tid": *tid,
+            "args": { "name": name },
+        }));
+    }
     metadata.extend(events);
     serde_json::to_string_pretty(&json!({ "traceEvents": metadata }))
 }
@@ -146,6 +228,15 @@ fn build_events(
             "dur": ns_to_us(t_finished.0.saturating_sub(t_received.0)),
             "pid": format_mailbox_label(node.recipient, mailbox_names),
             "tid": 0,
+            // Issue 734: stash the thread name captured at the
+            // dispatcher's receive hook. `render_chrome_trace` rewrites
+            // `pid` to an integer + assigns a per-thread tid + emits
+            // the matching `process_name` / `thread_name` M events,
+            // then strips this field. Underscore prefix marks it as
+            // an internal carrier (chrome ignores unknown fields, but
+            // the prefix flags it for human readers of intermediate
+            // dumps).
+            "_thread_name": node.thread_name,
             "args": {
                 "mail_id": format_mail_id(node.mail_id, mailbox_names),
                 "sender": format_mailbox_label(node.sender, mailbox_names),
@@ -187,6 +278,10 @@ fn build_events(
                 "ts": ns_to_us(node.t_sent.0),
                 "pid": format_mailbox_label(parent.recipient, mailbox_names),
                 "tid": 0,
+                // Issue 734: the s endpoint lives on the parent's
+                // (pid, tid) — bind to the parent's thread name so
+                // resolution lands the flow on the correct row.
+                "_thread_name": parent.thread_name,
                 "bp": "e",
             }));
             events.push(json!({
@@ -197,6 +292,9 @@ fn build_events(
                 "ts": ns_to_us(t_received.0),
                 "pid": format_mailbox_label(node.recipient, mailbox_names),
                 "tid": 0,
+                // Issue 734: the f endpoint lives on the child's
+                // (pid, tid) — bind to the child's thread name.
+                "_thread_name": node.thread_name,
                 "bp": "e",
             }));
         }
@@ -319,6 +417,7 @@ mod tests {
                     t_sent: Nanos(1_000),
                     t_received: Some(Nanos(2_000)),
                     t_finished: Some(Nanos(5_000)),
+                    thread_name: Some("aether-root-aether.input".to_owned()),
                 },
                 MailNodeWire {
                     mail_id: child_id,
@@ -329,6 +428,9 @@ mod tests {
                     t_sent: Nanos(3_000),
                     t_received: Some(Nanos(6_000)),
                     t_finished: Some(Nanos(9_000)),
+                    thread_name: Some(
+                        "aether-instanced-aether.component.trampoline:cam".to_owned(),
+                    ),
                 },
             ],
         };
@@ -355,8 +457,9 @@ mod tests {
         let json = render_chrome_trace(&result, &kind_names, &mailbox_names).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let all_events = parsed["traceEvents"].as_array().unwrap();
-        // Filter out the `process_name` metadata auto-prepend so
-        // existing X/s/f assertions stay focused on the trace shape.
+        // Filter out the `process_name` / `thread_name` metadata
+        // auto-prepend so existing X/s/f assertions stay focused on the
+        // trace shape; resolution happens via `pid_label_for`.
         let events: Vec<&Value> = all_events.iter().filter(|e| e["ph"] != "M").collect();
         // Two complete events + two flow events (s + f for the one
         // parent edge) = 4 total.
@@ -369,12 +472,17 @@ mod tests {
 
         // Root event: kind resolved → `kind:test.tick`; recipient
         // resolved → `actor:aether.input`; sender resolved →
-        // `chassis:aether.chassis`.
+        // `chassis:aether.chassis`. Issue 734: pids are integers now;
+        // resolve back through the `process_name` M metadata for the
+        // human-readable assertion.
         let root_complete = events
             .iter()
             .find(|e| e["ph"] == "X" && e["name"] == "kind:test.tick")
             .expect("root complete event with kind: prefix");
-        assert_eq!(root_complete["pid"], "actor:aether.input");
+        assert_eq!(
+            pid_label_for(all_events, root_complete["pid"].as_u64().unwrap()),
+            Some("actor:aether.input".to_owned())
+        );
         assert_eq!(root_complete["args"]["sender"], "chassis:aether.chassis");
         assert_eq!(root_complete["args"]["parent"], serde_json::Value::Null);
         // Root's mail_id renders as `<sender_label>#<cid>` =
@@ -386,6 +494,17 @@ mod tests {
         assert_eq!(root_complete["args"]["mail_id"], "chassis:aether.chassis#1");
         assert_eq!(root_complete["args"]["root"], "chassis:aether.chassis#1");
         assert_eq!(root_complete["args"]["kind_id"], "kind:test.tick");
+        // Issue 734: the root's recipient ran on `aether-root-aether
+        // .input` per the fixture; tid resolves through the
+        // `thread_name` M metadata bound to (pid, tid).
+        assert_eq!(
+            thread_label_for(
+                all_events,
+                root_complete["pid"].as_u64().unwrap(),
+                root_complete["tid"].as_u64().unwrap(),
+            ),
+            Some("aether-root-aether.input".to_owned())
+        );
 
         // Child event: kind NOT in the lookup → falls back to raw
         // `knd-...` (no `kind:` prefix). Recipient (0xEE) NOT in the
@@ -393,7 +512,12 @@ mod tests {
         // (0xAA) is resolved → parent renders prefixed.
         let child_complete = events
             .iter()
-            .find(|e| e["ph"] == "X" && e["pid"].as_str().unwrap_or("").starts_with("mbx-"))
+            .find(|e| {
+                e["ph"] == "X"
+                    && pid_label_for(all_events, e["pid"].as_u64().unwrap_or(0))
+                        .map(|s| s.starts_with("mbx-"))
+                        .unwrap_or(false)
+            })
             .expect("child complete event with raw mbx- pid");
         let child_kind_name = child_complete["name"].as_str().unwrap();
         assert!(
@@ -407,6 +531,16 @@ mod tests {
         assert_eq!(child_complete["args"]["parent"], "chassis:aether.chassis#1");
         // Root walks to root_id again.
         assert_eq!(child_complete["args"]["root"], "chassis:aether.chassis#1");
+        // Issue 734: the child's recipient ran on the camera
+        // trampoline thread per the fixture.
+        assert_eq!(
+            thread_label_for(
+                all_events,
+                child_complete["pid"].as_u64().unwrap(),
+                child_complete["tid"].as_u64().unwrap(),
+            ),
+            Some("aether-instanced-aether.component.trampoline:cam".to_owned())
+        );
 
         // Microsecond conversion (fractional): t_received=2000ns →
         // ts=2.0us, dur=(5000-2000)/1000.0 = 3.0us. f64 so
@@ -442,8 +576,42 @@ mod tests {
         // Flow event pids resolve through the same lookup. s.pid is
         // parent.recipient (0xCC) → `actor:aether.input`; f.pid is
         // node.recipient (0xEE) → unresolved raw.
-        assert_eq!(s["pid"], "actor:aether.input");
-        assert!(f["pid"].as_str().unwrap().starts_with("mbx-"));
+        assert_eq!(
+            pid_label_for(all_events, s["pid"].as_u64().unwrap()),
+            Some("actor:aether.input".to_owned())
+        );
+        assert!(
+            pid_label_for(all_events, f["pid"].as_u64().unwrap())
+                .map(|l| l.starts_with("mbx-"))
+                .unwrap_or(false)
+        );
+        // Issue 734: flow endpoints carry the same per-thread tid
+        // their pid lane was assigned — s on the parent's thread, f
+        // on the child's thread. Lining the s endpoint up with the
+        // parent's row is what keeps the flow arrow attached to the
+        // visible parent slice in Perfetto.
+        assert_eq!(s["tid"], root_complete["tid"]);
+        assert_eq!(f["tid"], child_complete["tid"]);
+    }
+
+    /// Helper: resolve an integer pid back to its `process_name`
+    /// metadata label for human-readable assertions.
+    fn pid_label_for(events: &[Value], pid: u64) -> Option<String> {
+        events
+            .iter()
+            .filter(|e| e["ph"] == "M" && e["name"] == "process_name")
+            .find(|e| e["pid"].as_u64() == Some(pid))
+            .and_then(|e| e["args"]["name"].as_str().map(str::to_owned))
+    }
+
+    /// Helper: resolve a (pid, tid) pair back to its `thread_name`
+    /// metadata label.
+    fn thread_label_for(events: &[Value], pid: u64, tid: u64) -> Option<String> {
+        events
+            .iter()
+            .filter(|e| e["ph"] == "M" && e["name"] == "thread_name")
+            .find(|e| e["pid"].as_u64() == Some(pid) && e["tid"].as_u64() == Some(tid))
+            .and_then(|e| e["args"]["name"].as_str().map(str::to_owned))
     }
 
     /// Mails without `t_received` / `t_finished` are skipped (no
@@ -463,6 +631,7 @@ mod tests {
                 t_sent: Nanos(1_000),
                 t_received: None,
                 t_finished: None,
+                thread_name: None,
             }],
         };
         let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new()).expect("render");
@@ -540,22 +709,36 @@ mod tests {
                 t_sent: Nanos(1_000),
                 t_received: Some(Nanos(2_000)),
                 t_finished: Some(Nanos(3_000)),
+                thread_name: Some("aether-root-aether.input".to_owned()),
             }],
         };
         let json = render_chrome_trace(&result, &HashMap::new(), &mailbox_names).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let events = parsed["traceEvents"].as_array().unwrap();
-        // Single X event has one unique pid (`actor:aether.input`),
-        // so we expect exactly one process_name metadata + the X
-        // event itself.
+        // Single X event has one unique pid (`actor:aether.input`)
+        // and one unique thread (`aether-root-aether.input`), so we
+        // expect one process_name M + one thread_name M + the X event.
         let metadata: Vec<&Value> = events.iter().filter(|e| e["ph"] == "M").collect();
-        assert_eq!(metadata.len(), 1);
-        assert_eq!(metadata[0]["name"], "process_name");
-        // The metadata event's `args.name` is just the bare label —
-        // no `#NNN` mail-id leakage. That's what Perfetto binds as
-        // the lane label.
-        assert_eq!(metadata[0]["pid"], "actor:aether.input");
-        assert_eq!(metadata[0]["args"]["name"], "actor:aether.input");
+        assert_eq!(metadata.len(), 2);
+        let process_name = metadata
+            .iter()
+            .find(|m| m["name"] == "process_name")
+            .expect("process_name metadata");
+        // Issue 734: pid is now an integer; the M event's args.name
+        // carries the bare label that Perfetto uses for the lane.
+        assert!(
+            process_name["pid"].is_u64(),
+            "pid should be integer, got: {:?}",
+            process_name["pid"]
+        );
+        assert_eq!(process_name["args"]["name"], "actor:aether.input");
+        let thread_name = metadata
+            .iter()
+            .find(|m| m["name"] == "thread_name")
+            .expect("thread_name metadata");
+        assert_eq!(thread_name["pid"], process_name["pid"]);
+        assert!(thread_name["tid"].is_u64());
+        assert_eq!(thread_name["args"]["name"], "aether-root-aether.input");
         // Metadata events come BEFORE slice events in the output —
         // chrome importers expect process metadata up-front.
         let first_slice_idx = events
@@ -566,7 +749,7 @@ mod tests {
             metadata
                 .iter()
                 .all(|m| events.iter().position(|e| std::ptr::eq(e, *m)).unwrap() < first_slice_idx),
-            "process_name metadata must precede slice events"
+            "process_name / thread_name metadata must precede slice events"
         );
     }
 
@@ -593,6 +776,7 @@ mod tests {
                 // 500ns handler — under the 1us floor.
                 t_received: Some(Nanos(2_000)),
                 t_finished: Some(Nanos(2_500)),
+                thread_name: None,
             }],
         };
         let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new()).expect("render");
@@ -635,18 +819,22 @@ mod tests {
                 t_sent: Nanos(1_000),
                 t_received: Some(Nanos(2_000)),
                 t_finished: Some(Nanos(3_000)),
+                thread_name: None,
             }],
         };
         let json = render_chrome_trace(&result, &HashMap::new(), &mailbox_names).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
-        let evt = parsed["traceEvents"]
-            .as_array()
-            .unwrap()
+        let all_events = parsed["traceEvents"].as_array().unwrap();
+        let evt = all_events
             .iter()
             .find(|e| e["ph"] == "X")
             .expect("X event present");
-        // Bare name, no prefix.
-        assert_eq!(evt["pid"], "user_thing");
+        // Issue 734: pid is an integer; the bare-label assertion goes
+        // through the `process_name` M event lookup.
+        assert_eq!(
+            pid_label_for(all_events, evt["pid"].as_u64().unwrap()),
+            Some("user_thing".to_owned())
+        );
         assert_eq!(evt["args"]["sender"], "user_thing");
         // Mail id retains the bare-name + correlation_id form,
         // separated by `#`.
