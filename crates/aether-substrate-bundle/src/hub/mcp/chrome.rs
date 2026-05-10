@@ -220,10 +220,17 @@ fn format_mail_id(id: MailId, mailbox_names: &MailboxLookup) -> String {
     )
 }
 
-/// Convert a nanosecond value to microseconds for chrome's
+/// Convert a nanosecond value to fractional microseconds for chrome's
 /// `ts`/`dur` fields (chrome's standard time unit).
-fn ns_to_us(nanos: u64) -> u64 {
-    nanos / 1_000
+///
+/// Returns `f64` so sub-microsecond handlers (the camera component's
+/// per-tick `aether.camera` send takes <1us in release builds) keep
+/// their non-zero duration after the unit conversion. Integer-floored
+/// 0-duration `ph:"X"` events render as invisible slices in Perfetto,
+/// which then makes incoming flow arrows look like they point at
+/// nothing.
+fn ns_to_us(nanos: u64) -> f64 {
+    (nanos as f64) / 1_000.0
 }
 
 /// Walk the parent chain to find the root mail. Falls back to the
@@ -363,10 +370,12 @@ mod tests {
         // Root walks to root_id again.
         assert_eq!(child_complete["args"]["root"], "chassis:aether.chassis#1");
 
-        // Microsecond conversion: t_received=2000ns → ts=2us,
-        // dur=(5000-2000)/1000 = 3us.
-        assert_eq!(root_complete["ts"], 2);
-        assert_eq!(root_complete["dur"], 3);
+        // Microsecond conversion (fractional): t_received=2000ns →
+        // ts=2.0us, dur=(5000-2000)/1000.0 = 3.0us. f64 so
+        // sub-microsecond handlers stay non-zero (and so visible
+        // in Perfetto) after the unit conversion.
+        assert_eq!(root_complete["ts"], 2.0);
+        assert_eq!(root_complete["dur"], 3.0);
 
         // Flow pair: child mail_id ties the s/f arrow. Same render
         // path on both sides means the ids match without extra
@@ -379,13 +388,14 @@ mod tests {
         let f = events.iter().find(|e| e["ph"] == "f").unwrap();
         assert_eq!(s["id"], child_mail_str);
         assert_eq!(f["id"], child_mail_str);
-        // s anchors at child.t_sent (3000ns -> 3us, inside parent's
-        // [2000, 5000) processing slice), f at child.t_received
-        // (6000ns -> 6us, the start of the child's own slice).
-        // Both endpoints sit inside concrete slices so Perfetto's
-        // flow-binder doesn't flag them as flow_invalid_id.
-        assert_eq!(s["ts"], 3);
-        assert_eq!(f["ts"], 6);
+        // s anchors at child.t_sent (3000ns -> 3.0us, inside
+        // parent's [2000, 5000) processing slice), f at
+        // child.t_received (6000ns -> 6.0us, the start of the
+        // child's own slice). Both endpoints sit inside concrete
+        // slices so Perfetto's flow-binder doesn't flag them as
+        // flow_invalid_id.
+        assert_eq!(s["ts"], 3.0);
+        assert_eq!(f["ts"], 6.0);
         // Both endpoints carry `bp: "e"` so the binder uses the
         // enclosing slice instead of searching for a past / future
         // one.
@@ -442,6 +452,41 @@ mod tests {
             arg_name.contains("not_found"),
             "metadata should mention not_found: {arg_name}"
         );
+    }
+
+    /// Sub-microsecond handlers (the camera component's per-tick
+    /// `aether.camera` send takes <1us in release builds) must keep
+    /// their non-zero duration after the ns→us unit conversion.
+    /// Integer-floored 0-duration `ph:"X"` events render as
+    /// invisible slices in Perfetto, which then makes the inbound
+    /// flow arrow look like it points at empty space (the user-
+    /// reported regression on the first #731 smoke).
+    #[test]
+    fn render_preserves_subus_duration_as_fractional() {
+        let id = mid(0xAA, 1);
+        let result = DescribeTreeResult::Ok {
+            root: id,
+            in_flight: 0,
+            mails: vec![MailNodeWire {
+                mail_id: id,
+                parent: None,
+                sender: MailboxId(with_tag(Tag::Mailbox, 0xAA)),
+                recipient: MailboxId(with_tag(Tag::Mailbox, 0xAA)),
+                kind: KindId(with_tag(Tag::Kind, 0x99)),
+                t_sent: Nanos(1_000),
+                // 500ns handler — under the 1us floor.
+                t_received: Some(Nanos(2_000)),
+                t_finished: Some(Nanos(2_500)),
+            }],
+        };
+        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new())
+            .expect("render");
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        let evt = &parsed["traceEvents"][0];
+        // dur survives as 0.5us — non-zero, so Perfetto draws the
+        // slice.
+        assert_eq!(evt["dur"], 0.5);
+        assert_eq!(evt["ts"], 2.0);
     }
 
     /// Issue iamacoffeepot/aether#731: a known-name mailbox with
