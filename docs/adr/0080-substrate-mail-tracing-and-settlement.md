@@ -130,7 +130,7 @@ v1 ships the trace queue as `crossbeam::queue::SegQueue` (unbounded MPSC). A pat
 
 Three landable PRs:
 
-1. **Tracing infrastructure + settlement gate.** Trace queue, drainer, `TraceObserver` cap, `TraceEvent` spec, per-actor `correlation_id` allocator (drives `MailId` allocation; root ids are just the originating mail's MailId, no separate counter), in-flight-context plumbing on `NativeCtx` / `WasmCtx`, `CHASSIS_MAILBOX_ID` sentinel + dispatcher switch. Replace `wait_instanced_quiesce` callers with settlement subscriptions; retire `await_tick_subscribed` and `settle_observations` from the #648 tests; close the `replace_component_preserves_mailbox_identity` flake.
+1. **Tracing infrastructure + settlement gate.** Trace queue, drainer, `TraceObserver` cap, `TraceEvent` spec, per-actor `correlation_id` allocator (drives `MailId` allocation; root ids are just the originating mail's MailId, no separate counter), in-flight-context plumbing on `NativeCtx` / `WasmCtx`, ctx-mediated thread-spawn primitives (`spawn_inherit` / `spawn_detached` / `spawn_root_worker` per §12), `CHASSIS_MAILBOX_ID` sentinel + dispatcher switch. Replace `wait_instanced_quiesce` callers with settlement subscriptions; retire `await_tick_subscribed` and `settle_observations` from the #648 tests; close the `replace_component_preserves_mailbox_identity` flake.
 2. **MCP `describe_tree(root)`.** Read the observer's graph, return the structured causal subgraph rooted at the given mail. Lights up live tracing in the agent harness. (Tool name keeps `tree` because what's *returned* is a tree-shaped subgraph — the parameter is a `root: MailId`.)
 3. **Flame-graph export.** `mcp__aether-hub__export_trace(root, format = "chrome" | "folded")` — Chrome-trace JSON is the de-facto standard (Perfetto / chrome://tracing / speedscope). Direct mapping from `MailNode` to a Chrome-trace span; trivial transform from the existing data.
 
@@ -169,6 +169,41 @@ A future refinement worth flagging but parked: **differential retention by `Root
 
 Neither is in scope for Phase 1 above.
 
+### 12. Actor-spawned threads: ctx-mediated send authority
+
+Some actors own threads driven by external events outside the actor's mail dispatch loop — `TcpCapability` per-connection workers, future drivers like `WebSocketCapability` or pollers, occasional CPU-offload workers. The trace-aware send path needs to know how each spawned thread relates to the in-flight causal graph; without a forcing function this becomes a "uninformed dev forgets to plumb the context" gap. The ctx pattern already established for handler dispatch (`NativeCtx` / `WasmCtx`) extends naturally: **threads receive a ctx that grants send authority and carries the inheritance choice in its type**. There is no way to send mail without holding one.
+
+Two ctx flavors:
+
+- **`InheritCtx<A>`** — captures the spawning handler's in-flight `(mail_id, root)` and a `Sender<A>` clone. Sends from the spawned thread inherit `tree = self.in_flight.root` and stamp `parent_mail = self.in_flight.mail_id`. The spawning handler's tree does not settle until every spawned-thread send completes. Correct shape for short-burst CPU offload that is *part of* the current handler's causal closure.
+- **`RootCtx<A>`** — carries a `Sender<A>` clone with no in-flight context. Each send mints a fresh root with `sender = A.mailbox` (per §1 / §5). Correct shape for long-lived workers that respond to external events with no caller context — the canonical case being `TcpCapability`'s per-connection worker minting one root per inbound network packet.
+
+Spawn primitives:
+
+```rust
+// Inside a handler — captures the handler's in-flight context:
+impl NativeCtx<'_, A> {
+    fn spawn_inherit<F>(&self, f: F) -> JoinHandle
+    where F: FnOnce(InheritCtx<A>) + Send + 'static;
+
+    fn spawn_detached<F>(&self, f: F) -> JoinHandle
+    where F: FnOnce(RootCtx<A>) + Send + 'static;
+}
+
+// On the actor handle (for boot-time / wire-time spawn of long-lived workers,
+// before any handler has been entered):
+impl ActorRef<A> {
+    fn spawn_root_worker<F>(&self, f: F) -> JoinHandle
+    where F: FnOnce(RootCtx<A>) + Send + 'static;
+}
+```
+
+The closures *receive* the appropriate ctx — they cannot construct one or smuggle a `Sender<A>` in another way. The type system enforces "every send goes through a ctx with the right inheritance shape."
+
+For the no-actor-context case (`Drop` impls, signal handlers, panic hooks) where there is no actor to send-from-as, the only path is `send_detached` (the same primitive §7 establishes for the drainer's recursion break) — bypasses tree tracking entirely, no parent / no root.
+
+**Shared thread pools and async runtimes are deferred to v2.** Pool workers don't statically belong to one actor; each submitted work item carries its own ctx (`InheritCtx<A>` or `RootCtx<A>`), and the pool worker function invokes the work-item closure with that ctx in scope. Same shape, just per-task instead of per-thread. v1 ships only the per-thread spawn primitives above; if shared pools become common the per-task variant slots in without re-shaping the contract.
+
 ## Consequences
 
 ### Positive
@@ -179,6 +214,7 @@ Neither is in scope for Phase 1 above.
 - **Flame graphs.** Chrome-trace export via the observer; Perfetto / chrome://tracing / speedscope read it natively.
 - **`engine_logs` causal grouping.** ADR-0023 text-log entries carry the in-flight root MailId of the actor that emitted them, so log lines group by causal chain. Light add to ADR-0023's `LogEntry`.
 - **Foundation for the future debugger.** Repeated user direction toward "show me what's happening inside the engine" lands here.
+- **Inheritance contract is type-enforced for actor-spawned threads.** §12's ctx-mediated spawn primitives (`spawn_inherit` / `spawn_detached`) make "this worker thread inherits the in-flight tree" vs "this worker thread mints fresh roots" a compile-time choice that survives across the FFI / wasm boundary. No way to send mail from a thread without explicitly stating the inheritance shape; new caps that spawn workers can't accidentally drop into an undefined-context mode.
 
 ### Negative
 
