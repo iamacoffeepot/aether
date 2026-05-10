@@ -35,9 +35,8 @@ use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    HubOutbound, Mailer, SubstrateBoot,
-    chassis::frame_loop,
-    mail::{Mail, MailboxId},
+    HubOutbound, Mailer, SubstrateBoot, chassis::frame_loop, mail::MailboxId,
+    runtime::trace::push_chassis_root_mail,
 };
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
@@ -125,6 +124,12 @@ pub struct App {
     window_inbox: std::sync::mpsc::Receiver<Envelope>,
     kind_set_window_mode: aether_data::KindId,
     kind_set_window_title: aether_data::KindId,
+    /// ADR-0080 §6 chassis-root correlation counter (issue
+    /// iamacoffeepot/aether#723). Bumped per chassis-source push so
+    /// every input/window/frame-stats emission carries a fresh
+    /// `MailId` for the trace observer to root a tree on. Symmetric
+    /// with the per-actor counter on `NativeBinding`.
+    chassis_correlation: AtomicU64,
 }
 
 /// Translate a winit `KeyCode` into the engine's stable named-key u32
@@ -288,6 +293,24 @@ fn resolve_fullscreen(
 }
 
 impl App {
+    /// ADR-0080 §6 chassis-source push helper (issue
+    /// iamacoffeepot/aether#723). Mints a fresh correlation, calls
+    /// `push_chassis_root_mail` so the trace observer sees a `Sent`
+    /// event for every input/window/frame-stats emission.
+    fn push_chassis_root(
+        &self,
+        recipient: MailboxId,
+        kind: aether_data::KindId,
+        payload: Vec<u8>,
+        count: u32,
+    ) {
+        let mut correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
+        if correlation == 0 {
+            correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
+        }
+        push_chassis_root_mail(&self.queue, correlation, recipient, kind, payload, count);
+    }
+
     fn apply_window_mode(
         &mut self,
         mode: WindowMode,
@@ -386,12 +409,7 @@ impl App {
 
     fn publish_window_size(&self, width: u32, height: u32) {
         let payload = encode(&WindowSize { width, height });
-        self.queue.push(Mail::new(
-            self.input_mailbox,
-            self.kind_window_size,
-            payload,
-            1,
-        ));
+        self.push_chassis_root(self.input_mailbox, self.kind_window_size, payload, 1);
     }
 
     fn set_occluded(&mut self, occluded: bool, event_loop: &ActiveEventLoop) {
@@ -478,12 +496,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.occluded && pending_capture.is_none() {
                     return;
                 }
-                self.queue.push(Mail::new(
+                self.push_chassis_root(
                     self.input_mailbox,
                     self.kind_tick,
                     encode_empty::<Tick>(),
                     1,
-                ));
+                );
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
                     if size.width != 0 && size.height != 0 {
@@ -530,11 +548,16 @@ impl ApplicationHandler<UserEvent> for App {
                         triangles,
                         "frame stats",
                     );
+                    let mut correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
+                    if correlation == 0 {
+                        correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
+                    }
                     frame_loop::emit_frame_stats(
                         &self.queue,
                         self.kind_frame_stats,
                         self.frame,
                         triangles,
+                        correlation,
                     );
                 }
                 if !self.occluded
@@ -554,20 +577,20 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 match key_event.state {
                     ElementState::Pressed => {
-                        self.queue.push(Mail::new(
+                        self.push_chassis_root(
                             self.input_mailbox,
                             self.kind_key,
                             encode(&Key { code }),
                             1,
-                        ));
+                        );
                     }
                     ElementState::Released => {
-                        self.queue.push(Mail::new(
+                        self.push_chassis_root(
                             self.input_mailbox,
                             self.kind_key_release,
                             encode(&KeyRelease { code }),
                             1,
-                        ));
+                        );
                     }
                 }
             }
@@ -575,24 +598,19 @@ impl ApplicationHandler<UserEvent> for App {
                 state: ElementState::Pressed,
                 ..
             } => {
-                self.queue.push(Mail::new(
+                self.push_chassis_root(
                     self.input_mailbox,
                     self.kind_mouse_button,
                     encode_empty::<MouseButton>(),
                     1,
-                ));
+                );
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let payload = encode(&MouseMove {
                     x: position.x as f32,
                     y: position.y as f32,
                 });
-                self.queue.push(Mail::new(
-                    self.input_mailbox,
-                    self.kind_mouse_move,
-                    payload,
-                    1,
-                ));
+                self.push_chassis_root(self.input_mailbox, self.kind_mouse_move, payload, 1);
             }
             _ => {}
         }
@@ -725,6 +743,9 @@ impl DriverCapability for DesktopDriverCapability {
             window_inbox: window_claim.receiver,
             kind_set_window_mode,
             kind_set_window_title,
+            // 0 is the "no correlation" sentinel; mirror NativeBinding's
+            // start-at-1 convention.
+            chassis_correlation: AtomicU64::new(1),
         };
 
         Ok(DesktopDriverRunning {

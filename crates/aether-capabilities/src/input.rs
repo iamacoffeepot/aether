@@ -35,12 +35,11 @@ mod native {
     };
     use aether_actor::actor;
     use aether_actor::actor::ctx::OutboundReply;
-    use aether_data::{Kind, KindId, encode};
+    use aether_data::{Kind, KindId};
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
-    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::MailboxId;
     use aether_substrate::mail::registry::{MailboxEntry, Registry};
-    use aether_substrate::mail::{Mail, MailboxId};
     use std::collections::{BTreeSet, HashMap};
     use std::sync::Arc;
 
@@ -69,7 +68,6 @@ mod native {
     /// runs on the cap's dispatcher thread.
     pub struct InputCapability {
         registry: Arc<Registry>,
-        mailer: Arc<Mailer>,
         subscribers: HashMap<KindId, BTreeSet<MailboxId>>,
     }
 
@@ -79,11 +77,9 @@ mod native {
         const NAMESPACE: &'static str = "aether.input";
 
         fn init(_config: InputConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            let mailer = ctx.mailer();
-            let registry = Arc::clone(mailer.registry());
+            let registry = Arc::clone(ctx.mailer().registry());
             Ok(Self {
                 registry,
-                mailer,
                 subscribers: HashMap::new(),
             })
         }
@@ -145,59 +141,54 @@ mod native {
 
         /// Per-frame tick fan-out (ADR-0021). Empty payload.
         #[handler]
-        fn on_tick(&mut self, _ctx: &mut NativeCtx<'_>, payload: Tick) {
-            self.fanout(Tick::ID, &payload);
+        fn on_tick(&mut self, ctx: &mut NativeCtx<'_>, payload: Tick) {
+            self.fanout(ctx, &payload);
         }
 
         /// Key-press fan-out.
         #[handler]
-        fn on_key(&mut self, _ctx: &mut NativeCtx<'_>, payload: Key) {
-            self.fanout(Key::ID, &payload);
+        fn on_key(&mut self, ctx: &mut NativeCtx<'_>, payload: Key) {
+            self.fanout(ctx, &payload);
         }
 
         /// Key-release fan-out (paired with [`Key`] for hold-to-act
         /// semantics).
         #[handler]
-        fn on_key_release(&mut self, _ctx: &mut NativeCtx<'_>, payload: KeyRelease) {
-            self.fanout(KeyRelease::ID, &payload);
+        fn on_key_release(&mut self, ctx: &mut NativeCtx<'_>, payload: KeyRelease) {
+            self.fanout(ctx, &payload);
         }
 
         /// Cursor-move fan-out.
         #[handler]
-        fn on_mouse_move(&mut self, _ctx: &mut NativeCtx<'_>, payload: MouseMove) {
-            self.fanout(MouseMove::ID, &payload);
+        fn on_mouse_move(&mut self, ctx: &mut NativeCtx<'_>, payload: MouseMove) {
+            self.fanout(ctx, &payload);
         }
 
         /// Mouse-press fan-out. Empty payload.
         #[handler]
-        fn on_mouse_button(&mut self, _ctx: &mut NativeCtx<'_>, payload: MouseButton) {
-            self.fanout(MouseButton::ID, &payload);
+        fn on_mouse_button(&mut self, ctx: &mut NativeCtx<'_>, payload: MouseButton) {
+            self.fanout(ctx, &payload);
         }
 
         /// Window-resize fan-out.
         #[handler]
-        fn on_window_size(&mut self, _ctx: &mut NativeCtx<'_>, payload: WindowSize) {
-            self.fanout(WindowSize::ID, &payload);
+        fn on_window_size(&mut self, ctx: &mut NativeCtx<'_>, payload: WindowSize) {
+            self.fanout(ctx, &payload);
         }
     }
 
     impl InputCapability {
-        /// Push one mail per subscriber for `kind`. Re-encodes
-        /// `payload` once and clones the `Vec<u8>` per recipient — the
-        /// payloads are tiny (cast-shaped, ≤ 8 bytes) so per-subscriber
-        /// allocation churn is negligible at 60Hz tick / 1kHz mouse
-        /// move cadence.
-        fn fanout<K: Kind + bytemuck::NoUninit>(&self, kind: KindId, payload: &K) {
-            let Some(subs) = self.subscribers.get(&kind) else {
+        /// Push one mail per subscriber for `K`. Routes through
+        /// [`NativeCtx::fanout`] so each subscriber-bound copy carries
+        /// the inbound `(mail_id, root)` as `parent_mail` +
+        /// `inherited_root` — the trace observer sees N children
+        /// fanning out under the same parent edge (ADR-0080 §6,
+        /// issue iamacoffeepot/aether#723).
+        fn fanout<K: Kind>(&self, ctx: &mut NativeCtx<'_>, payload: &K) {
+            let Some(subs) = self.subscribers.get(&K::ID) else {
                 return;
             };
-            if subs.is_empty() {
-                return;
-            }
-            let bytes = encode(payload);
-            for mbox in subs {
-                self.mailer.push(Mail::new(*mbox, kind, bytes.clone(), 1));
-            }
+            ctx.fanout(subs.iter().copied(), payload);
         }
     }
 

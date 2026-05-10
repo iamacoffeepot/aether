@@ -15,6 +15,7 @@
 //! Builder→BuiltChassis→run path applies all the same).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,9 +27,8 @@ use aether_kinds::Tick;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    Mailer, SubstrateBoot,
-    chassis::frame_loop,
-    mail::{Mail, MailboxId},
+    Mailer, SubstrateBoot, chassis::frame_loop, mail::MailboxId,
+    runtime::trace::push_chassis_root_mail,
 };
 
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
@@ -125,6 +125,20 @@ impl DriverRunning for HeadlessTimerRunning {
             _hub,
         } = *self;
 
+        // ADR-0080 §6 chassis-root correlation counter (issue
+        // iamacoffeepot/aether#723). One per driver, symmetric with the
+        // per-actor counter on `NativeBinding`. Skipping 0 keeps the
+        // sentinel slot reserved.
+        let chassis_correlation = AtomicU64::new(1);
+        let next_correlation = || -> u64 {
+            let id = chassis_correlation.fetch_add(1, Ordering::Relaxed);
+            if id == 0 {
+                chassis_correlation.fetch_add(1, Ordering::Relaxed)
+            } else {
+                id
+            }
+        };
+
         let started = Instant::now();
         let mut frame: u64 = 0;
         let mut next_deadline = Instant::now() + tick_period;
@@ -141,14 +155,22 @@ impl DriverRunning for HeadlessTimerRunning {
             next_deadline = Instant::now() + tick_period;
 
             frame += 1;
-            queue.push(Mail::new(
+            push_chassis_root_mail(
+                &queue,
+                next_correlation(),
                 input_mailbox,
                 kind_tick,
                 encode_empty::<Tick>(),
                 1,
-            ));
+            );
             if frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
-                frame_loop::emit_frame_stats(&queue, kind_frame_stats, frame, 0);
+                frame_loop::emit_frame_stats(
+                    &queue,
+                    kind_frame_stats,
+                    frame,
+                    0,
+                    next_correlation(),
+                );
                 let elapsed = started.elapsed().as_secs_f64().max(0.001);
                 tracing::info!(
                     target: "aether_substrate::frame_loop",
