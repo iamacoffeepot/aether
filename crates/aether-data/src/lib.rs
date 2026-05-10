@@ -54,7 +54,7 @@ pub use hash::{
     mailbox_id_from_name,
 };
 pub use ids::{HandleId, KindId, MailboxId, tag_for_type_id, type_name_for_type_id};
-pub use mail::{ReplyTarget, ReplyTo};
+pub use mail::{MailId, ReplyTarget, ReplyTo};
 pub use schema::*;
 pub use tagged_id::{Tag, with_tag};
 pub use wire_id::{EngineId, SessionToken, Uuid};
