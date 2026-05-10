@@ -34,9 +34,9 @@ use std::time::{Duration, Instant};
 use aether_data::encode;
 use aether_kinds::FrameStats;
 
+use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
-use crate::mail::{Mail, MailboxId};
 use crate::runtime::lifecycle;
 
 /// Frame-stats emission cadence. Hardcoded for v1; an env knob is
@@ -122,16 +122,23 @@ pub fn emit_frame_stats(
     kind_frame_stats: aether_data::KindId,
     frame: u64,
     triangles: u64,
+    correlation_id: u64,
 ) {
     if !frame.is_multiple_of(LOG_EVERY_FRAMES) {
         return;
     }
-    queue.push(Mail::new(
+    // ADR-0080 §6: emit through the chassis-root helper so the broadcast
+    // carries observable lineage (issue iamacoffeepot/aether#723). The
+    // caller mints `correlation_id` from its own counter — symmetric with
+    // `push_chassis_root_mail`'s contract.
+    crate::runtime::trace::push_chassis_root_mail(
+        queue,
+        correlation_id,
         aether_data::mailbox_id_from_name(aether_kinds::HUB_BROADCAST_MAILBOX_NAME),
         kind_frame_stats,
         encode(&FrameStats { frame, triangles }),
         1,
-    ));
+    );
 }
 
 #[cfg(test)]
@@ -166,8 +173,8 @@ mod tests {
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
         let kind_id = FrameStats::ID;
-        emit_frame_stats(&mailer, kind_id, 1, 0);
-        emit_frame_stats(&mailer, kind_id, 119, 0);
+        emit_frame_stats(&mailer, kind_id, 1, 0, 1);
+        emit_frame_stats(&mailer, kind_id, 119, 0, 2);
         assert!(captured.read().unwrap().is_empty());
     }
 
@@ -191,7 +198,7 @@ mod tests {
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
 
-        emit_frame_stats(&mailer, FrameStats::ID, LOG_EVERY_FRAMES, 42);
+        emit_frame_stats(&mailer, FrameStats::ID, LOG_EVERY_FRAMES, 42, 1);
         let frames = captured.read().unwrap();
         assert_eq!(frames.len(), 1, "one delivery on the boundary");
         let stats: FrameStats = aether_data::decode(&frames[0]).expect("decode FrameStats");

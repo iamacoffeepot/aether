@@ -26,7 +26,7 @@ use aether_actor::mail::sync::WaitError;
 use aether_actor::{Actor, HandlesKind, MailCtx, Sender, Singleton};
 
 use crate::actor::native::mailbox::NativeActorMailbox;
-use aether_data::{Kind, MailId, mailbox_id_from_name};
+use aether_data::{Kind, MailId, MailboxId, mailbox_id_from_name};
 
 use crate::actor::monitor::MonitorHandle;
 use crate::actor::native::binding::NativeBinding;
@@ -299,6 +299,44 @@ impl<'a> NativeCtx<'a> {
             None
         } else {
             Some(self.in_flight_root)
+        }
+    }
+}
+
+impl<'a> NativeCtx<'a> {
+    /// Lineage-aware multicast: encode `payload` once, then push one copy
+    /// to every `recipient`. The inbound `(mail_id, root)` from this ctx
+    /// propagate as `parent_mail` + `inherited_root`, so each fanned-out
+    /// copy lands in the same causal chain as the inbound that triggered
+    /// the fanout — every subscriber-bound copy gets its own fresh
+    /// `MailId` keyed under the same parent edge.
+    ///
+    /// Recipients aren't known to share a receiver type at compile site
+    /// (subscribers register at runtime by mailbox id), so this takes
+    /// mailbox ids directly rather than the typed
+    /// `R: Actor + HandlesKind<K>` shape of [`Sender::send`]. The empty
+    /// recipient set is a fast no-op — encoding only runs when there's at
+    /// least one consumer.
+    ///
+    /// Issue iamacoffeepot/aether#723.
+    pub fn fanout<K: Kind>(
+        &mut self,
+        recipients: impl IntoIterator<Item = MailboxId>,
+        payload: &K,
+    ) {
+        let mut recipients = recipients.into_iter();
+        let Some(first) = recipients.next() else {
+            return;
+        };
+        let bytes = payload.encode_into_bytes();
+        let parent = self.outbound_parent();
+        let root = self.outbound_root();
+        let kind = K::ID.0;
+        self.binding
+            .send_mail_with_lineage(first.0, kind, &bytes, 1, parent, root);
+        for recipient in recipients {
+            self.binding
+                .send_mail_with_lineage(recipient.0, kind, &bytes, 1, parent, root);
         }
     }
 }

@@ -793,6 +793,93 @@ mod tests {
         );
     }
 
+    /// Issue iamacoffeepot/aether#723: chassis-source ticks are minted
+    /// via `push_chassis_root_mail`, and the input cap fanout
+    /// propagates `(root, parent_mail)` from the inbound through
+    /// `NativeCtx::fanout` so each subscriber-bound copy lands in the
+    /// same causal chain. Verified by registering a closure-bound
+    /// mailbox, subscribing it to ticks, advancing one tick, and
+    /// asserting the captured `MailDispatch` carries non-default root +
+    /// parent.
+    #[test]
+    fn tick_fanout_propagates_chassis_root_lineage() {
+        use aether_data::{Kind as DataKind, MailId};
+        use aether_kinds::SubscribeInput;
+        use aether_substrate::mail::registry::MailDispatch;
+        use std::sync::Mutex;
+
+        let mut tb = match TestBench::start_with_size(64, 48) {
+            Ok(tb) => tb,
+            Err(e) => {
+                eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
+                return;
+            }
+        };
+
+        // Register a closure mailbox that captures the lineage of every
+        // mail it receives. The Closure variant is what the input cap's
+        // `validate_subscriber_mailbox` accepts.
+        type CapturedRow = (MailId, MailId, Option<MailId>);
+        let captured: Arc<Mutex<Vec<CapturedRow>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_handler = Arc::clone(&captured);
+        let subscriber_mbox = tb.registry.register_closure(
+            "issue_723_test_subscriber",
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                captured_for_handler.lock().unwrap().push((
+                    dispatch.mail_id,
+                    dispatch.root,
+                    dispatch.parent_mail,
+                ));
+            }),
+        );
+
+        // Subscribe the closure mailbox to Tick. Goes through the input
+        // cap's on_subscribe handler.
+        tb.send_mail(
+            "aether.input",
+            &SubscribeInput {
+                kind: aether_kinds::Tick::ID,
+                mailbox: subscriber_mbox,
+            },
+        )
+        .expect("subscribe");
+
+        // Advance one tick. This calls `push_chassis_root_mail` for the
+        // tick (issue 723), which mints a fresh chassis-root MailId and
+        // fires `Sent`. The input cap's `on_tick` reads `ctx.in_flight_*`
+        // and threads them through `ctx.fanout` to every subscriber.
+        let _ = tb.advance(1).expect("advance");
+
+        let captured = captured.lock().unwrap();
+        assert!(
+            !captured.is_empty(),
+            "subscriber received no mail — fanout never reached it",
+        );
+        let (mail_id, root, parent) = captured[0];
+        // Issue 723 fix: each fanned-out copy gets its own MailId, but
+        // the root is inherited from the chassis-root tick and the
+        // parent_mail points at it. Pre-fix both would be MailId::NONE
+        // (orphaned: ctx.in_flight was NONE because the tick used
+        // bare push, AND the fanout used bare push too).
+        assert_ne!(
+            root,
+            MailId::NONE,
+            "fanned-out copy should inherit a non-default root"
+        );
+        assert!(
+            parent.is_some_and(|p| p != MailId::NONE),
+            "fanned-out copy should carry a non-default parent_mail (got {:?})",
+            parent,
+        );
+        // The fanned-out copy's own mail_id must be distinct from its
+        // parent — it's a child node in the trace tree.
+        assert_ne!(
+            mail_id,
+            parent.unwrap(),
+            "fanned-out mail_id should differ from parent (each fanout copy gets a fresh id)"
+        );
+    }
+
     /// Issue 607 Phase 3 verify: spawn an instanced actor through
     /// `TestBench::spawn_actor`, exercise `Subname::Counter` +
     /// `Subname::Named`, assert returned `MailboxId` matches the

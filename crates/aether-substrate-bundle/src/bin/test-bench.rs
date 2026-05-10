@@ -20,9 +20,7 @@ use aether_actor::Actor;
 use aether_capabilities::InputCapability;
 use aether_data::{encode_empty, mailbox_id_from_name};
 use aether_kinds::{AdvanceResult, CaptureFrameResult, Tick};
-use aether_substrate::{
-    Chassis, capture::CaptureQueue, chassis::frame_loop, mail::Mail, mail::MailboxId,
-};
+use aether_substrate::{Chassis, capture::CaptureQueue, chassis::frame_loop, mail::MailboxId};
 use aether_substrate_bundle::test_bench::{
     TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
     events::{self, ChassisEvent},
@@ -138,6 +136,11 @@ fn drive_events_loop(
     let frame_bound_pending = passive.frame_bound_pending();
     let started = Instant::now();
     let mut frame: u64 = 0;
+    // ADR-0080 §6 chassis-root correlation counter (issue
+    // iamacoffeepot/aether#723). Threaded through `run_frame` so the
+    // tick + frame-stats pushes here carry observable lineage like
+    // the desktop and headless drivers do.
+    let chassis_correlation = std::sync::atomic::AtomicU64::new(1);
 
     while let Ok(event) = events_rx.recv() {
         match event {
@@ -157,6 +160,7 @@ fn drive_events_loop(
                         &render_handles,
                         &frame_bound_pending,
                         &mut gpu,
+                        &chassis_correlation,
                     );
                 }
                 outbound.send_reply(
@@ -181,6 +185,7 @@ fn drive_events_loop(
                     &render_handles,
                     &frame_bound_pending,
                     &mut gpu,
+                    &chassis_correlation,
                 );
             }
         }
@@ -213,14 +218,26 @@ fn run_frame(
         Arc<std::sync::atomic::AtomicU64>,
     )],
     gpu: &mut Gpu,
+    chassis_correlation: &std::sync::atomic::AtomicU64,
 ) {
+    let next_correlation = || -> u64 {
+        let id = chassis_correlation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if id == 0 {
+            chassis_correlation.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        } else {
+            id
+        }
+    };
+
     if dispatch_tick {
-        queue.push(Mail::new(
+        aether_substrate::runtime::trace::push_chassis_root_mail(
+            queue,
+            next_correlation(),
             input_mailbox,
             kind_tick,
             encode_empty::<Tick>(),
             1,
-        ));
+        );
     }
     // ADR-0074 §Decision 5: render's inbox must quiesce before
     // submit so any DrawTriangle / aether.camera mail this frame is
@@ -247,7 +264,13 @@ fn run_frame(
 
     if frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
         let triangles = render_handles.triangles_rendered.load(Ordering::Relaxed);
-        frame_loop::emit_frame_stats(queue, kind_frame_stats, frame, triangles);
+        frame_loop::emit_frame_stats(
+            queue,
+            kind_frame_stats,
+            frame,
+            triangles,
+            next_correlation(),
+        );
         let elapsed = started.elapsed().as_secs_f64().max(0.001);
         tracing::info!(
             target: "aether_substrate::frame_loop",
