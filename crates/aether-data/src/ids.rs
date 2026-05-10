@@ -152,18 +152,23 @@ impl MailboxId {
     /// real mailbox.
     pub const NONE: MailboxId = MailboxId(0);
 
-    /// ADR-0080 §5 chassis-as-sentinel mailbox id. Aliases
-    /// [`Self::NONE`] — the same reserved-zero id that "no origin"
-    /// already uses. Mail addressed to `CHASSIS_MAILBOX_ID` is
-    /// routed by `Mailer::route_mail` through a chassis-internal
-    /// switch ahead of the registry lookup; today that switch
-    /// handles `Settled { root }` and signals the gate-site
-    /// notification map.
+    /// ADR-0080 §5 chassis-as-mailbox id. Derived from the reserved
+    /// name `"aether.chassis"` so it carries normal `Tag::Mailbox` bits
+    /// and round-trips through the tagged-string wire form like every
+    /// other addressable mailbox (issue iamacoffeepot/aether#725).
+    /// Pre-issue-725 this aliased [`Self::NONE`] (= 0); the dual-use of
+    /// the zero sentinel for both "uninit/absent" and "chassis sender"
+    /// broke the JSON round-trip for chassis-rooted `MailId`s — the
+    /// zero id has reserved tag bits that don't encode.
     ///
-    /// The symbolic name documents the intent at the call site;
-    /// addressing chassis-internal mail by the bare `MailboxId::NONE`
-    /// would read as a bug.
-    pub const CHASSIS_MAILBOX_ID: MailboxId = Self::NONE;
+    /// Mail addressed to `CHASSIS_MAILBOX_ID` is short-circuited by
+    /// `Mailer::route_mail` through a chassis-internal switch ahead of
+    /// the registry lookup; today that switch handles `Settled { root }`
+    /// and signals the gate-site notification map. The chassis is
+    /// **not** registered as a real mailbox — `Registry::insert` rejects
+    /// any name that hashes to this id so the routing path stays
+    /// unambiguous.
+    pub const CHASSIS_MAILBOX_ID: MailboxId = mailbox_id_from_name("aether.chassis");
 
     /// Compute the deterministic id for a mailbox name. Same algorithm
     /// the guest SDK uses on the component side — ids round-trip
@@ -249,5 +254,46 @@ impl Serialize for HandleId {
 impl<'de> Deserialize<'de> for HandleId {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         deserialize_id(d, Tag::Handle).map(HandleId)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue iamacoffeepot/aether#725: CHASSIS_MAILBOX_ID is a real
+    /// `Tag::Mailbox`-tagged id derived from `mailbox_id_from_name(
+    /// "aether.chassis")`, distinct from the zero `NONE` sentinel.
+    /// Verifies the const isn't accidentally aliased back to NONE and
+    /// that it tag-encodes to the standard `mbx-XXXX-XXXX-XXXX` shape
+    /// — the serde human-readable branch routes through this same
+    /// `tagged_id::encode` path, so round-trip correctness on the JSON
+    /// wire follows from this test plus the existing serde tests.
+    #[test]
+    fn chassis_mailbox_id_is_tagged_and_distinct_from_none() {
+        assert_ne!(MailboxId::CHASSIS_MAILBOX_ID, MailboxId::NONE);
+        assert_ne!(MailboxId::CHASSIS_MAILBOX_ID.0, 0);
+        assert_eq!(
+            tagged_id::tag_of(MailboxId::CHASSIS_MAILBOX_ID.0),
+            Some(Tag::Mailbox),
+        );
+        let encoded = tagged_id::encode(MailboxId::CHASSIS_MAILBOX_ID.0)
+            .expect("CHASSIS_MAILBOX_ID must tag-encode");
+        assert!(encoded.starts_with("mbx-"), "expected tagged: {encoded}");
+        let decoded = tagged_id::decode_with_tag(&encoded, Tag::Mailbox)
+            .expect("CHASSIS_MAILBOX_ID must round-trip via decode_with_tag");
+        assert_eq!(decoded, MailboxId::CHASSIS_MAILBOX_ID.0);
+    }
+
+    /// `MailboxId::NONE` keeps its zero-sentinel meaning. Its tag bits
+    /// are reserved so `tagged_id::encode` returns `None` — the serde
+    /// `serialize_id` helper then falls back to `serialize_u64` and
+    /// the wire form is a raw `0`. This is the structural difference
+    /// between "no sender / uninit" and "chassis sender".
+    #[test]
+    fn none_remains_untagged_zero_sentinel() {
+        assert_eq!(MailboxId::NONE.0, 0);
+        assert_eq!(tagged_id::tag_of(MailboxId::NONE.0), None);
+        assert!(tagged_id::encode(MailboxId::NONE.0).is_none());
     }
 }

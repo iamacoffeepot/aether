@@ -21,9 +21,11 @@ use crate::{EngineId, MailboxId, Schema, SessionToken};
 /// `correlation_id`. Exact-by-construction — no central minter to
 /// contend on, no hash to collide.
 ///
-/// `sender` is `MailboxId::NONE` for chassis-originated mail (the
-/// reserved sentinel for "no actor mailbox"). Per-actor mints use the
-/// owning actor's `MailboxId`.
+/// `sender` is [`MailboxId::CHASSIS_MAILBOX_ID`] for chassis-originated
+/// mail (the reserved name `"aether.chassis"`, issue iamacoffeepot/aether#725).
+/// Per-actor mints use the owning actor's `MailboxId`. The
+/// [`MailId::NONE`] sentinel below carries `MailboxId::NONE` instead —
+/// "no inbound mail" is structurally distinct from "chassis as sender".
 ///
 /// Serde-serializable so PR 2's `TraceEvent` (and its postcard-shaped
 /// `BatchedTraceEvents` envelope) can carry `MailId` over the in-
