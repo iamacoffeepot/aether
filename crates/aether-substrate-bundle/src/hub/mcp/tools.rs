@@ -16,7 +16,10 @@ use aether_data::tagged_id::{self, Tag};
 use aether_kinds::{
     EnvVar, Spawn as WireSpawn, SpawnResult as WireSpawnResult, Terminate as WireTerminate,
     TerminateResult as WireTerminateResult,
-    trace::{DescribeTree, DescribeTreeResult, TRACE_OBSERVER_MAILBOX_NAME},
+    trace::{
+        DescribeTree, DescribeTreeResult, ListActiveRoots, ListActiveRootsResult,
+        TRACE_OBSERVER_MAILBOX_NAME,
+    },
 };
 use base64::Engine as _;
 use rmcp::{
@@ -36,10 +39,10 @@ use crate::hub::session::SessionHandle;
 use super::args::{
     CaptureFrameArgs, CaptureFrameResultWire, DescribeComponentArgs, DescribeComponentResponse,
     DescribeKindsArgs, DescribeTreeArgs, EngineInfo, EngineLogEntry, EngineLogsArgs,
-    EngineLogsResponse, LoadComponentArgs, LoadComponentResponse, LoadResultWire, MailSpec,
-    MailStatus, ReceiveMailArgs, ReceivedMail, ReplaceComponentArgs, ReplaceResultWire,
-    SendMailArgs, SpawnResult, SpawnSubstrateArgs, TerminateResult, TerminateSubstrateArgs,
-    log_level_to_str,
+    EngineLogsResponse, ListActiveRootsArgs, LoadComponentArgs, LoadComponentResponse,
+    LoadResultWire, MailSpec, MailStatus, ReceiveMailArgs, ReceivedMail, ReplaceComponentArgs,
+    ReplaceResultWire, SendMailArgs, SpawnResult, SpawnSubstrateArgs, TerminateResult,
+    TerminateSubstrateArgs, log_level_to_str,
 };
 use super::codecs::{decode_inbound, deliver_one, encode_capture_bundle};
 use super::{Hub, HubState};
@@ -947,6 +950,85 @@ impl Hub {
         // their human-readable serde branches emit tagged strings for
         // ids and a u64 for `Nanos`, so JSON serialization is a single
         // shot with no manual conversion.
+        serde_json::to_string(&result).map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    #[tool(
+        description = "List recent root mails the substrate's `aether.trace` observer is tracking (issue 718, ADR-0080 Phase 2). Surfaces one summary per active root: `root` (composite `{ sender, correlation_id }`), `kind` (tagged-string id of the root mail's payload kind), `sender` and `recipient` (tagged-string mailbox ids), `t_sent` (nanoseconds since substrate boot), and `in_flight` (count of mails in this chain currently between `Sent` and `Finished`). Sorted desc by `t_sent` so the most recent roots come first. `since_ms` filters by the root's originating send time (default 60_000); `max` caps the reply length (default 50, hard cap 1000). Use this to discover root ids the agent can hand to `describe_tree` for a full subtree view, or to spot-check whether a chain has settled by watching `in_flight` drop to zero. Default timeout 5000ms; clamped to 30000."
+    )]
+    pub(super) async fn list_active_roots(
+        &self,
+        Parameters(args): Parameters<ListActiveRootsArgs>,
+    ) -> Result<String, McpError> {
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+        if self.state.engines.get(&id).is_none() {
+            return Err(McpError::invalid_params(
+                format!("unknown engine_id {}", args.engine_id),
+                None,
+            ));
+        }
+
+        // ListActiveRoots's two fields are both `Option<u32>` — the
+        // schema-driven encoder accepts JSON `null` for None and the
+        // raw number for Some, so we serialize the agent's args
+        // straight through.
+        let request_params = serde_json::json!({
+            "since_ms": args.since_ms,
+            "max": args.max,
+        });
+
+        let result_kind = <ListActiveRootsResult as Kind>::NAME.to_owned();
+        let (_guard, rx) = self
+            .session
+            .replies
+            .register(result_kind.clone())
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    "a list_active_roots is already in flight on this session; wait for it to complete"
+                        .to_owned(),
+                    None,
+                )
+            })?;
+
+        let spec = MailSpec {
+            engine_id: args.engine_id.clone(),
+            recipient_name: TRACE_OBSERVER_MAILBOX_NAME.to_owned(),
+            kind_name: <ListActiveRoots as Kind>::NAME.to_owned(),
+            params: Some(request_params),
+            count: 1,
+        };
+        deliver_one(spec, &self.state.engines, self.session.token)
+            .await
+            .map_err(|e| McpError::internal_error(format!("send failed: {e}"), None))?;
+
+        let wait = args
+            .timeout_ms
+            .map(|ms| Duration::from_millis(ms as u64).min(MAX_REPLY_TIMEOUT))
+            .unwrap_or(DEFAULT_REPLY_TIMEOUT);
+        let queued = match timeout(wait, rx).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(_)) => {
+                return Err(McpError::internal_error(
+                    "list_active_roots reply channel closed before reply arrived".to_owned(),
+                    None,
+                ));
+            }
+            Err(_) => {
+                return Err(McpError::internal_error(
+                    format!(
+                        "timed out after {}ms waiting for {result_kind}",
+                        wait.as_millis()
+                    ),
+                    None,
+                ));
+            }
+        };
+
+        let result: ListActiveRootsResult = postcard::from_bytes(&queued.payload)
+            .map_err(|e| McpError::internal_error(format!("decode reply: {e}"), None))?;
         serde_json::to_string(&result).map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 

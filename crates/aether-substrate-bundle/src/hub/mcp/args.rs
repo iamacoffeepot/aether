@@ -474,6 +474,27 @@ pub struct MailIdWire {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListActiveRootsArgs {
+    /// Hub-assigned engine UUID as a string (from `list_engines`).
+    pub engine_id: String,
+    /// Filter to roots whose originating `Sent` event was emitted no
+    /// more than this many milliseconds ago. Defaults to 60_000 (1
+    /// minute). Roots older than the window aren't returned even if
+    /// they haven't been evicted yet.
+    #[serde(default)]
+    pub since_ms: Option<u32>,
+    /// Cap the reply length. Defaults to 50; clamped to 1000 by the
+    /// observer. Sorted desc by `t_sent` so the most recent roots
+    /// always land in the truncated head.
+    #[serde(default)]
+    pub max: Option<u32>,
+    /// Maximum time to wait for the substrate's reply, in
+    /// milliseconds. Defaults to 5000. Clamped to 30000.
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeTreeArgs {
     /// Hub-assigned engine UUID as a string (from `list_engines`).
     pub engine_id: String,
