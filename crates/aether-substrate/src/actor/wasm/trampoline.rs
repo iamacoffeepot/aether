@@ -248,8 +248,17 @@ impl NativeActor for WasmTrampoline {
             );
             return true;
         };
+        // Issue iamacoffeepot/aether#722: carry the inbound's lineage
+        // through to the synthetic `Mail`. `Component::deliver` reads
+        // `mail.mail_id` and `mail.root` to populate `ComponentCtx`'s
+        // in-flight cells, so any guest-triggered `send_mail_p32` /
+        // `reply_mail_p32` stamps `parent_mail = Some(env.mail_id)` and
+        // inherits the chain `root`. Without this, the trampoline's
+        // wrapped Mail defaults to `MailId::NONE` and the guest's
+        // outbound looks like a fresh root.
         let mail = Mail::new(self.mailbox, env.kind, env.payload.clone(), env.count)
-            .with_reply_to(env.sender);
+            .with_reply_to(env.sender)
+            .with_lineage(env.mail_id, env.root, env.parent_mail);
         if let Err(e) = component.deliver(&mail) {
             // ADR-0063 fail-fast: a wasm trap (or host-fn error
             // returned through `Component::deliver`) kills the

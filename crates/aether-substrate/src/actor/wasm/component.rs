@@ -19,7 +19,7 @@ use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry, ReplyTable};
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailboxEntry, Registry};
-use crate::mail::{Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};
+use crate::mail::{Mail, MailId, MailKind, MailboxId, ReplyTarget, ReplyTo};
 
 const MAIL_OFFSET: u32 = 1024;
 
@@ -106,6 +106,16 @@ pub struct ComponentCtx {
     /// threaded (ADR-0038 actor-per-component), so the counter is
     /// never touched from multiple threads.
     correlation_counter: Cell<u64>,
+    /// ADR-0080 §5 in-flight inbound `MailId`. Set by
+    /// [`Component::deliver`] before invoking the guest's
+    /// `receive_p32` shim so any [`ComponentCtx::send`] the guest
+    /// triggers stamps `parent_mail = Some(in_flight_mail_id)` and
+    /// `inherited_root = Some(in_flight_root)`. Cleared back to
+    /// [`MailId::NONE`] when `receive_p32` returns. Issue
+    /// iamacoffeepot/aether#722.
+    in_flight_mail_id: Cell<MailId>,
+    /// ADR-0080 §5 in-flight inbound `root`. See `in_flight_mail_id`.
+    in_flight_root: Cell<MailId>,
 }
 
 impl ComponentCtx {
@@ -131,6 +141,8 @@ impl ComponentCtx {
             init_failure: None,
             binding: None,
             correlation_counter: Cell::new(1),
+            in_flight_mail_id: Cell::new(MailId::NONE),
+            in_flight_root: Cell::new(MailId::NONE),
         }
     }
 
@@ -181,6 +193,32 @@ impl ComponentCtx {
         let correlation = self.mint_correlation();
         let reply_to = ReplyTo::with_correlation(ReplyTarget::Component(self.sender), correlation);
 
+        // ADR-0080 §1 (issue iamacoffeepot/aether#722): mint the
+        // outbound's MailId from the same correlation that drives
+        // reply routing — symmetric with `NativeBinding::send_mail_with_lineage`,
+        // which uses one counter for both. The in-flight cells were
+        // populated by `Component::deliver` for guest-triggered sends
+        // (and remain `NONE` for substrate-internal call sites that
+        // bypass `deliver`, e.g. test fixtures).
+        let mail_id = MailId::new(self.sender, correlation);
+        let parent_mail = match self.in_flight_mail_id.get() {
+            id if id == MailId::NONE => None,
+            id => Some(id),
+        };
+        let inherited_root = match self.in_flight_root.get() {
+            id if id == MailId::NONE => None,
+            id => Some(id),
+        };
+        let root = inherited_root.unwrap_or(mail_id);
+        crate::runtime::trace::record_sent(
+            mail_id,
+            root,
+            parent_mail,
+            self.sender,
+            recipient,
+            kind,
+        );
+
         if let Some(MailboxEntry::Closure(handler)) = self.registry.entry(recipient) {
             let kind_name = self.registry.kind_name(kind).unwrap_or_default();
             // Component-originated mail: the sender is this ctx's
@@ -191,13 +229,6 @@ impl ComponentCtx {
             // can route `*Result` back to this component via
             // `Mailer::send_reply`.
             let origin = self.registry.mailbox_name(self.sender);
-            // ADR-0080 §1: PR 2 plumbs the lineage triple through the
-            // `MailboxHandler` signature; producer-side population
-            // (mint MailId from the per-actor counter, inherit `root`
-            // from the component's in-flight context) lands in PR 3
-            // alongside the chassis sentinel and per-handler ctx
-            // accessors. PR 2 stamps `MailId::NONE` here so the
-            // envelope shape is honest while population catches up.
             handler(crate::mail::registry::MailDispatch {
                 kind,
                 kind_name: &kind_name,
@@ -205,25 +236,43 @@ impl ComponentCtx {
                 sender: reply_to,
                 payload: &payload,
                 count,
-                mail_id: crate::mail::MailId::NONE,
-                root: crate::mail::MailId::NONE,
-                parent_mail: None,
+                mail_id,
+                root,
+                parent_mail,
             });
             return;
         }
 
-        // Component / dropped / unknown all funnel through `Mailer::push`:
-        // - Component (ADR-0017): mail enters the recipient's inbox with
-        //   `reply_to.target = Component(self.sender)` so
-        //   `Component::deliver` can allocate a Component-variant
-        //   `ReplyEntry`.
+        // Dropped / unknown both funnel through `Mailer::push`:
         // - Dropped: warn-drops in `route_mail`.
         // - Unknown (ADR-0037): bubbles up to the hub-substrate via
         //   `MailToHubSubstrate`; the `source_mailbox_id` it carries is
         //   recovered from `reply_to.target` when it's a Component
         //   variant (warn-drops otherwise).
-        self.queue
-            .push(Mail::new(recipient, kind, payload, count).with_reply_to(reply_to));
+        self.queue.push(
+            Mail::new(recipient, kind, payload, count)
+                .with_reply_to(reply_to)
+                .with_lineage(mail_id, root, parent_mail),
+        );
+    }
+
+    /// Set the in-flight `(mail_id, root)` context the next
+    /// [`Self::send`] will read for `parent_mail` + `inherited_root`.
+    /// Called by [`Component::deliver`] right before the guest's
+    /// `receive_p32` shim runs. Pre-issue-722 `ComponentCtx::send`
+    /// stamped [`MailId::NONE`]; setting these cells ahead of the call
+    /// makes guest-triggered sends visible to the trace observer with
+    /// the correct parent edge.
+    pub(crate) fn set_in_flight(&self, mail_id: MailId, root: MailId) {
+        self.in_flight_mail_id.set(mail_id);
+        self.in_flight_root.set(root);
+    }
+
+    /// Clear the in-flight context after the guest's `receive_p32`
+    /// shim returns. Symmetric with [`Self::set_in_flight`].
+    pub(crate) fn clear_in_flight(&self) {
+        self.in_flight_mail_id.set(MailId::NONE);
+        self.in_flight_root.set(MailId::NONE);
     }
 }
 
@@ -455,10 +504,21 @@ impl Component {
         self.memory
             .write(&mut self.store, MAIL_OFFSET as usize, &mail.payload)?;
         let byte_len = mail.payload.len() as u32;
-        self.receive.call(
+        // ADR-0080 §5 (issue iamacoffeepot/aether#722): publish the
+        // inbound's lineage on `ComponentCtx` so any guest-triggered
+        // `send_mail_p32` / `reply_mail_p32` host fn — both routed
+        // through `ComponentCtx::send` — can stamp the outgoing mail
+        // with `parent_mail = Some(inbound.mail_id)` and inherit the
+        // chain `root`. Cleared after the call so a future cap-side
+        // call site that bypasses `deliver` (today: only test
+        // fixtures) doesn't accidentally pick up stale lineage.
+        self.store.data().set_in_flight(mail.mail_id, mail.root);
+        let result = self.receive.call(
             &mut self.store,
             (mail.kind.0, MAIL_OFFSET, byte_len, mail.count, handle),
-        )
+        );
+        self.store.data().clear_in_flight();
+        result
     }
 
     /// Issue 584 Phase 2b (ADR-0079 amended): pre-shutdown mail-allowed
@@ -1096,5 +1156,135 @@ mod tests {
             outbound_rx.try_recv().is_err(),
             "no bubble-up without a wired outbound"
         );
+    }
+
+    /// Issue iamacoffeepot/aether#722: when `Component::deliver` populates
+    /// `ComponentCtx::set_in_flight`, any subsequent `ctx.send` stamps
+    /// `parent_mail = Some(in_flight_mail_id)` and inherits the chain
+    /// `root` — closing the wasm-side gap that previously orphaned every
+    /// guest-triggered send. This test exercises the closure-handler
+    /// branch: register a sink that captures the inbound `MailDispatch`
+    /// fields, set in-flight on the ctx, send to the sink, and assert
+    /// the captured lineage matches.
+    #[test]
+    fn send_propagates_in_flight_lineage_on_closure_branch() {
+        use std::sync::Mutex;
+
+        type Captured = (
+            crate::mail::MailId,
+            crate::mail::MailId,
+            Option<crate::mail::MailId>,
+        );
+        let captured: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_handler = Arc::clone(&captured);
+
+        let registry = Arc::new(Registry::new());
+        let sink_id = registry
+            .try_register_closure(
+                "issue_722_sink",
+                Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
+                    captured_for_handler.lock().unwrap().push((
+                        dispatch.mail_id,
+                        dispatch.root,
+                        dispatch.parent_mail,
+                    ));
+                }),
+            )
+            .expect("register sink");
+
+        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let sender = MailboxId(aether_data::with_tag(
+            aether_data::tagged_id::Tag::Mailbox,
+            0x42,
+        ));
+        let ctx = ComponentCtx::new(
+            sender,
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            HubOutbound::disconnected(),
+        );
+
+        // Inbound lineage: the chassis-driven tick chain we're "in"
+        // when the wasm guest's on_tick handler fires its outbound.
+        let inbound_root = crate::mail::MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 7);
+        let inbound_mail = crate::mail::MailId::new(
+            MailboxId(aether_data::with_tag(
+                aether_data::tagged_id::Tag::Mailbox,
+                0x99,
+            )),
+            42,
+        );
+        ctx.set_in_flight(inbound_mail, inbound_root);
+
+        ctx.send(sink_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1);
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1, "sink should have been called once");
+        let (mail_id, root, parent) = captured[0];
+        assert_eq!(
+            parent,
+            Some(inbound_mail),
+            "parent_mail must point at inbound"
+        );
+        assert_eq!(root, inbound_root, "root must inherit from inbound chain");
+        // The minted mail_id is fresh — sender = self, correlation
+        // from the per-component counter (starts at 1 for the first send).
+        assert_eq!(mail_id.sender, sender);
+        assert_ne!(mail_id, inbound_mail, "outbound mail_id must be fresh");
+    }
+
+    /// Companion: with no in-flight context (chassis-bypass / test
+    /// fixture), `ctx.send` mints a fresh root chain — `parent_mail`
+    /// is `None` and `root == mail_id`. This is the same shape
+    /// `NativeBinding::send_mail_with_lineage(None, None)` produces.
+    #[test]
+    fn send_without_in_flight_mints_fresh_root_chain() {
+        use std::sync::Mutex;
+
+        type Captured = (
+            crate::mail::MailId,
+            crate::mail::MailId,
+            Option<crate::mail::MailId>,
+        );
+        let captured: Arc<Mutex<Vec<Captured>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_handler = Arc::clone(&captured);
+
+        let registry = Arc::new(Registry::new());
+        let sink_id = registry
+            .try_register_closure(
+                "issue_722_fresh_root_sink",
+                Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
+                    captured_for_handler.lock().unwrap().push((
+                        dispatch.mail_id,
+                        dispatch.root,
+                        dispatch.parent_mail,
+                    ));
+                }),
+            )
+            .expect("register sink");
+
+        let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let sender = MailboxId(aether_data::with_tag(
+            aether_data::tagged_id::Tag::Mailbox,
+            0x33,
+        ));
+        let ctx = ComponentCtx::new(
+            sender,
+            Arc::clone(&registry),
+            Arc::clone(&mailer),
+            HubOutbound::disconnected(),
+        );
+        // No `set_in_flight` call.
+
+        ctx.send(sink_id, aether_data::KindId(0xCAFE), vec![], 1);
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let (mail_id, root, parent) = captured[0];
+        assert!(parent.is_none(), "no inbound -> no parent edge");
+        assert_eq!(root, mail_id, "fresh chain: root == mail_id");
+        assert_eq!(mail_id.sender, sender);
     }
 }
