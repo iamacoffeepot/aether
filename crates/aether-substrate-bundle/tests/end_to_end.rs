@@ -15,9 +15,9 @@
 use std::path::Path;
 
 use aether_actor::Actor;
-use aether_capabilities::{ComponentHostCapability, InputCapability};
+use aether_capabilities::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{LoadComponent, LoadResult, SubscribeInput, SubscribeInputResult, Tick};
+use aether_kinds::{LoadComponent, LoadResult};
 use aether_scenario::test_helpers::require_runtime;
 use aether_substrate_bundle::test_bench::TestBench;
 use aether_test_fixture_probe::TickObserved;
@@ -41,41 +41,6 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
     }
 }
 
-/// The probe self-subscribes to `Tick` from its `wire` handler via
-/// fire-and-forget mail; `LoadResult` returns before that mail has
-/// necessarily been drained by `InputCapability`'s actor. Mailing a
-/// redundant `SubscribeInput` from the test side and awaiting its
-/// reply gives a deterministic happens-before: `InputCapability` is
-/// single-threaded mpsc-FIFO, so once our reply arrives the probe's
-/// prior wire-time subscribe has been processed too. The set is a
-/// `BTreeSet` so the duplicate insert is a no-op.
-fn await_tick_subscribed(bench: &mut TestBench, mailbox: MailboxId) {
-    let r: SubscribeInputResult = bench
-        .send_and_await_reply(
-            InputCapability::NAMESPACE,
-            &SubscribeInput {
-                kind: Tick::ID,
-                mailbox,
-            },
-        )
-        .expect("await redundant subscribe reply");
-    match r {
-        SubscribeInputResult::Ok => {}
-        SubscribeInputResult::Err { error } => panic!("redundant subscribe failed: {error}"),
-    }
-}
-
-/// Run one no-tick `capture()` after a measurement window so the
-/// last advanced frame's trampoline broadcast (which can still be
-/// in `BroadcastCapability`'s inbox if `wait_instanced_quiesce`
-/// gave up early under heavy parallel-test CPU pressure) lands in
-/// `observed_kinds` before we read the count. Capture runs a full
-/// frame with `dispatch_tick = false`, so no new `tick_observed`
-/// is produced — the count delta stays at exactly N.
-fn settle_observations(bench: &mut TestBench) {
-    let _png = bench.capture().expect("settle capture");
-}
-
 /// Tick fanout reaches a freshly-loaded wasm component, the
 /// component's `ctx.actor::<BroadcastCapability>().send(...)` host
 /// call lands a kind-tagged broadcast on the bench's loopback, and
@@ -88,12 +53,10 @@ fn tick_roundtrip_component_to_sink() {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    let mbox = load_probe(&mut bench, &wasm_path);
-    await_tick_subscribed(&mut bench, mbox);
+    let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 
     bench.advance(3).expect("advance 3");
-    settle_observations(&mut bench);
     let delta = bench.count_observed(TickObserved::NAME) - baseline;
     assert_eq!(
         delta,
@@ -118,12 +81,10 @@ fn batched_ticks_preserve_per_mailbox_count() {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    let mbox = load_probe(&mut bench, &wasm_path);
-    await_tick_subscribed(&mut bench, mbox);
+    let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 
     bench.advance(N).expect("advance N");
-    settle_observations(&mut bench);
     let delta = bench.count_observed(TickObserved::NAME) - baseline;
     assert_eq!(
         delta,

@@ -13,8 +13,8 @@ use aether_actor::Actor;
 use aether_capabilities::{ComponentHostCapability, InputCapability};
 use aether_data::{Kind, KindId, MailboxId};
 use aether_kinds::{
-    DropComponent, DropResult, LoadComponent, LoadResult, SubscribeInput, SubscribeInputResult,
-    Tick, UnsubscribeInput,
+    DropComponent, DropResult, LoadComponent, LoadResult, SubscribeInputResult, Tick,
+    UnsubscribeInput,
 };
 use aether_scenario::test_helpers::require_runtime;
 use aether_substrate_bundle::test_bench::TestBench;
@@ -63,41 +63,6 @@ fn drop_component(bench: &mut TestBench, mailbox_id: MailboxId) {
     }
 }
 
-/// The probe self-subscribes to `Tick` from its `wire` handler via
-/// fire-and-forget mail; `LoadResult` returns before that mail has
-/// necessarily been drained by `InputCapability`'s actor. Mailing a
-/// redundant `SubscribeInput` from the test side and awaiting its
-/// reply gives a deterministic happens-before: `InputCapability` is
-/// single-threaded mpsc-FIFO, so once our reply arrives the probe's
-/// prior wire-time subscribe has been processed too. The set is a
-/// `BTreeSet` so the duplicate insert is a no-op.
-fn await_tick_subscribed(bench: &mut TestBench, mailbox: MailboxId) {
-    let r: SubscribeInputResult = bench
-        .send_and_await_reply(
-            InputCapability::NAMESPACE,
-            &SubscribeInput {
-                kind: Tick::ID,
-                mailbox,
-            },
-        )
-        .expect("await redundant subscribe reply");
-    match r {
-        SubscribeInputResult::Ok => {}
-        SubscribeInputResult::Err { error } => panic!("redundant subscribe failed: {error}"),
-    }
-}
-
-/// Run one no-tick `capture()` after a measurement window so the
-/// last advanced frame's trampoline broadcast (which can still be
-/// in `BroadcastCapability`'s inbox if `wait_instanced_quiesce`
-/// gave up early under heavy parallel-test CPU pressure) lands in
-/// `observed_kinds` before we read the count. Capture runs a full
-/// frame with `dispatch_tick = false`, so no new `tick_observed`
-/// is produced.
-fn settle_observations(bench: &mut TestBench) {
-    let _png = bench.capture().expect("settle capture");
-}
-
 /// No probes loaded ⇒ no Tick subscribers ⇒ advance generates zero
 /// `tick_observed` broadcasts. Confirms the input fanout is gated on
 /// the subscriber set rather than firing unconditionally.
@@ -108,7 +73,6 @@ fn empty_subscribers_means_no_delivery() {
     }
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     bench.advance(2).expect("advance 2");
-    settle_observations(&mut bench);
     assert_eq!(
         bench.count_observed(TickObserved::NAME),
         0,
@@ -124,12 +88,10 @@ fn subscribed_component_receives_published_ticks() {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    let mbox = load_probe_named(&mut bench, &wasm_path, "listener");
-    await_tick_subscribed(&mut bench, mbox);
+    let _mbox = load_probe_named(&mut bench, &wasm_path, "listener");
     let baseline = bench.count_observed(TickObserved::NAME);
 
     bench.advance(3).expect("advance 3");
-    settle_observations(&mut bench);
     let delta = bench.count_observed(TickObserved::NAME) - baseline;
     assert_eq!(
         delta,
@@ -148,14 +110,11 @@ fn two_subscribers_each_receive_every_tick() {
         return;
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    let mbox_a = load_probe_named(&mut bench, &wasm_path, "a");
-    let mbox_b = load_probe_named(&mut bench, &wasm_path, "b");
-    await_tick_subscribed(&mut bench, mbox_a);
-    await_tick_subscribed(&mut bench, mbox_b);
+    let _mbox_a = load_probe_named(&mut bench, &wasm_path, "a");
+    let _mbox_b = load_probe_named(&mut bench, &wasm_path, "b");
     let baseline = bench.count_observed(TickObserved::NAME);
 
     bench.advance(2).expect("advance 2");
-    settle_observations(&mut bench);
     let delta = bench.count_observed(TickObserved::NAME) - baseline;
     assert_eq!(
         delta,
@@ -175,11 +134,9 @@ fn unsubscribe_stops_delivery() {
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let mbox = load_probe_named(&mut bench, &wasm_path, "listener");
-    await_tick_subscribed(&mut bench, mbox);
     let baseline = bench.count_observed(TickObserved::NAME);
 
     bench.advance(1).expect("pre-unsubscribe advance");
-    settle_observations(&mut bench);
     assert_eq!(
         bench.count_observed(TickObserved::NAME) - baseline,
         1,
@@ -190,7 +147,6 @@ fn unsubscribe_stops_delivery() {
 
     unsubscribe(&mut bench, Tick::ID, mbox);
     bench.advance(2).expect("post-unsubscribe advance");
-    settle_observations(&mut bench);
     assert_eq!(
         bench.count_observed(TickObserved::NAME),
         pre_unsub,
@@ -210,11 +166,9 @@ fn drop_clears_subscriptions() {
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let mbox = load_probe_named(&mut bench, &wasm_path, "victim");
-    await_tick_subscribed(&mut bench, mbox);
     let baseline = bench.count_observed(TickObserved::NAME);
 
     bench.advance(1).expect("pre-drop advance");
-    settle_observations(&mut bench);
     assert_eq!(
         bench.count_observed(TickObserved::NAME) - baseline,
         1,
@@ -225,7 +179,6 @@ fn drop_clears_subscriptions() {
 
     drop_component(&mut bench, mbox);
     bench.advance(2).expect("post-drop advance");
-    settle_observations(&mut bench);
     assert_eq!(
         bench.count_observed(TickObserved::NAME),
         pre_drop,
