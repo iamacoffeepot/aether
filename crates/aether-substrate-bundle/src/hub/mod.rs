@@ -48,7 +48,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_codec::frame::{read_frame, write_frame};
-use aether_data::{KindDescriptor, KindId, MailboxId};
+use aether_data::{KindDescriptor, KindId, MailboxDescriptor, MailboxId};
 use aether_substrate::{
     EgressBackend, HubOutbound, LogEntry as SubstrateLogEntry, LogLevel as SubstrateLogLevel, Mail,
     Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,
@@ -274,6 +274,10 @@ impl EgressBackend for HubProtocolBackend {
         self.send(EngineToHub::KindsChanged(descriptors));
     }
 
+    fn egress_mailboxes_changed(&self, descriptors: Vec<MailboxDescriptor>) {
+        self.send(EngineToHub::MailboxesChanged(descriptors));
+    }
+
     fn egress_log_batch(&self, entries: Vec<SubstrateLogEntry>) {
         let wire: Vec<HubLogEntry> = entries.into_iter().map(Self::entry_to_wire).collect();
         self.send(EngineToHub::LogBatch(wire));
@@ -310,11 +314,17 @@ impl HubClient {
     ///
     /// `outbound` is populated on success so any sink registered
     /// against it starts forwarding immediately.
+    // Wire-shaped fan-in (addr + name + version + kinds + mailboxes +
+    // 3 substrate handles) — clippy reads as too-many but every arg is
+    // a distinct shape with no obvious grouping; bundling would just
+    // be artificial nesting.
+    #[allow(clippy::too_many_arguments)]
     pub fn connect<A: ToSocketAddrs>(
         addr: A,
         name: impl Into<String>,
         version: impl Into<String>,
         kinds: Vec<KindDescriptor>,
+        mailboxes: Vec<MailboxDescriptor>,
         registry: Arc<Registry>,
         queue: Arc<Mailer>,
         outbound: Arc<HubOutbound>,
@@ -326,6 +336,7 @@ impl HubClient {
             started_unix: unix_now(),
             version: version.into(),
             kinds,
+            mailboxes,
         });
         write_frame(&mut stream, &hello).map_err(io::Error::other)?;
 
@@ -488,6 +499,7 @@ pub fn connect_hub_client(
         &boot.name,
         &boot.version,
         boot.boot_descriptors.clone(),
+        boot.registry.list_mailbox_descriptors(),
         Arc::clone(&boot.registry),
         Arc::clone(&boot.queue),
         Arc::clone(&boot.outbound),

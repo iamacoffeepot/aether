@@ -249,10 +249,17 @@ mod native {
                     .push(Mail::new(mailbox_id, kind, cfg_payload, 1));
             }
 
-            // 7. Announce the new kind vocabulary upstream so the hub
-            // (and attached MCP sessions) see the post-load surface.
+            // 7. Announce the new kind vocabulary AND mailbox inventory
+            // upstream so the hub (and attached MCP sessions) see the
+            // post-load surface. Mailboxes ship symmetrically with
+            // kinds (issue iamacoffeepot/aether#730) — every load adds
+            // exactly one trampoline mailbox at
+            // `aether.component.trampoline:NAME`, and the snapshot
+            // gives the hub the freshly-published name + category.
             self.outbound
                 .egress_kinds_changed(self.registry.list_kind_descriptors());
+            self.outbound
+                .egress_mailboxes_changed(self.registry.list_mailbox_descriptors());
 
             LoadResult::Ok {
                 mailbox_id,

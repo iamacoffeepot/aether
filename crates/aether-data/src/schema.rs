@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::ids::KindId;
+use crate::ids::{KindId, MailboxId};
 
 /// One entry in `Hello.kinds`: a kind-name plus its schema. The hub
 /// uses the schema to encode agent-supplied params into the exact
@@ -23,6 +23,54 @@ use crate::ids::KindId;
 pub struct KindDescriptor {
     pub name: String,
     pub schema: SchemaType,
+}
+
+/// One entry in `Hello.mailboxes` (and the `MailboxesChanged` frame).
+/// Like [`KindDescriptor`] for kinds: an authoritative snapshot of the
+/// substrate's mailbox table, shipped to the hub at handshake and
+/// re-shipped after each runtime mailbox add. The hub caches the list
+/// and uses `(name, category)` to render type-prefixed labels in
+/// trace tool output (issue iamacoffeepot/aether#731).
+///
+/// `id` is the deterministic [`MailboxId`] hash of `name` (ADR-0029);
+/// shipped explicitly so the hub doesn't have to re-hash and so a
+/// future categorisation change can't drift the id space.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxDescriptor {
+    pub id: MailboxId,
+    pub name: String,
+    /// Optional coarse classification of the mailbox's role. `None`
+    /// means "uncategorised registered mailbox" — the hub falls back
+    /// to the raw tagged id with no type prefix.
+    pub category: Option<MailboxCategory>,
+}
+
+/// Coarse classification of a mailbox's role for downstream
+/// presentation (the trace tool's type prefixes per issue 731).
+/// Derived from the mailbox name at snapshot time; the substrate
+/// stores no per-mailbox category state.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MailboxCategory {
+    /// A chassis cap or framework-level actor (`aether.input`,
+    /// `aether.render`, `aether.audio`, `aether.fs`, `aether.log`,
+    /// `aether.handle`, `aether.component`, `aether.diagnostics`,
+    /// etc.). Renders as `actor:NAME`.
+    Actor,
+    /// A wasm-component trampoline. Full name has the form
+    /// `aether.component.trampoline:NAME`. Renders as
+    /// `actor:NAME` too — the agent thinks of trampolines as just
+    /// another actor; the variant survives so the hub can tell them
+    /// apart for filtering / coloring if needed.
+    Trampoline,
+    /// The hub broadcast fan-out sink (`hub.claude.broadcast`).
+    /// Renders as `sink:NAME`.
+    BroadcastSink,
+    /// The chassis-router short-circuit sentinel (`aether.chassis`).
+    /// Reachable as a routing target id but never registered with a
+    /// real handler — the snapshot includes a synthetic entry so the
+    /// hub can resolve trace `sender` fields that name the chassis.
+    /// Renders as `chassis:NAME`.
+    ChassisSentinel,
 }
 
 /// ADR-0019 schema type vocabulary. Describes the structure of a mail

@@ -19,7 +19,7 @@
 //! [`read_frame`]: aether_codec::frame::read_frame
 //! [`write_frame`]: aether_codec::frame::write_frame
 
-use aether_data::{KindDescriptor, KindId, MailboxId};
+use aether_data::{KindDescriptor, KindId, MailboxDescriptor, MailboxId};
 use serde::{Deserialize, Serialize};
 
 pub use aether_data::{EngineId, SessionToken, Uuid};
@@ -32,6 +32,12 @@ pub use aether_data::{EngineId, SessionToken, Uuid};
 /// supplied params for that kind (ADR-0007). Engines that don't want
 /// schema-driven encoding can send an empty `kinds` and only the raw
 /// `payload_bytes` path will work for their clients.
+///
+/// `mailboxes` declares every mailbox the substrate has registered at
+/// handshake time (ADR-0080 / issue iamacoffeepot/aether#730 — the
+/// symmetric move with `kinds`). The hub caches the list and uses it
+/// to render type-prefixed labels in trace tool output. Runtime adds
+/// (post-load trampolines) re-ship via `MailboxesChanged`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
     pub name: String,
@@ -39,6 +45,8 @@ pub struct Hello {
     pub started_unix: u64,
     pub version: String,
     pub kinds: Vec<KindDescriptor>,
+    #[serde(default)]
+    pub mailboxes: Vec<MailboxDescriptor>,
 }
 
 /// Hub's reply to `Hello`. Carries the `EngineId` the engine should
@@ -222,6 +230,9 @@ pub struct MailByIdFrame {
 /// needed after `aether.component.load` /
 /// `aether.component.replace` registers a new kind, which the
 /// hub would otherwise miss since its cache is pinned at `Hello`.
+/// `MailboxesChanged` (issue iamacoffeepot/aether#730) does the same
+/// for mailboxes — fired after each `load_component` registers a new
+/// trampoline so the hub's inventory stays current.
 /// `LogBatch` (ADR-0023) carries captured log entries from the
 /// substrate's tracing layer; the hub appends them to a per-engine
 /// ring buffer served via the `engine_logs` MCP tool.
@@ -234,6 +245,7 @@ pub enum EngineToHub {
     Heartbeat,
     Mail(EngineMailFrame),
     KindsChanged(Vec<KindDescriptor>),
+    MailboxesChanged(Vec<MailboxDescriptor>),
     LogBatch(Vec<LogEntry>),
     Goodbye(Goodbye),
     MailToHubSubstrate(EngineMailToHubSubstrateFrame),
@@ -271,6 +283,7 @@ mod tests {
             started_unix: 1_712_345_678,
             version: "0.1.0".into(),
             kinds: vec![],
+            mailboxes: vec![],
         });
 
         let mut buf = Vec::new();
@@ -372,6 +385,41 @@ mod tests {
     }
 
     #[test]
+    fn mailboxes_changed_roundtrip() {
+        use aether_data::{MailboxCategory, MailboxDescriptor, MailboxId};
+        let msg = EngineToHub::MailboxesChanged(vec![
+            MailboxDescriptor {
+                id: MailboxId::CHASSIS_MAILBOX_ID,
+                name: "aether.chassis".into(),
+                category: Some(MailboxCategory::ChassisSentinel),
+            },
+            MailboxDescriptor {
+                id: MailboxId::from_name("aether.component.trampoline:cam"),
+                name: "aether.component.trampoline:cam".into(),
+                category: Some(MailboxCategory::Trampoline),
+            },
+            MailboxDescriptor {
+                id: MailboxId::from_name("user_thing"),
+                name: "user_thing".into(),
+                category: None,
+            },
+        ]);
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &msg).unwrap();
+        let back: EngineToHub = read_frame(&mut Cursor::new(buf)).unwrap();
+        match back {
+            EngineToHub::MailboxesChanged(m) => {
+                assert_eq!(m.len(), 3);
+                assert_eq!(m[0].name, "aether.chassis");
+                assert_eq!(m[0].category, Some(MailboxCategory::ChassisSentinel));
+                assert_eq!(m[1].category, Some(MailboxCategory::Trampoline));
+                assert_eq!(m[2].category, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn kinds_changed_roundtrip() {
         let msg = EngineToHub::KindsChanged(vec![
             KindDescriptor {
@@ -457,6 +505,7 @@ mod tests {
             started_unix: 0,
             version: "0".into(),
             kinds: vec![],
+            mailboxes: vec![],
         });
         let b = EngineToHub::Heartbeat;
         let c = EngineToHub::Goodbye(Goodbye {

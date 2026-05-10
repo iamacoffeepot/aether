@@ -235,6 +235,7 @@ impl LoopbackEngine {
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             kinds: boot.boot_descriptors.clone(),
+            mailboxes: boot.registry.list_mailbox_descriptors(),
             components: HashMap::new(),
             mail_tx: inbound_tx,
             spawned: false,
@@ -307,6 +308,9 @@ pub fn spawn_outbound_drainer(
                     EngineToHub::KindsChanged(kinds) => {
                         engines.update_kinds(&HUB_SELF_ENGINE_ID, kinds);
                     }
+                    EngineToHub::MailboxesChanged(mailboxes) => {
+                        engines.update_mailboxes(&HUB_SELF_ENGINE_ID, mailboxes);
+                    }
                     EngineToHub::LogBatch(entries) => {
                         logs.append(HUB_SELF_ENGINE_ID, entries);
                     }
@@ -366,10 +370,12 @@ mod tests {
     /// registry under the reserved id, so subsequent MCP tool calls
     /// (which look up engines through the same registry) can reach
     /// the hub without any per-tool special-casing. Smoke-checks
-    /// the presence, name, and that declared kinds are non-empty
-    /// (the boot seeds `aether_kinds::descriptors::all()`).
+    /// the presence, name, and that declared kinds + mailboxes are
+    /// non-empty (the boot seeds `aether_kinds::descriptors::all()`
+    /// and `Registry::list_mailbox_descriptors`).
     #[test]
     fn boot_registers_self_in_engine_registry() {
+        use aether_data::MailboxCategory;
         let engines = EngineRegistry::new();
         assert!(engines.is_empty());
 
@@ -384,6 +390,24 @@ mod tests {
         assert!(
             !record.kinds.is_empty(),
             "boot descriptors should be non-empty",
+        );
+        // Issue iamacoffeepot/aether#730: the hub-self loopback seeds
+        // its `EngineRecord.mailboxes` from the substrate registry at
+        // boot, so the hub's inventory cache is populated before any
+        // MailboxesChanged frame ever lands.
+        assert!(
+            !record.mailboxes.is_empty(),
+            "boot mailboxes should be non-empty",
+        );
+        // The synthetic chassis sentinel always rides along — that's
+        // the load-bearing entry the trace tool needs to resolve
+        // chassis-rooted senders.
+        assert!(
+            record.mailboxes.iter().any(|m| {
+                m.name == "aether.chassis" && m.category == Some(MailboxCategory::ChassisSentinel)
+            }),
+            "chassis sentinel must appear in hub-self inventory: {:#?}",
+            record.mailboxes,
         );
     }
 
@@ -410,6 +434,7 @@ mod tests {
             pid: 1,
             version: "0".to_owned(),
             kinds: vec![],
+            mailboxes: vec![],
             components: HashMap::new(),
             mail_tx,
             spawned: false,
@@ -502,6 +527,7 @@ mod tests {
             pid: 1,
             version: "0".into(),
             kinds: vec![],
+            mailboxes: vec![],
             components: HashMap::new(),
             mail_tx,
             spawned: false,

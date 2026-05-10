@@ -81,6 +81,7 @@ pub async fn handle_connection(
         pid: hello.pid,
         version: hello.version.clone(),
         kinds: hello.kinds,
+        mailboxes: hello.mailboxes,
         components: std::collections::HashMap::new(),
         mail_tx,
         spawned,
@@ -167,6 +168,9 @@ async fn read_loop(
             EngineToHub::Heartbeat => {}
             EngineToHub::Mail(m) => route_engine_mail(sessions, engine_id, m),
             EngineToHub::KindsChanged(kinds) => registry.update_kinds(&engine_id, kinds),
+            EngineToHub::MailboxesChanged(mailboxes) => {
+                registry.update_mailboxes(&engine_id, mailboxes)
+            }
             EngineToHub::LogBatch(entries) => logs.append(engine_id, entries),
             EngineToHub::MailToHubSubstrate(frame) => {
                 // ADR-0037 Phase 2: attribute the bubbled-up mail
