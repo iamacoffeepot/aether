@@ -165,8 +165,8 @@ where
     fn dispatch_one(&self, actor: &mut Box<A>, env: crate::actor::native::Envelope) {
         let inbound_mail_id = env.mail_id;
         // Issue 734: capture the OS thread name at the dispatcher's
-        // receive hook so the chrome trace renderer can stamp each
-        // event with a per-thread tid + thread_name M event. With the
+        // receive hook so the trace renderer can stamp each event
+        // with a per-thread tid + thread_name M event. With the
         // `Pooled` default scheduler (issue 635) this is the worker's
         // `aether-worker-N` name (shared across actors); `Thread`-
         // scheduled actors land on a per-actor name.

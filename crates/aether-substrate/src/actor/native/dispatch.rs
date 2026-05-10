@@ -76,11 +76,11 @@ pub(crate) fn dispatch_loop_run<A>(
         };
         let inbound_mail_id = env.mail_id;
         // ADR-0080 §2 producer hook: `Received` at handler entry.
-        // Issue 734: capture the OS thread name so the chrome trace
-        // renderer can stamp per-thread tids + emit thread_name M
-        // events. With the default `Pooled` scheduler (issue 635)
-        // this surfaces as `aether-worker-N` shared across actors;
-        // `Thread`-scheduled actors get per-actor names.
+        // Issue 734: capture the OS thread name so the trace renderer
+        // can stamp per-thread tids + emit thread_name M events. With
+        // the default `Pooled` scheduler (issue 635) this surfaces as
+        // `aether-worker-N` shared across actors; `Thread`-scheduled
+        // actors get per-actor names.
         let thread_name = std::thread::current().name().map(str::to_owned);
         crate::runtime::trace::record_received(inbound_mail_id, thread_name);
         aether_actor::local::with_stamped(slots, || {

@@ -128,8 +128,8 @@ pub fn record_sent(
 /// generating events that would re-feed the drainer.
 ///
 /// Issue 734: dispatchers pass `std::thread::current().name()
-/// .map(str::to_owned)` as `thread_name` so the chrome trace renderer
-/// can stamp each event with a per-thread row in Perfetto. The
+/// .map(str::to_owned)` as `thread_name` so the trace renderer
+/// (`hub::mcp::trace`) can stamp each event with a per-thread row. The
 /// default `Pooled` scheduler (post-issue-635) names worker threads
 /// `aether-worker-N`, so one tid commonly serves multiple actors;
 /// actors on the `Thread` scheduler get the per-actor names from

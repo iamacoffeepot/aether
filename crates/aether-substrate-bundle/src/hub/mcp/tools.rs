@@ -38,14 +38,14 @@ use crate::hub::session::SessionHandle;
 
 use super::args::{
     CaptureFrameArgs, CaptureFrameResultWire, DescribeComponentArgs, DescribeComponentResponse,
-    DescribeKindsArgs, DescribeTreeArgs, DumpTraceChromeArgs, EngineInfo, EngineLogEntry,
-    EngineLogsArgs, EngineLogsResponse, ListActiveRootsArgs, LoadComponentArgs,
-    LoadComponentResponse, LoadResultWire, MailSpec, MailStatus, ReceiveMailArgs, ReceivedMail,
-    ReplaceComponentArgs, ReplaceResultWire, SendMailArgs, SpawnResult, SpawnSubstrateArgs,
-    TerminateResult, TerminateSubstrateArgs, log_level_to_str,
+    DescribeKindsArgs, DescribeTreeArgs, DumpTraceArgs, EngineInfo, EngineLogEntry, EngineLogsArgs,
+    EngineLogsResponse, ListActiveRootsArgs, LoadComponentArgs, LoadComponentResponse,
+    LoadResultWire, MailSpec, MailStatus, ReceiveMailArgs, ReceivedMail, ReplaceComponentArgs,
+    ReplaceResultWire, SendMailArgs, SpawnResult, SpawnSubstrateArgs, TerminateResult,
+    TerminateSubstrateArgs, log_level_to_str,
 };
-use super::chrome::render_chrome_trace;
 use super::codecs::{decode_inbound, deliver_one, encode_capture_bundle};
+use super::trace::render;
 use super::{Hub, HubState};
 use crate::hub::registry::ComponentRecord;
 
@@ -870,18 +870,19 @@ impl Hub {
     }
 
     #[tool(
-        description = "Export the mail subtree under one root as a Chrome trace event format JSON file (issue iamacoffeepot/aether#728, ADR-0080 Phase 3). Calls the same `describe_tree` substrate path under the hood, then re-shapes each mail into a chrome `ph:\"X\"` (complete) event covering its `t_received → t_finished` interval on the recipient's lane, plus `ph:\"s\"`/`ph:\"f\"` (flow) arrows linking parent.t_finished → child.t_received for causal visualization. Mails without `t_received`/`t_finished` (orphan or in-flight at query time) are skipped. Drop the output JSON into chrome://tracing or perfetto.dev for a flame graph + causal arrows view. When `output_path` is omitted, returns the JSON inline (fine for small subtrees, may overflow agent context for busy substrates). When `output_path` is set, writes to the path (creating parent dirs) and returns a `{path}` confirmation. Default timeout 5000ms; clamped to 30000."
+        description = "Export the mail subtree under one root as a trace JSON file (issue iamacoffeepot/aether#728, ADR-0080 Phase 3). Output is the Chrome trace event format, which Perfetto, chrome://tracing, and speedscope all read natively — drop the file into perfetto.dev for a flame graph + causal arrows view. Calls the same `describe_tree` substrate path under the hood, then re-shapes each mail into one `ph:\"X\"` (complete) event covering its `t_received → t_finished` interval on the recipient's lane, plus `ph:\"s\"`/`ph:\"f\"` (flow) arrows linking parent.t_finished → child.t_received for causal visualization. Mails without `t_received`/`t_finished` (orphan or in-flight at query time) are skipped. When `output_path` is omitted, returns the JSON inline (fine for small subtrees, may overflow agent context for busy substrates). When `output_path` is set, writes to the path (creating parent dirs) and returns a `{path}` confirmation. Default timeout 5000ms; clamped to 30000."
     )]
-    pub(super) async fn dump_trace_chrome(
+    pub(super) async fn dump_trace(
         &self,
-        Parameters(args): Parameters<DumpTraceChromeArgs>,
+        Parameters(args): Parameters<DumpTraceArgs>,
     ) -> Result<String, McpError> {
         // Build kind-id → name + mailbox-id → (name, category) lookups
-        // from the engine's handshake-time + post-load caches. Chrome
-        // event `name` and id fields use the human-readable forms;
-        // missing entries fall back to the tagged-string id so an
-        // out-of-sync inventory surfaces as visible drift rather than
-        // silent corruption (issue iamacoffeepot/aether#731).
+        // from the engine's handshake-time + post-load caches. The
+        // renderer uses the human-readable forms in event `name` /
+        // id fields; missing entries fall back to the tagged-string
+        // id so an out-of-sync inventory surfaces as visible drift
+        // rather than silent corruption (issue
+        // iamacoffeepot/aether#731).
         let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
             McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
         })?;
@@ -900,7 +901,7 @@ impl Hub {
                 (kid, k.name.clone())
             })
             .collect();
-        let mailbox_names: super::chrome::MailboxLookup = record
+        let mailbox_names: super::trace::MailboxLookup = record
             .mailboxes
             .iter()
             .map(|m| (m.id.0, (m.name.clone(), m.category)))
@@ -913,8 +914,8 @@ impl Hub {
             timeout_ms: args.timeout_ms,
         };
         let result = self.do_describe_tree(describe_args).await?;
-        let chrome_json = render_chrome_trace(&result, &kind_names, &mailbox_names)
-            .map_err(|e| McpError::internal_error(format!("render chrome trace: {e}"), None))?;
+        let trace_json = render(&result, &kind_names, &mailbox_names)
+            .map_err(|e| McpError::internal_error(format!("render trace: {e}"), None))?;
 
         match args.output_path {
             Some(path) => {
@@ -928,12 +929,12 @@ impl Hub {
                         )
                     })?;
                 }
-                tokio::fs::write(&path, &chrome_json).await.map_err(|e| {
+                tokio::fs::write(&path, &trace_json).await.map_err(|e| {
                     McpError::internal_error(format!("write trace to {path}: {e}"), None)
                 })?;
                 Ok(serde_json::json!({ "path": path }).to_string())
             }
-            None => Ok(chrome_json),
+            None => Ok(trace_json),
         }
     }
 
@@ -953,9 +954,9 @@ impl Hub {
     }
 
     /// Shared describe_tree core. The public `describe_tree` tool wraps
-    /// this with JSON serialization; `dump_trace_chrome` reuses it to
-    /// fetch the same observer state and re-shape it as chrome trace
-    /// events (issue iamacoffeepot/aether#728).
+    /// this with JSON serialization; `dump_trace` reuses it to fetch
+    /// the same observer state and re-shape it as trace events (issue
+    /// iamacoffeepot/aether#728).
     async fn do_describe_tree(
         &self,
         args: DescribeTreeArgs,

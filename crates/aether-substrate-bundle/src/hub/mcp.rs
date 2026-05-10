@@ -31,9 +31,9 @@ use crate::hub::registry::EngineRegistry;
 use crate::hub::session::{QueuedMail, SessionHandle, SessionRegistry};
 
 pub(crate) mod args;
-mod chrome;
 mod codecs;
 mod tools;
+mod trace;
 
 // Bring args types and commonly-referenced protocol types into mcp's
 // namespace so the tests module below can reach them via `use
@@ -834,12 +834,12 @@ mod tests {
         );
     }
 
-    /// Issue 728: dump_trace_chrome calls the same describe_tree path
-    /// the existing tool uses, then re-shapes the reply as chrome
-    /// trace JSON. The output_path branch writes to disk and returns
+    /// Issue 728: dump_trace calls the same describe_tree path the
+    /// existing tool uses, then re-shapes the reply as trace JSON.
+    /// The output_path branch writes to disk and returns
     /// `{"path": ...}`; the inline branch returns the JSON.
     #[tokio::test]
-    async fn dump_trace_chrome_writes_file_when_path_set() {
+    async fn dump_trace_writes_file_when_path_set() {
         use aether_data::tagged_id::{self, Tag};
         use aether_data::{MailId, MailboxId, with_tag};
         use aether_kinds::trace::{DescribeTreeResult, MailNodeWire};
@@ -894,7 +894,7 @@ mod tests {
         let tmp =
             std::env::temp_dir().join(format!("aether-trace-728-{}.json", std::process::id()));
         let response = hub
-            .dump_trace_chrome(Parameters(args::DumpTraceChromeArgs {
+            .dump_trace(Parameters(args::DumpTraceArgs {
                 engine_id: id.0.to_string(),
                 root: args::MailIdWire {
                     sender: tagged_id::encode(sender_raw).unwrap(),
@@ -923,10 +923,10 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
     }
 
-    /// Inline branch: when `output_path` is omitted, the chrome JSON
+    /// Inline branch: when `output_path` is omitted, the trace JSON
     /// flows back as the tool result.
     #[tokio::test]
-    async fn dump_trace_chrome_returns_inline_when_path_unset() {
+    async fn dump_trace_returns_inline_when_path_unset() {
         use aether_data::tagged_id::{self, Tag};
         use aether_data::{MailId, MailboxId, with_tag};
         use aether_kinds::trace::{DescribeTreeResult, MailNodeWire};
@@ -978,7 +978,7 @@ mod tests {
         });
 
         let response = hub
-            .dump_trace_chrome(Parameters(args::DumpTraceChromeArgs {
+            .dump_trace(Parameters(args::DumpTraceArgs {
                 engine_id: id.0.to_string(),
                 root: args::MailIdWire {
                     sender: tagged_id::encode(sender_raw).unwrap(),
