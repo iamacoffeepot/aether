@@ -79,13 +79,15 @@ pub enum TraceEvent {
         t: Nanos,
         /// Issue 734: OS thread name captured at the dispatcher's
         /// receive hook (`std::thread::current().name()`). The
-        /// substrate names every actor's dispatcher thread per
-        /// ADR-0038 (`aether-instanced-<full_name>` for instanced
-        /// actors, `aether-root-<NAMESPACE>` for singletons), so this
-        /// gives the chrome trace renderer a stable per-actor tid
-        /// without inferring it from the recipient mailbox. `None`
-        /// when the OS thread has no name (anonymous test threads,
-        /// `std::thread::spawn` without `Builder::new().name(...)`).
+        /// substrate's default `Pooled` scheduler (post-issue-635)
+        /// names worker threads `aether-worker-N`, so the chrome
+        /// trace renderer can distinguish per-thread rows even when
+        /// one OS thread serves multiple actors. Actors that opt into
+        /// the `Thread` scheduler get `aether-instanced-<full_name>` /
+        /// `aether-root-<NAMESPACE>` from `actor::native::spawn` and
+        /// `spawn_thread`. `None` when the OS thread has no name
+        /// (anonymous test threads, `std::thread::spawn` without
+        /// `Builder::new().name(...)`).
         thread_name: Option<String>,
     },
     Finished {

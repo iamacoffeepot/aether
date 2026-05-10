@@ -166,9 +166,10 @@ where
         let inbound_mail_id = env.mail_id;
         // Issue 734: capture the OS thread name at the dispatcher's
         // receive hook so the chrome trace renderer can stamp each
-        // actor with a distinct per-thread tid + thread_name metadata
-        // event. Per ADR-0038 every dispatcher thread is named, so the
-        // value is stable for the actor's lifetime.
+        // event with a per-thread tid + thread_name M event. With the
+        // `Pooled` default scheduler (issue 635) this is the worker's
+        // `aether-worker-N` name (shared across actors); `Thread`-
+        // scheduled actors land on a per-actor name.
         let thread_name = std::thread::current().name().map(str::to_owned);
         crate::runtime::trace::record_received(inbound_mail_id, thread_name);
         aether_actor::local::with_stamped(&self.slots, || {

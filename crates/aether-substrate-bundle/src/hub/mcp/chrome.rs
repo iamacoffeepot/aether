@@ -105,13 +105,17 @@ pub(super) fn render_chrome_trace(
         }
     }
 
-    // Issue 734: assign integer tids per unique thread name. Same
-    // counter shape as pids — first unique name in event order gets
-    // tid = 1, etc. Events with no `_thread_name` stash (anonymous
-    // threads, the `Err::not_found` metadata-only path) keep `tid`
-    // unset and Perfetto folds them under tid 0 by default.
+    // Issue 734: assign integer tids per unique thread name, starting
+    // *past* the pid range. Perfetto inherits the Linux convention
+    // "thread's tid equals its process's pid means main thread" and
+    // decorates such rows with a `main-thread` tag in its UI; if our
+    // tid integers shared the 1..N range with pids, every actor whose
+    // thread happened to land on the matching tid would render as
+    // "main-thread" (visual noise — the substrate has no Linux-style
+    // process-main concept). Offsetting tids past the pid range
+    // sidesteps the heuristic without losing per-thread row distinction.
     let mut tid_for_thread: HashMap<String, u32> = HashMap::new();
-    let mut next_tid: u32 = 1;
+    let mut next_tid: u32 = next_pid;
     for e in &events {
         if let Some(tn) = e.get("_thread_name").and_then(Value::as_str)
             && !tid_for_thread.contains_key(tn)
@@ -791,6 +795,73 @@ mod tests {
         // slice.
         assert_eq!(evt["dur"], 0.5);
         assert_eq!(evt["ts"], 2.0);
+    }
+
+    /// Issue 734 follow-up: Perfetto inherits the Linux convention
+    /// "tid == pid means the process's main thread" from chrome
+    /// trace files and stamps such rows with a `main-thread` tag. Our
+    /// renderer offsets the tid namespace past the pid range so the
+    /// heuristic never fires; this test pins the invariant — every
+    /// emitted tid must be strictly greater than every emitted pid.
+    #[test]
+    fn render_tid_namespace_does_not_overlap_pid_namespace() {
+        let root_id = mid(0xAA, 1);
+        let child_id = mid(0xBB, 2);
+        // Three distinct pids (root.recipient = 0xCC, child.recipient
+        // = 0xEE, plus an unrelated mail to 0xFF) and two distinct
+        // thread names so we stress both maps.
+        let result = DescribeTreeResult::Ok {
+            root: root_id,
+            in_flight: 0,
+            mails: vec![
+                MailNodeWire {
+                    mail_id: root_id,
+                    parent: None,
+                    sender: MailboxId(with_tag(Tag::Mailbox, 0xAA)),
+                    recipient: MailboxId(with_tag(Tag::Mailbox, 0xCC)),
+                    kind: KindId(with_tag(Tag::Kind, 0x99)),
+                    t_sent: Nanos(1_000),
+                    t_received: Some(Nanos(2_000)),
+                    t_finished: Some(Nanos(3_000)),
+                    thread_name: Some("aether-worker-1".to_owned()),
+                },
+                MailNodeWire {
+                    mail_id: child_id,
+                    parent: Some(root_id),
+                    sender: MailboxId(with_tag(Tag::Mailbox, 0xCC)),
+                    recipient: MailboxId(with_tag(Tag::Mailbox, 0xEE)),
+                    kind: KindId(with_tag(Tag::Kind, 0x88)),
+                    t_sent: Nanos(2_500),
+                    t_received: Some(Nanos(4_000)),
+                    t_finished: Some(Nanos(5_000)),
+                    thread_name: Some("aether-worker-2".to_owned()),
+                },
+            ],
+        };
+        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new()).expect("render");
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        let events = parsed["traceEvents"].as_array().unwrap();
+        let max_pid = events
+            .iter()
+            .filter_map(|e| e["pid"].as_u64())
+            .max()
+            .expect("pid present");
+        let min_tid = events
+            .iter()
+            .filter_map(|e| {
+                if e["ph"] == "M" && e["name"] == "process_name" {
+                    None
+                } else {
+                    e["tid"].as_u64()
+                }
+            })
+            .min()
+            .expect("tid present");
+        assert!(
+            min_tid > max_pid,
+            "tid {min_tid} must be > max pid {max_pid} so Perfetto's \
+             tid==pid main-thread heuristic never fires; got events: {events:#?}"
+        );
     }
 
     /// Issue iamacoffeepot/aether#731: a known-name mailbox with

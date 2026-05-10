@@ -129,11 +129,12 @@ pub fn record_sent(
 ///
 /// Issue 734: dispatchers pass `std::thread::current().name()
 /// .map(str::to_owned)` as `thread_name` so the chrome trace renderer
-/// can give each actor a distinct per-thread row in Perfetto. The
-/// substrate names every dispatcher thread per ADR-0038
-/// (`aether-instanced-<full_name>`, `aether-root-<NAMESPACE>`), so the
-/// captured value is stable for the actor's lifetime; anonymous test
-/// threads pass `None`.
+/// can stamp each event with a per-thread row in Perfetto. The
+/// default `Pooled` scheduler (post-issue-635) names worker threads
+/// `aether-worker-N`, so one tid commonly serves multiple actors;
+/// actors on the `Thread` scheduler get the per-actor names from
+/// `actor::native::spawn` (`aether-instanced-<full_name>`,
+/// `aether-root-<NAMESPACE>`). Anonymous test threads pass `None`.
 pub fn record_received(mail_id: MailId, thread_name: Option<String>) {
     if mail_id == MailId::NONE {
         return;
