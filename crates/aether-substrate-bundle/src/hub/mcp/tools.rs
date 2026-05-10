@@ -17,8 +17,8 @@ use aether_kinds::{
     EnvVar, Spawn as WireSpawn, SpawnResult as WireSpawnResult, Terminate as WireTerminate,
     TerminateResult as WireTerminateResult,
     trace::{
-        DescribeTree, DescribeTreeResult, ListActiveRoots, ListActiveRootsResult,
-        TRACE_OBSERVER_MAILBOX_NAME,
+        DescribeTree, DescribeTreeResult, DescribeWindow, DescribeWindowResult, ListActiveRoots,
+        ListActiveRootsResult, TRACE_OBSERVER_MAILBOX_NAME, TraceWindow,
     },
 };
 use base64::Engine as _;
@@ -38,11 +38,11 @@ use crate::hub::session::SessionHandle;
 
 use super::args::{
     CaptureFrameArgs, CaptureFrameResultWire, DescribeComponentArgs, DescribeComponentResponse,
-    DescribeKindsArgs, DescribeTreeArgs, DumpTraceArgs, EngineInfo, EngineLogEntry, EngineLogsArgs,
-    EngineLogsResponse, ListActiveRootsArgs, LoadComponentArgs, LoadComponentResponse,
-    LoadResultWire, MailSpec, MailStatus, ReceiveMailArgs, ReceivedMail, ReplaceComponentArgs,
-    ReplaceResultWire, SendMailArgs, SpawnResult, SpawnSubstrateArgs, TerminateResult,
-    TerminateSubstrateArgs, log_level_to_str,
+    DescribeKindsArgs, DescribeTreeArgs, DescribeTreeWindowArgs, DumpTraceArgs, EngineInfo,
+    EngineLogEntry, EngineLogsArgs, EngineLogsResponse, ListActiveRootsArgs, LoadComponentArgs,
+    LoadComponentResponse, LoadResultWire, MailSpec, MailStatus, ReceiveMailArgs, ReceivedMail,
+    ReplaceComponentArgs, ReplaceResultWire, SendMailArgs, SpawnResult, SpawnSubstrateArgs,
+    TerminateResult, TerminateSubstrateArgs, TraceWindowArg, log_level_to_str,
 };
 use super::codecs::{decode_inbound, deliver_one, encode_capture_bundle};
 use super::trace::render;
@@ -1016,6 +1016,111 @@ impl Hub {
             Ok(Err(_)) => {
                 return Err(McpError::internal_error(
                     "describe_tree reply channel closed before reply arrived".to_owned(),
+                    None,
+                ));
+            }
+            Err(_) => {
+                return Err(McpError::internal_error(
+                    format!(
+                        "timed out after {}ms waiting for {result_kind}",
+                        wait.as_millis()
+                    ),
+                    None,
+                ));
+            }
+        };
+
+        postcard::from_bytes(&queued.payload)
+            .map_err(|e| McpError::internal_error(format!("decode reply: {e}"), None))
+    }
+
+    #[tool(
+        description = "Describe every mail whose `t_sent` falls within a time window (issue iamacoffeepot/aether#735). Same observer state as `describe_tree`, just collected by overlap rather than by root walk — useful for perf investigation when you want \"what happened in the last N ms?\" rather than drilling into one specific chain. `window` is either `{\"last_ms\": N}` for last-N-milliseconds (resolved against the substrate's monotonic now) or `{\"start_ns\": ..., \"end_ns\": ...}` for an explicit absolute range (`end_ns` optional, defaults to \"now\"). Strict `t_sent` containment — parent edges may dangle to mail outside the window; drill into a specific root via `describe_tree` for full chain context. `max_mails` caps the reply (default 10_000, substrate hard cap 100_000); over-cap windows reply `{\"Err\": {\"too_many\": <matched_count>}}` instead of truncating, so the caller can narrow before retrying. Default timeout 5000ms; clamped to 30000."
+    )]
+    pub(super) async fn describe_tree_window(
+        &self,
+        Parameters(args): Parameters<DescribeTreeWindowArgs>,
+    ) -> Result<String, McpError> {
+        let result = self.do_describe_window(args).await?;
+        // `DescribeWindowResult`'s serde branches emit tagged strings
+        // for ids and a u64 for `Nanos` on human-readable serializers,
+        // so JSON serialization is a single shot. The externally-
+        // tagged `Ok` / `Err` shape mirrors `describe_tree`'s reply.
+        serde_json::to_string(&result).map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    /// Shared describe_tree_window core. The public tool wraps this
+    /// with JSON serialization; `dump_trace_window` (Phase 3) reuses
+    /// it to fetch the same observer state and re-shape it as trace
+    /// events.
+    pub(super) async fn do_describe_window(
+        &self,
+        args: DescribeTreeWindowArgs,
+    ) -> Result<DescribeWindowResult, McpError> {
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+        if self.state.engines.get(&id).is_none() {
+            return Err(McpError::invalid_params(
+                format!("unknown engine_id {}", args.engine_id),
+                None,
+            ));
+        }
+
+        // Convert the agent's untagged `TraceWindowArg` to the
+        // substrate-side externally-tagged `TraceWindow`, then
+        // serialize the whole `DescribeWindow` request through serde.
+        // The schema codec expects externally-tagged enum JSON
+        // (`{"Absolute": {...}}` / `{"Relative": {...}}`), which is
+        // exactly what serde's default impl emits for `TraceWindow`.
+        let window_kind = match args.window {
+            TraceWindowArg::Absolute { start_ns, end_ns } => {
+                TraceWindow::Absolute { start_ns, end_ns }
+            }
+            TraceWindowArg::Relative { last_ms } => TraceWindow::Relative { last_ms },
+        };
+        let request = DescribeWindow {
+            window: window_kind,
+            max_mails: args.max_mails,
+        };
+        let request_params = serde_json::to_value(request).map_err(|e| {
+            McpError::internal_error(format!("encode describe_window request: {e}"), None)
+        })?;
+
+        let result_kind = <DescribeWindowResult as Kind>::NAME.to_owned();
+        let (_guard, rx) = self
+            .session
+            .replies
+            .register(result_kind.clone())
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    "a describe_tree_window is already in flight on this session; wait for it to complete"
+                        .to_owned(),
+                    None,
+                )
+            })?;
+
+        let spec = MailSpec {
+            engine_id: args.engine_id.clone(),
+            recipient_name: TRACE_OBSERVER_MAILBOX_NAME.to_owned(),
+            kind_name: <DescribeWindow as Kind>::NAME.to_owned(),
+            params: Some(request_params),
+            count: 1,
+        };
+        deliver_one(spec, &self.state.engines, self.session.token)
+            .await
+            .map_err(|e| McpError::internal_error(format!("send failed: {e}"), None))?;
+
+        let wait = args
+            .timeout_ms
+            .map(|ms| Duration::from_millis(ms as u64).min(MAX_REPLY_TIMEOUT))
+            .unwrap_or(DEFAULT_REPLY_TIMEOUT);
+        let queued = match timeout(wait, rx).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(_)) => {
+                return Err(McpError::internal_error(
+                    "describe_tree_window reply channel closed before reply arrived".to_owned(),
                     None,
                 ));
             }

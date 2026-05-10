@@ -516,6 +516,51 @@ pub struct DumpTraceArgs {
     pub timeout_ms: Option<u32>,
 }
 
+/// Issue 735: agent-facing window selector for the time-window trace
+/// queries. Untagged so the JSON discriminates by field presence —
+/// `{"last_ms": N}` is `Relative`, `{"start_ns": X, "end_ns": Y?}` is
+/// `Absolute`. The two field-name sets don't overlap, so deserialize
+/// is unambiguous. Mirrors `aether_kinds::trace::TraceWindow`; kept
+/// hub-side because `aether-kinds` is `no_std + alloc` and doesn't
+/// depend on `schemars`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum TraceWindowArg {
+    /// Explicit absolute range in nanoseconds-since-substrate-boot.
+    /// `end_ns: None` means "open-ended through now" (resolved by the
+    /// observer at handler entry).
+    Absolute {
+        start_ns: u64,
+        #[serde(default)]
+        end_ns: Option<u64>,
+    },
+    /// Last N milliseconds, relative to the substrate's monotonic now
+    /// at handler entry. Equivalent to `{ start_ns: now - last_ms, end_ns: None }`.
+    Relative { last_ms: u64 },
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DescribeTreeWindowArgs {
+    /// Hub-assigned engine UUID as a string (from `list_engines`).
+    pub engine_id: String,
+    /// Time window selector. Either `{"last_ms": N}` for "last N
+    /// milliseconds" (resolved against substrate monotonic now) or
+    /// `{"start_ns": ..., "end_ns": ...}` for an explicit absolute
+    /// range. `end_ns` is optional; omitting it means "open-ended
+    /// through now."
+    pub window: TraceWindowArg,
+    /// Cap on the number of in-window mails returned. Substrate
+    /// defaults 10_000; hard cap 100_000. Over-cap windows reply
+    /// `Err::too_many` with the matched count so you can narrow the
+    /// window or raise this. Strict containment of `t_sent`.
+    #[serde(default)]
+    pub max_mails: Option<u32>,
+    /// Maximum time to wait for the substrate's reply, in
+    /// milliseconds. Defaults to 5000. Clamped to 30000.
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeTreeArgs {
     /// Hub-assigned engine UUID as a string (from `list_engines`).
