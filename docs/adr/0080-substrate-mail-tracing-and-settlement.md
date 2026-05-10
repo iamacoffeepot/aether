@@ -25,7 +25,7 @@ The substrate emits a structured trace event for every mail's send / receive / c
 pub enum TraceEvent {
     Sent {
         mail_id: MailId,
-        tree: TreeId,
+        tree: MailId,
         parent_mail: Option<MailId>,
         sender: MailboxId,
         recipient: MailboxId,
@@ -41,9 +41,9 @@ pub enum TraceEvent {
 
 The `(MailboxId, u64)` shape is exact by construction — no central minter to contend on, no hash to collide. The 8 extra bytes per envelope vs a 64-bit MailId are worth the absence of birthday-paradox collision risk (a 64-bit hash of `(sender, correlation_id)` collides with ~1 % probability after ~5 hours of busy-substrate uptime; correctness-breaking for the observer's `HashMap<MailId, MailNode>`).
 
-`TreeId` is a type alias: `pub type TreeId = MailId;`. There is no separate tree-id type, no separate allocator, no separate id space. **A tree is identified by the `MailId` of the mail that started it** — when a `send_mail` call has no in-flight handler context to inherit from, the mail being sent is itself the root of a new tree, and that mail's `MailId` *is* the `TreeId`. Children inherit `tree = root_mail.MailId`. The framing is "you didn't have a trigger, so this mail is the root of its own causal tree."
+**A tree is identified by the `MailId` of the mail that started it.** No separate `TreeId` type, no separate allocator, no separate id space. When a `send_mail` call has no in-flight handler context to inherit from, the mail being sent is itself the root of a new tree, and that mail's `MailId` *is* the tree id; children inherit `tree = root_mail.MailId`. The framing is "you didn't have a trigger, so this mail is the root of its own causal tree." Field names (`tree: MailId` vs `mail_id: MailId` vs `parent_mail: Option<MailId>`) carry the role at every site where it matters; the type system only knows them as `MailId`s.
 
-The alias preserves the conceptual distinction at type-annotation sites (a function taking a `TreeId` reads differently from one taking a `MailId`) without a second physical type. The trade is type-system-level confusion (you *can* accidentally pass a non-root `MailId` where a `TreeId` is expected — they're the same type) for one fewer allocator, one fewer field on the envelope, and one fewer concept. Originator information (the chassis sentinel for chassis-dispatched mail; the owning cap's mailbox for cap-spawned worker threads such as `TcpCapability`'s per-connection workers) falls out of `tree.sender` directly — `TreeRoot.originator` (§4) collapses into the `MailId.sender` field of the tree's root.
+Originator information (chassis sentinel for chassis-dispatched mail; owning cap's mailbox for cap-spawned worker threads such as `TcpCapability`'s per-connection workers) reads off `tree.sender` directly — no separate `TreeRoot.originator` field needed.
 
 The chassis-wide MPSC is `crossbeam::queue::SegQueue<TraceEvent>` for v1 — unbounded, lock-free MPSC, per-producer FIFO.
 
@@ -87,9 +87,9 @@ Lives in `aether-capabilities` next to `BroadcastCapability` / `LogCapability`, 
 
 The observer maintains:
 
-- `HashMap<TreeId, TreeState>` where `TreeState { counter: u32, in_flight: HashSet<MailId>, lifecycle: TreeLifecycle }` and `TreeLifecycle = Tick(frame_no) | Wire(actor) | Init(actor) | Drop(actor) | Replace(actor) | McpRequest(...) | HubBridge(...) | External(MailboxId)` labels the tree's *cause* for query output. The originator (chassis sentinel, owning cap, etc.) is read directly off the tree's `MailId.sender` — no separate field needed.
+- `HashMap<MailId, TreeState>` keyed by the tree's root mail id, where `TreeState { counter: u32, in_flight: HashSet<MailId>, lifecycle: TreeLifecycle }` and `TreeLifecycle = Tick(frame_no) | Wire(actor) | Init(actor) | Drop(actor) | Replace(actor) | McpRequest(...) | HubBridge(...) | External(MailboxId)` labels the tree's *cause* for query output. The originator (chassis sentinel, owning cap, etc.) is read directly off the root `MailId.sender` — no separate field needed.
 - `HashMap<MailId, MailNode>` where `MailNode { tree, parent, sender, recipient, kind, t_sent: Nanos, t_received: Option<Nanos>, t_finished: Option<Nanos> }` for graph queries (`Option` on the latter two — a node is created at `Sent` arrival and patched as `Received` / `Finished` land later).
-- `HashMap<TreeId, Vec<ReplyTo>>` of pending settlement subscribers.
+- `HashMap<MailId, Vec<ReplyTo>>` of pending settlement subscribers, keyed by tree root.
 
 ### 5. Tree roots originate at "no in-flight mail" sites; everything else inherits
 
@@ -130,7 +130,7 @@ v1 ships the trace queue as `crossbeam::queue::SegQueue` (unbounded MPSC). A pat
 
 Three landable PRs:
 
-1. **Tracing infrastructure + settlement gate.** Trace queue, drainer, `TraceObserver` cap, `TraceEvent` spec, per-actor `correlation_id` allocator (covers both `MailId` and `TreeId` since they share a space), in-flight-context plumbing on `NativeCtx` / `WasmCtx`, `CHASSIS_MAILBOX_ID` sentinel + dispatcher switch. Replace `wait_instanced_quiesce` callers with settlement subscriptions; retire `await_tick_subscribed` and `settle_observations` from the #648 tests; close the `replace_component_preserves_mailbox_identity` flake.
+1. **Tracing infrastructure + settlement gate.** Trace queue, drainer, `TraceObserver` cap, `TraceEvent` spec, per-actor `correlation_id` allocator (drives `MailId` allocation; tree ids are root mail ids, no separate counter), in-flight-context plumbing on `NativeCtx` / `WasmCtx`, `CHASSIS_MAILBOX_ID` sentinel + dispatcher switch. Replace `wait_instanced_quiesce` callers with settlement subscriptions; retire `await_tick_subscribed` and `settle_observations` from the #648 tests; close the `replace_component_preserves_mailbox_identity` flake.
 2. **MCP `describe_tree`.** Read the observer's graph, return a structured causal tree per query. Lights up live tracing in the agent harness.
 3. **Flame-graph export.** `mcp__aether-hub__export_trace(tree, format = "chrome" | "folded")` — Chrome-trace JSON is the de-facto standard (Perfetto / chrome://tracing / speedscope). Direct mapping from `MailNode` to a Chrome-trace span; trivial transform from the existing data.
 
