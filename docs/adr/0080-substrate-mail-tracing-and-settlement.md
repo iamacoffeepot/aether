@@ -9,7 +9,7 @@ The substrate has no causal-closure detection for mail. Today every lifecycle-or
 
 These workarounds compose poorly. The flake `test_bench_scenario::replace_component_preserves_mailbox_identity` fails ~10 % of the time on a busy machine because `wait_instanced_quiesce` exits before the trampoline emits its last `tick_observed` broadcast. The substrate doesn't *know* the broadcast is coming — it just guesses with a deadline.
 
-Issue #707 was filed to address settlement detection for lifecycle gating. The design conversation expanded the scope: tracking every mail's causal lineage gives us settlement as one consumer of a much more general piece of infrastructure. Tying every `Sent` / `Received` / `Finished` event to a tree id and a parent mail id reconstructs the full causal graph of substrate work — the same data structure that powers distributed-tracing flame graphs, queue-latency analysis, handler-duration histograms, and the future MCP `describe_tree` / debugger surfaces.
+Issue #707 was filed to address settlement detection for lifecycle gating. The design conversation expanded the scope: tracking every mail's causal lineage gives us settlement as one consumer of a much more general piece of infrastructure. Tying every `Sent` / `Received` / `Finished` event to a `root` MailId and a `parent_mail` MailId reconstructs the full causal graph of substrate work — the same data structure that powers distributed-tracing flame graphs, queue-latency analysis, handler-duration histograms, and the future MCP `describe_tree` / debugger surfaces.
 
 The shape borrows lessons from ADR-0023 (substrate text-log capture) and ADR-0077 (actor-aware logging via per-actor `LogBuffer` + handler-exit drain) but cannot reuse the per-actor flush-on-handler-exit pattern: settlement correctness requires every `Sent` and `Finished` to reach the consumer, including across actor panics. A trace event lost to a missed flush corrupts the counter and either deadlocks the gate (lost `Finished`) or fires `Settled` prematurely (lost `Sent`).
 
@@ -25,7 +25,7 @@ The substrate emits a structured trace event for every mail's send / receive / c
 pub enum TraceEvent {
     Sent {
         mail_id: MailId,
-        tree: MailId,
+        root: MailId,
         parent_mail: Option<MailId>,
         sender: MailboxId,
         recipient: MailboxId,
@@ -41,9 +41,9 @@ pub enum TraceEvent {
 
 The `(MailboxId, u64)` shape is exact by construction — no central minter to contend on, no hash to collide. The 8 extra bytes per envelope vs a 64-bit MailId are worth the absence of birthday-paradox collision risk (a 64-bit hash of `(sender, correlation_id)` collides with ~1 % probability after ~5 hours of busy-substrate uptime; correctness-breaking for the observer's `HashMap<MailId, MailNode>`).
 
-**A tree is identified by the `MailId` of the mail that started it.** No separate `TreeId` type, no separate allocator, no separate id space. When a `send_mail` call has no in-flight handler context to inherit from, the mail being sent is itself the root of a new tree, and that mail's `MailId` *is* the tree id; children inherit `tree = root_mail.MailId`. The framing is "you didn't have a trigger, so this mail is the root of its own causal tree." Field names (`tree: MailId` vs `mail_id: MailId` vs `parent_mail: Option<MailId>`) carry the role at every site where it matters; the type system only knows them as `MailId`s.
+**A causal chain is identified by the `MailId` of its root — the mail that started it.** No separate id type for the chain, no separate allocator, no separate id space. When a `send_mail` call has no in-flight handler context to inherit from, the mail being sent is itself a root, and that mail's `MailId` is what every descendant carries in its `root` field. Children inherit `root = parent.root`. The framing is "you didn't have a trigger, so this mail is the root of its own causal chain." Field names (`root: MailId` vs `mail_id: MailId` vs `parent_mail: Option<MailId>`) carry the role at every site where it matters; the type system only knows them as `MailId`s.
 
-Originator information (chassis sentinel for chassis-dispatched mail; owning cap's mailbox for cap-spawned worker threads such as `TcpCapability`'s per-connection workers) reads off `tree.sender` directly — no separate `TreeRoot.originator` field needed.
+Originator information (chassis sentinel for chassis-dispatched mail; owning cap's mailbox for cap-spawned worker threads such as `TcpCapability`'s per-connection workers) reads off `root.sender` directly — no separate originator field needed.
 
 The chassis-wide MPSC is `crossbeam::queue::SegQueue<TraceEvent>` for v1 — unbounded, lock-free MPSC, per-producer FIFO.
 
@@ -53,7 +53,7 @@ The chassis-wide MPSC is `crossbeam::queue::SegQueue<TraceEvent>` for v1 — unb
 
 Three hook sites in `aether-substrate`:
 
-- **`Sender::send_to_named` (and the typed wrappers)**: after resolving the recipient mailbox and before enqueueing the mail to the recipient's mpsc, push a `Sent` event. `mail_id` is freshly allocated; `tree` is inherited from the sender's in-flight context (§5); `parent_mail` is the in-flight mail id at the sender (or `None` for chassis-root sends); `t = Instant::now()`.
+- **`Sender::send_to_named` (and the typed wrappers)**: after resolving the recipient mailbox and before enqueueing the mail to the recipient's mpsc, push a `Sent` event. `mail_id` is freshly allocated; `root` is inherited from the sender's in-flight context (§5); `parent_mail` is the in-flight mail id at the sender (or `None` for chassis-root sends); `t = Instant::now()`.
 - **Native dispatcher loop (`actor::native::dispatcher_slot`) and the wasm trampoline (`WasmTrampoline`)**: at handler entry, push `Received { mail_id, t }`. At handler exit (including the panic / unwind path that already brackets `#321` panic legibility), push `Finished { mail_id, t }`.
 
 `std::time::Instant` is monotonic since Rust 1.59 (the stdlib clamps backward jumps internally) and reads cost ~10–20 ns on Linux/macOS via VDSO (`clock_gettime(CLOCK_MONOTONIC)` / `mach_absolute_time`); the `duration_since(SUBSTRATE_START)` subtraction adds ~1–2 ns. CLOCK_MONOTONIC is process-global on Linux and `mach_absolute_time` is system-wide on macOS, so different actor threads on the same substrate share a clock source — no inter-actor skew. Per-mail producer overhead is three timestamp reads + three queue pushes ≈ 30–60 ns. At a busy-scene baseline of ~33 k mails/sec this is ~1 ms/sec of extra CPU per active actor — negligible.
@@ -81,26 +81,26 @@ Defaults: `BATCH_MAX = 256`, `BATCH_INTERVAL = 1 ms`. At baseline this is ~1 k o
 
 Lives in `aether-capabilities` next to `BroadcastCapability` / `LogCapability`, registered at substrate boot under `aether.trace`. Handlers:
 
-- `on_batched_trace_events(BatchedTraceEvents)` — fold each event into the in-flight tree-counter map and the parent / mail / kind graph used by query consumers.
-- `on_subscribe_settlement(SubscribeSettlement { tree, reply_to })` — register interest in a tree's settlement; emits `Settled { tree }` to `reply_to` when counter[tree] hits zero (per §6, possibly multiple times).
+- `on_batched_trace_events(BatchedTraceEvents)` — fold each event into the per-root counter map and the parent / mail / kind graph used by query consumers.
+- `on_subscribe_settlement(SubscribeSettlement { root, reply_to })` — register interest in a causal chain's settlement; emits `Settled { root }` to `reply_to` when `counter[root]` hits zero (per §6, possibly multiple times).
 - Future: `on_describe_tree`, `on_export_trace`, etc. — additional consumers slot in here without further infrastructure changes.
 
 The observer maintains:
 
-- `HashMap<MailId, TreeState>` keyed by the tree's root mail id, where `TreeState { counter: u32, in_flight: HashSet<MailId>, lifecycle: TreeLifecycle }` and `TreeLifecycle = Tick(frame_no) | Wire(actor) | Init(actor) | Drop(actor) | Replace(actor) | McpRequest(...) | HubBridge(...) | External(MailboxId)` labels the tree's *cause* for query output. The originator (chassis sentinel, owning cap, etc.) is read directly off the root `MailId.sender` — no separate field needed.
-- `HashMap<MailId, MailNode>` where `MailNode { tree, parent, sender, recipient, kind, t_sent: Nanos, t_received: Option<Nanos>, t_finished: Option<Nanos> }` for graph queries (`Option` on the latter two — a node is created at `Sent` arrival and patched as `Received` / `Finished` land later).
-- `HashMap<MailId, Vec<ReplyTo>>` of pending settlement subscribers, keyed by tree root.
+- `HashMap<MailId, RootState>` keyed by the root mail id, where `RootState { counter: u32, in_flight: HashSet<MailId>, lifecycle: RootLifecycle }` and `RootLifecycle = Tick(frame_no) | Wire(actor) | Init(actor) | Drop(actor) | Replace(actor) | McpRequest(...) | HubBridge(...) | External(MailboxId)` labels the chain's *cause* for query output. The originator (chassis sentinel, owning cap, etc.) is read directly off the root `MailId.sender` — no separate field needed.
+- `HashMap<MailId, MailNode>` where `MailNode { root, parent, sender, recipient, kind, t_sent: Nanos, t_received: Option<Nanos>, t_finished: Option<Nanos> }` for graph queries (`Option` on the latter two — a node is created at `Sent` arrival and patched as `Received` / `Finished` land later).
+- `HashMap<MailId, Vec<ReplyTo>>` of pending settlement subscribers, keyed by root.
 
-### 5. Tree roots originate at "no in-flight mail" sites; everything else inherits
+### 5. Roots originate at "no in-flight mail" sites; everything else inherits
 
-Each actor's per-handler context (`NativeCtx` / `WasmCtx`) carries the in-flight mail id and tree id of the mail it's currently processing. `Sender::send_to_named` reads the in-flight tree from the calling context:
+Each actor's per-handler context (`NativeCtx` / `WasmCtx`) carries the in-flight mail's `MailId` and `root: MailId` (the root of the causal chain it belongs to). `Sender::send_to_named` reads them from the calling context:
 
-- **In a handler** — child inherits the in-flight tree id and stamps `parent_mail` to the in-flight mail id.
-- **Outside any handler context** (chassis dispatching `Tick`, lifecycle (`init` / `wire` / `drop` / `replace`), externally-bridged mail from the hub or MCP, or a cap-owned worker thread reacting to an external event such as a TCP connection's inbound bytes) — the new mail's `MailId` *is* its tree id. The send path detects the absence of an inherited tree, stamps `tree = self.MailId` and `parent_mail = None` on the outgoing envelope, and the observer's `on_batched_trace_events` allocates a `TreeState` keyed by that `MailId` on first `Sent`-with-no-parent.
+- **In a handler** — child inherits the in-flight `root` and stamps `parent_mail` to the in-flight mail id.
+- **Outside any handler context** (chassis dispatching `Tick`, lifecycle (`init` / `wire` / `drop` / `replace`), externally-bridged mail from the hub or MCP, or a cap-owned worker thread reacting to an external event such as a TCP connection's inbound bytes) — the new mail's `MailId` *is* its own root. The send path detects the absence of an inherited root, stamps `root = self.MailId` and `parent_mail = None` on the outgoing envelope, and the observer's `on_batched_trace_events` allocates a `RootState` keyed by that `MailId` on first `Sent`-with-no-parent.
 
-Per-actor `correlation_id` allocators (§1) cover both mail-id and tree-id allocation in one — no separate tree allocator, no substrate-wide central counter, no cross-actor contention on the mail-throughput hot path. The id space is reset on substrate boot; ids are unique within a substrate run, not across runs (consistent with today's `MailboxId` / `KindId` per-run uniqueness).
+Per-actor `correlation_id` allocators (§1) cover the entire `MailId` space — root mails and child mails draw from the same counter, no separate root allocator, no substrate-wide central counter, no cross-actor contention on the mail-throughput hot path. The id space is reset on substrate boot; ids are unique within a substrate run, not across runs (consistent with today's `MailboxId` / `KindId` per-run uniqueness).
 
-The chassis is not an actor but is an addressable mail endpoint at `MailboxId(0)`, the existing `MailboxId::NONE` sentinel (`crates/aether-data/src/ids.rs:153`). The "no origin" semantic generalises naturally to "chassis-originated, no actor sender": chassis-dispatched mail (Tick, lifecycle, hub-bridged, MCP-bridged) has no actor sender, so one sentinel covers both cases. The mailbox-name registration guard already rejects names whose FNV-1a hash collides with 0 (collision probability ~2⁻⁶⁴), so the sentinel never collides with a real cap mailbox. The symbolic `CHASSIS_MAILBOX_ID` constant aliases `MailboxId::NONE` for code that wants the chassis-specific framing at the call site. The dispatcher loop has a small switch on `recipient == CHASSIS_MAILBOX_ID` ahead of the registry lookup; settlement reply mail (`Settled { tree }`) routes through that switch into the chassis's gate-site notification logic. The chassis-as-sentinel framing also gives the trace graph a labelled root node — every tree whose root mail's `sender == CHASSIS_MAILBOX_ID` is a chassis-originated tree, and `TreeState.lifecycle` (§4) names the specific cause (`Tick(frame_no) | Wire(actor) | Init(actor) | Drop(actor) | Replace(actor) | McpRequest(...) | HubBridge(...)`) so query output names the cause of every tree.
+The chassis is not an actor but is an addressable mail endpoint at `MailboxId(0)`, the existing `MailboxId::NONE` sentinel (`crates/aether-data/src/ids.rs:153`). The "no origin" semantic generalises naturally to "chassis-originated, no actor sender": chassis-dispatched mail (Tick, lifecycle, hub-bridged, MCP-bridged) has no actor sender, so one sentinel covers both cases. The mailbox-name registration guard already rejects names whose FNV-1a hash collides with 0 (collision probability ~2⁻⁶⁴), so the sentinel never collides with a real cap mailbox. The symbolic `CHASSIS_MAILBOX_ID` constant aliases `MailboxId::NONE` for code that wants the chassis-specific framing at the call site. The dispatcher loop has a small switch on `recipient == CHASSIS_MAILBOX_ID` ahead of the registry lookup; settlement reply mail (`Settled { root }`) routes through that switch into the chassis's gate-site notification logic. The chassis-as-sentinel framing also gives the causal graph a labelled root — every chain whose root mail's `sender == CHASSIS_MAILBOX_ID` is chassis-originated, and `RootState.lifecycle` (§4) names the specific cause (`Tick(frame_no) | Wire(actor) | Init(actor) | Drop(actor) | Replace(actor) | McpRequest(...) | HubBridge(...)`) so query output names the cause of every causal chain.
 
 ### 6. Settlement is a hint, not a guarantee — consumers are idempotent
 
@@ -108,11 +108,11 @@ The trace queue and the recipient mpsc are independent paths. Cross-producer eve
 
 Rather than enforce a producer-side "Sent before enqueue" ordering invariant (which would couple the trace push to the mail enqueue at every send site), the design treats `Settled` as a hint:
 
-- Observer fires `Settled { tree }` to subscribers whenever counter[tree] transitions to zero.
+- Observer fires `Settled { root }` to subscribers whenever `counter[root]` transitions to zero.
 - If a late `Sent` arrives, the counter increments back up and a subsequent transition to zero re-fires `Settled`.
-- Gate consumers (chassis Tick gate, lifecycle gates, `replace_component` drain) are written to be idempotent: first `Settled` unblocks the gate; duplicate `Settled` is a no-op. None of them destroy state on first `Settled` — they only unblock waiters. Late events landing under the new tree (which is in fact a new tree id) cannot mix in.
+- Gate consumers (chassis Tick gate, lifecycle gates, `replace_component` drain) are written to be idempotent: first `Settled` unblocks the gate; duplicate `Settled` is a no-op. None of them destroy state on first `Settled` — they only unblock waiters. Late events landing under the new chain (which has a different root MailId) cannot mix in.
 
-Optional follow-ons if telemetry shows spurious fires are common enough to matter: a one-batch quiescence window at the observer (fire only after counter[tree] has been zero for one batch interval), or generation numbers on `Settled` so consumers can reason about replay. Both deferred past v1.
+Optional follow-ons if telemetry shows spurious fires are common enough to matter: a one-batch quiescence window at the observer (fire only after `counter[root]` has been zero for one batch interval), or generation numbers on `Settled` so consumers can reason about replay. Both deferred past v1.
 
 ### 7. Trace events are detached — the tracing layer is meta
 
@@ -130,32 +130,32 @@ v1 ships the trace queue as `crossbeam::queue::SegQueue` (unbounded MPSC). A pat
 
 Three landable PRs:
 
-1. **Tracing infrastructure + settlement gate.** Trace queue, drainer, `TraceObserver` cap, `TraceEvent` spec, per-actor `correlation_id` allocator (drives `MailId` allocation; tree ids are root mail ids, no separate counter), in-flight-context plumbing on `NativeCtx` / `WasmCtx`, `CHASSIS_MAILBOX_ID` sentinel + dispatcher switch. Replace `wait_instanced_quiesce` callers with settlement subscriptions; retire `await_tick_subscribed` and `settle_observations` from the #648 tests; close the `replace_component_preserves_mailbox_identity` flake.
-2. **MCP `describe_tree`.** Read the observer's graph, return a structured causal tree per query. Lights up live tracing in the agent harness.
-3. **Flame-graph export.** `mcp__aether-hub__export_trace(tree, format = "chrome" | "folded")` — Chrome-trace JSON is the de-facto standard (Perfetto / chrome://tracing / speedscope). Direct mapping from `MailNode` to a Chrome-trace span; trivial transform from the existing data.
+1. **Tracing infrastructure + settlement gate.** Trace queue, drainer, `TraceObserver` cap, `TraceEvent` spec, per-actor `correlation_id` allocator (drives `MailId` allocation; root ids are just the originating mail's MailId, no separate counter), in-flight-context plumbing on `NativeCtx` / `WasmCtx`, `CHASSIS_MAILBOX_ID` sentinel + dispatcher switch. Replace `wait_instanced_quiesce` callers with settlement subscriptions; retire `await_tick_subscribed` and `settle_observations` from the #648 tests; close the `replace_component_preserves_mailbox_identity` flake.
+2. **MCP `describe_tree(root)`.** Read the observer's graph, return the structured causal subgraph rooted at the given mail. Lights up live tracing in the agent harness. (Tool name keeps `tree` because what's *returned* is a tree-shaped subgraph — the parameter is a `root: MailId`.)
+3. **Flame-graph export.** `mcp__aether-hub__export_trace(root, format = "chrome" | "folded")` — Chrome-trace JSON is the de-facto standard (Perfetto / chrome://tracing / speedscope). Direct mapping from `MailNode` to a Chrome-trace span; trivial transform from the existing data.
 
 Phases 2 and 3 don't change the substrate — they're pure additions to the observer cap and the hub.
 
 ### 11. Eviction policy: in-memory only, time + count cap, discard on evict
 
-The observer's `TreeState` and `MailNode` maps grow with every observed mail. Without a bound, an hour at busy load is ~120 M nodes. Two-tier eviction caps the footprint:
+The observer's `RootState` and `MailNode` maps grow with every observed mail. Without a bound, an hour at busy load is ~120 M nodes. Two-tier eviction caps the footprint:
 
 ```
 RETENTION_MS  = 30_000     // env: AETHER_TRACE_RETENTION_MS
-MAX_TREES     = 10_000     // env: AETHER_TRACE_MAX_TREES
+MAX_ROOTS     = 10_000     // env: AETHER_TRACE_MAX_ROOTS
 ```
 
-- A tree is **eligible for eviction** once `Settled` has fired and `now_nanos - tree.t_settled_nanos >= RETENTION_MS * 1_000_000`.
-- A tree is **forced for eviction** when the observer holds more than `MAX_TREES` total trees and this is the oldest-by-`t_settled_nanos`.
-- **In-flight trees are never evicted regardless of age** — they're load-bearing for gating.
-- Eviction runs at the tail of `on_batched_trace_events` (no separate timer thread, no separate scheduler tick). When a tree (keyed by its root `MailId`) is evicted, drop its `TreeState` and every `MailNode` whose `tree` field matches the evicted root.
+- A root is **eligible for eviction** once `Settled` has fired and `now_nanos - root_state.t_settled_nanos >= RETENTION_MS * 1_000_000`.
+- A root is **forced for eviction** when the observer holds more than `MAX_ROOTS` total roots and this is the oldest-by-`t_settled_nanos`.
+- **In-flight roots are never evicted regardless of age** — they're load-bearing for gating.
+- Eviction runs at the tail of `on_batched_trace_events` (no separate timer thread, no separate scheduler tick). When a root is evicted, drop its `RootState` and every `MailNode` whose `root` field matches the evicted MailId.
 
-At baseline (33 k mails/sec, ~5 mails per tree → 6.6 k trees/sec, 30 s retention → ~200 k retained nodes ≈ 20 MB) this is bounded and small. Pathological-volume scenarios hit the count cap and discard the oldest history rather than going OOM.
+At baseline (33 k mails/sec, ~5 mails per chain → 6.6 k roots/sec, 30 s retention → ~200 k retained nodes ≈ 20 MB) this is bounded and small. Pathological-volume scenarios hit the count cap and discard the oldest history rather than going OOM.
 
-**Discard, not persist, in v1.** Disk persistence is real complexity (format choice, rotation, syscall cost on the drainer hot path, crash-recovery semantics) that the v1 consumers don't need. Settlement gating only cares about in-flight trees; `engine_logs` causal grouping captures the in-flight tree id *into the log entry* at emission time so the observer can drop the tree afterwards; MCP `describe_tree` and Chrome-trace export are for "show me what just happened," seconds-to-minutes window. Two future opt-ins if usage justifies:
+**Discard, not persist, in v1.** Disk persistence is real complexity (format choice, rotation, syscall cost on the drainer hot path, crash-recovery semantics) that the v1 consumers don't need. Settlement gating only cares about in-flight roots; `engine_logs` causal grouping captures the in-flight root MailId *into the log entry* at emission time so the observer can drop the root afterwards; MCP `describe_tree` and Chrome-trace export are for "show me what just happened," seconds-to-minutes window. Two future opt-ins if usage justifies:
 
-- **Aggregated histograms** (always-on, separate retention budget). Per-bucket counters for handler duration per kind, queue latency per recipient — tiny memory, retained indefinitely, survives tree eviction. Feeds the performance-tuning use case (#687, scheduler tuning).
-- **Operator-opt-in streaming export** via `AETHER_TRACE_OUT=/path/to/trace.jsonl`. Observer appends each settled tree as one Chrome-trace JSON line. Operator-opt-in (not default), no rotation in v1 — just append. Use case: long-running profiling sessions, crash forensics for non-panic-path failures.
+- **Aggregated histograms** (always-on, separate retention budget). Per-bucket counters for handler duration per kind, queue latency per recipient — tiny memory, retained indefinitely, survives root eviction. Feeds the performance-tuning use case (#687, scheduler tuning).
+- **Operator-opt-in streaming export** via `AETHER_TRACE_OUT=/path/to/trace.jsonl`. Observer appends each settled chain as one Chrome-trace JSON line. Operator-opt-in (not default), no rotation in v1 — just append. Use case: long-running profiling sessions, crash forensics for non-panic-path failures.
 
 Neither is in scope for Phase 1 above.
 
@@ -163,24 +163,24 @@ Neither is in scope for Phase 1 above.
 
 ### Positive
 
-- **Settlement gating without deadlines.** `wait_instanced_quiesce` retires. Per-frame Tick gating, lifecycle gates, and `replace_component` drain all become "subscribe to tree T's `Settled`". The `replace_component_preserves_mailbox_identity` flake closes structurally. The #648 test helpers (`await_tick_subscribed`, `settle_observations`) retire.
-- **Causal graph for the agent harness.** MCP `describe_tree(tree_id)` returns the structured cause-and-effect chain of any in-flight or recent work. Future debugger / introspection tools build on the same graph.
-- **Performance instrumentation for free.** Inbox queue latency (`t_received - t_sent`), handler duration (`t_finished - t_received`), critical-path analysis (longest sequential chain through a tree), parallelism observation (overlapping `[t_sent, t_finished]` windows in the same tree). Used directly during scheduler tuning and the eventual lifecycle-barrier-graph work (issue #687).
+- **Settlement gating without deadlines.** `wait_instanced_quiesce` retires. Per-frame Tick gating, lifecycle gates, and `replace_component` drain all become "subscribe to root R's `Settled`". The `replace_component_preserves_mailbox_identity` flake closes structurally. The #648 test helpers (`await_tick_subscribed`, `settle_observations`) retire.
+- **Causal graph for the agent harness.** MCP `describe_tree(root)` returns the structured cause-and-effect subgraph of any in-flight or recent work. Future debugger / introspection tools build on the same graph.
+- **Performance instrumentation for free.** Inbox queue latency (`t_received - t_sent`), handler duration (`t_finished - t_received`), critical-path analysis (longest sequential chain in a causal subgraph), parallelism observation (overlapping `[t_sent, t_finished]` windows in the same chain). Used directly during scheduler tuning and the eventual lifecycle-barrier-graph work (issue #687).
 - **Flame graphs.** Chrome-trace export via the observer; Perfetto / chrome://tracing / speedscope read it natively.
-- **`engine_logs` causal grouping.** ADR-0023 text-log entries carry the in-flight tree id of the actor that emitted them, so log lines group by causal chain. Light add to ADR-0023's `LogEntry`.
+- **`engine_logs` causal grouping.** ADR-0023 text-log entries carry the in-flight root MailId of the actor that emitted them, so log lines group by causal chain. Light add to ADR-0023's `LogEntry`.
 - **Foundation for the future debugger.** Repeated user direction toward "show me what's happening inside the engine" lands here.
 
 ### Negative
 
 - **Always-on hot-path cost.** ~30–60 ns per mail in the producer path (three `Instant::now()` reads + three SegQueue pushes). Negligible at baseline; measurable under absolute-throughput stress. No knob to turn it off — settlement gating depends on it.
 - **One always-running drainer thread per chassis.** Plus the `TraceObserver` cap's dispatcher thread. Two more OS threads per substrate, joining the existing chassis infrastructure threads.
-- **Observer memory grows with in-flight + recent trees.** `TreeState` and `MailNode` retained until the tree settles + a retention window (default: drop after `Settled` fires + 5 s, so trailing `describe_tree` queries still see recently-finished trees). At baseline ~10 k retained nodes; bounded by load.
+- **Observer memory grows with in-flight + recent roots.** `RootState` and `MailNode` retained until the chain settles + a retention window (per §11). At baseline ~10 k retained nodes; bounded by load.
 - **Spurious `Settled` fires are possible.** Consumers must be idempotent. None of the v1 consumers destroy state on first `Settled`, but future consumers must respect the contract.
 - **Unbounded trace queue under pathological load.** Memory grows if drainer falls behind. v1 ships with a `trace_queue_depth` metric and no policy; bounded variants deferred.
 
 ### Neutral
 
-- **Sits alongside ADR-0023 / ADR-0077, not on top of them.** Text logging (`tracing::*` events → `LogBuffer` → `LogCapability` → hub) and mail tracing (substrate `send` / dispatch hooks → trace queue → `TraceObserver`) are independent pipelines with similar shape. Cross-link only at consumer side: `engine_logs` reads the in-flight tree id from a thread-local that the dispatcher stamps when entering a handler.
+- **Sits alongside ADR-0023 / ADR-0077, not on top of them.** Text logging (`tracing::*` events → `LogBuffer` → `LogCapability` → hub) and mail tracing (substrate `send` / dispatch hooks → trace queue → `TraceObserver`) are independent pipelines with similar shape. Cross-link only at consumer side: `engine_logs` reads the in-flight root MailId from a thread-local that the dispatcher stamps when entering a handler.
 - **No wire changes for existing consumers.** The substrate → hub wire is untouched in v1. New MCP tools (`describe_tree`, `export_trace`) are additions; no existing MCP tool's response changes.
 - **`correlation_id` rolls together with `MailId`.** The existing per-call `correlation_id` field becomes always-present and per-actor-allocated; reply-slot lookups key off `(sender, correlation_id)` (= `MailId`) instead of bare `correlation_id`. No new field on the envelope (`correlation_id` already exists), but its allocator moves from the test bench / hub to per-actor `AtomicU64`s.
 
