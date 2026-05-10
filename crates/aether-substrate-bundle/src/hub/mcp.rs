@@ -913,8 +913,7 @@ mod tests {
         // Filter out the auto-prepended `process_name` metadata
         // events (issue 731 follow-up to silence Perfetto's hashed-pid
         // display) so the assertion stays focused on the slice shape.
-        let slices: Vec<&serde_json::Value> =
-            events.iter().filter(|e| e["ph"] != "M").collect();
+        let slices: Vec<&serde_json::Value> = events.iter().filter(|e| e["ph"] != "M").collect();
         assert_eq!(slices.len(), 1, "one mail -> one X event");
         assert_eq!(slices[0]["ph"], "X");
 
@@ -990,8 +989,7 @@ mod tests {
 
         let trace: serde_json::Value = serde_json::from_str(&response).unwrap();
         let events = trace["traceEvents"].as_array().unwrap();
-        let slices: Vec<&serde_json::Value> =
-            events.iter().filter(|e| e["ph"] != "M").collect();
+        let slices: Vec<&serde_json::Value> = events.iter().filter(|e| e["ph"] != "M").collect();
         assert_eq!(slices.len(), 1);
         assert_eq!(slices[0]["ph"], "X");
     }
