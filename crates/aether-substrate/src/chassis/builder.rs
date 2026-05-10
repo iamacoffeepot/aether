@@ -1619,18 +1619,6 @@ impl<C: Chassis> PassiveChassis<C> {
     pub fn actor_registry(&self) -> &Arc<crate::ActorRegistry> {
         &self.booted.actor_registry
     }
-
-    /// Wait for every spawned instanced actor's inbox to drain
-    /// (`pending == 0`), polling until quiet or `deadline` passes.
-    /// Returns `true` on quiesce, `false` on timeout. Test-bench-only:
-    /// production drivers don't poll this; trampolines are
-    /// free-running by design and a slow tick handler stalls only
-    /// the next frame's render, not the chassis. Wedge detection
-    /// (CPU-loop wasm) waits on a future epoch-deadline ADR — this
-    /// is a passive wait, not an abort barrier.
-    pub fn wait_instanced_quiesce(&self, deadline: std::time::Instant) -> bool {
-        self.booted.spawner.wait_instanced_quiesce(deadline)
-    }
 }
 
 #[cfg(test)]

@@ -155,6 +155,42 @@ pub fn record_finished(mail_id: MailId) {
     });
 }
 
+/// ADR-0080 chassis-root push helper. Combines `MailId` minting,
+/// the `Sent` trace event emission, and the `Mailer::push` into one
+/// call so chassis-side mail (Tick fanout from the frame loop, hub-
+/// bridged inbound, MCP-bridged) gets observable lineage without
+/// duplicating the producer-side hook in `NativeBinding::send_mail_with_lineage`.
+///
+/// Returns the freshly minted `MailId` so the caller can subscribe
+/// to its settlement via the chassis [`crate::chassis::settlement::SettlementRegistry`]
+/// before waiting on the chain.
+///
+/// `correlation_id` is allocated by the caller (the chassis owns its
+/// own `AtomicU64` counter, symmetric with each per-actor `NativeBinding`'s
+/// counter). Pre-PR 4 the test bench / hub minters were the only
+/// chassis-side counters; this helper shapes them as ADR-0080 §1
+/// chassis-root MailIds.
+pub fn push_chassis_root_mail(
+    mailer: &Mailer,
+    correlation_id: u64,
+    recipient: MailboxId,
+    kind: KindId,
+    payload: Vec<u8>,
+    count: u32,
+) -> MailId {
+    let mail_id = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, correlation_id);
+    record_sent(
+        mail_id,
+        mail_id,
+        None,
+        MailboxId::CHASSIS_MAILBOX_ID,
+        recipient,
+        kind,
+    );
+    mailer.push(Mail::new(recipient, kind, payload, count).with_lineage(mail_id, mail_id, None));
+    mail_id
+}
+
 /// ADR-0080 §3 batch parameters: drain at most this many events per
 /// drainer cycle. Picked to amortise observer dispatch (~1k observer
 /// mails/sec at the busy-scene baseline of ~33k events/sec).

@@ -37,6 +37,7 @@ use aether_substrate::{
     capture::CaptureQueue,
     chassis::frame_loop,
     mail::{Mail, MailboxId},
+    runtime::trace::push_chassis_root_mail,
 };
 
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
@@ -653,33 +654,40 @@ impl TestBench {
 
     fn run_frame(&mut self, dispatch_tick: bool) {
         if dispatch_tick {
-            self.queue.push(Mail::new(
+            // ADR-0080 §6 settlement gating: push the Tick mail with a
+            // chassis-minted `MailId` so the trace pipeline tracks
+            // the chain, subscribe to its settlement before pushing,
+            // and wait on the receiver after. The chain rooted at
+            // this Tick's `MailId` covers everything the Tick
+            // triggers — input fanout, subscriber handlers, the
+            // tick_observed broadcasts that those subscribers emit,
+            // the broadcast cap's egress to outbound. When the
+            // chain settles, all derived work is done.
+            //
+            // Replaces the pre-PR-4 `wait_instanced_quiesce` poll
+            // loop (issue #707): the polling deadline guessed at
+            // when broadcasts had landed; settlement knows
+            // structurally.
+            let registry = self._passive.settlement_registry();
+            let tick_root = push_chassis_root_mail(
+                &self.queue,
+                self.fresh_correlation_id(),
                 self.input_mailbox,
                 self.kind_tick,
                 encode_empty::<Tick>(),
                 1,
-            ));
+            );
+            let rx = registry.subscribe_settlement(tick_root);
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
         }
-        // Wait for instanced actors (today: wasm trampolines) to
-        // process the just-pushed Tick before draining frame-bound
-        // caps. Without this, broadcasts the trampoline emits in
-        // response to the Tick land in the broadcast cap's inbox
-        // *after* `drain_frame_bound_or_abort` returns, and
-        // `pump_until_reply` sees `AdvanceResult` before the
-        // tick_observed broadcasts make the loopback round-trip.
-        // Production drivers don't share this wait — they let
-        // trampolines run free at their own cadence. Generous
-        // 5 s deadline matches the pre-Phase-4 implicit drain budget
-        // for slow CI; a never-quiescing actor surfaces as a test
-        // timeout, not a substrate abort (wedge detection waits on
-        // a future epoch-deadline ADR, symmetric with native).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let _ = self._passive.wait_instanced_quiesce(deadline);
         // ADR-0074 §Decision 5: render's inbox must quiesce before
         // submit so any DrawTriangle / aether.camera mail this frame
-        // is integrated into the recorded pass. (The pre-Phase-4
-        // component drain barrier is retired; trampoline traps
-        // fail-fast directly via `NativeBinding::fatal_abort`.)
+        // is integrated into the recorded pass. Settlement above
+        // covers the causal-chain invariant; this preserves the
+        // separate per-frame ordering invariant for frame-bound caps.
+        // (The pre-Phase-4 component drain barrier is retired;
+        // trampoline traps fail-fast directly via
+        // `NativeBinding::fatal_abort`.)
         frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
 
         match self.capture_queue.take() {
@@ -700,16 +708,29 @@ impl TestBench {
 
         if self.frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
             let triangles = self.triangles_rendered.load(Ordering::Relaxed);
-            frame_loop::emit_frame_stats(&self.queue, self.kind_frame_stats, self.frame, triangles);
-            // Issue 576: pre-cap-promotion the broadcast sink ran inline on
-            // the caller thread, so `emit_frame_stats` synchronously
-            // produced an `EngineToHub::Mail` on outbound. Post-576
-            // broadcast is `BroadcastCapability` with its own dispatcher
-            // thread (FRAME_BARRIER, so the chassis tracks its pending
-            // counter). Without this drain, `pump_until_reply` would see
-            // `AdvanceResult` first and return before the broadcast
-            // dispatcher's `egress_broadcast` reached outbound, dropping
-            // `aether.observation.frame_stats` from `observed_kinds`.
+            // ADR-0080 settlement-gate the FrameStats broadcast.
+            // Pre-PR-4 the helper pushed bare and the `drain_frame_bound_or_abort`
+            // below was the synchronisation point; with settlement we
+            // push as a chassis-root chain and wait for the broadcast
+            // cap's egress to outbound to complete.
+            let registry = self._passive.settlement_registry();
+            let stats_root = push_chassis_root_mail(
+                &self.queue,
+                self.fresh_correlation_id(),
+                aether_data::mailbox_id_from_name(aether_kinds::HUB_BROADCAST_MAILBOX_NAME),
+                self.kind_frame_stats,
+                aether_data::encode(&aether_kinds::FrameStats {
+                    frame: self.frame,
+                    triangles,
+                }),
+                1,
+            );
+            let rx = registry.subscribe_settlement(stats_root);
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+            // Belt-and-suspenders: keep the frame-bound drain so the
+            // ADR-0074 §Decision 5 ordering invariant for frame-bound
+            // caps still holds. Settlement covers the causal chain;
+            // this covers the per-frame ordering.
             frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
             let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
             tracing::info!(

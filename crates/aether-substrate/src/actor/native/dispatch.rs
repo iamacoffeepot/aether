@@ -51,7 +51,9 @@ use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTo};
 /// `pending` is decremented after every dispatched envelope when
 /// `Some` — singletons pass it for `FRAME_BARRIER` caps (the chassis
 /// frame-loop drain barrier reads it); instanced actors pass their
-/// per-actor counter (`Spawner::wait_instanced_quiesce` reads it).
+/// per-actor counter (no live consumer post-PR-4: `wait_instanced_quiesce`
+/// retired in favour of ADR-0080 settlement gating, but the counter
+/// stays plumbed for the trampoline's `tx.send` accounting).
 pub(crate) fn dispatch_loop_run<A>(
     binding: &Arc<NativeBinding>,
     actor: &mut Box<A>,
