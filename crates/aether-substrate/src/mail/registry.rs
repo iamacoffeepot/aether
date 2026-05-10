@@ -230,10 +230,16 @@ impl Registry {
     /// occupied entry is a collision.
     fn insert(&self, name: String, entry: MailboxEntry) -> Result<MailboxId, NameConflict> {
         let id = MailboxId::from_name(&name);
-        if id == MailboxId::NONE {
-            // Practically impossible at 64 bits, but the sentinel is
-            // reserved and silently shadowing it would break
-            // Option<MailboxId> semantics for the sender path.
+        if id == MailboxId::NONE || id == MailboxId::CHASSIS_MAILBOX_ID {
+            // Sentinel collisions are reserved: NONE shadows the
+            // "absent/uninit" id (Option<MailboxId> semantics break if
+            // a real mailbox claims it), and CHASSIS_MAILBOX_ID is the
+            // chassis-router short-circuit target — registering a real
+            // handler at that name would silently shadow chassis routing
+            // (issue iamacoffeepot/aether#725). Hash collision against
+            // either is practically impossible at 64 bits, but the
+            // CHASSIS check also blocks the obvious footgun: a caller
+            // literally registering "aether.chassis".
             return Err(NameConflict { name });
         }
         let mut inner = self.inner.write().unwrap();
@@ -806,6 +812,21 @@ mod tests {
         assert_eq!(r.lookup("loaded"), Some(first));
         // Entries count unchanged after the failed second attempt.
         assert_eq!(r.len(), 1);
+    }
+
+    /// Issue iamacoffeepot/aether#725: registering a real handler at the
+    /// reserved `"aether.chassis"` name would silently shadow the
+    /// chassis-router short-circuit in `Mailer::route_mail` (mail to
+    /// `CHASSIS_MAILBOX_ID` never reaches the registry). Reject at the
+    /// registration boundary so the routing path stays unambiguous.
+    #[test]
+    fn try_register_closure_rejects_reserved_chassis_name() {
+        let r = Registry::new();
+        let err = r
+            .try_register_closure("aether.chassis", noop_handler())
+            .expect_err("reserved name must reject");
+        assert_eq!(err.name, "aether.chassis");
+        assert_eq!(r.len(), 0);
     }
 
     #[test]
