@@ -23,6 +23,7 @@ pub mod ctx;
 pub mod error;
 pub mod frame_loop;
 pub mod helpers;
+pub mod settlement;
 
 use crate::chassis::builder::{BuiltChassis, DriverCapability};
 use crate::chassis::error::BootError;

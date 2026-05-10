@@ -106,3 +106,36 @@ pub enum TraceEvent {
 pub struct BatchedTraceEvents {
     pub events: Vec<TraceEvent>,
 }
+
+/// ADR-0080 §6 settlement notification. Emitted by
+/// [`crate::trace::BatchedTraceEvents`]'s consumer
+/// (`TraceObserverCapability`) when a causal chain's `in_flight`
+/// counter hits zero, addressed to
+/// [`aether_data::MailboxId::CHASSIS_MAILBOX_ID`]. The chassis-side
+/// dispatcher switch routes this kind into the gate-site
+/// notification map and signals every subscriber waiting on `root`.
+///
+/// **Settlement is a hint, not a guarantee.** Per ADR-0080 §6,
+/// consumers MUST be idempotent — duplicate `Settled { root }` mail
+/// for the same root is a no-op for any waiter that already woke.
+/// The observer's eviction may also lose late `Finished` events, in
+/// which case settlement is reported earlier than strictly correct;
+/// the gate-site contract is "settles eventually," not "settles only
+/// once every dependency is provably done."
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.trace.settled")]
+pub struct Settled {
+    pub root: aether_data::MailId,
+}
