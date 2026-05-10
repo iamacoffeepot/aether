@@ -603,6 +603,7 @@ mod tests {
                         t_sent: aether_kinds::trace::Nanos(100),
                         t_received: Some(aether_kinds::trace::Nanos(200)),
                         t_finished: None,
+                        thread_name: None,
                     },
                     MailNodeWire {
                         mail_id: child,
@@ -613,6 +614,7 @@ mod tests {
                         t_sent: aether_kinds::trace::Nanos(300),
                         t_received: None,
                         t_finished: None,
+                        thread_name: None,
                     },
                 ],
             };
@@ -872,6 +874,7 @@ mod tests {
                     t_sent: aether_kinds::trace::Nanos(1_000),
                     t_received: Some(aether_kinds::trace::Nanos(2_000)),
                     t_finished: Some(aether_kinds::trace::Nanos(5_000)),
+                    thread_name: None,
                 }],
             };
             let payload = postcard::to_allocvec(&reply).expect("encode reply");
@@ -958,6 +961,7 @@ mod tests {
                     t_sent: aether_kinds::trace::Nanos(1_000),
                     t_received: Some(aether_kinds::trace::Nanos(2_000)),
                     t_finished: Some(aether_kinds::trace::Nanos(5_000)),
+                    thread_name: None,
                 }],
             };
             let payload = postcard::to_allocvec(&reply).expect("encode reply");

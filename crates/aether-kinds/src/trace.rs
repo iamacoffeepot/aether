@@ -15,6 +15,7 @@
 //!   amortise dispatch cost (defaults: BATCH_MAX = 256, BATCH_INTERVAL
 //!   = 1ms; see ADR-0080 §3).
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_data::{KindId, MailId, MailboxId};
@@ -76,6 +77,18 @@ pub enum TraceEvent {
     Received {
         mail_id: MailId,
         t: Nanos,
+        /// Issue 734: OS thread name captured at the dispatcher's
+        /// receive hook (`std::thread::current().name()`). The
+        /// substrate's default `Pooled` scheduler (post-issue-635)
+        /// names worker threads `aether-worker-N`, so the chrome
+        /// trace renderer can distinguish per-thread rows even when
+        /// one OS thread serves multiple actors. Actors that opt into
+        /// the `Thread` scheduler get `aether-instanced-<full_name>` /
+        /// `aether-root-<NAMESPACE>` from `actor::native::spawn` and
+        /// `spawn_thread`. `None` when the OS thread has no name
+        /// (anonymous test threads, `std::thread::spawn` without
+        /// `Builder::new().name(...)`).
+        thread_name: Option<String>,
     },
     Finished {
         mail_id: MailId,
@@ -162,6 +175,11 @@ pub struct MailNodeWire {
     pub t_sent: Nanos,
     pub t_received: Option<Nanos>,
     pub t_finished: Option<Nanos>,
+    /// Issue 734: OS thread name captured at the dispatcher's receive
+    /// hook (`std::thread::current().name()`). `None` until the
+    /// `Received` event lands. See [`TraceEvent::Received::thread_name`]
+    /// for the producer-side semantics.
+    pub thread_name: Option<String>,
 }
 
 /// Issue 718: request kind for the recent-roots summary. `since_ms`

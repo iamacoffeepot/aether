@@ -126,7 +126,16 @@ pub fn record_sent(
 /// default `MailId::NONE`. Suppressing `Received`/`Finished` for
 /// `NONE`-stamped mail prevents the observer's own dispatch from
 /// generating events that would re-feed the drainer.
-pub fn record_received(mail_id: MailId) {
+///
+/// Issue 734: dispatchers pass `std::thread::current().name()
+/// .map(str::to_owned)` as `thread_name` so the chrome trace renderer
+/// can stamp each event with a per-thread row in Perfetto. The
+/// default `Pooled` scheduler (post-issue-635) names worker threads
+/// `aether-worker-N`, so one tid commonly serves multiple actors;
+/// actors on the `Thread` scheduler get the per-actor names from
+/// `actor::native::spawn` (`aether-instanced-<full_name>`,
+/// `aether-root-<NAMESPACE>`). Anonymous test threads pass `None`.
+pub fn record_received(mail_id: MailId, thread_name: Option<String>) {
     if mail_id == MailId::NONE {
         return;
     }
@@ -136,6 +145,7 @@ pub fn record_received(mail_id: MailId) {
     queue.push(TraceEvent::Received {
         mail_id,
         t: now_nanos(),
+        thread_name,
     });
 }
 

@@ -76,7 +76,13 @@ pub(crate) fn dispatch_loop_run<A>(
         };
         let inbound_mail_id = env.mail_id;
         // ADR-0080 §2 producer hook: `Received` at handler entry.
-        crate::runtime::trace::record_received(inbound_mail_id);
+        // Issue 734: capture the OS thread name so the chrome trace
+        // renderer can stamp per-thread tids + emit thread_name M
+        // events. With the default `Pooled` scheduler (issue 635)
+        // this surfaces as `aether-worker-N` shared across actors;
+        // `Thread`-scheduled actors get per-actor names.
+        let thread_name = std::thread::current().name().map(str::to_owned);
+        crate::runtime::trace::record_received(inbound_mail_id, thread_name);
         aether_actor::local::with_stamped(slots, || {
             crate::runtime::log_install::with_actor_dispatch(
                 &**binding as &dyn crate::runtime::log_install::MailDispatch,
@@ -123,7 +129,8 @@ pub(crate) fn dispatch_loop_run<A>(
     // the full inbox.
     while let Some(env) = binding.try_recv() {
         let inbound_mail_id = env.mail_id;
-        crate::runtime::trace::record_received(inbound_mail_id);
+        let thread_name = std::thread::current().name().map(str::to_owned);
+        crate::runtime::trace::record_received(inbound_mail_id, thread_name);
         aether_actor::local::with_stamped(slots, || {
             crate::runtime::log_install::with_actor_dispatch(
                 &**binding as &dyn crate::runtime::log_install::MailDispatch,
