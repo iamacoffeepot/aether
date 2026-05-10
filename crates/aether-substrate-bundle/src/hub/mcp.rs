@@ -691,6 +691,165 @@ mod tests {
         assert!(format!("{err:?}").contains("unknown engine_id"));
     }
 
+    /// Issue 735: descriptor for `aether.trace.describe_window`.
+    fn describe_window_descriptor() -> aether_data::KindDescriptor {
+        use aether_data::Kind as _;
+        aether_data::KindDescriptor {
+            name: aether_kinds::trace::DescribeWindow::NAME.to_owned(),
+            schema: <aether_kinds::trace::DescribeWindow as aether_data::Schema>::SCHEMA.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn describe_tree_window_round_trips_observer_reply() {
+        use aether_data::tagged_id::Tag;
+        use aether_data::{MailId, MailboxId, with_tag};
+        use aether_kinds::trace::{DescribeWindowResult, MailNodeWire};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![describe_window_descriptor()];
+        let (rec, mut rx) = record_with_kinds(0xd010, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let session_token = hub.session.token;
+
+        let m_in = MailId {
+            sender: MailboxId(with_tag(Tag::Mailbox, 0xAA01)),
+            correlation_id: 1,
+        };
+
+        let sessions_clone = state.sessions.clone();
+        let substrate_task = tokio::spawn(async move {
+            let _req = rx.recv().await.expect("tool should send request");
+            let reply = DescribeWindowResult::Ok {
+                mails: vec![MailNodeWire {
+                    mail_id: m_in,
+                    parent: None,
+                    sender: m_in.sender,
+                    recipient: MailboxId(with_tag(Tag::Mailbox, 0xAA02)),
+                    kind: aether_data::KindId(aether_data::with_tag(Tag::Kind, 0xCAFE)),
+                    t_sent: aether_kinds::trace::Nanos(500),
+                    t_received: Some(aether_kinds::trace::Nanos(600)),
+                    t_finished: Some(aether_kinds::trace::Nanos(700)),
+                    thread_name: Some("aether-worker-3".to_owned()),
+                }],
+            };
+            let payload = postcard::to_allocvec(&reply).expect("encode reply");
+            let record = sessions_clone.get(&session_token).expect("session");
+            let kind = "aether.trace.describe_window_result".to_owned();
+            let queued = QueuedMail {
+                engine_id: id,
+                kind_name: kind.clone(),
+                payload,
+                broadcast: false,
+                origin: None,
+            };
+            let remainder = record.replies.try_deliver(&kind, queued);
+            assert!(remainder.is_none(), "reply registry should consume mail");
+        });
+
+        let json = hub
+            .describe_tree_window(Parameters(args::DescribeTreeWindowArgs {
+                engine_id: id.0.to_string(),
+                window: args::TraceWindowArg::Relative { last_ms: 1_000 },
+                max_mails: Some(100),
+                timeout_ms: Some(2_000),
+            }))
+            .await
+            .expect("tool should succeed");
+
+        substrate_task.await.expect("stub substrate task");
+
+        let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let ok = &raw["Ok"];
+        let mails = ok["mails"].as_array().unwrap();
+        assert_eq!(mails.len(), 1);
+        let m = &mails[0];
+        assert!(
+            m["sender"].as_str().unwrap().starts_with("mbx-"),
+            "sender should be tagged"
+        );
+        assert!(
+            m["kind"].as_str().unwrap().starts_with("knd-"),
+            "kind should be tagged"
+        );
+        assert_eq!(m["t_sent"], 500);
+        assert_eq!(m["thread_name"], "aether-worker-3");
+    }
+
+    #[tokio::test]
+    async fn describe_tree_window_too_many_surfaces_err() {
+        use aether_kinds::trace::DescribeWindowResult;
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![describe_window_descriptor()];
+        let (rec, mut rx) = record_with_kinds(0xd011, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let session_token = hub.session.token;
+
+        // Stub substrate replies with Err::too_many — the hub should
+        // pass it through as the externally-tagged JSON envelope so
+        // the agent can read the matched count.
+        let sessions_clone = state.sessions.clone();
+        let substrate_task = tokio::spawn(async move {
+            let _req = rx.recv().await.expect("tool should send request");
+            let reply = DescribeWindowResult::Err {
+                too_many: Some(12_345),
+            };
+            let payload = postcard::to_allocvec(&reply).expect("encode reply");
+            let record = sessions_clone.get(&session_token).expect("session");
+            let kind = "aether.trace.describe_window_result".to_owned();
+            let queued = QueuedMail {
+                engine_id: id,
+                kind_name: kind.clone(),
+                payload,
+                broadcast: false,
+                origin: None,
+            };
+            let remainder = record.replies.try_deliver(&kind, queued);
+            assert!(remainder.is_none(), "reply registry should consume mail");
+        });
+
+        let json = hub
+            .describe_tree_window(Parameters(args::DescribeTreeWindowArgs {
+                engine_id: id.0.to_string(),
+                window: args::TraceWindowArg::Absolute {
+                    start_ns: 0,
+                    end_ns: Some(1_000_000_000_000),
+                },
+                max_mails: Some(5),
+                timeout_ms: Some(2_000),
+            }))
+            .await
+            .expect("tool should succeed");
+
+        substrate_task.await.expect("stub substrate task");
+
+        let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(raw["Err"]["too_many"], 12_345);
+    }
+
+    #[tokio::test]
+    async fn describe_tree_window_unknown_engine_errors() {
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
+        let hub = Hub::new(state);
+        let err = hub
+            .describe_tree_window(Parameters(args::DescribeTreeWindowArgs {
+                engine_id: Uuid::from_u128(0xdead_beef).to_string(),
+                window: args::TraceWindowArg::Relative { last_ms: 100 },
+                max_mails: None,
+                timeout_ms: Some(1_000),
+            }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("unknown engine_id"));
+    }
+
     fn list_active_roots_descriptor() -> aether_data::KindDescriptor {
         use aether_data::Kind as _;
         aether_data::KindDescriptor {
