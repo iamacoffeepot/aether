@@ -80,7 +80,26 @@ pub(super) fn render(
     kind_names: &HashMap<u64, String>,
     mailbox_names: &MailboxLookup,
 ) -> Result<String, serde_json::Error> {
-    let mut events = build_events(result, kind_names, mailbox_names);
+    match result {
+        DescribeTreeResult::Ok { mails, .. } => render_mails(mails, kind_names, mailbox_names),
+        DescribeTreeResult::Err { not_found } => render_not_found(*not_found, mailbox_names),
+    }
+}
+
+/// Issue 735: render a flat list of [`MailNodeWire`]s (the
+/// `dump_trace_window` shape — no `root` / `in_flight` context, just
+/// the mails that fell within the requested window). The body is the
+/// post-`build_events` pipeline lifted out of [`render`] so the
+/// describe-tree path and the describe-window path share the
+/// downstream sort + integer-pid/tid-rewrite + metadata emission
+/// logic without forcing the window-side caller to fabricate an
+/// unused root / in_flight tuple.
+pub(super) fn render_mails(
+    mails: &[MailNodeWire],
+    kind_names: &HashMap<u64, String>,
+    mailbox_names: &MailboxLookup,
+) -> Result<String, serde_json::Error> {
+    let mut events = build_events(mails, kind_names, mailbox_names);
     // Sort by `ts` ascending. Some chrome-trace importers (Perfetto
     // included) tolerate unsorted streams but emit warnings; sorting
     // here removes that whole category of noise without callers
@@ -193,31 +212,48 @@ pub(super) fn render(
     serde_json::to_string_pretty(&json!({ "traceEvents": metadata }))
 }
 
+/// Renders the `not_found` Err arm of [`DescribeTreeResult`] as a
+/// trace doc with a single metadata event explaining the empty
+/// payload. Pulled out of `render` for symmetry with `render_mails` —
+/// the window-side path never produces this shape (Phase 3 surfaces
+/// `Err::too_many` as an MCP error before reaching the renderer at
+/// all).
+fn render_not_found(
+    not_found: MailId,
+    mailbox_names: &MailboxLookup,
+) -> Result<String, serde_json::Error> {
+    let label = format_mail_id(not_found, mailbox_names);
+    // Two-event shape preserved from the pre-refactor pipeline: the
+    // post-build_events resolver auto-emitted one `process_name` M
+    // event per unique pid label, on top of the diagnostic `process_name`
+    // M event itself. Agents that scanned the trace doc for the
+    // `args.name = "...not_found..."` line still find it here.
+    let metadata = vec![
+        json!({
+            "ph": "M",
+            "name": "process_name",
+            "cat": "metadata",
+            "pid": 1,
+            "args": { "name": label.clone() },
+        }),
+        json!({
+            "ph": "M",
+            "name": "process_name",
+            "cat": "metadata",
+            "pid": 1,
+            "args": {
+                "name": format!("describe_tree returned not_found for {label}")
+            },
+        }),
+    ];
+    serde_json::to_string_pretty(&json!({ "traceEvents": metadata }))
+}
+
 fn build_events(
-    result: &DescribeTreeResult,
+    mails: &[MailNodeWire],
     kind_names: &HashMap<u64, String>,
     mailbox_names: &MailboxLookup,
 ) -> Vec<Value> {
-    let mails = match result {
-        DescribeTreeResult::Ok { mails, .. } => mails,
-        DescribeTreeResult::Err { not_found } => {
-            // Empty trace doc with a metadata event explaining the
-            // missing root — chrome://tracing surfaces metadata
-            // events as a top-level note so the agent sees why the
-            // file is empty.
-            let label = format_mail_id(*not_found, mailbox_names);
-            return vec![json!({
-                "ph": "M",
-                "name": "process_name",
-                "cat": "metadata",
-                "pid": label,
-                "args": {
-                    "name": format!("describe_tree returned not_found for {label}")
-                },
-            })];
-        }
-    };
-
     // Index for parent-edge lookup.
     let by_id: HashMap<MailId, &MailNodeWire> = mails.iter().map(|n| (n.mail_id, n)).collect();
 
