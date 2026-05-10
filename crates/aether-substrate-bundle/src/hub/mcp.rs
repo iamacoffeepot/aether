@@ -539,6 +539,178 @@ mod tests {
         assert!(format!("{err:?}").contains("unknown engine_id"));
     }
 
+    /// Issue 718: descriptor for `aether.trace.describe_tree`.
+    /// Cloned from the kind's `Schema` const so a future schema change
+    /// flows through to the test for free.
+    fn describe_tree_descriptor() -> aether_data::KindDescriptor {
+        use aether_data::Kind as _;
+        aether_data::KindDescriptor {
+            name: aether_kinds::trace::DescribeTree::NAME.to_owned(),
+            schema: <aether_kinds::trace::DescribeTree as aether_data::Schema>::SCHEMA.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn describe_tree_round_trips_observer_reply() {
+        use aether_data::tagged_id::{self, Tag};
+        use aether_data::{MailId, MailboxId, with_tag};
+        use aether_kinds::trace::{DescribeTreeResult, MailNodeWire};
+
+        // Engine record carries the descriptor for the request kind so
+        // the schema-driven encoder in deliver_one knows how to encode
+        // the agent's params into wire bytes. The reply kind doesn't
+        // need a descriptor — the hub decodes via postcard directly.
+        let engines = EngineRegistry::new();
+        let kinds = vec![describe_tree_descriptor()];
+        let (rec, mut rx) = record_with_kinds(0xd001, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let session_token = hub.session.token;
+
+        // Sender mailbox we'll use for the root id; only its tag matters
+        // for the JSON wire form. The root has one extra child node.
+        let sender_raw = with_tag(Tag::Mailbox, 0xABCD);
+        let root = MailId {
+            sender: MailboxId(sender_raw),
+            correlation_id: 7,
+        };
+        let child = MailId {
+            sender: MailboxId(with_tag(Tag::Mailbox, 0xCDEF)),
+            correlation_id: 1,
+        };
+
+        // Stub substrate: drain the request the tool sent (we don't
+        // care about its contents for this test — the encode path is
+        // already covered by `encode_schema` tests in aether-codec)
+        // and inject a postcard-encoded `DescribeTreeResult::Ok` reply.
+        let sessions_clone = state.sessions.clone();
+        let substrate_task = tokio::spawn(async move {
+            let _req = rx.recv().await.expect("tool should send request");
+            let reply = DescribeTreeResult::Ok {
+                root,
+                in_flight: 1,
+                mails: vec![
+                    MailNodeWire {
+                        mail_id: root,
+                        parent: None,
+                        sender: root.sender,
+                        recipient: MailboxId(with_tag(Tag::Mailbox, 1)),
+                        kind: aether_data::KindId(aether_data::with_tag(Tag::Kind, 0xBEEF)),
+                        t_sent: aether_kinds::trace::Nanos(100),
+                        t_received: Some(aether_kinds::trace::Nanos(200)),
+                        t_finished: None,
+                    },
+                    MailNodeWire {
+                        mail_id: child,
+                        parent: Some(root),
+                        sender: child.sender,
+                        recipient: MailboxId(with_tag(Tag::Mailbox, 2)),
+                        kind: aether_data::KindId(aether_data::with_tag(Tag::Kind, 0xCAFE)),
+                        t_sent: aether_kinds::trace::Nanos(300),
+                        t_received: None,
+                        t_finished: None,
+                    },
+                ],
+            };
+            let payload = postcard::to_allocvec(&reply).expect("encode reply");
+            let record = sessions_clone.get(&session_token).expect("session");
+            let kind = "aether.trace.describe_tree_result".to_owned();
+            let queued = QueuedMail {
+                engine_id: id,
+                kind_name: kind.clone(),
+                payload,
+                broadcast: false,
+                origin: None,
+            };
+            let remainder = record.replies.try_deliver(&kind, queued);
+            assert!(remainder.is_none(), "reply registry should consume mail");
+        });
+
+        let json = hub
+            .describe_tree(Parameters(args::DescribeTreeArgs {
+                engine_id: id.0.to_string(),
+                root: args::MailIdWire {
+                    sender: tagged_id::encode(sender_raw).unwrap(),
+                    correlation_id: 7,
+                },
+                timeout_ms: Some(2_000),
+            }))
+            .await
+            .expect("tool should succeed");
+
+        substrate_task.await.expect("stub substrate task");
+
+        // The reply enum serializes via serde's external tag — `Ok`
+        // becomes a top-level key. Each typed id flows out as a tagged
+        // string per its human-readable serde branch.
+        let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let ok = &raw["Ok"];
+        assert_eq!(ok["in_flight"], 1);
+        let mails = ok["mails"].as_array().unwrap();
+        assert_eq!(mails.len(), 2);
+        // Root node first; its sender renders as a tagged-string mbx-...
+        let m0 = &mails[0];
+        let s0 = m0["sender"].as_str().unwrap();
+        assert!(s0.starts_with("mbx-"), "sender should be tagged: {s0}");
+        let k0 = m0["kind"].as_str().unwrap();
+        assert!(k0.starts_with("knd-"), "kind should be tagged: {k0}");
+        // root field on the Ok variant: composite `{ sender, correlation_id }`
+        let root_obj = &ok["root"];
+        assert!(
+            root_obj["sender"].as_str().unwrap().starts_with("mbx-"),
+            "root.sender should be tagged"
+        );
+        assert_eq!(root_obj["correlation_id"], 7);
+    }
+
+    #[tokio::test]
+    async fn describe_tree_unknown_engine_errors() {
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
+        let hub = Hub::new(state);
+        let err = hub
+            .describe_tree(Parameters(args::DescribeTreeArgs {
+                engine_id: Uuid::from_u128(0xdead).to_string(),
+                root: args::MailIdWire {
+                    sender: aether_data::tagged_id::encode(aether_data::with_tag(
+                        aether_data::tagged_id::Tag::Mailbox,
+                        1,
+                    ))
+                    .unwrap(),
+                    correlation_id: 0,
+                },
+                timeout_ms: Some(1_000),
+            }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("unknown engine_id"));
+    }
+
+    #[tokio::test]
+    async fn describe_tree_rejects_malformed_sender() {
+        let engines = EngineRegistry::new();
+        let (rec, _rx) = record(0xd0c2);
+        let id = rec.id;
+        engines.insert(rec);
+        let hub = Hub::new(test_state(engines, SessionRegistry::new()));
+        let err = hub
+            .describe_tree(Parameters(args::DescribeTreeArgs {
+                engine_id: id.0.to_string(),
+                root: args::MailIdWire {
+                    sender: "not-a-mailbox".into(),
+                    correlation_id: 0,
+                },
+                timeout_ms: Some(1_000),
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").to_lowercase().contains("root.sender"),
+            "{err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn describe_component_rejects_malformed_mailbox_id() {
         // ADR-0064: a bare-number mailbox id is no longer valid wire

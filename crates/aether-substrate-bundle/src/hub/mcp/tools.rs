@@ -16,6 +16,7 @@ use aether_data::tagged_id::{self, Tag};
 use aether_kinds::{
     EnvVar, Spawn as WireSpawn, SpawnResult as WireSpawnResult, Terminate as WireTerminate,
     TerminateResult as WireTerminateResult,
+    trace::{DescribeTree, DescribeTreeResult, TRACE_OBSERVER_MAILBOX_NAME},
 };
 use base64::Engine as _;
 use rmcp::{
@@ -34,10 +35,11 @@ use crate::hub::session::SessionHandle;
 
 use super::args::{
     CaptureFrameArgs, CaptureFrameResultWire, DescribeComponentArgs, DescribeComponentResponse,
-    DescribeKindsArgs, EngineInfo, EngineLogEntry, EngineLogsArgs, EngineLogsResponse,
-    LoadComponentArgs, LoadComponentResponse, LoadResultWire, MailSpec, MailStatus,
-    ReceiveMailArgs, ReceivedMail, ReplaceComponentArgs, ReplaceResultWire, SendMailArgs,
-    SpawnResult, SpawnSubstrateArgs, TerminateResult, TerminateSubstrateArgs, log_level_to_str,
+    DescribeKindsArgs, DescribeTreeArgs, EngineInfo, EngineLogEntry, EngineLogsArgs,
+    EngineLogsResponse, LoadComponentArgs, LoadComponentResponse, LoadResultWire, MailSpec,
+    MailStatus, ReceiveMailArgs, ReceivedMail, ReplaceComponentArgs, ReplaceResultWire,
+    SendMailArgs, SpawnResult, SpawnSubstrateArgs, TerminateResult, TerminateSubstrateArgs,
+    log_level_to_str,
 };
 use super::codecs::{decode_inbound, deliver_one, encode_capture_bundle};
 use super::{Hub, HubState};
@@ -861,6 +863,91 @@ impl Hub {
             fallback: capabilities.fallback,
         };
         serde_json::to_string(&response).map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    #[tool(
+        description = "Describe the mail tree under one root (issue 718, ADR-0080 Phase 2). The substrate's `aether.trace` observer accumulates a parent → child mail graph keyed by `MailId`; this tool surfaces one root's subtree as JSON: every node's `mail_id`, `parent`, `sender`, `recipient`, `kind`, and `t_sent` / `t_received` / `t_finished` timestamps in nanoseconds-since-substrate-boot, plus the root's current `in_flight` count. `root` is a JSON object `{ sender: \"mbx-XXXX-XXXX-XXXX\", correlation_id: <number> }` — copy a `MailNodeWire.root` from a prior `describe_tree` reply or a `RootSummaryWire.root` from `list_active_roots`. Returns `Err::not_found` (echoing the requested root) when the root has been evicted past retention or never existed. Default timeout 5000ms; clamped to 30000."
+    )]
+    pub(super) async fn describe_tree(
+        &self,
+        Parameters(args): Parameters<DescribeTreeArgs>,
+    ) -> Result<String, McpError> {
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+        if self.state.engines.get(&id).is_none() {
+            return Err(McpError::invalid_params(
+                format!("unknown engine_id {}", args.engine_id),
+                None,
+            ));
+        }
+        // Validate the tagged-string sender up-front so a malformed
+        // form fails fast with a clear error rather than surfacing as
+        // a downstream encode error from the schema codec.
+        tagged_id::decode_with_tag(&args.root.sender, Tag::Mailbox)
+            .map_err(|e| McpError::invalid_params(format!("root.sender: {e}"), None))?;
+        let root_params = serde_json::json!({
+            "root": {
+                "sender": args.root.sender.clone(),
+                "correlation_id": args.root.correlation_id,
+            },
+        });
+
+        let result_kind = <DescribeTreeResult as Kind>::NAME.to_owned();
+        let (_guard, rx) = self
+            .session
+            .replies
+            .register(result_kind.clone())
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    "a describe_tree is already in flight on this session; wait for it to complete"
+                        .to_owned(),
+                    None,
+                )
+            })?;
+
+        let spec = MailSpec {
+            engine_id: args.engine_id.clone(),
+            recipient_name: TRACE_OBSERVER_MAILBOX_NAME.to_owned(),
+            kind_name: <DescribeTree as Kind>::NAME.to_owned(),
+            params: Some(root_params),
+            count: 1,
+        };
+        deliver_one(spec, &self.state.engines, self.session.token)
+            .await
+            .map_err(|e| McpError::internal_error(format!("send failed: {e}"), None))?;
+
+        let wait = args
+            .timeout_ms
+            .map(|ms| Duration::from_millis(ms as u64).min(MAX_REPLY_TIMEOUT))
+            .unwrap_or(DEFAULT_REPLY_TIMEOUT);
+        let queued = match timeout(wait, rx).await {
+            Ok(Ok(m)) => m,
+            Ok(Err(_)) => {
+                return Err(McpError::internal_error(
+                    "describe_tree reply channel closed before reply arrived".to_owned(),
+                    None,
+                ));
+            }
+            Err(_) => {
+                return Err(McpError::internal_error(
+                    format!(
+                        "timed out after {}ms waiting for {result_kind}",
+                        wait.as_millis()
+                    ),
+                    None,
+                ));
+            }
+        };
+
+        let result: DescribeTreeResult = postcard::from_bytes(&queued.payload)
+            .map_err(|e| McpError::internal_error(format!("decode reply: {e}"), None))?;
+        // The cap's reply is already MailId/MailboxId/KindId/Nanos —
+        // their human-readable serde branches emit tagged strings for
+        // ids and a u64 for `Nanos`, so JSON serialization is a single
+        // shot with no manual conversion.
+        serde_json::to_string(&result).map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 
     #[tool(

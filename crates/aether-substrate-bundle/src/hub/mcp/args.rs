@@ -457,3 +457,31 @@ pub struct ReceivedMail {
     /// which has no sending mailbox.
     pub origin: Option<String>,
 }
+
+/// Issue 718: agent-facing JSON shape of `aether_data::MailId`. The
+/// underlying type is a 128-bit composite (`MailboxId` sender + `u64`
+/// correlation) — too wide for the ADR-0064 single-string tagged-id
+/// scheme — so the wire form mirrors the struct, with `sender` carrying
+/// the existing `mbx-XXXX-XXXX-XXXX` tagged form. `correlation_id`
+/// stays a `u64`; for short-running processes it's well under 2^53 and
+/// the agent treats it as opaque (round-trip without arithmetic).
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub struct MailIdWire {
+    /// Tagged-string mailbox id of the sender that minted the mail.
+    pub sender: String,
+    /// Per-actor correlation counter; opaque to the agent.
+    pub correlation_id: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DescribeTreeArgs {
+    /// Hub-assigned engine UUID as a string (from `list_engines`).
+    pub engine_id: String,
+    /// Root mail id to describe. Obtained from a prior
+    /// `list_active_roots` reply or from any observed `MailNodeWire.root`.
+    pub root: MailIdWire,
+    /// Maximum time to wait for the substrate's reply, in
+    /// milliseconds. Defaults to 5000. Clamped to 30000.
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+}
