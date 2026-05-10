@@ -47,7 +47,7 @@ use super::{NativeActor, NativeDispatch};
 /// `mailer.send_reply(...)` directly; stage 2 routes those onto
 /// `ctx.reply(...)`).
 pub struct NativeCtx<'a> {
-    binding: &'a NativeBinding,
+    binding: &'a Arc<NativeBinding>,
     sender: ReplyTo,
     /// ADR-0080 §5: identity of the mail this handler is dispatching.
     /// Outbound `send` paths read this to stamp `parent_mail` on
@@ -70,7 +70,7 @@ impl<'a> NativeCtx<'a> {
     /// drive a handler without spinning up a full chassis; that's why
     /// it's `pub` rather than `pub(crate)`.
     pub fn new(
-        binding: &'a NativeBinding,
+        binding: &'a Arc<NativeBinding>,
         sender: ReplyTo,
         in_flight_mail_id: MailId,
         in_flight_root: MailId,
@@ -81,6 +81,54 @@ impl<'a> NativeCtx<'a> {
             in_flight_mail_id,
             in_flight_root,
         }
+    }
+
+    /// ADR-0080 §12 spawn primitive: launch a worker thread that
+    /// inherits this handler's in-flight `(mail_id, root)` so its
+    /// sends fold into the current causal chain. The closure `f`
+    /// receives a [`crate::actor::native::InheritCtx<A>`] — sends
+    /// from inside `f` carry `parent_mail = self.in_flight_mail_id()`
+    /// and `root = self.in_flight_root()` automatically.
+    ///
+    /// Use for short-burst CPU offload that is *part of* the current
+    /// handler's causal closure (e.g., parsing, encoding,
+    /// pixel-pushing). For long-lived workers responding to external
+    /// events with no caller context (TCP per-connection workers,
+    /// pollers), use [`Self::spawn_detached`] instead.
+    ///
+    /// **Settlement contract gap (issue iamacoffeepot/aether#716):**
+    /// the parent chain may settle before the worker's first send
+    /// arrives; callers gate-sensitive to settlement should not
+    /// rely on the parent chain staying open for the worker's
+    /// lifetime today.
+    pub fn spawn_inherit<A, F>(&self, f: F) -> std::thread::JoinHandle<()>
+    where
+        A: Actor + Singleton + 'static,
+        F: FnOnce(crate::actor::native::InheritCtx<A>) + Send + 'static,
+    {
+        crate::actor::native::spawn_thread::spawn_inherit::<A, F>(
+            Arc::clone(self.binding),
+            self.in_flight_mail_id,
+            self.in_flight_root,
+            f,
+        )
+    }
+
+    /// ADR-0080 §12 spawn primitive: launch a worker thread with no
+    /// in-flight inheritance. The closure `f` receives a
+    /// [`crate::actor::native::RootCtx<A>`] — each send mints a
+    /// fresh root chain with `A`'s mailbox as the producer.
+    ///
+    /// Use for long-lived workers that respond to external events
+    /// (TCP per-connection workers, pollers). For short-burst CPU
+    /// offload that is part of the current handler's causal closure,
+    /// use [`Self::spawn_inherit`].
+    pub fn spawn_detached<A, F>(&self, f: F) -> std::thread::JoinHandle<()>
+    where
+        A: Actor + Singleton + 'static,
+        F: FnOnce(crate::actor::native::RootCtx<A>) + Send + 'static,
+    {
+        crate::actor::native::spawn_thread::spawn_detached::<A, F>(Arc::clone(self.binding), f)
     }
 
     /// ADR-0080 §5: the [`MailId`] of the mail currently being
