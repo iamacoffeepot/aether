@@ -19,7 +19,7 @@
 use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
 
-use aether_data::{EngineId, KindDescriptor, KindId, MailboxId, SessionToken};
+use aether_data::{EngineId, KindDescriptor, KindId, MailboxDescriptor, MailboxId, SessionToken};
 
 use crate::mail::{ReplyTarget, ReplyTo};
 
@@ -132,6 +132,12 @@ pub trait EgressBackend: Send + Sync {
     /// `load_component` re-emits the engine's full descriptor list).
     fn egress_kinds_changed(&self, descriptors: Vec<KindDescriptor>);
 
+    /// Announce a mailbox-inventory change (issue
+    /// iamacoffeepot/aether#730 — symmetric with `egress_kinds_changed`).
+    /// Fired after each successful `load_component` registers a new
+    /// trampoline mailbox so the hub's cached inventory stays current.
+    fn egress_mailboxes_changed(&self, descriptors: Vec<MailboxDescriptor>);
+
     /// Push a batch of captured log entries (ADR-0023).
     fn egress_log_batch(&self, entries: Vec<LogEntry>);
 }
@@ -181,6 +187,7 @@ impl EgressBackend for DroppingBackend {
     ) {
     }
     fn egress_kinds_changed(&self, _descriptors: Vec<KindDescriptor>) {}
+    fn egress_mailboxes_changed(&self, _descriptors: Vec<MailboxDescriptor>) {}
     fn egress_log_batch(&self, _entries: Vec<LogEntry>) {}
 }
 
@@ -223,6 +230,9 @@ pub enum EgressEvent {
     },
     KindsChanged {
         descriptors: Vec<KindDescriptor>,
+    },
+    MailboxesChanged {
+        descriptors: Vec<MailboxDescriptor>,
     },
     LogBatch {
         entries: Vec<LogEntry>,
@@ -321,6 +331,10 @@ impl EgressBackend for RecordingBackend {
 
     fn egress_kinds_changed(&self, descriptors: Vec<KindDescriptor>) {
         let _ = self.tx.send(EgressEvent::KindsChanged { descriptors });
+    }
+
+    fn egress_mailboxes_changed(&self, descriptors: Vec<MailboxDescriptor>) {
+        let _ = self.tx.send(EgressEvent::MailboxesChanged { descriptors });
     }
 
     fn egress_log_batch(&self, entries: Vec<LogEntry>) {
@@ -453,6 +467,13 @@ impl HubOutbound {
     pub fn egress_kinds_changed(&self, descriptors: Vec<KindDescriptor>) {
         if let Some(b) = self.backend.get() {
             b.egress_kinds_changed(descriptors);
+        }
+    }
+
+    /// Announce a mailbox-inventory change.
+    pub fn egress_mailboxes_changed(&self, descriptors: Vec<MailboxDescriptor>) {
+        if let Some(b) = self.backend.get() {
+            b.egress_mailboxes_changed(descriptors);
         }
     }
 

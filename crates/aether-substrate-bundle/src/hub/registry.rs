@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use aether_data::KindDescriptor;
+use aether_data::{KindDescriptor, MailboxDescriptor};
 
 use crate::hub::wire::{EngineId, HubToEngine};
 use tokio::sync::mpsc;
@@ -44,6 +44,12 @@ pub struct EngineRecord {
     /// tool surface for `describe_kinds` and for schema-driven encoding
     /// on `send_mail`.
     pub kinds: Vec<KindDescriptor>,
+    /// Mailbox inventory the engine declared at Hello (issue
+    /// iamacoffeepot/aether#730 — symmetric with `kinds`). Used by
+    /// the trace MCP tools to resolve raw tagged mailbox ids back to
+    /// human-readable names + categories. Replaced wholesale on each
+    /// `MailboxesChanged` frame.
+    pub mailboxes: Vec<MailboxDescriptor>,
     /// Per-mailbox component metadata (ADR-0033). Keyed on the
     /// substrate-assigned `mailbox_id`. Clonable as a snapshot; the
     /// authoritative write path goes through
@@ -89,6 +95,16 @@ impl EngineRegistry {
     pub fn update_kinds(&self, id: &EngineId, kinds: Vec<KindDescriptor>) {
         if let Some(record) = self.inner.lock().unwrap().records.get_mut(id) {
             record.kinds = kinds;
+        }
+    }
+
+    /// Replace the cached mailbox descriptors for an engine. Called
+    /// when the substrate reports `EngineToHub::MailboxesChanged`
+    /// post-load (issue iamacoffeepot/aether#730 — symmetric with
+    /// `update_kinds`). No-op if the engine is unknown.
+    pub fn update_mailboxes(&self, id: &EngineId, mailboxes: Vec<MailboxDescriptor>) {
+        if let Some(record) = self.inner.lock().unwrap().records.get_mut(id) {
+            record.mailboxes = mailboxes;
         }
     }
 
@@ -169,6 +185,7 @@ mod tests {
             pid: 1,
             version: "0".into(),
             kinds: vec![],
+            mailboxes: vec![],
             components: HashMap::new(),
             mail_tx: tx,
             spawned: false,
@@ -216,5 +233,32 @@ mod tests {
         let reg = EngineRegistry::new();
         let unknown = EngineId(Uuid::from_u128(999));
         reg.update_kinds(&unknown, vec![]);
+    }
+
+    /// Issue iamacoffeepot/aether#730: `update_mailboxes` replaces the
+    /// cached descriptor list for an engine, mirroring `update_kinds`.
+    #[test]
+    fn update_mailboxes_replaces_cached_descriptors() {
+        use aether_data::{MailboxCategory, MailboxDescriptor, MailboxId};
+        let reg = EngineRegistry::new();
+        let r = record(7);
+        let id = r.id;
+        reg.insert(r);
+        assert!(reg.get(&id).unwrap().mailboxes.is_empty());
+
+        let new_mailboxes = vec![MailboxDescriptor {
+            id: MailboxId::from_name("aether.audio"),
+            name: "aether.audio".into(),
+            category: Some(MailboxCategory::Actor),
+        }];
+        reg.update_mailboxes(&id, new_mailboxes.clone());
+        assert_eq!(reg.get(&id).unwrap().mailboxes, new_mailboxes);
+    }
+
+    #[test]
+    fn update_mailboxes_for_unknown_engine_is_noop() {
+        let reg = EngineRegistry::new();
+        let unknown = EngineId(Uuid::from_u128(999));
+        reg.update_mailboxes(&unknown, vec![]);
     }
 }

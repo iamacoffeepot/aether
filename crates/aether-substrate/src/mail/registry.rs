@@ -49,7 +49,7 @@ pub fn noop_handler() -> MailboxHandler {
     Arc::new(|_dispatch: MailDispatch<'_>| {})
 }
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
-use aether_data::{KindDescriptor, SchemaType};
+use aether_data::{KindDescriptor, MailboxCategory, MailboxDescriptor, SchemaType};
 
 /// One mail's worth of dispatch metadata handed to a [`MailboxHandler`].
 /// Bundled into a single struct (rather than a positional argument
@@ -507,6 +507,41 @@ impl Registry {
         out
     }
 
+    /// Snapshot of every mailbox descriptor currently registered, plus
+    /// a synthetic entry for the chassis-router sentinel
+    /// (`aether.chassis` / [`MailboxId::CHASSIS_MAILBOX_ID`]). Sorted
+    /// by name. Used by the hub-client handshake to ship the
+    /// authoritative inventory in `Hello.mailboxes`, and by the
+    /// component cap to re-ship via `MailboxesChanged` after a load
+    /// registers a new trampoline mailbox (issue iamacoffeepot/aether#730).
+    ///
+    /// `Dropped` entries are included with their last-known name so a
+    /// trace tool can still resolve a mailbox that died after the
+    /// trace was captured. Categorisation is a pure function of the
+    /// mailbox name (`categorise_name`); the registry stores no
+    /// per-mailbox category state.
+    pub fn list_mailbox_descriptors(&self) -> Vec<MailboxDescriptor> {
+        let mut out: Vec<MailboxDescriptor> = self
+            .inner
+            .read()
+            .unwrap()
+            .mailboxes
+            .iter()
+            .map(|(id, m)| MailboxDescriptor {
+                id: *id,
+                name: m.name.clone(),
+                category: categorise_mailbox_name(&m.name),
+            })
+            .collect();
+        out.push(MailboxDescriptor {
+            id: MailboxId::CHASSIS_MAILBOX_ID,
+            name: "aether.chassis".to_owned(),
+            category: Some(MailboxCategory::ChassisSentinel),
+        });
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
     pub fn len(&self) -> usize {
         self.inner.read().unwrap().mailboxes.len()
     }
@@ -519,6 +554,31 @@ impl Registry {
 impl Default for Registry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Categorise a mailbox name for the inventory snapshot (issue 730).
+/// Pure function of the name string. The hub uses this categorisation
+/// (round-tripped through `MailboxDescriptor.category`) to render
+/// type-prefixed labels in trace tool output.
+fn categorise_mailbox_name(name: &str) -> Option<MailboxCategory> {
+    if name == "aether.chassis" {
+        // Reachable via [`MailboxId::CHASSIS_MAILBOX_ID`] short-circuit;
+        // never registered with a real handler. The synthetic entry in
+        // [`Registry::list_mailbox_descriptors`] uses the same
+        // categorisation so re-registration would be redundant.
+        Some(MailboxCategory::ChassisSentinel)
+    } else if name == "hub.claude.broadcast" {
+        Some(MailboxCategory::BroadcastSink)
+    } else if name.starts_with("aether.component.trampoline:") {
+        Some(MailboxCategory::Trampoline)
+    } else if name.starts_with("aether.") {
+        // Chassis caps and substrate-owned actors live under the
+        // `aether.` namespace (post-ADR-0074). Anything else is
+        // user-space and falls through to `None`.
+        Some(MailboxCategory::Actor)
+    } else {
+        None
     }
 }
 
@@ -862,6 +922,77 @@ mod tests {
             r.drop_mailbox(c),
             Err(DropError::AlreadyDropped(_))
         ));
+    }
+
+    /// Issue iamacoffeepot/aether#730: `list_mailbox_descriptors`
+    /// snapshots the table sorted by name, categorises each entry by
+    /// its name prefix, and inserts a synthetic `ChassisSentinel`
+    /// entry under `aether.chassis` (which is never a real registry
+    /// row — `insert` rejects the reserved name).
+    #[test]
+    fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
+        let r = Registry::new();
+        r.register_closure("aether.input", noop_handler());
+        r.register_closure("hub.claude.broadcast", noop_handler());
+        r.register_closure("aether.component.trampoline:cam", noop_handler());
+        r.register_closure("user_thing", noop_handler());
+
+        let snap = r.list_mailbox_descriptors();
+        // Five entries: 4 registered + 1 synthetic chassis sentinel.
+        assert_eq!(snap.len(), 5, "got: {snap:#?}");
+
+        // Sorted by name.
+        let names: Vec<&str> = snap.iter().map(|d| d.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "snapshot must be sorted by name");
+
+        // Each name maps to the expected category.
+        let cat = |n: &str| {
+            snap.iter()
+                .find(|d| d.name == n)
+                .and_then(|d| d.category)
+                .unwrap_or_else(|| panic!("missing entry for {n}"))
+        };
+        assert_eq!(cat("aether.chassis"), MailboxCategory::ChassisSentinel);
+        assert_eq!(cat("aether.input"), MailboxCategory::Actor);
+        assert_eq!(cat("hub.claude.broadcast"), MailboxCategory::BroadcastSink);
+        assert_eq!(
+            cat("aether.component.trampoline:cam"),
+            MailboxCategory::Trampoline
+        );
+        // User-space names fall outside any of the recognised
+        // categories; the hub's downstream renderer treats them as
+        // raw tagged ids without a type prefix.
+        assert!(
+            snap.iter()
+                .find(|d| d.name == "user_thing")
+                .unwrap()
+                .category
+                .is_none(),
+            "non-aether names categorise as None",
+        );
+
+        // The synthetic chassis sentinel uses the canonical id —
+        // hub-side resolution of trace senders against this id finds
+        // the right name without re-hashing.
+        let chassis = snap.iter().find(|d| d.name == "aether.chassis").unwrap();
+        assert_eq!(chassis.id, MailboxId::CHASSIS_MAILBOX_ID);
+    }
+
+    /// Each registered descriptor's id matches the deterministic hash
+    /// of its name (ADR-0029) — same id space the hub already knows.
+    #[test]
+    fn list_mailbox_descriptors_ids_match_name_hashes() {
+        let r = Registry::new();
+        let id = r.register_closure("aether.audio", noop_handler());
+        let entry = r
+            .list_mailbox_descriptors()
+            .into_iter()
+            .find(|d| d.name == "aether.audio")
+            .expect("audio entry");
+        assert_eq!(entry.id, id);
+        assert_eq!(entry.id, MailboxId::from_name("aether.audio"));
     }
 
     #[test]

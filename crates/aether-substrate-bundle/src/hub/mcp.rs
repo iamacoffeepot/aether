@@ -163,6 +163,7 @@ mod tests {
             pid: 42,
             version: "test".into(),
             kinds,
+            mailboxes: vec![],
             components: HashMap::new(),
             mail_tx: tx,
             spawned: false,

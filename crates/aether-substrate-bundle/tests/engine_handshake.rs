@@ -71,6 +71,7 @@ fn hello(name: &str) -> EngineToHub {
         started_unix: 0,
         version: "test".into(),
         kinds: vec![],
+        mailboxes: vec![],
     })
 }
 

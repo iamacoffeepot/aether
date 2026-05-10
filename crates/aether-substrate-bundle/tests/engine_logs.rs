@@ -53,6 +53,7 @@ async fn handshake(stream: &mut TcpStream) -> EngineId {
         started_unix: 0,
         version: "0".into(),
         kinds: vec![],
+        mailboxes: vec![],
     });
     stream.write_all(&encode_frame(&hello)).await.unwrap();
 
