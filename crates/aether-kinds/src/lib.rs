@@ -15,6 +15,7 @@ extern crate alloc;
 
 pub mod descriptors;
 pub mod keycode;
+pub mod trace;
 
 use bytemuck::{Pod, Zeroable};
 

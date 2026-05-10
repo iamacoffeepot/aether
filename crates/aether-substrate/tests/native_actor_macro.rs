@@ -130,7 +130,17 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
         panic!("expected mailbox entry under {recipient}");
     };
     let bytes = payload.encode_into_bytes();
-    handler(<K as Kind>::ID, K::NAME, None, ReplyTo::NONE, &bytes, 1);
+    handler(aether_substrate::mail::registry::MailDispatch {
+        kind: <K as Kind>::ID,
+        kind_name: K::NAME,
+        origin: None,
+        sender: ReplyTo::NONE,
+        payload: &bytes,
+        count: 1,
+        mail_id: aether_substrate::mail::MailId::NONE,
+        root: aether_substrate::mail::MailId::NONE,
+        parent_mail: None,
+    });
 }
 
 fn wait_for(target: u32, counter: &AtomicU32, budget: Duration) -> bool {

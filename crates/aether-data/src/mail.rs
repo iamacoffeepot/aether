@@ -9,7 +9,12 @@
 //! `aether-substrate` re-exports these from `aether_substrate::mail`
 //! so existing call sites compile unchanged.
 
-use crate::{EngineId, MailboxId, SessionToken};
+use alloc::borrow::Cow;
+
+use serde::{Deserialize, Serialize};
+
+use crate::schema::{LabelNode, NamedField, Primitive, SchemaType};
+use crate::{EngineId, MailboxId, Schema, SessionToken};
 
 /// ADR-0080 §1: the unique identity of a mail. A 128-bit composite of
 /// the producer's mailbox id and the producer's per-actor monotonic
@@ -20,14 +25,40 @@ use crate::{EngineId, MailboxId, SessionToken};
 /// reserved sentinel for "no actor mailbox"). Per-actor mints use the
 /// owning actor's `MailboxId`.
 ///
-/// Ships in PR 1 of issue #707 as a foundation for PR 2's producer-
-/// side `TraceEvent::Sent` emission. PR 2 plumbs `MailId` onto every
-/// substrate envelope and into per-handler context; PR 1 only
-/// introduces the type so downstream code can name it.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Serde-serializable so PR 2's `TraceEvent` (and its postcard-shaped
+/// `BatchedTraceEvents` envelope) can carry `MailId` over the in-
+/// process trace pipeline. The substrate's host-side `Envelope` and
+/// `Mail` types do not serialize, so the field additions on those
+/// remain wire-free.
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct MailId {
     pub sender: MailboxId,
     pub correlation_id: u64,
+}
+
+/// ADR-0080 §1: hand-written `Schema` impl. Cannot use the derive
+/// because it lives in `aether-actor-derive` and emits
+/// `aether_data::...` paths that don't resolve from inside `aether-
+/// data` itself. The shape mirrors what the derive would produce for
+/// a two-field non-`#[repr(C)]` struct.
+impl Schema for MailId {
+    const SCHEMA: SchemaType = SchemaType::Struct {
+        fields: Cow::Borrowed(&[
+            NamedField {
+                name: Cow::Borrowed("sender"),
+                ty: SchemaType::TypeId(MailboxId::TYPE_ID),
+            },
+            NamedField {
+                name: Cow::Borrowed("correlation_id"),
+                ty: SchemaType::Scalar(Primitive::U64),
+            },
+        ]),
+        repr_c: false,
+    };
+    const LABEL: Option<&'static str> = Some("aether.mail_id");
+    const LABEL_NODE: LabelNode = LabelNode::Anonymous;
 }
 
 impl MailId {

@@ -174,14 +174,17 @@ mod native {
                 }],
             };
             let bytes = postcard::to_allocvec(&batch).expect("encode");
-            handler(
-                <LogBatch as Kind>::ID,
-                "aether.log",
-                None,
-                aether_substrate::mail::ReplyTo::NONE,
-                &bytes,
-                1,
-            );
+            handler(aether_substrate::mail::registry::MailDispatch {
+                kind: <LogBatch as Kind>::ID,
+                kind_name: "aether.log",
+                origin: None,
+                sender: aether_substrate::mail::ReplyTo::NONE,
+                payload: &bytes,
+                count: 1,
+                mail_id: aether_substrate::mail::MailId::NONE,
+                root: aether_substrate::mail::MailId::NONE,
+                parent_mail: None,
+            });
 
             thread::sleep(Duration::from_millis(50));
             drop(chassis);
@@ -190,7 +193,10 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (registry, mailer) = fresh_substrate();
-            registry.register_closure(LogCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            registry.register_closure(
+                LogCapability::NAMESPACE,
+                aether_substrate::mail::registry::noop_handler(),
+            );
 
             let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<LogCapability>(())

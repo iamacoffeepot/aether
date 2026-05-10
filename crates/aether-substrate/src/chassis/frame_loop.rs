@@ -155,11 +155,12 @@ mod tests {
         let captured_for_sink = Arc::clone(&captured);
         registry.register_closure(
             aether_kinds::HUB_BROADCAST_MAILBOX_NAME,
-            Arc::new(
-                move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {
-                    captured_for_sink.write().unwrap().push(bytes.to_vec());
-                },
-            ),
+            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
+                captured_for_sink
+                    .write()
+                    .unwrap()
+                    .push(dispatch.payload.to_vec());
+            }),
         );
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
@@ -180,11 +181,12 @@ mod tests {
         let captured_for_sink = Arc::clone(&captured);
         registry.register_closure(
             aether_kinds::HUB_BROADCAST_MAILBOX_NAME,
-            Arc::new(
-                move |_kind_id, _kind_name, _origin, _sender, bytes, _count| {
-                    captured_for_sink.write().unwrap().push(bytes.to_vec());
-                },
-            ),
+            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
+                captured_for_sink
+                    .write()
+                    .unwrap()
+                    .push(dispatch.payload.to_vec());
+            }),
         );
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));

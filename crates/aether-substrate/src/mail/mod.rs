@@ -22,7 +22,7 @@ pub use registry::{MailboxEntry, MailboxHandler, Registry};
 /// ADR-0065 hoisted the canonical home into `aether_data` (per ADR-0069);
 /// this remains re-exported under the `aether_substrate::mail::MailboxId`
 /// path so existing call sites compile unchanged.
-pub use aether_data::{KindId, MailboxId};
+pub use aether_data::{KindId, MailId, MailboxId};
 /// Reply-routing types. Canonical home is `aether-data` (ADR-0076) —
 /// `aether-actor`'s `Dispatch` trait references them in its signature
 /// without taking an `aether-actor`-internal dep, and the location
@@ -66,6 +66,22 @@ pub struct Mail {
     pub payload: Vec<u8>,
     pub count: u32,
     pub reply_to: ReplyTo,
+    /// ADR-0080 §1: this mail's identity. The producer mints it from
+    /// `MailId::new(producer_mailbox, producer_per_actor_correlation)`
+    /// before pushing through `Mailer`. PR 2 stamps it inert (no
+    /// trace-event consumer reads it yet); PR 2's TraceObserver hooks
+    /// emit `TraceEvent::Sent { mail_id, .. }` against this value.
+    /// `MailId::NONE` for legacy paths that haven't migrated.
+    pub mail_id: MailId,
+    /// ADR-0080 §5: the root of this mail's causal chain — the
+    /// originating mail's `mail_id` for the chain. Inherited from the
+    /// sender's in-flight handler context; for chassis-root sends
+    /// (`Tick`, lifecycle, externally-bridged), `root == mail_id`.
+    /// `MailId::NONE` for legacy paths.
+    pub root: MailId,
+    /// ADR-0080 §5: the in-flight mail at the sender, or `None` for
+    /// chassis-root sends. The receiver's parent in the causal graph.
+    pub parent_mail: Option<MailId>,
 }
 
 impl Mail {
@@ -76,6 +92,9 @@ impl Mail {
             payload,
             count,
             reply_to: ReplyTo::NONE,
+            mail_id: MailId::NONE,
+            root: MailId::NONE,
+            parent_mail: None,
         }
     }
 
@@ -87,6 +106,23 @@ impl Mail {
     /// Other mail paths leave the default `ReplyTo::None`.
     pub fn with_reply_to(mut self, reply_to: ReplyTo) -> Self {
         self.reply_to = reply_to;
+        self
+    }
+
+    /// ADR-0080 §1 / §5: stamp the producer-minted lineage triple
+    /// (`mail_id`, `root`, `parent_mail`) onto this mail. Producer
+    /// paths (`NativeBinding::send_mail`, `Mailer::send_reply`,
+    /// chassis-root push sites) call this immediately after minting.
+    /// Mail with no lineage stamped retains `MailId::NONE` defaults.
+    pub fn with_lineage(
+        mut self,
+        mail_id: MailId,
+        root: MailId,
+        parent_mail: Option<MailId>,
+    ) -> Self {
+        self.mail_id = mail_id;
+        self.root = root;
+        self.parent_mail = parent_mail;
         self
     }
 }

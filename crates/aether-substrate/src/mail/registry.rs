@@ -14,24 +14,87 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-use crate::mail::{KindId, MailboxId, ReplyTo};
+use crate::mail::{KindId, MailId, MailboxId, ReplyTo};
+
+/// Test-only helper that builds a [`MailDispatch`] with empty
+/// `origin` / `ReplyTo::NONE` / `MailId::NONE` defaults from the
+/// minimum positional args. Used by chassis and capability tests
+/// that drive a registered handler synchronously without going
+/// through the full `Mail` → `Mailer::push` path.
+#[cfg(test)]
+pub(crate) fn test_dispatch<'a>(
+    kind: KindId,
+    kind_name: &'a str,
+    payload: &'a [u8],
+    count: u32,
+) -> MailDispatch<'a> {
+    MailDispatch {
+        kind,
+        kind_name,
+        origin: None,
+        sender: ReplyTo::NONE,
+        payload,
+        count,
+        mail_id: MailId::NONE,
+        root: MailId::NONE,
+        parent_mail: None,
+    }
+}
+
+/// No-op [`MailboxHandler`] for tests that just need a registered
+/// mailbox to route to *somewhere* without observing the mail. The
+/// explicit named helper documents intent at the call site and keeps
+/// the closure shape (post-ADR-0080 `MailDispatch`-based) hidden.
+pub fn noop_handler() -> MailboxHandler {
+    Arc::new(|_dispatch: MailDispatch<'_>| {})
+}
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
 use aether_data::{KindDescriptor, SchemaType};
 
+/// One mail's worth of dispatch metadata handed to a [`MailboxHandler`].
+/// Bundled into a single struct (rather than a positional argument
+/// list) so the producer-minted ADR-0080 §1 / §5 lineage fields
+/// (`mail_id` / `root` / `parent_mail`) ride alongside the existing
+/// envelope-style fields without exploding the closure's call shape.
+///
+/// Handlers that build an [`crate::actor::native::envelope::Envelope`]
+/// for an mpsc downstream copy `mail_id` / `root` / `parent_mail`
+/// onto it (the dispatcher reads them to populate the per-handler
+/// `NativeCtx`'s `in_flight()` accessors). Chassis-bound sinks that
+/// consume mail inline can ignore the lineage triple.
+#[derive(Copy, Clone, Debug)]
+pub struct MailDispatch<'a> {
+    /// Kind id (`K::ID`, ADR-0030 schema hash) the producer stamped.
+    pub kind: KindId,
+    /// Kind's registered name. Resolved by the dispatcher for
+    /// diagnostic logging; handlers that only match on `kind` ignore.
+    pub kind_name: &'a str,
+    /// Sending mailbox's registered name, if the mail came from a
+    /// component. `None` for substrate-core pushes with no sending
+    /// mailbox (ADR-0011).
+    pub origin: Option<&'a str>,
+    /// Remote reply target of the mail (ADR-0008 / ADR-0037 /
+    /// ADR-0042). Carries the correlation id for reply-routing.
+    pub sender: ReplyTo,
+    /// Payload bytes (the kind's encoded representation per ADR-0019).
+    pub payload: &'a [u8],
+    /// Kind-implied item count.
+    pub count: u32,
+    /// ADR-0080 §1: the producer-minted identity of this mail.
+    /// `MailId::NONE` for legacy paths that haven't migrated.
+    pub mail_id: MailId,
+    /// ADR-0080 §5: the root of this mail's causal chain.
+    pub root: MailId,
+    /// ADR-0080 §5: the in-flight mail at the sender, or `None` for
+    /// chassis-root sends.
+    pub parent_mail: Option<MailId>,
+}
+
 /// Closure invoked when mail is delivered to a chassis-bound mailbox.
 /// Called on the caller's thread (or the platform thread for input
-/// fan-out); must be `Send + Sync`. Arguments: the kind's id
-/// (`K::ID`, ADR-0030 schema hash), the kind's registered name
-/// (resolved by the dispatcher for diagnostic logging — handlers
-/// that only match on id can ignore it), the sending mailbox's
-/// registered name if the mail came from a component (`None` for
-/// substrate-core pushes with no sending mailbox, per ADR-0011),
-/// the remote reply target of the mail per ADR-0008 / ADR-0037
-/// (`Sender::Session` for hub-inbound, `ReplyTo::EngineMailbox` for
-/// bubbled-up, `ReplyTo::NONE` for substrate-local), payload bytes,
-/// and the kind-implied count.
-pub type MailboxHandler =
-    Arc<dyn Fn(KindId, &str, Option<&str>, ReplyTo, &[u8], u32) + Send + Sync + 'static>;
+/// fan-out); must be `Send + Sync`. The single [`MailDispatch`]
+/// argument bundles the per-mail metadata.
+pub type MailboxHandler = Arc<dyn for<'a> Fn(MailDispatch<'a>) + Send + Sync + 'static>;
 
 /// What a given mailbox actually is. The registry records this so the
 /// scheduler can dispatch appropriately without a per-mail type check.
@@ -462,7 +525,7 @@ mod tests {
     #[test]
     fn register_and_lookup_closure_mailbox() {
         let r = Registry::new();
-        let id = r.register_closure("physics", Arc::new(|_, _, _, _, _, _| {}));
+        let id = r.register_closure("physics", noop_handler());
         assert_eq!(id, MailboxId::from_name("physics"));
         assert_eq!(r.lookup("physics"), Some(id));
         assert!(matches!(r.entry(id), Some(MailboxEntry::Closure(_))));
@@ -475,32 +538,35 @@ mod tests {
         let c2 = Arc::clone(&counter);
         let id = r.register_closure(
             "heartbeat",
-            Arc::new(move |_kind_id, _kind, _origin, _sender, _bytes, count| {
-                c2.fetch_add(count, Ordering::SeqCst);
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                c2.fetch_add(dispatch.count, Ordering::SeqCst);
             }),
         );
         let Some(MailboxEntry::Closure(h)) = r.entry(id) else {
             panic!("expected closure entry")
         };
         // Test-side id is irrelevant — the handler ignores it.
-        h(KindId(0), "aether.tick", None, ReplyTo::NONE, &[], 7);
-        h(
-            KindId(0),
-            "aether.tick",
-            Some("physics"),
-            ReplyTo::NONE,
-            &[],
-            3,
-        );
+        h(test_dispatch(KindId(0), "aether.tick", &[], 7));
+        h(MailDispatch {
+            kind: KindId(0),
+            kind_name: "aether.tick",
+            origin: Some("physics"),
+            sender: ReplyTo::NONE,
+            payload: &[],
+            count: 3,
+            mail_id: MailId::NONE,
+            root: MailId::NONE,
+            parent_mail: None,
+        });
         assert_eq!(counter.load(Ordering::SeqCst), 10);
     }
 
     #[test]
     fn mailbox_ids_are_name_derived() {
         let r = Registry::new();
-        let a = r.register_closure("a", Arc::new(|_, _, _, _, _, _| {}));
-        let b = r.register_closure("b", Arc::new(|_, _, _, _, _, _| {}));
-        let c = r.register_closure("c", Arc::new(|_, _, _, _, _, _| {}));
+        let a = r.register_closure("a", noop_handler());
+        let b = r.register_closure("b", noop_handler());
+        let c = r.register_closure("c", noop_handler());
         assert_eq!(a, MailboxId::from_name("a"));
         assert_eq!(b, MailboxId::from_name("b"));
         assert_eq!(c, MailboxId::from_name("c"));
@@ -515,8 +581,8 @@ mod tests {
     #[should_panic(expected = "mailbox name already registered")]
     fn duplicate_name_panics() {
         let r = Registry::new();
-        r.register_closure("x", Arc::new(|_, _, _, _, _, _| {}));
-        r.register_closure("x", Arc::new(|_, _, _, _, _, _| {}));
+        r.register_closure("x", noop_handler());
+        r.register_closure("x", noop_handler());
     }
 
     #[test]
@@ -529,8 +595,8 @@ mod tests {
     #[test]
     fn mailbox_name_reverse_lookup() {
         let r = Registry::new();
-        let a = r.register_closure("physics", Arc::new(|_, _, _, _, _, _| {}));
-        let b = r.register_closure("hub.claude.broadcast", Arc::new(|_, _, _, _, _, _| {}));
+        let a = r.register_closure("physics", noop_handler());
+        let b = r.register_closure("hub.claude.broadcast", noop_handler());
         assert_eq!(r.mailbox_name(a).as_deref(), Some("physics"));
         assert_eq!(r.mailbox_name(b).as_deref(), Some("hub.claude.broadcast"));
         assert!(r.mailbox_name(MailboxId(999)).is_none());
@@ -731,10 +797,10 @@ mod tests {
     fn try_register_closure_is_non_panicking_on_collision() {
         let r = Registry::new();
         let first = r
-            .try_register_closure("loaded", Arc::new(|_, _, _, _, _, _| {}))
+            .try_register_closure("loaded", noop_handler())
             .expect("fresh name");
         let err = r
-            .try_register_closure("loaded", Arc::new(|_, _, _, _, _, _| {}))
+            .try_register_closure("loaded", noop_handler())
             .expect_err("collision must not panic");
         assert_eq!(err.name, "loaded");
         assert_eq!(r.lookup("loaded"), Some(first));
@@ -745,9 +811,7 @@ mod tests {
     #[test]
     fn drop_mailbox_frees_name_and_marks_entry_dropped() {
         let r = Registry::new();
-        let id = r
-            .try_register_closure("loaded", Arc::new(|_, _, _, _, _, _| {}))
-            .unwrap();
+        let id = r.try_register_closure("loaded", noop_handler()).unwrap();
         let name = r.drop_mailbox(id).expect("drop");
         assert_eq!(name, "loaded");
         assert!(r.lookup("loaded").is_none(), "name should be reusable");
@@ -758,9 +822,7 @@ mod tests {
         // Under ADR-0029 the id is a function of the name, so a
         // re-register produces the *same* id and flips the entry back
         // to `Component`.
-        let reloaded = r
-            .try_register_closure("loaded", Arc::new(|_, _, _, _, _, _| {}))
-            .unwrap();
+        let reloaded = r.try_register_closure("loaded", noop_handler()).unwrap();
         assert_eq!(reloaded, id);
         assert_eq!(r.lookup("loaded"), Some(reloaded));
         assert!(matches!(r.entry(reloaded), Some(MailboxEntry::Closure(_))));
@@ -773,9 +835,7 @@ mod tests {
             r.drop_mailbox(MailboxId(999)),
             Err(DropError::UnknownId(_))
         ));
-        let c = r
-            .try_register_closure("x", Arc::new(|_, _, _, _, _, _| {}))
-            .unwrap();
+        let c = r.try_register_closure("x", noop_handler()).unwrap();
         r.drop_mailbox(c).unwrap();
         assert!(matches!(
             r.drop_mailbox(c),
@@ -791,7 +851,7 @@ mod tests {
         // mailboxes and kinds from a handler that holds an Arc.
         let r = Arc::new(Registry::new());
         let r2 = Arc::clone(&r);
-        let id = r2.register_closure("late", Arc::new(|_, _, _, _, _, _| {}));
+        let id = r2.register_closure("late", noop_handler());
         assert_eq!(r.lookup("late"), Some(id));
         let kind_id = r.register_kind("aether.late");
         assert_eq!(

@@ -20,9 +20,9 @@ use aether_capabilities::{
     BroadcastCapability, ComponentHostCapability, ComponentHostConfig, FsCapability,
     HandleCapability, HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability,
     InputCapability, InputConfig, LogCapability, TcpCapability, UnsupportedTestBenchCapability,
-    fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    fs::NamespaceRoots, http::HttpConfig as HttpConf, trace::TraceObserverCapability,
 };
-use aether_data::{Kind, KindId};
+use aether_data::Kind;
 use aether_kinds::{FrameStats, SetMasterGain, SetMasterGainResult, Tick};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
@@ -118,15 +118,10 @@ impl HeadlessChassis {
         boot.registry.register_closure(
             "aether.audio",
             Arc::new(
-                move |kind: KindId,
-                      _kind_name: &str,
-                      _origin: Option<&str>,
-                      sender,
-                      _bytes: &[u8],
-                      _count: u32| {
-                    if kind == kind_set_master_gain {
+                move |dispatch: aether_substrate::mail::registry::MailDispatch<'_>| {
+                    if dispatch.kind == kind_set_master_gain {
                         outbound_for_audio_sink.send_reply(
-                            sender,
+                            dispatch.sender,
                             &SetMasterGainResult::Err {
                                 error: "unsupported on headless chassis — no audio device"
                                     .to_owned(),
@@ -177,6 +172,7 @@ impl HeadlessChassis {
             .with_actor::<BroadcastCapability>(())
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
+            .with_actor::<TraceObserverCapability>(())
             .with_actor::<InputCapability>(input_config)
             .with_actor::<ComponentHostCapability>(component_host_config)
             .with_actor::<FsCapability>(namespace_roots)

@@ -41,7 +41,7 @@ use crate::actor::native::ctx::NativeCtx;
 use crate::actor::native::{NativeActor, NativeDispatch};
 use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
-use crate::mail::{KindId, Mail, MailboxId, ReplyTo};
+use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTo};
 
 /// Run one actor's dispatcher loop on the calling thread. Returns
 /// when the binding signals shutdown (self-shutdown flag set or
@@ -72,11 +72,14 @@ pub(crate) fn dispatch_loop_run<A>(
             Some(e) => e,
             None => break,
         };
+        let inbound_mail_id = env.mail_id;
+        // ADR-0080 §2 producer hook: `Received` at handler entry.
+        crate::runtime::trace::record_received(inbound_mail_id);
         aether_actor::local::with_stamped(slots, || {
             crate::runtime::log_install::with_actor_dispatch(
                 &**binding as &dyn crate::runtime::log_install::MailDispatch,
                 || {
-                    let mut ctx = NativeCtx::new(binding, env.sender);
+                    let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
                     if actor
                         .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
                         .is_none()
@@ -99,6 +102,13 @@ pub(crate) fn dispatch_loop_run<A>(
                 },
             );
         });
+        // ADR-0080 §2 producer hook: `Finished` at handler exit. PR 2
+        // does not bracket the panic-unwind path; if a handler panics
+        // mid-dispatch the actor's process-level panic hook brings
+        // the substrate down anyway, so a missing `Finished` is
+        // moot. A future PR may add `catch_unwind` here for graceful
+        // settlement-on-panic.
+        crate::runtime::trace::record_finished(inbound_mail_id);
         if let Some(p) = pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }
@@ -110,16 +120,19 @@ pub(crate) fn dispatch_loop_run<A>(
     // runs so a "please close" handler that flushes state observes
     // the full inbox.
     while let Some(env) = binding.try_recv() {
+        let inbound_mail_id = env.mail_id;
+        crate::runtime::trace::record_received(inbound_mail_id);
         aether_actor::local::with_stamped(slots, || {
             crate::runtime::log_install::with_actor_dispatch(
                 &**binding as &dyn crate::runtime::log_install::MailDispatch,
                 || {
-                    let mut ctx = NativeCtx::new(binding, env.sender);
+                    let mut ctx = NativeCtx::new(binding, env.sender, env.mail_id, env.root);
                     let _ = actor.__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload);
                     aether_actor::log::drain_buffer();
                 },
             );
         });
+        crate::runtime::trace::record_finished(inbound_mail_id);
         if let Some(p) = pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }
@@ -131,7 +144,8 @@ pub(crate) fn dispatch_loop_run<A>(
         crate::runtime::log_install::with_actor_dispatch(
             &**binding as &dyn crate::runtime::log_install::MailDispatch,
             || {
-                let mut close_ctx = NativeCtx::new(binding, ReplyTo::NONE);
+                let mut close_ctx =
+                    NativeCtx::new(binding, ReplyTo::NONE, MailId::NONE, MailId::NONE);
                 actor.unwire(&mut close_ctx);
                 aether_actor::log::drain_buffer();
             },

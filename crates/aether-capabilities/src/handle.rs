@@ -218,14 +218,17 @@ mod native {
                 bytes: vec![1, 2, 3, 4, 5],
             };
             let bytes = postcard::to_allocvec(&req).unwrap();
-            handler(
-                <HandlePublish as Kind>::ID,
-                "aether.handle.publish",
-                None,
-                session_reply_to(),
-                &bytes,
-                1,
-            );
+            handler(aether_substrate::mail::registry::MailDispatch {
+                kind: <HandlePublish as Kind>::ID,
+                kind_name: "aether.handle.publish",
+                origin: None,
+                sender: session_reply_to(),
+                payload: &bytes,
+                count: 1,
+                mail_id: aether_substrate::mail::MailId::NONE,
+                root: aether_substrate::mail::MailId::NONE,
+                parent_mail: None,
+            });
 
             let deadline = Instant::now() + Duration::from_secs(2);
             let frame = loop {
@@ -285,7 +288,10 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (_store, mailer, registry, _rx) = fresh_substrate();
-            registry.register_closure(HandleCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            registry.register_closure(
+                HandleCapability::NAMESPACE,
+                aether_substrate::mail::registry::noop_handler(),
+            );
 
             let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<HandleCapability>(())

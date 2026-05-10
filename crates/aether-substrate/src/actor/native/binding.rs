@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::ctx::ChassisCtx;
 use crate::mail::mailer::Mailer;
-use crate::mail::{KindId, Mail, MailboxId, ReplyTarget, ReplyTo};
+use crate::mail::{KindId, Mail, MailId, MailboxId, ReplyTarget, ReplyTo};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 
 /// Per-actor binding state every native capability owns. Each
@@ -350,13 +350,57 @@ impl NativeBinding {
     /// routes back here, and pushes through the shared
     /// `Arc<Mailer>`. Returns `0` (channel-send failures collapse to
     /// the same scalar — there is no FFI surface here to differentiate).
+    ///
+    /// Stamps `MailId`/`root`/`parent_mail` as a chassis-root send
+    /// (no inheritance). Per-handler ctxs that have an in-flight mail
+    /// to inherit from go through [`Self::send_mail_with_lineage`]
+    /// instead — the four-arg shape preserves wire stability for the
+    /// FFI bridge and chassis-side log push paths that do not carry
+    /// a per-handler context.
     pub fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
+        self.send_mail_with_lineage(recipient, kind, bytes, count, None, None)
+    }
+
+    /// ADR-0080 §1 / §5: variant of [`Self::send_mail`] that accepts
+    /// the in-flight handler's lineage so the outgoing [`Mail`] picks
+    /// up the correct `parent_mail` and inherited `root`. The
+    /// per-handler [`super::ctx::NativeCtx`]'s [`Sender`] impl reads
+    /// from its `in_flight_mail_id()` / `in_flight_root()` accessors
+    /// and threads them in.
+    ///
+    /// `parent_mail = None` and `inherited_root = None` mean
+    /// chassis-root: the outgoing mail's `MailId` becomes its own
+    /// `root`, marking the start of a new causal chain.
+    pub fn send_mail_with_lineage(
+        &self,
+        recipient: u64,
+        kind: u64,
+        bytes: &[u8],
+        count: u32,
+        parent_mail: Option<MailId>,
+        inherited_root: Option<MailId>,
+    ) -> u32 {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let recipient_id = MailboxId(recipient);
         let reply_to =
             ReplyTo::with_correlation(ReplyTarget::Component(self.self_mailbox), correlation);
-        let mail =
-            Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count).with_reply_to(reply_to);
+        let mail_id = MailId::new(self.self_mailbox, correlation);
+        let root = inherited_root.unwrap_or(mail_id);
+        // ADR-0080 §2 producer hook: emit `Sent` before pushing the
+        // mail. No-op when the global trace queue isn't installed
+        // (test fixtures bypassing the chassis); the drainer is the
+        // only consumer.
+        crate::runtime::trace::record_sent(
+            mail_id,
+            root,
+            parent_mail,
+            self.self_mailbox,
+            recipient_id,
+            KindId(kind),
+        );
+        let mail = Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count)
+            .with_reply_to(reply_to)
+            .with_lineage(mail_id, root, parent_mail);
         // Record `correlation -> recipient` for the cross-class
         // `wait_reply` guard. We record on every send (the FFI here
         // can't tell fire-and-forget from request/reply) and let
@@ -549,14 +593,17 @@ mod tests {
         // hitting the unknown-recipient warn.
         registry.register_closure(
             "test.sink",
-            Arc::new(move |kind, kind_name, origin, sender, payload, count| {
+            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
                 let _ = tx.send(Envelope {
-                    kind,
-                    kind_name: kind_name.to_owned(),
-                    origin: origin.map(str::to_owned),
-                    sender,
-                    payload: payload.to_vec(),
-                    count,
+                    kind: dispatch.kind,
+                    kind_name: dispatch.kind_name.to_owned(),
+                    origin: dispatch.origin.map(str::to_owned),
+                    sender: dispatch.sender,
+                    payload: dispatch.payload.to_vec(),
+                    count: dispatch.count,
+                    mail_id: dispatch.mail_id,
+                    root: dispatch.root,
+                    parent_mail: dispatch.parent_mail,
                 });
             }),
         );
@@ -641,14 +688,17 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Envelope>();
         registry.register_closure(
             "test.free.running",
-            Arc::new(move |kind, kind_name, origin, sender, payload, count| {
+            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
                 let _ = tx.send(Envelope {
-                    kind,
-                    kind_name: kind_name.to_owned(),
-                    origin: origin.map(str::to_owned),
-                    sender,
-                    payload: payload.to_vec(),
-                    count,
+                    kind: dispatch.kind,
+                    kind_name: dispatch.kind_name.to_owned(),
+                    origin: dispatch.origin.map(str::to_owned),
+                    sender: dispatch.sender,
+                    payload: dispatch.payload.to_vec(),
+                    count: dispatch.count,
+                    mail_id: dispatch.mail_id,
+                    root: dispatch.root,
+                    parent_mail: dispatch.parent_mail,
                 });
             }),
         );
@@ -679,14 +729,17 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Envelope>();
         registry.register_closure(
             "test.frame.bound",
-            Arc::new(move |kind, kind_name, origin, sender, payload, count| {
+            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
                 let _ = tx.send(Envelope {
-                    kind,
-                    kind_name: kind_name.to_owned(),
-                    origin: origin.map(str::to_owned),
-                    sender,
-                    payload: payload.to_vec(),
-                    count,
+                    kind: dispatch.kind,
+                    kind_name: dispatch.kind_name.to_owned(),
+                    origin: dispatch.origin.map(str::to_owned),
+                    sender: dispatch.sender,
+                    payload: dispatch.payload.to_vec(),
+                    count: dispatch.count,
+                    mail_id: dispatch.mail_id,
+                    root: dispatch.root,
+                    parent_mail: dispatch.parent_mail,
                 });
             }),
         );
@@ -724,14 +777,17 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Envelope>();
         registry.register_closure(
             "test.any",
-            Arc::new(move |kind, kind_name, origin, sender, payload, count| {
+            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
                 let _ = tx.send(Envelope {
-                    kind,
-                    kind_name: kind_name.to_owned(),
-                    origin: origin.map(str::to_owned),
-                    sender,
-                    payload: payload.to_vec(),
-                    count,
+                    kind: dispatch.kind,
+                    kind_name: dispatch.kind_name.to_owned(),
+                    origin: dispatch.origin.map(str::to_owned),
+                    sender: dispatch.sender,
+                    payload: dispatch.payload.to_vec(),
+                    count: dispatch.count,
+                    mail_id: dispatch.mail_id,
+                    root: dispatch.root,
+                    parent_mail: dispatch.parent_mail,
                 });
             }),
         );
@@ -762,14 +818,17 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Envelope>();
         registry.register_closure(
             "test.prune",
-            Arc::new(move |kind, kind_name, origin, sender, payload, count| {
+            Arc::new(move |dispatch: crate::mail::registry::MailDispatch<'_>| {
                 let _ = tx.send(Envelope {
-                    kind,
-                    kind_name: kind_name.to_owned(),
-                    origin: origin.map(str::to_owned),
-                    sender,
-                    payload: payload.to_vec(),
-                    count,
+                    kind: dispatch.kind,
+                    kind_name: dispatch.kind_name.to_owned(),
+                    origin: dispatch.origin.map(str::to_owned),
+                    sender: dispatch.sender,
+                    payload: dispatch.payload.to_vec(),
+                    count: dispatch.count,
+                    mail_id: dispatch.mail_id,
+                    root: dispatch.root,
+                    parent_mail: dispatch.parent_mail,
                 });
             }),
         );
@@ -797,6 +856,9 @@ mod tests {
             sender: ReplyTo::with_correlation(ReplyTarget::None, correlation),
             payload,
             count: 1,
+            mail_id: crate::mail::MailId::NONE,
+            root: crate::mail::MailId::NONE,
+            parent_mail: None,
         }
     }
 

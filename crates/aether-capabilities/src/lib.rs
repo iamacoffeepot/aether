@@ -38,6 +38,7 @@ pub mod log;
 pub mod render;
 pub mod tcp;
 pub mod test_bench;
+pub mod trace;
 pub mod window;
 
 #[cfg(feature = "audio")]

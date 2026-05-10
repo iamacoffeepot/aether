@@ -124,14 +124,17 @@ fn push_log_batch(registry: &Registry, recipient: &str, payload: &[u8]) {
     let MailboxEntry::Closure(handler) = registry.entry(id).expect("entry exists") else {
         panic!("expected mailbox entry under {recipient}");
     };
-    handler(
-        <LogBatch as Kind>::ID,
-        LogBatch::NAME,
-        None,
-        ReplyTo::NONE,
+    handler(aether_substrate::mail::registry::MailDispatch {
+        kind: <LogBatch as Kind>::ID,
+        kind_name: LogBatch::NAME,
+        origin: None,
+        sender: ReplyTo::NONE,
         payload,
-        1,
-    );
+        count: 1,
+        mail_id: aether_substrate::mail::MailId::NONE,
+        root: aether_substrate::mail::MailId::NONE,
+        parent_mail: None,
+    });
 }
 
 fn drain_n_log_batches(rx: &std::sync::mpsc::Receiver<EgressEvent>, target: u32) -> u32 {

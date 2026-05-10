@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use crate::handle_store::{self, HandleStore, PutError, WalkOutcome};
 use crate::mail::outbound::HubOutbound;
-use crate::mail::registry::{MailboxEntry, Registry};
+use crate::mail::registry::{MailDispatch, MailboxEntry, Registry};
 use crate::mail::{Mail, ReplyTarget, ReplyTo};
 use aether_data::{HandleId, KindId};
 
@@ -256,14 +256,17 @@ fn route_mail(
             // ADR-0011 origin is `None`. Components reach
             // closure-bound mailboxes via `ComponentCtx::send` inline
             // and never enter `push`.
-            handler(
-                mail.kind,
-                &kind_name,
-                None,
-                mail.reply_to,
-                &mail.payload,
-                mail.count,
-            );
+            handler(MailDispatch {
+                kind: mail.kind,
+                kind_name: &kind_name,
+                origin: None,
+                sender: mail.reply_to,
+                payload: &mail.payload,
+                count: mail.count,
+                mail_id: mail.mail_id,
+                root: mail.root,
+                parent_mail: mail.parent_mail,
+            });
         }
         Some(MailboxEntry::Dropped) => {
             tracing::warn!(
@@ -459,17 +462,10 @@ mod tests {
         fn handler(&self) -> MailboxHandler {
             let captured = Arc::clone(&self.captured);
             let count = Arc::clone(&self.delivery_count);
-            Arc::new(
-                move |_kind_id: KindId,
-                      _kind_name: &str,
-                      _origin: Option<&str>,
-                      _sender: ReplyTo,
-                      bytes: &[u8],
-                      _count: u32| {
-                    captured.write().unwrap().push(bytes.to_vec());
-                    count.fetch_add(1, Ordering::SeqCst);
-                },
-            )
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                captured.write().unwrap().push(dispatch.payload.to_vec());
+                count.fetch_add(1, Ordering::SeqCst);
+            })
         }
     }
 
