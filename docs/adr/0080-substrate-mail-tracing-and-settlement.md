@@ -141,8 +141,8 @@ Phases 2 and 3 don't change the substrate — they're pure additions to the obse
 The observer's `RootState` and `MailNode` maps grow with every observed mail. Without a bound, an hour at busy load is ~120 M nodes. Two-tier eviction caps the footprint:
 
 ```
-RETENTION_MS  = 30_000     // env: AETHER_TRACE_RETENTION_MS
-MAX_ROOTS     = 10_000     // env: AETHER_TRACE_MAX_ROOTS
+RETENTION_MS  = 600_000    // env: AETHER_TRACE_RETENTION_MS (10 min)
+MAX_ROOTS     = 100_000    // env: AETHER_TRACE_MAX_ROOTS    (~50 MB at baseline)
 ```
 
 - A root is **eligible for eviction** once `Settled` has fired and `now_nanos - root_state.t_settled_nanos >= RETENTION_MS * 1_000_000`.
@@ -150,7 +150,17 @@ MAX_ROOTS     = 10_000     // env: AETHER_TRACE_MAX_ROOTS
 - **In-flight roots are never evicted regardless of age** — they're load-bearing for gating.
 - Eviction runs at the tail of `on_batched_trace_events` (no separate timer thread, no separate scheduler tick). When a root is evicted, drop its `RootState` and every `MailNode` whose `root` field matches the evicted MailId.
 
-At baseline (33 k mails/sec, ~5 mails per chain → 6.6 k roots/sec, 30 s retention → ~200 k retained nodes ≈ 20 MB) this is bounded and small. Pathological-volume scenarios hit the count cap and discard the oldest history rather than going OOM.
+Per-root memory ≈ 80 B `RootState` + 5 × 80 B `MailNode` ≈ 480 B at the baseline ~5-mails-per-chain estimate. Defaults sized to give the time cap room to actually matter at typical loads while keeping memory bounded:
+
+| Throughput | Roots/sec | Time at `MAX_ROOTS=100k` | Operative limit |
+|---|---|---|---|
+| Quiet (idle/menu) | ~100 | ~17 min | `RETENTION_MS` (10 min) wins |
+| Baseline (busy scene) | ~6.6k | ~15 s | `MAX_ROOTS` wins |
+| Pathological synthetic | ~30k+ | ~3 s | `MAX_ROOTS` wins, lossy |
+
+10 min retention covers "I noticed something a couple minutes ago" use cases and most agent-harness session lengths; 100k roots × ~480 B ≈ ~50 MB is small enough not to be a memory-budget concern in dev/debug builds. Operators tune both downward via env vars for production builds.
+
+A future refinement worth flagging but parked: **differential retention by `RootLifecycle`** (e.g., `Tick` chains evict after 30 s, `McpRequest` after 1 hr, `Wire`/`Init`/`Drop` after 10 min). At 60 Hz the substrate produces 60 root chains/sec just from Ticks, most uninteresting; differential retention would let the operator-facing trees survive longer for the same memory. Defer until the flat-retention defaults prove inadequate.
 
 **Discard, not persist, in v1.** Disk persistence is real complexity (format choice, rotation, syscall cost on the drainer hot path, crash-recovery semantics) that the v1 consumers don't need. Settlement gating only cares about in-flight roots; `engine_logs` causal grouping captures the in-flight root MailId *into the log entry* at emission time so the observer can drop the root afterwards; MCP `describe_tree` and Chrome-trace export are for "show me what just happened," seconds-to-minutes window. Two future opt-ins if usage justifies:
 
@@ -190,6 +200,7 @@ Neither is in scope for Phase 1 above.
 - **Function-call interface from chassis to observer (chassis is special, not an actor).** Chassis owns the observer struct, calls `mint_root` / `await_settled` directly; only actors emit observer events as mail. Rejected: carve-out for the dispatcher when the mail interface works fine. Mail round-trip latency is in the same order as a Tick fanout (sub-ms), which the chassis already does every frame. The "chassis isn't an actor but is a mail endpoint at a sentinel id" framing keeps the model uniform without making the chassis a `NativeActor`.
 - **Per-actor `LogBuffer`-style per-handler buffer flushed at handler exit (mirror ADR-0077).** Each actor accumulates trace events in a thread-local during dispatch, flushes at exit. Rejected: settlement correctness requires every `Sent` and `Finished` to reach the observer, including across actor panics. The flush-on-exit path is best-effort by construction; ADR-0077 tolerates dropped log events on panic, settlement does not. The shared-queue + drainer pattern decouples emission from delivery so panic-path bracketing alone is enough to ensure events ship.
 - **Producer-side "`Sent` before mail enqueue" FIFO invariant.** Eliminate spurious `Settled` fires by ordering the trace push before the mail enqueue at every send site. Considered: zero runtime cost. Rejected for v1: couples the trace push to the mail enqueue at every producer, including all the indirect send paths (cap handlers, trampoline forwards, drainer self-emissions). Pushing complexity to the consumer side (idempotent gates) keeps producer paths fully decoupled. The invariant remains a free optimization to add if spurious fires turn out to matter.
+- **`u32` `correlation_id` with eviction-window recycling.** Saves 4 bytes per `MailId` × ~4 `MailId`s per `Sent` event = 16 B/event ≈ ~530 KB/sec at baseline (~5 % of observer mail bandwidth). Wraparound at u32 max (4.29 B values) is per-actor: a 1k/sec actor wraps in ~50 days, a 60k/sec render-ish actor wraps in ~20 hours, a pathological 1M/sec actor wraps in ~71 minutes. Recycling is *safe* if the wrap time exceeds `RETENTION_MS` plus max-in-flight lifetime — at the new defaults (10 min retention) all realistic loads clear that bar. Rejected anyway: the safety condition couples a wire-format choice to an operator-tuned retention setting, and silently goes from "safe" to "incorrect" if either retention is bumped or a single actor's load spikes. Today's `correlation_id` field is already `u64` (test bench `next_correlation_id`, hub session counters); going to u32 is a regression in the existing field, not just a new constraint. The "no wraparound in any realistic scenario" property is worth more than ~5 % wire bandwidth for an always-on infrastructure system. If wire bytes do become the bottleneck (they won't at these rates), better levers are dropping the redundant `Sent.sender` (= `mail_id.sender`, ~265 KB/sec), per-batch dictionary encoding for repeated MailboxId/KindId values, or cap-side compression on `BatchedTraceEvents` — all preserve the safety properties.
 
 ### Clock alternatives
 
