@@ -241,7 +241,7 @@ mod native {
                     })
                 })
                 .collect();
-            summaries.sort_by(|a, b| b.t_sent.cmp(&a.t_sent));
+            summaries.sort_by_key(|s| std::cmp::Reverse(s.t_sent));
             summaries.truncate(max);
             ListActiveRootsResult { roots: summaries }
         }
