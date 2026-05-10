@@ -118,6 +118,8 @@ Optional follow-ons if telemetry shows spurious fires are common enough to matte
 
 The drainer's outbound `BatchedTraceEvents` mail goes through `Sender::send_detached`, a new send variant that bypasses the trace-event push. Without it the observer's own emissions would generate observer events and recurse. The detach API is also the explicit escape hatch for any future "fire-and-forget, do not gate my parent" send sites (logs, hub broadcasts of observation mail) — most code uses `send` and inherits; detach is opt-in and rare.
 
+**`send_detached` is fire-and-forget only.** Detached sends MUST NOT be used for reply-expecting requests: a detached send mints no parent linkage, so the receiver processes it as the root of a new tree, and any reply the receiver issues inherits the *receiver's* tree (not the sender's). The reply still routes back to the sender's reply slot via `(sender, correlation_id)` — that part is unchanged — but the causal-graph linkage between request and reply is broken by design. Reply-correlated sends always go through the inherited (`send`) path. The `send_detached` API documents this constraint at the call site; misuse is a logic bug, not a runtime error.
+
 ### 8. Names resolve at query time, not in events
 
 `MailboxId` and `KindId` ride events as 64-bit ids (per ADR-0029 / ADR-0030). The observer holds an id → name lookup populated from the same `describe_kinds` / `describe_component` info the hub already sees, and resolves names when a query consumer asks. Keeps event size tight; readable output stays cheap.
