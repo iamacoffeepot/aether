@@ -120,12 +120,28 @@ fn build_events(
             },
         }));
 
-        // Flow arrow: requires the parent's t_finished and this
-        // node's t_received. The flow id ties the start ("s") and
-        // finish ("f") events into one arrow on chrome://tracing.
+        // Flow arrow: ties the parent's processing slice to this
+        // mail's processing slice via a unique flow id (`s` start +
+        // `f` finish events). Both endpoints carry `bp: "e"` so
+        // Perfetto / chrome://tracing bind them to the *enclosing*
+        // slice on the same pid rather than searching for a future /
+        // past slice — that searching default is what flagged earlier
+        // anchors as `flow_invalid_id` when the s timestamp landed
+        // exactly at the parent slice's `t_finished` boundary
+        // (outside the half-open `[t_received, t_finished)` slice
+        // range, with no future slice to bind to).
+        //
+        // Anchor the `s` at `node.t_sent` — the moment the parent
+        // sent this mail. By construction `t_sent` falls within the
+        // parent's processing window `[t_received, t_finished)`, so
+        // the s event lands inside the parent's slice. The `f` lands
+        // at the child's `t_received`, which is the start of the
+        // child's own slice — inside it by definition. Both pairs of
+        // (pid, ts) now sit inside concrete slices, which is what
+        // Perfetto's flow-binder expects.
         if let Some(parent_id) = node.parent
             && let Some(parent) = by_id.get(&parent_id)
-            && let Some(parent_finished) = parent.t_finished
+            && parent.t_finished.is_some()
         {
             let flow_id = format_mail_id(node.mail_id, mailbox_names);
             events.push(json!({
@@ -133,9 +149,10 @@ fn build_events(
                 "name": "flow",
                 "cat": "flow",
                 "id": flow_id.clone(),
-                "ts": ns_to_us(parent_finished.0),
+                "ts": ns_to_us(node.t_sent.0),
                 "pid": format_mailbox_label(parent.recipient, mailbox_names),
                 "tid": 0,
+                "bp": "e",
             }));
             events.push(json!({
                 "ph": "f",
@@ -187,13 +204,17 @@ fn category_prefix(c: MailboxCategory) -> &'static str {
 }
 
 /// MailId composite → compact string for chrome event `id` and `args`
-/// fields. Format: `<sender_label>:<correlation_id>` — the sender
+/// fields. Format: `<sender_label>#<correlation_id>` — the sender
 /// component is resolved through [`format_mailbox_label`] (so it
 /// carries a category prefix when known), and the correlation id is
-/// appended verbatim.
+/// appended after `#`. The `#` separator (rather than another `:`)
+/// keeps the correlation_id visually distinct from the type-prefix
+/// separator already inside the sender label (e.g.
+/// `actor:aether.input#2489` reads as "actor `aether.input`, mail
+/// 2489" without `:` doing double duty).
 fn format_mail_id(id: MailId, mailbox_names: &MailboxLookup) -> String {
     format!(
-        "{}:{}",
+        "{}#{}",
         format_mailbox_label(id.sender, mailbox_names),
         id.correlation_id
     )
@@ -279,15 +300,17 @@ mod tests {
         let mut mailbox_names: MailboxLookup = HashMap::new();
         mailbox_names.insert(
             with_tag(Tag::Mailbox, 0xAA),
-            ("aether.chassis".to_owned(), Some(MailboxCategory::ChassisSentinel)),
+            (
+                "aether.chassis".to_owned(),
+                Some(MailboxCategory::ChassisSentinel),
+            ),
         );
         mailbox_names.insert(
             with_tag(Tag::Mailbox, 0xCC),
             ("aether.input".to_owned(), Some(MailboxCategory::Actor)),
         );
 
-        let json =
-            render_chrome_trace(&result, &kind_names, &mailbox_names).expect("render");
+        let json = render_chrome_trace(&result, &kind_names, &mailbox_names).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let events = parsed["traceEvents"].as_array().unwrap();
         // Two complete events + two flow events (s + f for the one
@@ -309,11 +332,14 @@ mod tests {
         assert_eq!(root_complete["pid"], "actor:aether.input");
         assert_eq!(root_complete["args"]["sender"], "chassis:aether.chassis");
         assert_eq!(root_complete["args"]["parent"], serde_json::Value::Null);
-        // Root's mail_id renders as `<sender_label>:<cid>` =
-        // `chassis:aether.chassis:1`. Same for `root` (root of root
-        // is itself).
-        assert_eq!(root_complete["args"]["mail_id"], "chassis:aether.chassis:1");
-        assert_eq!(root_complete["args"]["root"], "chassis:aether.chassis:1");
+        // Root's mail_id renders as `<sender_label>#<cid>` =
+        // `chassis:aether.chassis#1`. Same for `root` (root of root
+        // is itself). The `#` separator keeps `:` reserved for the
+        // type prefix; reading `chassis:aether.chassis#1` as "the
+        // chassis sentinel's mail 1" stays unambiguous even when
+        // names contain colons (trampolines have a `:NAME` suffix).
+        assert_eq!(root_complete["args"]["mail_id"], "chassis:aether.chassis#1");
+        assert_eq!(root_complete["args"]["root"], "chassis:aether.chassis#1");
         assert_eq!(root_complete["args"]["kind_id"], "kind:test.tick");
 
         // Child event: kind NOT in the lookup → falls back to raw
@@ -332,10 +358,10 @@ mod tests {
         // Child's sender (0xCC) IS resolved → `actor:aether.input`.
         assert_eq!(child_complete["args"]["sender"], "actor:aether.input");
         // Parent reference points at root_id, whose sender (0xAA) is
-        // resolved → `chassis:aether.chassis:1`.
-        assert_eq!(child_complete["args"]["parent"], "chassis:aether.chassis:1");
+        // resolved → `chassis:aether.chassis#1`.
+        assert_eq!(child_complete["args"]["parent"], "chassis:aether.chassis#1");
         // Root walks to root_id again.
-        assert_eq!(child_complete["args"]["root"], "chassis:aether.chassis:1");
+        assert_eq!(child_complete["args"]["root"], "chassis:aether.chassis#1");
 
         // Microsecond conversion: t_received=2000ns → ts=2us,
         // dur=(5000-2000)/1000 = 3us.
@@ -353,10 +379,18 @@ mod tests {
         let f = events.iter().find(|e| e["ph"] == "f").unwrap();
         assert_eq!(s["id"], child_mail_str);
         assert_eq!(f["id"], child_mail_str);
-        // s anchors at parent.t_finished (5000ns -> 5us), f at
-        // child.t_received (6000ns -> 6us).
-        assert_eq!(s["ts"], 5);
+        // s anchors at child.t_sent (3000ns -> 3us, inside parent's
+        // [2000, 5000) processing slice), f at child.t_received
+        // (6000ns -> 6us, the start of the child's own slice).
+        // Both endpoints sit inside concrete slices so Perfetto's
+        // flow-binder doesn't flag them as flow_invalid_id.
+        assert_eq!(s["ts"], 3);
         assert_eq!(f["ts"], 6);
+        // Both endpoints carry `bp: "e"` so the binder uses the
+        // enclosing slice instead of searching for a past / future
+        // one.
+        assert_eq!(s["bp"], "e");
+        assert_eq!(f["bp"], "e");
         // Flow event pids resolve through the same lookup. s.pid is
         // parent.recipient (0xCC) → `actor:aether.input`; f.pid is
         // node.recipient (0xEE) → unresolved raw.
@@ -383,8 +417,7 @@ mod tests {
                 t_finished: None,
             }],
         };
-        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new())
-            .expect("render");
+        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new()).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         assert!(
             parsed["traceEvents"].as_array().unwrap().is_empty(),
@@ -399,8 +432,7 @@ mod tests {
     fn render_not_found_emits_metadata_doc() {
         let missing = mid(0xFF, 99);
         let result = DescribeTreeResult::Err { not_found: missing };
-        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new())
-            .expect("render");
+        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new()).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let events = parsed["traceEvents"].as_array().unwrap();
         assert_eq!(events.len(), 1);
@@ -421,7 +453,10 @@ mod tests {
     fn render_uncategorised_mailbox_emits_bare_name() {
         let id = mid(0x77, 5);
         let mut mailbox_names: MailboxLookup = HashMap::new();
-        mailbox_names.insert(with_tag(Tag::Mailbox, 0x77), ("user_thing".to_owned(), None));
+        mailbox_names.insert(
+            with_tag(Tag::Mailbox, 0x77),
+            ("user_thing".to_owned(), None),
+        );
 
         let result = DescribeTreeResult::Ok {
             root: id,
@@ -437,14 +472,14 @@ mod tests {
                 t_finished: Some(Nanos(3_000)),
             }],
         };
-        let json = render_chrome_trace(&result, &HashMap::new(), &mailbox_names)
-            .expect("render");
+        let json = render_chrome_trace(&result, &HashMap::new(), &mailbox_names).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let evt = &parsed["traceEvents"][0];
         // Bare name, no prefix.
         assert_eq!(evt["pid"], "user_thing");
         assert_eq!(evt["args"]["sender"], "user_thing");
-        // Mail id retains the bare-name + correlation_id form.
-        assert_eq!(evt["args"]["mail_id"], "user_thing:5");
+        // Mail id retains the bare-name + correlation_id form,
+        // separated by `#`.
+        assert_eq!(evt["args"]["mail_id"], "user_thing#5");
     }
 }
