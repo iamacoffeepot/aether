@@ -581,6 +581,8 @@ impl<A: NativeActor + NativeDispatch> PassiveBoot for NativeActorBoot<A> {
                     let mut wire_ctx = crate::actor::native::NativeCtx::new(
                         &resources.transport,
                         aether_data::ReplyTo::NONE,
+                        aether_data::MailId::NONE,
+                        aether_data::MailId::NONE,
                     );
                     actor.wire(&mut wire_ctx);
                     aether_actor::log::drain_buffer();
@@ -1058,6 +1060,13 @@ struct BootedPassives {
     /// implicit field-drop ordering), so every Dedicated dispatcher
     /// thread is gone before pool workers join.
     _pool: PoolHandle,
+    /// ADR-0080 §3 trace drainer thread. Boots alongside the worker
+    /// pool; its `Drop` signals + joins the thread (final flush
+    /// included). Dropped after `shutdowns` and `_pool` per field
+    /// order, so the last batch may target an already-dead
+    /// `TraceObserver` mailbox — that's acceptable: the observer cap
+    /// drained its inbox during its own dispatcher's phase-2 drain.
+    _trace_drainer: crate::runtime::trace::TraceDrainerHandle,
 }
 
 /// Issue #601: dispatch a `ConfigureLogDrain { mailbox: drain }` mail
@@ -1133,6 +1142,19 @@ fn boot_passives(
     // booting it here means PR D / Phase 2 can flip a cap to Pooled
     // without re-plumbing the boot order.
     let pool = Pool::start(PoolConfig::default(), Arc::clone(aborter));
+
+    // ADR-0080 §3 trace pipeline. `init_substrate_start` pins the
+    // monotonic-since-boot reference; `install_trace_queue` makes the
+    // global queue visible to producer-side hooks; `start_drainer`
+    // owns the thread that batches events into mail addressed to the
+    // `aether.trace` sink. The handle in `BootedPassives` joins the
+    // thread on chassis tear down.
+    crate::runtime::trace::init_substrate_start();
+    let trace_queue: Arc<crossbeam_queue::SegQueue<aether_kinds::trace::TraceEvent>> =
+        Arc::new(crossbeam_queue::SegQueue::new());
+    crate::runtime::trace::install_trace_queue(Arc::clone(&trace_queue));
+    let trace_drainer =
+        crate::runtime::trace::start_drainer(Arc::clone(&trace_queue), Arc::clone(mailer));
     let spawner: Arc<crate::Spawner> = Arc::new(crate::Spawner::new(
         Arc::clone(registry),
         Arc::clone(&actor_registry),
@@ -1305,6 +1327,7 @@ fn boot_passives(
         actor_registry,
         spawner,
         _pool: pool,
+        _trace_drainer: trace_drainer,
     })
 }
 
@@ -1750,7 +1773,7 @@ mod tests {
     #[test]
     fn with_actor_boots_dispatches_and_tears_down() {
         use crate::mail::registry::MailboxEntry;
-        use aether_data::{Kind, ReplyTo as DataReplyTo};
+        use aether_data::Kind;
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
         // Fixture kind: a 4-byte cast-shape payload so encode_into_bytes
@@ -1839,14 +1862,12 @@ mod tests {
 
         let payload = Ping { tag: 0xDEAD_BEEF };
         let bytes = payload.encode_into_bytes();
-        handler(
+        handler(crate::mail::registry::test_dispatch(
             <Ping as Kind>::ID,
             Ping::NAME,
-            None,
-            DataReplyTo::NONE,
             &bytes,
             1,
-        );
+        ));
 
         // Wait briefly for the dispatcher thread to dispatch.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -1923,7 +1944,7 @@ mod tests {
     fn with_actor_stamps_local_for_init_and_handler() {
         use crate::mail::registry::MailboxEntry;
         use aether_actor::Local;
-        use aether_data::{Kind, ReplyTo as DataReplyTo};
+        use aether_data::Kind;
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
         #[repr(C)]
@@ -2021,14 +2042,12 @@ mod tests {
         for seq in 0..3 {
             let payload = Tick { seq };
             let bytes = payload.encode_into_bytes();
-            handler(
+            handler(crate::mail::registry::test_dispatch(
                 <Tick as Kind>::ID,
                 Tick::NAME,
-                None,
-                DataReplyTo::NONE,
                 &bytes,
                 1,
-            );
+            ));
         }
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -2055,7 +2074,7 @@ mod tests {
         use crate::actor::native::spawn::Subname;
         use crate::mail::registry::MailboxEntry;
         use aether_actor::{HandlesKind, Instanced};
-        use aether_data::{Kind, KindId as DataKindId, ReplyTo as DataReplyTo};
+        use aether_data::{Kind, KindId as DataKindId};
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
         #[repr(C)]
@@ -2190,14 +2209,12 @@ mod tests {
             panic!("expected mailbox entry");
         };
         let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-        handler(
+        handler(crate::mail::registry::test_dispatch(
             <Hatch as Kind>::ID,
             Hatch::NAME,
-            None,
-            DataReplyTo::NONE,
             &bytes,
             1,
-        );
+        ));
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         while child_received.load(AtomicOrdering::SeqCst) < 1
@@ -2316,14 +2333,12 @@ mod tests {
             panic!("expected mailbox entry for instanced actor");
         };
         let bytes = (Quit { tag: 1 }).encode_into_bytes();
-        handler(
+        handler(crate::mail::registry::test_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
-            None,
-            aether_data::ReplyTo::NONE,
             &bytes,
             1,
-        );
+        ));
 
         // Wait for unwire to run + the registry slot to flip Dead.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -2626,14 +2641,12 @@ mod tests {
         let order = WatchOrder {
             target_id: target_id.0,
         };
-        watcher_handler(
+        watcher_handler(crate::mail::registry::test_dispatch(
             <WatchOrder as Kind>::ID,
             WatchOrder::NAME,
-            None,
-            aether_data::ReplyTo::NONE,
             &order.encode_into_bytes(),
             1,
-        );
+        ));
 
         // Wait until the registry sees the monitor entry.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -2661,14 +2674,12 @@ mod tests {
         else {
             panic!("expected mailbox entry for target");
         };
-        target_handler(
+        target_handler(crate::mail::registry::test_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
-            None,
-            aether_data::ReplyTo::NONE,
             &(Quit { tag: 1 }).encode_into_bytes(),
             1,
-        );
+        ));
 
         // Wait for the notice to land at the watcher.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -2859,14 +2870,12 @@ mod tests {
         let order = WatchOrder {
             target_id: target_id.0,
         };
-        watcher_handler(
+        watcher_handler(crate::mail::registry::test_dispatch(
             <WatchOrder as Kind>::ID,
             WatchOrder::NAME,
-            None,
-            aether_data::ReplyTo::NONE,
             &order.encode_into_bytes(),
             1,
-        );
+        ));
 
         // Wait for register to land.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -2879,14 +2888,12 @@ mod tests {
 
         // Quit watcher — its close path walks `monitoring[watcher]` and
         // prunes watcher from `monitors_of[target]`.
-        watcher_handler(
+        watcher_handler(crate::mail::registry::test_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
-            None,
-            aether_data::ReplyTo::NONE,
             &(Quit { tag: 1 }).encode_into_bytes(),
             1,
-        );
+        ));
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         while close_observed.load(AtomicOrdering::SeqCst) == 0
@@ -3051,14 +3058,12 @@ mod tests {
         else {
             panic!("expected mailbox entry for c");
         };
-        handler(
+        handler(crate::mail::registry::test_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
-            None,
-            aether_data::ReplyTo::NONE,
             &(Quit { tag: 1 }).encode_into_bytes(),
             1,
-        );
+        ));
 
         // Wait for c's slot to flip Dead.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
@@ -3360,14 +3365,12 @@ mod tests {
         else {
             panic!("expected mailbox entry for parent");
         };
-        parent_handler(
+        parent_handler(crate::mail::registry::test_dispatch(
             <Hatch as Kind>::ID,
             Hatch::NAME,
-            None,
-            aether_data::ReplyTo::NONE,
             &(Hatch { tag: 1 }).encode_into_bytes(),
             1,
-        );
+        ));
 
         // Wait for the grandchild's after_init Ping to dispatch (proves
         // the recursive spawn happened AND the after_init plumbing
@@ -3412,14 +3415,12 @@ mod tests {
         // Closing the parent does NOT cascade-close the grandchild.
         // Parent-child shutdown coupling is opt-in via monitor; without
         // it, the grandchild keeps running.
-        parent_handler(
+        parent_handler(crate::mail::registry::test_dispatch(
             <Quit as Kind>::ID,
             Quit::NAME,
-            None,
-            aether_data::ReplyTo::NONE,
             &(Quit { tag: 1 }).encode_into_bytes(),
             1,
-        );
+        ));
 
         // Wait for parent slot to flip Dead.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);

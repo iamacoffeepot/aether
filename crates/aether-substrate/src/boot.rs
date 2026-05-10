@@ -141,33 +141,28 @@ impl<'a> SubstrateBootBuilder<'a> {
         // needing another sink.
         registry.register_closure(
             AETHER_DIAGNOSTICS,
-            Arc::new(
-                |_kind: aether_data::KindId,
-                 kind_name: &str,
-                 _origin: Option<&str>,
-                 _sender,
-                 bytes: &[u8],
-                 _count: u32| {
-                    if kind_name == <aether_kinds::UnresolvedMail as aether_data::Kind>::NAME
-                        && let Ok(record) =
-                            bytemuck::try_from_bytes::<aether_kinds::UnresolvedMail>(bytes)
-                    {
-                        tracing::warn!(
-                            target: "aether_substrate::diagnostics",
-                            recipient_mailbox_id = %record.recipient_mailbox_id,
-                            kind_id = %record.kind_id,
-                            "hub could not resolve bubbled-up mail recipient (ADR-0037); \
-                             mail dropped. Likely a typoed mailbox name at the sender.",
-                        );
-                        return;
-                    }
+            Arc::new(|dispatch: crate::mail::registry::MailDispatch<'_>| {
+                let kind_name = dispatch.kind_name;
+                let bytes = dispatch.payload;
+                if kind_name == <aether_kinds::UnresolvedMail as aether_data::Kind>::NAME
+                    && let Ok(record) =
+                        bytemuck::try_from_bytes::<aether_kinds::UnresolvedMail>(bytes)
+                {
                     tracing::warn!(
                         target: "aether_substrate::diagnostics",
-                        kind = %kind_name,
-                        "aether.diagnostics received an unexpected kind or malformed payload",
+                        recipient_mailbox_id = %record.recipient_mailbox_id,
+                        kind_id = %record.kind_id,
+                        "hub could not resolve bubbled-up mail recipient (ADR-0037); \
+                         mail dropped. Likely a typoed mailbox name at the sender.",
                     );
-                },
-            ),
+                    return;
+                }
+                tracing::warn!(
+                    target: "aether_substrate::diagnostics",
+                    kind = %kind_name,
+                    "aether.diagnostics received an unexpected kind or malformed payload",
+                );
+            }),
         );
 
         let handle_store = Arc::new(HandleStore::from_env());
@@ -217,7 +212,7 @@ mod tests {
         // The boot is alive; chassis sinks can be registered without
         // racing a hub-driven load.
         boot.registry
-            .register_closure("test_chassis_sink", Arc::new(|_, _, _, _, _, _| {}));
+            .register_closure("test_chassis_sink", Arc::new(|_dispatch| {}));
         // No backend attached → `is_connected()` is false. Chassis
         // crates that want a hub bridge wire `HubClientCapability`
         // themselves through their `Builder`.

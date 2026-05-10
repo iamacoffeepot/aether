@@ -500,7 +500,12 @@ mod native {
             }
 
             fn ctx(&self, sender: ReplyTo) -> NativeCtx<'_> {
-                NativeCtx::new(&self.transport, sender)
+                NativeCtx::new(
+                    &self.transport,
+                    sender,
+                    aether_data::MailId::NONE,
+                    aether_data::MailId::NONE,
+                )
             }
         }
 

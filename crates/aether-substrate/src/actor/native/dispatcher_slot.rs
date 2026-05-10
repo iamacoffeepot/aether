@@ -163,11 +163,13 @@ where
     /// `log_install::with_actor_dispatch` so tracing events carry the
     /// actor's mailbox id and the per-handler `LogBatch` ships at exit.
     fn dispatch_one(&self, actor: &mut Box<A>, env: crate::actor::native::Envelope) {
+        let inbound_mail_id = env.mail_id;
+        crate::runtime::trace::record_received(inbound_mail_id);
         aether_actor::local::with_stamped(&self.slots, || {
             crate::runtime::log_install::with_actor_dispatch(
                 &*self.binding as &dyn crate::runtime::log_install::MailDispatch,
                 || {
-                    let mut ctx = NativeCtx::new(&self.binding, env.sender);
+                    let mut ctx = NativeCtx::new(&self.binding, env.sender, env.mail_id, env.root);
                     if actor
                         .__aether_dispatch_envelope(&mut ctx, env.kind, &env.payload)
                         .is_none()
@@ -184,6 +186,7 @@ where
                 },
             );
         });
+        crate::runtime::trace::record_finished(inbound_mail_id);
         if let Some(p) = &self.pending {
             p.fetch_sub(1, Ordering::AcqRel);
         }
@@ -198,7 +201,12 @@ where
             crate::runtime::log_install::with_actor_dispatch(
                 &*self.binding as &dyn crate::runtime::log_install::MailDispatch,
                 || {
-                    let mut close_ctx = NativeCtx::new(&self.binding, ReplyTo::NONE);
+                    let mut close_ctx = NativeCtx::new(
+                        &self.binding,
+                        ReplyTo::NONE,
+                        aether_data::MailId::NONE,
+                        aether_data::MailId::NONE,
+                    );
                     actor.unwire(&mut close_ctx);
                     aether_actor::log::drain_buffer();
                 },

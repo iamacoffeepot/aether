@@ -26,7 +26,7 @@ use aether_actor::mail::sync::WaitError;
 use aether_actor::{Actor, HandlesKind, MailCtx, Sender, Singleton};
 
 use crate::actor::native::mailbox::NativeActorMailbox;
-use aether_data::{Kind, mailbox_id_from_name};
+use aether_data::{Kind, MailId, mailbox_id_from_name};
 
 use crate::actor::monitor::MonitorHandle;
 use crate::actor::native::binding::NativeBinding;
@@ -49,6 +49,18 @@ use super::{NativeActor, NativeDispatch};
 pub struct NativeCtx<'a> {
     binding: &'a NativeBinding,
     sender: ReplyTo,
+    /// ADR-0080 §5: identity of the mail this handler is dispatching.
+    /// Outbound `send` paths read this to stamp `parent_mail` on
+    /// child mail (so the receiver inherits the right parent in the
+    /// causal graph). `MailId::NONE` for ctxs without an inbound
+    /// (chassis-root sends, `unwire`, init).
+    in_flight_mail_id: MailId,
+    /// ADR-0080 §5: root of the causal chain this handler runs in.
+    /// Outbound `send` paths read this to stamp `root` on child mail
+    /// so descendants share the chain. `MailId::NONE` for ctxs without
+    /// an inbound — those sends mint a fresh root from their own
+    /// `mail_id` in `NativeBinding::send_mail`.
+    in_flight_root: MailId,
 }
 
 impl<'a> NativeCtx<'a> {
@@ -57,8 +69,35 @@ impl<'a> NativeCtx<'a> {
     /// `aether-capabilities` also reach for it directly so they can
     /// drive a handler without spinning up a full chassis; that's why
     /// it's `pub` rather than `pub(crate)`.
-    pub fn new(binding: &'a NativeBinding, sender: ReplyTo) -> Self {
-        Self { binding, sender }
+    pub fn new(
+        binding: &'a NativeBinding,
+        sender: ReplyTo,
+        in_flight_mail_id: MailId,
+        in_flight_root: MailId,
+    ) -> Self {
+        Self {
+            binding,
+            sender,
+            in_flight_mail_id,
+            in_flight_root,
+        }
+    }
+
+    /// ADR-0080 §5: the [`MailId`] of the mail currently being
+    /// dispatched. Read by outbound `send` paths to stamp
+    /// `parent_mail` on child mail. `MailId::NONE` when the ctx was
+    /// built without an inbound (close hook, init, chassis-pushed).
+    pub fn in_flight_mail_id(&self) -> MailId {
+        self.in_flight_mail_id
+    }
+
+    /// ADR-0080 §5: the root [`MailId`] of the causal chain this
+    /// handler is running in. Read by outbound `send` paths to inherit
+    /// `root` on child mail so descendants share the chain. The
+    /// chassis-root case (no inbound) leaves this `MailId::NONE` and
+    /// `NativeBinding::send_mail` mints a fresh root.
+    pub fn in_flight_root(&self) -> MailId {
+        self.in_flight_root
     }
 
     /// The reply target for the mail currently being dispatched.
@@ -191,6 +230,31 @@ impl<'a> NativeCtx<'a> {
     }
 }
 
+impl<'a> NativeCtx<'a> {
+    /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound
+    /// mail from this ctx's in-flight context. `MailId::NONE` collapses
+    /// to `None` (chassis-root or close/init ctx).
+    fn outbound_parent(&self) -> Option<MailId> {
+        if self.in_flight_mail_id == MailId::NONE {
+            None
+        } else {
+            Some(self.in_flight_mail_id)
+        }
+    }
+
+    /// ADR-0080 §5: derive the inherited `root` to stamp on outbound
+    /// mail from this ctx's in-flight context. `MailId::NONE` collapses
+    /// to `None`, in which case `NativeBinding::send_mail_with_lineage`
+    /// mints a fresh root from the outbound's own `mail_id`.
+    fn outbound_root(&self) -> Option<MailId> {
+        if self.in_flight_root == MailId::NONE {
+            None
+        } else {
+            Some(self.in_flight_root)
+        }
+    }
+}
+
 impl<'a> Sender for NativeCtx<'a> {
     fn send<R, K>(&mut self, payload: &K)
     where
@@ -198,8 +262,14 @@ impl<'a> Sender for NativeCtx<'a> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.binding
-            .send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
+        self.binding.send_mail_with_lineage(
+            mailbox_id_from_name(R::NAMESPACE).0,
+            K::ID.0,
+            &bytes,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+        );
     }
 
     fn send_many<R, K>(&mut self, payloads: &[K])
@@ -208,18 +278,26 @@ impl<'a> Sender for NativeCtx<'a> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        self.binding.send_mail(
+        self.binding.send_mail_with_lineage(
             mailbox_id_from_name(R::NAMESPACE).0,
             K::ID.0,
             bytes,
             payloads.len() as u32,
+            self.outbound_parent(),
+            self.outbound_root(),
         );
     }
 
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding
-            .send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
+        self.binding.send_mail_with_lineage(
+            mailbox_id_from_name(name).0,
+            K::ID.0,
+            &bytes,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+        );
     }
 }
 
@@ -350,8 +428,14 @@ impl<'a> MailSender for NativeCtx<'a> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.binding
-            .send_mail(mailbox_id_from_name(R::NAMESPACE).0, K::ID.0, &bytes, 1);
+        self.binding.send_mail_with_lineage(
+            mailbox_id_from_name(R::NAMESPACE).0,
+            K::ID.0,
+            &bytes,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+        );
     }
 
     fn send_many<R, K>(&mut self, payloads: &[K])
@@ -360,18 +444,26 @@ impl<'a> MailSender for NativeCtx<'a> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        self.binding.send_mail(
+        self.binding.send_mail_with_lineage(
             mailbox_id_from_name(R::NAMESPACE).0,
             K::ID.0,
             bytes,
             payloads.len() as u32,
+            self.outbound_parent(),
+            self.outbound_root(),
         );
     }
 
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding
-            .send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1);
+        self.binding.send_mail_with_lineage(
+            mailbox_id_from_name(name).0,
+            K::ID.0,
+            &bytes,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+        );
     }
 
     fn prev_correlation(&self) -> u64 {

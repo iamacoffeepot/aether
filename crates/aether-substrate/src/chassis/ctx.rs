@@ -15,9 +15,9 @@ use aether_actor::Actor;
 
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::error::BootError;
+use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::Registry;
-use crate::mail::{KindId, MailboxId, ReplyTo};
+use crate::mail::registry::{MailDispatch, Registry};
 use crate::runtime::lifecycle::FatalAborter;
 
 /// Result returned from [`ChassisCtx::claim_mailbox`].
@@ -280,30 +280,26 @@ impl<'a> ChassisCtx<'a> {
         let tx = Arc::new(tx);
         let id = self.registry.try_register_closure(
             name.to_owned(),
-            Arc::new(
-                move |kind: KindId,
-                      kind_name: &str,
-                      origin: Option<&str>,
-                      sender: ReplyTo,
-                      payload: &[u8],
-                      count: u32| {
-                    let env = Envelope {
-                        kind,
-                        kind_name: kind_name.to_owned(),
-                        origin: origin.map(str::to_owned),
-                        sender,
-                        payload: payload.to_vec(),
-                        count,
-                    };
-                    if tx.send(env).is_err() {
-                        tracing::warn!(
-                            target: "aether_substrate::capability",
-                            kind = kind_name,
-                            "capability mailbox receiver dropped — mail discarded"
-                        );
-                    }
-                },
-            ),
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                let env = Envelope {
+                    kind: dispatch.kind,
+                    kind_name: dispatch.kind_name.to_owned(),
+                    origin: dispatch.origin.map(str::to_owned),
+                    sender: dispatch.sender,
+                    payload: dispatch.payload.to_vec(),
+                    count: dispatch.count,
+                    mail_id: dispatch.mail_id,
+                    root: dispatch.root,
+                    parent_mail: dispatch.parent_mail,
+                };
+                if tx.send(env).is_err() {
+                    tracing::warn!(
+                        target: "aether_substrate::capability",
+                        kind = dispatch.kind_name,
+                        "capability mailbox receiver dropped — mail discarded"
+                    );
+                }
+            }),
         )?;
         self.claimed_actor_mailboxes.push(id);
         Ok(MailboxClaim { id, receiver: rx })
@@ -348,46 +344,42 @@ impl<'a> ChassisCtx<'a> {
         let wake_for_handler = Arc::clone(&wake_slot);
         let id = self.registry.try_register_closure(
             name.to_owned(),
-            Arc::new(
-                move |kind: KindId,
-                      kind_name: &str,
-                      origin: Option<&str>,
-                      sender: ReplyTo,
-                      payload: &[u8],
-                      count: u32| {
-                    let Some(tx) = weak.upgrade() else {
-                        tracing::warn!(
-                            target: "aether_substrate::capability",
-                            kind = kind_name,
-                            "capability mailbox sender dropped — mail discarded"
-                        );
-                        return;
-                    };
-                    let env = Envelope {
-                        kind,
-                        kind_name: kind_name.to_owned(),
-                        origin: origin.map(str::to_owned),
-                        sender,
-                        payload: payload.to_vec(),
-                        count,
-                    };
-                    if tx.send(env).is_err() {
-                        tracing::warn!(
-                            target: "aether_substrate::capability",
-                            kind = kind_name,
-                            "capability mailbox receiver dropped — mail discarded"
-                        );
-                        return;
-                    }
-                    // Issue 635 PR C: fire the `Pooled` wake hook (if
-                    // installed). `Dedicated` actors leave it empty,
-                    // so this is a single relaxed atomic load on the
-                    // hot path.
-                    if let Some(wake) = wake_for_handler.get() {
-                        wake();
-                    }
-                },
-            ),
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                let Some(tx) = weak.upgrade() else {
+                    tracing::warn!(
+                        target: "aether_substrate::capability",
+                        kind = dispatch.kind_name,
+                        "capability mailbox sender dropped — mail discarded"
+                    );
+                    return;
+                };
+                let env = Envelope {
+                    kind: dispatch.kind,
+                    kind_name: dispatch.kind_name.to_owned(),
+                    origin: dispatch.origin.map(str::to_owned),
+                    sender: dispatch.sender,
+                    payload: dispatch.payload.to_vec(),
+                    count: dispatch.count,
+                    mail_id: dispatch.mail_id,
+                    root: dispatch.root,
+                    parent_mail: dispatch.parent_mail,
+                };
+                if tx.send(env).is_err() {
+                    tracing::warn!(
+                        target: "aether_substrate::capability",
+                        kind = dispatch.kind_name,
+                        "capability mailbox receiver dropped — mail discarded"
+                    );
+                    return;
+                }
+                // Issue 635 PR C: fire the `Pooled` wake hook (if
+                // installed). `Dedicated` actors leave it empty,
+                // so this is a single relaxed atomic load on the
+                // hot path.
+                if let Some(wake) = wake_for_handler.get() {
+                    wake();
+                }
+            }),
         )?;
         self.claimed_actor_mailboxes.push(id);
         Ok(DropOnShutdownClaim {
@@ -432,56 +424,52 @@ impl<'a> ChassisCtx<'a> {
         let wake_for_handler = Arc::clone(&wake_slot);
         let id = self.registry.try_register_closure(
             name.to_owned(),
-            Arc::new(
-                move |kind: KindId,
-                      kind_name: &str,
-                      origin: Option<&str>,
-                      sender: ReplyTo,
-                      payload: &[u8],
-                      count: u32| {
-                    let Some(tx) = weak.upgrade() else {
-                        tracing::warn!(
-                            target: "aether_substrate::capability",
-                            kind = kind_name,
-                            "frame-bound capability sender dropped — mail discarded"
-                        );
-                        return;
-                    };
-                    let env = Envelope {
-                        kind,
-                        kind_name: kind_name.to_owned(),
-                        origin: origin.map(str::to_owned),
-                        sender,
-                        payload: payload.to_vec(),
-                        count,
-                    };
-                    // Increment before send so the dispatcher's
-                    // matching decrement-after-dispatch sees a count
-                    // > 0 by the time it tries to decrement. If the
-                    // send itself fails (receiver dropped between the
-                    // upgrade and the send — shutdown race), undo
-                    // the increment so the counter doesn't drift up.
-                    pending_for_handler.fetch_add(1, Ordering::AcqRel);
-                    if tx.send(env).is_err() {
-                        pending_for_handler.fetch_sub(1, Ordering::AcqRel);
-                        tracing::warn!(
-                            target: "aether_substrate::capability",
-                            kind = kind_name,
-                            "frame-bound capability receiver dropped — mail discarded"
-                        );
-                        return;
-                    }
-                    // Issue 635 PR C: fire the `Pooled` wake hook (if
-                    // installed). Frame-bound + pool-scheduled is a
-                    // valid combination per the issue's section 5
-                    // ("FRAME_BARRIER and SCHEDULING are orthogonal");
-                    // the chassis frame loop reads `pending` regardless
-                    // of where the dispatch happens.
-                    if let Some(wake) = wake_for_handler.get() {
-                        wake();
-                    }
-                },
-            ),
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                let Some(tx) = weak.upgrade() else {
+                    tracing::warn!(
+                        target: "aether_substrate::capability",
+                        kind = dispatch.kind_name,
+                        "frame-bound capability sender dropped — mail discarded"
+                    );
+                    return;
+                };
+                let env = Envelope {
+                    kind: dispatch.kind,
+                    kind_name: dispatch.kind_name.to_owned(),
+                    origin: dispatch.origin.map(str::to_owned),
+                    sender: dispatch.sender,
+                    payload: dispatch.payload.to_vec(),
+                    count: dispatch.count,
+                    mail_id: dispatch.mail_id,
+                    root: dispatch.root,
+                    parent_mail: dispatch.parent_mail,
+                };
+                // Increment before send so the dispatcher's
+                // matching decrement-after-dispatch sees a count
+                // > 0 by the time it tries to decrement. If the
+                // send itself fails (receiver dropped between the
+                // upgrade and the send — shutdown race), undo
+                // the increment so the counter doesn't drift up.
+                pending_for_handler.fetch_add(1, Ordering::AcqRel);
+                if tx.send(env).is_err() {
+                    pending_for_handler.fetch_sub(1, Ordering::AcqRel);
+                    tracing::warn!(
+                        target: "aether_substrate::capability",
+                        kind = dispatch.kind_name,
+                        "frame-bound capability receiver dropped — mail discarded"
+                    );
+                    return;
+                }
+                // Issue 635 PR C: fire the `Pooled` wake hook (if
+                // installed). Frame-bound + pool-scheduled is a
+                // valid combination per the issue's section 5
+                // ("FRAME_BARRIER and SCHEDULING are orthogonal");
+                // the chassis frame loop reads `pending` regardless
+                // of where the dispatch happens.
+                if let Some(wake) = wake_for_handler.get() {
+                    wake();
+                }
+            }),
         )?;
         self.frame_bound_pending.push((id, Arc::clone(&pending)));
         // Mirror the membership into the shared set so each

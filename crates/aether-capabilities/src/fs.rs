@@ -537,7 +537,12 @@ mod native {
             }
 
             fn ctx(&self, sender: ReplyTo) -> NativeCtx<'_> {
-                NativeCtx::new(&self.transport, sender)
+                NativeCtx::new(
+                    &self.transport,
+                    sender,
+                    aether_data::MailId::NONE,
+                    aether_data::MailId::NONE,
+                )
             }
         }
 
@@ -837,7 +842,10 @@ mod native {
         fn duplicate_claim_rejects_with_typed_error() {
             let root = scratch_root("collide");
             let (registry, mailer) = fresh_substrate();
-            registry.register_closure(FsCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            registry.register_closure(
+                FsCapability::NAMESPACE,
+                aether_substrate::mail::registry::noop_handler(),
+            );
 
             let err = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
                 .with_actor::<FsCapability>(roots_under(&root))

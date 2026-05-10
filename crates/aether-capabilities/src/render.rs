@@ -583,7 +583,17 @@ mod native {
             let MailboxEntry::Closure(handler) = registry.entry(id).expect("entry exists") else {
                 panic!("expected mailbox entry for {name}");
             };
-            handler(kind, "test.kind", None, ReplyTo::NONE, payload, 1);
+            handler(aether_substrate::mail::registry::MailDispatch {
+                kind,
+                kind_name: "test.kind",
+                origin: None,
+                sender: ReplyTo::NONE,
+                payload,
+                count: 1,
+                mail_id: aether_substrate::mail::MailId::NONE,
+                root: aether_substrate::mail::MailId::NONE,
+                parent_mail: None,
+            });
         }
 
         #[test]

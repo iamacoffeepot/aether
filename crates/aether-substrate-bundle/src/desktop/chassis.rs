@@ -18,7 +18,7 @@ use aether_capabilities::{
     ComponentHostConfig, FsCapability, HandleCapability, HttpCapability, InputCapability,
     InputConfig, LogCapability, RenderCapability, RenderConfig, TcpCapability,
     UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf, fs::NamespaceRoots,
-    http::HttpConfig as HttpConf,
+    http::HttpConfig as HttpConf, trace::TraceObserverCapability,
 };
 use aether_kinds::WindowMode;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
@@ -229,6 +229,7 @@ impl DesktopChassis {
             .with_actor::<BroadcastCapability>(())
             .with_actor::<HandleCapability>(())
             .with_actor::<LogCapability>(())
+            .with_actor::<TraceObserverCapability>(())
             .with_actor::<InputCapability>(input_config)
             .with_actor::<ComponentHostCapability>(component_host_config)
             .with_actor::<FsCapability>(namespace_roots)

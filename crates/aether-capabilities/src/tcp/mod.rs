@@ -394,7 +394,17 @@ mod cap_native {
                 panic!("expected mailbox entry");
             };
             let bytes = postcard::to_allocvec(mail).expect("encode");
-            handler(K::ID, K::NAME, None, session_reply(), &bytes, 1);
+            handler(aether_substrate::mail::registry::MailDispatch {
+                kind: K::ID,
+                kind_name: K::NAME,
+                origin: None,
+                sender: session_reply(),
+                payload: &bytes,
+                count: 1,
+                mail_id: aether_substrate::mail::MailId::NONE,
+                root: aether_substrate::mail::MailId::NONE,
+                parent_mail: None,
+            });
 
             let deadline = Instant::now() + Duration::from_secs(2);
             let frame = loop {

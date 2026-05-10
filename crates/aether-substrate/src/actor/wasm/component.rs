@@ -191,14 +191,24 @@ impl ComponentCtx {
             // can route `*Result` back to this component via
             // `Mailer::send_reply`.
             let origin = self.registry.mailbox_name(self.sender);
-            handler(
+            // ADR-0080 §1: PR 2 plumbs the lineage triple through the
+            // `MailboxHandler` signature; producer-side population
+            // (mint MailId from the per-actor counter, inherit `root`
+            // from the component's in-flight context) lands in PR 3
+            // alongside the chassis sentinel and per-handler ctx
+            // accessors. PR 2 stamps `MailId::NONE` here so the
+            // envelope shape is honest while population catches up.
+            handler(crate::mail::registry::MailDispatch {
                 kind,
-                &kind_name,
-                origin.as_deref(),
-                reply_to,
-                &payload,
+                kind_name: &kind_name,
+                origin: origin.as_deref(),
+                sender: reply_to,
+                payload: &payload,
                 count,
-            );
+                mail_id: crate::mail::MailId::NONE,
+                root: crate::mail::MailId::NONE,
+                parent_mail: None,
+            });
             return;
         }
 
@@ -1025,7 +1035,7 @@ mod tests {
         let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let sender = registry
-            .try_register_closure("client", Arc::new(|_, _, _, _, _, _| {}))
+            .try_register_closure("client", crate::mail::registry::noop_handler())
             .expect("register client mailbox");
 
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));
@@ -1067,7 +1077,7 @@ mod tests {
         let (outbound, outbound_rx) = HubOutbound::attached_loopback();
         let registry = Arc::new(Registry::new());
         let sender = registry
-            .try_register_closure("client", Arc::new(|_, _, _, _, _, _| {}))
+            .try_register_closure("client", crate::mail::registry::noop_handler())
             .expect("register client mailbox");
 
         let store = Arc::new(crate::handle_store::HandleStore::new(1024 * 1024));

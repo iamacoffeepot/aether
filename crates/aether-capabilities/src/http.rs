@@ -568,7 +568,10 @@ mod native {
         #[test]
         fn duplicate_claim_rejects_with_typed_error() {
             let (registry, mailer) = fresh_substrate();
-            registry.register_closure(HttpCapability::NAMESPACE, Arc::new(|_, _, _, _, _, _| {}));
+            registry.register_closure(
+                HttpCapability::NAMESPACE,
+                aether_substrate::mail::registry::noop_handler(),
+            );
             let config = HttpConfig {
                 disabled: true,
                 ..HttpConfig::default()
@@ -593,7 +596,12 @@ mod native {
                 HttpConfig::default().default_timeout,
             );
             let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
-            let mut ctx = NativeCtx::new(&transport, session_sender());
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
             cap.on_fetch(
                 &mut ctx,
                 Fetch {
@@ -702,7 +710,12 @@ mod native {
                 HttpConfig::default().default_timeout,
             );
             let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
-            let mut ctx = NativeCtx::new(&transport, session_sender());
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
             cap.on_fetch(
                 &mut ctx,
                 Fetch {
@@ -737,7 +750,12 @@ mod native {
                 HttpConfig::default().default_timeout,
             );
             let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
-            let mut ctx = NativeCtx::new(&transport, session_sender());
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
             cap.on_fetch(
                 &mut ctx,
                 Fetch {
@@ -771,7 +789,12 @@ mod native {
                 HttpConfig::default().default_timeout,
             );
             let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
-            let mut ctx = NativeCtx::new(&transport, session_sender());
+            let mut ctx = NativeCtx::new(
+                &transport,
+                session_sender(),
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
             cap.on_fetch(
                 &mut ctx,
                 Fetch {

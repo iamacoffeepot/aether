@@ -14,7 +14,7 @@ use crate::hub::HubClient;
 use aether_capabilities::{
     BroadcastCapability, CaptureBackend, FsCapability, HandleCapability, HeadlessWindowCapability,
     InputCapability, InputConfig, LogCapability, RenderCapability, RenderConfig, RenderHandles,
-    TcpCapability, fs::NamespaceRoots,
+    TcpCapability, fs::NamespaceRoots, trace::TraceObserverCapability,
 };
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
@@ -234,6 +234,7 @@ impl TestBenchChassis {
                 .with_actor::<BroadcastCapability>(())
                 .with_actor::<HandleCapability>(())
                 .with_actor::<LogCapability>(())
+                .with_actor::<TraceObserverCapability>(())
                 .with_actor::<InputCapability>(input_config)
                 .with_actor::<ComponentHostCapability>(component_host_config)
                 .with_actor::<TcpCapability>(())

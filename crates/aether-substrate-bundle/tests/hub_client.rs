@@ -105,17 +105,12 @@ fn inbound_mail_lands_in_queue_after_resolution() {
     let recipient = registry.register_closure(
         "hello",
         Arc::new(
-            move |_kind_id: aether_data::KindId,
-                  _kind: &str,
-                  _origin: Option<&str>,
-                  sender: ReplyTo,
-                  bytes: &[u8],
-                  count: u32| {
+            move |dispatch: aether_substrate::mail::registry::MailDispatch<'_>| {
                 let (lock, cv) = &*seen_for_sink;
                 let mut s = lock.lock().unwrap();
-                s.count_sum += count;
-                s.payload_lens.push(bytes.len());
-                s.senders.push(sender);
+                s.count_sum += dispatch.count;
+                s.payload_lens.push(dispatch.payload.len());
+                s.senders.push(dispatch.sender);
                 cv.notify_all();
             },
         ),
