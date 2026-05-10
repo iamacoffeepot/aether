@@ -69,12 +69,14 @@ pub(crate) mod dispatcher_slot;
 pub mod envelope;
 pub mod mailbox;
 pub mod spawn;
+pub mod spawn_thread;
 
 pub use binding::NativeBinding;
 pub use ctx::{ExportedHandles, NativeCtx, NativeInitCtx};
 pub use envelope::Envelope;
 pub use mailbox::NativeActorMailbox;
 pub use spawn::{SpawnBuilder, SpawnError, Spawner, Subname};
+pub use spawn_thread::{InheritCtx, RootCtx};
 
 use aether_actor::Actor;
 

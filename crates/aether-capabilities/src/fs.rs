@@ -522,13 +522,13 @@ mod native {
         struct TestFixture {
             cap: FsCapability,
             rx: std::sync::mpsc::Receiver<EgressEvent>,
-            transport: NativeBinding,
+            transport: Arc<NativeBinding>,
         }
 
         impl TestFixture {
             fn new(reg: Arc<AdapterRegistry>) -> Self {
                 let (mailer, rx) = test_mailer_and_rx();
-                let transport = NativeBinding::new_for_test(mailer, MailboxId(0));
+                let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
                 Self {
                     cap: FsCapability::from_registry(reg),
                     rx,

@@ -474,7 +474,7 @@ mod native {
         struct TestFixture {
             cap: ProcessCapability,
             rx: mpsc::Receiver<EgressEvent>,
-            transport: NativeBinding,
+            transport: Arc<NativeBinding>,
             _rt: Runtime,
         }
 
@@ -482,7 +482,10 @@ mod native {
             fn new() -> Self {
                 let rt = Runtime::new().expect("tokio runtime");
                 let (mailer, outbound, rx) = test_mailer_and_rx();
-                let transport = NativeBinding::new_for_test(mailer, aether_data::MailboxId(0));
+                let transport = Arc::new(NativeBinding::new_for_test(
+                    mailer,
+                    aether_data::MailboxId(0),
+                ));
                 let cap = ProcessCapability {
                     engines: EngineRegistry::new(),
                     pending: PendingSpawns::new(),
