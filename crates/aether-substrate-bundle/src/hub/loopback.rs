@@ -404,8 +404,7 @@ mod tests {
         // chassis-rooted senders.
         assert!(
             record.mailboxes.iter().any(|m| {
-                m.name == "aether.chassis"
-                    && m.category == Some(MailboxCategory::ChassisSentinel)
+                m.name == "aether.chassis" && m.category == Some(MailboxCategory::ChassisSentinel)
             }),
             "chassis sentinel must appear in hub-self inventory: {:#?}",
             record.mailboxes,
