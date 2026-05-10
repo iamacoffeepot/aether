@@ -237,6 +237,75 @@ pub struct RootSummaryWire {
     pub in_flight: u32,
 }
 
+/// Issue 735: window selector for the time-window trace queries
+/// ([`DescribeWindow`] today; `dump_trace_window` Phase 3 reuses the
+/// same enum). The substrate resolves [`TraceWindow::Relative`] using
+/// its own `SUBSTRATE_START`-relative monotonic clock at handler
+/// entry, so callers don't have to deal with hub-vs-substrate clock
+/// skew.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
+pub enum TraceWindow {
+    /// Absolute nanoseconds since substrate boot. `end_ns: None`
+    /// means "open-ended through now" — resolved at handler entry to
+    /// the substrate's current `SUBSTRATE_START`-relative reading.
+    Absolute { start_ns: u64, end_ns: Option<u64> },
+    /// Last N milliseconds, relative to the substrate's monotonic
+    /// now at handler entry. Equivalent to
+    /// `Absolute { start_ns: now - last_ms, end_ns: None }`.
+    Relative { last_ms: u64 },
+}
+
+/// Issue 735: time-window mail query. Sent to
+/// [`TRACE_OBSERVER_MAILBOX_NAME`]; the observer replies with
+/// [`DescribeWindowResult`]. The hub MCP `describe_tree_window` and
+/// `dump_trace_window` tools wrap the round-trip.
+///
+/// **Strict `t_sent` containment.** A mail belongs to the window iff
+/// `start_ns <= mail.t_sent <= end_ns`. Long-running mail (still
+/// in flight when the window closes) re-surfaces in subsequent
+/// window queries while it remains tracked. Parent edges may dangle
+/// to mail outside the window — drill into a specific root via
+/// [`DescribeTree`] for full chain context.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.trace.describe_window")]
+pub struct DescribeWindow {
+    pub window: TraceWindow,
+    /// Cap on the number of in-window mails the observer will
+    /// return. The observer counts the matching set first; if the
+    /// count exceeds `max_mails` (or the substrate-side default) the
+    /// reply is `Err { too_many: Some(count) }` instead of a
+    /// truncated set — the count tells the caller how to narrow the
+    /// window.
+    pub max_mails: Option<u32>,
+}
+
+/// Issue 735: reply to [`DescribeWindow`]. `Ok` carries the in-window
+/// mails in undefined order — agents reconstruct chains via `parent`
+/// edges (some of which may reference mail outside the window). `Err`
+/// carries `too_many: Some(matched)` when the window matched more
+/// mails than the requested cap, signalling the caller should narrow
+/// the window or raise `max_mails`. Future error variants extend the
+/// `Err` shape with additional `Option<...>` fields rather than
+/// adding sibling variants.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
+)]
+#[kind(name = "aether.trace.describe_window_result")]
+pub enum DescribeWindowResult {
+    Ok { mails: Vec<MailNodeWire> },
+    Err { too_many: Option<u32> },
+}
+
 /// ADR-0080 §6 settlement notification. Emitted by
 /// [`crate::trace::BatchedTraceEvents`]'s consumer
 /// (`TraceObserverCapability`) when a causal chain's `in_flight`

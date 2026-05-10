@@ -17,17 +17,18 @@
 //! `NativeBinding::send_mail_with_lineage`). See ADR-0080 §7.
 
 use aether_kinds::trace::{
-    BatchedTraceEvents, DescribeTree, DescribeTreeResult, ListActiveRoots, ListActiveRootsResult,
-    MailNodeWire, RootSummaryWire,
+    BatchedTraceEvents, DescribeTree, DescribeTreeResult, DescribeWindow, DescribeWindowResult,
+    ListActiveRoots, ListActiveRootsResult, MailNodeWire, RootSummaryWire, TraceWindow,
 };
 
 #[aether_actor::bridge(singleton)]
 mod native {
     use super::{
-        BatchedTraceEvents, DescribeTree, DescribeTreeResult, ListActiveRoots,
-        ListActiveRootsResult, MailNodeWire, RootSummaryWire,
+        BatchedTraceEvents, DescribeTree, DescribeTreeResult, DescribeWindow, DescribeWindowResult,
+        ListActiveRoots, ListActiveRootsResult, MailNodeWire, RootSummaryWire, TraceWindow,
     };
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
+    use std::ops::Bound;
     use std::time::{Duration, Instant};
 
     use std::sync::Arc;
@@ -87,6 +88,14 @@ mod native {
     pub struct TraceObserverCapability {
         roots: HashMap<MailId, RootState>,
         mails: HashMap<MailId, MailNode>,
+        /// Issue 735: secondary index by `t_sent` for the time-window
+        /// query path (`describe_window`). `BTreeSet<(Nanos, MailId)>`
+        /// because two mails *could* share a `Nanos` (synthetic test
+        /// timestamps; in production `Nanos` is monotonic ~10ns
+        /// granularity, but tight back-to-back sends could collide).
+        /// Inserted on `TraceEvent::Sent`, removed in `evict` whenever
+        /// a `MailNode` drops.
+        t_sent_index: BTreeSet<(Nanos, MailId)>,
         retention: Duration,
         max_roots: usize,
         /// Mailer handle stashed at init so `Settled` mail can be
@@ -148,6 +157,7 @@ mod native {
                             thread_name: None,
                         },
                     );
+                    self.t_sent_index.insert((t, mail_id));
                 }
                 TraceEvent::Received {
                     mail_id,
@@ -258,6 +268,76 @@ mod native {
             ListActiveRootsResult { roots: summaries }
         }
 
+        /// Issue 735: pure compute path for `on_describe_window`.
+        /// `now` is injected so tests can drive deterministic windows
+        /// without depending on `SUBSTRATE_START` being initialised.
+        ///
+        /// Strict `t_sent` containment: a mail belongs to the window
+        /// iff `start_ns <= t_sent <= end_ns`. Counts the matched set
+        /// before allocating the reply so an over-cap query returns
+        /// `Err { too_many: Some(matched) }` instead of a partial
+        /// vector — see issue body for the design rationale.
+        pub(crate) fn build_describe_window(
+            &self,
+            request: DescribeWindow,
+            now: Nanos,
+        ) -> DescribeWindowResult {
+            const DEFAULT_MAX: u32 = 10_000;
+            const HARD_MAX: u32 = 100_000;
+
+            let max = request.max_mails.unwrap_or(DEFAULT_MAX).min(HARD_MAX) as usize;
+
+            let (start, end) = match request.window {
+                TraceWindow::Absolute { start_ns, end_ns } => {
+                    (Nanos(start_ns), Nanos(end_ns.unwrap_or(u64::MAX)))
+                }
+                TraceWindow::Relative { last_ms } => {
+                    let last_ns = last_ms.saturating_mul(1_000_000);
+                    (Nanos(now.0.saturating_sub(last_ns)), now)
+                }
+            };
+
+            // BTreeSet range: lower bound is `(start, MailId::NONE)`;
+            // upper bound is `(end + 1ns, MailId::NONE)` excluded so
+            // the inclusive end timestamp is captured for every
+            // `MailId` tied to it. `saturating_add` covers the (vanishing)
+            // edge where `end == u64::MAX`.
+            let upper = Nanos(end.0.saturating_add(1));
+            let range = self.t_sent_index.range((
+                Bound::Included((start, MailId::NONE)),
+                Bound::Excluded((upper, MailId::NONE)),
+            ));
+
+            // Two-pass: count first to honour the cap-or-error contract,
+            // then collect. `BTreeSet::range` is cheap to iterate twice
+            // (O(log N + matches) per pass).
+            let count = range.clone().count();
+            if count > max {
+                return DescribeWindowResult::Err {
+                    too_many: Some(count as u32),
+                };
+            }
+
+            let mails: Vec<MailNodeWire> = range
+                .filter_map(|(_, mid)| {
+                    let node = self.mails.get(mid)?;
+                    Some(MailNodeWire {
+                        mail_id: *mid,
+                        parent: node.parent,
+                        sender: node.sender,
+                        recipient: node.recipient,
+                        kind: node.kind,
+                        t_sent: node.t_sent,
+                        t_received: node.t_received,
+                        t_finished: node.t_finished,
+                        thread_name: node.thread_name.clone(),
+                    })
+                })
+                .collect();
+
+            DescribeWindowResult::Ok { mails }
+        }
+
         fn fire_settled(&self, root: MailId) {
             let payload = match postcard::to_allocvec(&Settled { root }) {
                 Ok(p) => p,
@@ -283,8 +363,7 @@ mod native {
             let cutoff = Instant::now().checked_sub(self.retention);
             if let Some(cutoff) = cutoff {
                 self.roots.retain(|_, state| state.last_event_at >= cutoff);
-                self.mails
-                    .retain(|_, node| self.roots.contains_key(&node.root));
+                self.drop_orphaned_mails();
             }
             // Hard cap: if we still exceed `max_roots`, drop oldest
             // by `last_event_at`. This is O(n) but only triggers on
@@ -300,8 +379,28 @@ mod native {
                 for (id, _) in entries.into_iter().take(drop_n) {
                     self.roots.remove(&id);
                 }
-                self.mails
-                    .retain(|_, node| self.roots.contains_key(&node.root));
+                self.drop_orphaned_mails();
+            }
+        }
+
+        /// Drops every `MailNode` whose root is no longer in
+        /// `self.roots`, and removes the matching entry from
+        /// `self.t_sent_index`. Issue 735: keeping the secondary
+        /// index in sync is the load-bearing part — a stale entry
+        /// would cause `describe_window` to surface a `MailId` that
+        /// `self.mails.get` can't resolve (handled by `filter_map`,
+        /// but it's a silent miscount of the matched set).
+        fn drop_orphaned_mails(&mut self) {
+            let dropped: Vec<MailId> = self
+                .mails
+                .iter()
+                .filter(|(_, node)| !self.roots.contains_key(&node.root))
+                .map(|(mid, _)| *mid)
+                .collect();
+            for mid in &dropped {
+                if let Some(node) = self.mails.remove(mid) {
+                    self.t_sent_index.remove(&(node.t_sent, *mid));
+                }
             }
         }
     }
@@ -334,6 +433,7 @@ mod native {
             Ok(Self {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
+                t_sent_index: BTreeSet::new(),
                 retention: Duration::from_millis(retention_ms),
                 max_roots,
                 mailer: ctx.mailer(),
@@ -385,6 +485,23 @@ mod native {
             let result = self.build_list_active_roots(request, now);
             ctx.reply(&result);
         }
+
+        /// # Agent
+        /// Returns every mail in the observer whose `t_sent` falls
+        /// within the requested window (strict containment). Window
+        /// can be absolute nanoseconds or `Relative { last_ms }`
+        /// (resolved against the substrate's monotonic now).
+        /// `max_mails` caps the reply size (default 10_000, hard cap
+        /// 100_000); over-cap windows reply `Err { too_many: Some(n)
+        /// }` so the caller can narrow the window. Parent edges may
+        /// dangle to mail outside the window — drill into a specific
+        /// root via `describe_tree` for full chain context. Issue 735.
+        #[handler]
+        fn on_describe_window(&mut self, ctx: &mut NativeCtx<'_>, request: DescribeWindow) {
+            let now = aether_substrate::runtime::trace::now_nanos();
+            let result = self.build_describe_window(request, now);
+            ctx.reply(&result);
+        }
     }
 
     #[cfg(test)]
@@ -412,6 +529,7 @@ mod native {
             TraceObserverCapability {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
+                t_sent_index: BTreeSet::new(),
                 retention,
                 max_roots,
                 mailer,
@@ -565,6 +683,7 @@ mod native {
             let mut obs = TraceObserverCapability {
                 roots: HashMap::new(),
                 mails: HashMap::new(),
+                t_sent_index: BTreeSet::new(),
                 retention: Duration::from_secs(60),
                 max_roots: 1000,
                 mailer: Arc::clone(&mailer),
@@ -729,6 +848,273 @@ mod native {
             // Top 2 by t_sent desc: cid 5 (t=500), cid 4 (t=400).
             assert_eq!(result.roots[0].root, mail(1, 5));
             assert_eq!(result.roots[1].root, mail(1, 4));
+        }
+
+        #[test]
+        fn t_sent_index_inserts_on_sent() {
+            let mut obs = boot_observer();
+            let m = mail(1, 1);
+            obs.apply_event(TraceEvent::Sent {
+                mail_id: m,
+                root: m,
+                parent_mail: None,
+                sender: MailboxId(1),
+                recipient: MailboxId(2),
+                kind: KindId(0xABCD),
+                t: Nanos(500),
+            });
+            assert!(obs.t_sent_index.contains(&(Nanos(500), m)));
+        }
+
+        #[test]
+        fn t_sent_index_drops_on_evict() {
+            let mut obs = observer_with(Duration::from_millis(50), 1000);
+            let m = mail(1, 1);
+            obs.apply_event(TraceEvent::Sent {
+                mail_id: m,
+                root: m,
+                parent_mail: None,
+                sender: MailboxId(1),
+                recipient: MailboxId(2),
+                kind: KindId(0xABCD),
+                t: Nanos(100),
+            });
+            assert_eq!(obs.t_sent_index.len(), 1);
+            std::thread::sleep(Duration::from_millis(80));
+            obs.evict();
+            assert!(obs.t_sent_index.is_empty(), "secondary index out of sync");
+        }
+
+        #[test]
+        fn t_sent_index_drops_on_max_roots_overflow() {
+            // Exceeding `max_roots` evicts the oldest by `last_event_at`,
+            // and `drop_orphaned_mails` should prune the secondary
+            // index for the evicted mails too.
+            let mut obs = observer_with(Duration::from_secs(3600), 3);
+            for cid in 1..=5u64 {
+                let m = mail(1, cid);
+                obs.apply_event(TraceEvent::Sent {
+                    mail_id: m,
+                    root: m,
+                    parent_mail: None,
+                    sender: MailboxId(1),
+                    recipient: MailboxId(2),
+                    kind: KindId(0xABCD),
+                    t: Nanos(cid * 100),
+                });
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            obs.evict();
+            assert_eq!(obs.roots.len(), 3);
+            assert_eq!(
+                obs.t_sent_index.len(),
+                3,
+                "secondary index out of sync with mails"
+            );
+            // Index entries should match the surviving mails (cid 3, 4, 5).
+            assert!(obs.t_sent_index.contains(&(Nanos(300), mail(1, 3))));
+            assert!(obs.t_sent_index.contains(&(Nanos(400), mail(1, 4))));
+            assert!(obs.t_sent_index.contains(&(Nanos(500), mail(1, 5))));
+        }
+
+        #[test]
+        fn describe_window_returns_in_window_mails() {
+            let mut obs = boot_observer();
+            // Three sends at t = 100, 500, 900.
+            for (cid, t) in [(1u64, 100u64), (2, 500), (3, 900)] {
+                let m = mail(1, cid);
+                obs.apply_event(TraceEvent::Sent {
+                    mail_id: m,
+                    root: m,
+                    parent_mail: None,
+                    sender: MailboxId(1),
+                    recipient: MailboxId(2),
+                    kind: KindId(0xABCD),
+                    t: Nanos(t),
+                });
+            }
+            // Window [200, 800] strictly contains only the t=500 mail.
+            let result = obs.build_describe_window(
+                DescribeWindow {
+                    window: TraceWindow::Absolute {
+                        start_ns: 200,
+                        end_ns: Some(800),
+                    },
+                    max_mails: None,
+                },
+                Nanos(1_000),
+            );
+            match result {
+                DescribeWindowResult::Ok { mails } => {
+                    assert_eq!(mails.len(), 1);
+                    assert_eq!(mails[0].mail_id, mail(1, 2));
+                }
+                DescribeWindowResult::Err { too_many } => {
+                    panic!("expected Ok, got Err::too_many {too_many:?}")
+                }
+            }
+        }
+
+        #[test]
+        fn describe_window_inclusive_at_boundaries() {
+            let mut obs = boot_observer();
+            for (cid, t) in [(1u64, 200u64), (2, 800)] {
+                let m = mail(1, cid);
+                obs.apply_event(TraceEvent::Sent {
+                    mail_id: m,
+                    root: m,
+                    parent_mail: None,
+                    sender: MailboxId(1),
+                    recipient: MailboxId(2),
+                    kind: KindId(0xABCD),
+                    t: Nanos(t),
+                });
+            }
+            let result = obs.build_describe_window(
+                DescribeWindow {
+                    window: TraceWindow::Absolute {
+                        start_ns: 200,
+                        end_ns: Some(800),
+                    },
+                    max_mails: None,
+                },
+                Nanos(1_000),
+            );
+            match result {
+                DescribeWindowResult::Ok { mails } => assert_eq!(mails.len(), 2),
+                DescribeWindowResult::Err { .. } => panic!("expected Ok"),
+            }
+        }
+
+        #[test]
+        fn describe_window_collisions_at_same_t_sent() {
+            // BTreeSet<(Nanos, MailId)>: two mails at the same Nanos
+            // tie-break by MailId and both survive in the index.
+            let mut obs = boot_observer();
+            for cid in 1..=3u64 {
+                let m = mail(1, cid);
+                obs.apply_event(TraceEvent::Sent {
+                    mail_id: m,
+                    root: m,
+                    parent_mail: None,
+                    sender: MailboxId(1),
+                    recipient: MailboxId(2),
+                    kind: KindId(0xABCD),
+                    t: Nanos(500),
+                });
+            }
+            assert_eq!(obs.t_sent_index.len(), 3);
+            let result = obs.build_describe_window(
+                DescribeWindow {
+                    window: TraceWindow::Absolute {
+                        start_ns: 500,
+                        end_ns: Some(500),
+                    },
+                    max_mails: None,
+                },
+                Nanos(1_000),
+            );
+            match result {
+                DescribeWindowResult::Ok { mails } => assert_eq!(mails.len(), 3),
+                DescribeWindowResult::Err { .. } => panic!("expected Ok"),
+            }
+        }
+
+        #[test]
+        fn describe_window_too_many_returns_err() {
+            let mut obs = boot_observer();
+            for cid in 1..=10u64 {
+                let m = mail(1, cid);
+                obs.apply_event(TraceEvent::Sent {
+                    mail_id: m,
+                    root: m,
+                    parent_mail: None,
+                    sender: MailboxId(1),
+                    recipient: MailboxId(2),
+                    kind: KindId(0xABCD),
+                    t: Nanos(cid * 10),
+                });
+            }
+            let result = obs.build_describe_window(
+                DescribeWindow {
+                    window: TraceWindow::Absolute {
+                        start_ns: 0,
+                        end_ns: Some(1_000),
+                    },
+                    max_mails: Some(5),
+                },
+                Nanos(1_000),
+            );
+            assert_eq!(result, DescribeWindowResult::Err { too_many: Some(10) });
+        }
+
+        #[test]
+        fn describe_window_relative_resolves_against_now() {
+            let mut obs = boot_observer();
+            // Sends at t = 1s, 5s, 10s (in nanos).
+            for (cid, t) in [
+                (1u64, 1_000_000_000u64),
+                (2, 5_000_000_000),
+                (3, 10_000_000_000),
+            ] {
+                let m = mail(1, cid);
+                obs.apply_event(TraceEvent::Sent {
+                    mail_id: m,
+                    root: m,
+                    parent_mail: None,
+                    sender: MailboxId(1),
+                    recipient: MailboxId(2),
+                    kind: KindId(0xABCD),
+                    t: Nanos(t),
+                });
+            }
+            // now = 11s, last_ms = 6_000 → window [5s, 11s] keeps cids 2, 3.
+            let result = obs.build_describe_window(
+                DescribeWindow {
+                    window: TraceWindow::Relative { last_ms: 6_000 },
+                    max_mails: None,
+                },
+                Nanos(11_000_000_000),
+            );
+            match result {
+                DescribeWindowResult::Ok { mails } => {
+                    assert_eq!(mails.len(), 2);
+                    let ids: std::collections::HashSet<MailId> =
+                        mails.iter().map(|m| m.mail_id).collect();
+                    assert!(ids.contains(&mail(1, 2)));
+                    assert!(ids.contains(&mail(1, 3)));
+                }
+                DescribeWindowResult::Err { .. } => panic!("expected Ok"),
+            }
+        }
+
+        #[test]
+        fn describe_window_empty_when_no_match() {
+            let mut obs = boot_observer();
+            let m = mail(1, 1);
+            obs.apply_event(TraceEvent::Sent {
+                mail_id: m,
+                root: m,
+                parent_mail: None,
+                sender: MailboxId(1),
+                recipient: MailboxId(2),
+                kind: KindId(0xABCD),
+                t: Nanos(100),
+            });
+            let result = obs.build_describe_window(
+                DescribeWindow {
+                    window: TraceWindow::Absolute {
+                        start_ns: 1_000,
+                        end_ns: Some(2_000),
+                    },
+                    max_mails: None,
+                },
+                Nanos(3_000),
+            );
+            match result {
+                DescribeWindowResult::Ok { mails } => assert!(mails.is_empty()),
+                DescribeWindowResult::Err { .. } => panic!("expected Ok"),
+            }
         }
 
         #[test]
