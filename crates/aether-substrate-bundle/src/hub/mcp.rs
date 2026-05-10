@@ -687,6 +687,125 @@ mod tests {
         assert!(format!("{err:?}").contains("unknown engine_id"));
     }
 
+    fn list_active_roots_descriptor() -> aether_data::KindDescriptor {
+        use aether_data::Kind as _;
+        aether_data::KindDescriptor {
+            name: aether_kinds::trace::ListActiveRoots::NAME.to_owned(),
+            schema: <aether_kinds::trace::ListActiveRoots as aether_data::Schema>::SCHEMA.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_active_roots_round_trips_observer_reply() {
+        use aether_data::tagged_id::Tag;
+        use aether_data::{MailId, MailboxId, with_tag};
+        use aether_kinds::trace::{ListActiveRootsResult, RootSummaryWire};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![list_active_roots_descriptor()];
+        let (rec, mut rx) = record_with_kinds(0xd003, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let session_token = hub.session.token;
+
+        let root_a = MailId {
+            sender: MailboxId(with_tag(Tag::Mailbox, 0x111)),
+            correlation_id: 1,
+        };
+        let root_b = MailId {
+            sender: MailboxId(with_tag(Tag::Mailbox, 0x222)),
+            correlation_id: 2,
+        };
+
+        let sessions_clone = state.sessions.clone();
+        let substrate_task = tokio::spawn(async move {
+            let _req = rx.recv().await.expect("tool should send request");
+            let reply = ListActiveRootsResult {
+                roots: vec![
+                    RootSummaryWire {
+                        root: root_b,
+                        kind: aether_data::KindId(with_tag(Tag::Kind, 0xCAFE)),
+                        sender: root_b.sender,
+                        recipient: MailboxId(with_tag(Tag::Mailbox, 9)),
+                        t_sent: aether_kinds::trace::Nanos(2_000_000_000),
+                        in_flight: 0,
+                    },
+                    RootSummaryWire {
+                        root: root_a,
+                        kind: aether_data::KindId(with_tag(Tag::Kind, 0xBEEF)),
+                        sender: root_a.sender,
+                        recipient: MailboxId(with_tag(Tag::Mailbox, 8)),
+                        t_sent: aether_kinds::trace::Nanos(1_000_000_000),
+                        in_flight: 3,
+                    },
+                ],
+            };
+            let payload = postcard::to_allocvec(&reply).expect("encode");
+            let record = sessions_clone.get(&session_token).expect("session");
+            let kind = "aether.trace.list_active_roots_result".to_owned();
+            let queued = QueuedMail {
+                engine_id: id,
+                kind_name: kind.clone(),
+                payload,
+                broadcast: false,
+                origin: None,
+            };
+            let remainder = record.replies.try_deliver(&kind, queued);
+            assert!(remainder.is_none(), "reply registry should consume mail");
+        });
+
+        let json = hub
+            .list_active_roots(Parameters(args::ListActiveRootsArgs {
+                engine_id: id.0.to_string(),
+                since_ms: Some(60_000),
+                max: Some(50),
+                timeout_ms: Some(2_000),
+            }))
+            .await
+            .expect("tool should succeed");
+
+        substrate_task.await.expect("stub substrate task");
+
+        let raw: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let roots = raw["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 2);
+        // Order preserved from the substrate's reply (the substrate
+        // sorts desc by t_sent before encoding).
+        assert_eq!(roots[0]["in_flight"], 0);
+        assert_eq!(roots[1]["in_flight"], 3);
+        // Each typed id renders as its tagged-string form.
+        let r0_sender = roots[0]["sender"].as_str().unwrap();
+        assert!(r0_sender.starts_with("mbx-"), "sender tagged: {r0_sender}");
+        let r0_kind = roots[0]["kind"].as_str().unwrap();
+        assert!(r0_kind.starts_with("knd-"), "kind tagged: {r0_kind}");
+        // Composite root field.
+        assert!(
+            roots[0]["root"]["sender"]
+                .as_str()
+                .unwrap()
+                .starts_with("mbx-"),
+            "root.sender tagged"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_active_roots_unknown_engine_errors() {
+        let state = test_state(EngineRegistry::new(), SessionRegistry::new());
+        let hub = Hub::new(state);
+        let err = hub
+            .list_active_roots(Parameters(args::ListActiveRootsArgs {
+                engine_id: Uuid::from_u128(0xdead).to_string(),
+                since_ms: None,
+                max: None,
+                timeout_ms: Some(1_000),
+            }))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("unknown engine_id"));
+    }
+
     #[tokio::test]
     async fn describe_tree_rejects_malformed_sender() {
         let engines = EngineRegistry::new();
