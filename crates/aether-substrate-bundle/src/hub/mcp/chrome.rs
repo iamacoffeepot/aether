@@ -64,8 +64,43 @@ pub(super) fn render_chrome_trace(
     kind_names: &HashMap<u64, String>,
     mailbox_names: &MailboxLookup,
 ) -> Result<String, serde_json::Error> {
-    let events = build_events(result, kind_names, mailbox_names);
-    serde_json::to_string_pretty(&json!({ "traceEvents": events }))
+    let mut events = build_events(result, kind_names, mailbox_names);
+    // Sort by `ts` ascending. Some chrome-trace importers (Perfetto
+    // included) tolerate unsorted streams but emit warnings; sorting
+    // here removes that whole category of noise without callers
+    // noticing.
+    events.sort_by(|a, b| {
+        let a_ts = a.get("ts").and_then(Value::as_f64).unwrap_or(0.0);
+        let b_ts = b.get("ts").and_then(Value::as_f64).unwrap_or(0.0);
+        a_ts.partial_cmp(&b_ts).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    // Prepend one `process_name` metadata event per unique `pid`. The
+    // chrome trace format binds pid → display name through these
+    // metadata events; without them Perfetto treats each pid as an
+    // opaque process and may flag `process_name_unset` / similar
+    // unattributed warnings. Our `pid` strings are already the
+    // human-readable labels, so the metadata args.name just echoes
+    // the pid value.
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in &events {
+        if let Some(pid) = e.get("pid").and_then(Value::as_str) {
+            seen.insert(pid.to_owned());
+        }
+    }
+    let mut metadata: Vec<Value> = seen
+        .into_iter()
+        .map(|name| {
+            json!({
+                "ph": "M",
+                "name": "process_name",
+                "cat": "metadata",
+                "pid": name,
+                "args": { "name": name },
+            })
+        })
+        .collect();
+    metadata.extend(events);
+    serde_json::to_string_pretty(&json!({ "traceEvents": metadata }))
 }
 
 fn build_events(
@@ -319,7 +354,10 @@ mod tests {
 
         let json = render_chrome_trace(&result, &kind_names, &mailbox_names).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
-        let events = parsed["traceEvents"].as_array().unwrap();
+        let all_events = parsed["traceEvents"].as_array().unwrap();
+        // Filter out the `process_name` metadata auto-prepend so
+        // existing X/s/f assertions stay focused on the trace shape.
+        let events: Vec<&Value> = all_events.iter().filter(|e| e["ph"] != "M").collect();
         // Two complete events + two flow events (s + f for the one
         // parent edge) = 4 total.
         assert_eq!(events.len(), 4, "got: {events:#?}");
@@ -435,9 +473,12 @@ mod tests {
         );
     }
 
-    /// `Err::not_found` produces a trace doc with a single metadata
-    /// event noting the missing root, so chrome://tracing displays
-    /// the diagnostic instead of a blank file.
+    /// `Err::not_found` produces a trace doc with the diagnostic
+    /// metadata event noting the missing root, so chrome://tracing
+    /// displays the diagnostic instead of a blank file. The
+    /// `process_name` auto-prepend (issue 731 follow-up to silence
+    /// Perfetto's hashed-pid display) adds one more metadata event
+    /// for the same pid; both are valid metadata entries.
     #[test]
     fn render_not_found_emits_metadata_doc() {
         let missing = mid(0xFF, 99);
@@ -445,12 +486,87 @@ mod tests {
         let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new()).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let events = parsed["traceEvents"].as_array().unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["ph"], "M");
-        let arg_name = events[0]["args"]["name"].as_str().unwrap();
+        // Both events are metadata: the auto-prepended `process_name`
+        // for the missing-root pid, plus the `not_found` diagnostic
+        // M event with the human-readable explanation in args.name.
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e["ph"] == "M"));
+        let diagnostic = events
+            .iter()
+            .find(|e| {
+                e["args"]["name"]
+                    .as_str()
+                    .map(|s| s.contains("not_found"))
+                    .unwrap_or(false)
+            })
+            .expect("diagnostic event present");
+        let arg_name = diagnostic["args"]["name"].as_str().unwrap();
         assert!(
             arg_name.contains("not_found"),
             "metadata should mention not_found: {arg_name}"
+        );
+    }
+
+    /// Issue 731 follow-up: Perfetto auto-hashes string pids and
+    /// shows the lane label as `<pid> <hash>` (e.g.
+    /// `actor:aether.input 7230`) when no `process_name` metadata
+    /// event registers the friendly name. Auto-prepend one
+    /// `process_name` per unique pid so Perfetto uses just the
+    /// configured name.
+    #[test]
+    fn render_prepends_process_name_metadata_per_unique_pid() {
+        let id = mid(0xAA, 1);
+        let mut mailbox_names: MailboxLookup = HashMap::new();
+        mailbox_names.insert(
+            with_tag(Tag::Mailbox, 0xAA),
+            (
+                "aether.chassis".to_owned(),
+                Some(MailboxCategory::ChassisSentinel),
+            ),
+        );
+        mailbox_names.insert(
+            with_tag(Tag::Mailbox, 0xCC),
+            ("aether.input".to_owned(), Some(MailboxCategory::Actor)),
+        );
+        let result = DescribeTreeResult::Ok {
+            root: id,
+            in_flight: 0,
+            mails: vec![MailNodeWire {
+                mail_id: id,
+                parent: None,
+                sender: MailboxId(with_tag(Tag::Mailbox, 0xAA)),
+                recipient: MailboxId(with_tag(Tag::Mailbox, 0xCC)),
+                kind: KindId(with_tag(Tag::Kind, 0x99)),
+                t_sent: Nanos(1_000),
+                t_received: Some(Nanos(2_000)),
+                t_finished: Some(Nanos(3_000)),
+            }],
+        };
+        let json = render_chrome_trace(&result, &HashMap::new(), &mailbox_names).expect("render");
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        let events = parsed["traceEvents"].as_array().unwrap();
+        // Single X event has one unique pid (`actor:aether.input`),
+        // so we expect exactly one process_name metadata + the X
+        // event itself.
+        let metadata: Vec<&Value> = events.iter().filter(|e| e["ph"] == "M").collect();
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0]["name"], "process_name");
+        // The metadata event's `args.name` is just the bare label —
+        // no `#NNN` mail-id leakage. That's what Perfetto binds as
+        // the lane label.
+        assert_eq!(metadata[0]["pid"], "actor:aether.input");
+        assert_eq!(metadata[0]["args"]["name"], "actor:aether.input");
+        // Metadata events come BEFORE slice events in the output —
+        // chrome importers expect process metadata up-front.
+        let first_slice_idx = events
+            .iter()
+            .position(|e| e["ph"] == "X")
+            .expect("X event present");
+        assert!(
+            metadata
+                .iter()
+                .all(|m| events.iter().position(|e| std::ptr::eq(e, *m)).unwrap() < first_slice_idx),
+            "process_name metadata must precede slice events"
         );
     }
 
@@ -479,10 +595,14 @@ mod tests {
                 t_finished: Some(Nanos(2_500)),
             }],
         };
-        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new())
-            .expect("render");
+        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new()).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
-        let evt = &parsed["traceEvents"][0];
+        let evt = parsed["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["ph"] == "X")
+            .expect("X event present");
         // dur survives as 0.5us — non-zero, so Perfetto draws the
         // slice.
         assert_eq!(evt["dur"], 0.5);
@@ -519,7 +639,12 @@ mod tests {
         };
         let json = render_chrome_trace(&result, &HashMap::new(), &mailbox_names).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
-        let evt = &parsed["traceEvents"][0];
+        let evt = parsed["traceEvents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["ph"] == "X")
+            .expect("X event present");
         // Bare name, no prefix.
         assert_eq!(evt["pid"], "user_thing");
         assert_eq!(evt["args"]["sender"], "user_thing");
