@@ -107,6 +107,118 @@ pub struct BatchedTraceEvents {
     pub events: Vec<TraceEvent>,
 }
 
+/// Issue 718 (ADR-0080 Phase 2): request kind sent to
+/// [`TRACE_OBSERVER_MAILBOX_NAME`] to describe the mail tree under a
+/// given root. The observer replies with [`DescribeTreeResult`]; the
+/// hub MCP `describe_tree` tool wraps the round-trip.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.trace.describe_tree")]
+pub struct DescribeTree {
+    pub root: aether_data::MailId,
+}
+
+/// Issue 718: reply to [`DescribeTree`]. `Ok` carries the root's
+/// current `in_flight` count and one [`MailNodeWire`] per mail in the
+/// tree (no ordering guarantee — agents reconstruct via `parent`
+/// edges). `Err::not_found` is returned when the root isn't present
+/// in the observer (never-seen or evicted past retention).
+#[derive(
+    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
+)]
+#[kind(name = "aether.trace.describe_tree_result")]
+pub enum DescribeTreeResult {
+    Ok {
+        root: aether_data::MailId,
+        in_flight: u32,
+        mails: Vec<MailNodeWire>,
+    },
+    Err {
+        not_found: aether_data::MailId,
+    },
+}
+
+/// Issue 718: wire shape of one node in [`DescribeTreeResult`]. The
+/// observer keeps the same logical fields in its in-memory `MailNode`;
+/// this struct mirrors them on the wire so the hub can decode without
+/// pulling in the cap's internal type.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
+pub struct MailNodeWire {
+    pub mail_id: MailId,
+    pub parent: Option<MailId>,
+    pub sender: MailboxId,
+    pub recipient: MailboxId,
+    pub kind: KindId,
+    pub t_sent: Nanos,
+    pub t_received: Option<Nanos>,
+    pub t_finished: Option<Nanos>,
+}
+
+/// Issue 718: request kind for the recent-roots summary. `since_ms`
+/// filters to roots whose originating `Sent` event is no older than
+/// the given window (default 60_000 ms). `max` caps the reply length
+/// (default 50, hard cap 1000).
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.trace.list_active_roots")]
+pub struct ListActiveRoots {
+    pub since_ms: Option<u32>,
+    pub max: Option<u32>,
+}
+
+/// Issue 718: reply to [`ListActiveRoots`]. `roots` is sorted by
+/// `t_sent` descending (most recent first). Empty when the observer
+/// has no roots in the requested window.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.trace.list_active_roots_result")]
+pub struct ListActiveRootsResult {
+    pub roots: Vec<RootSummaryWire>,
+}
+
+/// Issue 718: per-root summary in [`ListActiveRootsResult`]. The
+/// non-counter fields (`kind`, `sender`, `recipient`, `t_sent`) come
+/// from the root's own `MailNode` — the observer guarantees the root
+/// node lives as long as the root entry, so the lookup never misses.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
+pub struct RootSummaryWire {
+    pub root: MailId,
+    pub kind: KindId,
+    pub sender: MailboxId,
+    pub recipient: MailboxId,
+    pub t_sent: Nanos,
+    pub in_flight: u32,
+}
+
 /// ADR-0080 §6 settlement notification. Emitted by
 /// [`crate::trace::BatchedTraceEvents`]'s consumer
 /// (`TraceObserverCapability`) when a causal chain's `in_flight`
