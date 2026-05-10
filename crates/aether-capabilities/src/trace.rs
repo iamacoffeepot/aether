@@ -65,8 +65,8 @@ mod native {
     /// after the originating `Sent`. Issue 734: `thread_name` patches
     /// from the `Received` event the same way `t_received` does — the
     /// dispatcher captures `std::thread::current().name()` so the
-    /// chrome trace renderer can give each actor its own per-thread
-    /// row.
+    /// trace renderer (`hub::mcp::trace`) can give each actor its
+    /// own per-thread row.
     #[derive(Debug, Clone)]
     pub struct MailNode {
         pub root: MailId,

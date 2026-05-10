@@ -1,36 +1,41 @@
-//! Chrome trace event format (a.k.a. "trace event format" / "Catapult")
-//! converter for the substrate's `TraceObserverCapability` state. Issue
-//! iamacoffeepot/aether#728 / ADR-0080 Phase 3.
+//! Trace renderer for the substrate's `TraceObserverCapability` state.
+//! Issue iamacoffeepot/aether#728 / ADR-0080 Phase 3. The MCP
+//! `dump_trace` tool ([`super::tools`]) is the only consumer.
+//!
+//! Output format today is the Chrome trace event format (a.k.a.
+//! "trace event format" / "Catapult"), which Perfetto, chrome://tracing,
+//! and speedscope all read natively — see
+//! <https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview>.
+//! The module name is intentionally generic so a future renderer
+//! (pprof, perfetto-protobuf, …) can land as a sibling without
+//! re-shuffling the path; the `dump_trace` tool would gain a `format`
+//! param and dispatch.
 //!
 //! Pure function over [`aether_kinds::trace::DescribeTreeResult`] +
 //! a kind-id → name lookup + a mailbox-id → (name, category) lookup
-//! (issue iamacoffeepot/aether#731). The MCP `dump_trace_chrome` tool
-//! builds both lookups from the engine record's `kinds` + `mailboxes`
-//! caches, calls [`render_chrome_trace`], and either returns the JSON
-//! inline or writes it to disk.
-//!
-//! Output format reference:
-//! <https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview>
+//! (issue iamacoffeepot/aether#731). The tool builds both lookups
+//! from the engine record's `kinds` + `mailboxes` caches, calls
+//! [`render`], and either returns the JSON inline or writes it to
+//! disk.
 //!
 //! Per mail with `t_received` and `t_finished` populated, one
 //! `ph:"X"` (complete) event covering the receive→finish interval on
 //! the recipient's lane. Per mail with a parent (and where both
 //! `parent.t_finished` and `self.t_received` are set), one
-//! `ph:"s"` / `ph:"f"` flow pair so chrome://tracing draws a causal
+//! `ph:"s"` / `ph:"f"` flow pair so the trace viewer draws a causal
 //! arrow. Mails missing timestamps (orphan or in-flight at query
 //! time) are skipped — they remain inspectable via `describe_tree`.
 //!
 //! Issue iamacoffeepot/aether#734: pids and tids are emitted as
-//! integers, not strings — Perfetto's chrome-trace importer auto-
-//! hashes string pids (showing `<label> <hashed_pid>` decoration in
-//! lane headers); integers go through the `process_name` /
-//! `thread_name` metadata events as the only display-name binding.
-//! `process_name` events bind each integer pid to the resolved actor
-//! label; `thread_name` events bind each integer tid to the OS thread
-//! name captured at the dispatcher's receive hook (per ADR-0038
-//! every dispatcher thread is named `aether-instanced-<full_name>` /
-//! `aether-root-<NAMESPACE>`, so the per-actor row labels read
-//! directly).
+//! integers, not strings — Perfetto's importer auto-hashes string
+//! pids (showing `<label> <hashed_pid>` decoration in lane headers);
+//! integers go through the `process_name` / `thread_name` metadata
+//! events as the only display-name binding. `process_name` events
+//! bind each integer pid to the resolved actor label; `thread_name`
+//! events bind each integer tid to the OS thread name captured at
+//! the dispatcher's receive hook. Tids start past the pid range so
+//! Perfetto's "tid==pid means main-thread" Linux heuristic never
+//! fires.
 
 use std::collections::HashMap;
 
@@ -38,20 +43,19 @@ use aether_data::{MailId, MailboxCategory, MailboxId};
 use aether_kinds::trace::{DescribeTreeResult, MailNodeWire};
 use serde_json::{Value, json};
 
-/// Per-engine mailbox lookup the chrome renderer uses to swap raw
-/// tagged ids for category-prefixed names (issue
-/// iamacoffeepot/aether#731). Keyed on the raw `MailboxId` u64 so
-/// the call site can pre-strip the tag once instead of per-event.
-/// `None` category means "we know the name but the substrate didn't
-/// classify it" — render the bare name without a prefix so the
-/// failure mode stays visible.
+/// Per-engine mailbox lookup the renderer uses to swap raw tagged
+/// ids for category-prefixed names (issue iamacoffeepot/aether#731).
+/// Keyed on the raw `MailboxId` u64 so the call site can pre-strip
+/// the tag once instead of per-event. `None` category means "we know
+/// the name but the substrate didn't classify it" — render the bare
+/// name without a prefix so the failure mode stays visible.
 pub(super) type MailboxLookup = HashMap<u64, (String, Option<MailboxCategory>)>;
 
 /// Render a `DescribeTreeResult` into Chrome trace event format JSON.
 /// Returns the serialized document as a `String`.
 ///
 /// `kind_names` maps the raw `KindId` u64 → human-readable kind name
-/// for the chrome event `name` field. Resolved entries render as
+/// for the event `name` field. Resolved entries render as
 /// `kind:NAME`; missing entries fall back to the tagged-string id
 /// (`knd-XXXX-XXXX-XXXX`) with no prefix so unresolved ids are
 /// visually distinct from resolved-but-empty.
@@ -71,7 +75,7 @@ pub(super) type MailboxLookup = HashMap<u64, (String, Option<MailboxCategory>)>;
 ///
 /// Unknown ids fall back to the raw `mbx-XXXX-XXXX-XXXX` tagged form
 /// so the unresolved case stays visible.
-pub(super) fn render_chrome_trace(
+pub(super) fn render(
     result: &DescribeTreeResult,
     kind_names: &HashMap<u64, String>,
     mailbox_names: &MailboxLookup,
@@ -233,7 +237,7 @@ fn build_events(
             "pid": format_mailbox_label(node.recipient, mailbox_names),
             "tid": 0,
             // Issue 734: stash the thread name captured at the
-            // dispatcher's receive hook. `render_chrome_trace` rewrites
+            // dispatcher's receive hook. `render` rewrites
             // `pid` to an integer + assigns a per-thread tid + emits
             // the matching `process_name` / `thread_name` M events,
             // then strips this field. Underscore prefix marks it as
@@ -458,7 +462,7 @@ mod tests {
             ("aether.input".to_owned(), Some(MailboxCategory::Actor)),
         );
 
-        let json = render_chrome_trace(&result, &kind_names, &mailbox_names).expect("render");
+        let json = render(&result, &kind_names, &mailbox_names).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let all_events = parsed["traceEvents"].as_array().unwrap();
         // Filter out the `process_name` / `thread_name` metadata
@@ -638,7 +642,7 @@ mod tests {
                 thread_name: None,
             }],
         };
-        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new()).expect("render");
+        let json = render(&result, &HashMap::new(), &HashMap::new()).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         assert!(
             parsed["traceEvents"].as_array().unwrap().is_empty(),
@@ -656,7 +660,7 @@ mod tests {
     fn render_not_found_emits_metadata_doc() {
         let missing = mid(0xFF, 99);
         let result = DescribeTreeResult::Err { not_found: missing };
-        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new()).expect("render");
+        let json = render(&result, &HashMap::new(), &HashMap::new()).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let events = parsed["traceEvents"].as_array().unwrap();
         // Both events are metadata: the auto-prepended `process_name`
@@ -716,7 +720,7 @@ mod tests {
                 thread_name: Some("aether-root-aether.input".to_owned()),
             }],
         };
-        let json = render_chrome_trace(&result, &HashMap::new(), &mailbox_names).expect("render");
+        let json = render(&result, &HashMap::new(), &mailbox_names).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let events = parsed["traceEvents"].as_array().unwrap();
         // Single X event has one unique pid (`actor:aether.input`)
@@ -783,7 +787,7 @@ mod tests {
                 thread_name: None,
             }],
         };
-        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new()).expect("render");
+        let json = render(&result, &HashMap::new(), &HashMap::new()).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let evt = parsed["traceEvents"]
             .as_array()
@@ -838,7 +842,7 @@ mod tests {
                 },
             ],
         };
-        let json = render_chrome_trace(&result, &HashMap::new(), &HashMap::new()).expect("render");
+        let json = render(&result, &HashMap::new(), &HashMap::new()).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let events = parsed["traceEvents"].as_array().unwrap();
         let max_pid = events
@@ -893,7 +897,7 @@ mod tests {
                 thread_name: None,
             }],
         };
-        let json = render_chrome_trace(&result, &HashMap::new(), &mailbox_names).expect("render");
+        let json = render(&result, &HashMap::new(), &mailbox_names).expect("render");
         let parsed: Value = serde_json::from_str(&json).unwrap();
         let all_events = parsed["traceEvents"].as_array().unwrap();
         let evt = all_events
