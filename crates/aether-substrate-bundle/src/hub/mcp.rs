@@ -910,8 +910,12 @@ mod tests {
         let written = std::fs::read_to_string(&tmp).expect("trace file written");
         let trace: serde_json::Value = serde_json::from_str(&written).unwrap();
         let events = trace["traceEvents"].as_array().unwrap();
-        assert_eq!(events.len(), 1, "one mail -> one X event");
-        assert_eq!(events[0]["ph"], "X");
+        // Filter out the auto-prepended `process_name` metadata
+        // events (issue 731 follow-up to silence Perfetto's hashed-pid
+        // display) so the assertion stays focused on the slice shape.
+        let slices: Vec<&serde_json::Value> = events.iter().filter(|e| e["ph"] != "M").collect();
+        assert_eq!(slices.len(), 1, "one mail -> one X event");
+        assert_eq!(slices[0]["ph"], "X");
 
         std::fs::remove_file(&tmp).ok();
     }
@@ -985,8 +989,9 @@ mod tests {
 
         let trace: serde_json::Value = serde_json::from_str(&response).unwrap();
         let events = trace["traceEvents"].as_array().unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0]["ph"], "X");
+        let slices: Vec<&serde_json::Value> = events.iter().filter(|e| e["ph"] != "M").collect();
+        assert_eq!(slices.len(), 1);
+        assert_eq!(slices[0]["ph"], "X");
     }
 
     #[tokio::test]
