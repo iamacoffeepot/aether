@@ -21,3 +21,10 @@ spikes/*/target/
 # not part of the source tree; issues filed from them link back to
 # the source instead.
 /audits/
+# Trace dumps from `dump_trace` (issue #730 / ADR-0080). Per-run
+# JSON, not part of the source tree — keep them out of /tmp so
+# they survive shell sessions and land somewhere predictable. The
+# directory itself is tracked via `.gitkeep` so the path is
+# discoverable; everything else under it is ignored.
+/traces/*
+!/traces/.gitkeep
