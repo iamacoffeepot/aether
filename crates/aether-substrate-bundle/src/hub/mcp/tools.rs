@@ -876,30 +876,36 @@ impl Hub {
         &self,
         Parameters(args): Parameters<DumpTraceChromeArgs>,
     ) -> Result<String, McpError> {
-        // Build kind-id → name lookup from the engine's handshake-time
-        // descriptor list. Each chrome event's `name` field uses the
-        // human-readable kind name; missing entries fall back to the
-        // tagged-string kind id.
+        // Build kind-id → name + mailbox-id → (name, category) lookups
+        // from the engine's handshake-time + post-load caches. Chrome
+        // event `name` and id fields use the human-readable forms;
+        // missing entries fall back to the tagged-string id so an
+        // out-of-sync inventory surfaces as visible drift rather than
+        // silent corruption (issue iamacoffeepot/aether#731).
         let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
             McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
         })?;
         let id = EngineId(uuid);
-        let kind_names: std::collections::HashMap<u64, String> = match self.state.engines.get(&id) {
-            Some(record) => record
-                .kinds
-                .iter()
-                .map(|k| {
-                    let kid = aether_data::canonical::kind_id_from_parts(&k.name, &k.schema);
-                    (kid, k.name.clone())
-                })
-                .collect(),
-            None => {
-                return Err(McpError::invalid_params(
-                    format!("unknown engine_id {}", args.engine_id),
-                    None,
-                ));
-            }
+        let Some(record) = self.state.engines.get(&id) else {
+            return Err(McpError::invalid_params(
+                format!("unknown engine_id {}", args.engine_id),
+                None,
+            ));
         };
+        let kind_names: std::collections::HashMap<u64, String> = record
+            .kinds
+            .iter()
+            .map(|k| {
+                let kid = aether_data::canonical::kind_id_from_parts(&k.name, &k.schema);
+                (kid, k.name.clone())
+            })
+            .collect();
+        let mailbox_names: super::chrome::MailboxLookup = record
+            .mailboxes
+            .iter()
+            .map(|m| (m.id.0, (m.name.clone(), m.category)))
+            .collect();
+        drop(record);
 
         let describe_args = DescribeTreeArgs {
             engine_id: args.engine_id.clone(),
@@ -907,7 +913,7 @@ impl Hub {
             timeout_ms: args.timeout_ms,
         };
         let result = self.do_describe_tree(describe_args).await?;
-        let chrome_json = render_chrome_trace(&result, &kind_names)
+        let chrome_json = render_chrome_trace(&result, &kind_names, &mailbox_names)
             .map_err(|e| McpError::internal_error(format!("render chrome trace: {e}"), None))?;
 
         match args.output_path {
