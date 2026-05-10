@@ -76,6 +76,37 @@ pub trait Sender {
     /// substrate registered without a corresponding Rust type).
     /// Survives stage 4 alongside the actor-typed sends.
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K);
+
+    /// ADR-0080 §7 fire-and-forget escape hatch: send `payload` to `R`
+    /// without inheriting the caller's in-flight causal chain. The
+    /// recipient processes the mail as the root of a new tree.
+    ///
+    /// **Fire-and-forget only.** Detached sends mint no parent linkage,
+    /// so any reply the recipient issues inherits the *recipient's*
+    /// tree rather than the sender's. The reply still routes back to
+    /// the sender's reply slot via `(sender, correlation_id)` — the
+    /// correlation echo is unchanged — but the causal-graph linkage
+    /// between request and reply is broken by design. Reply-correlated
+    /// requests always go through [`Self::send`].
+    ///
+    /// PR 1 ships only the API surface (default body delegates to
+    /// [`Self::send`]). PR 2's tracing layer specialises this on each
+    /// per-target impl to suppress the `TraceEvent::Sent` push that
+    /// `send` would otherwise emit, breaking the recursion when the
+    /// drainer's outbound `BatchedTraceEvents` mail is itself a send.
+    fn send_detached<R, K>(&mut self, payload: &K)
+    where
+        R: Actor + HandlesKind<K>,
+        K: Kind,
+    {
+        self.send::<R, K>(payload);
+    }
+
+    /// String-keyed counterpart to [`Self::send_detached`]. Same
+    /// fire-and-forget contract; same default-body delegation in PR 1.
+    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
+        self.send_to_named::<K>(name, payload);
+    }
 }
 
 /// Per-handler ctx surface, on top of [`Sender`]. Adds reply-to-

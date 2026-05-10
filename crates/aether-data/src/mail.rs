@@ -11,6 +11,46 @@
 
 use crate::{EngineId, MailboxId, SessionToken};
 
+/// ADR-0080 §1: the unique identity of a mail. A 128-bit composite of
+/// the producer's mailbox id and the producer's per-actor monotonic
+/// `correlation_id`. Exact-by-construction — no central minter to
+/// contend on, no hash to collide.
+///
+/// `sender` is `MailboxId::NONE` for chassis-originated mail (the
+/// reserved sentinel for "no actor mailbox"). Per-actor mints use the
+/// owning actor's `MailboxId`.
+///
+/// Ships in PR 1 of issue #707 as a foundation for PR 2's producer-
+/// side `TraceEvent::Sent` emission. PR 2 plumbs `MailId` onto every
+/// substrate envelope and into per-handler context; PR 1 only
+/// introduces the type so downstream code can name it.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MailId {
+    pub sender: MailboxId,
+    pub correlation_id: u64,
+}
+
+impl MailId {
+    /// Sentinel for "not yet stamped" / "chassis root". Equivalent to
+    /// `MailId::default()`. The PR 2 dispatch path treats this value
+    /// as the chassis-as-originator marker.
+    pub const NONE: MailId = MailId {
+        sender: MailboxId::NONE,
+        correlation_id: 0,
+    };
+
+    /// Construct a `MailId` from a sender mailbox and correlation id.
+    /// Producer paths (`NativeBinding::send_mail`, plus the future
+    /// drainer and chassis-pushed sites) call this immediately after
+    /// fetching the next correlation from the per-actor counter.
+    pub const fn new(sender: MailboxId, correlation_id: u64) -> Self {
+        Self {
+            sender,
+            correlation_id,
+        }
+    }
+}
+
 /// Where a reply-bearing mail should route when the recipient
 /// answers. Strictly a routing hint: mail is pushed at a recipient,
 /// not sent from a mailbox.
