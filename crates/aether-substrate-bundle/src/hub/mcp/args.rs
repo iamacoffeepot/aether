@@ -495,6 +495,28 @@ pub struct ListActiveRootsArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct DumpTraceChromeArgs {
+    /// Hub-assigned engine UUID as a string (from `list_engines`).
+    pub engine_id: String,
+    /// Root mail id whose subtree should be exported. Same shape as
+    /// `describe_tree`'s `root` argument — a `MailNodeWire.root` from
+    /// a prior `describe_tree` reply or a `RootSummaryWire.root` from
+    /// `list_active_roots`.
+    pub root: MailIdWire,
+    /// Optional filesystem path to write the chrome trace JSON to.
+    /// Parent directories are created as needed. When omitted, the
+    /// JSON is returned inline as the tool result (fine for small
+    /// subtrees; for busy substrates that generate thousands of
+    /// events the inline path may overflow the agent's context).
+    #[serde(default)]
+    pub output_path: Option<String>,
+    /// Maximum time to wait for the substrate's `DescribeTreeResult`
+    /// reply, in milliseconds. Defaults to 5000. Clamped to 30000.
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeTreeArgs {
     /// Hub-assigned engine UUID as a string (from `list_engines`).
     pub engine_id: String,

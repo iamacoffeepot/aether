@@ -38,12 +38,13 @@ use crate::hub::session::SessionHandle;
 
 use super::args::{
     CaptureFrameArgs, CaptureFrameResultWire, DescribeComponentArgs, DescribeComponentResponse,
-    DescribeKindsArgs, DescribeTreeArgs, EngineInfo, EngineLogEntry, EngineLogsArgs,
-    EngineLogsResponse, ListActiveRootsArgs, LoadComponentArgs, LoadComponentResponse,
-    LoadResultWire, MailSpec, MailStatus, ReceiveMailArgs, ReceivedMail, ReplaceComponentArgs,
-    ReplaceResultWire, SendMailArgs, SpawnResult, SpawnSubstrateArgs, TerminateResult,
-    TerminateSubstrateArgs, log_level_to_str,
+    DescribeKindsArgs, DescribeTreeArgs, DumpTraceChromeArgs, EngineInfo, EngineLogEntry,
+    EngineLogsArgs, EngineLogsResponse, ListActiveRootsArgs, LoadComponentArgs,
+    LoadComponentResponse, LoadResultWire, MailSpec, MailStatus, ReceiveMailArgs, ReceivedMail,
+    ReplaceComponentArgs, ReplaceResultWire, SendMailArgs, SpawnResult, SpawnSubstrateArgs,
+    TerminateResult, TerminateSubstrateArgs, log_level_to_str,
 };
+use super::chrome::render_chrome_trace;
 use super::codecs::{decode_inbound, deliver_one, encode_capture_bundle};
 use super::{Hub, HubState};
 use crate::hub::registry::ComponentRecord;
@@ -869,12 +870,90 @@ impl Hub {
     }
 
     #[tool(
+        description = "Export the mail subtree under one root as a Chrome trace event format JSON file (issue iamacoffeepot/aether#728, ADR-0080 Phase 3). Calls the same `describe_tree` substrate path under the hood, then re-shapes each mail into a chrome `ph:\"X\"` (complete) event covering its `t_received → t_finished` interval on the recipient's lane, plus `ph:\"s\"`/`ph:\"f\"` (flow) arrows linking parent.t_finished → child.t_received for causal visualization. Mails without `t_received`/`t_finished` (orphan or in-flight at query time) are skipped. Drop the output JSON into chrome://tracing or perfetto.dev for a flame graph + causal arrows view. When `output_path` is omitted, returns the JSON inline (fine for small subtrees, may overflow agent context for busy substrates). When `output_path` is set, writes to the path (creating parent dirs) and returns a `{path}` confirmation. Default timeout 5000ms; clamped to 30000."
+    )]
+    pub(super) async fn dump_trace_chrome(
+        &self,
+        Parameters(args): Parameters<DumpTraceChromeArgs>,
+    ) -> Result<String, McpError> {
+        // Build kind-id → name lookup from the engine's handshake-time
+        // descriptor list. Each chrome event's `name` field uses the
+        // human-readable kind name; missing entries fall back to the
+        // tagged-string kind id.
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+        let kind_names: std::collections::HashMap<u64, String> = match self.state.engines.get(&id) {
+            Some(record) => record
+                .kinds
+                .iter()
+                .map(|k| {
+                    let kid = aether_data::canonical::kind_id_from_parts(&k.name, &k.schema);
+                    (kid, k.name.clone())
+                })
+                .collect(),
+            None => {
+                return Err(McpError::invalid_params(
+                    format!("unknown engine_id {}", args.engine_id),
+                    None,
+                ));
+            }
+        };
+
+        let describe_args = DescribeTreeArgs {
+            engine_id: args.engine_id.clone(),
+            root: args.root,
+            timeout_ms: args.timeout_ms,
+        };
+        let result = self.do_describe_tree(describe_args).await?;
+        let chrome_json = render_chrome_trace(&result, &kind_names)
+            .map_err(|e| McpError::internal_error(format!("render chrome trace: {e}"), None))?;
+
+        match args.output_path {
+            Some(path) => {
+                if let Some(parent) = std::path::Path::new(&path).parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                        McpError::internal_error(
+                            format!("create parent dirs for {path}: {e}"),
+                            None,
+                        )
+                    })?;
+                }
+                tokio::fs::write(&path, &chrome_json).await.map_err(|e| {
+                    McpError::internal_error(format!("write trace to {path}: {e}"), None)
+                })?;
+                Ok(serde_json::json!({ "path": path }).to_string())
+            }
+            None => Ok(chrome_json),
+        }
+    }
+
+    #[tool(
         description = "Describe the mail tree under one root (issue 718, ADR-0080 Phase 2). The substrate's `aether.trace` observer accumulates a parent → child mail graph keyed by `MailId`; this tool surfaces one root's subtree as JSON: every node's `mail_id`, `parent`, `sender`, `recipient`, `kind`, and `t_sent` / `t_received` / `t_finished` timestamps in nanoseconds-since-substrate-boot, plus the root's current `in_flight` count. `root` is a JSON object `{ sender: \"mbx-XXXX-XXXX-XXXX\", correlation_id: <number> }` — copy a `MailNodeWire.root` from a prior `describe_tree` reply or a `RootSummaryWire.root` from `list_active_roots`. Returns `Err::not_found` (echoing the requested root) when the root has been evicted past retention or never existed. Default timeout 5000ms; clamped to 30000."
     )]
     pub(super) async fn describe_tree(
         &self,
         Parameters(args): Parameters<DescribeTreeArgs>,
     ) -> Result<String, McpError> {
+        let result = self.do_describe_tree(args).await?;
+        // The cap's reply is already MailId/MailboxId/KindId/Nanos —
+        // their human-readable serde branches emit tagged strings for
+        // ids and a u64 for `Nanos`, so JSON serialization is a single
+        // shot with no manual conversion.
+        serde_json::to_string(&result).map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    /// Shared describe_tree core. The public `describe_tree` tool wraps
+    /// this with JSON serialization; `dump_trace_chrome` reuses it to
+    /// fetch the same observer state and re-shape it as chrome trace
+    /// events (issue iamacoffeepot/aether#728).
+    async fn do_describe_tree(
+        &self,
+        args: DescribeTreeArgs,
+    ) -> Result<DescribeTreeResult, McpError> {
         let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
             McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
         })?;
@@ -944,13 +1023,8 @@ impl Hub {
             }
         };
 
-        let result: DescribeTreeResult = postcard::from_bytes(&queued.payload)
-            .map_err(|e| McpError::internal_error(format!("decode reply: {e}"), None))?;
-        // The cap's reply is already MailId/MailboxId/KindId/Nanos —
-        // their human-readable serde branches emit tagged strings for
-        // ids and a u64 for `Nanos`, so JSON serialization is a single
-        // shot with no manual conversion.
-        serde_json::to_string(&result).map_err(|e| McpError::internal_error(e.to_string(), None))
+        postcard::from_bytes(&queued.payload)
+            .map_err(|e| McpError::internal_error(format!("decode reply: {e}"), None))
     }
 
     #[tool(

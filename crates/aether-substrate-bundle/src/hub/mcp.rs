@@ -31,6 +31,7 @@ use crate::hub::registry::EngineRegistry;
 use crate::hub::session::{QueuedMail, SessionHandle, SessionRegistry};
 
 pub(crate) mod args;
+mod chrome;
 mod codecs;
 mod tools;
 
@@ -828,6 +829,163 @@ mod tests {
             format!("{err:?}").to_lowercase().contains("root.sender"),
             "{err:?}"
         );
+    }
+
+    /// Issue 728: dump_trace_chrome calls the same describe_tree path
+    /// the existing tool uses, then re-shapes the reply as chrome
+    /// trace JSON. The output_path branch writes to disk and returns
+    /// `{"path": ...}`; the inline branch returns the JSON.
+    #[tokio::test]
+    async fn dump_trace_chrome_writes_file_when_path_set() {
+        use aether_data::tagged_id::{self, Tag};
+        use aether_data::{MailId, MailboxId, with_tag};
+        use aether_kinds::trace::{DescribeTreeResult, MailNodeWire};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![describe_tree_descriptor()];
+        let (rec, mut rx) = record_with_kinds(0xd728, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let session_token = hub.session.token;
+
+        let sender_raw = with_tag(Tag::Mailbox, 0xCAFE);
+        let root = MailId {
+            sender: MailboxId(sender_raw),
+            correlation_id: 1,
+        };
+
+        let sessions_clone = state.sessions.clone();
+        let substrate_task = tokio::spawn(async move {
+            let _req = rx.recv().await.expect("tool should send request");
+            let reply = DescribeTreeResult::Ok {
+                root,
+                in_flight: 0,
+                mails: vec![MailNodeWire {
+                    mail_id: root,
+                    parent: None,
+                    sender: root.sender,
+                    recipient: MailboxId(with_tag(Tag::Mailbox, 0xBEEF)),
+                    kind: aether_data::KindId(with_tag(Tag::Kind, 0xDEAD)),
+                    t_sent: aether_kinds::trace::Nanos(1_000),
+                    t_received: Some(aether_kinds::trace::Nanos(2_000)),
+                    t_finished: Some(aether_kinds::trace::Nanos(5_000)),
+                }],
+            };
+            let payload = postcard::to_allocvec(&reply).expect("encode reply");
+            let record = sessions_clone.get(&session_token).expect("session");
+            let kind = "aether.trace.describe_tree_result".to_owned();
+            let queued = QueuedMail {
+                engine_id: id,
+                kind_name: kind.clone(),
+                payload,
+                broadcast: false,
+                origin: None,
+            };
+            let remainder = record.replies.try_deliver(&kind, queued);
+            assert!(remainder.is_none(), "reply registry should consume mail");
+        });
+
+        let tmp =
+            std::env::temp_dir().join(format!("aether-trace-728-{}.json", std::process::id()));
+        let response = hub
+            .dump_trace_chrome(Parameters(args::DumpTraceChromeArgs {
+                engine_id: id.0.to_string(),
+                root: args::MailIdWire {
+                    sender: tagged_id::encode(sender_raw).unwrap(),
+                    correlation_id: 1,
+                },
+                output_path: Some(tmp.to_string_lossy().into_owned()),
+                timeout_ms: Some(2_000),
+            }))
+            .await
+            .expect("tool should succeed");
+        substrate_task.await.expect("stub substrate task");
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["path"].as_str().unwrap(), tmp.to_string_lossy());
+
+        let written = std::fs::read_to_string(&tmp).expect("trace file written");
+        let trace: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let events = trace["traceEvents"].as_array().unwrap();
+        assert_eq!(events.len(), 1, "one mail -> one X event");
+        assert_eq!(events[0]["ph"], "X");
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    /// Inline branch: when `output_path` is omitted, the chrome JSON
+    /// flows back as the tool result.
+    #[tokio::test]
+    async fn dump_trace_chrome_returns_inline_when_path_unset() {
+        use aether_data::tagged_id::{self, Tag};
+        use aether_data::{MailId, MailboxId, with_tag};
+        use aether_kinds::trace::{DescribeTreeResult, MailNodeWire};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![describe_tree_descriptor()];
+        let (rec, mut rx) = record_with_kinds(0xd729, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let session_token = hub.session.token;
+
+        let sender_raw = with_tag(Tag::Mailbox, 0xCAFE);
+        let root = MailId {
+            sender: MailboxId(sender_raw),
+            correlation_id: 1,
+        };
+
+        let sessions_clone = state.sessions.clone();
+        let substrate_task = tokio::spawn(async move {
+            let _req = rx.recv().await.expect("tool should send request");
+            let reply = DescribeTreeResult::Ok {
+                root,
+                in_flight: 0,
+                mails: vec![MailNodeWire {
+                    mail_id: root,
+                    parent: None,
+                    sender: root.sender,
+                    recipient: MailboxId(with_tag(Tag::Mailbox, 0xBEEF)),
+                    kind: aether_data::KindId(with_tag(Tag::Kind, 0xDEAD)),
+                    t_sent: aether_kinds::trace::Nanos(1_000),
+                    t_received: Some(aether_kinds::trace::Nanos(2_000)),
+                    t_finished: Some(aether_kinds::trace::Nanos(5_000)),
+                }],
+            };
+            let payload = postcard::to_allocvec(&reply).expect("encode reply");
+            let record = sessions_clone.get(&session_token).expect("session");
+            let kind = "aether.trace.describe_tree_result".to_owned();
+            let queued = QueuedMail {
+                engine_id: id,
+                kind_name: kind.clone(),
+                payload,
+                broadcast: false,
+                origin: None,
+            };
+            let _ = record.replies.try_deliver(&kind, queued);
+        });
+
+        let response = hub
+            .dump_trace_chrome(Parameters(args::DumpTraceChromeArgs {
+                engine_id: id.0.to_string(),
+                root: args::MailIdWire {
+                    sender: tagged_id::encode(sender_raw).unwrap(),
+                    correlation_id: 1,
+                },
+                output_path: None,
+                timeout_ms: Some(2_000),
+            }))
+            .await
+            .expect("tool should succeed");
+        substrate_task.await.expect("stub substrate task");
+
+        let trace: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let events = trace["traceEvents"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["ph"], "X");
     }
 
     #[tokio::test]
