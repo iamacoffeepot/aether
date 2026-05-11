@@ -114,6 +114,15 @@ where
     /// Static label for tracing / fairness logs. Today this is the
     /// actor's `NAMESPACE`.
     label: &'static str,
+    /// Issue 714: one-shot completion sender installed by
+    /// [`crate::actor::native::spawn::Spawner::shutdown_instanced`].
+    /// Fired exactly once after the `Closed` branch of [`Self::run_cycle`]
+    /// finishes its `unwire` + registry-close + `actor_guard.take()`
+    /// sequence. The Spawner waits on the matching receiver via
+    /// `recv_timeout` so chassis teardown settles deterministically
+    /// without a 2 ms polling loop. `Mutex<Option<_>>` so the slot can
+    /// take + send without holding the lock across the actor mutex.
+    close_done_tx: Mutex<Option<crossbeam_channel::Sender<()>>>,
 }
 
 impl<A> DispatcherSlot<A>
@@ -154,7 +163,27 @@ where
             mailer,
             self_id,
             label: A::NAMESPACE,
+            close_done_tx: Mutex::new(None),
         })
+    }
+
+    /// Issue 714: fire the installed one-shot completion sender if any.
+    /// Called once from the `Closed` branch of [`Self::run_cycle`] after
+    /// `unwire` + registry close + `actor_guard.take()` have run. Take +
+    /// `try_send`: bounded(1) guarantees the receiver only sees the
+    /// first send; subsequent calls (idempotent — there should never be
+    /// any) are no-ops. Done outside the actor mutex.
+    fn fire_close_done(&self) {
+        let tx = self
+            .close_done_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
+        if let Some(tx) = tx {
+            // Receiver may have hung up if the wait already timed out.
+            // Either way, the channel goes away after this call.
+            let _ = tx.try_send(());
+        }
     }
 
     /// Per-envelope dispatch matching
@@ -266,7 +295,11 @@ where
             Some(a) => a,
             None => {
                 // Slot already finalized. Nothing to do.
+                drop(actor_guard);
                 self.state.mark_idle();
+                // Issue 714: a wait that came in after the close cycle
+                // already ran needs the signal too.
+                self.fire_close_done();
                 return CycleResult::Closed;
             }
         };
@@ -305,7 +338,16 @@ where
             // Phase 4: registry close + monitor fan-out.
             self.finalize_registry();
             actor_guard.take();
+            // Drop the actor mutex before signalling so the waiter (the
+            // chassis-teardown thread in `Spawner::shutdown_instanced`)
+            // wakes onto an unlocked slot.
+            drop(actor_guard);
             self.state.mark_idle();
+            // Issue 714: signal chassis teardown that this slot's
+            // close cycle finished. `is_closed()` would return `true`
+            // from this point onward; the channel signal lets the
+            // waiter wake immediately instead of polling.
+            self.fire_close_done();
             return CycleResult::Closed;
         }
 
@@ -359,14 +401,47 @@ where
     /// Issue 685: chassis-teardown wait predicate. The Closed branch
     /// of [`Self::run_cycle`] takes the actor out of the `Mutex<Option<Box<A>>>`
     /// guard, so `actor_guard.is_none()` is equivalent to "close cycle
-    /// has run." Spawner polls this with a bounded timeout while
-    /// waiting for spawned actors to wind down before the pool drops.
+    /// has run." Issue 714 retired the polling caller in favour of a
+    /// channel signal (see [`Self::set_close_done_tx`]), but the
+    /// predicate stays available for diagnostics + the fast-path
+    /// already-closed check inside `set_close_done_tx`.
     fn is_closed(&self) -> bool {
         let guard = self
             .actor
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.is_none()
+    }
+
+    /// Issue 714: install the chassis-teardown completion sender.
+    /// Stash it in the slot; the close cycle's `fire_close_done` will
+    /// fire it on the way out. Fast path: if the slot already finished
+    /// its close cycle (actor mutex empty), fire immediately so a late
+    /// waiter doesn't park forever waiting for a signal that already
+    /// passed.
+    fn set_close_done_tx(&self, tx: crossbeam_channel::Sender<()>) {
+        // Fast-path: already closed. Signal directly without stashing.
+        if self.is_closed() {
+            let _ = tx.try_send(());
+            return;
+        }
+        let prior = self
+            .close_done_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .replace(tx);
+        // Defensive: if a prior sender was installed (shouldn't happen
+        // — `shutdown_instanced` runs once per chassis), drop it. The
+        // bounded(1) channel goes away with it; that waiter will see
+        // a Disconnected, not a Timeout.
+        drop(prior);
+        // Re-check: the close cycle may have run between the
+        // `is_closed` fast-path check and the stash. If so, fire the
+        // sender we just stashed manually — it isn't going to be picked
+        // up by another `fire_close_done` call.
+        if self.is_closed() {
+            self.fire_close_done();
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
