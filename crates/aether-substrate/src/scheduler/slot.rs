@@ -529,6 +529,15 @@ pub(crate) mod tests {
     fn post_empty_recheck_requeues_on_concurrent_send() {
         // Simulate the race: drain to empty, then a "sender" pushes
         // before the recheck fires. The recheck should self-requeue.
+        //
+        // The load-bearing invariant is "no envelope is lost across
+        // drain/push interleavings", not "one cycle suffices". The
+        // loop covers both outcomes: a single-cycle drain (no budget
+        // pressure) and a split-across-cycles drain (when
+        // `BatchBudget::standard()`'s wallclock deadline trips between
+        // envelopes under CPU contention — the cycle returns
+        // `Requeue` after envelope 1, and a follow-up cycle drains
+        // envelope 2). `Closed` would indicate a real bug.
         let slot = CounterSlot::new("recheck");
         slot.push(1);
         slot.state.try_wake();
@@ -538,10 +547,29 @@ pub(crate) mod tests {
         // already does the recheck inline, we simulate "push during
         // drain" by pushing just-in-time: push, then call run_cycle.
         slot.push(2);
-        let result = run_one_cycle(&slot);
-        // Both envelopes drained in one cycle (no budget pressure).
-        assert_eq!(result, CycleResult::Idle);
-        assert_eq!(slot.dispatched(), 2);
+        for _ in 0..8 {
+            let result = run_one_cycle(&slot);
+            match result {
+                CycleResult::Idle | CycleResult::Requeue => {}
+                CycleResult::Closed => {
+                    panic!("unexpected Closed during recheck-requeue test")
+                }
+            }
+            if slot.dispatched() == 2 {
+                break;
+            }
+            // Ensure the slot is wakeable for the next cycle. After
+            // an `Idle` result with envelopes still pending the state
+            // is Idle; after `Requeue` it is already Ready. `try_wake`
+            // is idempotent — no-op when already Ready (see
+            // `wake_handle_pushes_to_ready_queue_once_per_idle`).
+            slot.state.try_wake();
+        }
+        assert_eq!(
+            slot.dispatched(),
+            2,
+            "both envelopes should drain across at most 8 cycles"
+        );
     }
 
     #[test]
