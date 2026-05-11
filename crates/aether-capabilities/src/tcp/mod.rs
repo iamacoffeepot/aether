@@ -629,16 +629,17 @@ mod cap_native {
             // (the loopback HubOutbound) ships every broadcast over
             // `rx`. We tolerate other egress events (e.g. Tick
             // broadcasts) interleaved.
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + Duration::from_secs(5);
             let mut saw_data = false;
             let mut saw_closed = false;
-            while Instant::now() < deadline && (!saw_data || !saw_closed) {
-                let frame = match rx.try_recv() {
+            while !saw_data || !saw_closed {
+                let remaining = match deadline.checked_duration_since(Instant::now()) {
+                    Some(d) => d,
+                    None => break,
+                };
+                let frame = match rx.recv_timeout(remaining) {
                     Ok(f) => f,
-                    Err(_) => {
-                        thread::sleep(Duration::from_millis(5));
-                        continue;
-                    }
+                    Err(_) => break,
                 };
                 let (kind_name, payload) = match frame {
                     EgressEvent::Broadcast {
