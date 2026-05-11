@@ -562,6 +562,33 @@ pub struct DescribeTreeWindowArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct DumpTraceWindowArgs {
+    /// Hub-assigned engine UUID as a string (from `list_engines`).
+    pub engine_id: String,
+    /// Time window selector. Same shape as `describe_tree_window`'s
+    /// `window` arg — `{"last_ms": N}` for relative or
+    /// `{"start_ns": ..., "end_ns": ...}` for absolute. `end_ns`
+    /// optional.
+    pub window: TraceWindowArg,
+    /// Optional filesystem path to write the trace JSON to. Parent
+    /// directories are created as needed. When omitted the JSON is
+    /// returned inline; for any non-trivial window that's likely
+    /// to overflow the agent's context — point this at a file
+    /// instead and load it into Perfetto.
+    #[serde(default)]
+    pub output_path: Option<String>,
+    /// Cap on the number of in-window mails the substrate will return
+    /// before erroring with `Err::too_many`. Substrate defaults
+    /// 10_000; hard cap 100_000. Mirrors `describe_tree_window`.
+    #[serde(default)]
+    pub max_mails: Option<u32>,
+    /// Maximum time to wait for the substrate's `DescribeWindowResult`
+    /// reply, in milliseconds. Defaults to 5000. Clamped to 30000.
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeTreeArgs {
     /// Hub-assigned engine UUID as a string (from `list_engines`).
     pub engine_id: String,

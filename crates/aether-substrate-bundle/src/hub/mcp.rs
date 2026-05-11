@@ -1157,6 +1157,168 @@ mod tests {
         assert_eq!(slices[0]["ph"], "X");
     }
 
+    /// Issue 735 phase 3: dump_trace_window calls describe_window then
+    /// renders the resulting flat mail set as Chrome trace JSON. With
+    /// `output_path` set, the trace is written to disk and the tool
+    /// returns `{"path": ...}` — same shape as `dump_trace`. The
+    /// rendered events come straight from the windowed mails (no root
+    /// context); each mail with `t_received`/`t_finished` populated
+    /// becomes one `ph: "X"` slice.
+    #[tokio::test]
+    async fn dump_trace_window_writes_file_when_path_set() {
+        use aether_data::tagged_id::Tag;
+        use aether_data::{MailId, MailboxId, with_tag};
+        use aether_kinds::trace::{DescribeWindowResult, MailNodeWire};
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![describe_window_descriptor()];
+        let (rec, mut rx) = record_with_kinds(0xd735, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let session_token = hub.session.token;
+
+        // Two unrelated mails (different roots) inside the window —
+        // dump_trace_window renders both even though they're in
+        // separate chains.
+        let m_a = MailId {
+            sender: MailboxId(with_tag(Tag::Mailbox, 0xAA)),
+            correlation_id: 1,
+        };
+        let m_b = MailId {
+            sender: MailboxId(with_tag(Tag::Mailbox, 0xBB)),
+            correlation_id: 1,
+        };
+
+        let sessions_clone = state.sessions.clone();
+        let substrate_task = tokio::spawn(async move {
+            let _req = rx.recv().await.expect("tool should send request");
+            let reply = DescribeWindowResult::Ok {
+                mails: vec![
+                    MailNodeWire {
+                        mail_id: m_a,
+                        parent: None,
+                        sender: m_a.sender,
+                        recipient: MailboxId(with_tag(Tag::Mailbox, 1)),
+                        kind: aether_data::KindId(with_tag(Tag::Kind, 0xCAFE)),
+                        t_sent: aether_kinds::trace::Nanos(1_000),
+                        t_received: Some(aether_kinds::trace::Nanos(2_000)),
+                        t_finished: Some(aether_kinds::trace::Nanos(3_000)),
+                        thread_name: None,
+                    },
+                    MailNodeWire {
+                        mail_id: m_b,
+                        parent: None,
+                        sender: m_b.sender,
+                        recipient: MailboxId(with_tag(Tag::Mailbox, 2)),
+                        kind: aether_data::KindId(with_tag(Tag::Kind, 0xDEAD)),
+                        t_sent: aether_kinds::trace::Nanos(5_000),
+                        t_received: Some(aether_kinds::trace::Nanos(6_000)),
+                        t_finished: Some(aether_kinds::trace::Nanos(8_000)),
+                        thread_name: None,
+                    },
+                ],
+            };
+            let payload = postcard::to_allocvec(&reply).expect("encode reply");
+            let record = sessions_clone.get(&session_token).expect("session");
+            let kind = "aether.trace.describe_window_result".to_owned();
+            let queued = QueuedMail {
+                engine_id: id,
+                kind_name: kind.clone(),
+                payload,
+                broadcast: false,
+                origin: None,
+            };
+            let remainder = record.replies.try_deliver(&kind, queued);
+            assert!(remainder.is_none(), "reply registry should consume mail");
+        });
+
+        let tmp =
+            std::env::temp_dir().join(format!("aether-trace-window-{}.json", std::process::id()));
+        let response = hub
+            .dump_trace_window(Parameters(args::DumpTraceWindowArgs {
+                engine_id: id.0.to_string(),
+                window: args::TraceWindowArg::Relative { last_ms: 10_000 },
+                output_path: Some(tmp.to_string_lossy().into_owned()),
+                max_mails: Some(1_000),
+                timeout_ms: Some(2_000),
+            }))
+            .await
+            .expect("tool should succeed");
+        substrate_task.await.expect("stub substrate task");
+
+        let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed["path"].as_str().unwrap(), tmp.to_string_lossy());
+
+        let written = std::fs::read_to_string(&tmp).expect("trace file written");
+        let trace: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let events = trace["traceEvents"].as_array().unwrap();
+        let slices: Vec<&serde_json::Value> = events.iter().filter(|e| e["ph"] != "M").collect();
+        assert_eq!(slices.len(), 2, "two mails -> two X events");
+        for s in &slices {
+            assert_eq!(s["ph"], "X");
+        }
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    /// Issue 735 phase 3: when the substrate replies `Err::too_many`
+    /// the hub surfaces it as an `invalid_params` MCP error mentioning
+    /// the matched count, so the agent knows whether to narrow the
+    /// window or raise `max_mails`. No file is written.
+    #[tokio::test]
+    async fn dump_trace_window_too_many_surfaces_error() {
+        use aether_kinds::trace::DescribeWindowResult;
+
+        let engines = EngineRegistry::new();
+        let kinds = vec![describe_window_descriptor()];
+        let (rec, mut rx) = record_with_kinds(0xd736, kinds);
+        let id = rec.id;
+        engines.insert(rec);
+        let state = test_state(engines, SessionRegistry::new());
+        let hub = Hub::new(Arc::clone(&state));
+        let session_token = hub.session.token;
+
+        let sessions_clone = state.sessions.clone();
+        let substrate_task = tokio::spawn(async move {
+            let _req = rx.recv().await.expect("tool should send request");
+            let reply = DescribeWindowResult::Err {
+                too_many: Some(54_321),
+            };
+            let payload = postcard::to_allocvec(&reply).expect("encode reply");
+            let record = sessions_clone.get(&session_token).expect("session");
+            let kind = "aether.trace.describe_window_result".to_owned();
+            let queued = QueuedMail {
+                engine_id: id,
+                kind_name: kind.clone(),
+                payload,
+                broadcast: false,
+                origin: None,
+            };
+            let remainder = record.replies.try_deliver(&kind, queued);
+            assert!(remainder.is_none(), "reply registry should consume mail");
+        });
+
+        let err = hub
+            .dump_trace_window(Parameters(args::DumpTraceWindowArgs {
+                engine_id: id.0.to_string(),
+                window: args::TraceWindowArg::Relative { last_ms: 10_000 },
+                output_path: None,
+                max_mails: Some(5),
+                timeout_ms: Some(2_000),
+            }))
+            .await
+            .unwrap_err();
+        substrate_task.await.expect("stub substrate task");
+
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("54321") && msg.contains("max_mails"),
+            "error should mention matched count + how to fix: {msg}"
+        );
+    }
+
     #[tokio::test]
     async fn describe_component_rejects_malformed_mailbox_id() {
         // ADR-0064: a bare-number mailbox id is no longer valid wire

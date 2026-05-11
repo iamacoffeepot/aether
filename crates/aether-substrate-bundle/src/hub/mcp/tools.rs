@@ -38,14 +38,15 @@ use crate::hub::session::SessionHandle;
 
 use super::args::{
     CaptureFrameArgs, CaptureFrameResultWire, DescribeComponentArgs, DescribeComponentResponse,
-    DescribeKindsArgs, DescribeTreeArgs, DescribeTreeWindowArgs, DumpTraceArgs, EngineInfo,
-    EngineLogEntry, EngineLogsArgs, EngineLogsResponse, ListActiveRootsArgs, LoadComponentArgs,
-    LoadComponentResponse, LoadResultWire, MailSpec, MailStatus, ReceiveMailArgs, ReceivedMail,
-    ReplaceComponentArgs, ReplaceResultWire, SendMailArgs, SpawnResult, SpawnSubstrateArgs,
-    TerminateResult, TerminateSubstrateArgs, TraceWindowArg, log_level_to_str,
+    DescribeKindsArgs, DescribeTreeArgs, DescribeTreeWindowArgs, DumpTraceArgs,
+    DumpTraceWindowArgs, EngineInfo, EngineLogEntry, EngineLogsArgs, EngineLogsResponse,
+    ListActiveRootsArgs, LoadComponentArgs, LoadComponentResponse, LoadResultWire, MailSpec,
+    MailStatus, ReceiveMailArgs, ReceivedMail, ReplaceComponentArgs, ReplaceResultWire,
+    SendMailArgs, SpawnResult, SpawnSubstrateArgs, TerminateResult, TerminateSubstrateArgs,
+    TraceWindowArg, log_level_to_str,
 };
 use super::codecs::{decode_inbound, deliver_one, encode_capture_bundle};
-use super::trace::render;
+use super::trace::{render, render_mails};
 use super::{Hub, HubState};
 use crate::hub::registry::ComponentRecord;
 
@@ -1032,6 +1033,88 @@ impl Hub {
 
         postcard::from_bytes(&queued.payload)
             .map_err(|e| McpError::internal_error(format!("decode reply: {e}"), None))
+    }
+
+    #[tool(
+        description = "Export every mail whose `t_sent` falls within a time window as a trace JSON file (issue iamacoffeepot/aether#735, ADR-0080 Phase 3). Same Chrome trace event format as `dump_trace`, just collected by overlap rather than by root walk — useful for \"what happened in the last N ms?\" perf investigation. Loads into Perfetto, chrome://tracing, or speedscope. `window` is either `{\"last_ms\": N}` for last-N-milliseconds (resolved against substrate monotonic now) or `{\"start_ns\": ..., \"end_ns\": ...}` for an explicit absolute range. Strict `t_sent` containment — parent edges may dangle to mail outside the window (Perfetto renders these as flow arrows with no destination); drill into a specific root via `dump_trace` for full chain context. `max_mails` caps the substrate's matched set (default 10_000, hard cap 100_000); over-cap windows fail with the matched count so the caller can narrow before retrying. When `output_path` is omitted the JSON is returned inline (likely to overflow agent context for any non-trivial window — point at a file). When set, writes to the path (creating parent dirs) and returns a `{path}` confirmation. Default timeout 5000ms; clamped to 30000."
+    )]
+    pub(super) async fn dump_trace_window(
+        &self,
+        Parameters(args): Parameters<DumpTraceWindowArgs>,
+    ) -> Result<String, McpError> {
+        // Same lookup-build path as `dump_trace`. Resolved entries
+        // give human-readable kind names + category-prefixed mailbox
+        // names in the trace doc; missing entries fall back to the
+        // tagged-string id so an out-of-sync inventory surfaces as
+        // visible drift rather than silent corruption (issue 731).
+        let uuid = Uuid::parse_str(&args.engine_id).map_err(|e| {
+            McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None)
+        })?;
+        let id = EngineId(uuid);
+        let Some(record) = self.state.engines.get(&id) else {
+            return Err(McpError::invalid_params(
+                format!("unknown engine_id {}", args.engine_id),
+                None,
+            ));
+        };
+        let kind_names: std::collections::HashMap<u64, String> = record
+            .kinds
+            .iter()
+            .map(|k| {
+                let kid = aether_data::canonical::kind_id_from_parts(&k.name, &k.schema);
+                (kid, k.name.clone())
+            })
+            .collect();
+        let mailbox_names: super::trace::MailboxLookup = record
+            .mailboxes
+            .iter()
+            .map(|m| (m.id.0, (m.name.clone(), m.category)))
+            .collect();
+        drop(record);
+
+        let describe_args = DescribeTreeWindowArgs {
+            engine_id: args.engine_id.clone(),
+            window: args.window,
+            max_mails: args.max_mails,
+            timeout_ms: args.timeout_ms,
+        };
+        let result = self.do_describe_window(describe_args).await?;
+        let mails = match result {
+            DescribeWindowResult::Ok { mails } => mails,
+            DescribeWindowResult::Err { too_many } => {
+                let count = too_many
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "<unspecified>".to_owned());
+                return Err(McpError::invalid_params(
+                    format!(
+                        "describe_window matched {count} mails (over max_mails); narrow the window or raise max_mails"
+                    ),
+                    None,
+                ));
+            }
+        };
+        let trace_json = render_mails(&mails, &kind_names, &mailbox_names)
+            .map_err(|e| McpError::internal_error(format!("render trace: {e}"), None))?;
+
+        match args.output_path {
+            Some(path) => {
+                if let Some(parent) = std::path::Path::new(&path).parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                        McpError::internal_error(
+                            format!("create parent dirs for {path}: {e}"),
+                            None,
+                        )
+                    })?;
+                }
+                tokio::fs::write(&path, &trace_json).await.map_err(|e| {
+                    McpError::internal_error(format!("write trace to {path}: {e}"), None)
+                })?;
+                Ok(serde_json::json!({ "path": path }).to_string())
+            }
+            None => Ok(trace_json),
+        }
     }
 
     #[tool(
