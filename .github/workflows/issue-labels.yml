@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   enforce:
-    name: Require type and crate (or design)
+    name: Lint title and auto-apply type/crate labels
     runs-on: ubuntu-latest
     steps:
       - uses: actions/github-script@v7
@@ -18,18 +18,82 @@ jobs:
             const issue = context.payload.issue;
             const labels = issue.labels.map(l => l.name);
 
-            const hasType = labels.some(n => n.startsWith('type:'));
-            const hasCrate = labels.some(n => n.startsWith('crate:'));
-            const hasDesign = labels.includes('design');
+            // Allowed types match the existing `type:*` label set.
+            const TYPES = ['feat', 'fix', 'chore', 'docs', 'perf', 'refactor', 'flake'];
 
-            const missing = [];
-            if (!hasType) {
-              missing.push('a `type:*` label (`type:fix`, `type:feat`, `type:refactor`, `type:chore`, `type:docs`, `type:perf`)');
-            }
-            if (!hasCrate && !hasDesign) {
-              missing.push('a `crate:*` label (or `design` for cross-cutting / architectural issues)');
+            // {type}({crate}): <subject>  OR  {type}({crate}/{subfeat}): <subject>
+            const titleRegex = new RegExp(
+              '^(' + TYPES.join('|') + ')\\(([a-z0-9-]+)(?:/[a-z0-9-]+)?\\): .+$'
+            );
+            const m = issue.title.match(titleRegex);
+
+            const messages = [];
+            const labelsToAdd = [];
+            const labelsToRemove = [];
+
+            if (!m) {
+              messages.push(
+                'Title must match `{type}({crate}): <subject>` ' +
+                '(subfeatures allowed via `{type}({crate}/{subfeat}): <subject>`).'
+              );
+              messages.push('Allowed types: ' + TYPES.join(', ') + '.');
+              if (!labels.includes('invalid-title')) {
+                labelsToAdd.push('invalid-title');
+              }
+            } else {
+              const typeFromTitle = m[1];
+              const crateFromTitle = m[2];
+
+              const allRepoLabels = await github.paginate(
+                github.rest.issues.listLabelsForRepo,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  per_page: 100,
+                }
+              );
+              const validCrates = allRepoLabels
+                .filter(l => l.name.startsWith('crate:'))
+                .map(l => l.name.slice('crate:'.length))
+                .sort();
+
+              if (!validCrates.includes(crateFromTitle)) {
+                messages.push(
+                  'Scope `' + crateFromTitle + '` is not a known crate. ' +
+                  'Valid: ' + validCrates.join(', ') + '.'
+                );
+                if (!labels.includes('invalid-title')) {
+                  labelsToAdd.push('invalid-title');
+                }
+              } else {
+                const wantType = 'type:' + typeFromTitle;
+                const wantCrate = 'crate:' + crateFromTitle;
+                if (!labels.includes(wantType)) labelsToAdd.push(wantType);
+                if (!labels.includes(wantCrate)) labelsToAdd.push(wantCrate);
+                if (labels.includes('invalid-title')) {
+                  labelsToRemove.push('invalid-title');
+                }
+              }
             }
 
+            if (labelsToAdd.length > 0) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: labelsToAdd,
+              });
+            }
+            for (const name of labelsToRemove) {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                name,
+              });
+            }
+
+            // Comment management — single rolling comment marker.
             const marker = '<!-- issue-label-bot -->';
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
@@ -38,7 +102,7 @@ jobs:
             });
             const existing = comments.find(c => c.body && c.body.includes(marker));
 
-            if (missing.length === 0) {
+            if (messages.length === 0) {
               if (existing) {
                 await github.rest.issues.deleteComment({
                   owner: context.repo.owner,
@@ -51,9 +115,9 @@ jobs:
 
             const body = [
               marker,
-              'This issue is missing ' + missing.join(' and ') + '.',
+              ...messages,
               '',
-              'Add via the labels sidebar — this comment auto-resolves once the labels are present.',
+              'This comment auto-resolves once the title matches the convention.',
             ].join('\n');
 
             if (existing) {
