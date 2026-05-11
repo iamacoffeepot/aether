@@ -156,8 +156,9 @@ impl Spawner {
     /// Issue 685: walk every spawned instanced slot, signal shutdown
     /// on its binding, fire one wake so a pool worker picks it up and
     /// runs the close path (drain residual → `unwire` → registry
-    /// close + monitor fan-out), then poll [`crate::scheduler::Drainable::is_closed`]
-    /// until every slot has finished or `timeout` elapses.
+    /// close + monitor fan-out), then wait per-slot on a one-shot
+    /// completion channel until every slot has finished or `timeout`
+    /// elapses.
     ///
     /// Called from [`crate::chassis::builder::BootedPassives::shutdown_in_place`]
     /// before the singleton shutdowns walk. The ordering matters:
@@ -167,6 +168,16 @@ impl Spawner {
     /// `_pool: PoolHandle` field on `BootedPassives` which has a later
     /// drop order than the explicit `shutdown_in_place` call), so
     /// workers can drain the close cycles we just queued.
+    ///
+    /// Issue 714: the original implementation polled
+    /// [`crate::scheduler::Drainable::is_closed`] every 2 ms with a
+    /// `timeout`-bounded loop. Under nextest contention the worker that
+    /// observed the wake could be scheduled out long enough that the
+    /// 2 s deadline elapsed before the close cycle ran, surfacing as
+    /// the chassis_teardown_runs_unwire flake. The waker now installs a
+    /// one-shot `crossbeam_channel::bounded(1)` per entry; the slot's
+    /// close cycle fires it after `unwire` + registry close land, so
+    /// teardown wakes the instant the cycle settles instead of polling.
     ///
     /// On timeout: logs at warn level and returns. The slot Arcs we
     /// drained out of `instanced_slots` will then drop, and any actor
@@ -180,27 +191,50 @@ impl Spawner {
         if entries.is_empty() {
             return;
         }
+        // Wire one (tx, rx) per entry up-front. Installing the tx on
+        // the slot before signalling shutdown ensures the close cycle
+        // sees the sender to fire — even if the worker enters the
+        // close path before `signal_shutdown` returns control. The
+        // slot's `set_close_done_tx` fast-paths an already-closed slot
+        // by firing immediately, so there's no race window where the
+        // close cycle ran without seeing the tx.
+        let mut waiters: Vec<crossbeam_channel::Receiver<()>> = Vec::with_capacity(entries.len());
         for entry in &entries {
+            let (tx, rx) = crossbeam_channel::bounded::<()>(1);
+            entry.slot.set_close_done_tx(tx);
+            waiters.push(rx);
             entry.slot.signal_shutdown();
             entry.wake.wake();
         }
         let deadline = std::time::Instant::now() + timeout;
-        loop {
-            let all_closed = entries.iter().all(|e| e.slot.is_closed());
-            if all_closed {
-                return;
+        let mut stuck = 0usize;
+        for rx in &waiters {
+            let now = std::time::Instant::now();
+            let remaining = deadline.saturating_duration_since(now);
+            // `remaining == 0` means the deadline has passed; pass
+            // `Duration::ZERO` to `recv_timeout` and treat as a
+            // timeout. crossbeam channels return Timeout for the
+            // zero-duration call when the channel has nothing to
+            // recv, which is exactly what we want.
+            match rx.recv_timeout(remaining) {
+                Ok(()) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    stuck += 1;
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    // Slot dropped its sender without firing — treat
+                    // the same as a timeout (close cycle didn't run).
+                    stuck += 1;
+                }
             }
-            if std::time::Instant::now() >= deadline {
-                let stuck = entries.iter().filter(|e| !e.slot.is_closed()).count();
-                tracing::warn!(
-                    target: "aether_substrate::spawner",
-                    stuck_count = stuck,
-                    total = entries.len(),
-                    "shutdown_instanced timed out waiting for spawned actors to run close path",
-                );
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        if stuck > 0 {
+            tracing::warn!(
+                target: "aether_substrate::spawner",
+                stuck_count = stuck,
+                total = entries.len(),
+                "shutdown_instanced timed out waiting for spawned actors to run close path",
+            );
         }
     }
 

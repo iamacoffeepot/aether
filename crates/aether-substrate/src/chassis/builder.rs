@@ -2504,6 +2504,81 @@ mod tests {
         let _ = id;
     }
 
+    /// Issue 714: stress version of the chassis-teardown contract.
+    /// Spawn N=64 instanced actors and assert all N close_observed
+    /// counters tick to exactly 1 after `drop(chassis)`. Pre-714 the
+    /// polling-based `shutdown_instanced` could lose individual wakes
+    /// under contention; the channel-signal rewrite is deterministic
+    /// — even one missed `unwire` here fails the test.
+    #[test]
+    fn chassis_teardown_runs_unwire_for_many_pooled_actors() {
+        use crate::actor::native::spawn::Subname;
+        use aether_actor::Instanced;
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+        struct Quiet {
+            close_observed: Arc<AtomicU32>,
+        }
+        impl aether_actor::Actor for Quiet {
+            const NAMESPACE: &'static str = "test.teardown.quiet_many";
+        }
+        impl Instanced for Quiet {}
+        impl crate::actor::native::NativeActor for Quiet {
+            type Config = Arc<AtomicU32>;
+            fn init(
+                config: Self::Config,
+                _ctx: &mut crate::actor::native::ctx::NativeInitCtx<'_>,
+            ) -> Result<Self, BootError> {
+                Ok(Self {
+                    close_observed: config,
+                })
+            }
+            fn unwire(&mut self, _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>) {
+                self.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+        }
+        impl crate::actor::native::NativeDispatch for Quiet {
+            fn __aether_dispatch_envelope(
+                &mut self,
+                _ctx: &mut crate::actor::native::ctx::NativeCtx<'_>,
+                _kind: crate::mail::KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                None
+            }
+        }
+
+        const N: usize = 64;
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .build_passive()
+            .expect("empty chassis boots");
+
+        let counters: Vec<Arc<AtomicU32>> = (0..N).map(|_| Arc::new(AtomicU32::new(0))).collect();
+        for (i, counter) in counters.iter().enumerate() {
+            let name = format!("inst-{i}");
+            chassis
+                .spawn_actor::<Quiet>(Subname::Named(&name), Arc::clone(counter))
+                .finish()
+                .expect("spawn instanced actor");
+        }
+
+        for counter in &counters {
+            assert_eq!(counter.load(AtomicOrdering::SeqCst), 0);
+        }
+
+        drop(chassis);
+
+        for (i, counter) in counters.iter().enumerate() {
+            assert_eq!(
+                counter.load(AtomicOrdering::SeqCst),
+                1,
+                "actor {i} must have run unwire exactly once",
+            );
+        }
+    }
+
     /// Issue 607 Phase 4b verify: a `ctx.monitor(target)` registration
     /// fires exactly one `MonitorNotice` at the watcher when the
     /// target self-shuts. Two-actor scenario: Watcher (instanced)

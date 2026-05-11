@@ -261,6 +261,19 @@ pub trait Drainable: Send + Sync + 'static {
         true
     }
 
+    /// Issue 714: install a one-shot completion sender the slot fires
+    /// when its [`CycleResult::Closed`] cycle finishes — i.e. after
+    /// `unwire` + registry close ran and the actor box was taken out.
+    /// [`crate::actor::native::spawn::Spawner::shutdown_instanced`]
+    /// uses this to settle on each spawned slot via `recv_timeout`
+    /// instead of polling [`Self::is_closed`] in a 2 ms loop, which
+    /// flaked under nextest contention.
+    ///
+    /// Default no-op: mock fixtures don't have a real close cycle so
+    /// they never need to signal. Idempotent — the slot only fires the
+    /// first installed sender once; a re-install after close is a no-op.
+    fn set_close_done_tx(&self, _tx: crossbeam_channel::Sender<()>) {}
+
     /// Upcast helper for downcasting in tests. Production code doesn't
     /// reach for this.
     fn as_any(&self) -> &dyn Any;
