@@ -121,7 +121,23 @@ pub enum MailboxEntry {
 
 pub struct Registry {
     inner: RwLock<Inner>,
+    /// Issue iamacoffeepot/aether#742: notification hook fired after
+    /// every successful mailbox registration. The chassis (or any
+    /// hub-aware boot path) installs a closure that pushes the full
+    /// inventory snapshot to the hub via `HubOutbound::egress_mailboxes_changed`,
+    /// keeping the hub's per-engine mailbox cache in sync without
+    /// requiring callers (chassis caps, the component-load cap) to
+    /// remember to publish manually after each registration. Default
+    /// `None` — registry stays decoupled from the hub layer.
+    on_mailbox_change: RwLock<Option<MailboxChangeHook>>,
 }
+
+/// Issue iamacoffeepot/aether#742: hook signature. Receives the full
+/// post-registration mailbox inventory so the chassis-installed
+/// implementation can hand it straight to `HubOutbound::egress_mailboxes_changed`,
+/// matching the existing `MailboxesChanged` wire shape (full snapshot
+/// per replace, not deltas).
+pub type MailboxChangeHook = Arc<dyn Fn(Vec<MailboxDescriptor>) + Send + Sync>;
 
 /// One mailbox's bookkeeping. Grouped so a single lookup hits name,
 /// entry, and any future per-mailbox fields together.
@@ -221,6 +237,31 @@ impl Registry {
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(Inner::default()),
+            on_mailbox_change: RwLock::new(None),
+        }
+    }
+
+    /// Issue iamacoffeepot/aether#742: install the post-registration
+    /// hook. The chassis calls this once during boot — typically
+    /// inside `connect_hub_client` — to wire up automatic
+    /// `MailboxesChanged` republishing for any subsequent registration
+    /// (chassis-builder `.with_actor::<...>` chain, runtime
+    /// `load_component`, etc.). Subsequent calls overwrite the
+    /// previous hook.
+    pub fn set_on_mailbox_change(&self, hook: MailboxChangeHook) {
+        *self.on_mailbox_change.write().unwrap() = Some(hook);
+    }
+
+    /// Snapshot the inventory and invoke the hook (if installed).
+    /// Called from every successful `register_closure` /
+    /// `try_register_closure`. Snapshot is taken with the inner read
+    /// lock — separate from the write lock the registration just
+    /// released — so a concurrent registration sees a consistent
+    /// (post-this-insert) view rather than a torn one.
+    fn notify_mailbox_change(&self) {
+        let hook = self.on_mailbox_change.read().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(self.list_mailbox_descriptors());
         }
     }
 
@@ -289,7 +330,10 @@ impl Registry {
     pub fn register_closure(&self, name: impl Into<String>, handler: MailboxHandler) -> MailboxId {
         let name = name.into();
         match self.insert(name.clone(), MailboxEntry::Closure(handler)) {
-            Ok(id) => id,
+            Ok(id) => {
+                self.notify_mailbox_change();
+                id
+            }
             Err(_) => panic!("mailbox name already registered: {name}"),
         }
     }
@@ -306,7 +350,11 @@ impl Registry {
         name: impl Into<String>,
         handler: MailboxHandler,
     ) -> Result<MailboxId, NameConflict> {
-        self.insert(name.into(), MailboxEntry::Closure(handler))
+        let result = self.insert(name.into(), MailboxEntry::Closure(handler));
+        if result.is_ok() {
+            self.notify_mailbox_change();
+        }
+        result
     }
 
     /// Issue 607 Phase 7: fully remove a closure-bound mailbox. Used
@@ -993,6 +1041,65 @@ mod tests {
             .expect("audio entry");
         assert_eq!(entry.id, id);
         assert_eq!(entry.id, MailboxId::from_name("aether.audio"));
+    }
+
+    /// Issue iamacoffeepot/aether#742: every successful
+    /// `register_closure` fires the installed change hook with the
+    /// post-registration inventory snapshot. The chassis wires this
+    /// hook to push to the hub via `egress_mailboxes_changed` so any
+    /// chassis-builder cap that registers post-Hello shows up in the
+    /// hub's inventory cache without an explicit publish.
+    #[test]
+    fn mailbox_change_hook_fires_on_register_closure() {
+        use std::sync::Mutex;
+
+        let r = Arc::new(Registry::new());
+        let snapshots: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let snapshots_for_hook = Arc::clone(&snapshots);
+        r.set_on_mailbox_change(Arc::new(move |descriptors| {
+            let names: Vec<String> = descriptors.into_iter().map(|d| d.name).collect();
+            snapshots_for_hook.lock().unwrap().push(names);
+        }));
+
+        r.register_closure("aether.input", noop_handler());
+        r.register_closure("aether.render", noop_handler());
+
+        let captured = snapshots.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            2,
+            "hook should fire once per successful register_closure"
+        );
+        // Each snapshot is the FULL inventory at that moment (matches
+        // the wire `MailboxesChanged` semantics — full replace, not
+        // delta), so the second snapshot strictly contains the first.
+        assert!(captured[0].contains(&"aether.input".to_owned()));
+        assert!(captured[1].contains(&"aether.input".to_owned()));
+        assert!(captured[1].contains(&"aether.render".to_owned()));
+    }
+
+    /// Issue 742: `try_register_closure` fires the hook on the Ok
+    /// branch and stays silent on `NameConflict`.
+    #[test]
+    fn mailbox_change_hook_fires_on_try_register_closure_ok_only() {
+        use std::sync::Mutex;
+
+        let r = Arc::new(Registry::new());
+        let count: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        let count_for_hook = Arc::clone(&count);
+        r.set_on_mailbox_change(Arc::new(move |_| {
+            *count_for_hook.lock().unwrap() += 1;
+        }));
+
+        let _ = r
+            .try_register_closure("aether.input", noop_handler())
+            .expect("first register OK");
+        // Second registration with the same name conflicts.
+        let _ = r
+            .try_register_closure("aether.input", noop_handler())
+            .expect_err("second register should NameConflict");
+
+        assert_eq!(*count.lock().unwrap(), 1, "hook fires once on Ok only");
     }
 
     #[test]

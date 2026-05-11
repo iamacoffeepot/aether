@@ -505,5 +505,21 @@ pub fn connect_hub_client(
         Arc::clone(&boot.outbound),
     )
     .map_err(|e| anyhow::anyhow!("hub connect to {url:?} failed: {e}"))?;
+
+    // Issue iamacoffeepot/aether#742: install the registry's
+    // mailbox-change hook so every subsequent registration (the
+    // chassis-builder `.with_actor::<...>` chain that runs *after*
+    // this connect, plus runtime `load_component` trampoline
+    // registrations, plus any future registration path) republishes
+    // the inventory to the hub. Without this the Hello frame above is
+    // the only inventory the hub ever sees, missing every chassis
+    // cap that registers post-connect — those would then render as
+    // bare `mbx-XXXX-XXXX-XXXX` ids in the trace tools.
+    let outbound_for_hook = Arc::clone(&boot.outbound);
+    boot.registry
+        .set_on_mailbox_change(Arc::new(move |descriptors| {
+            outbound_for_hook.egress_mailboxes_changed(descriptors);
+        }));
+
     Ok(Some(client))
 }
