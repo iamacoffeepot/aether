@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pre-flight check for `gh pr create` / `gh pr edit` / `gh issue
-# create` / `gh issue edit` body and title content. Catches the four
+# create` / `gh issue edit` body and title content. Catches the five
 # recurring failure modes documented in the user's auto-memory file
 # `feedback_heredoc_no_backtick_escape.md`.
 #
@@ -12,7 +12,7 @@
 # To deliberately submit a body that looks like one of the patterns
 # (rare — usually the pattern means the body really is broken),
 # include `<!-- pr-body-ok: <letters> — <reason> -->` in the command.
-# The letter list is one or more of a/b/c/d (comma-separated, e.g.
+# The letter list is one or more of a/b/c/d/e (comma-separated, e.g.
 # `<!-- pr-body-ok: a,b — reason -->`); only listed patterns are
 # skipped, unlisted ones still fire. A bare `pr-body-ok:` with no
 # letter list is rejected to force the author to think about which
@@ -31,6 +31,26 @@ case "$command" in
     *) exit 0 ;;
 esac
 
+# Distinguish PR vs issue commands. Body content (heredoc text,
+# commit messages, examples) often mentions both `gh pr create` and
+# `gh issue create` literally, so substring matching can find both
+# in a single Bash invocation. Heuristic: if the command contains
+# any `gh pr (create|edit)`, treat it as a PR command — Pattern E
+# (issue-title check) only fires when NO PR call is present. The
+# rare hybrid (one Bash that publishes both a PR and an issue) is
+# treated as PR; intentionally publishing an issue from inside a
+# PR-creation flow can override via `<!-- pr-body-ok: e — ... -->`.
+is_pr_cmd=0
+is_issue_cmd=0
+case "$command" in
+    *"gh pr create"*|*"gh pr edit"*) is_pr_cmd=1 ;;
+esac
+if (( is_pr_cmd == 0 )); then
+    case "$command" in
+        *"gh issue create"*|*"gh issue edit"*) is_issue_cmd=1 ;;
+    esac
+fi
+
 # Parse the override line. `# pr-body-ok: <letters> — <reason>` skips
 # only the listed patterns; bare `# pr-body-ok:` is rejected. Letters
 # are extracted individually, so `b,d`, `bd`, and `b d` all parse to
@@ -41,9 +61,9 @@ if [[ -n "$override_line" ]]; then
     rest=${override_line#pr-body-ok:}
     rest=${rest# }
     prefix=${rest%%[[:space:]—]*}
-    allowed=$(printf '%s' "$prefix" | tr '[:upper:]' '[:lower:]' | grep -oE '[a-d]' | tr '\n' ',' | sed 's/,$//' || true)
+    allowed=$(printf '%s' "$prefix" | tr '[:upper:]' '[:lower:]' | grep -oE '[a-e]' | tr '\n' ',' | sed 's/,$//' || true)
     if [[ -z "$allowed" ]]; then
-        printf 'pr-body-ok override needs at least one pattern letter (a/b/c/d), e.g. `<!-- pr-body-ok: b — reason -->`\n' >&2
+        printf 'pr-body-ok override needs at least one pattern letter (a/b/c/d/e), e.g. `<!-- pr-body-ok: b — reason -->`\n' >&2
         exit 2
     fi
 fi
@@ -83,12 +103,12 @@ if [[ ",$allowed," != *",d,"* ]] && printf '%s' "$search_text" | grep -qE '\$[^ 
     issues+=("Pattern D: \$...\$ renders as LaTeX math on GitHub — switch inline code to backticks")
 fi
 
-# Pattern C: PR title subject must start lowercase. CI runs
-# amannn/action-semantic-pull-request with subjectPattern
-# `^(?![A-Z]).+$`. Extract --title argument; works for both single
-# and double-quoted forms.
+# Extract --title argument once; used by Pattern C (lowercase subject)
+# and Pattern E (issue-only title format). Works for both single and
+# double-quoted forms.
 title_match=$(printf '%s' "$command" | grep -oE -- "--title[ =]+(\"[^\"]*\"|'[^']*')" || true)
-if [[ ",$allowed," != *",c,"* ]] && [[ -n "$title_match" ]]; then
+title=""
+if [[ -n "$title_match" ]]; then
     title=${title_match#*--title}
     title=${title# }
     title=${title#=}
@@ -96,13 +116,35 @@ if [[ ",$allowed," != *",c,"* ]] && [[ -n "$title_match" ]]; then
     title=${title#\'}
     title=${title%\"}
     title=${title#\"}
-    if [[ "$title" == *:* ]]; then
-        subject=${title#*:}
-        subject=${subject# }
-        first=${subject:0:1}
-        if [[ "$first" =~ [A-Z] ]]; then
-            issues+=("Pattern C: PR title subject starts uppercase ('$first') — CI rejects, rephrase ('adr-0045 ...' not 'ADR-0045 ...')")
+fi
+
+# Pattern C: PR title subject must start lowercase. CI runs
+# amannn/action-semantic-pull-request with subjectPattern
+# `^(?![A-Z]).+$`.
+if [[ ",$allowed," != *",c,"* ]] && [[ -n "$title" && "$title" == *:* ]]; then
+    subject=${title#*:}
+    subject=${subject# }
+    first=${subject:0:1}
+    if [[ "$first" =~ [A-Z] ]]; then
+        issues+=("Pattern C: PR title subject starts uppercase ('$first') — CI rejects, rephrase ('adr-0045 ...' not 'ADR-0045 ...')")
+    fi
+fi
+
+# Pattern E: issue title must match `{type}({crate}): subject` (or
+# `{type}({crate}/{subfeat}): subject` for subfeatures). Scope must be
+# a registered `crate:*` label. Mirrors the server-side workflow at
+# `.github/workflows/issue-labels.yml`. Fires only on `gh issue
+# create` / `gh issue edit`.
+if [[ ",$allowed," != *",e,"* ]] && (( is_issue_cmd == 1 )) && [[ -n "$title" ]]; then
+    title_re='^(feat|fix|chore|docs|perf|refactor|flake)\(([a-z0-9-]+)(/[a-z0-9-]+)?\):[[:space:]].+$'
+    if [[ "$title" =~ $title_re ]]; then
+        scope="${BASH_REMATCH[2]}"
+        if ! gh label list --search "crate:$scope" --json name --jq '.[].name' 2>/dev/null | grep -qx "crate:$scope"; then
+            valid_crates=$(gh label list --limit 100 --json name --jq '.[].name | select(startswith("crate:")) | sub("^crate:"; "")' 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')
+            issues+=("Pattern E: issue title scope '$scope' is not a known crate. Valid: $valid_crates")
         fi
+    else
+        issues+=("Pattern E: issue title must match {type}({crate}): subject (subfeatures via {type}({crate}/{subfeat}): subject). Allowed types: feat, fix, chore, docs, perf, refactor, flake")
     fi
 fi
 
@@ -113,7 +155,7 @@ if (( ${#issues[@]} )); then
             printf '  - %s\n' "$i"
         done
         printf '\nSee feedback_heredoc_no_backtick_escape.md (auto-memory) for context.\n'
-        printf 'To override deliberately, include `<!-- pr-body-ok: <letters> — <reason> -->` (letters: a/b/c/d, comma-separated; only listed patterns are skipped).\n'
+        printf 'To override deliberately, include `<!-- pr-body-ok: <letters> — <reason> -->` (letters: a/b/c/d/e, comma-separated; only listed patterns are skipped).\n'
     } >&2
     exit 2
 fi
