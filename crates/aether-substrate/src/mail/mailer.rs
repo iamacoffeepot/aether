@@ -64,6 +64,20 @@ pub struct Mailer {
     /// trace pipeline — chassis-addressed mail is silently dropped
     /// in that case.
     chassis_router: OnceLock<Box<dyn Fn(Mail) + Send + Sync>>,
+    /// ADR-0080 §6 settlement registry handle, exposed so capabilities
+    /// hosting external entry points (RpcServer, future event-source
+    /// caps) can subscribe to settlement of mail they dispatch from
+    /// their handlers. Threaded through the Mailer rather than down
+    /// every `NativeBinding` because settlement is a chassis-wide
+    /// service used at runtime — the cap reaches it via
+    /// `ctx.mailer().settlement_registry()`.
+    ///
+    /// `OnceLock` so the chassis builder installs exactly once at
+    /// boot alongside [`Self::chassis_router`]. `None` on test fixtures
+    /// / chassis that don't bring up the trace pipeline; callers that
+    /// expect to subscribe must check for the presence and surface a
+    /// clear error otherwise.
+    settlement_registry: OnceLock<Arc<crate::chassis::settlement::SettlementRegistry>>,
 }
 
 impl Mailer {
@@ -79,6 +93,7 @@ impl Mailer {
             handle_store,
             outbound: None,
             chassis_router: OnceLock::new(),
+            settlement_registry: OnceLock::new(),
         }
     }
 
@@ -88,6 +103,28 @@ impl Mailer {
     /// calls are no-ops — the router slot is single-claim.
     pub fn install_chassis_router(&self, router: Box<dyn Fn(Mail) + Send + Sync>) {
         let _ = self.chassis_router.set(router);
+    }
+
+    /// ADR-0080 §6 settlement-registry installation. Called once by the
+    /// chassis builder at boot alongside [`Self::install_chassis_router`]
+    /// so capability handlers can reach the registry via
+    /// `ctx.mailer().settlement_registry()`. Single-claim; subsequent
+    /// calls are no-ops.
+    pub fn install_settlement_registry(
+        &self,
+        registry: Arc<crate::chassis::settlement::SettlementRegistry>,
+    ) {
+        let _ = self.settlement_registry.set(registry);
+    }
+
+    /// Borrow the wired [`SettlementRegistry`], or `None` if no
+    /// registry was installed (test fixtures, chassis that don't bring
+    /// up the trace pipeline). Capabilities subscribe via
+    /// [`crate::chassis::settlement::SettlementRegistry::subscribe_settlement_mail`].
+    pub fn settlement_registry(
+        &self,
+    ) -> Option<&Arc<crate::chassis::settlement::SettlementRegistry>> {
+        self.settlement_registry.get()
     }
 
     /// Attach a `HubOutbound` so mail to unknown mailbox ids bubbles

@@ -8,8 +8,12 @@
 //!
 //! See issue 750 for the full design.
 
+pub mod server;
 pub mod wire;
 
+pub use server::{RpcServerCapability, rpc_server_mailbox_id};
+#[cfg(not(target_arch = "wasm32"))]
+pub use server::{RpcServerConfig, RpcServerHandle};
 pub use wire::{
     Hello, HelloAck, KindDescriptor, MailEnvelope, MailboxAddress, PeerKind, RpcError,
     WIRE_VERSION, WireFrame,

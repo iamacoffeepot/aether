@@ -65,6 +65,7 @@ audio-native = ["audio", "native", "aether-substrate/audio", "dep:cpal", "dep:cr
 # compile fine for `wasm32-unknown-unknown` and carry the markers
 # wasm components rely on.
 aether-actor = { path = "../aether-actor" }
+aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
 serde = { version = "1", default-features = false, features = ["derive"] }

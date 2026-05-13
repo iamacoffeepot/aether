@@ -377,6 +377,33 @@ impl<'a> NativeCtx<'a> {
             self.outbound_root(),
         )
     }
+
+    /// Like [`Self::send_envelope_traced`] but always starts a fresh
+    /// causal chain — ignores the ctx's in-flight lineage and passes
+    /// `parent_mail = None, inherited_root = None` to the dispatch
+    /// path. The returned [`MailId`] is the root of the new chain, so
+    /// subscribing to its settlement via
+    /// `SettlementRegistry::subscribe_settlement_mail` fires when the
+    /// dispatch's entire descendant subtree drains.
+    ///
+    /// Use this when the cap is acting on an external event (wire-
+    /// borne RPC call, file watcher, timer) rather than forwarding a
+    /// mail that was already in flight. The RpcServer cap's `Call`
+    /// handler is the motivating case: the inbound that wakes the cap
+    /// is an internal wake mail causally unrelated to the wire-borne
+    /// `Call` — inheriting its chain would attribute the dispatch to
+    /// the wrong root and `subscribe_settlement_mail` would never fire
+    /// (descendants don't settle individually; only the chain root
+    /// does).
+    pub fn send_envelope_as_root(
+        &self,
+        recipient: MailboxId,
+        kind: KindId,
+        bytes: &[u8],
+    ) -> MailId {
+        self.binding
+            .push_envelope_returning_root(recipient.0, kind.0, bytes, 1, None, None)
+    }
 }
 
 impl<'a> Sender for NativeCtx<'a> {

@@ -1180,6 +1180,7 @@ fn boot_passives(
     // the router closure without touching the Mailer's surface.
     let settlement_registry: Arc<crate::chassis::settlement::SettlementRegistry> =
         Arc::new(crate::chassis::settlement::SettlementRegistry::new());
+    mailer.install_settlement_registry(Arc::clone(&settlement_registry));
     let registry_for_router = Arc::clone(&settlement_registry);
     let settled_kind = <aether_kinds::trace::Settled as aether_data::Kind>::ID;
     mailer.install_chassis_router(Box::new(move |mail| {
