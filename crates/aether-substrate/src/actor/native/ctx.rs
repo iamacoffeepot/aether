@@ -282,7 +282,7 @@ impl<'a> NativeCtx<'a> {
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound
     /// mail from this ctx's in-flight context. `MailId::NONE` collapses
     /// to `None` (chassis-root or close/init ctx).
-    fn outbound_parent(&self) -> Option<MailId> {
+    pub(crate) fn outbound_parent(&self) -> Option<MailId> {
         if self.in_flight_mail_id == MailId::NONE {
             None
         } else {
@@ -294,7 +294,7 @@ impl<'a> NativeCtx<'a> {
     /// mail from this ctx's in-flight context. `MailId::NONE` collapses
     /// to `None`, in which case `NativeBinding::send_mail_with_lineage`
     /// mints a fresh root from the outbound's own `mail_id`.
-    fn outbound_root(&self) -> Option<MailId> {
+    pub(crate) fn outbound_root(&self) -> Option<MailId> {
         if self.in_flight_root == MailId::NONE {
             None
         } else {
