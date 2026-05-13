@@ -380,6 +380,34 @@ impl NativeBinding {
         parent_mail: Option<MailId>,
         inherited_root: Option<MailId>,
     ) -> u32 {
+        let _ = self.push_envelope_returning_root(
+            recipient,
+            kind,
+            bytes,
+            count,
+            parent_mail,
+            inherited_root,
+        );
+        0
+    }
+
+    /// Like [`Self::send_mail_with_lineage`] but returns the minted
+    /// `MailId` (== the new root when `inherited_root.is_none()`) so the
+    /// caller can subscribe to its settlement via the chassis
+    /// [`crate::chassis::settlement::SettlementRegistry`].
+    ///
+    /// Same semantics as the `u32`-returning variant; the success-path
+    /// `0` was vestigial at this layer (channel-send failures collapse to
+    /// the same scalar).
+    pub fn push_envelope_returning_root(
+        &self,
+        recipient: u64,
+        kind: u64,
+        bytes: &[u8],
+        count: u32,
+        parent_mail: Option<MailId>,
+        inherited_root: Option<MailId>,
+    ) -> MailId {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let recipient_id = MailboxId(recipient);
         let reply_to =
@@ -416,7 +444,7 @@ impl NativeBinding {
             pending.insert(correlation, recipient_id);
         }
         self.mailer.push(mail);
-        0
+        mail_id
     }
 
     /// Block this actor's thread until a mail of `expected_kind`

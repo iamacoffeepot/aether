@@ -32,9 +32,9 @@
 //! memory bounded.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use aether_data::MailId;
+use aether_data::{KindId, MailId, MailboxId};
 use crossbeam_channel::{Receiver, Sender, bounded};
 
 /// Chassis-owned settlement notification registry. Owned by the
@@ -53,11 +53,26 @@ struct Inner {
     /// (lifecycle gates + the per-frame drain barrier might both
     /// listen on the same Tick root).
     pending: HashMap<MailId, Vec<Sender<()>>>,
+    /// Mail subscriptions. On `fire_settled(root)`, push a mail of
+    /// `kind` to `target` via `mailer`. Coexists with `pending` — a
+    /// root can have both channel and mail subscribers; both fire on
+    /// `fire_settled`.
+    pending_mail: HashMap<MailId, Vec<MailSubscription>>,
     /// Roots that have already settled at least once. Subscribing to
     /// one pre-fires the receiver. Grows unboundedly within a
     /// chassis lifetime; v1 accepts the bound (chassis tear-down
     /// reclaims).
     settled: HashSet<MailId>,
+}
+
+/// One mail subscription parked on a root pending settlement. On
+/// `fire_settled`, the registry pushes a [`crate::mail::Mail`] of
+/// `kind` to `target` via `mailer` with the settled root postcard-
+/// encoded as the payload.
+struct MailSubscription {
+    target: MailboxId,
+    kind: KindId,
+    mailer: Arc<crate::mail::mailer::Mailer>,
 }
 
 impl SettlementRegistry {
@@ -93,6 +108,40 @@ impl SettlementRegistry {
         rx
     }
 
+    /// Subscribe a mailbox to receive a notification mail when `root`
+    /// settles. The notification is a [`crate::mail::Mail`] with the
+    /// given `kind`, the [`MailId`] of the settled root postcard-encoded
+    /// as payload, and `count = 1`. Pre-fires immediately (synchronously
+    /// pushes the mail) if `root` has already settled at least once.
+    ///
+    /// Coexists with [`Self::subscribe_settlement`] — a root can have
+    /// channel and mail subscribers; both fire on `fire_settled`.
+    pub fn subscribe_settlement_mail(
+        &self,
+        root: MailId,
+        target: MailboxId,
+        kind: KindId,
+        mailer: Arc<crate::mail::mailer::Mailer>,
+    ) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.settled.contains(&root) {
+            // Drop the mutex before pushing — `push` may run hot
+            // (resolves the recipient inline on this thread).
+            drop(inner);
+            push_settlement_notice(&mailer, target, kind, root);
+        } else {
+            inner
+                .pending_mail
+                .entry(root)
+                .or_default()
+                .push(MailSubscription {
+                    target,
+                    kind,
+                    mailer,
+                });
+        }
+    }
+
     /// Fire the settlement signal for `root`. Wakes every subscriber
     /// currently registered for `root` and records the root in the
     /// `settled` set so subsequent [`Self::subscribe_settlement`]
@@ -104,6 +153,14 @@ impl SettlementRegistry {
         if let Some(subs) = inner.pending.remove(&root) {
             for tx in subs {
                 let _ = tx.try_send(());
+            }
+        }
+        if let Some(subs) = inner.pending_mail.remove(&root) {
+            // Drop the mutex before pushing — `push` may run hot
+            // (resolves the recipient inline on this thread).
+            drop(inner);
+            for sub in subs {
+                push_settlement_notice(&sub.mailer, sub.target, sub.kind, root);
             }
         }
     }
@@ -128,17 +185,93 @@ impl SettlementRegistry {
     fn settled_count(&self) -> usize {
         self.inner.lock().unwrap().settled.len()
     }
+
+    /// Test introspection: count of pending mail subscribers across all
+    /// roots.
+    #[cfg(test)]
+    fn pending_mail_count(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap()
+            .pending_mail
+            .values()
+            .map(Vec::len)
+            .sum()
+    }
+}
+
+/// Push a settlement-notice mail to `target` via `mailer`. The payload
+/// is the postcard-encoded settled-root [`MailId`]; on encode failure
+/// the notification is dropped (logged at error) — `MailId` is a small
+/// `repr(C)` postcard-shaped struct, so encode failure here is a "this
+/// should never happen" path rather than a recoverable condition.
+fn push_settlement_notice(
+    mailer: &crate::mail::mailer::Mailer,
+    target: MailboxId,
+    kind: KindId,
+    root: MailId,
+) {
+    let payload = match postcard::to_allocvec(&root) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(
+                target: "aether_substrate::settlement",
+                error = %e,
+                "settlement registry: postcard encode of MailId failed; notification dropped"
+            );
+            return;
+        }
+    };
+    mailer.push(crate::mail::Mail::new(target, kind, payload, 1));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handle_store::HandleStore;
+    use crate::mail::mailer::Mailer;
+    use crate::mail::registry::{MailDispatch, Registry};
+    use std::sync::Mutex as StdMutex;
 
     fn root(sender: u64, cid: u64) -> MailId {
         MailId {
             sender: aether_data::MailboxId(sender),
             correlation_id: cid,
         }
+    }
+
+    /// One captured dispatch — what the test asserts against.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CapturedDispatch {
+        kind: KindId,
+        payload: Vec<u8>,
+        count: u32,
+    }
+
+    /// Build a fresh `Mailer` backed by a registry + handle store
+    /// pair. Registers a closure-bound sink under `sink_name` that
+    /// captures the dispatched mails into a shared buffer the test
+    /// asserts against. Returns the mailer, the registered sink's
+    /// mailbox id, and the buffer.
+    fn fresh_mailer_with_sink(
+        sink_name: &str,
+    ) -> (Arc<Mailer>, MailboxId, Arc<StdMutex<Vec<CapturedDispatch>>>) {
+        let registry = Arc::new(Registry::new());
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
+        let captured: Arc<StdMutex<Vec<CapturedDispatch>>> = Arc::new(StdMutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        let target = registry.register_closure(
+            sink_name,
+            Arc::new(move |dispatch: MailDispatch<'_>| {
+                captured_clone.lock().unwrap().push(CapturedDispatch {
+                    kind: dispatch.kind,
+                    payload: dispatch.payload.to_vec(),
+                    count: dispatch.count,
+                });
+            }),
+        );
+        (mailer, target, captured)
     }
 
     #[test]
@@ -206,5 +339,151 @@ mod tests {
         assert!(rx2.try_recv().is_err());
         reg.fire_settled(r2);
         rx2.recv().expect("r2 wakes");
+    }
+
+    /// `subscribe_settlement_mail` then `fire_settled`: one mail is
+    /// pushed to the subscribed target with the expected `(kind,
+    /// payload-decodes-to-root)`.
+    #[test]
+    fn subscribe_mail_then_fire_pushes_notification() {
+        let reg = SettlementRegistry::new();
+        let (mailer, target, captured) = fresh_mailer_with_sink("test.settlement.subscribe_fire");
+        let r = root(1, 1);
+        let kind = KindId(0xABCD);
+
+        reg.subscribe_settlement_mail(r, target, kind, Arc::clone(&mailer));
+        assert_eq!(reg.pending_mail_count(), 1);
+        reg.fire_settled(r);
+        assert_eq!(reg.pending_mail_count(), 0);
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let mail = &captured[0];
+        assert_eq!(mail.kind, kind);
+        assert_eq!(mail.count, 1);
+        let decoded: MailId = postcard::from_bytes(&mail.payload).expect("decode MailId");
+        assert_eq!(decoded, r);
+    }
+
+    /// `fire_settled` first, then `subscribe_settlement_mail`: the
+    /// notification pre-fires synchronously.
+    #[test]
+    fn fire_then_subscribe_mail_pre_fires() {
+        let reg = SettlementRegistry::new();
+        let (mailer, target, captured) = fresh_mailer_with_sink("test.settlement.fire_subscribe");
+        let r = root(2, 4);
+        let kind = KindId(0x1234);
+
+        reg.fire_settled(r);
+        assert!(captured.lock().unwrap().is_empty());
+
+        reg.subscribe_settlement_mail(r, target, kind, Arc::clone(&mailer));
+        // Pre-fire path: no parked entry should remain.
+        assert_eq!(reg.pending_mail_count(), 0);
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].kind, kind);
+        let decoded: MailId = postcard::from_bytes(&captured[0].payload).expect("decode MailId");
+        assert_eq!(decoded, r);
+    }
+
+    /// Three mail subscribers on the same root all receive a
+    /// notification when `fire_settled` runs.
+    #[test]
+    fn multiple_mail_subscribers_all_receive() {
+        let reg = SettlementRegistry::new();
+        let (mailer, target, captured) = fresh_mailer_with_sink("test.settlement.multi");
+        let r = root(3, 9);
+        let kind = KindId(0x5555);
+
+        reg.subscribe_settlement_mail(r, target, kind, Arc::clone(&mailer));
+        reg.subscribe_settlement_mail(r, target, kind, Arc::clone(&mailer));
+        reg.subscribe_settlement_mail(r, target, kind, Arc::clone(&mailer));
+        assert_eq!(reg.pending_mail_count(), 3);
+
+        reg.fire_settled(r);
+        assert_eq!(reg.pending_mail_count(), 0);
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 3);
+        for entry in captured.iter() {
+            assert_eq!(entry.kind, kind);
+            let decoded: MailId = postcard::from_bytes(&entry.payload).expect("decode MailId");
+            assert_eq!(decoded, r);
+        }
+    }
+
+    /// A channel subscriber and a mail subscriber on the same root
+    /// both fire when `fire_settled` runs.
+    #[test]
+    fn channel_and_mail_subscribers_coexist() {
+        let reg = SettlementRegistry::new();
+        let (mailer, target, captured) = fresh_mailer_with_sink("test.settlement.coexist");
+        let r = root(4, 16);
+        let kind = KindId(0x7777);
+
+        let rx = reg.subscribe_settlement(r);
+        reg.subscribe_settlement_mail(r, target, kind, Arc::clone(&mailer));
+        assert_eq!(reg.pending_count(), 1);
+        assert_eq!(reg.pending_mail_count(), 1);
+
+        reg.fire_settled(r);
+        assert_eq!(reg.pending_count(), 0);
+        assert_eq!(reg.pending_mail_count(), 0);
+
+        rx.recv().expect("channel subscriber wakes");
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].kind, kind);
+    }
+
+    /// Mail subscribers on distinct roots fire independently — settling
+    /// r1 does not fire r2's mail subscription.
+    #[test]
+    fn distinct_roots_independent_for_mail() {
+        let reg = SettlementRegistry::new();
+        let (mailer, target, captured) = fresh_mailer_with_sink("test.settlement.distinct");
+        let r1 = root(5, 25);
+        let r2 = root(5, 36);
+        let kind = KindId(0x9999);
+
+        reg.subscribe_settlement_mail(r1, target, kind, Arc::clone(&mailer));
+        reg.subscribe_settlement_mail(r2, target, kind, Arc::clone(&mailer));
+        assert_eq!(reg.pending_mail_count(), 2);
+
+        reg.fire_settled(r1);
+        assert_eq!(reg.pending_mail_count(), 1);
+
+        let after_r1 = captured.lock().unwrap().clone();
+        assert_eq!(after_r1.len(), 1);
+        let decoded: MailId = postcard::from_bytes(&after_r1[0].payload).expect("decode MailId");
+        assert_eq!(decoded, r1);
+
+        reg.fire_settled(r2);
+        assert_eq!(reg.pending_mail_count(), 0);
+
+        let after_r2 = captured.lock().unwrap().clone();
+        assert_eq!(after_r2.len(), 2);
+        let decoded: MailId = postcard::from_bytes(&after_r2[1].payload).expect("decode MailId");
+        assert_eq!(decoded, r2);
+    }
+
+    /// The settlement-notice payload postcard-decodes back to the
+    /// subscribed root — direct check of the wire contract.
+    #[test]
+    fn mail_payload_decodes_to_root() {
+        let reg = SettlementRegistry::new();
+        let (mailer, target, captured) = fresh_mailer_with_sink("test.settlement.payload");
+        let r = root(7, 49);
+        let kind = KindId(0x4321);
+
+        reg.subscribe_settlement_mail(r, target, kind, Arc::clone(&mailer));
+        reg.fire_settled(r);
+
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let decoded: MailId = postcard::from_bytes(&captured[0].payload).expect("decode MailId");
+        assert_eq!(decoded, r);
     }
 }
