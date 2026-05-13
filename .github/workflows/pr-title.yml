@@ -25,6 +25,7 @@ jobs:
             ci
             style
             revert
+            flake
           requireScope: false
           subjectPattern: ^(?![A-Z]).+$
           subjectPatternError: |
