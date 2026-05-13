@@ -513,7 +513,20 @@ pub(crate) mod tests {
         slot.push(2);
         slot.state.try_wake();
 
-        assert_eq!(run_one_cycle(&slot), CycleResult::Idle);
+        // Both Idle and Requeue are legitimate per-cycle results under
+        // nextest CPU contention (see PR 747). The invariant is that both
+        // envelopes get dispatched and the slot eventually reaches Idle.
+        for _ in 0..8 {
+            match run_one_cycle(&slot) {
+                CycleResult::Idle | CycleResult::Requeue => {}
+                CycleResult::Closed => panic!("slot closed unexpectedly"),
+            }
+            if slot.dispatched() == 2 {
+                break;
+            }
+            slot.state.try_wake();
+        }
+
         assert_eq!(slot.dispatched(), 2);
         assert_eq!(slot.state.current(), SlotStateLabel::Idle);
     }
