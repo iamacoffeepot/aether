@@ -772,6 +772,191 @@ mod tests {
         assert_eq!(reply, WireFrame::Pong(0xc0ffee));
     }
 
+    /// End-to-end Call dispatch: connect, handshake, fire a `Call`
+    /// addressed at `aether.tcp`'s `BindListener` kind, observe a
+    /// `ReplyEvent { BindListenerResult::Ok }` followed by a
+    /// `ReplyEnd { Ok(()) }` when the chain settles. Exercises the
+    /// full dispatch / settlement / reply-interception path from
+    /// phase 2.
+    #[test]
+    fn call_bind_listener_round_trip_event_then_end() {
+        use crate::TcpCapability;
+        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use crate::trace::TraceObserverCapability;
+        use aether_actor::Actor;
+        use aether_data::{Kind, mailbox_id_from_name};
+        use aether_kinds::{BindListener, BindListenerResult};
+
+        let (registry, mailer) = fresh_substrate();
+        let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            // TraceObserver folds substrate-wide trace events into per-
+            // root counters and fires `Settled { root }` mail at the
+            // chassis-mailbox once a root drains. Without it,
+            // RpcServer's settlement subscription never wakes and
+            // the `Call` never produces a `ReplyEnd`.
+            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<TcpCapability>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: test_peer_kind(),
+            })
+            .build_passive()
+            .expect("caps boot");
+
+        let port = _chassis
+            .handle::<RpcServerHandle>()
+            .expect("RpcServerHandle published")
+            .local_port;
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // Handshake.
+        write_frame(
+            &mut stream,
+            &WireFrame::Hello(Hello {
+                wire_version: WIRE_VERSION,
+                peer: PeerKind::Client {
+                    client_name: "test-client".into(),
+                    client_version: "0.0.1".into(),
+                },
+            }),
+        )
+        .unwrap();
+        let _: WireFrame = read_frame(&mut stream).unwrap();
+
+        // Fire a Call against aether.tcp's BindListener kind. cid =
+        // 0xabc; the cap correlates and ends with ReplyEnd matching
+        // the same cid.
+        let bind_payload = postcard::to_allocvec(&BindListener {
+            addr: "127.0.0.1:0".into(),
+            name: None,
+        })
+        .unwrap();
+        let tcp_mailbox = mailbox_id_from_name(<TcpCapability as Actor>::NAMESPACE);
+        write_frame(
+            &mut stream,
+            &WireFrame::Call {
+                cid: Some(0xabc),
+                envelope: MailEnvelope {
+                    to: MailboxAddress::local(tcp_mailbox),
+                    from: None,
+                    kind: <BindListener as Kind>::ID,
+                    correlation_id: None,
+                    payload: bind_payload,
+                },
+            },
+        )
+        .unwrap();
+
+        // First frame back should be the ReplyEvent carrying the
+        // BindListenerResult::Ok variant.
+        let event: WireFrame = read_frame(&mut stream).expect("read ReplyEvent");
+        let envelope = match event {
+            WireFrame::ReplyEvent { cid, envelope } => {
+                assert_eq!(cid, 0xabc);
+                envelope
+            }
+            other => panic!("expected ReplyEvent, got {other:?}"),
+        };
+        assert_eq!(envelope.kind, <BindListenerResult as Kind>::ID);
+        let decoded: BindListenerResult =
+            postcard::from_bytes(&envelope.payload).expect("decode reply");
+        match decoded {
+            BindListenerResult::Ok { local_port, .. } => {
+                assert!(local_port > 0, "OS-picked listener port should be non-zero");
+            }
+            BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
+        }
+
+        // Then the ReplyEnd closes the call.
+        let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
+        match end {
+            WireFrame::ReplyEnd { cid, result } => {
+                assert_eq!(cid, 0xabc);
+                result.expect("ReplyEnd result Ok");
+            }
+            other => panic!("expected ReplyEnd, got {other:?}"),
+        }
+    }
+
+    /// Fire-and-forget `Call { cid: None }` skips reply correlation
+    /// entirely — no settlement subscription is created, no
+    /// `ReplyEnd` is written. Verify by sending a Call with cid None
+    /// against `aether.tcp`'s `ListListeners` (a no-op when empty)
+    /// and confirming a subsequent `Ping(token)` round-trips
+    /// immediately, which proves no stale ReplyEvent / ReplyEnd
+    /// frames are in the way.
+    #[test]
+    fn call_without_cid_is_fire_and_forget() {
+        use crate::TcpCapability;
+        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use aether_actor::Actor;
+        use aether_data::{Kind, mailbox_id_from_name};
+        use aether_kinds::ListListeners;
+
+        let (registry, mailer) = fresh_substrate();
+        let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TcpCapability>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: test_peer_kind(),
+            })
+            .build_passive()
+            .expect("caps boot");
+
+        let port = _chassis
+            .handle::<RpcServerHandle>()
+            .expect("RpcServerHandle published")
+            .local_port;
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        // Handshake.
+        write_frame(
+            &mut stream,
+            &WireFrame::Hello(Hello {
+                wire_version: WIRE_VERSION,
+                peer: PeerKind::Client {
+                    client_name: "test-client".into(),
+                    client_version: "0.0.1".into(),
+                },
+            }),
+        )
+        .unwrap();
+        let _: WireFrame = read_frame(&mut stream).unwrap();
+
+        // Fire-and-forget Call (cid = None).
+        let list_payload = postcard::to_allocvec(&ListListeners::default()).unwrap();
+        let tcp_mailbox = mailbox_id_from_name(<TcpCapability as Actor>::NAMESPACE);
+        write_frame(
+            &mut stream,
+            &WireFrame::Call {
+                cid: None,
+                envelope: MailEnvelope {
+                    to: MailboxAddress::local(tcp_mailbox),
+                    from: None,
+                    kind: <ListListeners as Kind>::ID,
+                    correlation_id: None,
+                    payload: list_payload,
+                },
+            },
+        )
+        .unwrap();
+
+        // Immediately Ping. If the fire-and-forget Call had leaked
+        // reply correlation, a ReplyEvent / ReplyEnd would arrive
+        // before the Pong. Asserting we see Pong first proves no leak.
+        write_frame(&mut stream, &WireFrame::Ping(0xc0ffee)).unwrap();
+        let reply: WireFrame = read_frame(&mut stream).expect("read Pong");
+        assert_eq!(reply, WireFrame::Pong(0xc0ffee));
+    }
+
     /// A `Hello` carrying a mismatched `wire_version` triggers a `Bye`
     /// and connection close on the server side.
     #[test]
