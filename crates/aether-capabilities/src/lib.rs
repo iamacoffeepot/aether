@@ -36,6 +36,7 @@ pub mod input;
 pub mod log;
 #[cfg(feature = "render")]
 pub mod render;
+pub mod rpc;
 pub mod tcp;
 pub mod test_bench;
 pub mod trace;

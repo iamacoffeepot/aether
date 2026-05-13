@@ -26,7 +26,7 @@ use aether_actor::mail::sync::WaitError;
 use aether_actor::{Actor, HandlesKind, MailCtx, Sender, Singleton};
 
 use crate::actor::native::mailbox::NativeActorMailbox;
-use aether_data::{Kind, MailId, MailboxId, mailbox_id_from_name};
+use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
 
 use crate::actor::monitor::MonitorHandle;
 use crate::actor::native::binding::NativeBinding;
@@ -338,6 +338,44 @@ impl<'a> NativeCtx<'a> {
             self.binding
                 .send_mail_with_lineage(recipient.0, kind, &bytes, 1, parent, root);
         }
+    }
+
+    /// Untyped sibling of [`NativeActorMailbox::send_traced`]: dispatch
+    /// an already-encoded mail payload with runtime `recipient` /
+    /// `kind` ids and return the minted [`MailId`] for settlement
+    /// subscription.
+    ///
+    /// Issue 750: the typed `send_traced` path is gated on
+    /// `R: HandlesKind<K>`, which requires the kind and receiver to be
+    /// known at compile site. Endpoints that route mail with runtime
+    /// ids (the RPC server forwarding `Call.envelope` from the wire is
+    /// the motivating case) have neither — they hold a `MailboxId` +
+    /// `KindId` + opaque payload bytes. This method is the escape
+    /// hatch: skips the type-system check, dispatches the raw bytes
+    /// through the same lineage-aware path the typed helpers go
+    /// through.
+    ///
+    /// When `ctx` represents a chassis-root edge (`in_flight_mail_id`
+    /// is `NONE`) the returned id is the root of a fresh causal chain;
+    /// when mid-handler, the returned id is the new mail's id inside
+    /// the inherited chain. Settlement subscription against a mid-
+    /// handler return only fires on settlement of *that mail's*
+    /// descendants, not the whole chain — callers wanting chain-root
+    /// settlement should be at chassis-root.
+    ///
+    /// No untraced counterpart at this layer — callers reaching for
+    /// untyped dispatch always want the returned `MailId`. The typed
+    /// `send` / `send_many` on `NativeActorMailbox` cover the
+    /// fire-and-forget case.
+    pub fn send_envelope_traced(&self, recipient: MailboxId, kind: KindId, bytes: &[u8]) -> MailId {
+        self.binding.push_envelope_returning_root(
+            recipient.0,
+            kind.0,
+            bytes,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+        )
     }
 }
 
