@@ -83,6 +83,7 @@ name = "aether-capabilities"
 version = "0.2.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-codec",
  "aether-data",
  "aether-kinds",
  "aether-substrate",
