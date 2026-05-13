@@ -16,9 +16,10 @@
 use core::marker::PhantomData;
 
 use aether_actor::{Actor, HandlesKind};
-use aether_data::Kind;
+use aether_data::{Kind, MailId};
 
 use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::ctx::NativeCtx;
 
 /// Phantom-typed receiver-actor handle for native callers. Carries a
 /// borrow of the sender's [`NativeBinding`] so `send` /
@@ -83,5 +84,39 @@ impl<'a, R: Actor> NativeActorMailbox<'a, R> {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         self.binding
             .send_mail(self.mailbox, K::ID.0, bytes, payloads.len() as u32);
+    }
+
+    /// ADR-0080: like [`Self::send`] but returns the minted `MailId`
+    /// so the caller can subscribe to its settlement via the chassis
+    /// [`crate::chassis::settlement::SettlementRegistry`].
+    ///
+    /// Uses this mailbox's stored per-instance id, so settlement
+    /// subscription works uniformly for singleton actors
+    /// (`ctx.actor::<R>()`) and instanced actors like wasm trampolines
+    /// (`ctx.resolve_actor::<R>(name)`). The compile-time
+    /// `R: HandlesKind<K>` gate is the same as [`Self::send`].
+    ///
+    /// When `ctx` represents a chassis-root edge (in-flight `MailId`
+    /// is `NONE`), the returned id is itself the root of a fresh
+    /// causal chain. When `ctx` is mid-handler, the returned id is
+    /// the new mail's id inside the inherited root chain —
+    /// subscribing to it would only fire on settlement of *that
+    /// mail's* descendants, not the whole chain. Callers that want
+    /// chain-root settlement should be at chassis-root (typical for
+    /// capability-init / external-event entry points).
+    pub fn send_traced<K>(&self, ctx: &NativeCtx<'_>, payload: &K) -> MailId
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        self.binding.push_envelope_returning_root(
+            self.mailbox,
+            K::ID.0,
+            &bytes,
+            1,
+            ctx.outbound_parent(),
+            ctx.outbound_root(),
+        )
     }
 }

@@ -1,14 +1,21 @@
 //! ADR-0080 §6 settlement registry — chassis-side gate-notification
 //! map for `Settled { root }` mail.
 //!
-//! Subscribers (lifecycle gates, the per-frame Tick drain, the
-//! `replace_component` drain — landing in PR 4) call
-//! [`SettlementRegistry::subscribe_settlement`] with the root
-//! `MailId` of the causal chain they want to wait on. They get a
-//! `crossbeam_channel::Receiver<()>` that fires when the
-//! [`crate::actor::native`] dispatcher routes a `Settled { root }`
-//! mail addressed to [`aether_data::MailboxId::CHASSIS_MAILBOX_ID`]
-//! through the registry's [`SettlementRegistry::fire_settled`] hook.
+//! Two subscriber shapes share one pending map (keyed on root
+//! [`MailId`]):
+//!
+//! - [`SettlementRegistry::subscribe_settlement`] returns a
+//!   `crossbeam_channel::Receiver<()>` for in-thread waiters
+//!   (chassis-internal code, tests) that can block on `recv` directly.
+//! - [`SettlementRegistry::subscribe_settlement_mail`] pushes a
+//!   notification mail to a target mailbox when the root settles —
+//!   for actors whose thread is committed to its mpsc inbox and
+//!   can't block on a separate channel without per-cid helper threads.
+//!
+//! Both fire when the [`crate::actor::native`] dispatcher routes a
+//! `Settled { root }` mail addressed to
+//! [`aether_data::MailboxId::CHASSIS_MAILBOX_ID`] through the
+//! registry's [`SettlementRegistry::fire_settled`] hook.
 //!
 //! ADR-0080 §6 framing: settlement is eventually-consistent, not
 //! transactional. Two races are handled here:
@@ -51,13 +58,10 @@ struct Inner {
     /// Subscribers waiting on each root's settlement signal. Vec so
     /// multiple gate sites can wait on the same root concurrently
     /// (lifecycle gates + the per-frame drain barrier might both
-    /// listen on the same Tick root).
-    pending: HashMap<MailId, Vec<Sender<()>>>,
-    /// Mail subscriptions. On `fire_settled(root)`, push a mail of
-    /// `kind` to `target` via `mailer`. Coexists with `pending` — a
-    /// root can have both channel and mail subscribers; both fire on
-    /// `fire_settled`.
-    pending_mail: HashMap<MailId, Vec<MailSubscription>>,
+    /// listen on the same Tick root). Channel and mail subscribers
+    /// coexist in the same vec, distinguished by [`SettlementSubscriber`]
+    /// variant — one map, one drain.
+    pending: HashMap<MailId, Vec<SettlementSubscriber>>,
     /// Roots that have already settled at least once. Subscribing to
     /// one pre-fires the receiver. Grows unboundedly within a
     /// chassis lifetime; v1 accepts the bound (chassis tear-down
@@ -65,14 +69,42 @@ struct Inner {
     settled: HashSet<MailId>,
 }
 
-/// One mail subscription parked on a root pending settlement. On
-/// `fire_settled`, the registry pushes a [`crate::mail::Mail`] of
-/// `kind` to `target` via `mailer` with the settled root postcard-
-/// encoded as the payload.
-struct MailSubscription {
-    target: MailboxId,
-    kind: KindId,
-    mailer: Arc<crate::mail::mailer::Mailer>,
+/// One subscriber parked on a root pending settlement. Channel
+/// subscribers are for in-thread waiters (chassis-internal code, tests)
+/// that block on `Receiver<()>`; mail subscribers are for actors whose
+/// thread is committed to its mpsc inbox and can't block on a separate
+/// channel without per-cid helper threads.
+enum SettlementSubscriber {
+    /// Wake an in-thread waiter on a `bounded(1)` channel.
+    Channel(Sender<()>),
+    /// Push a notification mail to `target` via `mailer` with the
+    /// settled root postcard-encoded as the payload.
+    Mail {
+        target: MailboxId,
+        kind: KindId,
+        mailer: Arc<crate::mail::mailer::Mailer>,
+    },
+}
+
+impl SettlementSubscriber {
+    /// Fire this subscriber for the settled `root`. Channel sends are
+    /// non-blocking (`try_send`, so a closed receiver doesn't panic);
+    /// mail sends go through the chassis [`crate::mail::mailer::Mailer`]
+    /// which resolves the recipient inline on the firing thread.
+    fn fire(self, root: MailId) {
+        match self {
+            SettlementSubscriber::Channel(tx) => {
+                let _ = tx.try_send(());
+            }
+            SettlementSubscriber::Mail {
+                target,
+                kind,
+                mailer,
+            } => {
+                push_settlement_notice(&mailer, target, kind, root);
+            }
+        }
+    }
 }
 
 impl SettlementRegistry {
@@ -103,7 +135,11 @@ impl SettlementRegistry {
             // before reading) doesn't panic.
             let _ = tx.try_send(());
         } else {
-            inner.pending.entry(root).or_default().push(tx);
+            inner
+                .pending
+                .entry(root)
+                .or_default()
+                .push(SettlementSubscriber::Channel(tx));
         }
         rx
     }
@@ -131,10 +167,10 @@ impl SettlementRegistry {
             push_settlement_notice(&mailer, target, kind, root);
         } else {
             inner
-                .pending_mail
+                .pending
                 .entry(root)
                 .or_default()
-                .push(MailSubscription {
+                .push(SettlementSubscriber::Mail {
                     target,
                     kind,
                     mailer,
@@ -148,26 +184,26 @@ impl SettlementRegistry {
     /// calls pre-fire. Idempotent: calling twice is the same as
     /// calling once for any waiter that already woke.
     pub fn fire_settled(&self, root: MailId) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.settled.insert(root);
-        if let Some(subs) = inner.pending.remove(&root) {
-            for tx in subs {
-                let _ = tx.try_send(());
-            }
-        }
-        if let Some(subs) = inner.pending_mail.remove(&root) {
-            // Drop the mutex before pushing — `push` may run hot
-            // (resolves the recipient inline on this thread).
-            drop(inner);
+        // Drop the mutex before firing — mail subscribers resolve
+        // the recipient inline on this thread, and channel sends are
+        // cheap but uniformly drop-then-fire keeps the lock window
+        // tight and removes a re-entrancy hazard if a future
+        // subscriber type re-enters the registry.
+        let subs = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.settled.insert(root);
+            inner.pending.remove(&root)
+        };
+        if let Some(subs) = subs {
             for sub in subs {
-                push_settlement_notice(&sub.mailer, sub.target, sub.kind, root);
+                sub.fire(root);
             }
         }
     }
 
-    /// Test introspection: count of pending subscribers across all
-    /// roots. Used by the unit tests in this module; production code
-    /// queries via mail (subscribe + recv).
+    /// Test introspection: count of pending channel subscribers
+    /// across all roots. Used by the unit tests in this module;
+    /// production code queries via mail (subscribe + recv).
     #[cfg(test)]
     fn pending_count(&self) -> usize {
         self.inner
@@ -175,8 +211,9 @@ impl SettlementRegistry {
             .unwrap()
             .pending
             .values()
-            .map(Vec::len)
-            .sum()
+            .flat_map(|v| v.iter())
+            .filter(|s| matches!(s, SettlementSubscriber::Channel(_)))
+            .count()
     }
 
     /// Test introspection: count of roots recorded as already
@@ -193,10 +230,11 @@ impl SettlementRegistry {
         self.inner
             .lock()
             .unwrap()
-            .pending_mail
+            .pending
             .values()
-            .map(Vec::len)
-            .sum()
+            .flat_map(|v| v.iter())
+            .filter(|s| matches!(s, SettlementSubscriber::Mail { .. }))
+            .count()
     }
 }
 

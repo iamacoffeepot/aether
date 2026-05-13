@@ -282,7 +282,7 @@ impl<'a> NativeCtx<'a> {
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound
     /// mail from this ctx's in-flight context. `MailId::NONE` collapses
     /// to `None` (chassis-root or close/init ctx).
-    fn outbound_parent(&self) -> Option<MailId> {
+    pub(crate) fn outbound_parent(&self) -> Option<MailId> {
         if self.in_flight_mail_id == MailId::NONE {
             None
         } else {
@@ -294,7 +294,7 @@ impl<'a> NativeCtx<'a> {
     /// mail from this ctx's in-flight context. `MailId::NONE` collapses
     /// to `None`, in which case `NativeBinding::send_mail_with_lineage`
     /// mints a fresh root from the outbound's own `mail_id`.
-    fn outbound_root(&self) -> Option<MailId> {
+    pub(crate) fn outbound_root(&self) -> Option<MailId> {
         if self.in_flight_root == MailId::NONE {
             None
         } else {
@@ -338,33 +338,6 @@ impl<'a> NativeCtx<'a> {
             self.binding
                 .send_mail_with_lineage(recipient.0, kind, &bytes, 1, parent, root);
         }
-    }
-
-    /// ADR-0080: like [`Sender::send`] but returns the minted `MailId` so
-    /// the caller can subscribe to its settlement via the chassis
-    /// [`crate::chassis::settlement::SettlementRegistry`].
-    ///
-    /// When this ctx represents a chassis-root edge (in-flight `MailId` is
-    /// `NONE`), the returned id is itself the root of a fresh causal chain.
-    /// When this ctx is mid-handler, the returned id is the new mail's id
-    /// inside the inherited root chain — subscribing to it would only fire
-    /// on settlement of *that mail's* descendants, not the whole chain.
-    /// Callers that want chain-root settlement should be at chassis-root
-    /// (typical for capability-init / external-event entry points).
-    pub fn send_envelope_traced<R, K>(&mut self, payload: &K) -> MailId
-    where
-        R: Actor + HandlesKind<K>,
-        K: Kind,
-    {
-        let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_returning_root(
-            mailbox_id_from_name(R::NAMESPACE).0,
-            K::ID.0,
-            &bytes,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
-        )
     }
 }
 
