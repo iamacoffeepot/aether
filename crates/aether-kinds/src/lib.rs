@@ -479,6 +479,7 @@ pub struct MonitorNotice {
 // components anyway).
 
 pub use control_plane::*;
+pub use engine::*;
 pub use rpc::*;
 pub use tcp::*;
 
@@ -695,6 +696,33 @@ mod rpc {
     )]
     #[kind(name = "aether.rpc.inbound_ready")]
     pub struct RpcInboundReady {}
+}
+
+mod engine {
+    use alloc::vec::Vec;
+
+    use serde::{Deserialize, Serialize};
+
+    /// `aether.engine.forward` — hand a per-engine proxy
+    /// (`aether.engine.proxy:<id>`) one mail to relay to its substrate
+    /// over the proxy's outbound RPC connection. Issue 763 P3.
+    ///
+    /// Carries the *remote* target explicitly: a plain mail to the
+    /// proxy is only `kind` + `payload` — it can't say *which mailbox
+    /// on the substrate* to deliver to. `ForwardEnvelope` is that
+    /// carrier. The proxy wraps `mailbox` + `kind` + the already-encoded
+    /// `payload` into an RPC `Call`; the substrate's
+    /// `RpcServerCapability` dispatches it into its local actor system.
+    /// Any reply streams back through the proxy and routes to whoever
+    /// sent this `ForwardEnvelope` — the proxy keys reply correlation
+    /// off the inbound mail's `ReplyTo`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.forward")]
+    pub struct ForwardEnvelope {
+        pub mailbox: aether_data::MailboxId,
+        pub kind: aether_data::KindId,
+        pub payload: Vec<u8>,
+    }
 }
 
 mod control_plane {
