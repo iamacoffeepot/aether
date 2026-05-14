@@ -13,9 +13,11 @@
 //! deleted as a kind in Phase 4 — no replacement, no MCP path until
 //! issue 603 §F2 revives the per-domain shape.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     BroadcastCapability, ComponentHostCapability, ComponentHostConfig, FsCapability,
     HandleCapability, HeadlessRenderCapability, HeadlessWindowCapability, HttpCapability,
@@ -54,6 +56,10 @@ pub struct HeadlessEnv {
     pub namespace_roots: NamespaceRoots,
     pub http: HttpConf,
     pub tick_period: Duration,
+    /// Issue 763 P2: optional `aether.rpc.server` bind address.
+    /// Populated from `AETHER_RPC_PORT`; `None` (default) skips booting
+    /// `RpcServerCapability` so existing chassis behavior is unchanged.
+    pub rpc_addr: Option<SocketAddr>,
 }
 
 impl HeadlessEnv {
@@ -62,16 +68,24 @@ impl HeadlessEnv {
     /// issue 464). Tests bypass this by constructing `HeadlessEnv`
     /// directly.
     pub fn from_env() -> Self {
+        use std::net::{IpAddr, Ipv4Addr};
         let hub_url = std::env::var("AETHER_HUB_URL").ok();
         let http = HttpConf::from_env();
         let namespace_roots = NamespaceRoots::from_env();
         let tick_hz = parse_tick_hz_env();
         let tick_period = Duration::from_nanos(1_000_000_000 / u64::from(tick_hz));
+        // `AETHER_RPC_PORT` has no default — absent means RpcServer
+        // doesn't boot. Binds `127.0.0.1`, matching the hub chassis.
+        let rpc_addr = std::env::var("AETHER_RPC_PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         HeadlessEnv {
             hub_url,
             namespace_roots,
             http,
             tick_period,
+            rpc_addr,
         }
     }
 }
@@ -90,6 +104,7 @@ impl HeadlessChassis {
             namespace_roots,
             http,
             tick_period,
+            rpc_addr,
         } = env;
 
         let boot = SubstrateBoot::builder("headless", env!("CARGO_PKG_VERSION")).build()?;
@@ -167,7 +182,7 @@ impl HeadlessChassis {
         // chassis_builder `.with()` chain. Boot order is declaration
         // order — log first so other capabilities' boot tracing routes
         // through the log capture.
-        Builder::<HeadlessChassis>::new(registry, Arc::clone(&mailer))
+        let mut builder = Builder::<HeadlessChassis>::new(registry, Arc::clone(&mailer))
             .with_aborter(aborter)
             .with_actor::<BroadcastCapability>(())
             .with_actor::<HandleCapability>(())
@@ -180,7 +195,21 @@ impl HeadlessChassis {
             .with_actor::<TcpCapability>(())
             .with_actor::<HeadlessRenderCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
-            .with_actor::<UnsupportedTestBenchCapability>(())
+            .with_actor::<UnsupportedTestBenchCapability>(());
+        // Issue 763 P2: boot the RPC server only when `AETHER_RPC_PORT`
+        // is set, mirroring the hub chassis. The substrate becomes an
+        // RPC server peer that a hub (or any client) connects out to.
+        if let Some(rpc_addr) = rpc_addr {
+            builder = builder.with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: rpc_addr.to_string(),
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "aether-headless".into(),
+                    engine_version: env!("CARGO_PKG_VERSION").into(),
+                    kinds: vec![],
+                },
+            });
+        }
+        builder
             .with_log_drain::<LogCapability>()
             .driver(driver)
             .build()
