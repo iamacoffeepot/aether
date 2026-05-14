@@ -49,10 +49,12 @@ pub use proxy_native::EngineProxyConfig;
 mod proxy_native {
     use super::{ForwardEnvelope, RpcInboundReady, TerminateEngine};
     use crate::rpc::{
-        MailEnvelope, MailboxAddress, PeerKind, RpcClient, RpcClientError, RpcConnection, WireFrame,
+        MailEnvelope, MailboxAddress, PeerKind, RpcClient, RpcClientError, RpcConnection, RpcError,
+        WireFrame,
     };
     use aether_actor::actor;
     use aether_data::{EngineId, Kind, KindId};
+    use aether_kinds::CallSettled;
     use aether_substrate::Mail;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
@@ -206,9 +208,7 @@ mod proxy_native {
             while let Ok(frame) = self.conn.inbound.try_recv() {
                 match frame {
                     WireFrame::ReplyEvent { cid, envelope } => self.route_reply(cid, envelope),
-                    WireFrame::ReplyEnd { cid, .. } => {
-                        self.in_flight.remove(&cid);
-                    }
+                    WireFrame::ReplyEnd { cid, result } => self.route_settled(cid, result),
                     WireFrame::Bye { reason } => {
                         tracing::info!(
                             target: "aether_substrate::engine_proxy",
@@ -352,6 +352,47 @@ mod proxy_native {
                 Mail::new(target, envelope.kind, envelope.payload, 1).with_reply_to(
                     ReplyTo::with_correlation(ReplyTarget::None, reply_to.correlation_id),
                 ),
+            );
+        }
+
+        /// Lift the substrate's terminal `ReplyEnd` for `cid` into a
+        /// [`CallSettled`] mail back to whoever opened the call, then
+        /// clear the in-flight entry. Mirrors [`Self::route_reply`]'s
+        /// correlation handling — a forwarded call has no local chain
+        /// to settle, so this explicit terminal signal is how the
+        /// originating `RpcServerCapability` learns to close its wire
+        /// call. The wire `RpcError` is rendered to a string; the
+        /// `aether-kinds` layer can't carry the structured variant.
+        fn route_settled(&mut self, cid: u64, result: Result<(), RpcError>) {
+            let Some(reply_to) = self.in_flight.remove(&cid) else {
+                tracing::debug!(
+                    target: "aether_substrate::engine_proxy",
+                    engine_id = ?self.engine_id,
+                    cid,
+                    "engine proxy: ReplyEnd with no matching in-flight forward; dropping",
+                );
+                return;
+            };
+            let ReplyTarget::Component(target) = reply_to.target else {
+                return;
+            };
+            let settled = match result {
+                Ok(()) => CallSettled::Ok,
+                Err(e) => CallSettled::Err {
+                    error: format!("{e:?}"),
+                },
+            };
+            self.mailer.push(
+                Mail::new(
+                    target,
+                    <CallSettled as Kind>::ID,
+                    settled.encode_into_bytes(),
+                    1,
+                )
+                .with_reply_to(ReplyTo::with_correlation(
+                    ReplyTarget::None,
+                    reply_to.correlation_id,
+                )),
             );
         }
     }

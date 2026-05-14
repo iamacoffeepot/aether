@@ -806,6 +806,49 @@ mod engine {
         Ok,
         Err { error: String },
     }
+
+    /// `aether.engine.route` — ask the engines cap (`aether.engine`) to
+    /// relay one mail to a *specific* engine's substrate. Issue 763 P5a.
+    ///
+    /// The engine-addressed sibling of [`ForwardEnvelope`]: where
+    /// `ForwardEnvelope` already names a proxy and only needs the
+    /// substrate-local `mailbox` + `kind` + `payload`, `RouteEnvelope`
+    /// also carries the `engine_id`, because the sender (the hub's
+    /// `RpcServerCapability`, relaying an `engine = Some(_)` wire
+    /// `Call`) doesn't know which proxy hosts that engine. The engines
+    /// cap looks the engine up in its table and re-emits a
+    /// `ForwardEnvelope` at the right `aether.engine.proxy:<id>`,
+    /// propagating the original reply-to so the substrate's reply
+    /// streams back to the originating `RpcServerCapability`.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.route")]
+    pub struct RouteEnvelope {
+        pub engine_id: String,
+        pub mailbox: aether_data::MailboxId,
+        pub kind: aether_data::KindId,
+        pub payload: Vec<u8>,
+    }
+
+    /// `aether.engine.call_settled` — a per-engine proxy's signal that
+    /// a forwarded RPC call has run to completion. Issue 763 P5a.
+    ///
+    /// When the proxy relays a [`ForwardEnvelope`] as an RPC `Call`,
+    /// the substrate eventually answers with a wire `ReplyEnd`. The
+    /// proxy lifts that terminal frame into this kind and pushes it
+    /// back to whoever opened the call (correlation preserved) — the
+    /// hub's `RpcServerCapability` matches it to the in-flight wire
+    /// call and writes its own `ReplyEnd` to the RPC client. (Local,
+    /// non-forwarded calls close on chassis settlement instead; a
+    /// forwarded call has no local chain to settle, so it needs this
+    /// explicit terminal signal.) `Err` carries the wire `RpcError`
+    /// rendered as a string — the structured variant doesn't survive
+    /// the `aether-kinds` layer, which can't depend on the RPC crate.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.call_settled")]
+    pub enum CallSettled {
+        Ok,
+        Err { error: String },
+    }
 }
 
 mod control_plane {

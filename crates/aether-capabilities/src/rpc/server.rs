@@ -36,7 +36,8 @@ mod server_native {
     };
     use aether_actor::actor;
     use aether_codec::frame::{read_frame, write_frame};
-    use aether_data::{Kind, KindId, MailId, MailboxId};
+    use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
+    use aether_kinds::{CallSettled, RouteEnvelope};
     use aether_substrate::Mail;
     use aether_substrate::actor::native::envelope::Envelope;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -322,6 +323,31 @@ mod server_native {
                 );
                 return;
             };
+
+            // A forwarded engine call (issue 763 P5a) closes when its
+            // proxy lifts the substrate's terminal `ReplyEnd` into a
+            // `CallSettled` — there's no local chain for `on_settled`
+            // to catch. Recognize it here, write the wire `ReplyEnd`,
+            // and clear the in-flight entry.
+            if env.kind == <CallSettled as Kind>::ID {
+                let result = match CallSettled::decode_from_bytes(&env.payload) {
+                    Some(CallSettled::Ok) => Ok(()),
+                    Some(CallSettled::Err { error }) => Err(RpcError::Other { reason: error }),
+                    None => Err(RpcError::Other {
+                        reason: "malformed CallSettled payload".into(),
+                    }),
+                };
+                self.write_frame_to(
+                    entry.conn_id,
+                    &WireFrame::ReplyEnd {
+                        cid: entry.wire_cid,
+                        result,
+                    },
+                );
+                self.in_flight.remove(&correlation);
+                return;
+            }
+
             let envelope = MailEnvelope {
                 to: MailboxAddress::local(self.self_mailbox),
                 from: match env.sender.target {
@@ -512,19 +538,41 @@ mod server_native {
             cid: Option<u64>,
             envelope: MailEnvelope,
         ) {
-            // Cross-engine routing isn't in v1. Anything addressed at
-            // a non-local engine surfaces as a ReplyEnd::Err.
-            if envelope.to.engine.is_some() {
+            // Engine-addressed Calls (issue 763 P5a): relay to the
+            // engines cap (`aether.engine`), which owns the
+            // `EngineId -> proxy` table and re-emits a `ForwardEnvelope`
+            // at the right proxy. The substrate's reply streams back
+            // here as a normal reply mail (handled by `on_any` as a
+            // `ReplyEvent`); its terminal `ReplyEnd` arrives — via the
+            // proxy — as a `CallSettled` (also handled by `on_any`).
+            //
+            // Crucially this path does NOT subscribe to settlement: the
+            // local `RouteEnvelope` chain settles almost immediately,
+            // long before the remote substrate replies, so settlement
+            // would close the wire call prematurely. The terminal close
+            // comes from `CallSettled` instead.
+            //
+            // On a chassis with no engines cap the `RouteEnvelope`
+            // warn-drops and the call never closes — only the hub
+            // chassis wires `aether.engine`, and only the hub fields
+            // engine-addressed Calls.
+            if let Some(engine_id) = envelope.to.engine {
+                let route = RouteEnvelope {
+                    engine_id: engine_id.0.to_string(),
+                    mailbox: envelope.to.mailbox,
+                    kind: envelope.kind,
+                    payload: envelope.payload,
+                };
+                // `mailbox_id_from_name` of `EngineServer::NAMESPACE`.
+                let engine_cap = mailbox_id_from_name("aether.engine");
+                let mail_id = ctx.send_envelope_as_root(
+                    engine_cap,
+                    <RouteEnvelope as Kind>::ID,
+                    &route.encode_into_bytes(),
+                );
                 if let Some(wire_cid) = cid {
-                    self.write_frame_to(
-                        conn_id,
-                        &WireFrame::ReplyEnd {
-                            cid: wire_cid,
-                            result: Err(RpcError::UnsupportedTarget {
-                                reason: "cross-engine routing not in v1".into(),
-                            }),
-                        },
-                    );
+                    self.in_flight
+                        .insert(mail_id.correlation_id, InFlight { conn_id, wire_cid });
                 }
                 return;
             }
