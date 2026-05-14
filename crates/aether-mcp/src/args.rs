@@ -68,3 +68,74 @@ pub struct MailStatus {
     /// dispatch chain settled, or `"error: <reason>"` on failure.
     pub status: String,
 }
+
+/// `load_component` arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LoadComponentArgs {
+    /// Engine UUID the component loads into (from `list_engines`).
+    pub engine_id: String,
+    /// Absolute path to the component's `.wasm`. `aether-mcp` reads
+    /// the bytes and forwards them to the substrate — agents never
+    /// inline wasm through the tool call.
+    pub binary_path: String,
+    /// Optional human-readable name. The substrate defaults one from
+    /// the wasm if omitted; the reply echoes the resolved name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// `replace_component` arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReplaceComponentArgs {
+    /// Engine UUID hosting the component (from `list_engines`).
+    pub engine_id: String,
+    /// Tagged mailbox id (`mbx-…`) of the component to replace, as
+    /// returned by `load_component`.
+    pub mailbox_id: String,
+    /// Absolute path to the replacement `.wasm`.
+    pub binary_path: String,
+    /// Accepted for wire compatibility; currently ignored by the
+    /// substrate (post-ADR-0038 the splice is structural).
+    #[serde(default)]
+    pub drain_timeout_ms: Option<u32>,
+}
+
+/// `describe_component` arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DescribeComponentArgs {
+    /// Engine UUID hosting the component (from `list_engines`).
+    pub engine_id: String,
+    /// Tagged mailbox id (`mbx-…`) of the loaded component.
+    pub mailbox_id: String,
+}
+
+/// One mail in a `capture_frame` bundle. Like [`MailSpec`] but without
+/// `engine_id` — every bundle entry is dispatched on the engine being
+/// captured, so the engine is already fixed by `CaptureFrameArgs`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CaptureMailSpec {
+    /// Mailbox name on the captured engine (e.g. `"aether.render"`).
+    pub recipient_name: String,
+    /// Kind name, resolved against the substrate kind vocabulary.
+    pub kind_name: String,
+    /// Structured params, schema-encoded to wire bytes. Omit or
+    /// `null` for a fieldless kind.
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+}
+
+/// `capture_frame` arguments.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CaptureFrameArgs {
+    /// Engine UUID to capture (from `list_engines`).
+    pub engine_id: String,
+    /// Mail dispatched *before* the frame is read back — state changes
+    /// whose effects should appear in the image. Resolved atomically:
+    /// any bad entry aborts the whole capture.
+    #[serde(default)]
+    pub mails: Vec<CaptureMailSpec>,
+    /// Mail dispatched *after* readback — cleanup such as restoring a
+    /// flag the caller flipped for the capture.
+    #[serde(default)]
+    pub after_mails: Vec<CaptureMailSpec>,
+}

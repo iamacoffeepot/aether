@@ -212,6 +212,7 @@ dependencies = [
  "aether-substrate",
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "rmcp",
  "schemars",
  "serde",

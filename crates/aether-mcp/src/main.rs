@@ -20,7 +20,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
 use crate::rpc::RpcSession;
-use crate::tools::Mcp;
+use crate::tools::{ComponentCache, Mcp};
 
 /// Default port the MCP HTTP server binds. Distinct from the embedded
 /// hub MCP's 8888 so the two coexist until the P5d cutover.
@@ -62,9 +62,20 @@ async fn main() -> anyhow::Result<()> {
         "hub rpc connection established",
     );
 
+    // Process-wide component-capability cache, shared into every
+    // per-session `Mcp` — `load_component` / `replace_component`
+    // populate it, `describe_component` reads it.
+    let components: Arc<ComponentCache> = Arc::new(ComponentCache::default());
+
     let factory_session = Arc::clone(&session);
+    let factory_components = Arc::clone(&components);
     let service = StreamableHttpService::new(
-        move || Ok(Mcp::new(Arc::clone(&factory_session))),
+        move || {
+            Ok(Mcp::new(
+                Arc::clone(&factory_session),
+                Arc::clone(&factory_components),
+            ))
+        },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
