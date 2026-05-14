@@ -59,6 +59,7 @@ pub use component::ComponentHostConfig;
 pub use engine::EngineProxy;
 #[cfg(not(target_arch = "wasm32"))]
 pub use engine::EngineProxyConfig;
+pub use engine::EngineServer;
 pub use handle::HandleCapability;
 pub use http::{HttpCapability, HttpConfig};
 pub use input::InputCapability;

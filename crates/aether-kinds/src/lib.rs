@@ -699,6 +699,7 @@ mod rpc {
 }
 
 mod engine {
+    use alloc::string::String;
     use alloc::vec::Vec;
 
     use serde::{Deserialize, Serialize};
@@ -722,6 +723,88 @@ mod engine {
         pub mailbox: aether_data::MailboxId,
         pub kind: aether_data::KindId,
         pub payload: Vec<u8>,
+    }
+
+    /// `aether.engine.list` — ask the engines cap (`aether.engine`) to
+    /// enumerate every engine it currently supervises. Fieldless
+    /// request; the reply is an [`EngineList`]. Issue 763 P4.
+    #[derive(
+        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
+    )]
+    #[kind(name = "aether.engine.list")]
+    pub struct ListEngines {}
+
+    /// One supervised engine, as reported in an [`EngineList`].
+    ///
+    /// `engine_id` is the plain UUID string the engines cap minted at
+    /// spawn time — `EngineId` itself doesn't implement `Schema`, so
+    /// the wire carries the string form (the same convention the
+    /// `aether.process.*` kinds use). `rpc_port` is the localhost port
+    /// the cap assigned the substrate's `RpcServerCapability`.
+    #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    pub struct EngineDescriptor {
+        pub engine_id: String,
+        pub rpc_port: u16,
+    }
+
+    /// `aether.engine.list_result` — reply to [`ListEngines`]: every
+    /// engine the cap supervises right now. Issue 763 P4.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.list_result")]
+    pub struct ListEnginesResult {
+        pub engines: Vec<EngineDescriptor>,
+    }
+
+    /// `aether.engine.spawn` — ask the engines cap to fork+exec a
+    /// substrate binary and connect a per-engine proxy to it. Issue
+    /// 763 P4.
+    ///
+    /// The cap picks a free localhost port for the substrate's
+    /// `RpcServerCapability`, injects it as `AETHER_RPC_PORT`, forks
+    /// `binary_path` with `args` forwarded verbatim, then boots an
+    /// `aether.engine.proxy:<id>` actor that dials it. Reply:
+    /// [`SpawnResult`].
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.spawn")]
+    pub struct SpawnEngine {
+        pub binary_path: String,
+        pub args: Vec<String>,
+    }
+
+    /// Reply to [`SpawnEngine`]. Issue 763 P4.
+    ///
+    /// `Ok` carries the freshly minted `engine_id` (plain UUID string —
+    /// pass it back to [`TerminateEngine`]) and the `rpc_port` the cap
+    /// assigned. `Err` carries a free-form reason — fork failure, or
+    /// the proxy failing to connect within the substrate's startup
+    /// window. On `Err` no child process is left running.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.spawn_result")]
+    pub enum SpawnEngineResult {
+        Ok { engine_id: String, rpc_port: u16 },
+        Err { error: String },
+    }
+
+    /// `aether.engine.terminate` — ask the engines cap to shut down a
+    /// supervised engine. Issue 763 P4.
+    ///
+    /// The cap forwards this kind to the engine's
+    /// `aether.engine.proxy:<id>` actor, which SIGKILLs the child
+    /// substrate it forked and self-shuts-down. `engine_id` is the
+    /// plain UUID string from [`SpawnResult`] / [`EngineList`].
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.terminate")]
+    pub struct TerminateEngine {
+        pub engine_id: String,
+    }
+
+    /// Reply to [`TerminateEngine`]. Issue 763 P4. `Err` is for an
+    /// `engine_id` that doesn't parse or names no supervised engine.
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+    #[kind(name = "aether.engine.terminate_result")]
+    pub enum TerminateEngineResult {
+        Ok,
+        Err { error: String },
     }
 }
 

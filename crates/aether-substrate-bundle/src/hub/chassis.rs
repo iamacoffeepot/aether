@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
-use aether_capabilities::{BroadcastCapability, trace::TraceObserverCapability};
+use aether_capabilities::{BroadcastCapability, EngineServer, trace::TraceObserverCapability};
 use aether_substrate::Chassis;
 use aether_substrate::chassis::builder::{
     Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError,
@@ -168,7 +168,13 @@ impl HubChassis {
                 pending,
                 hub_engine_addr: engine_addr,
                 runtime: rt_handle,
-            });
+            })
+            // Issue 763 P4: the forward-model engines cap. Forks
+            // substrates and connects out to them as an RPC client —
+            // independent of the hub's own inbound RPC server, so it
+            // boots unconditionally. Coexists with the legacy
+            // `ProcessCapability` spawn path until P5 collapses the hub.
+            .with_actor::<EngineServer>(());
         if let Some(rpc_addr) = rpc_addr {
             builder = builder.with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: rpc_addr.to_string(),
