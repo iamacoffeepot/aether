@@ -14,6 +14,7 @@ members = [
     "crates/aether-mesh",
     "crates/aether-camera",
     "crates/aether-capabilities",
+    "crates/aether-mcp",
     "crates/aether-mesh-viewer",
     "crates/aether-test-fixture-probe",
     "demos/sokoban",
