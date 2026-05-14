@@ -1,0 +1,387 @@
+//! The `aether-mcp` tool surface: the per-session [`Mcp`] service, its
+//! `#[tool_router]` impl, and the `ServerHandler` (issue 763 P5b).
+//!
+//! Each tool translates to one or more RPC `Call`s over the shared
+//! [`RpcSession`]. Engine-management tools (`list_engines`,
+//! `spawn_substrate`, `terminate_substrate`) address the hub's own
+//! `aether.engine` cap (`engine = None`, dispatched locally on the
+//! hub); `send_mail` addresses a specific substrate (`engine = Some`),
+//! which the hub routes through to the matching proxy.
+
+use std::sync::Arc;
+
+use aether_capabilities::rpc::{MailEnvelope, MailboxAddress};
+use aether_data::canonical::kind_id_from_parts;
+use aether_data::{EngineId, Kind, KindDescriptor, KindId, Uuid, mailbox_id_from_name};
+use aether_kinds::{
+    ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult, TerminateEngine,
+    TerminateEngineResult,
+};
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
+use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
+
+use crate::args::{
+    EngineInfo, MailSpec, MailStatus, SendMailArgs, SpawnSubstrateArgs, TerminateSubstrateArgs,
+};
+use crate::rpc::RpcSession;
+
+/// Mailbox name of the hub's engines cap — the `engine = None` target
+/// for the engine-management tools.
+const ENGINE_CAP: &str = "aether.engine";
+
+/// Per-session MCP service. `rmcp` calls the factory once per session
+/// and may clone the result for concurrent tool dispatch — `session`
+/// is an `Arc`, so clones share the one hub connection.
+#[derive(Clone)]
+pub struct Mcp {
+    session: Arc<RpcSession>,
+    tool_router: ToolRouter<Self>,
+}
+
+impl Mcp {
+    /// Construct a per-session service over an established hub
+    /// connection.
+    pub fn new(session: Arc<RpcSession>) -> Self {
+        Self {
+            session,
+            tool_router: Self::tool_router(),
+        }
+    }
+}
+
+#[tool_router]
+impl Mcp {
+    #[tool(
+        description = "List every engine the hub currently supervises. Each item reports the engine_id (pass it to send_mail / terminate_substrate) and the localhost RPC port the hub assigned its substrate."
+    )]
+    pub async fn list_engines(&self) -> Result<String, McpError> {
+        let reply = self
+            .session
+            .call_one(local_envelope(ENGINE_CAP, &ListEngines {}))
+            .await
+            .map_err(internal)?;
+        let result = ListEnginesResult::decode_from_bytes(&reply.payload)
+            .ok_or_else(|| internal_msg("undecodable ListEnginesResult"))?;
+        let engines: Vec<EngineInfo> = result
+            .engines
+            .into_iter()
+            .map(|e| EngineInfo {
+                engine_id: e.engine_id,
+                rpc_port: e.rpc_port,
+            })
+            .collect();
+        json(&engines)
+    }
+
+    #[tool(
+        description = "Fork+exec a substrate binary as a child of the hub. The hub assigns the substrate a free localhost RPC port, injects it as AETHER_RPC_PORT, forks the binary, and connects a proxy. Returns the engine_id and rpc_port on success."
+    )]
+    pub async fn spawn_substrate(
+        &self,
+        Parameters(args): Parameters<SpawnSubstrateArgs>,
+    ) -> Result<String, McpError> {
+        let reply = self
+            .session
+            .call_one(local_envelope(
+                ENGINE_CAP,
+                &SpawnEngine {
+                    binary_path: args.binary_path,
+                    args: args.args,
+                },
+            ))
+            .await
+            .map_err(internal)?;
+        match SpawnEngineResult::decode_from_bytes(&reply.payload) {
+            Some(SpawnEngineResult::Ok {
+                engine_id,
+                rpc_port,
+            }) => json(&EngineInfo {
+                engine_id,
+                rpc_port,
+            }),
+            Some(SpawnEngineResult::Err { error }) => Err(internal_msg(&error)),
+            None => Err(internal_msg("undecodable SpawnEngineResult")),
+        }
+    }
+
+    #[tool(
+        description = "Terminate a substrate the hub supervises. The hub forwards the request to the engine's proxy, which SIGKILLs the child process and self-shuts-down."
+    )]
+    pub async fn terminate_substrate(
+        &self,
+        Parameters(args): Parameters<TerminateSubstrateArgs>,
+    ) -> Result<String, McpError> {
+        let reply = self
+            .session
+            .call_one(local_envelope(
+                ENGINE_CAP,
+                &TerminateEngine {
+                    engine_id: args.engine_id,
+                },
+            ))
+            .await
+            .map_err(internal)?;
+        match TerminateEngineResult::decode_from_bytes(&reply.payload) {
+            Some(TerminateEngineResult::Ok) => json(&serde_json::json!({ "status": "terminated" })),
+            Some(TerminateEngineResult::Err { error }) => Err(internal_msg(&error)),
+            None => Err(internal_msg("undecodable TerminateEngineResult")),
+        }
+    }
+
+    #[tool(
+        description = "Send one or more mail items to substrate mailboxes. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. 'delivered' means the call reached the substrate and its dispatch chain settled."
+    )]
+    pub async fn send_mail(
+        &self,
+        Parameters(args): Parameters<SendMailArgs>,
+    ) -> Result<String, McpError> {
+        // Snapshot the substrate descriptor inventory once for the
+        // whole batch rather than per item.
+        let descriptors = aether_kinds::descriptors::all();
+        let mut statuses = Vec::with_capacity(args.mails.len());
+        for (index, spec) in args.mails.into_iter().enumerate() {
+            let status = match self.deliver_one(&descriptors, spec).await {
+                Ok(()) => "delivered".to_owned(),
+                Err(e) => format!("error: {e}"),
+            };
+            statuses.push(MailStatus { index, status });
+        }
+        json(&statuses)
+    }
+}
+
+impl Mcp {
+    /// Build one `MailSpec` into an `engine = Some` envelope and route
+    /// it through the hub, awaiting the substrate's terminal settle.
+    async fn deliver_one(
+        &self,
+        descriptors: &[KindDescriptor],
+        spec: MailSpec,
+    ) -> anyhow::Result<()> {
+        let engine = EngineId(
+            Uuid::parse_str(&spec.engine_id)
+                .map_err(|e| anyhow::anyhow!("engine_id is not a valid UUID: {e}"))?,
+        );
+        // Resolve the kind against the substrate vocabulary baked into
+        // `aether-kinds` — the same descriptor set the scenario runner
+        // and the embedded hub encode `send_mail` params against.
+        let desc = descriptors
+            .iter()
+            .find(|d| d.name == spec.kind_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown kind: {}", spec.kind_name))?;
+        let params = spec.params.unwrap_or(serde_json::Value::Null);
+        let payload = aether_codec::encode_schema(&params, &desc.schema)
+            .map_err(|e| anyhow::anyhow!("param encode failed: {e}"))?;
+        let envelope = MailEnvelope {
+            to: MailboxAddress {
+                engine: Some(engine),
+                mailbox: mailbox_id_from_name(&spec.recipient_name),
+            },
+            from: None,
+            kind: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
+            correlation_id: None,
+            payload,
+        };
+        self.session.call_settled(envelope).await
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for Mcp {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            server_info: Implementation {
+                name: "aether-mcp".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// Build a `MailEnvelope` addressed at a hub-local mailbox
+/// (`engine = None`) carrying a typed kind.
+fn local_envelope<K: Kind + serde::Serialize>(mailbox: &str, kind: &K) -> MailEnvelope {
+    MailEnvelope {
+        to: MailboxAddress::local(mailbox_id_from_name(mailbox)),
+        from: None,
+        kind: K::ID,
+        correlation_id: None,
+        payload: kind.encode_into_bytes(),
+    }
+}
+
+/// Serialize a tool result to the JSON string `rmcp` wraps as text
+/// content.
+fn json<T: serde::Serialize>(value: &T) -> Result<String, McpError> {
+    serde_json::to_string(value).map_err(|e| McpError::internal_error(e.to_string(), None))
+}
+
+fn internal(e: anyhow::Error) -> McpError {
+    McpError::internal_error(e.to_string(), None)
+}
+
+fn internal_msg(msg: &str) -> McpError {
+    McpError::internal_error(msg.to_owned(), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::{MailSpec, SendMailArgs, SpawnSubstrateArgs, TerminateSubstrateArgs};
+    use aether_capabilities::EngineServer;
+    use aether_capabilities::rpc::{
+        PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
+    };
+    use aether_capabilities::trace::TraceObserverCapability;
+    use aether_substrate::chassis::Chassis;
+    use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
+    use aether_substrate::chassis::error::BootError;
+    use aether_substrate::handle_store::HandleStore;
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::outbound::HubOutbound;
+    use aether_substrate::mail::registry::Registry;
+
+    struct TestChassis;
+    impl Chassis for TestChassis {
+        const PROFILE: &'static str = "test";
+        type Driver = NeverDriver;
+        type Env = ();
+        fn build(_env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+            unreachable!("TestChassis is driven by Builder::new directly in unit tests")
+        }
+    }
+
+    /// Boot a hub-shaped passive chassis: a forwarding
+    /// `RpcServerCapability` + the engines cap + `TraceObserver` (so
+    /// the RpcServer's local Calls settle and close). Returns the
+    /// chassis (kept alive for its dispatcher threads) and the RPC
+    /// port an `RpcSession` dials.
+    fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
+        let registry = Arc::new(Registry::new());
+        for d in aether_kinds::descriptors::all() {
+            let _ = registry.register_kind_with_descriptor(d);
+        }
+        let (outbound, _rx) = HubOutbound::attached_loopback();
+        let store = Arc::new(HandleStore::new(1024 * 1024));
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store).with_outbound(outbound));
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<EngineServer>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "test-hub".into(),
+                    engine_version: "0.1.0".into(),
+                    kinds: vec![],
+                },
+            })
+            .build_passive()
+            .expect("hub caps boot");
+        let port = chassis
+            .handle::<RpcServerHandle>()
+            .expect("RpcServerHandle published")
+            .local_port;
+        (chassis, port)
+    }
+
+    /// Connect an `RpcSession` + wrap it in an `Mcp` against a booted
+    /// hub chassis.
+    fn connect_mcp(port: u16) -> Mcp {
+        let session = RpcSession::connect(&format!("127.0.0.1:{port}")).expect("session connects");
+        Mcp::new(Arc::new(session))
+    }
+
+    /// `list_engines` over the RPC round-trip yields an empty array on
+    /// a fresh hub — proves the whole `RpcSession` demux + the
+    /// `engine = None` Call path against the real `aether.engine` cap.
+    #[tokio::test]
+    async fn list_engines_on_empty_hub_is_empty() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let out = mcp.list_engines().await.expect("list_engines ok");
+        assert_eq!(out, "[]", "fresh hub supervises no engines");
+    }
+
+    /// `spawn_substrate` with a binary path that doesn't exist surfaces
+    /// the hub's `SpawnEngineResult::Err` as a tool error.
+    #[tokio::test]
+    async fn spawn_substrate_missing_binary_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .spawn_substrate(Parameters(SpawnSubstrateArgs {
+                binary_path: "/nonexistent/aether-substrate-does-not-exist".to_owned(),
+                args: vec![],
+            }))
+            .await;
+        assert!(result.is_err(), "a missing binary should be a tool error");
+    }
+
+    /// `terminate_substrate` with a malformed `engine_id` surfaces the
+    /// hub's `TerminateEngineResult::Err` as a tool error.
+    #[tokio::test]
+    async fn terminate_substrate_bad_engine_id_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .terminate_substrate(Parameters(TerminateSubstrateArgs {
+                engine_id: "not-a-uuid".to_owned(),
+            }))
+            .await;
+        assert!(
+            result.is_err(),
+            "a malformed engine_id should be a tool error"
+        );
+    }
+
+    /// `send_mail` is a best-effort batch: a bad `kind_name` and a bad
+    /// `engine_id` fail locally in `deliver_one`, while a well-formed
+    /// item addressed at an unknown engine round-trips to the hub and
+    /// comes back a `CallSettled::Err`. Every item reports `error: ...`
+    /// and none aborts its siblings.
+    #[tokio::test]
+    async fn send_mail_reports_per_item_errors() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let out = mcp
+            .send_mail(Parameters(SendMailArgs {
+                mails: vec![
+                    MailSpec {
+                        engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                        recipient_name: "aether.fs".to_owned(),
+                        kind_name: "not.a.real.kind".to_owned(),
+                        params: None,
+                    },
+                    MailSpec {
+                        engine_id: "not-a-uuid".to_owned(),
+                        recipient_name: "aether.fs".to_owned(),
+                        kind_name: "aether.fs.list".to_owned(),
+                        params: None,
+                    },
+                    MailSpec {
+                        engine_id: "00000000-0000-0000-0000-000000000002".to_owned(),
+                        recipient_name: "aether.fs".to_owned(),
+                        kind_name: "aether.fs.list".to_owned(),
+                        params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+                    },
+                ],
+            }))
+            .await
+            .expect("send_mail returns a status array, not a tool error");
+        let statuses: Vec<MailStatus> = serde_json::from_str(&out).expect("status array");
+        assert_eq!(statuses.len(), 3);
+        for status in &statuses {
+            assert!(
+                status.status.starts_with("error: "),
+                "item {} should be an error: {}",
+                status.index,
+                status.status,
+            );
+        }
+    }
+}

@@ -201,6 +201,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-mcp"
+version = "0.2.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-capabilities",
+ "aether-codec",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "anyhow",
+ "axum",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "aether-mesh"
 version = "0.2.0-alpha"
 dependencies = [

@@ -1,0 +1,46 @@
+[package]
+name = "aether-mcp"
+version.workspace = true
+edition.workspace = true
+
+# The out-of-process MCP coordinator (issue 763 P5). Claude Code points
+# `.mcp.json` at this binary; it owns the `rmcp` HTTP server and the
+# tool surface, and reaches engines purely as an RPC *client* — it dials
+# the hub's `RpcServerCapability` and relays tool calls as wire `Call`s.
+# No `aether-substrate` / wasmtime / wgpu in the dep graph: the MCP
+# coordinator never hosts an actor system, it just speaks the wire.
+#
+# Until the P5d cutover the embedded `aether-substrate-bundle::hub::mcp`
+# server keeps running on its own port — this crate is additive.
+
+[[bin]]
+name = "aether-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# Wire vocabulary + the RPC client primitive. `aether-capabilities`
+# with default features pulls `aether-substrate`; we only need the
+# `rpc::client` types, but the crate isn't split finer than this today
+# so we take the native default. (Trimming this is a P5d follow-up.)
+aether-capabilities = { path = "../aether-capabilities" }
+aether-codec = { path = "../aether-codec" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+
+anyhow = "1"
+axum = "0.8"
+rmcp = { version = "0.8", features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server",
+] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-substrate = { path = "../aether-substrate" }
