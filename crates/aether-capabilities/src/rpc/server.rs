@@ -630,81 +630,6 @@ pub fn rpc_server_mailbox_id() -> aether_data::MailboxId {
 }
 
 #[cfg(test)]
-use serde::{Deserialize, Serialize};
-
-/// Test-only kinds for the call-roundtrip test. Need to live at file
-/// root (not in `mod tests`) because the `Kind` derive's inventory
-/// submission relies on items being addressable from a path the
-/// linker keeps. The `Kind` derive also registers the kind in
-/// `aether_kinds::descriptors::all()` so `fresh_substrate()`'s
-/// registry walk picks them up.
-#[cfg(test)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "aether.rpc.test.echo_request")]
-pub struct TestEchoRequest {
-    pub value: u64,
-}
-
-#[cfg(test)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "aether.rpc.test.echo_reply")]
-pub struct TestEchoReply {
-    pub value: u64,
-}
-
-/// Test-only echo actor: handles [`TestEchoRequest`] and replies with
-/// a matching [`TestEchoReply`]. The minimum viable receiver for
-/// exercising RpcServer's `Call → ReplyEvent → ReplyEnd` path
-/// without coupling the test to a production cap's semantics.
-#[cfg(test)]
-#[aether_actor::bridge(singleton)]
-mod test_echo_actor {
-    use super::{TestEchoReply, TestEchoRequest};
-    use aether_actor::{actor, actor::ctx::OutboundReply};
-    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
-    use aether_substrate::chassis::error::BootError;
-
-    pub struct TestEchoActor;
-
-    #[actor]
-    impl NativeActor for TestEchoActor {
-        type Config = ();
-        const NAMESPACE: &'static str = "aether.rpc.test.echo";
-
-        fn init(_: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self)
-        }
-
-        #[handler]
-        fn on_echo(&mut self, ctx: &mut NativeCtx<'_>, mail: TestEchoRequest) {
-            ctx.reply(&TestEchoReply { value: mail.value });
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::rpc::wire::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
@@ -855,7 +780,7 @@ mod tests {
     /// phase 2.
     #[test]
     fn call_echo_round_trip_event_then_end() {
-        use crate::rpc::server::test_echo_actor::TestEchoActor;
+        use crate::rpc::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
         use crate::rpc::wire::{MailEnvelope, MailboxAddress};
         use crate::trace::TraceObserverCapability;
         use aether_actor::Actor;
@@ -954,7 +879,7 @@ mod tests {
     /// no stale ReplyEvent / ReplyEnd frames are in the way.
     #[test]
     fn call_without_cid_is_fire_and_forget() {
-        use crate::rpc::server::test_echo_actor::TestEchoActor;
+        use crate::rpc::test_echo::{TestEchoActor, TestEchoRequest};
         use crate::rpc::wire::{MailEnvelope, MailboxAddress};
         use aether_actor::Actor;
         use aether_data::{Kind, mailbox_id_from_name};
