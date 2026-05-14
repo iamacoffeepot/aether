@@ -1,51 +1,75 @@
 //! The `aether-mcp` tool surface: the per-session [`Mcp`] service, its
-//! `#[tool_router]` impl, and the `ServerHandler` (issue 763 P5b).
+//! `#[tool_router]` impl, and the `ServerHandler` (issue 763 P5b/P5c).
 //!
-//! Each tool translates to one or more RPC `Call`s over the shared
-//! [`RpcSession`]. Engine-management tools (`list_engines`,
-//! `spawn_substrate`, `terminate_substrate`) address the hub's own
-//! `aether.engine` cap (`engine = None`, dispatched locally on the
-//! hub); `send_mail` addresses a specific substrate (`engine = Some`),
-//! which the hub routes through to the matching proxy.
+//! Each tool translates to RPC `Call`s over the shared [`RpcSession`].
+//! Engine-management tools (`list_engines`, `spawn_substrate`,
+//! `terminate_substrate`) address the hub's own `aether.engine` cap
+//! (`engine = None`, dispatched locally on the hub); the per-engine
+//! tools (`send_mail`, `load_component`, `replace_component`,
+//! `capture_frame`) address a specific substrate (`engine = Some`),
+//! which the hub routes through to the matching proxy. `describe_kinds`
+//! and `describe_component` answer locally — from the substrate kind
+//! inventory baked into `aether-kinds` and from a component-capability
+//! cache populated by `load_component` / `replace_component`.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use aether_capabilities::rpc::{MailEnvelope, MailboxAddress};
 use aether_data::canonical::kind_id_from_parts;
-use aether_data::{EngineId, Kind, KindDescriptor, KindId, Uuid, mailbox_id_from_name};
-use aether_kinds::{
-    ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult, TerminateEngine,
-    TerminateEngineResult,
+use aether_data::{
+    EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, mailbox_id_from_name, tagged_id,
 };
+use aether_kinds::{
+    CaptureFrame, CaptureFrameResult, ComponentCapabilities, ListEngines, ListEnginesResult,
+    LoadComponent, LoadResult, ReplaceComponent, ReplaceResult, SpawnEngine, SpawnEngineResult,
+    TerminateEngine, TerminateEngineResult,
+};
+use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
 
 use crate::args::{
-    EngineInfo, MailSpec, MailStatus, SendMailArgs, SpawnSubstrateArgs, TerminateSubstrateArgs,
+    CaptureFrameArgs, CaptureMailSpec, DescribeComponentArgs, EngineInfo, LoadComponentArgs,
+    MailSpec, MailStatus, ReplaceComponentArgs, SendMailArgs, SpawnSubstrateArgs,
+    TerminateSubstrateArgs,
 };
 use crate::rpc::RpcSession;
 
 /// Mailbox name of the hub's engines cap — the `engine = None` target
 /// for the engine-management tools.
 const ENGINE_CAP: &str = "aether.engine";
+/// Mailbox name of a substrate's component-host cap.
+const COMPONENT_CAP: &str = "aether.component";
+/// Mailbox name of a substrate's render cap.
+const RENDER_CAP: &str = "aether.render";
+
+/// Component receive-side capabilities, keyed by `(engine, mailbox)`.
+/// Populated from `load_component` / `replace_component` replies and
+/// read by `describe_component` — the forward-model stand-in for the
+/// embedded hub's component registry.
+pub type ComponentCache = Mutex<HashMap<(EngineId, MailboxId), ComponentCapabilities>>;
 
 /// Per-session MCP service. `rmcp` calls the factory once per session
 /// and may clone the result for concurrent tool dispatch — `session`
-/// is an `Arc`, so clones share the one hub connection.
+/// and `components` are `Arc`s, so clones share the one hub connection
+/// and one component cache.
 #[derive(Clone)]
 pub struct Mcp {
     session: Arc<RpcSession>,
+    components: Arc<ComponentCache>,
     tool_router: ToolRouter<Self>,
 }
 
 impl Mcp {
     /// Construct a per-session service over an established hub
-    /// connection.
-    pub fn new(session: Arc<RpcSession>) -> Self {
+    /// connection + the process-wide component cache.
+    pub fn new(session: Arc<RpcSession>, components: Arc<ComponentCache>) -> Self {
         Self {
             session,
+            components,
             tool_router: Self::tool_router(),
         }
     }
@@ -150,6 +174,168 @@ impl Mcp {
         }
         json(&statuses)
     }
+
+    #[tool(
+        description = "Load a WASM component into a substrate by filesystem path. aether-mcp reads the binary, forwards it as aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The path must exist as given (no ~ expansion, no relative resolution). The component's kind vocabulary rides in the wasm's aether.kinds custom section."
+    )]
+    pub async fn load_component(
+        &self,
+        Parameters(args): Parameters<LoadComponentArgs>,
+    ) -> Result<String, McpError> {
+        let engine = parse_engine_id(&args.engine_id)?;
+        let wasm = tokio::fs::read(&args.binary_path).await.map_err(|e| {
+            McpError::invalid_params(
+                format!("reading binary_path {:?}: {e}", args.binary_path),
+                None,
+            )
+        })?;
+        let reply = self
+            .session
+            .call_one(engine_envelope(
+                engine,
+                COMPONENT_CAP,
+                &LoadComponent {
+                    wasm,
+                    name: args.name,
+                },
+            ))
+            .await
+            .map_err(internal)?;
+        match LoadResult::decode_from_bytes(&reply.payload) {
+            Some(LoadResult::Ok {
+                mailbox_id,
+                name,
+                capabilities,
+            }) => {
+                self.components
+                    .lock()
+                    .unwrap()
+                    .insert((engine, mailbox_id), capabilities.clone());
+                json(&serde_json::json!({
+                    "mailbox_id": mailbox_id,
+                    "name": name,
+                    "capabilities": capabilities,
+                }))
+            }
+            Some(LoadResult::Err { error }) => Err(internal_msg(&error)),
+            None => Err(internal_msg("undecodable LoadResult")),
+        }
+    }
+
+    #[tool(
+        description = "Atomically replace a live component's WASM with a new binary loaded from a filesystem path (ADR-0022 structural splice). aether-mcp reads the binary and forwards aether.component.replace to the engine's aether.component mailbox. drain_timeout_ms is accepted for wire compatibility but currently ignored. Returns the replaced component's advertised capabilities."
+    )]
+    pub async fn replace_component(
+        &self,
+        Parameters(args): Parameters<ReplaceComponentArgs>,
+    ) -> Result<String, McpError> {
+        let engine = parse_engine_id(&args.engine_id)?;
+        let mailbox_id = parse_mailbox_id(&args.mailbox_id)?;
+        let wasm = tokio::fs::read(&args.binary_path).await.map_err(|e| {
+            McpError::invalid_params(
+                format!("reading binary_path {:?}: {e}", args.binary_path),
+                None,
+            )
+        })?;
+        let reply = self
+            .session
+            .call_one(engine_envelope(
+                engine,
+                COMPONENT_CAP,
+                &ReplaceComponent {
+                    mailbox_id,
+                    wasm,
+                    drain_timeout_ms: args.drain_timeout_ms,
+                },
+            ))
+            .await
+            .map_err(internal)?;
+        match ReplaceResult::decode_from_bytes(&reply.payload) {
+            Some(ReplaceResult::Ok { capabilities }) => {
+                self.components
+                    .lock()
+                    .unwrap()
+                    .insert((engine, mailbox_id), capabilities.clone());
+                json(&capabilities)
+            }
+            Some(ReplaceResult::Err { error }) => Err(internal_msg(&error)),
+            None => Err(internal_msg("undecodable ReplaceResult")),
+        }
+    }
+
+    #[tool(
+        description = "Capture an engine's current frame as a PNG, returned inline as image content. Optionally carries two mail bundles dispatched atomically around the capture: `mails` fires before readback (state changes that should appear in the image), `after_mails` fires after (cleanup). A bad bundle entry aborts the whole capture before any mail moves."
+    )]
+    pub async fn capture_frame(
+        &self,
+        Parameters(args): Parameters<CaptureFrameArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let engine = parse_engine_id(&args.engine_id)?;
+        // Encode both bundles before sending — a bad entry produces a
+        // clean invalid-params error and never touches the wire.
+        let descriptors = aether_kinds::descriptors::all();
+        let mails = encode_capture_bundle(&descriptors, &args.mails).map_err(|e| {
+            McpError::invalid_params(format!("capture_frame mails bundle: {e}"), None)
+        })?;
+        let after_mails = encode_capture_bundle(&descriptors, &args.after_mails).map_err(|e| {
+            McpError::invalid_params(format!("capture_frame after_mails bundle: {e}"), None)
+        })?;
+        let reply = self
+            .session
+            .call_one(engine_envelope(
+                engine,
+                RENDER_CAP,
+                &CaptureFrame { mails, after_mails },
+            ))
+            .await
+            .map_err(internal)?;
+        match CaptureFrameResult::decode_from_bytes(&reply.payload) {
+            Some(CaptureFrameResult::Ok { png }) => {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+                Ok(CallToolResult::success(vec![Content::image(
+                    encoded,
+                    "image/png",
+                )]))
+            }
+            Some(CaptureFrameResult::Err { error }) => Err(internal_msg(&error)),
+            None => Err(internal_msg("undecodable CaptureFrameResult")),
+        }
+    }
+
+    #[tool(
+        description = "List the substrate kind vocabulary — every aether.* kind with its full schema, enough to build send_mail params. This is the static vocabulary aether-mcp ships with, not a per-engine query; component-defined kinds aren't included (use describe_component for a loaded component's handlers)."
+    )]
+    pub async fn describe_kinds(&self) -> Result<String, McpError> {
+        json(&aether_kinds::descriptors::all())
+    }
+
+    #[tool(
+        description = "Describe a loaded component's receive-side capabilities (ADR-0033): the kinds it typed-handles with per-handler docs, whether it has a fallback catchall, and its top-level doc. Reads aether-mcp's component cache, populated by load_component / replace_component — describing a component aether-mcp didn't load (or after an aether-mcp restart) returns an error."
+    )]
+    pub async fn describe_component(
+        &self,
+        Parameters(args): Parameters<DescribeComponentArgs>,
+    ) -> Result<String, McpError> {
+        let engine = parse_engine_id(&args.engine_id)?;
+        let mailbox_id = parse_mailbox_id(&args.mailbox_id)?;
+        let caps = self
+            .components
+            .lock()
+            .unwrap()
+            .get(&(engine, mailbox_id))
+            .cloned();
+        match caps {
+            Some(caps) => json(&caps),
+            None => Err(McpError::invalid_params(
+                format!(
+                    "no component cached at {} on engine {} — load_component / replace_component \
+                     populate this cache",
+                    args.mailbox_id, args.engine_id
+                ),
+                None,
+            )),
+        }
+    }
 }
 
 impl Mcp {
@@ -215,6 +401,70 @@ fn local_envelope<K: Kind + serde::Serialize>(mailbox: &str, kind: &K) -> MailEn
     }
 }
 
+/// Build a `MailEnvelope` addressed at a mailbox on a specific
+/// substrate (`engine = Some`) carrying a typed kind — the hub routes
+/// it through to that engine's proxy.
+fn engine_envelope<K: Kind + serde::Serialize>(
+    engine: EngineId,
+    mailbox: &str,
+    kind: &K,
+) -> MailEnvelope {
+    MailEnvelope {
+        to: MailboxAddress {
+            engine: Some(engine),
+            mailbox: mailbox_id_from_name(mailbox),
+        },
+        from: None,
+        kind: K::ID,
+        correlation_id: None,
+        payload: kind.encode_into_bytes(),
+    }
+}
+
+/// Parse a UUID-string `engine_id` (from `list_engines` /
+/// `spawn_substrate`) into an `EngineId`.
+fn parse_engine_id(s: &str) -> Result<EngineId, McpError> {
+    Uuid::parse_str(s)
+        .map(EngineId)
+        .map_err(|e| McpError::invalid_params(format!("engine_id is not a valid UUID: {e}"), None))
+}
+
+/// Parse a tagged mailbox-id string (`mbx-…`, ADR-0064) into a
+/// `MailboxId`.
+fn parse_mailbox_id(s: &str) -> Result<MailboxId, McpError> {
+    tagged_id::decode_with_tag(s, Tag::Mailbox)
+        .map(MailboxId)
+        .map_err(|e| McpError::invalid_params(format!("mailbox_id: {e}"), None))
+}
+
+/// Encode a `capture_frame` mail bundle: resolve each spec's kind
+/// against the substrate descriptor inventory, schema-encode its
+/// params, and wrap into the substrate-side `aether_kinds::MailEnvelope`
+/// shape (name-level addressing + pre-encoded payload).
+fn encode_capture_bundle(
+    descriptors: &[KindDescriptor],
+    specs: &[CaptureMailSpec],
+) -> anyhow::Result<Vec<aether_kinds::MailEnvelope>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let desc = descriptors
+                .iter()
+                .find(|d| d.name == spec.kind_name)
+                .ok_or_else(|| anyhow::anyhow!("unknown kind: {}", spec.kind_name))?;
+            let params = spec.params.clone().unwrap_or(serde_json::Value::Null);
+            let payload = aether_codec::encode_schema(&params, &desc.schema)
+                .map_err(|e| anyhow::anyhow!("param encode failed for {}: {e}", spec.kind_name))?;
+            Ok(aether_kinds::MailEnvelope {
+                recipient_name: spec.recipient_name.clone(),
+                kind_name: spec.kind_name.clone(),
+                payload,
+                count: 1,
+            })
+        })
+        .collect()
+}
+
 /// Serialize a tool result to the JSON string `rmcp` wraps as text
 /// content.
 fn json<T: serde::Serialize>(value: &T) -> Result<String, McpError> {
@@ -232,7 +482,10 @@ fn internal_msg(msg: &str) -> McpError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::args::{MailSpec, SendMailArgs, SpawnSubstrateArgs, TerminateSubstrateArgs};
+    use crate::args::{
+        CaptureFrameArgs, CaptureMailSpec, DescribeComponentArgs, LoadComponentArgs, MailSpec,
+        ReplaceComponentArgs, SendMailArgs, SpawnSubstrateArgs, TerminateSubstrateArgs,
+    };
     use aether_capabilities::EngineServer;
     use aether_capabilities::rpc::{
         PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
@@ -290,10 +543,10 @@ mod tests {
     }
 
     /// Connect an `RpcSession` + wrap it in an `Mcp` against a booted
-    /// hub chassis.
+    /// hub chassis, with a fresh component cache.
     fn connect_mcp(port: u16) -> Mcp {
         let session = RpcSession::connect(&format!("127.0.0.1:{port}")).expect("session connects");
-        Mcp::new(Arc::new(session))
+        Mcp::new(Arc::new(session), Arc::new(ComponentCache::default()))
     }
 
     /// `list_engines` over the RPC round-trip yields an empty array on
@@ -383,5 +636,120 @@ mod tests {
                 status.status,
             );
         }
+    }
+
+    /// `describe_kinds` is fully local — it renders the substrate kind
+    /// inventory baked into `aether-kinds`, no hub round-trip. The
+    /// result is a non-empty JSON array.
+    #[tokio::test]
+    async fn describe_kinds_returns_the_substrate_inventory() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let out = mcp.describe_kinds().await.expect("describe_kinds ok");
+        let kinds: serde_json::Value = serde_json::from_str(&out).expect("json array");
+        assert!(
+            kinds.as_array().is_some_and(|a| !a.is_empty()),
+            "describe_kinds should list the substrate vocabulary",
+        );
+    }
+
+    /// `load_component` with a binary path that doesn't exist fails at
+    /// the file read, before any RPC.
+    #[tokio::test]
+    async fn load_component_missing_binary_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .load_component(Parameters(LoadComponentArgs {
+                engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                binary_path: "/nonexistent/does-not-exist.wasm".to_owned(),
+                name: None,
+            }))
+            .await;
+        assert!(result.is_err(), "a missing binary should be a tool error");
+    }
+
+    /// `replace_component` with a malformed tagged mailbox id is
+    /// rejected before any RPC.
+    #[tokio::test]
+    async fn replace_component_bad_mailbox_id_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .replace_component(Parameters(ReplaceComponentArgs {
+                engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                mailbox_id: "not-a-tagged-id".to_owned(),
+                binary_path: "/tmp/whatever.wasm".to_owned(),
+                drain_timeout_ms: None,
+            }))
+            .await;
+        assert!(
+            result.is_err(),
+            "a malformed mailbox_id should be a tool error"
+        );
+    }
+
+    /// `capture_frame` with an unknown kind in the mails bundle is
+    /// rejected up front — the bundle is encoded before any RPC.
+    #[tokio::test]
+    async fn capture_frame_bad_bundle_is_tool_error() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let result = mcp
+            .capture_frame(Parameters(CaptureFrameArgs {
+                engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                mails: vec![CaptureMailSpec {
+                    recipient_name: "aether.render".to_owned(),
+                    kind_name: "not.a.real.kind".to_owned(),
+                    params: None,
+                }],
+                after_mails: vec![],
+            }))
+            .await;
+        assert!(
+            result.is_err(),
+            "an unknown kind in the bundle should be a tool error",
+        );
+    }
+
+    /// `describe_component` reads the component cache: an empty cache
+    /// errors, a seeded entry round-trips.
+    #[tokio::test]
+    async fn describe_component_reads_the_cache() {
+        let (_chassis, port) = boot_hub();
+        let mcp = connect_mcp(port);
+        let engine_id = "00000000-0000-0000-0000-000000000001";
+        // A real, taggable mailbox id (arbitrary u64s don't carry the
+        // mailbox-domain bits `tagged_id::encode` needs).
+        let mailbox = mailbox_id_from_name("aether.test.fake_component");
+        let tagged = tagged_id::encode(mailbox.0).expect("mailbox id is taggable");
+
+        // Empty cache → error.
+        let miss = mcp
+            .describe_component(Parameters(DescribeComponentArgs {
+                engine_id: engine_id.to_owned(),
+                mailbox_id: tagged.clone(),
+            }))
+            .await;
+        assert!(
+            miss.is_err(),
+            "an uncached component should be a tool error"
+        );
+
+        // Seed the cache, then it round-trips.
+        let engine = EngineId(Uuid::parse_str(engine_id).unwrap());
+        mcp.components
+            .lock()
+            .unwrap()
+            .insert((engine, mailbox), ComponentCapabilities::default());
+        let hit = mcp
+            .describe_component(Parameters(DescribeComponentArgs {
+                engine_id: engine_id.to_owned(),
+                mailbox_id: tagged,
+            }))
+            .await
+            .expect("cached component describes");
+        let caps: serde_json::Value = serde_json::from_str(&hit).expect("json");
+        assert!(caps.get("handlers").is_some(), "capabilities shape: {hit}");
     }
 }
