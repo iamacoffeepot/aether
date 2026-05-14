@@ -37,7 +37,7 @@
 // Handler-signature kinds must be importable at file root — the
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.
-use aether_kinds::{ForwardEnvelope, RpcInboundReady};
+use aether_kinds::{ForwardEnvelope, RpcInboundReady, TerminateEngine};
 
 // `EngineProxyConfig` carries only wasm-safe types, but it lives inside
 // the bridge mod (which the macro elides on wasm), so the re-export is
@@ -47,8 +47,10 @@ pub use proxy_native::EngineProxyConfig;
 
 #[aether_actor::bridge(instanced)]
 mod proxy_native {
-    use super::{ForwardEnvelope, RpcInboundReady};
-    use crate::rpc::{MailEnvelope, MailboxAddress, PeerKind, RpcClient, RpcConnection, WireFrame};
+    use super::{ForwardEnvelope, RpcInboundReady, TerminateEngine};
+    use crate::rpc::{
+        MailEnvelope, MailboxAddress, PeerKind, RpcClient, RpcClientError, RpcConnection, WireFrame,
+    };
     use aether_actor::actor;
     use aether_data::{EngineId, Kind, KindId};
     use aether_substrate::Mail;
@@ -57,16 +59,36 @@ mod proxy_native {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::{ReplyTarget, ReplyTo};
     use std::collections::HashMap;
+    use std::io::ErrorKind;
+    use std::process::Child;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// Total time [`connect_proxy`] keeps retrying a refused dial when
+    /// the proxy just forked the substrate and it may still be coming
+    /// up. Picked to comfortably cover a debug-build headless cold
+    /// start; far longer than a healthy localhost dial needs.
+    const PROXY_CONNECT_RETRY_BUDGET: Duration = Duration::from_secs(5);
+    /// Pause between dial attempts within [`PROXY_CONNECT_RETRY_BUDGET`].
+    const PROXY_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
     /// Init config for [`EngineProxy`]. `engine_id` is the proxy's
     /// engine identity (also the per-instance subname — full address
     /// `aether.engine.proxy:<engine_id>`); `rpc_addr` is the
     /// substrate's `RpcServerCapability` bind address the proxy dials
     /// at init.
+    ///
+    /// `spawned` is `Some` when the engines cap (`aether.engine`)
+    /// fork+exec'd the substrate and handed its child handle here —
+    /// the proxy then owns that process: it retries the startup dial
+    /// (the substrate may not have bound its port yet), kills it on a
+    /// failed boot, and SIGKILLs + reaps it on `Drop`. `None` for an
+    /// adopted / externally-running substrate, whose lifetime the
+    /// proxy doesn't manage.
     pub struct EngineProxyConfig {
         pub engine_id: EngineId,
         pub rpc_addr: String,
+        pub spawned: Option<Child>,
     }
 
     /// Per-engine proxy: one outbound RPC connection to one substrate,
@@ -86,6 +108,10 @@ mod proxy_native {
         /// opened the call. `ReplyEvent` frames route back here;
         /// `ReplyEnd` clears the entry.
         in_flight: HashMap<u64, ReplyTo>,
+        /// The forked child substrate, when the engines cap spawned it
+        /// (see [`EngineProxyConfig::spawned`]). `Drop` SIGKILLs +
+        /// reaps it; `None` once taken or for an adopted substrate.
+        spawned: Option<Child>,
     }
 
     #[actor]
@@ -93,34 +119,39 @@ mod proxy_native {
         type Config = EngineProxyConfig;
         const NAMESPACE: &'static str = "aether.engine.proxy";
 
-        fn init(config: EngineProxyConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init(
+            mut config: EngineProxyConfig,
+            ctx: &mut NativeInitCtx<'_>,
+        ) -> Result<Self, BootError> {
             let self_mailbox = ctx.self_id();
             let mailer = ctx.mailer();
-
-            // The reader sidecar fires `RpcInboundReady` at this
-            // proxy's own mailbox after every inbound frame so
-            // `on_inbound_ready` drains `conn.inbound` on the
-            // dispatcher thread.
-            let wake_mailer = Arc::clone(&mailer);
             let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
-            let on_frame = move || {
-                wake_mailer.push(Mail::new(self_mailbox, wake_kind, Vec::new(), 1));
-            };
 
-            let conn = RpcClient::connect(
-                &config.rpc_addr,
-                PeerKind::Client {
-                    client_name: "aether.engine.proxy".to_owned(),
-                    client_version: env!("CARGO_PKG_VERSION").to_owned(),
-                },
-                on_frame,
-            )
-            .map_err(|e| BootError::Other(Box::new(e)))?;
+            // A freshly-forked substrate (`spawned.is_some()`) may not
+            // have bound its RPC port yet, so the startup dial retries
+            // briefly. An adopted / externally-running substrate
+            // (`spawned.is_none()`) is dialed once — a refused
+            // connection there is a real error, not a startup race.
+            let retry = config.spawned.is_some();
+            let conn =
+                match connect_proxy(&config.rpc_addr, &mailer, self_mailbox, wake_kind, retry) {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        // The proxy owns the child it was handed — a
+                        // failed boot must not orphan the substrate.
+                        if let Some(mut child) = config.spawned.take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        return Err(BootError::Other(Box::new(e)));
+                    }
+                };
 
             tracing::info!(
                 target: "aether_substrate::engine_proxy",
                 engine_id = ?config.engine_id,
                 addr = %config.rpc_addr,
+                spawned = config.spawned.is_some(),
                 "engine proxy connected",
             );
 
@@ -129,6 +160,7 @@ mod proxy_native {
                 mailer,
                 conn,
                 in_flight: HashMap::new(),
+                spawned: config.spawned,
             })
         }
 
@@ -199,6 +231,95 @@ mod proxy_native {
                         );
                     }
                 }
+            }
+        }
+
+        /// Shut this proxy's substrate down.
+        ///
+        /// # Agent
+        /// Sent by the engines cap (`aether.engine`) on a terminate
+        /// request. The proxy self-shuts-down; its `Drop` SIGKILLs and
+        /// reaps the child substrate it forked (if any), and the
+        /// outbound RPC connection closes as the actor drops. The
+        /// `engine_id` field is ignored — a proxy only ever terminates
+        /// its own engine.
+        #[handler]
+        fn on_terminate(&mut self, ctx: &mut NativeCtx<'_>, _mail: TerminateEngine) {
+            tracing::info!(
+                target: "aether_substrate::engine_proxy",
+                engine_id = ?self.engine_id,
+                "engine proxy: terminate requested; shutting down",
+            );
+            ctx.shutdown();
+        }
+    }
+
+    /// Dial the substrate's `RpcServerCapability`, building a fresh
+    /// `on_frame` wake closure per attempt. When `retry` is set, a
+    /// connection-refused / reset error is retried (after a short
+    /// pause) until [`PROXY_CONNECT_RETRY_BUDGET`] elapses — a
+    /// freshly-forked substrate may not have bound its port yet.
+    /// Handshake / frame errors are always terminal: the peer
+    /// answered, just wrongly.
+    fn connect_proxy(
+        addr: &str,
+        mailer: &Arc<Mailer>,
+        self_mailbox: aether_data::MailboxId,
+        wake_kind: KindId,
+        retry: bool,
+    ) -> Result<RpcConnection, RpcClientError> {
+        let deadline = Instant::now() + PROXY_CONNECT_RETRY_BUDGET;
+        loop {
+            // The reader sidecar fires `RpcInboundReady` at the proxy's
+            // own mailbox after every inbound frame so
+            // `on_inbound_ready` drains `conn.inbound` on the
+            // dispatcher thread. `RpcClient::connect` consumes the
+            // closure, so a retry needs a fresh one.
+            let wake_mailer = Arc::clone(mailer);
+            let on_frame = move || {
+                wake_mailer.push(Mail::new(self_mailbox, wake_kind, Vec::new(), 1));
+            };
+            match RpcClient::connect(
+                addr,
+                PeerKind::Client {
+                    client_name: "aether.engine.proxy".to_owned(),
+                    client_version: env!("CARGO_PKG_VERSION").to_owned(),
+                },
+                on_frame,
+            ) {
+                Ok(conn) => return Ok(conn),
+                Err(e) => {
+                    if retry && is_transient_connect_error(&e) && Instant::now() < deadline {
+                        std::thread::sleep(PROXY_CONNECT_RETRY_INTERVAL);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// `true` for the connection-level errors a still-coming-up
+    /// substrate produces — worth retrying. Handshake / frame errors
+    /// mean the peer answered wrongly: terminal, never retried.
+    fn is_transient_connect_error(e: &RpcClientError) -> bool {
+        matches!(
+            e,
+            RpcClientError::Connect(io)
+                if matches!(io.kind(), ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset)
+        )
+    }
+
+    impl Drop for EngineProxy {
+        /// SIGKILL + reap the child substrate this proxy forked, so a
+        /// terminated proxy (or a chassis teardown) never orphans a
+        /// substrate process. A no-op for an adopted substrate
+        /// (`spawned` is `None`). Graceful SIGTERM is a follow-up;
+        /// v1 is forceful.
+        fn drop(&mut self) {
+            if let Some(mut child) = self.spawned.take() {
+                let _ = child.kill();
+                let _ = child.wait();
             }
         }
     }
@@ -365,6 +486,7 @@ mod tests {
                 EngineProxyConfig {
                     engine_id: EngineId(Uuid::from_u128(1)),
                     rpc_addr: format!("127.0.0.1:{port}"),
+                    spawned: None,
                 },
             )
             .finish()
@@ -435,6 +557,7 @@ mod tests {
                 EngineProxyConfig {
                     engine_id: EngineId(Uuid::from_u128(2)),
                     rpc_addr: format!("127.0.0.1:{port}"),
+                    spawned: None,
                 },
             )
             .finish();
