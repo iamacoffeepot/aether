@@ -33,7 +33,11 @@ The chassis layer consolidated in May 2026 (ADR-0073). All four chassis live in 
 
 ## MCP harness
 
-Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision. Starting `cargo run -p aether-substrate-bundle --bin aether-substrate-hub` (and either letting the hub spawn substrates via `spawn_substrate`, or running `AETHER_HUB_URL=127.0.0.1:8889 cargo run -p aether-substrate-bundle --bin aether-substrate` by hand — `--bin aether-substrate-headless` for workloads that don't need a window or GPU, ADR-0035) exposes eleven tools to a Claude Code session pointed at the project-scoped `.mcp.json`:
+Claude drives a running engine through MCP — the concrete form of the "Claude-in-harness" vision.
+
+**Issue 763 P5 — the harness is moving out-of-process (migration in progress).** The MCP coordinator now lives in the standalone `aether-mcp` crate — an RPC client that dials the hub, not an embedded server. The dev workflow is two processes: start the hub (`cargo run -p aether-substrate-bundle --bin aether-substrate-hub`; it now boots its RPC server on `127.0.0.1:8901` by default), then start `cargo run -p aether-mcp` (it dials the hub there and serves MCP on `127.0.0.1:8890`, where `.mcp.json` points). Get a substrate with `spawn_substrate` — `aether-mcp` tracks the engines the hub forks via the `aether.engine` cap. `aether-mcp` exposes nine of the eleven tools below; `receive_mail` is dropped (broadcast retires) and `engine_logs` is deferred (substrate-side pull migration). The embedded hub MCP server (`:8888`) still compiles but is unwired from `.mcp.json` — it and this section's full rewrite retire in P5e.
+
+The tool surface a Claude Code session sees:
 
 - `mcp__aether-hub__list_engines` — connected engines (UUID + name/pid/version + `spawned` flag: `true` if the hub launched the process, `false` if it connected externally).
 - `mcp__aether-hub__describe_kinds(engine_id)` — the kind vocabulary the engine declared at handshake, with enough structural detail to build params.
