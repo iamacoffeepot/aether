@@ -14,7 +14,6 @@ mod args;
 mod rpc;
 mod tools;
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -45,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MCP_PORT);
-    let mcp_addr = SocketAddr::from(([127, 0, 0, 1], mcp_port));
+    let mcp_addr = format!("127.0.0.1:{mcp_port}");
 
     // Dial the hub. The handshake is blocking, so run it on a
     // blocking-pool thread rather than stalling a runtime worker.
@@ -71,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let app = axum::Router::new().nest_service("/mcp", service);
-    let listener = tokio::net::TcpListener::bind(mcp_addr).await?;
+    let listener = tokio::net::TcpListener::bind(&mcp_addr).await?;
     let bound = listener.local_addr()?;
     tracing::info!(target: "aether_mcp", "mcp listener bound on http://{bound}/mcp");
     axum::serve(listener, app).await?;
