@@ -630,6 +630,81 @@ pub fn rpc_server_mailbox_id() -> aether_data::MailboxId {
 }
 
 #[cfg(test)]
+use serde::{Deserialize, Serialize};
+
+/// Test-only kinds for the call-roundtrip test. Need to live at file
+/// root (not in `mod tests`) because the `Kind` derive's inventory
+/// submission relies on items being addressable from a path the
+/// linker keeps. The `Kind` derive also registers the kind in
+/// `aether_kinds::descriptors::all()` so `fresh_substrate()`'s
+/// registry walk picks them up.
+#[cfg(test)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.rpc.test.echo_request")]
+pub struct TestEchoRequest {
+    pub value: u64,
+}
+
+#[cfg(test)]
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    aether_data::Kind,
+    aether_data::Schema,
+)]
+#[kind(name = "aether.rpc.test.echo_reply")]
+pub struct TestEchoReply {
+    pub value: u64,
+}
+
+/// Test-only echo actor: handles [`TestEchoRequest`] and replies with
+/// a matching [`TestEchoReply`]. The minimum viable receiver for
+/// exercising RpcServer's `Call → ReplyEvent → ReplyEnd` path
+/// without coupling the test to a production cap's semantics.
+#[cfg(test)]
+#[aether_actor::bridge(singleton)]
+mod test_echo_actor {
+    use super::{TestEchoReply, TestEchoRequest};
+    use aether_actor::{actor, actor::ctx::OutboundReply};
+    use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+    use aether_substrate::chassis::error::BootError;
+
+    pub struct TestEchoActor;
+
+    #[actor]
+    impl NativeActor for TestEchoActor {
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.rpc.test.echo";
+
+        fn init(_: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+
+        #[handler]
+        fn on_echo(&mut self, ctx: &mut NativeCtx<'_>, mail: TestEchoRequest) {
+            ctx.reply(&TestEchoReply { value: mail.value });
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::rpc::wire::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
@@ -768,6 +843,180 @@ mod tests {
         let _: WireFrame = read_frame(&mut stream).unwrap();
 
         write_frame(&mut stream, &WireFrame::Ping(0xc0ffee)).expect("write Ping");
+        let reply: WireFrame = read_frame(&mut stream).expect("read Pong");
+        assert_eq!(reply, WireFrame::Pong(0xc0ffee));
+    }
+
+    /// End-to-end Call dispatch: connect, handshake, fire a `Call`
+    /// addressed at the test echo actor's `TestEchoRequest` kind,
+    /// observe a `ReplyEvent { TestEchoReply }` followed by a
+    /// `ReplyEnd { Ok(()) }` when the chain settles. Exercises the
+    /// full dispatch / settlement / reply-interception path from
+    /// phase 2.
+    #[test]
+    fn call_echo_round_trip_event_then_end() {
+        use crate::rpc::server::test_echo_actor::TestEchoActor;
+        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use crate::trace::TraceObserverCapability;
+        use aether_actor::Actor;
+        use aether_data::{Kind, mailbox_id_from_name};
+
+        let (registry, mailer) = fresh_substrate();
+        let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            // TraceObserver folds substrate-wide trace events into per-
+            // root counters and fires `Settled { root }` mail at the
+            // chassis-mailbox once a root drains. Without it,
+            // RpcServer's settlement subscription never wakes and
+            // the `Call` never produces a `ReplyEnd`.
+            .with_actor::<TraceObserverCapability>(())
+            .with_actor::<TestEchoActor>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: test_peer_kind(),
+            })
+            .build_passive()
+            .expect("caps boot");
+
+        let port = _chassis
+            .handle::<RpcServerHandle>()
+            .expect("RpcServerHandle published")
+            .local_port;
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        // Handshake.
+        write_frame(
+            &mut stream,
+            &WireFrame::Hello(Hello {
+                wire_version: WIRE_VERSION,
+                peer: PeerKind::Client {
+                    client_name: "test-client".into(),
+                    client_version: "0.0.1".into(),
+                },
+            }),
+        )
+        .unwrap();
+        let _: WireFrame = read_frame(&mut stream).unwrap();
+
+        // Fire a Call against the echo actor. cid = 0xabc; the cap
+        // correlates and ends with ReplyEnd matching the same cid.
+        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 42 }).unwrap();
+        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
+        write_frame(
+            &mut stream,
+            &WireFrame::Call {
+                cid: Some(0xabc),
+                envelope: MailEnvelope {
+                    to: MailboxAddress::local(echo_mailbox),
+                    from: None,
+                    kind: <TestEchoRequest as Kind>::ID,
+                    correlation_id: None,
+                    payload: echo_payload,
+                },
+            },
+        )
+        .unwrap();
+
+        // First frame back should be the ReplyEvent carrying the
+        // TestEchoReply with the echoed value.
+        let event: WireFrame = read_frame(&mut stream).expect("read ReplyEvent");
+        let envelope = match event {
+            WireFrame::ReplyEvent { cid, envelope } => {
+                assert_eq!(cid, 0xabc);
+                envelope
+            }
+            other => panic!("expected ReplyEvent, got {other:?}"),
+        };
+        assert_eq!(envelope.kind, <TestEchoReply as Kind>::ID);
+        let decoded: TestEchoReply = postcard::from_bytes(&envelope.payload).expect("decode reply");
+        assert_eq!(decoded.value, 42);
+
+        // Then the ReplyEnd closes the call.
+        let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
+        match end {
+            WireFrame::ReplyEnd { cid, result } => {
+                assert_eq!(cid, 0xabc);
+                result.expect("ReplyEnd result Ok");
+            }
+            other => panic!("expected ReplyEnd, got {other:?}"),
+        }
+    }
+
+    /// Fire-and-forget `Call { cid: None }` skips reply correlation
+    /// entirely — no settlement subscription is created, no
+    /// `ReplyEnd` is written. Verify by sending a Call with cid None
+    /// at the test echo actor (whose reply would otherwise come back
+    /// as a ReplyEvent if correlation had leaked) and confirming a
+    /// subsequent `Ping(token)` round-trips immediately, which proves
+    /// no stale ReplyEvent / ReplyEnd frames are in the way.
+    #[test]
+    fn call_without_cid_is_fire_and_forget() {
+        use crate::rpc::server::test_echo_actor::TestEchoActor;
+        use crate::rpc::wire::{MailEnvelope, MailboxAddress};
+        use aether_actor::Actor;
+        use aether_data::{Kind, mailbox_id_from_name};
+
+        let (registry, mailer) = fresh_substrate();
+        let _chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TestEchoActor>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                peer_kind: test_peer_kind(),
+            })
+            .build_passive()
+            .expect("caps boot");
+
+        let port = _chassis
+            .handle::<RpcServerHandle>()
+            .expect("RpcServerHandle published")
+            .local_port;
+        let mut stream =
+            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        // Handshake.
+        write_frame(
+            &mut stream,
+            &WireFrame::Hello(Hello {
+                wire_version: WIRE_VERSION,
+                peer: PeerKind::Client {
+                    client_name: "test-client".into(),
+                    client_version: "0.0.1".into(),
+                },
+            }),
+        )
+        .unwrap();
+        let _: WireFrame = read_frame(&mut stream).unwrap();
+
+        // Fire-and-forget Call (cid = None). The echo actor will
+        // still reply, but with cid None there's no in-flight entry
+        // so the reply has no matching correlation and gets dropped.
+        let echo_payload = postcard::to_allocvec(&TestEchoRequest { value: 7 }).unwrap();
+        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Actor>::NAMESPACE);
+        write_frame(
+            &mut stream,
+            &WireFrame::Call {
+                cid: None,
+                envelope: MailEnvelope {
+                    to: MailboxAddress::local(echo_mailbox),
+                    from: None,
+                    kind: <TestEchoRequest as Kind>::ID,
+                    correlation_id: None,
+                    payload: echo_payload,
+                },
+            },
+        )
+        .unwrap();
+
+        // Immediately Ping. If the fire-and-forget Call had leaked
+        // reply correlation, a ReplyEvent / ReplyEnd would arrive
+        // before the Pong. Asserting we see Pong first proves no leak.
+        write_frame(&mut stream, &WireFrame::Ping(0xc0ffee)).unwrap();
         let reply: WireFrame = read_frame(&mut stream).expect("read Pong");
         assert_eq!(reply, WireFrame::Pong(0xc0ffee));
     }

@@ -26,6 +26,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{BroadcastCapability, trace::TraceObserverCapability};
 use aether_substrate::Chassis;
 use aether_substrate::chassis::builder::{
@@ -74,13 +75,19 @@ impl Chassis for HubChassis {
 pub struct HubEnv {
     pub engine_addr: SocketAddr,
     pub mcp_addr: SocketAddr,
+    /// Issue 750: optional `aether.rpc.server` bind address. Populated
+    /// from `AETHER_RPC_PORT`; `None` (default) skips booting
+    /// `RpcServerCapability` so existing chassis behavior is
+    /// unchanged.
+    pub rpc_addr: Option<SocketAddr>,
 }
 
 impl HubEnv {
-    /// Read `AETHER_ENGINE_PORT` / `AETHER_MCP_PORT` from the
-    /// environment; fall back to [`DEFAULT_ENGINE_PORT`] /
-    /// [`DEFAULT_MCP_PORT`] when unset or unparseable. Binds both
-    /// listeners on `127.0.0.1` — intentional for the current
+    /// Read `AETHER_ENGINE_PORT` / `AETHER_MCP_PORT` / `AETHER_RPC_PORT`
+    /// from the environment; fall back to [`DEFAULT_ENGINE_PORT`] /
+    /// [`DEFAULT_MCP_PORT`] when unset or unparseable. `AETHER_RPC_PORT`
+    /// has no default — absent means RpcServer doesn't boot. Binds
+    /// every listener on `127.0.0.1` — intentional for the current
     /// single-host development story.
     pub fn from_env() -> Self {
         use std::net::{IpAddr, Ipv4Addr};
@@ -90,6 +97,7 @@ impl HubEnv {
         Self {
             engine_addr: SocketAddr::new(loopback, engine_port),
             mcp_addr: SocketAddr::new(loopback, mcp_port),
+            rpc_addr: env_port("AETHER_RPC_PORT").map(|p| SocketAddr::new(loopback, p)),
         }
     }
 }
@@ -109,6 +117,7 @@ impl HubChassis {
         let HubEnv {
             engine_addr,
             mcp_addr,
+            rpc_addr,
         } = env;
         let registry = EngineRegistry::new();
         let sessions = SessionRegistry::new();
@@ -151,7 +160,7 @@ impl HubChassis {
             rt,
         };
 
-        Builder::<HubChassis>::new(registry_arc, mailer_arc)
+        let mut builder = Builder::<HubChassis>::new(registry_arc, mailer_arc)
             .with_actor::<BroadcastCapability>(())
             .with_actor::<TraceObserverCapability>(())
             .with_actor::<ProcessCapability>(ProcessCapabilityConfig {
@@ -159,9 +168,18 @@ impl HubChassis {
                 pending,
                 hub_engine_addr: engine_addr,
                 runtime: rt_handle,
-            })
-            .driver(driver)
-            .build()
+            });
+        if let Some(rpc_addr) = rpc_addr {
+            builder = builder.with_actor::<RpcServerCapability>(RpcServerConfig {
+                bind_addr: rpc_addr.to_string(),
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "aether-hub".into(),
+                    engine_version: env!("CARGO_PKG_VERSION").into(),
+                    kinds: vec![],
+                },
+            });
+        }
+        builder.driver(driver).build()
     }
 }
 
