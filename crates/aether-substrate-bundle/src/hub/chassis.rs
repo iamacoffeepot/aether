@@ -41,8 +41,8 @@ use crate::hub::loopback::{
     LoopbackEngine, LoopbackHandle, run_inbound_drainer, spawn_outbound_drainer,
 };
 use crate::hub::{
-    DEFAULT_ENGINE_PORT, DEFAULT_MCP_PORT, EngineRegistry, HubState, LogStore, PendingSpawns,
-    SessionRegistry, run_engine_listener, run_mcp_server,
+    DEFAULT_ENGINE_PORT, DEFAULT_MCP_PORT, DEFAULT_RPC_PORT, EngineRegistry, HubState, LogStore,
+    PendingSpawns, SessionRegistry, run_engine_listener, run_mcp_server,
 };
 
 /// Grace window per child when the hub shuts down. Shorter than
@@ -75,29 +75,32 @@ impl Chassis for HubChassis {
 pub struct HubEnv {
     pub engine_addr: SocketAddr,
     pub mcp_addr: SocketAddr,
-    /// Issue 750: optional `aether.rpc.server` bind address. Populated
-    /// from `AETHER_RPC_PORT`; `None` (default) skips booting
-    /// `RpcServerCapability` so existing chassis behavior is
-    /// unchanged.
+    /// `aether.rpc.server` bind address. Issue 763 P5d: the hub now
+    /// boots its RPC server unconditionally — it's the target the
+    /// out-of-process `aether-mcp` coordinator dials — so
+    /// [`HubEnv::from_env`] always populates this (`AETHER_RPC_PORT`
+    /// overrides the port). The field stays `Option` so embedders
+    /// constructing `HubEnv` directly (tests) can still opt out with
+    /// `None`.
     pub rpc_addr: Option<SocketAddr>,
 }
 
 impl HubEnv {
     /// Read `AETHER_ENGINE_PORT` / `AETHER_MCP_PORT` / `AETHER_RPC_PORT`
     /// from the environment; fall back to [`DEFAULT_ENGINE_PORT`] /
-    /// [`DEFAULT_MCP_PORT`] when unset or unparseable. `AETHER_RPC_PORT`
-    /// has no default — absent means RpcServer doesn't boot. Binds
-    /// every listener on `127.0.0.1` — intentional for the current
-    /// single-host development story.
+    /// [`DEFAULT_MCP_PORT`] / [`DEFAULT_RPC_PORT`] when unset or
+    /// unparseable. Binds every listener on `127.0.0.1` — intentional
+    /// for the current single-host development story.
     pub fn from_env() -> Self {
         use std::net::{IpAddr, Ipv4Addr};
         let engine_port = env_port("AETHER_ENGINE_PORT").unwrap_or(DEFAULT_ENGINE_PORT);
         let mcp_port = env_port("AETHER_MCP_PORT").unwrap_or(DEFAULT_MCP_PORT);
+        let rpc_port = env_port("AETHER_RPC_PORT").unwrap_or(DEFAULT_RPC_PORT);
         let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
         Self {
             engine_addr: SocketAddr::new(loopback, engine_port),
             mcp_addr: SocketAddr::new(loopback, mcp_port),
-            rpc_addr: env_port("AETHER_RPC_PORT").map(|p| SocketAddr::new(loopback, p)),
+            rpc_addr: Some(SocketAddr::new(loopback, rpc_port)),
         }
     }
 }

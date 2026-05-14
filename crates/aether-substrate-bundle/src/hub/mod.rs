@@ -93,6 +93,12 @@ pub use spawn::{
 /// fixes this; `AETHER_ENGINE_PORT` overrides.
 pub const DEFAULT_ENGINE_PORT: u16 = 8889;
 
+/// Default port the hub binds its `aether.rpc.server` on (issue 763).
+/// The hub now boots its RPC server unconditionally — it's the target
+/// the out-of-process `aether-mcp` coordinator dials (matching that
+/// crate's `DEFAULT_HUB_RPC_ADDR`). `AETHER_RPC_PORT` overrides.
+pub const DEFAULT_RPC_PORT: u16 = 8901;
+
 /// Run the engine listener loop on `addr`, dispatching each accepted
 /// connection to a per-connection task. Returns on listener error
 /// only; individual connection failures are logged and isolated.
