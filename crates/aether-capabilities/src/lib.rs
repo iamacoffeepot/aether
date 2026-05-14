@@ -29,6 +29,7 @@
 pub mod audio;
 pub mod broadcast;
 pub mod component;
+pub mod engine;
 pub mod fs;
 pub mod handle;
 pub mod http;
@@ -55,6 +56,9 @@ pub use component::ComponentHostCapability;
 // without dragging the wasmtime stack into the wasm graph.
 #[cfg(not(target_arch = "wasm32"))]
 pub use component::ComponentHostConfig;
+pub use engine::EngineProxy;
+#[cfg(not(target_arch = "wasm32"))]
+pub use engine::EngineProxyConfig;
 pub use handle::HandleCapability;
 pub use http::{HttpCapability, HttpConfig};
 pub use input::InputCapability;

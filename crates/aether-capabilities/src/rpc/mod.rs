@@ -20,9 +20,10 @@ pub mod wire;
 pub mod client;
 
 // Shared round-trip test scaffolding (echo actor + its kinds), used by
-// both the `server` and `client` test modules.
+// the `server` / `client` test modules and the `engine::proxy` test —
+// `pub(crate)` so cross-module test code outside `rpc` can reach it.
 #[cfg(test)]
-mod test_echo;
+pub(crate) mod test_echo;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use client::{RpcClient, RpcClientError, RpcConnection, RpcReaderHandle};
