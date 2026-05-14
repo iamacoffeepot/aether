@@ -32,23 +32,28 @@
 // Handler-signature kinds must be importable at file root — the
 // `#[bridge]` macro emits `impl HandlesKind<K>` markers as siblings of
 // the mod.
-use aether_kinds::{ListEngines, SpawnEngine, TerminateEngine};
+use aether_kinds::{ListEngines, RouteEnvelope, SpawnEngine, TerminateEngine};
 
 #[aether_actor::bridge(singleton)]
 mod server_native {
-    use super::{ListEngines, SpawnEngine, TerminateEngine};
+    use super::{ListEngines, RouteEnvelope, SpawnEngine, TerminateEngine};
     use crate::engine::proxy::{EngineProxy, EngineProxyConfig};
     use aether_actor::{MailCtx, actor};
     use aether_data::{EngineId, Kind, MailboxId, Uuid};
     use aether_kinds::{
-        EngineDescriptor, ListEnginesResult, SpawnEngineResult, TerminateEngineResult,
+        CallSettled, EngineDescriptor, ForwardEnvelope, ListEnginesResult, SpawnEngineResult,
+        TerminateEngineResult,
     };
+    use aether_substrate::Mail;
     use aether_substrate::Subname;
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::chassis::error::BootError;
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::{ReplyTarget, ReplyTo};
     use std::collections::HashMap;
     use std::net::TcpListener;
     use std::process::{Command, Stdio};
+    use std::sync::Arc;
 
     /// One supervised engine in [`EngineServer`]'s table.
     struct EngineEntry {
@@ -69,6 +74,11 @@ mod server_native {
         /// dependency. Starts at 1 (`Uuid::from_u128(0)` is the nil
         /// uuid).
         next_engine_seq: u128,
+        /// Cached so `on_route` can push a `ForwardEnvelope` at a proxy
+        /// while *propagating the inbound reply-to* — `NativeCtx`'s
+        /// sends stamp the cap as sender, but a routed call's reply
+        /// must reach the originating `RpcServerCapability`, not here.
+        mailer: Arc<Mailer>,
     }
 
     #[actor]
@@ -76,10 +86,11 @@ mod server_native {
         type Config = ();
         const NAMESPACE: &'static str = "aether.engine";
 
-        fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self {
                 engines: HashMap::new(),
                 next_engine_seq: 1,
+                mailer: ctx.mailer(),
             })
         }
 
@@ -216,6 +227,94 @@ mod server_native {
             ctx.send_envelope_traced(entry.proxy_mailbox, <TerminateEngine as Kind>::ID, &payload);
             ctx.reply(&TerminateEngineResult::Ok);
         }
+
+        /// Relay one mail to a specific engine's substrate.
+        ///
+        /// # Agent
+        /// Not a user-facing tool — the hub's `RpcServerCapability`
+        /// sends this when an RPC client addresses a `Call` at
+        /// `engine = Some(_)`. The cap looks the engine up in its
+        /// table and re-emits a `ForwardEnvelope` at the matching
+        /// `aether.engine.proxy:<id>`, propagating the inbound
+        /// reply-to verbatim so the substrate's reply (and the proxy's
+        /// terminal `CallSettled`) stream straight back to that
+        /// `RpcServerCapability`. An unknown / unparseable `engine_id`
+        /// is answered with `CallSettled::Err` so the originating wire
+        /// call closes instead of hanging.
+        #[handler]
+        fn on_route(&mut self, ctx: &mut NativeCtx<'_>, mail: RouteEnvelope) {
+            let reply_to = ctx.reply_target();
+            let ReplyTarget::Component(reply_target) = reply_to.target else {
+                // A routed call always carries a Component reply-to
+                // (the originating RpcServerCapability). Without one
+                // there's nowhere to stream the reply or the
+                // CallSettled — drop rather than guess.
+                tracing::warn!(
+                    target: "aether_substrate::engine_server",
+                    engine_id = %mail.engine_id,
+                    "engine route: no Component reply-to; dropping",
+                );
+                return;
+            };
+            let correlation = reply_to.correlation_id;
+
+            let engine_id = match Uuid::parse_str(&mail.engine_id) {
+                Ok(uuid) => EngineId(uuid),
+                Err(e) => {
+                    settle_err(
+                        &self.mailer,
+                        reply_target,
+                        correlation,
+                        format!("engine_id {:?} is not a valid UUID: {e}", mail.engine_id),
+                    );
+                    return;
+                }
+            };
+            let Some(entry) = self.engines.get(&engine_id) else {
+                settle_err(
+                    &self.mailer,
+                    reply_target,
+                    correlation,
+                    format!("no supervised engine {}", mail.engine_id),
+                );
+                return;
+            };
+
+            // Re-emit as a ForwardEnvelope at the proxy, carrying the
+            // inbound reply-to verbatim so the substrate's reply — and
+            // the proxy's CallSettled — route straight back to the
+            // originating RpcServerCapability.
+            let forward = ForwardEnvelope {
+                mailbox: mail.mailbox,
+                kind: mail.kind,
+                payload: mail.payload,
+            };
+            self.mailer.push(
+                Mail::new(
+                    entry.proxy_mailbox,
+                    <ForwardEnvelope as Kind>::ID,
+                    forward.encode_into_bytes(),
+                    1,
+                )
+                .with_reply_to(reply_to),
+            );
+        }
+    }
+
+    /// Push a `CallSettled::Err` back to `target` (correlation
+    /// preserved) so a routed call that the cap can't satisfy — bad
+    /// `engine_id`, unknown engine — closes with a wire `ReplyEnd`
+    /// instead of leaving the RPC client hanging.
+    fn settle_err(mailer: &Arc<Mailer>, target: MailboxId, correlation: u64, error: String) {
+        mailer.push(
+            Mail::new(
+                target,
+                <CallSettled as Kind>::ID,
+                CallSettled::Err { error }.encode_into_bytes(),
+                1,
+            )
+            .with_reply_to(ReplyTo::with_correlation(ReplyTarget::None, correlation)),
+        );
     }
 
     /// Bind `127.0.0.1:0`, read the OS-assigned port, drop the
