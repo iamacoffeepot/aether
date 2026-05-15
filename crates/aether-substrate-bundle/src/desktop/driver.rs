@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crate::hub::HubClient;
 use aether_actor::Actor;
 use aether_capabilities::InputCapability;
 use aether_capabilities::RenderHandles;
@@ -633,9 +632,6 @@ pub struct DesktopDriverCapability {
     pub boot_mode: WindowMode,
     pub boot_size: Option<(u32, u32)>,
     pub boot_title: String,
-    /// Held for the chassis lifetime so the hub reader + heartbeat
-    /// threads stay spawned. `None` when `AETHER_HUB_URL` was unset.
-    pub hub: Option<HubClient>,
 }
 
 pub struct DesktopDriverRunning {
@@ -647,7 +643,6 @@ pub struct DesktopDriverRunning {
     /// drops just after, tearing down each passive in reverse boot
     /// order via `RunningCapability::shutdown`.
     _boot: SubstrateBoot,
-    _hub: Option<HubClient>,
 }
 
 impl DriverCapability for DesktopDriverCapability {
@@ -661,7 +656,6 @@ impl DriverCapability for DesktopDriverCapability {
             boot_mode,
             boot_size,
             boot_title,
-            hub,
         } = self;
 
         // Issue 629 / Phase A: render publishes its `RenderHandles`
@@ -755,11 +749,9 @@ impl DriverCapability for DesktopDriverCapability {
             // `boot` stays alive on the running so its scheduler joins
             // workers on drop. Drop ordering on
             // `DesktopDriverRunning::run` exit: app → event_loop →
-            // triangles_rendered → _boot → _hub, which means
-            // capabilities (held by `app`) tear down before the hub
-            // disconnects.
+            // triangles_rendered → _boot, which means capabilities
+            // (held by `app`) tear down before the scheduler joins.
             _boot: boot,
-            _hub: hub,
         })
     }
 }
@@ -771,7 +763,6 @@ impl DriverRunning for DesktopDriverRunning {
             event_loop,
             triangles_rendered,
             _boot,
-            _hub,
         } = *self;
 
         event_loop

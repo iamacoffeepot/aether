@@ -1,9 +1,10 @@
 //! `TestBench` — the in-process driver for the test-bench chassis (ADR-0067).
 //!
-//! Boots the same substrate machinery `main.rs` does, but instead
-//! of dialing a hub it attaches a loopback channel to `outbound`.
-//! Substrate-emitted replies arrive on `loopback_rx` so the test
-//! thread can correlate them to its requests by `correlation_id`.
+//! Boots the same substrate machinery `main.rs` does, but attaches a
+//! [`RecordingBackend`] to `outbound` instead of relying on an external
+//! egress target. Substrate-emitted replies arrive on `loopback_rx`
+//! as [`EgressEvent`]s so the test thread can correlate them to its
+//! requests by `correlation_id`.
 //!
 //! The chassis-control handler is the same one the binary uses —
 //! it pushes `Advance` / `CaptureRequested` events onto the events
@@ -24,16 +25,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::hub::wire::{ClaudeAddress, EngineToHub, SessionToken, Uuid};
-use aether_data::{Kind, KindId, encode_empty, encode_struct};
+use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty, encode_struct};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tick};
 // `encode_struct` is used for control kinds (postcard-shape); cast-
 // shape kinds (e.g. FrameStats) flow through `frame_loop` helpers.
-use crate::hub::HubProtocolBackend;
 use aether_actor::Actor;
 use aether_capabilities::{RenderCapability, fs::NamespaceRoots};
 use aether_substrate::{
-    HubOutbound, Mailer, PassiveChassis, ReplyTarget, ReplyTo, SubstrateBoot,
+    EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, ReplyTarget, ReplyTo,
+    SubstrateBoot,
     capture::CaptureQueue,
     chassis::frame_loop,
     mail::{Mail, MailboxId},
@@ -104,7 +104,7 @@ pub struct TestBench {
     queue: Arc<Mailer>,
     registry: Arc<aether_substrate::Registry>,
     outbound: Arc<HubOutbound>,
-    loopback_rx: mpsc::Receiver<EngineToHub>,
+    loopback_rx: mpsc::Receiver<EgressEvent>,
 
     capture_queue: CaptureQueue,
     events_rx: EventReceiver,
@@ -142,7 +142,7 @@ pub struct TestBench {
     /// for yet. Single-threaded callers won't accumulate entries
     /// here; the field exists so an out-of-order reply (e.g. a
     /// late-arriving frame) doesn't get silently dropped.
-    stashed_replies: HashMap<u64, EngineToHub>,
+    stashed_replies: HashMap<u64, EgressEvent>,
 
     /// Kind names of mail observed via the chassis-owned render sink
     /// (`aether.render` — both `aether.draw_triangle` and
@@ -266,9 +266,6 @@ impl TestBench {
             name: "test-bench".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             workers: WORKERS,
-            // In-process bench doesn't dial a hub; replies route to
-            // the loopback attached below.
-            hub_url: None,
             observed_kinds: Some(Arc::clone(&observed_kinds)),
             events_tx,
             capture_queue: capture_queue.clone(),
@@ -280,15 +277,15 @@ impl TestBench {
             render_handles,
             kind_tick,
             kind_frame_stats,
-            hub: _hub,
         } = TestBenchChassis::build_passive(env)
             .map_err(|e| TestBenchError::Boot(e.to_string()))?;
 
-        // Attach a loopback to the boot's outbound. Replies the
-        // substrate emits via `outbound.send_reply` arrive here.
-        let (loopback_tx, loopback_rx) = mpsc::channel::<EngineToHub>();
-        boot.outbound
-            .attach_backend(Arc::new(HubProtocolBackend::new(loopback_tx)));
+        // Attach a `RecordingBackend` to the boot's outbound. Replies
+        // the substrate emits via `outbound.send_reply` arrive here
+        // as `EgressEvent::ToSession` / `Broadcast`, which `pump_until_reply`
+        // correlates by `correlation_id`.
+        let (recording, loopback_rx) = RecordingBackend::new();
+        boot.outbound.attach_backend(Arc::new(recording));
 
         let gpu = Gpu::new(width, height, render_handles.clone());
 
@@ -574,24 +571,21 @@ impl TestBench {
 
             // Look for our reply on the loopback.
             let mut found_reply = false;
-            while let Ok(frame) = self.loopback_rx.try_recv() {
+            while let Ok(event) = self.loopback_rx.try_recv() {
                 found_reply = true;
-                if let Some(frame_cid) = correlation_of(&frame) {
-                    if frame_cid == cid {
-                        return Self::decode_reply::<R>(frame, expected);
+                if let Some(event_cid) = correlation_of(&event) {
+                    if event_cid == cid {
+                        return Self::decode_reply::<R>(event, expected);
                     }
                     // Reply for a different cid (rare; out-of-order).
-                    self.stashed_replies.insert(frame_cid, frame);
+                    self.stashed_replies.insert(event_cid, event);
                     continue;
                 }
-                // Broadcast or session-zero — frame_stats and the
-                // like. Record the kind so scenario assertions can
-                // observe substrate-emitted broadcasts.
-                if let EngineToHub::Mail(m) = &frame {
-                    self.observed_kinds
-                        .lock()
-                        .unwrap()
-                        .push(m.kind_name.clone());
+                // Broadcast or other untracked emission (e.g.
+                // frame_stats). Record the kind so scenario assertions
+                // can observe substrate-emitted broadcasts.
+                if let EgressEvent::Broadcast { kind_name, .. } = &event {
+                    self.observed_kinds.lock().unwrap().push(kind_name.clone());
                 }
             }
 
@@ -615,16 +609,18 @@ impl TestBench {
         })
     }
 
-    fn decode_reply<R>(frame: EngineToHub, expected: &'static str) -> Result<R, TestBenchError>
+    fn decode_reply<R>(event: EgressEvent, expected: &'static str) -> Result<R, TestBenchError>
     where
         R: serde::de::DeserializeOwned,
     {
-        match frame {
-            EngineToHub::Mail(m) => postcard::from_bytes::<R>(&m.payload).map_err(|e| {
-                TestBenchError::Decode(format!("{expected} decode: {e} (kind={})", m.kind_name))
+        match event {
+            EgressEvent::ToSession {
+                kind_name, payload, ..
+            } => postcard::from_bytes::<R>(&payload).map_err(|e| {
+                TestBenchError::Decode(format!("{expected} decode: {e} (kind={kind_name})"))
             }),
             other => Err(TestBenchError::Decode(format!(
-                "expected {expected} mail frame, got {other:?}"
+                "expected {expected} reply event, got {other:?}"
             ))),
         }
     }
@@ -744,14 +740,13 @@ impl TestBench {
     }
 }
 
-/// Pull the correlation_id out of an EngineToHub frame, if any.
-/// Mail frames addressed at a `Session` carry a correlation_id;
-/// broadcasts and other variants return None.
-fn correlation_of(frame: &EngineToHub) -> Option<u64> {
-    match frame {
-        EngineToHub::Mail(m) if !matches!(m.address, ClaudeAddress::Broadcast) => {
-            Some(m.correlation_id)
-        }
+/// Pull the correlation_id out of an `EgressEvent`, if it represents
+/// a session-targeted reply. `Broadcast` and the other event shapes
+/// aren't replies and return `None` — `pump_until_reply` records the
+/// broadcast kind for `observed_kinds` and otherwise ignores them.
+fn correlation_of(event: &EgressEvent) -> Option<u64> {
+    match event {
+        EgressEvent::ToSession { correlation_id, .. } => Some(*correlation_id),
         _ => None,
     }
 }

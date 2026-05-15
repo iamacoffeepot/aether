@@ -4,12 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 # Multi-binary chassis crate. Holds the desktop, headless, hub, and
-# test-bench chassis source as submodules (`src/<chassis>/`), plus
-# the hub library (substrate-side client, wire types, MCP
-# coordinator) under `src/hub/`. Each chassis produces a binary via
-# `src/bin/<chassis>.rs`. The shared substrate runtime stays in
-# `aether-substrate`; this crate is the per-deployment chassis
-# layer.
+# test-bench chassis source as submodules (`src/<chassis>/`). Each
+# chassis produces a binary via `src/bin/<chassis>.rs`. The shared
+# substrate runtime stays in `aether-substrate`; this crate is the
+# per-deployment chassis layer.
 #
 # The in-process `TestBench` API surfaces as
 # `aether_substrate_bundle::test_bench::TestBench` for component +

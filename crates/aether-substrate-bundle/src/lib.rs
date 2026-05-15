@@ -5,8 +5,8 @@
 //! - `src/<chassis>/` — chassis-specific source (chassis impl,
 //!   driver capability, render plumbing, etc.) for the four chassis:
 //!   `desktop`, `headless`, `hub`, `test_bench`.
-//! - `src/hub/` — the hub library (substrate-side client, wire types,
-//!   MCP coordinator, hub chassis).
+//! - `src/hub/` — the hub chassis (the `aether-substrate-hub` binary's
+//!   thin Chassis impl post-issue-763 P5f).
 //! - `src/test_bench/` — the test-bench chassis plus the in-process
 //!   `TestBench` library API consumers reach via
 //!   `aether_substrate_bundle::test_bench::TestBench`.
@@ -15,14 +15,14 @@
 //!   `aether-substrate-hub`, `aether-substrate-test-bench` —
 //!   output names preserved across the rename).
 //!
-//! The lib root re-exports a convenience surface (the hub types and
-//! the most-used `aether-substrate` runtime types) so external
-//! consumers — components, integration tests, the scenario runner,
-//! demos — can write `use aether_substrate_bundle::{HubClient,
-//! Registry, ...};` instead of chasing through chassis submodules.
-//! The shared substrate runtime (mail scheduler, registry, wasmtime
-//! host, capabilities) lives in `aether-substrate` — depend on that
-//! directly when you don't need chassis or hub surface.
+//! The lib root re-exports a convenience surface (the most-used
+//! `aether-substrate` runtime types) so external consumers —
+//! components, integration tests, the scenario runner, demos — can
+//! write `use aether_substrate_bundle::{Registry, ...};` instead of
+//! chasing through chassis submodules. The shared substrate runtime
+//! (mail scheduler, registry, wasmtime host, capabilities) lives in
+//! `aether-substrate` — depend on that directly when you don't need
+//! chassis surface.
 
 pub mod desktop;
 pub mod headless;
@@ -42,4 +42,3 @@ pub use aether_substrate::{
     mail::registry,
     runtime::log_install,
 };
-pub use hub::{HubClient, dispatch_hub_mail_by_id, dispatch_hub_to_engine_mail};

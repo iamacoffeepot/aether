@@ -2,15 +2,16 @@
 //!
 //! Two driver modes:
 //!
-//! - **Binary (`src/bin/test-bench.rs`)** — connects to a hub via TCP,
-//!   runs the chassis events loop on the main thread blocking on
-//!   `events_rx.recv()`. Hub-driven exploration (the `spawn_substrate`
-//!   MCP path).
-//! - **In-process ([`TestBench`] struct)** — no hub, no TCP. Substrate
-//!   state is owned by the test thread; mail goes through the same
-//!   sinks + control plane but replies route to a loopback channel
-//!   instead of a socket. Rust integration tests and `aether-scenario`
-//!   link this directly via `aether_substrate_bundle::test_bench::TestBench`.
+//! - **Binary (`src/bin/test-bench.rs`)** — runs the chassis events
+//!   loop on the main thread blocking on `events_rx.recv()`. Driven
+//!   by the `aether-mcp` harness through the forward-model RPC
+//!   (the substrate hosts `RpcServerCapability`).
+//! - **In-process ([`TestBench`] struct)** — substrate state is owned
+//!   by the test thread; mail goes through the same sinks + control
+//!   plane but replies route to a `RecordingBackend` loopback instead
+//!   of a socket. Rust integration tests and `aether-scenario` link
+//!   this directly via
+//!   `aether_substrate_bundle::test_bench::TestBench`.
 
 mod bench;
 pub mod cap;
