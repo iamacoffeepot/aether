@@ -15,20 +15,48 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use aether_data::{KindDescriptor, MailboxDescriptor};
+use serde::{Deserialize, Serialize};
 
 use crate::hub::wire::{EngineId, HubToEngine};
 use tokio::sync::mpsc;
 
-use crate::hub::mcp::args::ComponentCapabilitiesWire;
-
 /// Per-loaded-component metadata tracked by the hub (ADR-0033). Seeded
-/// when `load_component` resolves, refreshed on `replace_component`,
-/// removed on `drop_component`. Surfaced verbatim by the
-/// `describe_component` MCP tool.
+/// when a component loads, refreshed on replace, removed on drop.
 #[derive(Clone, Debug)]
 pub struct ComponentRecord {
     pub name: String,
     pub capabilities: ComponentCapabilitiesWire,
+}
+
+/// Wire-format mirror of `aether-kinds::ComponentCapabilities`
+/// (ADR-0033) — the hub's decode of the substrate's `LoadResult`.
+/// Lived in `hub/mcp/args.rs` until the embedded MCP server retired
+/// (issue 763 P5e); it moved here, next to its only consumer
+/// ([`ComponentRecord`]), and shed the `JsonSchema` derive the rmcp
+/// tool surface needed.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ComponentCapabilitiesWire {
+    pub handlers: Vec<HandlerCapabilityWire>,
+    pub fallback: Option<FallbackCapabilityWire>,
+    pub doc: Option<String>,
+}
+
+/// One `#[handler]` method's capability entry — see
+/// `aether-kinds::HandlerCapability`. `id`'s serde impl emits the
+/// tagged-string form for human-readable serializers and the raw
+/// `u64` for binary (ADR-0064 / ADR-0065).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HandlerCapabilityWire {
+    pub id: aether_data::KindId,
+    pub name: String,
+    pub doc: Option<String>,
+}
+
+/// `#[fallback]` presence + optional doc — see
+/// `aether-kinds::FallbackCapability`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FallbackCapabilityWire {
+    pub doc: Option<String>,
 }
 
 /// One entry in the hub's engine table. `mail_tx` is how any other

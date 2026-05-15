@@ -18,11 +18,9 @@ pub const DEFAULT_RING_ENTRIES: usize = 2_000;
 /// Default cap on bytes per engine (variable-length parts only).
 pub const DEFAULT_RING_BYTES: usize = 2 * 1024 * 1024;
 
-/// Hard ceiling the MCP tool will honour. Caller-supplied `max`
-/// values above this clamp down silently.
+/// Hard ceiling on entries returned in one read. Caller-supplied
+/// `max` values above this clamp down silently.
 pub const TOOL_MAX_ENTRIES: usize = 1_000;
-/// Default `max` when the caller omits it.
-pub const TOOL_DEFAULT_ENTRIES: usize = 100;
 
 /// Shared, thread-safe per-engine log store. Cheap to clone — all
 /// clones share the same map.
