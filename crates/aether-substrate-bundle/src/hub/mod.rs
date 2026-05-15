@@ -1,6 +1,6 @@
-//! aether-hub: substrate-side hub client + capability + the hub
-//! coordinator itself (ADR-0070 phases 4-5 / ADR-0071 phase 7,
-//! ADR-0072 fold of `aether-hub-protocol`).
+//! aether-hub: substrate-side hub client + the thin hub chassis
+//! (ADR-0070 phases 4-5 / ADR-0071 phase 7, ADR-0072 fold of
+//! `aether-hub-protocol`).
 //!
 //! Houses everything that needs to know the hub wire format on the
 //! substrate side:
@@ -15,30 +15,27 @@
 //!   its URL is `Some`; no-ops when `None` so chassis can opt out
 //!   cleanly.
 //! - [`loopback_outbound`] — substitute for an in-process driver
-//!   (test-bench, hub-chassis loopback) that wants to drain
-//!   `EngineToHub` frames the substrate would otherwise serialise.
+//!   (test-bench) that wants to drain `EngineToHub` frames the
+//!   substrate would otherwise serialise.
 //! - [`dispatch_hub_to_engine_mail`] / [`dispatch_hub_mail_by_id`] —
-//!   inbound-frame resolvers shared by [`HubClient`]'s reader and the
-//!   hub-chassis's loopback drainer.
+//!   inbound-frame resolvers shared by [`HubClient`]'s reader.
 //!
-//! Plus the hub coordinator itself (ADR-0071 phase 7d-2 relocated
-//! these from the `aether-substrate-hub` binary crate):
+//! Plus the hub chassis itself (post-issue-763 P5f):
 //!
 //! - [`HubChassis`] / [`HubServerDriverCapability`] — Chassis marker +
-//!   driver capability that owns the tokio runtime + listeners.
-//! - [`run_engine_listener`] — the engine-facing TCP listener loop.
-//! - [`EngineRegistry`] / [`SessionRegistry`] / [`PendingSpawns`] /
-//!   [`LogStore`] — the in-process state the coordinator wires
-//!   together.
-//! - [`spawn_substrate`] / [`terminate_substrate`] — child-process
-//!   lifecycle for the `spawn_substrate` MCP tool.
+//!   driver capability. The hub is now a thin coordinator: it stands
+//!   up `TraceObserverCapability` + `EngineServer` +
+//!   `RpcServerCapability` and blocks on SIGINT/SIGTERM. The OLD
+//!   `EngineToHub` TCP listener, hub-side sessions,
+//!   `ProcessCapability`, loopback drainers, and embedded MCP server
+//!   all retired with P5e/P5f.
 //!
 //! Per ADR-0006's "substrate stays sync" note, the hub-client
 //! machinery uses `std::sync::mpsc` and the sync framing helpers from
-//! [`aether_codec::frame`]. The coordinator itself is async (tokio).
+//! [`aether_codec::frame`].
 
 use std::io;
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::process;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -51,7 +48,6 @@ use aether_substrate::{
     EgressBackend, HubOutbound, LogEntry as SubstrateLogEntry, LogLevel as SubstrateLogLevel, Mail,
     Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,
 };
-use tokio::net::TcpListener;
 
 use crate::hub::wire::{
     ClaudeAddress, EngineId, EngineMailFrame, EngineMailToHubSubstrateFrame, EngineToHub, Hello,
@@ -60,72 +56,17 @@ use crate::hub::wire::{
 };
 
 mod chassis;
-mod engine;
-mod log_store;
-mod loopback;
-mod process_capability;
-mod registry;
-mod session;
-mod spawn;
 pub mod wire;
 
 pub use aether_codec::{DecodeError, EncodeError, decode_schema, encode_schema};
 pub use aether_substrate::Chassis;
 pub use chassis::{HubChassis, HubEnv, HubServerDriverCapability, HubServerDriverRunning};
-pub use engine::READ_TIMEOUT;
-pub use log_store::{LogStore, ReadResult as LogReadResult};
-pub use loopback::{HUB_SELF_ENGINE_ID, LoopbackEngine, LoopbackHandle};
-pub use process_capability::{ProcessCapability, ProcessCapabilityConfig};
-pub use registry::{EngineRecord, EngineRegistry};
-pub use session::{
-    QueuedMail, SESSION_CHANNEL_CAPACITY, SessionHandle, SessionRecord, SessionRegistry,
-};
-pub use spawn::{
-    DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_TERMINATE_GRACE, PendingSpawns, SpawnError, SpawnOpts,
-    TerminateOutcome, spawn_substrate_no_adopt, terminate_substrate,
-};
-
-/// Default port the hub binds for engine TCP clients. ADR-0006 V0
-/// fixes this; `AETHER_ENGINE_PORT` overrides.
-pub const DEFAULT_ENGINE_PORT: u16 = 8889;
 
 /// Default port the hub binds its `aether.rpc.server` on (issue 763).
-/// The hub now boots its RPC server unconditionally — it's the target
-/// the out-of-process `aether-mcp` coordinator dials (matching that
+/// The hub boots its RPC server unconditionally — it's the target the
+/// out-of-process `aether-mcp` coordinator dials (matching that
 /// crate's `DEFAULT_HUB_RPC_ADDR`). `AETHER_RPC_PORT` overrides.
 pub const DEFAULT_RPC_PORT: u16 = 8901;
-
-/// Run the engine listener loop on `addr`, dispatching each accepted
-/// connection to a per-connection task. Returns on listener error
-/// only; individual connection failures are logged and isolated.
-pub async fn run_engine_listener(
-    addr: SocketAddr,
-    registry: EngineRegistry,
-    sessions: SessionRegistry,
-    pending: PendingSpawns,
-    logs: LogStore,
-    loopback: loopback::LoopbackHandle,
-) -> std::io::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    let bound = listener.local_addr()?;
-    eprintln!("aether-substrate-hub: engine listener bound on {bound}");
-
-    loop {
-        let (stream, peer) = listener.accept().await?;
-        let registry = registry.clone();
-        let sessions = sessions.clone();
-        let pending = pending.clone();
-        let logs = logs.clone();
-        let loopback = loopback.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                engine::handle_connection(stream, registry, sessions, pending, logs, loopback).await
-            {
-                eprintln!("aether-substrate-hub: engine {peer} dropped: {e}");
-            }
-        });
-    }
-}
 
 /// Cadence at which this client emits `Heartbeat` to the hub. Must be
 /// comfortably below the hub's read timeout (15s) so a single missed

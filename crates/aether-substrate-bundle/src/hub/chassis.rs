@@ -1,55 +1,25 @@
-//! Hub chassis (ADR-0034 Phase 1 / ADR-0035 / ADR-0071 phase 7d).
-//!
-//! Builder-shape adoption: [`HubChassis`] is a `Chassis` marker,
-//! [`HubEnv`] carries resolved listener addresses, and
-//! [`HubServerDriverCapability`] is the driver. [`HubChassis::build`]
-//! returns a `BuiltChassis<HubChassis>` whose `run()` blocks the
-//! calling thread on the tokio coordinator.
-//!
-//! The driver owns a multi-thread tokio runtime, the engine TCP
-//! listener, the loopback drainers (inbound tokio task + outbound
-//! std thread), and the SIGINT/SIGTERM → children-cleanup →
-//! drop-substrate shutdown sequence — exactly the coordinator
-//! behavior the previous `HubChassis::run_async` body held inline.
-//! The Builder pattern adds no behavior change; it just gives the
-//! hub the same compositional shape as desktop, headless, and
-//! test-bench.
-//!
-//! Issue 763 P5e: the embedded rmcp MCP server retired — the harness
-//! moved out-of-process into the `aether-mcp` crate, which reaches
-//! the hub through its `RpcServerCapability`. The legacy engine TCP
-//! listener still lives here pending the P5f collapse.
+//! Hub chassis (post-issue-763 P5f). The hub is now a thin coordinator
+//! between the out-of-process `aether-mcp` MCP server and the
+//! substrates the engines cap forks: it stands up a `SubstrateBoot` to
+//! host actors, wires `TraceObserverCapability` + `EngineServer` +
+//! `RpcServerCapability` (the inbound `aether-mcp` dials), and blocks
+//! on a SIGINT/SIGTERM signal in `run`. The OLD `EngineToHub` TCP
+//! listener, hub-side sessions, `ProcessCapability`, loopback drainers,
+//! and embedded MCP server all retired with P5e/P5f.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
-use aether_capabilities::{BroadcastCapability, EngineServer, trace::TraceObserverCapability};
-use aether_substrate::Chassis;
+use aether_capabilities::{EngineServer, trace::TraceObserverCapability};
 use aether_substrate::chassis::builder::{
     Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError,
 };
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::{Chassis, SubstrateBoot};
 use tokio::runtime::Runtime;
 
-use crate::hub::process_capability::{ProcessCapability, ProcessCapabilityConfig};
-
-use crate::hub::loopback::{
-    LoopbackEngine, LoopbackHandle, run_inbound_drainer, spawn_outbound_drainer,
-};
-use crate::hub::{
-    DEFAULT_ENGINE_PORT, DEFAULT_RPC_PORT, EngineRegistry, LogStore, PendingSpawns,
-    SessionRegistry, run_engine_listener,
-};
-
-/// Grace window per child when the hub shuts down. Shorter than
-/// `DEFAULT_TERMINATE_GRACE` (2s for individual MCP calls) because
-/// shutdown is latency-sensitive: a user hitting Ctrl-C or a system
-/// sending SIGTERM wants the hub gone promptly, and well-behaved
-/// substrates exit on SIGTERM near-instantly. A child that ignores
-/// SIGTERM gets SIGKILL'd after this window.
-const SHUTDOWN_CHILD_GRACE: Duration = Duration::from_millis(1500);
+use crate::hub::DEFAULT_RPC_PORT;
 
 /// ADR-0071 marker for the hub chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<HubChassis>`] returned by
@@ -67,292 +37,99 @@ impl Chassis for HubChassis {
 }
 
 /// Resolved configuration the hub chassis takes at build time.
-/// Embedders construct this and hand it to [`HubChassis::build`];
-/// the binary `main()` reads `AETHER_ENGINE_PORT` / `AETHER_RPC_PORT`
-/// via [`HubEnv::from_env`].
+/// `rpc_addr` is the `aether.rpc.server` bind — the target the
+/// out-of-process `aether-mcp` coordinator dials. `AETHER_RPC_PORT`
+/// overrides the port.
 pub struct HubEnv {
-    pub engine_addr: SocketAddr,
-    /// `aether.rpc.server` bind address. Issue 763 P5d: the hub now
-    /// boots its RPC server unconditionally — it's the target the
-    /// out-of-process `aether-mcp` coordinator dials — so
-    /// [`HubEnv::from_env`] always populates this (`AETHER_RPC_PORT`
-    /// overrides the port). The field stays `Option` so embedders
-    /// constructing `HubEnv` directly (tests) can still opt out with
-    /// `None`.
-    pub rpc_addr: Option<SocketAddr>,
+    pub rpc_addr: SocketAddr,
 }
 
 impl HubEnv {
-    /// Read `AETHER_ENGINE_PORT` / `AETHER_RPC_PORT` from the
-    /// environment; fall back to [`DEFAULT_ENGINE_PORT`] /
-    /// [`DEFAULT_RPC_PORT`] when unset or unparseable. Binds every
-    /// listener on `127.0.0.1` — intentional for the current
-    /// single-host development story.
+    /// Read `AETHER_RPC_PORT` from the environment; fall back to
+    /// [`DEFAULT_RPC_PORT`] when unset or unparseable. Binds on
+    /// `127.0.0.1` — intentional for the current single-host
+    /// development story.
     pub fn from_env() -> Self {
         use std::net::{IpAddr, Ipv4Addr};
-        let engine_port = env_port("AETHER_ENGINE_PORT").unwrap_or(DEFAULT_ENGINE_PORT);
-        let rpc_port = env_port("AETHER_RPC_PORT").unwrap_or(DEFAULT_RPC_PORT);
-        let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let rpc_port = std::env::var("AETHER_RPC_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_RPC_PORT);
         Self {
-            engine_addr: SocketAddr::new(loopback, engine_port),
-            rpc_addr: Some(SocketAddr::new(loopback, rpc_port)),
+            rpc_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
         }
     }
 }
 
 impl HubChassis {
-    /// Build a hub chassis: stand up the engine / session / spawn /
-    /// log stores, boot the in-process [`LoopbackEngine`] (which
-    /// constructs its own `SubstrateBoot` and registers it under
-    /// `HUB_SELF_ENGINE_ID`), build the [`HubServerDriverCapability`]
-    /// driver, and assemble a [`BuiltChassis<HubChassis>`] via the
-    /// chassis_builder [`Builder`]. The hub chassis has no passive
-    /// capabilities of its own today; future passives (an in-process
-    /// log capability, etc.) compose via `Builder::with_actor` between
-    /// `new()` and `driver()`. The trait method [`Chassis::build`]
-    /// forwards here.
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<HubChassis>, BootError> {
-        let HubEnv {
-            engine_addr,
-            rpc_addr,
-        } = env;
-        let registry = EngineRegistry::new();
-        let sessions = SessionRegistry::new();
-        let pending = PendingSpawns::new();
-        let logs = LogStore::new();
-        let loopback = LoopbackEngine::boot(&registry)?;
+        let HubEnv { rpc_addr } = env;
+        let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
+        let registry = Arc::clone(&boot.registry);
+        let mailer = Arc::clone(&boot.queue);
 
-        // ADR-0078 Phase 1: ProcessCapability needs a tokio runtime
-        // handle at cap-init time to drive its async spawn / wait /
-        // terminate work from the dispatcher-thread sync handlers.
-        // Build the runtime here (instead of in
-        // `DriverCapability::boot`) so the Handle is available before
-        // `Builder::with_actor::<ProcessCapability>(...)` runs `init`.
-        // The driver later runs `block_on(coordinator)` against this
-        // same runtime — no second runtime is constructed.
-        let rt = tokio::runtime::Builder::new_multi_thread()
+        // Current-thread runtime — only used to block on the shutdown
+        // signal. No async tasks live here; the actors (RpcServer,
+        // EngineServer, proxies) run on their own std threads.
+        let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| BootError::Other(Box::new(e)))?;
-        let rt_handle = rt.handle().clone();
 
-        // The chassis_builder's `Builder::new` takes the substrate's
-        // registry + mailer so passives have somewhere to claim
-        // mailboxes against. The hub-chassis substrate lives inside
-        // `LoopbackEngine.boot`; clone the handles before moving
-        // `loopback` into the driver.
-        let registry_arc = Arc::clone(&loopback.boot.registry);
-        let mailer_arc = Arc::clone(&loopback.boot.queue);
+        let driver = HubServerDriverCapability { rt, boot };
 
-        let driver = HubServerDriverCapability {
-            engine_addr,
-            registry: registry.clone(),
-            sessions,
-            pending: pending.clone(),
-            logs,
-            loopback,
-            rt,
-        };
-
-        let mut builder = Builder::<HubChassis>::new(registry_arc, mailer_arc)
-            .with_actor::<BroadcastCapability>(())
+        Builder::<HubChassis>::new(registry, mailer)
             .with_actor::<TraceObserverCapability>(())
-            .with_actor::<ProcessCapability>(ProcessCapabilityConfig {
-                engines: registry,
-                pending,
-                hub_engine_addr: engine_addr,
-                runtime: rt_handle,
-            })
-            // Issue 763 P4: the forward-model engines cap. Forks
-            // substrates and connects out to them as an RPC client —
-            // independent of the hub's own inbound RPC server, so it
-            // boots unconditionally. Coexists with the legacy
-            // `ProcessCapability` spawn path until P5 collapses the hub.
-            .with_actor::<EngineServer>(());
-        if let Some(rpc_addr) = rpc_addr {
-            builder = builder.with_actor::<RpcServerCapability>(RpcServerConfig {
+            .with_actor::<EngineServer>(())
+            .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: rpc_addr.to_string(),
                 peer_kind: PeerKind::Substrate {
                     engine_name: "aether-hub".into(),
                     engine_version: env!("CARGO_PKG_VERSION").into(),
                     kinds: vec![],
                 },
-            });
-        }
-        builder.driver(driver).build()
+            })
+            .driver(driver)
+            .build()
     }
 }
 
 /// ADR-0071 driver capability for the hub chassis. Owns the tokio
-/// runtime, the engine TCP listener, the loopback drainers, and the
-/// SIGINT/SIGTERM coordinator. `boot` constructs the multi-thread
-/// tokio runtime; `run` blocks on `rt.block_on(coordinator)` and
-/// returns when the listener exits or a shutdown signal arrives,
-/// after running the children-cleanup + boot-drop sequence.
+/// runtime + the `SubstrateBoot` whose registry hosts the chassis
+/// actors. `run` blocks on a SIGINT/SIGTERM signal, then drops the
+/// boot so the actor registry tears down.
 pub struct HubServerDriverCapability {
-    engine_addr: SocketAddr,
-    registry: EngineRegistry,
-    sessions: SessionRegistry,
-    pending: PendingSpawns,
-    logs: LogStore,
-    loopback: LoopbackEngine,
-    /// Tokio runtime constructed in `HubChassis::build_inner` so
-    /// `ProcessCapability::init` could grab a `Handle` at cap boot.
-    /// `boot` moves this into [`HubServerDriverRunning`]; `run`
-    /// blocks on `block_on(coordinator)` against it.
     rt: Runtime,
+    boot: SubstrateBoot,
 }
 
-/// Post-boot handle for [`HubServerDriverCapability`]. Holds the constructed
-/// tokio runtime + every state handle the coordinator needs. `run`
-/// drains the runtime and returns once shutdown completes.
+/// Post-boot handle for [`HubServerDriverCapability`].
 pub struct HubServerDriverRunning {
     rt: Runtime,
-    engine_addr: SocketAddr,
-    registry: EngineRegistry,
-    sessions: SessionRegistry,
-    pending: PendingSpawns,
-    logs: LogStore,
-    loopback: LoopbackEngine,
-    /// Issue 629 / Phase A: handle bundle published by
-    /// [`ProcessCapability::init`] — the shutdown coordinator calls
-    /// [`ProcessHandles::shutdown_all`] to terminate every spawned
-    /// child before dropping the loopback substrate. `None` is
-    /// unreachable in production (the cap is always booted on the
-    /// hub chassis); kept Optional only because
-    /// `DriverCtx::handle::<H>()` returns Option for type-system purity.
-    process_handles: Option<crate::hub::process_capability::ProcessHandles>,
+    boot: SubstrateBoot,
 }
 
 impl DriverCapability for HubServerDriverCapability {
     type Running = HubServerDriverRunning;
 
-    fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let HubServerDriverCapability {
-            engine_addr,
-            registry,
-            sessions,
-            pending,
-            logs,
-            loopback,
-            rt,
-        } = self;
-        let process_handles = ctx.handle::<crate::hub::process_capability::ProcessHandles>();
-        Ok(HubServerDriverRunning {
-            rt,
-            engine_addr,
-            registry,
-            sessions,
-            pending,
-            logs,
-            loopback,
-            process_handles,
-        })
+    fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+        let HubServerDriverCapability { rt, boot } = self;
+        Ok(HubServerDriverRunning { rt, boot })
     }
 }
 
 impl DriverRunning for HubServerDriverRunning {
     fn run(self: Box<Self>) -> Result<(), RunError> {
-        let HubServerDriverRunning {
-            rt,
-            engine_addr,
-            registry,
-            sessions,
-            pending,
-            logs,
-            loopback,
-            process_handles,
-        } = *self;
-
-        rt.block_on(coordinator(
-            engine_addr,
-            registry,
-            sessions,
-            pending,
-            logs,
-            loopback,
-            process_handles,
-        ));
-
+        let HubServerDriverRunning { rt, boot } = *self;
+        rt.block_on(async {
+            let sig = shutdown_signal().await;
+            eprintln!("aether-substrate-hub: {sig} received, shutting down");
+        });
+        // `boot` drops here — actor registries shut down, dispatcher
+        // threads see their inbox senders drop and exit.
+        drop(boot);
         Ok(())
     }
-}
-
-/// The body that pre-Builder lived inside `HubChassis::run_async`.
-/// Spawns the inbound + outbound loopback drainers and the engine
-/// listener; `tokio::select!`s on those + the shutdown-signal
-/// future; then asks `ProcessCapability` to terminate every spawned
-/// child and drops the substrate boot in deterministic order.
-#[allow(clippy::too_many_arguments)]
-async fn coordinator(
-    engine_addr: SocketAddr,
-    registry: EngineRegistry,
-    sessions: SessionRegistry,
-    pending: PendingSpawns,
-    logs: LogStore,
-    loopback: LoopbackEngine,
-    process_handles: Option<crate::hub::process_capability::ProcessHandles>,
-) {
-    let LoopbackEngine {
-        boot,
-        inbound_rx,
-        outbound_rx,
-    } = loopback;
-
-    let loopback_handle = LoopbackHandle::from_boot(&boot);
-
-    // Loopback drainers. The inbound task runs alongside the engine
-    // listener; the outbound drainer runs on a dedicated std::thread
-    // because `std::sync::mpsc::Receiver` blocks synchronously. Both
-    // exit when their channel closes (at drop time on process
-    // shutdown).
-    let loopback_inbound_task = tokio::spawn(run_inbound_drainer(
-        inbound_rx,
-        Arc::clone(&boot.registry),
-        Arc::clone(&boot.queue),
-    ));
-    let _loopback_outbound_thread = spawn_outbound_drainer(
-        outbound_rx,
-        registry.clone(),
-        sessions.clone(),
-        logs.clone(),
-    );
-
-    let engine_task = tokio::spawn(run_engine_listener(
-        engine_addr,
-        registry,
-        sessions,
-        pending,
-        logs,
-        loopback_handle,
-    ));
-
-    tokio::select! {
-        r = engine_task => log_exit("engine listener", r),
-        r = loopback_inbound_task => log_exit("loopback inbound", r.map(Ok)),
-        sig = shutdown_signal() => {
-            eprintln!("aether-substrate-hub: {sig} received, shutting down");
-        }
-    }
-
-    // Drain spawned children explicitly before dropping `boot` and
-    // the tokio runtime. `kill_on_drop` would reap them on Arc
-    // drop, but the drop ordering across tasks holding the cap's
-    // children map isn't deterministic — an explicit pass guarantees
-    // every child gets SIGTERM + a grace window (+ SIGKILL
-    // escalation) regardless of which task drops its Arc last.
-    // Skipping this is what orphaned children into init on hub
-    // SIGTERM pre-fix.
-    if let Some(handles) = process_handles.as_ref() {
-        handles.shutdown_all(SHUTDOWN_CHILD_GRACE).await;
-    }
-
-    // `boot` drops here — scheduler workers join, HubOutbound's
-    // Sender drops (closing the outbound channel), which lets
-    // the outbound drainer thread exit naturally. We don't
-    // explicitly join the thread: process shutdown handles any
-    // still-draining frames.
-    drop(boot);
 }
 
 /// Resolves when either SIGINT (Ctrl-C) or SIGTERM arrives on Unix;
@@ -363,7 +140,7 @@ async fn coordinator(
 /// supervisors (systemd, supervisord), shell utilities (`pkill`,
 /// `kill` without `-9`), and CI cancellation all send SIGTERM.
 /// Ignoring SIGTERM means `pkill -f aether-substrate-hub` kills the
-/// hub without running drops, orphaning its spawned children.
+/// hub without running drops.
 async fn shutdown_signal() -> &'static str {
     #[cfg(unix)]
     {
@@ -395,17 +172,5 @@ async fn shutdown_signal() -> &'static str {
     {
         let _ = tokio::signal::ctrl_c().await;
         "Ctrl-C"
-    }
-}
-
-fn env_port(name: &str) -> Option<u16> {
-    std::env::var(name).ok().and_then(|s| s.parse().ok())
-}
-
-fn log_exit(label: &str, result: Result<std::io::Result<()>, tokio::task::JoinError>) {
-    match result {
-        Ok(Ok(())) => eprintln!("aether-substrate-hub: {label} exited"),
-        Ok(Err(e)) => eprintln!("aether-substrate-hub: {label} error: {e}"),
-        Err(e) => eprintln!("aether-substrate-hub: {label} join error: {e}"),
     }
 }

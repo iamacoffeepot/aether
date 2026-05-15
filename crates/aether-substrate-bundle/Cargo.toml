@@ -55,19 +55,17 @@ postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # `aether-mcp` crate, which owns those deps now.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "process", "fs"] }
-tokio-util = "0.7"
+# Hub chassis uses tokio only to block on a SIGINT/SIGTERM signal in
+# `HubServerDriverRunning::run`. The OLD `net`/`io-util`/`process`/`fs`/
+# `sync`/`time`/`tokio-util` deps retired with the embedded MCP +
+# engine listener (issue 763 P5e/P5f).
+tokio = { version = "1", features = ["rt", "macros", "signal"] }
 tracing = "0.1"
-uuid = { version = "1", features = ["v4", "serde"] }
 wasmtime = "30"
 wgpu = "29.0.1"
 winit = "0.30.13"
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 wat = "1"
 # Test-bench Phase 3 substrate-feature scenarios (issue 430). Tests
 # boot a `TestBench` and load `aether-test-fixture-probe`'s wasm to
