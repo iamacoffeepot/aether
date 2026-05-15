@@ -42,7 +42,7 @@ cargo run -p aether-substrate-bundle --bin aether-substrate-hub   # RPC server o
 cargo run -p aether-mcp                                          # serves MCP HTTP on 127.0.0.1:8890
 ```
 
-`.mcp.json` points Claude Code at `:8890`. The hub boots its RPC server unconditionally (`AETHER_RPC_PORT` overrides `8901`); `aether-mcp` dials it (`AETHER_HUB_RPC_ADDR` overrides) and serves MCP on `AETHER_MCP_PORT` (default `8890`). Get a substrate with `spawn_substrate` — the hub forks it, assigns its RPC port, and connects a per-engine proxy; `aether-mcp` tracks the fleet through the hub's `aether.engine` cap. (P5e removed the embedded hub MCP server; the legacy `EngineToHub` engine listener still exists pending the P5f hub collapse.)
+`.mcp.json` points Claude Code at `:8890`. The hub boots its RPC server unconditionally (`AETHER_RPC_PORT` overrides `8901`); `aether-mcp` dials it (`AETHER_HUB_RPC_ADDR` overrides) and serves MCP on `AETHER_MCP_PORT` (default `8890`). Get a substrate with `spawn_substrate` — the hub forks it, assigns its RPC port, and connects a per-engine proxy; `aether-mcp` tracks the fleet through the hub's `aether.engine` cap. (Issue 763 P5f collapsed the hub to a thin chassis hosting `RpcServerCapability` + `EngineServer` + `TraceObserverCapability`; the legacy `EngineToHub` engine listener, hub-side sessions, `ProcessCapability`, loopback drainers, and embedded MCP server are gone.)
 
 Tools (`mcp__aether-hub__*`):
 
