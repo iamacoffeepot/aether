@@ -64,14 +64,12 @@ fn main() -> anyhow::Result<()> {
     let (events_tx, events_rx) = events::channel();
 
     // Per issue 464, this `main()` is the env-reading edge.
-    let hub_url = std::env::var("AETHER_HUB_URL").ok();
     let namespace_roots = aether_capabilities::fs::NamespaceRoots::from_env();
 
     let env = TestBenchEnv {
         name: "test-bench".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         workers: WORKERS,
-        hub_url,
         observed_kinds: None,
         events_tx,
         capture_queue: capture_queue.clone(),
@@ -84,7 +82,6 @@ fn main() -> anyhow::Result<()> {
         render_handles,
         kind_tick,
         kind_frame_stats,
-        hub,
     } = TestBenchChassis::build_passive(env)?;
 
     let (width, height) = parse_size_env();
@@ -110,7 +107,6 @@ fn main() -> anyhow::Result<()> {
         gpu,
         kind_tick,
         kind_frame_stats,
-        hub,
     )
 }
 
@@ -128,7 +124,6 @@ fn drive_events_loop(
     mut gpu: Gpu,
     kind_tick: aether_data::KindId,
     kind_frame_stats: aether_data::KindId,
-    hub: Option<aether_substrate_bundle::hub::HubClient>,
 ) -> anyhow::Result<()> {
     let queue = Arc::clone(&boot.queue);
     let outbound = Arc::clone(&boot.outbound);
@@ -192,12 +187,10 @@ fn drive_events_loop(
     }
 
     // Drop ordering: passive (chassis_builder Log + Render shut
-    // down) → boot (legacy capabilities + scheduler join) → hub
-    // (reader + heartbeat threads). Listed last-first since locals
-    // drop in reverse declaration order.
+    // down) → boot (legacy capabilities + scheduler join). Listed
+    // last-first since locals drop in reverse declaration order.
     drop(passive);
     drop(boot);
-    drop(hub);
     Ok(())
 }
 

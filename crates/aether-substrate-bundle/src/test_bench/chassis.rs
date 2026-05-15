@@ -10,7 +10,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::hub::HubClient;
 use aether_capabilities::{
     BroadcastCapability, CaptureBackend, FsCapability, HandleCapability, HeadlessWindowCapability,
     InputCapability, InputConfig, LogCapability, RenderCapability, RenderConfig, RenderHandles,
@@ -82,9 +81,6 @@ pub struct TestBenchEnv {
     /// Number of workers for the wire-stable `EngineInfo.workers`
     /// field. Defaults to [`WORKERS`].
     pub workers: usize,
-    /// Hub URL for `connect_hub`. Binary reads `AETHER_HUB_URL`;
-    /// in-process API typically passes `None`.
-    pub hub_url: Option<String>,
     /// Optional observation log: when `Some`, both render and
     /// camera dispatchers push every inbound mail's kind name to it.
     /// In-process API uses this to assert what the sinks have seen;
@@ -113,14 +109,13 @@ pub struct TestBenchEnv {
 /// `PassiveChassis<TestBenchChassis>` (holding the booted Log +
 /// Render passives via chassis_builder typed lookup) with the
 /// substrate handles the embedder needs to drive its event loop —
-/// queue, outbound, kind ids, render accumulator handles, the hub
-/// client.
+/// queue, outbound, kind ids, render accumulator handles.
 ///
-/// `boot` is exposed so the embedder can attach a hub-outbound
-/// loopback (the in-process `TestBench` does this for reply
-/// correlation), read substrate-level handles (`registry`, `queue`,
-/// `outbound`), and own the lifetime guard the scheduler joins
-/// against on shutdown.
+/// `boot` is exposed so the embedder can attach an egress backend
+/// for reply correlation (the in-process `TestBench` wires a
+/// `RecordingBackend` for this), read substrate-level handles
+/// (`registry`, `queue`, `outbound`), and own the lifetime guard the
+/// scheduler joins against on shutdown.
 ///
 /// The embedder owns the matching `EventReceiver` for whichever
 /// `EventSender` it passed into [`TestBenchEnv`]; the build does
@@ -136,24 +131,22 @@ pub struct TestBenchBuild {
     pub render_handles: RenderHandles,
     pub kind_tick: KindId,
     pub kind_frame_stats: KindId,
-    pub hub: Option<HubClient>,
 }
 
 impl TestBenchChassis {
     /// Build the test-bench chassis: stand up substrate-core
     /// internals via [`SubstrateBoot::builder`], boot the standard
     /// passives + `TestBenchCapability` via the chassis_builder
-    /// [`Builder`], connect the hub if `env.hub_url` is set, and
-    /// return a [`TestBenchBuild`] the embedder takes ownership of.
-    /// The embedder is responsible for any further capability adds
-    /// (io with whatever failure semantics it wants), GPU creation,
-    /// loopback attach, and driving the event loop.
+    /// [`Builder`], and return a [`TestBenchBuild`] the embedder
+    /// takes ownership of. The embedder is responsible for any
+    /// further capability adds (io with whatever failure semantics
+    /// it wants), GPU creation, egress-backend attach, and driving
+    /// the event loop.
     pub fn build_passive(env: TestBenchEnv) -> anyhow::Result<TestBenchBuild> {
         let TestBenchEnv {
             name,
             version,
             workers,
-            hub_url,
             observed_kinds,
             events_tx,
             capture_queue,
@@ -257,8 +250,6 @@ impl TestBenchChassis {
                 )
             })?;
 
-        let hub = crate::hub::connect_hub_client(&boot, hub_url.as_deref())?;
-
         // The cap config already cloned `events_tx`; dropping the
         // local copy lets the receiver hang up cleanly once every
         // sender is released.
@@ -270,7 +261,6 @@ impl TestBenchChassis {
             render_handles,
             kind_tick,
             kind_frame_stats,
-            hub,
         })
     }
 }

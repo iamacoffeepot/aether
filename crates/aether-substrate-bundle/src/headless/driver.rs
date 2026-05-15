@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::hub::HubClient;
 use aether_actor::Actor;
 use aether_capabilities::InputCapability;
 use aether_data::{KindId, encode_empty, mailbox_id_from_name};
@@ -69,9 +68,6 @@ pub struct HeadlessTimerCapability {
     pub kind_tick: KindId,
     pub kind_frame_stats: KindId,
     pub tick_period: Duration,
-    /// Held for the chassis lifetime so the hub reader + heartbeat
-    /// threads stay spawned. `None` when `AETHER_HUB_URL` was unset.
-    pub hub: Option<HubClient>,
 }
 
 pub struct HeadlessTimerRunning {
@@ -84,9 +80,8 @@ pub struct HeadlessTimerRunning {
     kind_frame_stats: KindId,
     tick_period: Duration,
     /// `SubstrateBoot` drops at the end of `run()` so its scheduler
-    /// joins workers before the hub disconnects.
+    /// joins workers before the chassis exits.
     _boot: SubstrateBoot,
-    _hub: Option<HubClient>,
 }
 
 impl DriverCapability for HeadlessTimerCapability {
@@ -98,7 +93,6 @@ impl DriverCapability for HeadlessTimerCapability {
             kind_tick,
             kind_frame_stats,
             tick_period,
-            hub,
         } = self;
 
         Ok(HeadlessTimerRunning {
@@ -108,7 +102,6 @@ impl DriverCapability for HeadlessTimerCapability {
             kind_frame_stats,
             tick_period,
             _boot: boot,
-            _hub: hub,
         })
     }
 }
@@ -122,7 +115,6 @@ impl DriverRunning for HeadlessTimerRunning {
             kind_frame_stats,
             tick_period,
             _boot,
-            _hub,
         } = *self;
 
         // ADR-0080 §6 chassis-root correlation counter (issue

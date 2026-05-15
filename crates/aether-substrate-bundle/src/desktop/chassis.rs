@@ -70,7 +70,6 @@ impl Chassis for DesktopChassis {
 pub struct DesktopEnv {
     pub event_loop: EventLoop<UserEvent>,
     pub capture_queue: CaptureQueue,
-    pub hub_url: Option<String>,
     pub namespace_roots: NamespaceRoots,
     pub http: HttpConf,
     pub audio: AudioConf,
@@ -98,7 +97,6 @@ impl DesktopEnv {
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
         let capture_queue = CaptureQueue::new();
 
-        let hub_url = std::env::var("AETHER_HUB_URL").ok();
         let http = HttpConf::from_env();
         let namespace_roots = NamespaceRoots::from_env();
         let audio = AudioConf::from_env();
@@ -134,7 +132,6 @@ impl DesktopEnv {
         Ok(DesktopEnv {
             event_loop,
             capture_queue,
-            hub_url,
             namespace_roots,
             http,
             audio,
@@ -148,10 +145,9 @@ impl DesktopEnv {
 
 impl DesktopChassis {
     /// Build the desktop chassis: stand up substrate-core internals,
-    /// connect to the hub if requested, compose the native passives
-    /// (log, io, http, audio, render+camera) through the
-    /// chassis_builder `.with()` chain, then wrap everything in a
-    /// [`DesktopDriverCapability`] and hand it to the builder.
+    /// compose the native passives (log, io, http, audio, render+camera)
+    /// through the chassis_builder `.with()` chain, then wrap everything
+    /// in a [`DesktopDriverCapability`] and hand it to the builder.
     /// Returns a [`BuiltChassis`] whose [`BuiltChassis::run`] blocks
     /// on the winit event loop.
     ///
@@ -160,7 +156,6 @@ impl DesktopChassis {
         let DesktopEnv {
             event_loop,
             capture_queue,
-            hub_url,
             namespace_roots,
             http,
             audio,
@@ -202,15 +197,6 @@ impl DesktopChassis {
             "componentless boot — close window to exit; load a component via aether.component.load",
         );
 
-        // Hub connect AFTER every chassis sink is registered (issue #262).
-        // Post-ADR-0070 phase 4: the hub client lives in `aether-hub`;
-        // substrate-core has no hub knowledge. The free-function form
-        // matches the pre-refactor `boot.connect_hub` shape; chassis
-        // that prefer Builder-pipeline composition can swap in
-        // `aether_hub::HubClientCapability` instead (the free fn is
-        // a thin wrapper around the same path).
-        let hub = crate::hub::connect_hub_client(&boot, hub_url.as_deref())?;
-
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
         // ADR-0074 §Decision 5: production chassis configures the
@@ -235,7 +221,6 @@ impl DesktopChassis {
             boot_mode,
             boot_size,
             boot_title,
-            hub,
         };
 
         // Boot order is declaration order — log first so other

@@ -52,7 +52,6 @@ impl Chassis for HeadlessChassis {
 /// `main()` populates it from env vars (per ADR-0070's "substrate-core
 /// never reads env" invariant); tests construct one directly.
 pub struct HeadlessEnv {
-    pub hub_url: Option<String>,
     pub namespace_roots: NamespaceRoots,
     pub http: HttpConf,
     pub tick_period: Duration,
@@ -69,7 +68,6 @@ impl HeadlessEnv {
     /// directly.
     pub fn from_env() -> Self {
         use std::net::{IpAddr, Ipv4Addr};
-        let hub_url = std::env::var("AETHER_HUB_URL").ok();
         let http = HttpConf::from_env();
         let namespace_roots = NamespaceRoots::from_env();
         let tick_hz = parse_tick_hz_env();
@@ -81,7 +79,6 @@ impl HeadlessEnv {
             .and_then(|s| s.parse::<u16>().ok())
             .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         HeadlessEnv {
-            hub_url,
             namespace_roots,
             http,
             tick_period,
@@ -100,7 +97,6 @@ impl HeadlessChassis {
     /// builder.
     fn build_inner(env: HeadlessEnv) -> Result<BuiltChassis<HeadlessChassis>, BootError> {
         let HeadlessEnv {
-            hub_url,
             namespace_roots,
             http,
             tick_period,
@@ -155,10 +151,6 @@ impl HeadlessChassis {
             "componentless boot — load a component via aether.component.load",
         );
 
-        // Hub connect AFTER every chassis sink is registered (issue #262).
-        // Post-ADR-0070 phase 4: hub client lives in `aether-hub`.
-        let hub = crate::hub::connect_hub_client(&boot, hub_url.as_deref())?;
-
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
         // ADR-0074 §Decision 5: production chassis configures the
@@ -175,7 +167,6 @@ impl HeadlessChassis {
             kind_tick,
             kind_frame_stats,
             tick_period,
-            hub,
         };
 
         // ADR-0071 phase B: io / http / log compose through the
