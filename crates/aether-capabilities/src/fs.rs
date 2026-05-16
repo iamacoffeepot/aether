@@ -506,7 +506,7 @@ mod native {
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::Registry;
 
-        use crate::test_chassis::TestChassis;
+        use crate::test_chassis::{TestChassis, fresh_substrate};
 
         /// Test fixture that bundles the cap, a fully-wired test mailer,
         /// and a `NativeBinding` long enough for handlers to borrow.
@@ -552,18 +552,6 @@ mod native {
 
         fn cleanup(path: &Path) {
             let _ = std::fs::remove_dir_all(path);
-        }
-
-        fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-            let registry = Arc::new(Registry::new());
-            for d in aether_kinds::descriptors::all() {
-                let _ = registry.register_kind_with_descriptor(d);
-            }
-            let store = ::std::sync::Arc::new(::aether_substrate::handle_store::HandleStore::new(
-                1024 * 1024,
-            ));
-            let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
-            (registry, mailer)
         }
 
         fn roots_under(root: &Path) -> NamespaceRoots {

@@ -876,24 +876,10 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::test_chassis::TestChassis;
+        use crate::test_chassis::{TestChassis, fresh_substrate};
         use aether_actor::Actor;
         use aether_substrate::chassis::builder::Builder;
         use aether_substrate::chassis::error::BootError;
-        use aether_substrate::mail::mailer::Mailer;
-        use aether_substrate::mail::registry::Registry;
-
-        fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-            let registry = Arc::new(Registry::new());
-            for d in aether_kinds::descriptors::all() {
-                let _ = registry.register_kind_with_descriptor(d);
-            }
-            let store = ::std::sync::Arc::new(::aether_substrate::handle_store::HandleStore::new(
-                1024 * 1024,
-            ));
-            let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
-            (registry, mailer)
-        }
 
         #[test]
         fn builtin_registry_covers_five_patches() {
