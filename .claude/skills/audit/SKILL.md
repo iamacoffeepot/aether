@@ -145,11 +145,12 @@ Commit type when filing: `refactor` for magic-string findings, `chore` for stale
 
 Verified during the skill's first smoke (against `aether-codec`): RustRover's built-in Duplicates inspection runs as part of `get_file_problems` and returns symbolic findings of the form `"Duplicated code fragment (<N> lines long)"`. No custom kts script needed for v1 — the IDE's PSI-driven dup detector already does the work the audit was going to script by hand.
 
-1. For each file under `<crate>/src` and `<crate>/tests`, call `get_file_problems` with `errorsOnly: false`. Filter problems whose `description` matches `Duplicated code fragment`. Each problem carries the file + the starting line of one duplicate; aggregate across files into clusters by parsing the `(<N> lines long)` length and locating the matching block in the second file via `search_symbol` for the leading identifier on the duplicated lines.
-2. Each cluster of size ≥ 2 across distinct functions becomes a `D<n>` finding. Severity heuristic: the IDE inspection reports `WEAK WARNING` for every dup it finds — promote to medium if the cluster spans ≥ 15 lines, medium-low otherwise. (The dup-finding shape doesn't currently carry confidence — RustRover's inspection either matches or doesn't.)
-3. Architecture Observed for `dup` lists the crate's function inventory (counts by module) so the reader sees the denominator.
+1. For each file under `<crate>/src` and `<crate>/tests`, call `get_file_problems` with `errorsOnly: false`. Filter problems whose `description` matches `Duplicated code fragment` — the format is `Duplicated code fragment (<N> lines long)`.
+2. Each surviving problem becomes a `D<n>` finding. **Honest limitation**: `get_file_problems` returns each dup site standalone — it doesn't carry the partner location. RustRover's UI shows the partner in its tooltip and via Find Usages, but the MCP tool doesn't expose that link directly. The skill's per-finding body therefore includes the dup's line + length + leading line content, and notes that the partner is locatable by opening the file in RustRover or by string-matching the leading line against sibling files in the same crate.
+3. The skill DOES attempt an inferred-cluster pass as a hint: group findings whose `(leading_line, length)` tuple matches across files. Findings in the same inferred cluster get the same `D<n>` ID with sub-letters (`D1a`, `D1b`); findings the inference can't pair stay standalone. Severity heuristic: medium if length ≥ 15 lines, medium-low otherwise.
+4. Architecture Observed for `dup` lists the crate's function inventory (counts by module) so the reader sees the denominator.
 
-For dup clusters that need richer detection — semantically-equivalent functions written with different variable names, or cross-crate dup — promote to a custom kts script under `patterns/kts/duplicates-deep.kts` and ride `run_inspection_kts`. Deferred until v1's built-in pass proves insufficient.
+For dup clusters that need richer detection — semantically-equivalent functions written with different variable names, cross-crate dup, or the partner-location info the built-in inspection withholds — promote to a custom kts script under `patterns/kts/duplicates-deep.kts` and ride `run_inspection_kts`. Deferred until v1's built-in pass proves insufficient.
 
 Commit type when filing: `refactor`.
 
