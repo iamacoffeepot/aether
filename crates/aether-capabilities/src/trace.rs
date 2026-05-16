@@ -210,17 +210,7 @@ mod native {
                 .mails
                 .iter()
                 .filter(|(_, node)| node.root == root)
-                .map(|(mail_id, node)| MailNodeWire {
-                    mail_id: *mail_id,
-                    parent: node.parent,
-                    sender: node.sender,
-                    recipient: node.recipient,
-                    kind: node.kind,
-                    t_sent: node.t_sent,
-                    t_received: node.t_received,
-                    t_finished: node.t_finished,
-                    thread_name: node.thread_name.clone(),
-                })
+                .map(|(mail_id, node)| mail_node_wire_from(*mail_id, node))
                 .collect();
             DescribeTreeResult::Ok {
                 root,
@@ -321,17 +311,7 @@ mod native {
             let mails: Vec<MailNodeWire> = range
                 .filter_map(|(_, mid)| {
                     let node = self.mails.get(mid)?;
-                    Some(MailNodeWire {
-                        mail_id: *mid,
-                        parent: node.parent,
-                        sender: node.sender,
-                        recipient: node.recipient,
-                        kind: node.kind,
-                        t_sent: node.t_sent,
-                        t_received: node.t_received,
-                        t_finished: node.t_finished,
-                        thread_name: node.thread_name.clone(),
-                    })
+                    Some(mail_node_wire_from(*mid, node))
                 })
                 .collect();
 
@@ -417,6 +397,24 @@ mod native {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(default)
+    }
+
+    /// Builds the wire-shaped projection of a `MailNode` for the
+    /// `describe_tree` / `describe_window` replies. Consolidates the
+    /// two near-identical struct-literal sites that differ only in
+    /// how the caller obtains the `(mail_id, node)` pair.
+    fn mail_node_wire_from(mail_id: MailId, node: &MailNode) -> MailNodeWire {
+        MailNodeWire {
+            mail_id,
+            parent: node.parent,
+            sender: node.sender,
+            recipient: node.recipient,
+            kind: node.kind,
+            t_sent: node.t_sent,
+            t_received: node.t_received,
+            t_finished: node.t_finished,
+            thread_name: node.thread_name.clone(),
+        }
     }
 
     #[actor]
@@ -544,19 +542,45 @@ mod native {
             }
         }
 
+        /// Consolidates the `obs.apply_event(TraceEvent::Sent { ... })`
+        /// call-site that recurs across every state-fold test. Same
+        /// field order as the variant so call sites read positionally.
+        #[allow(clippy::too_many_arguments)]
+        fn apply_sent_event(
+            obs: &mut TraceObserverCapability,
+            mail_id: MailId,
+            root: MailId,
+            parent_mail: Option<MailId>,
+            sender: MailboxId,
+            recipient: MailboxId,
+            kind: KindId,
+            t: Nanos,
+        ) {
+            obs.apply_event(TraceEvent::Sent {
+                mail_id,
+                root,
+                parent_mail,
+                sender,
+                recipient,
+                kind,
+                t,
+            });
+        }
+
         #[test]
         fn sent_creates_root_and_node() {
             let mut obs = boot_observer();
             let m = mail(1, 1);
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: m,
-                root: m,
-                parent_mail: None,
-                sender: MailboxId(1),
-                recipient: MailboxId(2),
-                kind: KindId(0xABCD),
-                t: Nanos(100),
-            });
+            apply_sent_event(
+                &mut obs,
+                m,
+                m,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
             assert_eq!(obs.roots.len(), 1);
             assert_eq!(obs.roots.get(&m).unwrap().in_flight, 1);
             assert_eq!(obs.mails.len(), 1);
@@ -568,24 +592,26 @@ mod native {
             let mut obs = boot_observer();
             let root = mail(1, 1);
             let child = mail(2, 1);
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: root,
+            apply_sent_event(
+                &mut obs,
                 root,
-                parent_mail: None,
-                sender: MailboxId(1),
-                recipient: MailboxId(2),
-                kind: KindId(0xABCD),
-                t: Nanos(100),
-            });
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: child,
                 root,
-                parent_mail: Some(root),
-                sender: MailboxId(2),
-                recipient: MailboxId(3),
-                kind: KindId(0xCDEF),
-                t: Nanos(200),
-            });
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
+            apply_sent_event(
+                &mut obs,
+                child,
+                root,
+                Some(root),
+                MailboxId(2),
+                MailboxId(3),
+                KindId(0xCDEF),
+                Nanos(200),
+            );
             assert_eq!(obs.roots.len(), 1);
             assert_eq!(obs.roots.get(&root).unwrap().in_flight, 2);
             assert_eq!(obs.mails.get(&child).unwrap().parent, Some(root));
@@ -595,15 +621,16 @@ mod native {
         fn finished_decrements_root_in_flight() {
             let mut obs = boot_observer();
             let m = mail(1, 1);
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: m,
-                root: m,
-                parent_mail: None,
-                sender: MailboxId(1),
-                recipient: MailboxId(2),
-                kind: KindId(0xABCD),
-                t: Nanos(100),
-            });
+            apply_sent_event(
+                &mut obs,
+                m,
+                m,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
             obs.apply_event(TraceEvent::Received {
                 mail_id: m,
                 t: Nanos(200),
@@ -638,15 +665,16 @@ mod native {
             let mut obs = observer_with(Duration::from_secs(3600), 3);
             for cid in 1..=5 {
                 let m = mail(1, cid);
-                obs.apply_event(TraceEvent::Sent {
-                    mail_id: m,
-                    root: m,
-                    parent_mail: None,
-                    sender: MailboxId(1),
-                    recipient: MailboxId(2),
-                    kind: KindId(0xABCD),
-                    t: Nanos(cid * 100),
-                });
+                apply_sent_event(
+                    &mut obs,
+                    m,
+                    m,
+                    None,
+                    MailboxId(1),
+                    MailboxId(2),
+                    KindId(0xABCD),
+                    Nanos(cid * 100),
+                );
                 // Tiny delay so `Instant::now()` advances across
                 // each insert — cheap-enough for a 5-root test.
                 std::thread::sleep(Duration::from_millis(2));
@@ -691,15 +719,16 @@ mod native {
             };
 
             let root = mail(1, 1);
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: root,
+            apply_sent_event(
+                &mut obs,
                 root,
-                parent_mail: None,
-                sender: MailboxId(1),
-                recipient: MailboxId(2),
-                kind: KindId(0xABCD),
-                t: Nanos(100),
-            });
+                root,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
             // No Settled yet — in_flight is 1.
             assert!(captured.lock().unwrap().is_empty());
             obs.apply_event(TraceEvent::Finished {
@@ -719,42 +748,46 @@ mod native {
             let a = mail(2, 1);
             let b = mail(2, 2);
             let unrelated = mail(9, 9);
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: root,
+            apply_sent_event(
+                &mut obs,
                 root,
-                parent_mail: None,
-                sender: MailboxId(1),
-                recipient: MailboxId(2),
-                kind: KindId(0xABCD),
-                t: Nanos(100),
-            });
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: a,
                 root,
-                parent_mail: Some(root),
-                sender: MailboxId(2),
-                recipient: MailboxId(3),
-                kind: KindId(0xCDEF),
-                t: Nanos(200),
-            });
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: b,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
+            apply_sent_event(
+                &mut obs,
+                a,
                 root,
-                parent_mail: Some(root),
-                sender: MailboxId(2),
-                recipient: MailboxId(4),
-                kind: KindId(0xDEAD),
-                t: Nanos(300),
-            });
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: unrelated,
-                root: unrelated,
-                parent_mail: None,
-                sender: MailboxId(9),
-                recipient: MailboxId(8),
-                kind: KindId(0xBEEF),
-                t: Nanos(400),
-            });
+                Some(root),
+                MailboxId(2),
+                MailboxId(3),
+                KindId(0xCDEF),
+                Nanos(200),
+            );
+            apply_sent_event(
+                &mut obs,
+                b,
+                root,
+                Some(root),
+                MailboxId(2),
+                MailboxId(4),
+                KindId(0xDEAD),
+                Nanos(300),
+            );
+            apply_sent_event(
+                &mut obs,
+                unrelated,
+                unrelated,
+                None,
+                MailboxId(9),
+                MailboxId(8),
+                KindId(0xBEEF),
+                Nanos(400),
+            );
 
             let result = obs.build_describe_tree(root);
             match result {
@@ -796,15 +829,16 @@ mod native {
             // Window since_ms = 6000 keeps the latter two.
             for (cid, t) in [(1u64, 100u64), (2, 5_000_000_000), (3, 10_000_000_000)] {
                 let m = mail(1, cid);
-                obs.apply_event(TraceEvent::Sent {
-                    mail_id: m,
-                    root: m,
-                    parent_mail: None,
-                    sender: MailboxId(1),
-                    recipient: MailboxId(2),
-                    kind: KindId(0xABCD),
-                    t: Nanos(t),
-                });
+                apply_sent_event(
+                    &mut obs,
+                    m,
+                    m,
+                    None,
+                    MailboxId(1),
+                    MailboxId(2),
+                    KindId(0xABCD),
+                    Nanos(t),
+                );
             }
 
             // "Now" is 11s past boot.
@@ -827,15 +861,16 @@ mod native {
             let mut obs = boot_observer();
             for cid in 1..=5 {
                 let m = mail(1, cid);
-                obs.apply_event(TraceEvent::Sent {
-                    mail_id: m,
-                    root: m,
-                    parent_mail: None,
-                    sender: MailboxId(1),
-                    recipient: MailboxId(2),
-                    kind: KindId(0xABCD),
-                    t: Nanos(cid * 100),
-                });
+                apply_sent_event(
+                    &mut obs,
+                    m,
+                    m,
+                    None,
+                    MailboxId(1),
+                    MailboxId(2),
+                    KindId(0xABCD),
+                    Nanos(cid * 100),
+                );
             }
             let result = obs.build_list_active_roots(
                 ListActiveRoots {
@@ -854,15 +889,16 @@ mod native {
         fn t_sent_index_inserts_on_sent() {
             let mut obs = boot_observer();
             let m = mail(1, 1);
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: m,
-                root: m,
-                parent_mail: None,
-                sender: MailboxId(1),
-                recipient: MailboxId(2),
-                kind: KindId(0xABCD),
-                t: Nanos(500),
-            });
+            apply_sent_event(
+                &mut obs,
+                m,
+                m,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(500),
+            );
             assert!(obs.t_sent_index.contains(&(Nanos(500), m)));
         }
 
@@ -870,15 +906,16 @@ mod native {
         fn t_sent_index_drops_on_evict() {
             let mut obs = observer_with(Duration::from_millis(50), 1000);
             let m = mail(1, 1);
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: m,
-                root: m,
-                parent_mail: None,
-                sender: MailboxId(1),
-                recipient: MailboxId(2),
-                kind: KindId(0xABCD),
-                t: Nanos(100),
-            });
+            apply_sent_event(
+                &mut obs,
+                m,
+                m,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
             assert_eq!(obs.t_sent_index.len(), 1);
             std::thread::sleep(Duration::from_millis(80));
             obs.evict();
@@ -893,15 +930,16 @@ mod native {
             let mut obs = observer_with(Duration::from_secs(3600), 3);
             for cid in 1..=5u64 {
                 let m = mail(1, cid);
-                obs.apply_event(TraceEvent::Sent {
-                    mail_id: m,
-                    root: m,
-                    parent_mail: None,
-                    sender: MailboxId(1),
-                    recipient: MailboxId(2),
-                    kind: KindId(0xABCD),
-                    t: Nanos(cid * 100),
-                });
+                apply_sent_event(
+                    &mut obs,
+                    m,
+                    m,
+                    None,
+                    MailboxId(1),
+                    MailboxId(2),
+                    KindId(0xABCD),
+                    Nanos(cid * 100),
+                );
                 std::thread::sleep(Duration::from_millis(2));
             }
             obs.evict();
@@ -923,15 +961,16 @@ mod native {
             // Three sends at t = 100, 500, 900.
             for (cid, t) in [(1u64, 100u64), (2, 500), (3, 900)] {
                 let m = mail(1, cid);
-                obs.apply_event(TraceEvent::Sent {
-                    mail_id: m,
-                    root: m,
-                    parent_mail: None,
-                    sender: MailboxId(1),
-                    recipient: MailboxId(2),
-                    kind: KindId(0xABCD),
-                    t: Nanos(t),
-                });
+                apply_sent_event(
+                    &mut obs,
+                    m,
+                    m,
+                    None,
+                    MailboxId(1),
+                    MailboxId(2),
+                    KindId(0xABCD),
+                    Nanos(t),
+                );
             }
             // Window [200, 800] strictly contains only the t=500 mail.
             let result = obs.build_describe_window(
@@ -960,15 +999,16 @@ mod native {
             let mut obs = boot_observer();
             for (cid, t) in [(1u64, 200u64), (2, 800)] {
                 let m = mail(1, cid);
-                obs.apply_event(TraceEvent::Sent {
-                    mail_id: m,
-                    root: m,
-                    parent_mail: None,
-                    sender: MailboxId(1),
-                    recipient: MailboxId(2),
-                    kind: KindId(0xABCD),
-                    t: Nanos(t),
-                });
+                apply_sent_event(
+                    &mut obs,
+                    m,
+                    m,
+                    None,
+                    MailboxId(1),
+                    MailboxId(2),
+                    KindId(0xABCD),
+                    Nanos(t),
+                );
             }
             let result = obs.build_describe_window(
                 DescribeWindow {
@@ -993,15 +1033,16 @@ mod native {
             let mut obs = boot_observer();
             for cid in 1..=3u64 {
                 let m = mail(1, cid);
-                obs.apply_event(TraceEvent::Sent {
-                    mail_id: m,
-                    root: m,
-                    parent_mail: None,
-                    sender: MailboxId(1),
-                    recipient: MailboxId(2),
-                    kind: KindId(0xABCD),
-                    t: Nanos(500),
-                });
+                apply_sent_event(
+                    &mut obs,
+                    m,
+                    m,
+                    None,
+                    MailboxId(1),
+                    MailboxId(2),
+                    KindId(0xABCD),
+                    Nanos(500),
+                );
             }
             assert_eq!(obs.t_sent_index.len(), 3);
             let result = obs.build_describe_window(
@@ -1025,15 +1066,16 @@ mod native {
             let mut obs = boot_observer();
             for cid in 1..=10u64 {
                 let m = mail(1, cid);
-                obs.apply_event(TraceEvent::Sent {
-                    mail_id: m,
-                    root: m,
-                    parent_mail: None,
-                    sender: MailboxId(1),
-                    recipient: MailboxId(2),
-                    kind: KindId(0xABCD),
-                    t: Nanos(cid * 10),
-                });
+                apply_sent_event(
+                    &mut obs,
+                    m,
+                    m,
+                    None,
+                    MailboxId(1),
+                    MailboxId(2),
+                    KindId(0xABCD),
+                    Nanos(cid * 10),
+                );
             }
             let result = obs.build_describe_window(
                 DescribeWindow {
@@ -1058,15 +1100,16 @@ mod native {
                 (3, 10_000_000_000),
             ] {
                 let m = mail(1, cid);
-                obs.apply_event(TraceEvent::Sent {
-                    mail_id: m,
-                    root: m,
-                    parent_mail: None,
-                    sender: MailboxId(1),
-                    recipient: MailboxId(2),
-                    kind: KindId(0xABCD),
-                    t: Nanos(t),
-                });
+                apply_sent_event(
+                    &mut obs,
+                    m,
+                    m,
+                    None,
+                    MailboxId(1),
+                    MailboxId(2),
+                    KindId(0xABCD),
+                    Nanos(t),
+                );
             }
             // now = 11s, last_ms = 6_000 → window [5s, 11s] keeps cids 2, 3.
             let result = obs.build_describe_window(
@@ -1092,15 +1135,16 @@ mod native {
         fn describe_window_empty_when_no_match() {
             let mut obs = boot_observer();
             let m = mail(1, 1);
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: m,
-                root: m,
-                parent_mail: None,
-                sender: MailboxId(1),
-                recipient: MailboxId(2),
-                kind: KindId(0xABCD),
-                t: Nanos(100),
-            });
+            apply_sent_event(
+                &mut obs,
+                m,
+                m,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
             let result = obs.build_describe_window(
                 DescribeWindow {
                     window: TraceWindow::Absolute {
@@ -1121,15 +1165,16 @@ mod native {
         fn retention_evicts_stale() {
             let mut obs = observer_with(Duration::from_millis(50), 1000);
             let m = mail(1, 1);
-            obs.apply_event(TraceEvent::Sent {
-                mail_id: m,
-                root: m,
-                parent_mail: None,
-                sender: MailboxId(1),
-                recipient: MailboxId(2),
-                kind: KindId(0xABCD),
-                t: Nanos(100),
-            });
+            apply_sent_event(
+                &mut obs,
+                m,
+                m,
+                None,
+                MailboxId(1),
+                MailboxId(2),
+                KindId(0xABCD),
+                Nanos(100),
+            );
             assert_eq!(obs.roots.len(), 1);
             std::thread::sleep(Duration::from_millis(80));
             obs.evict();
