@@ -16,8 +16,7 @@ use aether_kinds::{
     DropComponent, DropResult, LoadComponent, LoadResult, SubscribeInputResult, Tick,
     UnsubscribeInput,
 };
-use aether_scenario::test_helpers::require_runtime;
-use aether_substrate_bundle::test_bench::TestBench;
+use aether_substrate_bundle::test_bench::{TestBench, test_helpers::require_runtime};
 use aether_test_fixture_probe::TickObserved;
 
 fn load_probe_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> MailboxId {

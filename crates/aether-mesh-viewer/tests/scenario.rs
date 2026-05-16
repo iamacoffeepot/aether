@@ -14,25 +14,26 @@
 //!   builds the wasm before invoking `cargo test`.
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
-//! gate, `save://` sandbox, `tick_to`, `Runner::run` + assert
-//! postscript) live in `aether_scenario::test_helpers` (issue 460).
-//! Per issue 464, the sandbox is plumbed via
+//! gate, `save://` sandbox) live in
+//! `aether_substrate_bundle::test_bench::test_helpers` (issues 460 +
+//! 821). Per issue 464, the sandbox is plumbed via
 //! `TestBench::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
-use aether_scenario::test_helpers::{
-    init_save_sandbox, require_runtime, run_or_panic, test_namespace_roots, tick_to, write_fixture,
+use aether_data::Kind;
+use aether_kinds::{LoadComponent, LoadResult, Tick};
+use aether_mesh_viewer::LoadMesh;
+use aether_substrate_bundle::test_bench::{
+    TestBench,
+    test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots, write_fixture},
+    visual::{decode_png, differs_from_background},
 };
-use aether_scenario::{Check, Script, Step};
-use aether_substrate_bundle::test_bench::TestBench;
 
 // Force linkage of `aether-mesh-viewer`'s `inventory::submit!`
 // `KindDescriptor` entries into this test binary. Cargo treats
 // integration tests as separate crates that link against the test
 // target's host rlib, but the linker strips inventory submits for
-// kinds the test code doesn't statically reference. Without this
-// anchor, `Step::SendMail` for `aether.mesh.load` fails with
-// "unknown kind".
+// kinds the test code doesn't statically reference.
 #[allow(unused_imports)]
 use aether_mesh_viewer as _;
 
@@ -56,6 +57,60 @@ f 1 2 3 4
 ";
 const BAD_DSL: &[u8] = b"(box not-a-number 1 1)\n";
 
+/// Load this crate's pre-built wasm into the bench and await
+/// `LoadResult`. Panics on load failure so the calling test surfaces
+/// the error message rather than wedging on a missing subscription.
+fn load_viewer(bench: &mut TestBench, wasm_path: &std::path::Path) {
+    let wasm = std::fs::read(wasm_path).expect("read mesh-viewer wasm");
+    let result: LoadResult = bench
+        .send_and_await_reply(
+            "aether.component",
+            &LoadComponent {
+                wasm,
+                name: Some(COMPONENT_NAME.to_owned()),
+            },
+        )
+        .expect("await load_component reply");
+    match result {
+        LoadResult::Ok { .. } => {}
+        LoadResult::Err { error } => panic!("load_component: {error}"),
+    }
+}
+
+/// Direct `aether.tick` to the loaded viewer so the next `capture`
+/// sees fresh render-sink emissions.
+///
+/// Background: `TestBench::capture` runs its frame with
+/// `dispatch_tick=false` (capture is a state snapshot, not a tick
+/// advance). The render sink's vert buffer is consumed-and-replaced
+/// every frame, so a component that emits geometry only on `on_tick`
+/// paints nothing during the capture frame even though the previous
+/// `advance` ticked it. Sending `Tick` directly to the component's
+/// mailbox right before `capture` queues a tick that drains alongside
+/// the capture request, populating the buffer before the offscreen
+/// render reads it.
+fn nudge_tick(bench: &mut TestBench) {
+    // `Tick` is a unit struct on the cast wire shape (no Serialize),
+    // so it can't go through `send_mail::<K>` (postcard-only). Use
+    // the bytes path with the kind's own `encode_into_bytes` helper,
+    // which the derive emits per-shape.
+    bench
+        .send_bytes(COMPONENT_ADDRESS, Tick::ID, Tick.encode_into_bytes())
+        .expect("send tick");
+}
+
+/// Assert that `aether.draw_triangle` was observed at least once.
+/// Surfaces the observed-kinds list on failure so a typo or missing
+/// subscription is debuggable.
+fn assert_draw_triangle_observed(bench: &TestBench) {
+    let observed = bench.count_observed("aether.draw_triangle");
+    assert!(
+        observed >= 1,
+        "expected ≥1 aether.draw_triangle observed; got {observed}; observed kinds: {:?}",
+        bench.observed_kinds(),
+    );
+}
+
 /// Smoke test: load a `.dsl` box → triangles flow to the render sink
 /// every tick → the captured frame contains pixels that diverge from
 /// the chassis clear color. Validates the entire DSL load path: the
@@ -69,44 +124,33 @@ fn dsl_box_loads_and_renders() {
     let sandbox = init_save_sandbox("mesh-viewer");
     let path = write_fixture("dsl_box.dsl", BOX_DSL);
 
-    let script = Script {
-        name: "mesh viewer loads DSL box".to_owned(),
-        steps: vec![
-            Step::LoadComponent {
-                path: wasm_path.to_string_lossy().into_owned(),
-                name: Some(COMPONENT_NAME.to_owned()),
-            },
-            // First tick triggers the load; the read reply lands on
-            // a later tick. A handful of ticks ensures the cache is
-            // populated and several render-sink emissions land.
-            Step::Advance { ticks: 1 },
-            Step::SendMail {
-                recipient: COMPONENT_ADDRESS.to_owned(),
-                kind: "aether.mesh.load".to_owned(),
-                params: serde_yml::from_str(&format!("namespace: save\npath: {path}"))
-                    .expect("dsl load params parse"),
-            },
-            Step::Advance { ticks: 5 },
-            tick_to(COMPONENT_ADDRESS),
-            Step::Capture,
-            Step::Assert {
-                check: Check::MailObserved {
-                    name: "aether.draw_triangle".to_owned(),
-                    min_count: 1,
-                },
-            },
-            Step::Assert {
-                check: Check::DiffersFromBackground { tolerance: 5 },
-            },
-        ],
-    };
-
     let mut bench = TestBench::builder()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
-    run_or_panic(&mut bench, &script);
+    load_viewer(&mut bench, &wasm_path);
+
+    // First tick triggers the load; the read reply lands on a later
+    // tick. A handful of ticks ensures the cache is populated and
+    // several render-sink emissions land.
+    bench.advance(1).expect("priming advance");
+    bench
+        .send_mail(
+            COMPONENT_ADDRESS,
+            &LoadMesh {
+                namespace: "save".to_owned(),
+                path,
+            },
+        )
+        .expect("send mesh.load");
+    bench.advance(5).expect("post-load advance");
+    nudge_tick(&mut bench);
+
+    let png = bench.capture().expect("capture");
+    let img = decode_png(&png).expect("decode capture png");
+    assert_draw_triangle_observed(&bench);
+    differs_from_background(&img, 5).expect("captured frame should diverge from clear color");
 }
 
 /// `.obj` parser smoke. The OBJ path doesn't go through `aether-mesh`'s
@@ -121,49 +165,38 @@ fn obj_quad_loads_and_renders() {
     let sandbox = init_save_sandbox("mesh-viewer");
     let path = write_fixture("obj_quad.obj", QUAD_OBJ);
 
-    let script = Script {
-        name: "mesh viewer loads OBJ quad".to_owned(),
-        steps: vec![
-            Step::LoadComponent {
-                path: wasm_path.to_string_lossy().into_owned(),
-                name: Some(COMPONENT_NAME.to_owned()),
-            },
-            Step::Advance { ticks: 1 },
-            Step::SendMail {
-                recipient: COMPONENT_ADDRESS.to_owned(),
-                kind: "aether.mesh.load".to_owned(),
-                params: serde_yml::from_str(&format!("namespace: save\npath: {path}"))
-                    .expect("obj load params parse"),
-            },
-            Step::Advance { ticks: 5 },
-            tick_to(COMPONENT_ADDRESS),
-            Step::Capture,
-            Step::Assert {
-                check: Check::MailObserved {
-                    name: "aether.draw_triangle".to_owned(),
-                    min_count: 1,
-                },
-            },
-            Step::Assert {
-                check: Check::DiffersFromBackground { tolerance: 5 },
-            },
-        ],
-    };
-
     let mut bench = TestBench::builder()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
-    run_or_panic(&mut bench, &script);
+    load_viewer(&mut bench, &wasm_path);
+
+    bench.advance(1).expect("priming advance");
+    bench
+        .send_mail(
+            COMPONENT_ADDRESS,
+            &LoadMesh {
+                namespace: "save".to_owned(),
+                path,
+            },
+        )
+        .expect("send mesh.load");
+    bench.advance(5).expect("post-load advance");
+    nudge_tick(&mut bench);
+
+    let png = bench.capture().expect("capture");
+    let img = decode_png(&png).expect("decode capture png");
+    assert_draw_triangle_observed(&bench);
+    differs_from_background(&img, 5).expect("captured frame should diverge from clear color");
 }
 
 /// Parse-failure resilience: a known-bad DSL after a known-good DSL
-/// must keep the previous mesh visible — the component's contract
-/// is "partial parse / mesh failure leaves the previous mesh
-/// intact." Loads a good box, advances until triangles flow, loads
-/// the bad DSL, advances again, and verifies the frame still
-/// diverges from the clear color.
+/// must keep the previous mesh visible — the component's contract is
+/// "partial parse / mesh failure leaves the previous mesh intact."
+/// Loads a good box, advances until triangles flow, loads the bad
+/// DSL, advances again, and verifies the frame still diverges from
+/// the clear color.
 #[test]
 fn parse_failure_keeps_prior_mesh() {
     let Some(wasm_path) = require_runtime("aether_mesh_viewer") else {
@@ -173,50 +206,45 @@ fn parse_failure_keeps_prior_mesh() {
     let good = write_fixture("good.dsl", BOX_DSL);
     let bad = write_fixture("bad.dsl", BAD_DSL);
 
-    let script = Script {
-        name: "parse failure keeps prior mesh".to_owned(),
-        steps: vec![
-            Step::LoadComponent {
-                path: wasm_path.to_string_lossy().into_owned(),
-                name: Some(COMPONENT_NAME.to_owned()),
-            },
-            Step::Advance { ticks: 1 },
-            Step::SendMail {
-                recipient: COMPONENT_ADDRESS.to_owned(),
-                kind: "aether.mesh.load".to_owned(),
-                params: serde_yml::from_str(&format!("namespace: save\npath: {good}"))
-                    .expect("good load params parse"),
-            },
-            Step::Advance { ticks: 5 },
-            // Baseline: the good mesh is publishing.
-            Step::Assert {
-                check: Check::MailObserved {
-                    name: "aether.draw_triangle".to_owned(),
-                    min_count: 1,
-                },
-            },
-            // Now hand the viewer something it can't parse.
-            Step::SendMail {
-                recipient: COMPONENT_ADDRESS.to_owned(),
-                kind: "aether.mesh.load".to_owned(),
-                params: serde_yml::from_str(&format!("namespace: save\npath: {bad}"))
-                    .expect("bad load params parse"),
-            },
-            Step::Advance { ticks: 5 },
-            tick_to(COMPONENT_ADDRESS),
-            Step::Capture,
-            // The cached triangle list should be intact — the
-            // captured frame still has non-clear-color geometry.
-            Step::Assert {
-                check: Check::DiffersFromBackground { tolerance: 5 },
-            },
-        ],
-    };
-
     let mut bench = TestBench::builder()
         .size(64, 48)
         .namespace_roots(test_namespace_roots(sandbox))
         .build()
         .expect("boot");
-    run_or_panic(&mut bench, &script);
+    load_viewer(&mut bench, &wasm_path);
+
+    bench.advance(1).expect("priming advance");
+    bench
+        .send_mail(
+            COMPONENT_ADDRESS,
+            &LoadMesh {
+                namespace: "save".to_owned(),
+                path: good,
+            },
+        )
+        .expect("send good mesh.load");
+    bench.advance(5).expect("post-good-load advance");
+
+    // Baseline: the good mesh is publishing.
+    assert_draw_triangle_observed(&bench);
+
+    // Now hand the viewer something it can't parse.
+    bench
+        .send_mail(
+            COMPONENT_ADDRESS,
+            &LoadMesh {
+                namespace: "save".to_owned(),
+                path: bad,
+            },
+        )
+        .expect("send bad mesh.load");
+    bench.advance(5).expect("post-bad-load advance");
+    nudge_tick(&mut bench);
+
+    // The cached triangle list should be intact — the captured frame
+    // still has non-clear-color geometry.
+    let png = bench.capture().expect("capture");
+    let img = decode_png(&png).expect("decode capture png");
+    differs_from_background(&img, 5)
+        .expect("cached mesh should remain visible after parse failure");
 }

@@ -80,10 +80,8 @@ ctrlc = "3"
 wat = "1"
 # Test-bench Phase 3 substrate-feature scenarios (issue 430). Tests
 # boot a `TestBench` and load `aether-test-fixture-probe`'s wasm to
-# exercise input subscription, drop_component, etc.
+# exercise input subscription, drop_component, etc. The bench's own
+# integration tests reach the visual/PNG helpers + `test_helpers`
+# module through `crate::test_bench::{visual, test_helpers}` directly
+# (post-issue-821, formerly via `aether-scenario`).
 aether-test-fixture-probe = { path = "../aether-test-fixture-probe" }
-# Re-uses the visual/PNG helpers (`decode_png`,
-# `differs_from_background`) and the shared `test_helpers` module
-# (issue 460) the per-component scenarios already exercise; avoids
-# reinventing pixel-diff plumbing in the test-bench's own scenarios.
-aether-scenario = { path = "../aether-scenario" }
