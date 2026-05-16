@@ -18,9 +18,6 @@ members = [
     "crates/aether-mesh-viewer",
     "crates/aether-test-fixture-probe",
     "demos/sokoban",
-    "demos/tic-tac-toe",
-    "demos/tic-tac-toe-server",
-    "demos/tic-tac-toe-client",
 ]
 # Reference artefacts under spikes/ are standalone Cargo workspaces
 # (see ADR-0003 §Consequences) and must be excluded so they aren't
