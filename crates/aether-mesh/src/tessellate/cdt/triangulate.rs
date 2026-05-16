@@ -17,38 +17,8 @@ use super::predicates::Point2;
 #[cfg(test)]
 use super::predicates::orient2d;
 use crate::cleanup::mesh::VertexId;
-use crate::plane::Plane3;
+use crate::plane::{Axis, Plane3, projection_axes};
 use crate::point::Point3;
-
-#[derive(Debug, Clone, Copy)]
-enum Axis {
-    X,
-    Y,
-    Z,
-}
-
-fn projection_axes(plane: &Plane3) -> (Axis, Axis) {
-    let ax = plane.n_x.unsigned_abs();
-    let ay = plane.n_y.unsigned_abs();
-    let az = plane.n_z.unsigned_abs();
-    if ax >= ay && ax >= az {
-        if plane.n_x >= 0 {
-            (Axis::Y, Axis::Z)
-        } else {
-            (Axis::Z, Axis::Y)
-        }
-    } else if ay >= az {
-        if plane.n_y >= 0 {
-            (Axis::Z, Axis::X)
-        } else {
-            (Axis::X, Axis::Z)
-        }
-    } else if plane.n_z >= 0 {
-        (Axis::X, Axis::Y)
-    } else {
-        (Axis::Y, Axis::X)
-    }
-}
 
 fn project_point(p: Point3, axis_a: Axis, axis_b: Axis) -> Point2 {
     let pick = |a: Axis| -> i64 {

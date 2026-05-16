@@ -162,6 +162,52 @@ impl Plane3 {
     }
 }
 
+/// A world-space coordinate axis. Used by [`projection_axes`] to name
+/// the pair of axes a 3D point projects onto for 2D operations
+/// (signed-area, point-in-polygon, CDT). Distinct from
+/// [`crate::ast::Axis`], which carries DSL semantics (symbol parsing,
+/// orientation enums) the projection helpers don't need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+/// Pick the ordered pair of world axes to project a 3D point onto for
+/// 2D operations on a polygon lying in `plane`. Drops the axis with
+/// the largest absolute normal component (keeps the projection
+/// non-degenerate) and orders the remaining two so the projection
+/// preserves CCW winding around `plane.normal` — flipping the pair
+/// when the dropped component is negative cancels the reflection that
+/// would otherwise reverse orientation.
+///
+/// Shared by `polygon::projected_signed_area` and
+/// `tessellate::cdt::triangulate` so both domains agree on the
+/// orientation convention.
+pub(crate) fn projection_axes(plane: &Plane3) -> (Axis, Axis) {
+    let ax = plane.n_x.unsigned_abs();
+    let ay = plane.n_y.unsigned_abs();
+    let az = plane.n_z.unsigned_abs();
+    if ax >= ay && ax >= az {
+        if plane.n_x >= 0 {
+            (Axis::Y, Axis::Z)
+        } else {
+            (Axis::Z, Axis::Y)
+        }
+    } else if ay >= az {
+        if plane.n_y >= 0 {
+            (Axis::Z, Axis::X)
+        } else {
+            (Axis::X, Axis::Z)
+        }
+    } else if plane.n_z >= 0 {
+        (Axis::X, Axis::Y)
+    } else {
+        (Axis::Y, Axis::X)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
