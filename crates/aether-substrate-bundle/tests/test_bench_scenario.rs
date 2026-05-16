@@ -17,8 +17,9 @@
 //!   into hard panics so a missing pre-build is loud.
 //!
 //! All boot-time mechanics (wgpu probe, wasm locator, skip-or-panic
-//! gate, `save://` sandbox) live in `aether_scenario::test_helpers`
-//! (issue 460). Per issue 464, the sandbox flows in via
+//! gate, `save://` sandbox) live in
+//! `aether_substrate_bundle::test_bench::test_helpers` (issues 460 +
+//! 821). Per issue 464, the sandbox flows in via
 //! `TestBench::builder().namespace_roots(...)` rather than env-var
 //! mutation.
 
@@ -29,11 +30,11 @@ use aether_kinds::{
     Delete, DeleteResult, DropComponent, FsError, List, ListResult, LoadComponent, MailEnvelope,
     Read, ReadResult, ReplaceComponent, Write, WriteResult,
 };
-use aether_scenario::test_helpers::{
-    has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots,
+use aether_substrate_bundle::test_bench::{
+    TestBench,
+    test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
+    visual::{decode_png, differs_from_background},
 };
-use aether_scenario::{decode_png, differs_from_background};
-use aether_substrate_bundle::test_bench::TestBench;
 use aether_test_fixture_probe::SetRender;
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`

@@ -21,8 +21,7 @@ use aether_actor::Actor;
 use aether_capabilities::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_scenario::test_helpers::require_runtime;
-use aether_substrate_bundle::test_bench::TestBench;
+use aether_substrate_bundle::test_bench::{TestBench, test_helpers::require_runtime};
 use aether_test_fixture_probe::TickObserved;
 
 const PROBE_NAME: &str = "probe";

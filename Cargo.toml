@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "crates/aether-substrate",
     "crates/aether-substrate-bundle",
-    "crates/aether-scenario",
     "crates/aether-codec",
     "crates/aether-data",
     "crates/aether-kinds",
