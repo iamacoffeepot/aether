@@ -68,7 +68,7 @@
 //! tiebreak in the angular pick).
 
 use super::mesh::{IndexedMesh, IndexedPolygon, VertexId};
-use crate::plane::Plane3;
+use crate::plane::{Plane3, project_2d};
 use crate::point::Point3;
 use std::collections::HashMap;
 
@@ -604,11 +604,6 @@ fn drop_axis(plane: &Plane3) -> (usize, usize) {
     } else {
         (0, 1)
     }
-}
-
-fn project_2d(p: Point3, axes: (usize, usize)) -> (i64, i64) {
-    let coords = [p.x as i64, p.y as i64, p.z as i64];
-    (coords[axes.0], coords[axes.1])
 }
 
 #[cfg(test)]
