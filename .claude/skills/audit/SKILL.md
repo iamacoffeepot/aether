@@ -89,34 +89,36 @@ If `<type>` or `<crate>` is missing or unknown, stop and surface the gap — don
 
 Each procedure starts with the RustRover tools it relies on and the symbolic queries it issues. None of them grep for type shapes — text search appears only where the question is literally about text (e.g. is a name mentioned in a comment).
 
-### `unused` — unused fields, methods, pub items
+### `unused` — unused fields, methods, items
 
-**Tools**: `mcp__rustrover__get_file_problems` (primary), `mcp__rustrover__search_symbol`, `mcp__rustrover__get_symbol_info`.
+**Tools**: `mcp__rustrover__get_file_problems`.
 
-Two passes:
+For each file under `<crate>/src` and `<crate>/tests`, call `get_file_problems` with `errorsOnly: false`. The tool returns problems as `{ severity, description, lineContent, line, column }` — there's no structured category tag, so filtering happens on the description string. Keep problems whose `description` matches a case-insensitive `Unused | Dead | Never used | does nothing | unreachable | redundant import | never read` substring. Each surviving problem becomes a `U<n>` finding. Severity mapping: `WARNING` and above → high, `WEAK WARNING` → medium, `INFORMATION` → low (the resolver is symbolic — false positives here are rare and almost always intentional `#[allow]` candidates).
 
-1. **IDE inspections per file.** For each file under `<crate>/src` and `<crate>/tests`, call `get_file_problems` with `errorsOnly: false`. Filter to inspection categories whose name carries `Unused` / `Dead` / `NoEffect` (e.g. `RsDeadCode`, `RsUnusedImport`, `RsUnusedVariable`, `RsUnusedFunction`, `RsUnusedField`). Each surviving problem becomes a `U<n>` finding; severity high (the resolver is symbolic — false positives here are rare and almost always intentional `#[allow]` candidates).
+The report's Architecture Observed section lists the crate's module + pub surface (just by reading `src/lib.rs` and `src/*.rs` headers — no symbolic enumeration needed) so the reader sees the denominator before reading findings.
 
-2. **Pub-but-unimported scan.** `search_symbol` over `<crate>/**/src/**/*.rs` with the crate's name as a `q` seed isn't useful directly — instead, enumerate pub items by issuing `search_symbol` for the crate's module names (the entry points the IDE knows about), then walk each returned symbol via `get_symbol_info` to read its visibility + check the IDE's resolved reference list. A pub item with zero external resolved references → `U<n>` finding (severity: medium — pub items may be intended for future external API or `#[cfg(test)]` consumers; the finding body has to call out the ambiguity).
-
-The report's Architecture Observed section lists the crate's pub surface (counts by item kind, derived from `search_symbol`) so the reader sees what "pub" means for this crate before reading findings.
+**Deferred from v1 — cross-crate pub-but-unimported pass.** RustRover's built-in "Unused declaration" inspection conservatively skips `pub` items (since `pub` declares external API intent), so an item that's pub and only used within the same crate doesn't surface in `get_file_problems`. Properly finding cross-crate unused pubs requires either a workspace-PSI walk via `run_inspection_kts` (expensive per-name; needs verification that the API exposes reference lookup) or a textual `use <crate>::` reconciliation (drops the symbolic guarantee). Surfaced during the skill's first smoke against `aether-codec`; deferred to a future PR rather than shipped with a shaky implementation.
 
 Commit type when filing: `refactor` (or `chore` for pure deletion of dead code with no behavioural surface).
 
 ### `concurrency` — concurrency primitive smells
 
-**Tools**: `mcp__rustrover__search_symbol` (primary entry point), `mcp__rustrover__get_symbol_info` (resolution + type-shape inspection), `mcp__rustrover__run_inspection_kts` (for patterns that need PSI walking).
+**Tools**: `mcp__rustrover__run_inspection_kts` (primary — PSI + resolver walks per pattern), `mcp__rustrover__generate_inspection_kts_api` + `generate_inspection_kts_examples` (consulted when writing or revising a pattern's kts script).
+
+The patterns in this category ask questions of the form "find every struct field whose resolved type tree matches X" — that's field-type enumeration over PSI, not name-fragment lookup. `search_symbol` returns hits by name; it can't be inverted to "give me all fields of resolved type Y". So the primary path is a per-pattern kts script the audit runs via `run_inspection_kts` against each file in `<crate>/src`.
 
 The pattern catalogue lives in `patterns/concurrency.md` (sibling of this file); load it and apply each pattern in order. Each pattern entry specifies:
 - The **symbolic question** it asks (e.g. "find every field whose resolved type is `Arc<Mutex<Option<T>>>` for any `T`").
-- The **primary tool** + the symbolic query (e.g. `search_symbol q: "Mutex"`, then for each hit `get_symbol_info` and inspect the resolved generic args).
-- An **optional kts script** path under `patterns/kts/` for patterns that need real PSI walking; the procedure runs it via `run_inspection_kts` per file in `<crate>/src`.
+- The **kts script** path under `patterns/kts/<pattern-id>.kts` — the script does the PSI walk + resolver query.
+- An **expected output shape** so the aggregator can convert per-file results into clustered findings.
 
-Each hit becomes a `C<n>` finding; per-pattern severity + suggested-fix text live in the catalogue.
+Each surviving hit becomes a `C<n>` finding; per-pattern severity + suggested-fix text live in the catalogue.
 
-Architecture Observed for `concurrency` enumerates the crate's sync primitives in use (Mutex / RwLock / Atomic / Condvar / channel kinds), thread-creation sites, and channel-creation sites with their bounds (or unbounded) — all gathered through `search_symbol` for `Mutex`, `RwLock`, `spawn`, `channel`, etc., then `get_symbol_info` to confirm the resolved source (`std::sync::Mutex` vs a local alias).
+Architecture Observed for `concurrency` is itself generated by a small inventory kts script (`patterns/kts/inventory.kts`) that walks struct fields + function calls and emits a per-crate primitive census (Mutex count, RwLock count, channel-creation sites with bounds, thread-spawn sites). The findings paragraph then references the inventory.
 
-If a pattern's symbolic query proves infeasible (the inspection API can't express what we need), the catalogue entry is flagged `status: deferred — kts unsupported` rather than degrading to a regex fallback. Better to under-report than to silently switch off the symbolic guarantee.
+**Honest limitation**: the kts scripts haven't been verified against Rust PSI yet. The first run of `/audit concurrency <crate>` is the verification — `run_inspection_kts` returns compilation errors if a script can't reach the Rust PSI types it needs. If a pattern's script fails to compile, that pattern is flagged `status: deferred — kts unsupported` in the catalogue rather than degrading to a regex fallback; better to under-report than to silently switch off the symbolic guarantee.
+
+Until a `/audit concurrency <crate>` run successfully populates findings end-to-end, treat the concurrency category as v1-pending and skip it for routine use. The simpler `unused` and `dup` categories are unblocked today via `get_file_problems`.
 
 Commit type when filing: `refactor`.
 
@@ -139,17 +141,15 @@ Commit type when filing: `refactor` for magic-string findings, `chore` for stale
 
 ### `dup` — duplicated code
 
-**Tools**: `mcp__rustrover__run_inspection_kts` (primary; PSI-subtree hashing), with `mcp__rustrover__generate_inspection_kts_api` + `generate_inspection_kts_examples` consulted when writing or revising the duplicate-detection script.
+**Tools**: `mcp__rustrover__get_file_problems` (primary), `mcp__rustrover__get_symbol_info` (used when aggregating clusters across files).
 
-Function-body duplicate detection within `<crate>/src` + `<crate>/tests`. Cross-crate dup is out of scope for v1 (forcing function deferred).
+Verified during the skill's first smoke (against `aether-codec`): RustRover's built-in Duplicates inspection runs as part of `get_file_problems` and returns symbolic findings of the form `"Duplicated code fragment (<N> lines long)"`. No custom kts script needed for v1 — the IDE's PSI-driven dup detector already does the work the audit was going to script by hand.
 
-1. The dup detection script lives at `patterns/kts/duplicate-bodies.kts` (sibling of this file). It walks function PSI subtrees, normalizes ident names to placeholders, hashes per-statement, and flags clusters of size ≥ 2. The script is the symbolic engine here — no regex sliding-window approximation.
-2. For each file under `<crate>/src` and `<crate>/tests`, call `run_inspection_kts` with the script as `inspectionKtsCode` and the file as `contextPath`. Aggregate the per-file results into clusters across the crate.
-3. Each cluster of size ≥ 2 across distinct functions becomes a `D<n>` finding. Severity: high if 100% normalized match across all sites, medium if 80–99% match, low if 70–80% (skip <70%).
+1. For each file under `<crate>/src` and `<crate>/tests`, call `get_file_problems` with `errorsOnly: false`. Filter problems whose `description` matches `Duplicated code fragment`. Each problem carries the file + the starting line of one duplicate; aggregate across files into clusters by parsing the `(<N> lines long)` length and locating the matching block in the second file via `search_symbol` for the leading identifier on the duplicated lines.
+2. Each cluster of size ≥ 2 across distinct functions becomes a `D<n>` finding. Severity heuristic: the IDE inspection reports `WEAK WARNING` for every dup it finds — promote to medium if the cluster spans ≥ 15 lines, medium-low otherwise. (The dup-finding shape doesn't currently carry confidence — RustRover's inspection either matches or doesn't.)
+3. Architecture Observed for `dup` lists the crate's function inventory (counts by module) so the reader sees the denominator.
 
-Architecture Observed for `dup` lists the crate's function inventory (counts by module) so the reader sees the denominator.
-
-**Honest limitation**: this depends on whether `run_inspection_kts` exposes Rust PSI access via the inspection.kts API. The first run of `/audit dup <crate>` is the verification — if the script fails to compile because the Rust PSI types aren't reachable, the failure surface is loud (the tool returns compilation errors), and the skill's procedure documents that we'd revisit the duplicates inspection or fall back to invoking RustRover's built-in "Locate Duplicates" action via a different MCP path. Until verified, treat `dup` as the highest-risk category in this skill.
+For dup clusters that need richer detection — semantically-equivalent functions written with different variable names, or cross-crate dup — promote to a custom kts script under `patterns/kts/duplicates-deep.kts` and ride `run_inspection_kts`. Deferred until v1's built-in pass proves insufficient.
 
 Commit type when filing: `refactor`.
 
