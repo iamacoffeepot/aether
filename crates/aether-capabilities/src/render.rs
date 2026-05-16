@@ -550,7 +550,7 @@ mod native {
         use super::*;
         use crate::test_chassis::TestChassis;
         use aether_actor::Actor;
-        use aether_substrate::chassis::builder::Builder;
+        use aether_substrate::chassis::builder::{Builder, PassiveChassis};
         use aether_substrate::mail::mailer::Mailer;
         use aether_substrate::mail::registry::{MailboxEntry, Registry};
         use aether_substrate::mail::{KindId, ReplyTo};
@@ -565,6 +565,19 @@ mod native {
             ));
             let mailer = Arc::new(Mailer::new(Arc::clone(&registry), store));
             (registry, mailer)
+        }
+
+        /// Boots a passive `TestChassis` with a default `RenderCapability`.
+        /// Collapses the four-line `Builder::<TestChassis>::new(...)` chain
+        /// every render test repeated (issue 795).
+        fn build_render_chassis(
+            registry: &Arc<Registry>,
+            mailer: &Arc<Mailer>,
+        ) -> PassiveChassis<TestChassis> {
+            Builder::<TestChassis>::new(Arc::clone(registry), Arc::clone(mailer))
+                .with_actor::<RenderCapability>(RenderConfig::default())
+                .build_passive()
+                .expect("build succeeds")
         }
 
         fn deliver(registry: &Registry, name: &str, kind: KindId, payload: &[u8]) {
@@ -588,10 +601,7 @@ mod native {
         #[test]
         fn capability_claims_render_mailbox_only() {
             let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<RenderCapability>(RenderConfig::default())
-                .build_passive()
-                .expect("build succeeds");
+            let chassis = build_render_chassis(&registry, &mailer);
             assert_eq!(chassis.len(), 1);
             assert!(registry.lookup(RenderCapability::NAMESPACE).is_some());
             // Camera mailbox retired (ADR-0074 §Decision 7).
@@ -607,10 +617,7 @@ mod native {
         #[test]
         fn render_dispatcher_appends_triangles_to_frame_vertices() {
             let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<RenderCapability>(RenderConfig::default())
-                .build_passive()
-                .expect("build succeeds");
+            let chassis = build_render_chassis(&registry, &mailer);
 
             let one_triangle = vec![0u8; DRAW_TRIANGLE_BYTES];
             deliver(
@@ -652,10 +659,7 @@ mod native {
         #[test]
         fn render_registers_frame_bound_pending_counter() {
             let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<RenderCapability>(RenderConfig::default())
-                .build_passive()
-                .expect("build succeeds");
+            let chassis = build_render_chassis(&registry, &mailer);
             assert_eq!(
                 chassis.frame_bound_pending().len(),
                 1,
@@ -667,10 +671,7 @@ mod native {
         #[test]
         fn camera_kind_drops_wrong_length_payload() {
             let (registry, mailer) = fresh_substrate();
-            let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-                .with_actor::<RenderCapability>(RenderConfig::default())
-                .build_passive()
-                .expect("build succeeds");
+            let chassis = build_render_chassis(&registry, &mailer);
 
             // 16 bytes — wrong length, decode fails, macro miss path
             // logs warn at chassis-side dispatcher; identity unchanged.
