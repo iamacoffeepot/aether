@@ -53,6 +53,10 @@ postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # `aether-mcp` crate, which owns those deps now.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# `test_bench::visual::ImageError` derives `thiserror::Error` (moved
+# from `aether-scenario` per issue 821). New runtime dep here because
+# `aether-substrate-bundle` had no prior thiserror consumer.
+thiserror = "1"
 tracing = "0.1"
 wasmtime = "30"
 wgpu = "29.0.1"

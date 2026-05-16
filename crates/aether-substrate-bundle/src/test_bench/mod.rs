@@ -18,6 +18,8 @@ pub mod cap;
 pub mod chassis;
 pub mod events;
 pub mod render;
+pub mod test_helpers;
+pub mod visual;
 
 pub use bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TestBench, TestBenchBuilder, TestBenchError};
 pub use cap::{TestBenchCapConfig, TestBenchCapability};
