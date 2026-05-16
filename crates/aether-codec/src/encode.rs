@@ -35,6 +35,8 @@ use aether_data::tagged_id;
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::Value;
 
+use crate::cast::align_of_primitive;
+
 #[derive(Debug)]
 pub enum EncodeError {
     NotAnObject,
@@ -740,15 +742,6 @@ fn alignment_of_schema(ty: &SchemaType) -> Result<usize, EncodeError> {
         _ => Err(EncodeError::UnsupportedSchema(
             "alignment query on non-cast schema",
         )),
-    }
-}
-
-fn align_of_primitive(p: Primitive) -> usize {
-    match p {
-        Primitive::U8 | Primitive::I8 => 1,
-        Primitive::U16 | Primitive::I16 => 2,
-        Primitive::U32 | Primitive::I32 | Primitive::F32 => 4,
-        Primitive::U64 | Primitive::I64 | Primitive::F64 => 8,
     }
 }
 
