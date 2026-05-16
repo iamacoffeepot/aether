@@ -42,6 +42,7 @@ pub mod test_bench;
 #[cfg(test)]
 pub(crate) mod test_chassis;
 pub mod trace;
+pub mod trampoline;
 pub mod window;
 
 #[cfg(feature = "audio")]
@@ -76,4 +77,7 @@ pub use render::RenderCapability;
 pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles};
 pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
+pub use trampoline::WasmTrampoline;
+#[cfg(not(target_arch = "wasm32"))]
+pub use trampoline::WasmTrampolineConfig;
 pub use window::HeadlessWindowCapability;

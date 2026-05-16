@@ -20,11 +20,18 @@
 //! - [`reply_table`] — wasm-only `wait_reply` correlation table.
 //! - [`kind_manifest`] — parses the `aether.kinds` custom section the
 //!   guest's [`aether_actor::export!`] macro emits.
+//!
+//! The `WasmTrampoline` actor itself lives in
+//! `aether_capabilities::trampoline` (issue 654) — next to the
+//! `ComponentHostCapability` that spawns it, so the trampoline's
+//! `Actor::NAMESPACE` is the single cap-owned declaration of the
+//! `aether.component.trampoline` prefix. The substrate still owns the
+//! spawn primitives, the `Component`/`ComponentCtx` types, and the
+//! host-fn linker; only the actor wrapper moved.
 
 pub mod component;
 pub mod host_fns;
 pub mod kind_manifest;
 pub mod reply_table;
-pub mod trampoline;
 
 pub use component::{Component, ComponentCtx};

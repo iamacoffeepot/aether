@@ -501,11 +501,14 @@ impl<'a> NativeInitCtx<'a> {
         }
     }
 
-    /// Substrate-internal: borrow the Arc'd cap-bound
-    /// [`NativeBinding`]. Used by the wasm trampoline at init to
-    /// install itself on the [`crate::actor::wasm::component::ComponentCtx`]
-    /// so the `wait_reply_p32` host fn can route through this binding.
-    pub(crate) fn binding(&self) -> &Arc<NativeBinding> {
+    /// Borrow the Arc'd cap-bound [`NativeBinding`]. Used by the wasm
+    /// trampoline at init to install itself on the
+    /// [`crate::actor::wasm::component::ComponentCtx`] so the
+    /// `wait_reply_p32` host fn can route through this binding.
+    /// Promoted from `pub(crate)` to `pub` by issue 654 when the
+    /// trampoline moved to `aether-capabilities` next to its consumer;
+    /// no other external caller is intended.
+    pub fn binding(&self) -> &Arc<NativeBinding> {
         self.binding
     }
 

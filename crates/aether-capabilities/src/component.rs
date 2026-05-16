@@ -23,18 +23,77 @@
 //! ADR-0078 — the cap is single-threaded, every handler runs on the
 //! cap's dispatcher thread.
 
+use aether_actor::{Actor, FfiActorMailbox};
 #[cfg(not(target_arch = "wasm32"))]
 use aether_kinds::UnsubscribeAll;
 use aether_kinds::{DropComponent, LoadComponent, ReplaceComponent};
+#[cfg(not(target_arch = "wasm32"))]
+use aether_substrate::actor::native::NativeActorMailbox;
+
+use crate::trampoline::WasmTrampoline;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::ComponentHostConfig;
+
+/// Sender-side facade for FFI guests addressing a loaded peer
+/// component through [`ComponentHostCapability`].
+///
+/// "Sending mail to a loaded component" isn't a SDK primitive — it
+/// only exists *because* this cap loaded a wasm component and gave it
+/// a trampoline address. So the helper lives here, attached to the
+/// cap's FFI mailbox, mirroring [`crate::fs::FsMailboxExt`]'s
+/// cap-owned facade pattern (issue 580).
+///
+/// `.loaded::<R>(name)` resolves a typed peer handle. The trampoline
+/// prefix lives in exactly one place in the workspace —
+/// [`WasmTrampoline::NAMESPACE`] (issue 654) — and this method reads
+/// from it, so a future rename of the convention touches one constant
+/// and propagates everywhere.
+///
+/// `R: Actor` is the peer's actor type, supplied by the caller (same
+/// as today's `FfiCtx::resolve_actor` surface). Type-checks at the
+/// send site — `peer.send::<K>(&mail)` compiles only when
+/// `R: HandlesKind<K>`.
+pub trait ComponentHostFfiExt {
+    /// Resolve a typed peer-component mailbox for the loaded component
+    /// named `name`. The full mailbox address is
+    /// `format!("{}:{}", WasmTrampoline::NAMESPACE, name)`.
+    fn loaded<R: Actor>(&self, name: &str) -> FfiActorMailbox<R>;
+}
+
+impl ComponentHostFfiExt for FfiActorMailbox<ComponentHostCapability> {
+    fn loaded<R: Actor>(&self, name: &str) -> FfiActorMailbox<R> {
+        self.resolve_peer::<R>(&format!("{}:{}", WasmTrampoline::NAMESPACE, name))
+    }
+}
+
+/// Sender-side facade for native cap-to-cap callers addressing a
+/// loaded peer component through [`ComponentHostCapability`]. Same
+/// shape as [`ComponentHostFfiExt`] for the native transport — the
+/// returned handle inherits the parent mailbox's `'a` binding ref so
+/// `.send::<K>(&mail)` dispatches through the same `NativeBinding`
+/// without re-threading the ctx.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait ComponentHostNativeExt {
+    /// Resolve a typed peer-component mailbox for the loaded component
+    /// named `name`. The full mailbox address is
+    /// `format!("{}:{}", WasmTrampoline::NAMESPACE, name)`.
+    fn loaded<'a, R: Actor>(&'a self, name: &str) -> NativeActorMailbox<'a, R>;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> ComponentHostNativeExt for NativeActorMailbox<'a, ComponentHostCapability> {
+    fn loaded<'b, R: Actor>(&'b self, name: &str) -> NativeActorMailbox<'b, R> {
+        self.resolve_peer::<R>(&format!("{}:{}", WasmTrampoline::NAMESPACE, name))
+    }
+}
 
 #[aether_actor::bridge(singleton)]
 mod native {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use aether_actor::Actor;
     use aether_actor::actor;
     use aether_actor::actor::ctx::OutboundReply;
     use aether_data::Kind;
@@ -47,13 +106,14 @@ mod native {
     use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use aether_substrate::actor::wasm::component::ComponentCtx;
     use aether_substrate::actor::wasm::kind_manifest;
-    use aether_substrate::actor::wasm::trampoline::{self, WasmTrampoline, WasmTrampolineConfig};
     use aether_substrate::chassis::error::BootError;
     use aether_substrate::mail::helpers::register_or_match_all;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
     use aether_substrate::mail::{KindId, Mail, MailboxId};
+
+    use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
     /// Configuration for [`ComponentHostCapability`]. `engine` and
     /// `linker` are the wasmtime instances every load instantiates
@@ -263,7 +323,7 @@ mod native {
 
             LoadResult::Ok {
                 mailbox_id,
-                name: trampoline::full_name(&name),
+                name: format!("{}:{}", WasmTrampoline::NAMESPACE, name),
                 capabilities,
             }
         }

@@ -16,7 +16,7 @@
 use core::marker::PhantomData;
 
 use aether_actor::{Actor, HandlesKind};
-use aether_data::{Kind, MailId};
+use aether_data::{Kind, MailId, mailbox_id_from_name};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::ctx::NativeCtx;
@@ -59,6 +59,17 @@ impl<'a, R> NativeActorMailbox<'a, R> {
     /// it for diagnostics or a host fn the SDK doesn't yet wrap.
     pub fn mailbox_id(&self) -> aether_data::MailboxId {
         aether_data::MailboxId(self.mailbox)
+    }
+
+    /// Resolve a sibling mailbox on the same binding, addressed by
+    /// `name`. Same FNV-hash name resolution as
+    /// [`NativeCtx::resolve_actor`] — kept as an inherent method so
+    /// cap-owned ext traits (which only have a mailbox in hand, not a
+    /// ctx) can hand back peer handles without rethreading the ctx.
+    /// Threads the existing `'a` binding ref, so the returned handle
+    /// inherits the parent mailbox's borrow lifetime.
+    pub fn resolve_peer<Peer: Actor>(&self, name: &str) -> NativeActorMailbox<'a, Peer> {
+        NativeActorMailbox::__new(mailbox_id_from_name(name).0, self.binding)
     }
 }
 

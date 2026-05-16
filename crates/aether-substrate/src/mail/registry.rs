@@ -616,6 +616,12 @@ fn categorise_mailbox_name(name: &str) -> Option<MailboxCategory> {
         // [`Registry::list_mailbox_descriptors`] uses the same
         // categorisation so re-registration would be redundant.
         Some(MailboxCategory::ChassisSentinel)
+    // Literal kept in sync with `aether_capabilities::trampoline::WasmTrampoline::NAMESPACE`
+    // (issue 654 made that the single source of truth). Substrate can't
+    // import from capabilities (wrong dep direction), so this routing
+    // categorisation duplicates the prefix; if it drifts, every
+    // loaded-component test fails immediately because the mailbox
+    // categorisation no longer matches.
     } else if name.starts_with("aether.component.trampoline:") {
         Some(MailboxCategory::Trampoline)
     } else if name.starts_with("aether.") {

@@ -43,7 +43,17 @@ use aether_camera as _;
 /// tests don't currently send any mail to the loaded trampoline by
 /// address, so only the load-time name matters here.
 const COMPONENT_NAME: &str = "cam";
-const COMPONENT_ADDRESS: &str = "aether.component.trampoline:cam";
+
+/// Built from `WasmTrampoline::NAMESPACE` — the cap-owned single
+/// source of truth post issue 654.
+fn component_address() -> String {
+    use aether_actor::Actor;
+    format!(
+        "{}:{}",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+        COMPONENT_NAME,
+    )
+}
 
 /// Load this crate's pre-built wasm into the bench and await
 /// `LoadResult`. Panics on load failure so the calling test surfaces
@@ -142,7 +152,7 @@ fn camera_destroy_main_keeps_substrate_alive() {
     // trampoline's full name (`aether.component.trampoline:NAME`).
     bench
         .send_mail(
-            COMPONENT_ADDRESS,
+            &component_address(),
             &CameraDestroy {
                 name: "main".to_owned(),
             },
