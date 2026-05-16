@@ -20,6 +20,25 @@ use crate::mail::mailer::Mailer;
 use crate::mail::registry::{MailDispatch, Registry};
 use crate::runtime::lifecycle::FatalAborter;
 
+/// Materialise an owned [`Envelope`] from a borrowed [`MailDispatch`].
+/// Used by every `claim_mailbox*` variant's registry closure to copy the
+/// dispatch's borrowed `kind_name` / `origin` / `payload` into owned
+/// fields before the envelope crosses the mpsc boundary into the
+/// capability's dispatcher thread.
+fn build_envelope(dispatch: &MailDispatch<'_>) -> Envelope {
+    Envelope {
+        kind: dispatch.kind,
+        kind_name: dispatch.kind_name.to_owned(),
+        origin: dispatch.origin.map(str::to_owned),
+        sender: dispatch.sender,
+        payload: dispatch.payload.to_vec(),
+        count: dispatch.count,
+        mail_id: dispatch.mail_id,
+        root: dispatch.root,
+        parent_mail: dispatch.parent_mail,
+    }
+}
+
 /// Result returned from [`ChassisCtx::claim_mailbox`].
 ///
 /// The capability owns the receiver afterward; the slot is consumed
@@ -281,17 +300,7 @@ impl<'a> ChassisCtx<'a> {
         let id = self.registry.try_register_closure(
             name.to_owned(),
             Arc::new(move |dispatch: MailDispatch<'_>| {
-                let env = Envelope {
-                    kind: dispatch.kind,
-                    kind_name: dispatch.kind_name.to_owned(),
-                    origin: dispatch.origin.map(str::to_owned),
-                    sender: dispatch.sender,
-                    payload: dispatch.payload.to_vec(),
-                    count: dispatch.count,
-                    mail_id: dispatch.mail_id,
-                    root: dispatch.root,
-                    parent_mail: dispatch.parent_mail,
-                };
+                let env = build_envelope(&dispatch);
                 if tx.send(env).is_err() {
                     tracing::warn!(
                         target: "aether_substrate::capability",
@@ -353,17 +362,7 @@ impl<'a> ChassisCtx<'a> {
                     );
                     return;
                 };
-                let env = Envelope {
-                    kind: dispatch.kind,
-                    kind_name: dispatch.kind_name.to_owned(),
-                    origin: dispatch.origin.map(str::to_owned),
-                    sender: dispatch.sender,
-                    payload: dispatch.payload.to_vec(),
-                    count: dispatch.count,
-                    mail_id: dispatch.mail_id,
-                    root: dispatch.root,
-                    parent_mail: dispatch.parent_mail,
-                };
+                let env = build_envelope(&dispatch);
                 if tx.send(env).is_err() {
                     tracing::warn!(
                         target: "aether_substrate::capability",
@@ -433,17 +432,7 @@ impl<'a> ChassisCtx<'a> {
                     );
                     return;
                 };
-                let env = Envelope {
-                    kind: dispatch.kind,
-                    kind_name: dispatch.kind_name.to_owned(),
-                    origin: dispatch.origin.map(str::to_owned),
-                    sender: dispatch.sender,
-                    payload: dispatch.payload.to_vec(),
-                    count: dispatch.count,
-                    mail_id: dispatch.mail_id,
-                    root: dispatch.root,
-                    parent_mail: dispatch.parent_mail,
-                };
+                let env = build_envelope(&dispatch);
                 // Increment before send so the dispatcher's
                 // matching decrement-after-dispatch sees a count
                 // > 0 by the time it tries to decrement. If the
