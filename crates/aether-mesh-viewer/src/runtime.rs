@@ -32,9 +32,10 @@
 //!    `"aether.render"`.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
+use aether_capabilities::fs::FsMailboxExt;
 use aether_capabilities::{FsCapability, InputCapability, RenderCapability};
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{DrawTriangle, Read, ReadResult, SubscribeInput, Tick, Vertex};
+use aether_kinds::{DrawTriangle, ReadResult, SubscribeInput, Tick, Vertex};
 use aether_math::Vec3;
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
 
@@ -123,10 +124,7 @@ impl FfiActor for MeshViewer {
             path = %msg.path,
             "load requested; issuing read",
         );
-        ctx.actor::<FsCapability>().send(&Read {
-            namespace: msg.namespace,
-            path: msg.path,
-        });
+        ctx.actor::<FsCapability>().read(&msg.namespace, &msg.path);
     }
 
     /// Consumes the substrate's I/O reply. Dispatches on the echoed
