@@ -381,7 +381,7 @@ pub struct UnresolvedMail {
     aether_data::Kind,
     aether_data::Schema,
 )]
-#[kind(name = "aether.observation.monitor_notice")]
+#[kind(name = "aether.actor.monitor_notice")]
 pub struct MonitorNotice {
     pub target: aether_data::MailboxId,
 }
@@ -1785,6 +1785,7 @@ mod tests {
             SetMasterGainResult::NAME,
             "aether.audio.set_master_gain_result"
         );
+        assert_eq!(MonitorNotice::NAME, "aether.actor.monitor_notice");
         assert_eq!(Read::NAME, "aether.fs.read");
         assert_eq!(ReadResult::NAME, "aether.fs.read_result");
         assert_eq!(Write::NAME, "aether.fs.write");
