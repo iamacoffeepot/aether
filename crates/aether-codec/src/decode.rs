@@ -23,7 +23,7 @@ use std::fmt;
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::{Map, Value};
 
-use crate::cast::align_of_primitive;
+use crate::cast::{NON_CAST_VARIANTS_MSG, align_of_primitive};
 
 #[derive(Debug)]
 pub enum DecodeError {
@@ -194,9 +194,7 @@ fn decode_cast_field(
         | SchemaType::Enum { .. }
         | SchemaType::Unit
         | SchemaType::Ref(_)
-        | SchemaType::Map { .. } => Err(DecodeError::UnsupportedSchema(
-            "non-cast field inside cast-shaped struct",
-        )),
+        | SchemaType::Map { .. } => Err(DecodeError::UnsupportedSchema(NON_CAST_VARIANTS_MSG)),
     }
 }
 
