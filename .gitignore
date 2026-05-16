@@ -14,6 +14,7 @@ spikes/*/target/
 .claude/scheduled_tasks.lock
 .claude/skills/*
 !.claude/skills/adr/
+!.claude/skills/audit/
 !.claude/skills/delegate/
 !.claude/skills/sweep/
 # Agent audit artifacts — runs of an audit workflow that examines
