@@ -53,15 +53,24 @@ postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 # `aether-mcp` crate, which owns those deps now.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Hub chassis uses tokio only to block on a SIGINT/SIGTERM signal in
-# `HubServerDriverRunning::run`. The OLD `net`/`io-util`/`process`/`fs`/
-# `sync`/`time`/`tokio-util` deps retired with the embedded MCP +
-# engine listener (issue 763 P5e/P5f).
-tokio = { version = "1", features = ["rt", "macros", "signal"] }
 tracing = "0.1"
 wasmtime = "30"
 wgpu = "29.0.1"
 winit = "0.30.13"
+
+# Hub chassis blocks on a SIGINT/SIGTERM signal in
+# `HubServerDriverRunning::run`. Tokio retired alongside the embedded
+# MCP + engine listener (issue 763 P5e/P5f); signal-hook is a much
+# smaller dep and runs synchronously on the calling thread — no async
+# runtime to host, no mio/tokio-macros transitive build cost.
+# signal-hook is Unix-only; the Windows fallback rides `ctrlc` for
+# Ctrl-C only (matches the pre-tokio-retirement behavior, which also
+# distinguished SIGINT/SIGTERM only on Unix).
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = "3"
 
 [dev-dependencies]
 wat = "1"

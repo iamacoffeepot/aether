@@ -6,6 +6,10 @@
 //! on a SIGINT/SIGTERM signal in `run`. The OLD `EngineToHub` TCP
 //! listener, hub-side sessions, `ProcessCapability`, loopback drainers,
 //! and embedded MCP server all retired with P5e/P5f.
+//!
+//! Signal handling is sync: there is no async runtime to host. On Unix
+//! `signal-hook`'s iterator API blocks the driver thread until SIGINT
+//! or SIGTERM arrives; on Windows the `ctrlc` fallback covers Ctrl-C.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,7 +21,6 @@ use aether_substrate::chassis::builder::{
 };
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};
-use tokio::runtime::Runtime;
 
 use crate::hub::DEFAULT_RPC_PORT;
 
@@ -68,15 +71,7 @@ impl HubChassis {
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
 
-        // Current-thread runtime — only used to block on the shutdown
-        // signal. No async tasks live here; the actors (RpcServer,
-        // EngineServer, proxies) run on their own std threads.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| BootError::Other(Box::new(e)))?;
-
-        let driver = HubServerDriverCapability { rt, boot };
+        let driver = HubServerDriverCapability { boot };
 
         Builder::<HubChassis>::new(registry, mailer)
             .with_actor::<TraceObserverCapability>(())
@@ -94,18 +89,16 @@ impl HubChassis {
     }
 }
 
-/// ADR-0071 driver capability for the hub chassis. Owns the tokio
-/// runtime + the `SubstrateBoot` whose registry hosts the chassis
-/// actors. `run` blocks on a SIGINT/SIGTERM signal, then drops the
-/// boot so the actor registry tears down.
+/// ADR-0071 driver capability for the hub chassis. Owns the
+/// `SubstrateBoot` whose registry hosts the chassis actors. `run`
+/// blocks the calling thread on a SIGINT/SIGTERM signal, then drops
+/// the boot so the actor registry tears down.
 pub struct HubServerDriverCapability {
-    rt: Runtime,
     boot: SubstrateBoot,
 }
 
 /// Post-boot handle for [`HubServerDriverCapability`].
 pub struct HubServerDriverRunning {
-    rt: Runtime,
     boot: SubstrateBoot,
 }
 
@@ -113,18 +106,16 @@ impl DriverCapability for HubServerDriverCapability {
     type Running = HubServerDriverRunning;
 
     fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let HubServerDriverCapability { rt, boot } = self;
-        Ok(HubServerDriverRunning { rt, boot })
+        let HubServerDriverCapability { boot } = self;
+        Ok(HubServerDriverRunning { boot })
     }
 }
 
 impl DriverRunning for HubServerDriverRunning {
     fn run(self: Box<Self>) -> Result<(), RunError> {
-        let HubServerDriverRunning { rt, boot } = *self;
-        rt.block_on(async {
-            let sig = shutdown_signal().await;
-            eprintln!("aether-substrate-hub: {sig} received, shutting down");
-        });
+        let HubServerDriverRunning { boot } = *self;
+        let sig = shutdown_signal();
+        eprintln!("aether-substrate-hub: {sig} received, shutting down");
         // `boot` drops here — actor registries shut down, dispatcher
         // threads see their inbox senders drop and exit.
         drop(boot);
@@ -132,45 +123,57 @@ impl DriverRunning for HubServerDriverRunning {
     }
 }
 
-/// Resolves when either SIGINT (Ctrl-C) or SIGTERM arrives on Unix;
-/// on non-Unix falls back to `ctrl_c()` since tokio doesn't expose
-/// named signals outside Unix. Returns a short label for the log line.
+/// Blocks the calling thread until SIGINT or SIGTERM arrives on Unix;
+/// on Windows falls back to Ctrl-C only via `ctrlc`. Returns a short
+/// label for the log line.
 ///
-/// Why both signals: interactive shells deliver SIGINT, but process
-/// supervisors (systemd, supervisord), shell utilities (`pkill`,
-/// `kill` without `-9`), and CI cancellation all send SIGTERM.
-/// Ignoring SIGTERM means `pkill -f aether-substrate-hub` kills the
-/// hub without running drops.
-async fn shutdown_signal() -> &'static str {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("aether-substrate-hub: SIGTERM handler install failed: {e}");
-                // Fall through to ctrl_c-only — better than nothing.
-                let _ = tokio::signal::ctrl_c().await;
-                return "SIGINT";
-            }
-        };
-        let mut sigint = match signal(SignalKind::interrupt()) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("aether-substrate-hub: SIGINT handler install failed: {e}");
-                // Wait on SIGTERM only; SIGINT default action still kills.
-                let _ = sigterm.recv().await;
-                return "SIGTERM";
-            }
-        };
-        tokio::select! {
-            _ = sigterm.recv() => "SIGTERM",
-            _ = sigint.recv() => "SIGINT",
+/// Why both signals on Unix: interactive shells deliver SIGINT, but
+/// process supervisors (systemd, supervisord), shell utilities
+/// (`pkill`, `kill` without `-9`), and CI cancellation all send
+/// SIGTERM. Ignoring SIGTERM means `pkill -f aether-substrate-hub`
+/// kills the hub without running drops.
+#[cfg(unix)]
+fn shutdown_signal() -> &'static str {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    use signal_hook::iterator::Signals;
+
+    let mut signals = match Signals::new([SIGINT, SIGTERM]) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "aether-substrate-hub: signal handler install failed: {e}; \
+                 parking thread — SIGKILL is the only exit"
+            );
+            std::thread::park();
+            return "park";
         }
+    };
+    // The iterator only returns `None` if the underlying file
+    // descriptor closes — can't happen for the lifetime of `signals`,
+    // but the explicit branch keeps coverage total.
+    match signals.forever().next() {
+        Some(SIGINT) => "SIGINT",
+        Some(SIGTERM) => "SIGTERM",
+        Some(_) => "unknown signal",
+        None => "signal stream ended",
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-        "Ctrl-C"
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> &'static str {
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel::<()>();
+    if let Err(e) = ctrlc::set_handler(move || {
+        let _ = tx.send(());
+    }) {
+        eprintln!(
+            "aether-substrate-hub: ctrl-c handler install failed: {e}; \
+             parking thread — SIGKILL is the only exit"
+        );
+        std::thread::park();
+        return "park";
     }
+    let _ = rx.recv();
+    "Ctrl-C"
 }
