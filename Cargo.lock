@@ -219,23 +219,11 @@ dependencies = [
  "aether-codec",
  "aether-data",
  "aether-kinds",
- "aether-scenario-macros",
  "aether-substrate-bundle",
- "png",
- "pollster",
  "serde",
  "serde_json",
  "serde_yml",
  "thiserror 1.0.69",
- "wgpu",
-]
-
-[[package]]
-name = "aether-scenario-macros"
-version = "0.2.0-alpha"
-dependencies = [
- "proc-macro2",
- "quote",
 ]
 
 [[package]]
@@ -286,6 +274,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
+ "thiserror 1.0.69",
  "tracing",
  "wasmtime",
  "wat",
