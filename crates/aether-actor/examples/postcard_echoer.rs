@@ -1,9 +1,14 @@
 //! Smoke-test component for the postcard receive path. Receives
 //! `demo.postcard_request { tag, payload }` (a struct with a `String`
 //! and `Vec<u8>` — postcard-shaped, not bytemuck-castable) via the
-//! same bare `#[handler]` attribute that cast-shaped components use,
-//! and broadcasts a `demo.postcard_observed` cast-shaped acknowledgement
-//! so the receive landed observably.
+//! same bare `#[handler]` attribute that cast-shaped components use.
+//!
+//! Pre-issue-775 the example broadcast a cast-shaped
+//! `demo.postcard_observed` acknowledgement to `hub.claude.broadcast`
+//! so the receive landed observably. With `BroadcastCapability`
+//! retired the broadcast goes away; the handler still decodes the
+//! postcard payload (the dispatch path being smoke-tested) but no
+//! observation kind ships.
 //!
 //! Pairs with the cast-shaped `echoer.rs` example to demonstrate that
 //! `#[actor]` dispatches both wire shapes from the same impl block
@@ -14,9 +19,7 @@
 //! `demo.postcard_request` to verify the dispatch.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, Resolver, actor};
-use aether_capabilities::BroadcastCapability;
 use aether_data::{Kind, Schema};
-use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
 /// Postcard-shaped request: contains a `String` and `Vec<u8>` so the
@@ -27,17 +30,6 @@ use serde::{Deserialize, Serialize};
 pub struct PostcardRequest {
     pub tag: String,
     pub payload: Vec<u8>,
-}
-
-/// Cast-shaped acknowledgement: empty payload, broadcast to confirm
-/// the postcard request was received and decoded. Stays cast so the
-/// observation path doesn't depend on the same code path it's testing.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, Kind, Schema)]
-#[kind(name = "demo.postcard_observed")]
-pub struct PostcardObserved {
-    pub tag_len: u32,
-    pub payload_len: u32,
 }
 
 pub struct PostcardEchoer;
@@ -58,11 +50,9 @@ impl FfiActor for PostcardEchoer {
     /// (synthesised by the Kind derive on `PostcardRequest` based on
     /// the absence of `#[repr(C)]`) already knows the wire shape.
     #[handler]
-    fn on_request(&mut self, ctx: &mut FfiCtx<'_>, req: PostcardRequest) {
-        ctx.actor::<BroadcastCapability>().send(&PostcardObserved {
-            tag_len: req.tag.len() as u32,
-            payload_len: req.payload.len() as u32,
-        });
+    fn on_request(&mut self, _ctx: &mut FfiCtx<'_>, _req: PostcardRequest) {
+        // Pre-#775 the handler broadcast a `PostcardObserved` ack to
+        // the hub fan-out mailbox. Broadcast retired with the cap.
     }
 }
 

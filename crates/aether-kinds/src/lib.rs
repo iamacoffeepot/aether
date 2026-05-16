@@ -19,15 +19,6 @@ pub mod trace;
 
 use bytemuck::{Pod, Zeroable};
 
-/// Hub broadcast mailbox name (ADR-0008 observation path). The
-/// `BroadcastCapability` (in `aether-capabilities`) reuses this string
-/// as its `Actor::NAMESPACE`; substrate-internal pushes (frame_loop's
-/// frame-stats emission, the scheduler-death announce) read the same
-/// const so name and id stay in lockstep without depending on
-/// `aether-capabilities`. Issue #613 retired the `mailboxes` module
-/// the const used to live in; this single string is the residue.
-pub const HUB_BROADCAST_MAILBOX_NAME: &str = "hub.claude.broadcast";
-
 // Every kind below derives both `Kind` and `Schema`. Pre-ADR-0032
 // `Schema` was gated behind a `descriptors` feature so wasm guests
 // stayed free of hub-protocol; that gate retired once hub-protocol
@@ -333,75 +324,6 @@ pub struct Ping {
 #[kind(name = "aether.pong")]
 pub struct Pong {
     pub seq: u32,
-}
-
-/// Periodic observation emitted by the substrate's frame loop when a
-/// hub is attached (ADR-0008). The substrate pushes one of these at
-/// `LOG_EVERY_FRAMES` cadence to the `hub.claude.broadcast` sink, so
-/// every attached Claude session learns how the engine is running
-/// without having to poll the engine directly.
-#[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
-#[kind(name = "aether.observation.frame_stats")]
-pub struct FrameStats {
-    pub frame: u64,
-    pub triangles: u64,
-}
-
-/// Substrate broadcast on actor death (issue 321 Phase 2). The
-/// dispatcher emits one of these to `hub.claude.broadcast` when a
-/// component's actor thread is marked dead — either because the guest
-/// trapped during `deliver` or a host-side panic was caught around the
-/// loop body. External monitor components (or a Claude session in MCP)
-/// observe this kind via `receive_mail` and decide what to do —
-/// `replace_component` for hot-recovery, page a human, or just leave
-/// the mailbox dead. The substrate itself takes no recovery action;
-/// policy lives outside.
-///
-/// `last_kind` carries the kind name being delivered when the actor
-/// died. `reason` is a human-readable string describing the failure
-/// (panic payload, trap message). String fields make this postcard-
-/// shaped on the wire (cast eligibility is false for non-`Pod` types).
-#[derive(
-    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
-)]
-#[kind(name = "aether.observation.component_died")]
-pub struct ComponentDied {
-    pub mailbox_id: aether_data::MailboxId,
-    pub mailbox_name: alloc::string::String,
-    pub last_kind: alloc::string::String,
-    pub reason: alloc::string::String,
-}
-
-/// Final broadcast emitted by the substrate before `lifecycle::
-/// fatal_abort` calls `std::process::exit` (ADR-0063). Tells attached
-/// hub sessions that the substrate is going down on purpose, with a
-/// human-readable reason. Distinct from `ComponentDied`: the latter
-/// fires per dying component while the substrate keeps running;
-/// `SubstrateDying` fires once, immediately before exit, regardless of
-/// whether the cause was a component death or a wedged dispatcher.
-///
-/// `reason` is the same string that lands in `engine_logs` (e.g.
-/// `"component died: <kind> ..."` or `"dispatcher wedged: mailbox=...
-/// waited=5s"`). Receivers should treat this as the engine's last
-/// word — the TCP connection drops moments later.
-#[derive(
-    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
-)]
-#[kind(name = "aether.observation.substrate_dying")]
-pub struct SubstrateDying {
-    pub reason: alloc::string::String,
 }
 
 /// Diagnostic the hub emits back to an originating engine when mail
@@ -1830,7 +1752,6 @@ mod tests {
         assert_eq!(MouseButton::NAME, "aether.mouse_button");
         assert_eq!(MouseMove::NAME, "aether.mouse_move");
         assert_eq!(DrawTriangle::NAME, "aether.draw_triangle");
-        assert_eq!(FrameStats::NAME, "aether.observation.frame_stats");
         assert_eq!(Ping::NAME, "aether.ping");
         assert_eq!(Pong::NAME, "aether.pong");
         assert_eq!(LoadComponent::NAME, "aether.component.load");
@@ -1874,18 +1795,6 @@ mod tests {
         assert_eq!(ListResult::NAME, "aether.fs.list_result");
     }
 
-    #[test]
-    fn frame_stats_roundtrip() {
-        let s = FrameStats {
-            frame: 120,
-            triangles: 240,
-        };
-        let bytes = encode(&s);
-        assert_eq!(bytes.len(), 16);
-        let back: FrameStats = decode(&bytes).unwrap();
-        assert_eq!(back, s);
-    }
-
     // ADR-0019 PR 3 — every kind below now has a derived `Schema` impl
     // (gated on `descriptors`). These tests pin the derive output so
     // PR 5's switch-over of `descriptors.rs` from legacy `Pod`/`Signal`
@@ -1909,7 +1818,6 @@ mod tests {
             const { assert!(<DrawTriangle as CastEligible>::ELIGIBLE) };
             const { assert!(<Ping as CastEligible>::ELIGIBLE) };
             const { assert!(<Pong as CastEligible>::ELIGIBLE) };
-            const { assert!(<FrameStats as CastEligible>::ELIGIBLE) };
         }
 
         #[test]
@@ -1947,19 +1855,6 @@ mod tests {
             assert_eq!(nested_fields[0].name, "x");
             assert_eq!(nested_fields[2].name, "z");
             assert_eq!(nested_fields[5].name, "b");
-        }
-
-        #[test]
-        fn frame_stats_schema_is_two_u64_fields() {
-            let SchemaType::Struct { repr_c, fields } = &<FrameStats as Schema>::SCHEMA else {
-                panic!("expected Struct");
-            };
-            assert!(*repr_c);
-            assert_eq!(fields.len(), 2);
-            assert_eq!(fields[0].name, "frame");
-            assert_eq!(fields[0].ty, SchemaType::Scalar(Primitive::U64));
-            assert_eq!(fields[1].name, "triangles");
-            assert_eq!(fields[1].ty, SchemaType::Scalar(Primitive::U64));
         }
     }
 

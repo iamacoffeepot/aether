@@ -62,9 +62,6 @@ pub enum MailboxCategory {
     /// another actor; the variant survives so the hub can tell them
     /// apart for filtering / coloring if needed.
     Trampoline,
-    /// The hub broadcast fan-out sink (`hub.claude.broadcast`).
-    /// Renders as `sink:NAME`.
-    BroadcastSink,
     /// The chassis-router short-circuit sentinel (`aether.chassis`).
     /// Reachable as a routing target id but never registered with a
     /// real handler — the snapshot includes a synthetic entry so the

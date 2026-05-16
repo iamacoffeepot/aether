@@ -30,7 +30,7 @@ pub mod hub;
 pub mod test_bench;
 
 pub use aether_capabilities as capabilities;
-pub use aether_capabilities::{BroadcastCapability, ComponentHostCapability, ComponentHostConfig};
+pub use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 pub use aether_substrate::{
     Chassis, Component, ComponentCtx, HubOutbound, KindId, Mail, MailKind, MailboxEntry,
     MailboxHandler, MailboxId, Mailer, Registry, ReplyTarget, ReplyTo, SubstrateBoot,

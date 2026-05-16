@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty, encode_struct};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult, Tick};
@@ -110,18 +110,12 @@ pub struct TestBench {
     events_rx: EventReceiver,
 
     gpu: Gpu,
-    /// `triangles_rendered` is read on the FrameStats emit path; the
-    /// other accumulator handles (`frame_vertices` / `camera_state`)
-    /// retired post-C2 because `RenderCapability::record_frame` drains
-    /// them internally.
-    triangles_rendered: Arc<AtomicU64>,
 
     /// `aether.input` mailbox id, cached at boot. `advance()` ticks
     /// fan through this single push and the input cap re-fans per
     /// subscriber (issue 640).
     input_mailbox: MailboxId,
     kind_tick: KindId,
-    kind_frame_stats: KindId,
     /// Snapshot of every frame-bound capability's pending counter
     /// (ADR-0074 §Decision 5). Today: render. Cloned out of
     /// `PassiveChassis::frame_bound_pending` at boot; `advance` /
@@ -130,7 +124,6 @@ pub struct TestBench {
     /// quiesces before `record_frame`.
     frame_bound_pending: Vec<(MailboxId, Arc<AtomicU64>)>,
 
-    started: Instant,
     frame: u64,
     next_correlation_id: AtomicU64,
     /// Stable session identity for reply addressing. The substrate
@@ -276,13 +269,12 @@ impl TestBench {
             boot,
             render_handles,
             kind_tick,
-            kind_frame_stats,
         } = TestBenchChassis::build_passive(env)
             .map_err(|e| TestBenchError::Boot(e.to_string()))?;
 
         // Attach a `RecordingBackend` to the boot's outbound. Replies
         // the substrate emits via `outbound.send_reply` arrive here
-        // as `EgressEvent::ToSession` / `Broadcast`, which `pump_until_reply`
+        // as `EgressEvent::ToSession`, which `pump_until_reply`
         // correlates by `correlation_id`.
         let (recording, loopback_rx) = RecordingBackend::new();
         boot.outbound.attach_backend(Arc::new(recording));
@@ -305,12 +297,9 @@ impl TestBench {
             capture_queue,
             events_rx,
             gpu,
-            triangles_rendered: render_handles.triangles_rendered,
             input_mailbox,
             kind_tick,
-            kind_frame_stats,
             frame_bound_pending,
-            started: Instant::now(),
             frame: 0,
             next_correlation_id: AtomicU64::new(1),
             session: SessionToken(Uuid::from_u128(TESTBENCH_SESSION_UUID)),
@@ -581,12 +570,9 @@ impl TestBench {
                     self.stashed_replies.insert(event_cid, event);
                     continue;
                 }
-                // Broadcast or other untracked emission (e.g.
-                // frame_stats). Record the kind so scenario assertions
-                // can observe substrate-emitted broadcasts.
-                if let EgressEvent::Broadcast { kind_name, .. } = &event {
-                    self.observed_kinds.lock().unwrap().push(kind_name.clone());
-                }
+                // Other untracked emission (kinds_changed,
+                // mailboxes_changed, log_batch). Ignored — only
+                // session-targeted replies matter for advance().
             }
 
             if found_event || found_reply {
@@ -702,41 +688,12 @@ impl TestBench {
             }
         }
 
-        if self.frame.is_multiple_of(frame_loop::LOG_EVERY_FRAMES) {
-            let triangles = self.triangles_rendered.load(Ordering::Relaxed);
-            // ADR-0080 settlement-gate the FrameStats broadcast.
-            // Pre-PR-4 the helper pushed bare and the `drain_frame_bound_or_abort`
-            // below was the synchronisation point; with settlement we
-            // push as a chassis-root chain and wait for the broadcast
-            // cap's egress to outbound to complete.
-            let registry = self._passive.settlement_registry();
-            let stats_root = push_chassis_root_mail(
-                &self.queue,
-                self.fresh_correlation_id(),
-                aether_data::mailbox_id_from_name(aether_kinds::HUB_BROADCAST_MAILBOX_NAME),
-                self.kind_frame_stats,
-                aether_data::encode(&aether_kinds::FrameStats {
-                    frame: self.frame,
-                    triangles,
-                }),
-                1,
-            );
-            let rx = registry.subscribe_settlement(stats_root);
-            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
-            // Belt-and-suspenders: keep the frame-bound drain so the
-            // ADR-0074 §Decision 5 ordering invariant for frame-bound
-            // caps still holds. Settlement covers the causal chain;
-            // this covers the per-frame ordering.
-            frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
-            let elapsed = self.started.elapsed().as_secs_f64().max(0.001);
-            tracing::info!(
-                target: "aether_substrate::frame_loop",
-                frame = self.frame,
-                fps = self.frame as f64 / elapsed,
-                triangles,
-                "test-bench in-process frame",
-            );
-        }
+        // ADR-0074 §Decision 5 ordering invariant: keep the frame-bound
+        // drain so render and any future frame-bound cap quiesces before
+        // the next frame. Pre-#775 this was paired with a periodic
+        // FrameStats settlement gate every `LOG_EVERY_FRAMES`; with the
+        // observation path retired the drain stands on its own.
+        frame_loop::drain_frame_bound_or_abort(&self.frame_bound_pending, &self.outbound);
     }
 }
 

@@ -2,21 +2,22 @@
 //! handles). On every tick, sends `demo.request { seq }` to the
 //! component registered as `"echoer"`. When the matching
 //! `demo.response { seq }` arrives via the Component-variant sender
-//! handle the substrate allocated, broadcasts
-//! `demo.observation { seq }` to `hub.claude.broadcast` so the round
-//! trip is visible to the driving Claude session.
+//! handle the substrate allocated, logs the round trip.
+//!
+//! Pre-issue-775 the example also broadcast `demo.observation { seq }`
+//! to `hub.claude.broadcast` so the round trip was visible to the
+//! driving Claude session. With `BroadcastCapability` retired the
+//! observation send goes away; the component is now a pure
+//! request/reply smoke without an observation channel.
 //!
 //! ADR-0033 phase 3: each kind gets its own `#[handler]` method on
-//! the `#[actor]`-decorated impl. ADR-0075 actor-typed sender API:
-//! the broadcast send goes through `ctx.actor::<BroadcastCapability>()`
-//! (typed receiver, gates `HandlesKind<K>` at the call site), and
-//! the peer-component send to `"echoer"` rides the `Sender::send_to_named`
-//! string-keyed escape hatch — the echoer's actor type lives in a
-//! sibling cdylib this crate can't import without colliding FFI
-//! exports.
+//! the `#[actor]`-decorated impl. The peer-component send to
+//! `"echoer"` rides the `Sender::send_to_named` string-keyed escape
+//! hatch — the echoer's actor type lives in a sibling cdylib this
+//! crate can't import without colliding FFI exports.
 
 use aether_actor::{BootError, FfiActor, FfiCtx, MailSender, Resolver, actor};
-use aether_capabilities::{BroadcastCapability, InputCapability};
+use aether_capabilities::InputCapability;
 use aether_data::{Kind, MailboxId, Schema};
 use aether_kinds::{SubscribeInput, Tick};
 use bytemuck::{Pod, Zeroable};
@@ -32,13 +33,6 @@ pub struct Request {
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, Kind, Schema)]
 #[kind(name = "demo.response")]
 pub struct Response {
-    pub seq: u32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, Kind, Schema)]
-#[kind(name = "demo.observation")]
-pub struct Observation {
     pub seq: u32,
 }
 
@@ -72,9 +66,9 @@ impl FfiActor for Caller {
     }
 
     #[handler]
-    fn on_response(&mut self, ctx: &mut FfiCtx<'_>, resp: Response) {
-        ctx.actor::<BroadcastCapability>()
-            .send(&Observation { seq: resp.seq });
+    fn on_response(&mut self, _ctx: &mut FfiCtx<'_>, _resp: Response) {
+        // Pre-#775 this broadcast `Observation { seq: resp.seq }` to
+        // the hub fan-out mailbox. Broadcast retired with the cap.
     }
 }
 

@@ -14,8 +14,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aether-actor = { path = "../../crates/aether-actor" }
-# Server uses `BroadcastCapability` (always-on, no feature) — no
-# marker features needed.
+# Server reaches sibling caps only by name (`send_to_named`); no cap
+# imports needed today.
 aether-capabilities = { path = "../../crates/aether-capabilities", default-features = false }
 aether-demo-tic-tac-toe = { path = "../tic-tac-toe" }
 aether-data = { path = "../../crates/aether-data" }

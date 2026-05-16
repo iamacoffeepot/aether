@@ -2,8 +2,11 @@
 //! routing path. Boots a [`TestBench`], loads `aether-test-fixture-probe`
 //! into it via the same `aether.component` mail surface a hub-driven
 //! session uses, and asserts the wasm host-fn call chain
-//! (`ctx.actor::<BroadcastCapability>().send(&TickObserved)`) reaches
-//! the bench's loopback observation queue.
+//! (`ctx.send_to_named(TEST_BENCH_OBSERVER_MAILBOX_NAME, &TickObserved)`)
+//! reaches the bench's loopback observation queue. Issue 775 retired
+//! the previous `ctx.actor::<BroadcastCapability>().send(...)` shape;
+//! the test-bench observer mailbox replaced the broadcast cap for
+//! scenario observation.
 //!
 //! Replaces the pre-Phase-4 WAT-driven harness which drove a hand-built
 //! `Component` past the cap's dispatcher infrastructure via the retired
@@ -42,11 +45,11 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
 }
 
 /// Tick fanout reaches a freshly-loaded wasm component, the
-/// component's `ctx.actor::<BroadcastCapability>().send(...)` host
-/// call lands a kind-tagged broadcast on the bench's loopback, and
-/// `count_observed` sees it. End-to-end proof of host-fn linking,
-/// trampoline dispatch, `wire`-time input subscription, and outbound
-/// broadcast routing.
+/// component's `ctx.send_to_named(TEST_BENCH_OBSERVER_MAILBOX_NAME, &...)`
+/// host call lands the kind on the bench's loopback observation
+/// queue, and `count_observed` sees it. End-to-end proof of host-fn
+/// linking, trampoline dispatch, `wire`-time input subscription, and
+/// outbound mail routing.
 #[test]
 fn tick_roundtrip_component_to_sink() {
     let Some(wasm_path) = require_runtime("aether_test_fixture_probe") else {
