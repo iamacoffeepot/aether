@@ -22,6 +22,7 @@
 //! sibling modules. Future framing variants subdivide [`frame`] under
 //! `frame::postcard` / `frame::protobuf`.
 
+mod cast;
 mod decode;
 mod encode;
 pub mod frame;
