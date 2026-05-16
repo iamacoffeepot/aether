@@ -35,7 +35,7 @@ use aether_data::tagged_id;
 use aether_data::{EnumVariant, NamedField, Primitive, SchemaType};
 use serde_json::Value;
 
-use crate::cast::align_of_primitive;
+use crate::cast::{NON_CAST_VARIANTS_MSG, align_of_primitive};
 
 #[derive(Debug)]
 pub enum EncodeError {
@@ -715,9 +715,7 @@ fn encode_field_value(
         | SchemaType::Enum { .. }
         | SchemaType::Unit
         | SchemaType::Ref(_)
-        | SchemaType::Map { .. } => Err(EncodeError::UnsupportedSchema(
-            "non-cast field inside cast-shaped struct",
-        )),
+        | SchemaType::Map { .. } => Err(EncodeError::UnsupportedSchema(NON_CAST_VARIANTS_MSG)),
     }
 }
 

@@ -18,3 +18,10 @@ pub(crate) fn align_of_primitive(p: Primitive) -> usize {
         Primitive::U64 | Primitive::I64 | Primitive::F64 => 8,
     }
 }
+
+/// Error message reported when a non-cast `SchemaType` variant
+/// (`Bool` / `String` / `Bytes` / `Option` / `Vec` / `Enum` / `Unit` /
+/// `Ref` / `Map`) appears inside a `#[repr(C)]` cast-shaped struct.
+/// Used by both the encode and decode paths so the diagnostic string
+/// stays byte-identical across the two sides.
+pub(crate) const NON_CAST_VARIANTS_MSG: &str = "non-cast field inside cast-shaped struct";
