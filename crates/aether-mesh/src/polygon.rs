@@ -263,7 +263,7 @@ fn unit_normal(plane: &plane::Plane3) -> Vec3 {
 /// Signed doubled area of `vertices` projected onto the plane's
 /// dominant axes. Positive = CCW around `plane.normal`, negative = CW.
 fn projected_signed_area(vertices: &[Point3], plane: &plane::Plane3) -> i128 {
-    let (axis_a, axis_b) = projection_axes(plane);
+    let (axis_a, axis_b) = plane::projection_axes(plane);
     let mut sum: i128 = 0;
     let n = vertices.len();
     for i in 0..n {
@@ -277,41 +277,11 @@ fn projected_signed_area(vertices: &[Point3], plane: &plane::Plane3) -> i128 {
     sum
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Axis {
-    X,
-    Y,
-    Z,
-}
-
-fn pick(p: Point3, a: Axis) -> i32 {
+fn pick(p: Point3, a: plane::Axis) -> i32 {
     match a {
-        Axis::X => p.x,
-        Axis::Y => p.y,
-        Axis::Z => p.z,
-    }
-}
-
-fn projection_axes(plane: &plane::Plane3) -> (Axis, Axis) {
-    let ax = plane.n_x.unsigned_abs();
-    let ay = plane.n_y.unsigned_abs();
-    let az = plane.n_z.unsigned_abs();
-    if ax >= ay && ax >= az {
-        if plane.n_x >= 0 {
-            (Axis::Y, Axis::Z)
-        } else {
-            (Axis::Z, Axis::Y)
-        }
-    } else if ay >= az {
-        if plane.n_y >= 0 {
-            (Axis::Z, Axis::X)
-        } else {
-            (Axis::X, Axis::Z)
-        }
-    } else if plane.n_z >= 0 {
-        (Axis::X, Axis::Y)
-    } else {
-        (Axis::Y, Axis::X)
+        plane::Axis::X => p.x,
+        plane::Axis::Y => p.y,
+        plane::Axis::Z => p.z,
     }
 }
 
