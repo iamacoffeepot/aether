@@ -80,6 +80,8 @@ mod tests {
 
     static F32: SchemaType = SchemaType::Scalar(Primitive::F32);
 
+    /// `repr(C)` `{ x: f32, y: f32 }` — the canonical vertex fixture
+    /// reused by struct, nested-array, and structural-equality tests.
     static VERTEX: SchemaType = SchemaType::Struct {
         fields: Cow::Borrowed(&[
             NamedField {
@@ -93,6 +95,38 @@ mod tests {
         ]),
         repr_c: true,
     };
+
+    /// Runtime `SchemaShape` that `VERTEX`'s canonical bytes decode to.
+    /// Used directly when a test asserts the struct shape, and nested
+    /// inside larger shapes (e.g. `TRIANGLE`'s array element).
+    fn vertex_shape() -> SchemaShape {
+        SchemaShape::Struct {
+            fields: vec![
+                SchemaShape::Scalar(Primitive::F32),
+                SchemaShape::Scalar(Primitive::F32),
+            ],
+            repr_c: true,
+        }
+    }
+
+    /// Runtime `SchemaShape` that `RESULT`'s canonical bytes decode to —
+    /// the three-variant Unit/Tuple/Struct enum exercised by the all-variants
+    /// round-trip test.
+    fn result_enum_shape() -> SchemaShape {
+        SchemaShape::Enum {
+            variants: vec![
+                VariantShape::Unit { discriminant: 0 },
+                VariantShape::Tuple {
+                    discriminant: 1,
+                    fields: vec![SchemaShape::Scalar(Primitive::U64)],
+                },
+                VariantShape::Struct {
+                    discriminant: 2,
+                    fields: vec![SchemaShape::String],
+                },
+            ],
+        }
+    }
 
     static TRIANGLE: SchemaType = SchemaType::Struct {
         fields: Cow::Borrowed(&[NamedField {
@@ -140,16 +174,7 @@ mod tests {
         const N: usize = canonical_len_schema(&VERTEX);
         const BYTES: [u8; N] = canonical_serialize_schema::<N>(&VERTEX);
         let shape: SchemaShape = postcard::from_bytes(&BYTES).expect("decode");
-        assert_eq!(
-            shape,
-            SchemaShape::Struct {
-                fields: vec![
-                    SchemaShape::Scalar(Primitive::F32),
-                    SchemaShape::Scalar(Primitive::F32),
-                ],
-                repr_c: true,
-            }
-        );
+        assert_eq!(shape, vertex_shape());
     }
 
     #[test]
@@ -159,13 +184,7 @@ mod tests {
         let shape: SchemaShape = postcard::from_bytes(&BYTES).expect("decode");
         let expected = SchemaShape::Struct {
             fields: vec![SchemaShape::Array {
-                element: Box::new(SchemaShape::Struct {
-                    fields: vec![
-                        SchemaShape::Scalar(Primitive::F32),
-                        SchemaShape::Scalar(Primitive::F32),
-                    ],
-                    repr_c: true,
-                }),
+                element: Box::new(vertex_shape()),
                 len: 3,
             }],
             repr_c: true,
@@ -178,22 +197,7 @@ mod tests {
         const N: usize = canonical_len_schema(&RESULT);
         const BYTES: [u8; N] = canonical_serialize_schema::<N>(&RESULT);
         let shape: SchemaShape = postcard::from_bytes(&BYTES).expect("decode");
-        assert_eq!(
-            shape,
-            SchemaShape::Enum {
-                variants: vec![
-                    VariantShape::Unit { discriminant: 0 },
-                    VariantShape::Tuple {
-                        discriminant: 1,
-                        fields: vec![SchemaShape::Scalar(Primitive::U64)],
-                    },
-                    VariantShape::Struct {
-                        discriminant: 2,
-                        fields: vec![SchemaShape::String],
-                    },
-                ],
-            }
-        );
+        assert_eq!(shape, result_enum_shape());
     }
 
     #[test]
@@ -236,19 +240,8 @@ mod tests {
         // Two schemas with identical wire shape but different field
         // names must produce identical canonical bytes. This pins the
         // structural-not-nominal hashing invariant from ADR-0032.
-        static V1: SchemaType = SchemaType::Struct {
-            fields: Cow::Borrowed(&[
-                NamedField {
-                    name: Cow::Borrowed("x"),
-                    ty: SchemaType::Scalar(Primitive::F32),
-                },
-                NamedField {
-                    name: Cow::Borrowed("y"),
-                    ty: SchemaType::Scalar(Primitive::F32),
-                },
-            ]),
-            repr_c: true,
-        };
+        // `VERTEX` (fields `x`, `y`) pairs against a sibling with
+        // `row`, `col` — same shape, different names.
         static V2: SchemaType = SchemaType::Struct {
             fields: Cow::Borrowed(&[
                 NamedField {
@@ -262,9 +255,9 @@ mod tests {
             ]),
             repr_c: true,
         };
-        const N1: usize = canonical_len_schema(&V1);
+        const N1: usize = canonical_len_schema(&VERTEX);
         const N2: usize = canonical_len_schema(&V2);
-        const B1: [u8; N1] = canonical_serialize_schema::<N1>(&V1);
+        const B1: [u8; N1] = canonical_serialize_schema::<N1>(&VERTEX);
         const B2: [u8; N2] = canonical_serialize_schema::<N2>(&V2);
         assert_eq!(&B1[..], &B2[..]);
     }
