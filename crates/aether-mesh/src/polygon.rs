@@ -37,6 +37,7 @@
 use crate::loop_polygon;
 use crate::mesh::MeshError;
 use crate::plane;
+use crate::plane::project_2d;
 use crate::point::Point3;
 use aether_math::Vec3;
 use std::collections::HashMap;
@@ -206,11 +207,6 @@ fn containment_axes(plane: &plane::Plane3) -> (usize, usize) {
     } else {
         (0, 1)
     }
-}
-
-fn project_2d(p: Point3, axes: (usize, usize)) -> (i64, i64) {
-    let coords = [p.x as i64, p.y as i64, p.z as i64];
-    (coords[axes.0], coords[axes.1])
 }
 
 /// Standard ray-casting point-in-polygon test in 2D fixed-point

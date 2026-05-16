@@ -208,6 +208,18 @@ pub(crate) fn projection_axes(plane: &Plane3) -> (Axis, Axis) {
     }
 }
 
+/// Project a 3D fixed-point point onto a pair of world axes, returning
+/// the two retained coordinates as i64. Used by callers that pick a
+/// containment-plane axis pair (via local `drop_axis` / `containment_axes`
+/// helpers that yield `(usize, usize)`) and need the 2D coordinates for
+/// signed-area, point-in-polygon, or coplanar-merge geometry. Distinct
+/// from [`projection_axes`], which returns the typed [`Axis`] pair used
+/// where CCW-orientation preservation matters.
+pub(crate) fn project_2d(p: Point3, axes: (usize, usize)) -> (i64, i64) {
+    let coords = [p.x as i64, p.y as i64, p.z as i64];
+    (coords[axes.0], coords[axes.1])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
