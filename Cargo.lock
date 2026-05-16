@@ -143,46 +143,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-demo-tic-tac-toe"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-data",
- "bytemuck",
- "inventory",
-]
-
-[[package]]
-name = "aether-demo-tic-tac-toe-client"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-capabilities",
- "aether-data",
- "aether-demo-tic-tac-toe",
- "aether-kinds",
- "aether-scenario",
- "aether-substrate-bundle",
- "pollster",
- "serde_yml",
- "wgpu",
-]
-
-[[package]]
-name = "aether-demo-tic-tac-toe-server"
-version = "0.2.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-capabilities",
- "aether-data",
- "aether-demo-tic-tac-toe",
- "aether-scenario",
- "aether-substrate-bundle",
- "pollster",
- "serde_yml",
- "wgpu",
-]
-
-[[package]]
 name = "aether-kinds"
 version = "0.2.0-alpha"
 dependencies = [
