@@ -20,7 +20,10 @@ use std::sync::Arc;
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
+use aether_actor::FfiActorMailbox;
 use aether_kinds::{Delete, FsError, List, Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
+use aether_substrate::actor::native::NativeActorMailbox;
 
 /// Result shape used throughout the adapter layer. The variants of
 /// `FsError` map directly onto ADR-0041 §1's reply enums, so the
@@ -250,6 +253,111 @@ impl NamespaceRoots {
         self.assets.canonicalize()?;
         self.config.canonicalize()?;
         Ok(())
+    }
+}
+
+/// Sender-side facade for actors addressed via
+/// `ctx.actor::<FsCapability>()`.
+///
+/// Lifts the cap-shaped methods (`read(ns, path)`, `write(ns, path,
+/// bytes)`, ...) one indirection above the raw
+/// `.send(&Read { ns, path })` so component code stops reconstructing
+/// the kind struct (and the `.into()` conversions on every field) at
+/// every call site. The cap module owns receive-side
+/// ([`FsCapability`]) AND send-side ([`FsMailboxExt`]) so future
+/// kind additions land both surfaces in one place.
+///
+/// Impl'd for both transports `ctx.actor::<FsCapability>()` can
+/// return:
+///
+/// - [`FfiActorMailbox<FsCapability>`] — always-on, for wasm-component
+///   callers.
+/// - [`NativeActorMailbox<'_, FsCapability>`] — native cap-to-cap
+///   sends, gated on `#[cfg(not(target_arch = "wasm32"))]`.
+///
+/// All methods are fire-and-forget. Replies arrive as
+/// `aether.fs.read_result` / `aether.fs.write_result` /
+/// `aether.fs.delete_result` / `aether.fs.list_result`, correlated
+/// by the echoed `namespace` + `path` (or `prefix`) per ADR-0041.
+/// Synchronous `read_sync` / `write_sync` wrappers were on the
+/// original issue 580 sketch — parked as a follow-up so this PR
+/// stays mechanical.
+///
+/// The generic escape hatch is unaffected: `mailbox.send(&CustomKind { .. })`
+/// still works for any `K` the cap declares via `HandlesKind<K>`,
+/// since `send` is an inherent method on the underlying mailbox type.
+pub trait FsMailboxExt {
+    /// Mail `aether.fs.read { namespace, path }` to the cap.
+    fn read(&self, namespace: &str, path: &str);
+
+    /// Mail `aether.fs.write { namespace, path, bytes }` to the cap.
+    /// The reply echoes `namespace` + `path` only (bytes are omitted
+    /// from the echo so a megabyte write doesn't produce a megabyte
+    /// reply).
+    fn write(&self, namespace: &str, path: &str, bytes: &[u8]);
+
+    /// Mail `aether.fs.delete { namespace, path }` to the cap.
+    fn delete(&self, namespace: &str, path: &str);
+
+    /// Mail `aether.fs.list { namespace, prefix }` to the cap. The
+    /// reply enumerates entries under the prefix.
+    fn list(&self, namespace: &str, prefix: &str);
+}
+
+impl FsMailboxExt for FfiActorMailbox<FsCapability> {
+    fn read(&self, namespace: &str, path: &str) {
+        self.send(&Read {
+            namespace: namespace.into(),
+            path: path.into(),
+        });
+    }
+    fn write(&self, namespace: &str, path: &str, bytes: &[u8]) {
+        self.send(&Write {
+            namespace: namespace.into(),
+            path: path.into(),
+            bytes: bytes.to_vec(),
+        });
+    }
+    fn delete(&self, namespace: &str, path: &str) {
+        self.send(&Delete {
+            namespace: namespace.into(),
+            path: path.into(),
+        });
+    }
+    fn list(&self, namespace: &str, prefix: &str) {
+        self.send(&List {
+            namespace: namespace.into(),
+            prefix: prefix.into(),
+        });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> FsMailboxExt for NativeActorMailbox<'a, FsCapability> {
+    fn read(&self, namespace: &str, path: &str) {
+        self.send(&Read {
+            namespace: namespace.into(),
+            path: path.into(),
+        });
+    }
+    fn write(&self, namespace: &str, path: &str, bytes: &[u8]) {
+        self.send(&Write {
+            namespace: namespace.into(),
+            path: path.into(),
+            bytes: bytes.to_vec(),
+        });
+    }
+    fn delete(&self, namespace: &str, path: &str) {
+        self.send(&Delete {
+            namespace: namespace.into(),
+            path: path.into(),
+        });
+    }
+    fn list(&self, namespace: &str, prefix: &str) {
+        self.send(&List {
+            namespace: namespace.into(),
+            prefix: prefix.into(),
+        });
     }
 }
 

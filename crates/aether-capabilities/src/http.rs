@@ -18,7 +18,10 @@ use std::time::Duration;
 // Handler-signature kinds must be importable at file root because
 // `#[bridge]` emits `impl HandlesKind<K> for X {}` markers as siblings
 // of the mod (always-on, outside the cfg gate).
+use aether_actor::FfiActorMailbox;
 use aether_kinds::{Fetch, HttpError, HttpHeader, HttpMethod};
+#[cfg(not(target_arch = "wasm32"))]
+use aether_substrate::actor::native::NativeActorMailbox;
 
 /// Default response-body cap when `AETHER_HTTP_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
@@ -159,6 +162,85 @@ fn parse_default_timeout_env() -> Duration {
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(DEFAULT_TIMEOUT_MS);
     Duration::from_millis(ms as u64)
+}
+
+/// Sender-side facade for actors addressed via
+/// `ctx.actor::<HttpCapability>()`.
+///
+/// Lifts the two most common HTTP verbs to a typed method so callers
+/// stop reconstructing `Fetch { method: HttpMethod::Get, headers:
+/// vec![], body: vec![], timeout_ms: None, .. }` for a basic
+/// request. Same shape and rationale as [`crate::fs::FsMailboxExt`].
+///
+/// All methods are fire-and-forget. Replies arrive as
+/// `aether.http.fetch_result`, correlated by the echoed `url`
+/// (ADR-0043).
+///
+/// For requests that need custom headers, body, method, or a
+/// per-request timeout, the generic escape hatch is unchanged:
+/// `mailbox.send(&Fetch { ... })` still works because the cap
+/// declares `HandlesKind<Fetch>`. The facade only exists for the
+/// no-options cases that don't benefit from spelling out a five-
+/// field struct.
+///
+/// Impl'd for both transports `ctx.actor::<HttpCapability>()` can
+/// return:
+///
+/// - [`FfiActorMailbox<HttpCapability>`] — always-on, for
+///   wasm-component callers.
+/// - [`NativeActorMailbox<'_, HttpCapability>`] — native cap-to-cap
+///   sends, gated on `#[cfg(not(target_arch = "wasm32"))]`.
+pub trait HttpMailboxExt {
+    /// Mail `aether.http.fetch { url, method: Get, headers: [], body: [], timeout_ms: None }`
+    /// to the cap. Uses the chassis default timeout.
+    fn get(&self, url: &str);
+
+    /// Mail `aether.http.fetch { url, method: Post, headers: [], body, timeout_ms: None }`
+    /// to the cap. Uses the chassis default timeout.
+    fn post(&self, url: &str, body: &[u8]);
+}
+
+impl HttpMailboxExt for FfiActorMailbox<HttpCapability> {
+    fn get(&self, url: &str) {
+        self.send(&Fetch {
+            url: url.into(),
+            method: HttpMethod::Get,
+            headers: Vec::new(),
+            body: Vec::new(),
+            timeout_ms: None,
+        });
+    }
+    fn post(&self, url: &str, body: &[u8]) {
+        self.send(&Fetch {
+            url: url.into(),
+            method: HttpMethod::Post,
+            headers: Vec::new(),
+            body: body.to_vec(),
+            timeout_ms: None,
+        });
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> HttpMailboxExt for NativeActorMailbox<'a, HttpCapability> {
+    fn get(&self, url: &str) {
+        self.send(&Fetch {
+            url: url.into(),
+            method: HttpMethod::Get,
+            headers: Vec::new(),
+            body: Vec::new(),
+            timeout_ms: None,
+        });
+    }
+    fn post(&self, url: &str, body: &[u8]) {
+        self.send(&Fetch {
+            url: url.into(),
+            method: HttpMethod::Post,
+            headers: Vec::new(),
+            body: body.to_vec(),
+            timeout_ms: None,
+        });
+    }
 }
 
 #[aether_actor::bridge(singleton)]
