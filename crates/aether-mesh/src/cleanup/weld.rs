@@ -144,16 +144,8 @@ fn lookup_or_insert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixed::f32_to_fixed;
     use crate::plane::Plane3;
-
-    fn pt(x: f32, y: f32, z: f32) -> Point3 {
-        Point3 {
-            x: f32_to_fixed(x).unwrap(),
-            y: f32_to_fixed(y).unwrap(),
-            z: f32_to_fixed(z).unwrap(),
-        }
-    }
+    use crate::test_helpers::pt;
 
     #[test]
     fn empty_input_produces_empty_mesh() {

@@ -614,17 +614,8 @@ fn project_2d(p: Point3, axes: (usize, usize)) -> (i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixed::f32_to_fixed;
     use crate::loop_polygon::Polygon;
-    use crate::point::Point3;
-
-    fn pt(x: f32, y: f32, z: f32) -> Point3 {
-        Point3 {
-            x: f32_to_fixed(x).unwrap(),
-            y: f32_to_fixed(y).unwrap(),
-            z: f32_to_fixed(z).unwrap(),
-        }
-    }
+    use crate::test_helpers::pt;
 
     fn weld_then_merge(polys: Vec<Polygon>) -> Vec<Polygon> {
         IndexedMesh::weld(polys).merge_coplanar().into_polygons()

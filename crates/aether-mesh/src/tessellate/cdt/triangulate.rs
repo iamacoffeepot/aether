@@ -268,15 +268,7 @@ pub(in crate::tessellate) fn signed_area2_2d(loop2d: &[Point2]) -> i128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixed::f32_to_fixed;
-
-    fn pt(x: f32, y: f32, z: f32) -> Point3 {
-        Point3 {
-            x: f32_to_fixed(x).unwrap(),
-            y: f32_to_fixed(y).unwrap(),
-            z: f32_to_fixed(z).unwrap(),
-        }
-    }
+    use crate::test_helpers::pt;
 
     fn xy_plane() -> Plane3 {
         Plane3 {

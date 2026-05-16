@@ -164,16 +164,7 @@ fn find_polygon_with_edge(polygons: &[IndexedPolygon], a: VertexId, b: VertexId)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixed::f32_to_fixed;
-    use crate::point::Point3;
-
-    fn pt(x: f32, y: f32, z: f32) -> Point3 {
-        Point3 {
-            x: f32_to_fixed(x).unwrap(),
-            y: f32_to_fixed(y).unwrap(),
-            z: f32_to_fixed(z).unwrap(),
-        }
-    }
+    use crate::test_helpers::pt;
 
     #[test]
     fn watertight_mesh_has_no_provenance_records() {
