@@ -1,6 +1,6 @@
 # ADR-0023: Substrate log capture and the `engine_logs` MCP tool
 
-- **Status:** Superseded in part by ADR-0077
+- **Status:** Superseded in part by ADR-0077; §4 restored under the forward model by issue 776
 - **Date:** 2026-04-17
 - **Accepted:** 2026-04-18
 
@@ -11,6 +11,21 @@
 > normative contract; only `LogEntry` grew an `origin: Option<MailboxId>`
 > field. Read this ADR for context on the original design and §4's wire
 > shape; read ADR-0077 for the substrate-side design that ships today.
+
+> **Note (2026-05-16):** Issue 763's out-of-process MCP move retired the
+> hub-side `LogStore` and the embedded `engine_logs` MCP tool. Issue 776
+> restored §4 under the forward model: the ring now lives **inside
+> `aether-capabilities::LogCapability`** on the substrate (not the hub),
+> and pulls flow as `aether.log.read` mail → `aether.log.read_result`
+> reply rather than a hub-side cache lookup. The wire shape (`max`,
+> `level`, `since`, `next_since`, `truncated_before`) matches this
+> ADR's §4 exactly; the per-engine ring is bounded at 2,000 entries per
+> substrate. The `aether-mcp` `engine_logs` tool wraps the call,
+> forwarding to the engine's RPC proxy. `EgressBackend::egress_log_batch`
+> + the substrate-local `LogEntry`/`LogLevel` types retired along with
+> the embedded hub's `LogStore` — log entries are owned end-to-end by
+> `LogCapability` now, with `aether_kinds::LogEntry` as the only wire
+> shape.
 
 ## Context
 

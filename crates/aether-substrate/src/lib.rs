@@ -68,7 +68,7 @@ pub use chassis::ctx::{
 pub use chassis::error::{BootError, WedgedFrameBound};
 pub use mail::mailer::Mailer;
 pub use mail::outbound::{
-    DroppingBackend, EgressBackend, EgressEvent, HubOutbound, LogEntry, LogLevel, RecordingBackend,
+    DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend,
 };
 pub use mail::registry::{MailboxEntry, MailboxHandler, Registry};
 pub use mail::{KindId, Mail, MailKind, MailboxId, ReplyTarget, ReplyTo};

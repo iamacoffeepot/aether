@@ -124,6 +124,65 @@ pub struct CaptureMailSpec {
     pub params: Option<serde_json::Value>,
 }
 
+/// `engine_logs` arguments — pull entries out of a substrate's log
+/// ring (issue 776, restoring ADR-0023 §4 under the forward model).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EngineLogsArgs {
+    /// Engine UUID to pull from (from `list_engines`).
+    pub engine_id: String,
+    /// Cap on returned entries. Defaults to 100; clamped to 1000.
+    /// Use the response's `next_since` to walk past the cap on the
+    /// next call.
+    #[serde(default)]
+    pub max: Option<u32>,
+    /// Minimum severity to return — `"trace"`, `"debug"`, `"info"`,
+    /// `"warn"`, or `"error"`. Omitted returns every entry in the
+    /// ring (subject to the chassis's `AETHER_LOG_FILTER`).
+    #[serde(default)]
+    pub level: Option<String>,
+    /// Cursor: return only entries with `sequence > since`. Omitted
+    /// returns from the oldest entry currently in the ring; thread
+    /// the prior response's `next_since` here to poll without
+    /// re-receiving entries.
+    #[serde(default)]
+    pub since: Option<u64>,
+}
+
+/// One log entry as `engine_logs` returns it. Mirrors
+/// `aether_kinds::LogEntry` but renders `level` as a string per the
+/// ADR-0023 §4 contract.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct EngineLogEntry {
+    /// Unix epoch milliseconds the entry was stamped at on the
+    /// substrate's wall clock.
+    pub timestamp_unix_ms: u64,
+    /// Severity: `"trace"` | `"debug"` | `"info"` | `"warn"` | `"error"`.
+    pub level: String,
+    /// `tracing` target — typically the module path the event was
+    /// emitted from.
+    pub target: String,
+    /// Pre-formatted event body; structured fields are flattened
+    /// into the message string.
+    pub message: String,
+    /// Monotonic per-substrate sequence; cursor for the next call.
+    pub sequence: u64,
+    /// Tagged mailbox id (`mbx-…`) of the actor whose dispatch
+    /// buffered this entry, or `null` for host-emitted events.
+    pub origin: Option<String>,
+}
+
+/// `engine_logs` response. `next_since` echoes the cursor to thread
+/// into the next call; `truncated_before` is `Some(seq)` when the
+/// ring evicted entries the caller hadn't seen yet (the lowest
+/// sequence still in the ring), `null` otherwise.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct EngineLogsResponse {
+    pub engine_id: String,
+    pub entries: Vec<EngineLogEntry>,
+    pub next_since: u64,
+    pub truncated_before: Option<u64>,
+}
+
 /// `capture_frame` arguments.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CaptureFrameArgs {
