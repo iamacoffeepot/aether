@@ -656,72 +656,96 @@ mod tests {
         }
     }
 
+    /// Six axis-aligned faces of a `[-h, h]³` cube, with consistent
+    /// CCW-from-outside winding. Returned as `(face_label, polygon)` so
+    /// callers can filter out a specific face (e.g. the boundary-edge
+    /// test below drops `+Z` to expose four boundary edges).
+    fn unit_cube_faces(h: f32) -> [(&'static str, Polygon); 6] {
+        // Each face: a normal axis (sign × unit vector) and four CCW
+        // vertices listed when looking *down* the outward normal.
+        [
+            (
+                "-X",
+                quad(
+                    [
+                        Vec3::new(-h, -h, -h),
+                        Vec3::new(-h, -h, h),
+                        Vec3::new(-h, h, h),
+                        Vec3::new(-h, h, -h),
+                    ],
+                    Vec3::new(-1.0, 0.0, 0.0),
+                ),
+            ),
+            (
+                "+X",
+                quad(
+                    [
+                        Vec3::new(h, -h, -h),
+                        Vec3::new(h, h, -h),
+                        Vec3::new(h, h, h),
+                        Vec3::new(h, -h, h),
+                    ],
+                    Vec3::new(1.0, 0.0, 0.0),
+                ),
+            ),
+            (
+                "-Y",
+                quad(
+                    [
+                        Vec3::new(-h, -h, -h),
+                        Vec3::new(h, -h, -h),
+                        Vec3::new(h, -h, h),
+                        Vec3::new(-h, -h, h),
+                    ],
+                    Vec3::new(0.0, -1.0, 0.0),
+                ),
+            ),
+            (
+                "+Y",
+                quad(
+                    [
+                        Vec3::new(-h, h, -h),
+                        Vec3::new(-h, h, h),
+                        Vec3::new(h, h, h),
+                        Vec3::new(h, h, -h),
+                    ],
+                    Vec3::new(0.0, 1.0, 0.0),
+                ),
+            ),
+            (
+                "-Z",
+                quad(
+                    [
+                        Vec3::new(-h, -h, -h),
+                        Vec3::new(-h, h, -h),
+                        Vec3::new(h, h, -h),
+                        Vec3::new(h, -h, -h),
+                    ],
+                    Vec3::new(0.0, 0.0, -1.0),
+                ),
+            ),
+            (
+                "+Z",
+                quad(
+                    [
+                        Vec3::new(-h, -h, h),
+                        Vec3::new(h, -h, h),
+                        Vec3::new(h, h, h),
+                        Vec3::new(-h, h, h),
+                    ],
+                    Vec3::new(0.0, 0.0, 1.0),
+                ),
+            ),
+        ]
+    }
+
     #[test]
     fn closed_unit_cube_passes_manifold_check() {
         // 6 quad faces with consistent CCW-from-outside winding.
-        let h = 0.5;
-        let polys = vec![
-            // -X
-            quad(
-                [
-                    Vec3::new(-h, -h, -h),
-                    Vec3::new(-h, -h, h),
-                    Vec3::new(-h, h, h),
-                    Vec3::new(-h, h, -h),
-                ],
-                Vec3::new(-1.0, 0.0, 0.0),
-            ),
-            // +X
-            quad(
-                [
-                    Vec3::new(h, -h, -h),
-                    Vec3::new(h, h, -h),
-                    Vec3::new(h, h, h),
-                    Vec3::new(h, -h, h),
-                ],
-                Vec3::new(1.0, 0.0, 0.0),
-            ),
-            // -Y
-            quad(
-                [
-                    Vec3::new(-h, -h, -h),
-                    Vec3::new(h, -h, -h),
-                    Vec3::new(h, -h, h),
-                    Vec3::new(-h, -h, h),
-                ],
-                Vec3::new(0.0, -1.0, 0.0),
-            ),
-            // +Y
-            quad(
-                [
-                    Vec3::new(-h, h, -h),
-                    Vec3::new(-h, h, h),
-                    Vec3::new(h, h, h),
-                    Vec3::new(h, h, -h),
-                ],
-                Vec3::new(0.0, 1.0, 0.0),
-            ),
-            // -Z
-            quad(
-                [
-                    Vec3::new(-h, -h, -h),
-                    Vec3::new(-h, h, -h),
-                    Vec3::new(h, h, -h),
-                    Vec3::new(h, -h, -h),
-                ],
-                Vec3::new(0.0, 0.0, -1.0),
-            ),
-            // +Z
-            quad(
-                [
-                    Vec3::new(-h, -h, h),
-                    Vec3::new(h, -h, h),
-                    Vec3::new(h, h, h),
-                    Vec3::new(-h, h, h),
-                ],
-                Vec3::new(0.0, 0.0, 1.0),
-            ),
-        ];
+        let polys: Vec<Polygon> = unit_cube_faces(0.5)
+            .into_iter()
+            .map(|(_, poly)| poly)
+            .collect();
         let violations = validate_manifold(&polys);
         assert!(
             violations.is_empty(),
@@ -933,56 +957,12 @@ mod tests {
 
     #[test]
     fn cube_with_one_face_missing_reports_boundary_edges() {
-        let h = 0.5;
         // Same as above but drop the +Z face.
-        let polys = vec![
-            quad(
-                [
-                    Vec3::new(-h, -h, -h),
-                    Vec3::new(-h, -h, h),
-                    Vec3::new(-h, h, h),
-                    Vec3::new(-h, h, -h),
-                ],
-                Vec3::new(-1.0, 0.0, 0.0),
-            ),
-            quad(
-                [
-                    Vec3::new(h, -h, -h),
-                    Vec3::new(h, h, -h),
-                    Vec3::new(h, h, h),
-                    Vec3::new(h, -h, h),
-                ],
-                Vec3::new(1.0, 0.0, 0.0),
-            ),
-            quad(
-                [
-                    Vec3::new(-h, -h, -h),
-                    Vec3::new(h, -h, -h),
-                    Vec3::new(h, -h, h),
-                    Vec3::new(-h, -h, h),
-                ],
-                Vec3::new(0.0, -1.0, 0.0),
-            ),
-            quad(
-                [
-                    Vec3::new(-h, h, -h),
-                    Vec3::new(-h, h, h),
-                    Vec3::new(h, h, h),
-                    Vec3::new(h, h, -h),
-                ],
-                Vec3::new(0.0, 1.0, 0.0),
-            ),
-            quad(
-                [
-                    Vec3::new(-h, -h, -h),
-                    Vec3::new(-h, h, -h),
-                    Vec3::new(h, h, -h),
-                    Vec3::new(h, -h, -h),
-                ],
-                Vec3::new(0.0, 0.0, -1.0),
-            ),
-            // +Z face removed.
-        ];
+        let polys: Vec<Polygon> = unit_cube_faces(0.5)
+            .into_iter()
+            .filter(|(label, _)| *label != "+Z")
+            .map(|(_, poly)| poly)
+            .collect();
         let violations = validate_manifold(&polys);
         // The 4 edges around where the +Z face would have been are now boundary.
         let boundary_count = violations
